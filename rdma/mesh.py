@@ -1,6 +1,8 @@
 import ctypes as C
 import os
 
+import mesh_graph
+
 U, Q, Z, D = C.c_uint32, C.c_uint64, C.c_size_t, C.c_double
 
 
@@ -91,6 +93,20 @@ class View(C.Structure):
     _fields_ = [('address', C.c_void_p), ('bytes', Z)]
 
 
+# design/compilation-composition-change-request.md item 6, unit 6D: mesh-collective.h struct mesh_planned_call and struct
+# mesh_planned, mesh_plan's results for the program's native preparation (each call's plan, lead, function, ordinal
+# and every; the calls' graph's vertices as mesh-graph.h struct mesh_graph_task, the plan signature's tasks; its edges
+# between this node's submissions and parts as struct mesh_graph_dependence over those vertices), freed by
+# mesh_planned_free.  What must stay: the fields in the header's order and of its types
+class PlannedCall(C.Structure):
+    _fields_ = [('plan', Q), ('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('padding', U)]
+
+
+class Planned(C.Structure):
+    _fields_ = [('call', C.POINTER(PlannedCall)), ('task', C.POINTER(mesh_graph.Task)),
+                ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('tasks', U), ('orders', Z)]
+
+
 INVARIANT, EXECUTION = 0, 1
 JOIN, PAGES = 0, 1
 FROM_PRODUCED, TO_PRODUCED, FROM_SOURCE_READ, TO_SOURCE_READ = 1, 2, 4, 8
@@ -122,7 +138,7 @@ class State(C.Structure):
                 ('broadcast', Q), ('arrived', Q), ('room', Q), ('deliveries', Q), ('submits', Q), ('announced', Q),
                 ('waits', U), ('tells', U), ('syncs', Q), ('calls', U), ('closed', U), ('rows', Q),
                 ('submit_room', Q), ('transfers', Q), ('sequencer', U), ('padding4', U), ('boot', Q),
-                ('times', Q), ('padding3', Q * 2)]
+                ('times', Q), ('signature', Q), ('signature_bytes', Q)]
 
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7: "Every
@@ -191,11 +207,20 @@ CONTEXT = C.POINTER(Context)
 # mesh_host_publish and mesh_host_arrived name a range by its plan and its declared transfer's index, where they took
 # its first row's section; mesh_view_values maps every `run` value of the program and gives each value's offset in the
 # mapping.  What must stay: each binding the header's declaration
+# 2026-11-09 (design/compilation-composition-change-request.md items 1 and 2; design/aot-compilation-change-request.md
+# A10, "Its output"): mesh_plan takes, after the calls, A10's order constraints between calls (`orders`, pairs of call
+# indices) and each call's commuting chain (`chains`, its chain's first call), before the deadline.  What must stay:
+# each binding the header's declaration
+# 2026-11-09 (design/compilation-composition-change-request.md item 6, unit 6D): mesh_plan gives, last, the plan's
+# results for native preparation (Planned), which mesh_planned_free releases.  What must stay: each binding the header's
+# declaration
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
-        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, Q]),
+        ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), U, C.POINTER(U),
+                                Q, C.POINTER(Planned)]),
+        ('mesh_planned_free', None, [C.POINTER(Planned)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, Q]),
@@ -206,6 +231,17 @@ for name, result, arguments in (
         ('mesh_host_sent', Q, [CONTEXT, Q, U, Q])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
+# mesh-collective.h mesh_strided_extents (design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3): a view's maximal
+# contiguous byte ranges, the owning module's traversal.  What must stay: the header's declaration
+EXTENT = C.CFUNCTYPE(None, C.c_void_p, Q, Q)
+LIB.mesh_strided_extents.restype, LIB.mesh_strided_extents.argtypes = None, [C.POINTER(Strided), EXTENT, C.c_void_p]
+
+
+def extents(view):
+    found = []
+    LIB.mesh_strided_extents(C.byref(view), EXTENT(lambda context, offset, length: found.append((offset, length))),
+                             None)
+    return found
 
 
 def check(status):

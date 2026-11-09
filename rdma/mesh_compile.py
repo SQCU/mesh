@@ -8,6 +8,7 @@ import hashlib
 import math
 import operator
 import os
+import re
 import subprocess
 import time
 import weakref
@@ -26,7 +27,7 @@ import mesh_graph
 # torch 2.14.0 torch/export/__init__.py, export; torch/_ops.py, OpOverload
 A = torch.ops.aten
 # Y. Xu et al., GSPMD, arXiv 2105.04663, 2021, section 3.5
-ELEMENTWISE = {A.add, A.sub, A.mul, A.div, A.neg, A.relu, A.tanh, A.sigmoid, A.exp, A.gelu, A.silu}
+ELEMENTWISE = {A.add, A.sub, A.mul, A.div, A.neg, A.relu, A.tanh, A.sigmoid, A.exp, A.gelu, A.silu, A.copy_}
 # GSPMD sections 3.2 and 3.5
 DOT = {A.matmul, A.mm, A.bmm}
 # GSPMD section 4.3
@@ -40,8 +41,11 @@ PAD = {A.pad, A.constant_pad_nd}
 Placement = collections.namedtuple('Placement', 'mesh nodes splits')
 # GSPMD sections 2.1, 3.2, 4.2 and 4.5
 Collective = collections.namedtuple('Collective', 'kind node dims dim position')
-# design/aot-compilation-change-request.md A10, "Its output"; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997
-Calls = collections.namedtuple('Calls', 'mine outstanding orders commuting')
+# design/aot-compilation-change-request.md A10, "Its output": "the order constraints between calls, which the program
+# keeps when it submits"; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997, section 2; mesh-collective.h mesh_plan:
+# each function's outstanding calls, `norders` pairs (a, b) of call indexes in `orders`, and `chains[j]` the first call
+# of call j's commuting chain
+Calls = collections.namedtuple('Calls', 'outstanding orders norders chains')
 # GSPMD section 4.1, "Static operator configurations"
 Local = collections.namedtuple('Local', 'op target args kwargs')
 # GSPMD sections 3.2, 3.5, 4 and 4.6
@@ -63,26 +67,28 @@ class IR:
         self.device, self.index, self.serial, self.identity = here[0] if here else None, nodes.self, nodes.serial, 0
         self.sharding, self.program, self.roles, self.events = {}, [], {}, []
         self.declared, self.dependences, self.values, self.layouts = [], [], [], []
-        self.made, self.calls, self.locals, self.shapes = set(), None, {}, {}
+        self.made, self.locals, self.shapes = set(), {}, {}
         self.metas, self.forms, self.over, self.producer, self.places = {}, {}, {}, {}, {}
         self.homes, self.at, self.inside, self.added, self.owned = {}, {}, {}, {}, {}
         self.publishes, self.inputs, self.declares, self.waits = {}, {}, {}, {}
         self.attributes, self.loads, self.kinds, self.page, self.hull = {}, set(), {}, None, None
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
+        self.given, self.landed = None, {}
 
     # GSPMD section 3.1
     def local(self, node, sharding):
         return tuple(s // self.shape[m] if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
 
     # mesh-collective.h struct mesh_declared; design/plan-to-bridge-change-request.md R2 and R4;
-    # design/aot-compilation-change-request.md, appendix item 5
-    def transfer(self, source, destinations, kind, part, landings):
+    # design/aot-compilation-change-request.md, appendix item 5; design/compilation-composition-change-request.md item
+    # 6, unit 6D: a destination is a device of this function's map, or with `at` a map index outside it (`at[d]`)
+    def transfer(self, source, destinations, kind, part, landings, at=None):
         self.identity += 1
         transfers = {}
         for d in destinations:
             transfers[d] = len(self.declared)
-            self.declared.append(mesh.Declared(self.map[source], self.map[d], self.identity, kind, mesh.ABSENT, 0,
-                                               part, landings[d]))
+            self.declared.append(mesh.Declared(self.map[source], self.map[d] if at is None else at[d], self.identity,
+                                               kind, mesh.ABSENT, 0, part, landings[d]))
         return transfers
 
     # mesh-collective.h struct mesh_value; design/aot-compilation-change-request.md, appendix item 7; torch 2.14.0
@@ -1166,6 +1172,49 @@ def lower(ir):
     _place(ir)
 
 
+# design/compilation-composition-change-request.md requirement 1 and item 6, unit 6D; design/aot-compilation-change-
+# request.md A4 and appendix item 7; GSPMD section 4.5 (each device holds the whole output after its reshard): function
+# f's output leaf o, read by calls of the functions `wanted[f, o]` at map nodes outside f's map, is delivered there by
+# f's own plan, one declared transfer from f's least device, landing at each such node in one EXECUTION value of f
+# there laid out as the output's owner at the source (the same view at both ends, so the landed result has the
+# producer's offset, sizes and strides), `ir.landed[o]` = (that value, its transfer) and `ir.homes[key]` its view, as
+# at a node with a section; there f does no other work, so no event is added there.  An output over one of f's loads
+# (ir.loads: a constant of f's module, every node's own host copy, placed and written by `make`'s loads as at the source)
+# moves nothing: at each such node it is that load, one INVARIANT value with the source's view, `ir.landed[o]` = (that
+# value, None).  `o` indexes pytree.tree_leaves of f's output node's args.  Called after partition and before lower
+def _deliver(irs, wanted):
+    for (f, o), readers in sorted(wanted.items()):
+        ir = irs[f]
+        nodes = sorted({y for k in readers for y in irs[k].map} - set(ir.map))
+        if not nodes:
+            continue
+        output = next(item for item in ir.program if item[0] == 'output')[3]
+        key, source = output[1][pytree.tree_leaves(output[0].args)[o]], min(ir.coords)
+        place = ir.places[source][key]
+        if place is None:
+            raise NotImplementedError('function %d\'s result leaf %d is its own input %s, which f holds in no value of its '
+                                      'own: its readers at map nodes %s take it from that input\'s source (the call '
+                                      'graph\'s sources resolved through the passthrough), not from a delivery by f'
+                                      % (f, o, key[0].name, nodes))
+        dtype, shape = _layout(ir, place.owner)
+        if place.owner in ir.loads:
+            if ir.index in nodes:
+                v = ir.value(dtype, math.prod(shape), _device(ir, key), 0, 0, 0, kind=mesh.INVARIANT)
+                ir.landed[o], ir.homes[key] = (v, None), (v, place.offset, place.sizes, place.strides)
+            continue
+        view = _strided(ir, place)
+        transfers = ir.transfer(source, nodes, mesh.JOIN, view, dict.fromkeys(nodes, view), at={y: y for y in nodes})
+        ir.events += _produced(ir, source, min(transfers.values()), key, 3 * len(ir.program))
+        if ir.device == source:
+            ir.at.update(dict.fromkeys(transfers.values(), place.owner))
+            _send(ir, min(transfers.values()), key)
+        elif ir.index in transfers:
+            i = transfers[ir.index]
+            ir.declared[i].value = ir.value(dtype, math.prod(shape), _device(ir, key), 1, 0, len(ir.program) - 1)
+            ir.landed[o] = (ir.declared[i].value, i)
+            ir.homes[key] = (ir.declared[i].value, place.offset, place.sizes, place.strides)
+
+
 # design/aot-compilation-change-request.md A4 and appendix item 7; design/disjoint-pages-change-request.md C3.2 and
 # C3.3; design/plan-to-bridge-change-request.md R2; mesh-collective.h struct mesh_value and struct mesh_declared;
 # ExecuTorch exir/memory_planning.py, update_tensor_lifetime; MPI 4.1 sections 3.7 and 3.9, MPI_START
@@ -1294,41 +1343,12 @@ def _wait(ready, progress, what):
             raise OSError(errno.ETIMEDOUT, what)
 
 
-def _arrived(context, plan, transfer, t, count):
-    def ready():
-        status = mesh.LIB.mesh_host_arrived(C.byref(context), plan, transfer, t)
-        if status == mesh.FAILED:
-            raise OSError(errno.ECANCELED, 'execution %d of declared transfer %d: a field ahead, or the range cancelled '
-                                           '(mesh-collective.h mesh_host_arrived)' % (t, transfer))
-        return status == 1
-    _wait(ready, lambda: count.value, 'execution %d of declared transfer %d: no landing for MESH_PLATFORM_NS'
-          % (t, transfer))
-
-
-# design/aot-compilation-change-request.md, appendix item 7, "A publish waits for nothing"; rdma/mesh-torch.mm
-# mesh_torch_publish
-TORCH = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(mesh.__file__)), 'libmesh-torch.dylib'))
-TORCH.mesh_torch_publish.restype, TORCH.mesh_torch_publish.argtypes = C.c_int, [C.c_void_p, C.c_void_p, mesh.Q,
-                                                                                C.POINTER(mesh.U), mesh.U, mesh.Q]
-TORCH.mesh_torch_notifying.restype, TORCH.mesh_torch_notifying.argtypes = mesh.Q, []
-PUBLISH = C.cast(mesh.LIB.mesh_host_publish, C.c_void_p)
+# mesh-dataflow.h mesh_host_started, the program's `started`
 STARTED = C.cast(mesh.LIB.mesh_host_started, C.c_void_p)
-# rdma/mesh-torch.mm mesh_torch_retire, mesh_torch_end and mesh_torch_ended
-TORCH.mesh_torch_retire.restype, TORCH.mesh_torch_retire.argtypes = C.c_int, [C.c_void_p, C.c_void_p, mesh.Q]
-TORCH.mesh_torch_end.restype, TORCH.mesh_torch_end.argtypes = C.c_int, [mesh.Q]
-TORCH.mesh_torch_ended.restype, TORCH.mesh_torch_ended.argtypes = mesh.Q, []
-RETIRE = C.cast(mesh.LIB.mesh_retire, C.c_void_p)
 
 
-def _publishes(context, plan, devices, transfers):
-    metal = [i for i in transfers if devices[i] == 'mps']
-    steps = [lambda env, inputs, t, i=i: mesh.LIB.mesh_host_publish(C.byref(context), plan, i, t)
-             for i in transfers if devices[i] != 'mps']
-    if metal:
-        array = (mesh.U * len(metal))(*metal)
-        steps.append(lambda env, inputs, t: mesh.check(TORCH.mesh_torch_publish(PUBLISH, C.addressof(context), plan,
-                                                                                array, len(array), t)))
-    return steps
+def _publishes(context, plan, transfers, ranges=lambda i: ()):
+    return [_Bridge(PUBLISH, i, None, ranges(i)) for i in transfers]
 
 
 # torch v2.14.0 include/ATen/dlpack.h, DLPACK_MAJOR_VERSION 1, DLPACK_MINOR_VERSION 3
@@ -1410,8 +1430,8 @@ LEVELS = _message(C.c_uint32, C.c_void_p)
 VALUES = _message(C.c_ulong, C.c_void_p, C.c_uint32, C.c_void_p)
 PLACE_OPERAND = _message(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_bool)
 PLACE_VALUE = _message(None, C.c_void_p, C.c_ulong, C.c_void_p, C.c_void_p, C.c_ulong, C.c_bool)
-SIGNAL = _message(None, C.c_void_p, C.c_uint64)
-WAIT = _message(C.c_bool, C.c_uint64, C.c_uint64)
+# metal_recording.h place:step:offsets:copies:shares:
+PLACE_STEP = _message(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_bool)
 
 
 # metal_recording.h struct MetalReplay, struct MetalCall and struct MetalValue
@@ -1420,17 +1440,102 @@ class Replay(C.Structure):
                 ('buffers', C.c_uint16), ('memory', C.c_uint16)]
 
 
+# design/aot-compilation-change-request.md, appendix item 6: "have each call launch one execution of its function";
+# metal_recording.h struct MetalCall: call `ordinal` of its function's `every` calls in a block runs plan execution
+# b every + ordinal at block execution b
+# design/torch-source-lowering-change-request.md item 1, "on whichever Apple silicon backend it is placed, the CPU
+# included"; design/compilation-composition-change-request.md item 5; metal_recording.h struct MetalNativeTask, struct
+# MetalNative and struct MetalCall `native`, `residues`: a row's native tasks at block execution t are
+# native[t % residues], run in the program's order; mesh-graph.h struct mesh_graph_access
+class Task(C.Structure):
+    _fields_ = [('kind', mesh.U), ('transfer', mesh.U), ('entry', C.c_void_p), ('pointers', C.c_void_p),
+                ('count', mesh.Q)]
+
+
+class Access(C.Structure):
+    _fields_ = [('key', mesh.Q), ('start', mesh.Q), ('end', mesh.Q), ('vertex', mesh.U), ('write', mesh.U)]
+
+
+class Native(C.Structure):
+    _fields_ = [('task', C.POINTER(Task)), ('access', C.POINTER(Access)), ('tasks', mesh.Q), ('accesses', mesh.Q)]
+
+
+TASK, ARRIVED, PUBLISH, SENT_TASK = 0, 1, 2, 3
+
+
 class Call(C.Structure):
-    _fields_ = [('replay', C.POINTER(Replay)), ('plan', mesh.Q), ('passes', mesh.Q), ('landed', C.c_void_p),
-                ('lead', mesh.Q)]
+    _fields_ = [('replay', C.POINTER(Replay)), ('plan', mesh.Q), ('lead', mesh.Q), ('every', mesh.Q),
+                ('ordinal', mesh.Q), ('native', C.POINTER(Native)), ('residues', mesh.Q)]
 
 
 class MetalValue(C.Structure):
     _fields_ = [('bytes', C.c_ulong), ('kind', mesh.U), ('state', mesh.U), ('begin', mesh.U), ('end', mesh.U)]
 
 
+# rdma/mesh-metal.h struct mesh_metal_transport, struct mesh_metal_input (metal_recording.h struct MetalRemote), struct
+# mesh_metal_publication and struct mesh_metal_sent (metal_recording.h struct MetalSent); mesh.h struct mesh_hop
+class Transport(C.Structure):
+    _fields_ = [('state', C.c_void_p), ('offset', mesh.Q), ('bytes', mesh.Q)]
+
+
+class Remote(C.Structure):
+    _fields_ = [('phases', mesh.Q), ('group', mesh.Q), ('count', mesh.Q), ('pages', mesh.U), ('copies', mesh.U),
+                ('time', C.c_double)]
+
+
+class Supplied(C.Structure):
+    _fields_ = [('supplied', mesh.Q)]
+
+
+class MetalSent(C.Structure):
+    _fields_ = [('counter', C.c_void_p), ('sends', mesh.Q), ('copies', mesh.Q)]
+
+
+# metal_recording.h struct MetalGeneration
+class Generation(C.Structure):
+    _fields_ = [('every', mesh.Q), ('producer', mesh.Q), ('ordinal', mesh.Q)]
+
+
+# metal_recording.h received:operand:remote:fields:, a field landing in another member buffer
+UNNAMED = 2 ** 32 - 1
 ENCODE = C.CFUNCTYPE(None, C.c_void_p)
 START = C.cast(mesh.LIB.mesh_transfers_start, C.c_void_p)
+# metal_recording.h receive:page:, publish:, received:operand:remote:fields:, published:operand:supplied:,
+# state:buffer:status:; NSData.h initWithBytes:length:; objc/objc-internal.h objc_autoreleasePoolPush and Pop
+MARK_RECEIVED = _message(None, C.c_void_p, C.c_ulong, Generation)
+OBJECTS = _message(C.c_void_p, C.c_void_p, C.c_ulong)
+SENT = _message(None, C.c_void_p, C.c_void_p, MetalSent, C.c_void_p)
+RECEIVED = _message(None, C.c_void_p, C.c_void_p, Remote, C.c_void_p)
+PUBLISHED = _message(None, C.c_void_p, C.c_void_p, C.c_ulong)
+DATA = _message(C.c_void_p, C.c_void_p, C.c_ulong)
+OBJC.objc_autoreleasePoolPush.restype, OBJC.objc_autoreleasePoolPush.argtypes = C.c_void_p, []
+OBJC.objc_autoreleasePoolPop.restype, OBJC.objc_autoreleasePoolPop.argtypes = None, [C.c_void_p]
+TRANSPORT = []
+
+
+def _transport():
+    if not TRANSPORT:
+        lib = C.CDLL(os.path.join(_repository(), '.build', 'libmesh_metal.dylib'))
+        for name, result, arguments in (
+                ('mesh_metal_transport_create', C.c_int, [mesh.CONTEXT, C.POINTER(mesh.Planned), C.c_void_p,
+                                                          C.POINTER(Transport)]),
+                ('mesh_metal_transport_destroy', None, [C.POINTER(Transport)]),
+                ('mesh_metal_receive_prepare', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, mesh.U,
+                                                         C.POINTER(Remote)]),
+                ('mesh_metal_publication_prepare', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, mesh.U,
+                                                             C.POINTER(Supplied)]),
+                ('mesh_metal_sent_prepare', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, mesh.U,
+                                                      C.POINTER(MetalSent)]),
+                ('mesh_metal_receive_fields', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, C.POINTER(Remote),
+                                                        mesh.Section, C.POINTER(mesh.U)]),
+                ('mesh_metal_sent_extents', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q, mesh.U, mesh.Section,
+                                                      C.POINTER(Access), C.c_size_t, C.POINTER(C.c_size_t)]),
+                ('mesh_metal_status_prepare', C.c_int, [mesh.CONTEXT, C.POINTER(Transport), mesh.Q,
+                                                        C.POINTER(mesh.Q)])):
+            function = getattr(lib, name)
+            function.restype, function.argtypes = result, arguments
+        TRANSPORT.append(lib)
+    return TRANSPORT[0]
 
 
 # dyld include/mach-o/dyld-interposing.h, DYLD_INTERPOSE; torch 2.14.0 aten/src/ATen/mps/MPSDevice.mm
@@ -1462,10 +1567,19 @@ def _recorder():
         lib.MetalRecorderReplay.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(Replay), C.c_char_p, C.c_size_t]
         lib.MetalRecorderOperand.restype = C.c_int
         lib.MetalRecorderOperand.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(mesh.U), C.POINTER(mesh.U)]
-        lib.MetalRecorderRun.restype = C.c_int
-        lib.MetalRecorderRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.U, C.POINTER(Call), mesh.U, mesh.Q,
-                                         C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalRecorderProgram.restype = C.c_void_p
+        lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, mesh.U, C.POINTER(mesh.Planned),
+                                             C.c_char_p, C.c_size_t]
+        lib.MetalProgramRun.restype = C.c_int
+        lib.MetalProgramRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.Q, mesh.Q, C.c_void_p, C.c_void_p,
+                                        C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalProgramEnd.restype = C.c_int
+        lib.MetalProgramEnd.argtypes = [C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
+        lib.MetalRecorderEffects.restype, lib.MetalRecorderEffects.argtypes = None, [C.POINTER(Access), C.c_size_t]
+        lib.MetalProgramSignature.restype = C.c_int
+        lib.MetalProgramSignature.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, C.POINTER(mesh_graph.Signature),
+                                              C.c_char_p, C.c_size_t]
         metal.MTLCreateSystemDefaultDevice.restype = C.c_void_p
         RECORDER.append((lib, metal.MTLCreateSystemDefaultDevice))
     return RECORDER[0]
@@ -1485,8 +1599,8 @@ def _engine(self, mat2, out):
             '#define MMB_MATRIX_INPUTS uint4(%du, 0u, 1u, %du)\n#define MMB_MATRIX_OUTPUT uint2(%du, %du)\n'
             % (out.stride(1) != 1, m, k, n, m, self.stride(0), mat2.stride(1), out.stride(0), out.stride(1))
             + ENGINE['source'])
-    ENGINE[key].dense_tensor_f16(self, mat2, out, out, threads=[(m + 63) // 64 * 128, (n + 63) // 64, 1],
-                                 group_size=[128, 1, 1])
+    _launch(ENGINE[key].dense_tensor_f16, (self, mat2, out, out), threads=[(m + 63) // 64 * 128, (n + 63) // 64, 1],
+            group_size=[128, 1, 1])
     return out
 
 
@@ -1539,14 +1653,27 @@ def _grid(name, count, arguments):
     if ('cpu', name) not in OPERATORS:
         entry = getattr(_cpu(), name + '_grid')
         entry.restype, entry.argtypes = None, [C.c_void_p, C.c_uint]
-        OPERATORS['cpu', name] = entry
-    entry = OPERATORS['cpu', name]
+        OPERATORS['cpu', name] = entry, C.c_uint64.in_dll(_cpu(), name + '_written').value
+    entry, written = OPERATORS['cpu', name]
     held = [value if isinstance(value, torch.Tensor) else
             ((C.c_float if any(isinstance(x, float) for x in value) else C.c_int64) * len(value))(*value)
             for value in arguments]
     pointers = (C.c_void_p * len(held))(*[value.data_ptr() if isinstance(value, torch.Tensor) else C.addressof(value)
                                           for value in held])
-    return lambda held=held: entry(pointers, count)
+    return _Task(entry, pointers, count, held, written)
+
+
+# design/torch-source-lowering-change-request.md item 1; design/compilation-composition-change-request.md item 5: a CPU task is its
+# compiled entry, its arguments' addresses and its grid, a native instruction of the one program; `written`, the
+# entry's operator_shaders.metal `<name>_written`, bit J argument J's write (MSL 4.1 §4.2, `device` writable,
+# `constant`/`device const` read)
+class _Task:
+    def __init__(self, entry, pointers, count, held, written):
+        self.entry, self.pointers, self.count, self.held, self.written = entry, pointers, count, held, written
+        self.address = C.cast(entry, C.c_void_p).value
+
+    def __call__(self):
+        self.entry(self.pointers, self.count)
 
 
 # MTLComputeCommandEncoder.h dispatchThreads:threadsPerThreadgroup:; design/torch-source-lowering-change-request.md
@@ -1566,12 +1693,44 @@ def _dispatch(name, count, *arguments):
         OPERATORS[name] = getattr(_library(), name)
     kernel = OPERATORS[name]
     group = min(256, kernel.max_threads_per_threadgroup, count)
-    return [functools.partial(kernel, *arguments, threads=count, group_size=group)]
+    return [functools.partial(_launch, kernel, arguments, threads=count, group_size=group)]
+
+
+# design/compilation-composition-change-request.md item 6.4; metal_recording.h MetalRecorderEffects; torch 2.14.0
+# torch/mps/__init__.py compile_shader and aten/src/ATen/native/mps/OperationUtils.mm, mtl_setBuffer: argument j
+# binds buffer j at its storage offset x element size; each tensor operand's typed view gives its kernel's bytes there,
+# its maximal contiguous ranges (_access, mesh-collective.h mesh_strided_extents) from its storage's start
+def _launch(kernel, arguments, **dispatched):
+    named = [Access(j, extent.start - base, extent.end - base, 0, 0)
+             for j, value in enumerate(arguments) if isinstance(value, torch.Tensor) and value.numel()
+             for base in (value.untyped_storage().data_ptr(),) for extent in _access(value, 0)]
+    _recorder()[0].MetalRecorderEffects((Access * max(len(named), 1))(*named), len(named))
+    kernel(*arguments, **dispatched)
 
 
 def _each(thunks):
     for thunk in thunks:
         thunk()
+
+
+# design/torch-source-lowering-change-request.md items 1 and 3: a lowered step is its compiled tasks (an MPS call's
+# are recorded by its capture, a CPU call's become its row's native operations) or one synchronization with the bridge
+# (`_Bridge`)
+class _Thunks:
+    def __init__(self, thunks):
+        self.thunks = thunks
+
+    def __call__(self, env, inputs, t):
+        _each(self.thunks)
+
+
+# metal_recording.h METAL_NATIVE_ARRIVED, METAL_NATIVE_SENT and METAL_NATIVE_PUBLISH: one synchronization with the
+# bridge, of declared transfer `transfer` of the row's plan; `word` its watched word of the execution's copy (the
+# range's count word, its {count, error} cell, none for a publication); `ranges` the placed bytes it orders: an
+# arrival writes them, a send's completion and a publication read them
+class _Bridge:
+    def __init__(self, kind, transfer, word, ranges=()):
+        self.kind, self.transfer, self.word, self.ranges = kind, transfer, word, ranges
 
 
 def _typed(target, operands, outs, results=FLOATING):
@@ -1655,7 +1814,7 @@ def _fill(out, value, step=0):
 
 
 def _copying(target, given, outs):
-    return _assign(outs[0], given['src']) if target.overloadpacket is A.copy else _copy(outs[0], given['self'])
+    return _assign(outs[0], given['src']) if target.overloadpacket in (A.copy, A.copy_) else _copy(outs[0], given['self'])
 
 
 # PyTorch 2.14 documentation, torch.einsum
@@ -2113,8 +2272,8 @@ def _concatenated(target, given, outs):
 
 
 # design/torch-source-lowering-change-request.md item 1
-SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy),
-                                                                    _copying),
+SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A._to_copy, A._unsafe_view, A.copy,
+                                                                     A.copy_), _copying),
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys((*CONVOLUTION, *TRANSPOSED, A.convolution), _convolving),
            **dict.fromkeys((*MAXIMUM, *AVERAGE, *INDEXED), _pooled), **dict.fromkeys(PAD, _padded),
@@ -2416,14 +2575,18 @@ def _metas(value):
 def _launched(ir, lower, arguments, dynamic, outs):
     lower(*_metas(arguments(_Stand(ir) if dynamic else None)), _metas(outs))
     if not dynamic:
-        thunks = lower(*arguments(None), outs)
-        return [lambda env, inputs, t: _each(thunks)]
+        return [_Thunks(lower(*arguments(None), outs))]
     return [lambda env, inputs, t: _each(lower(*arguments(env), outs))]
 
 
 def _aliases(local):
     return local.target is operator.getitem or isinstance(local.target, torch._ops.OpOverload) \
         and any(r.alias_info is not None for r in local.target._schema.returns)
+
+
+def _writes(local):
+    return isinstance(local.target, torch._ops.OpOverload) and any(
+        a.alias_info is not None and a.alias_info.is_write for a in local.target._schema.arguments)
 
 
 def _entry(context, state, transfer):
@@ -2441,16 +2604,9 @@ def _time(context, state, transfer):
 
 # mesh-graph.h mesh_graph_heap_order; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997,
 # §2.1
-mesh.LIB.mesh_graph_heap_order.restype = C.c_int
-mesh.LIB.mesh_graph_heap_order.argtypes = [mesh.U, C.POINTER(C.c_double), C.c_size_t, C.POINTER(mesh.U), C.POINTER(mesh.U),
-                                           C.POINTER(mesh.U)]
-
-
 def _listed(context, state, receives):
     count = len(receives)
-    place = (mesh.U * max(count, 1))()
-    priority = (C.c_double * max(count, 1))(*[-_time(context, state, i) for i, _ in receives])
-    mesh.check(mesh.LIB.mesh_graph_heap_order(count, priority, 0, None, None, place))
+    place = mesh_graph.heap_order([-_time(context, state, i) for i, _ in receives], ())
     listed = [None] * count
     for k in range(count):
         listed[place[k]] = receives[k]
@@ -2483,7 +2639,7 @@ def _pages(ir, key, local, arguments, dynamic, out, reads):
 
 
 def _once(thunks):
-    return [lambda env, inputs, t: _each(thunks)]
+    return [_Thunks(thunks)]
 
 
 # design/homomorphism-sources-2026-11-08.md; L. Meertens, Algorithmics, CWI Monographs 1, 1986, "Inserted-in", (i);
@@ -2585,9 +2741,10 @@ def _called(ir, key, operands, local, form, placed):
         return tuple(outs) if len(outs) > 1 else mine, _launched(ir, _lowering(local), arguments, dynamic, outs)
     if key in ir.contiguous:
         base = operands[_based(local)]
-        thunks = _assign(mine.view(base.shape), base)
-        return mine, [lambda env, inputs, t: _each(thunks)]
-    if mine is not None and ir.places[ir.device][key].owner == key:
+        return mine, [_Thunks(_assign(mine.view(base.shape), base))]
+    # torch 2.14.0 torchgen/model.py Annotation.is_write (`Tensor(a!)`): a call writing an operand in place writes its
+    # result's place, the operand's bytes (_view); a pure alias (`Tensor(a)`) has no work of its own
+    if mine is not None and (ir.places[ir.device][key].owner == key or _writes(local)):
         return mine, _launched(ir, _lowering(local), arguments, dynamic, [mine])
     if mine is not None:
         return mine, []
@@ -2643,47 +2800,49 @@ def _collected(ir, context, plan, state, placed, c, item, operands):
         steps = _once(_fill(total, _identity(A.sum, total.dtype)) + _pointwise(0, total, total, first))
         listed = receives if state is None else _listed(context, state, receives)
         for i, (received, j) in listed:
-            wait = [lambda env, inputs, t, i=i, count=_count(context, state, _entry(context, state, i).count, c):
-                    _arrived(context, plan, i, t, count)] if state is not None else []
-            steps += wait + _once([thunk for a, b, page in _received(placed(received), j, flat.numel(), row)
-                                   for thunk in _pointwise(0, flat[a:b], flat[a:b], page)])
+            pages = list(_received(placed(received), j, flat.numel(), row))
+            steps += [_Bridge(ARRIVED, i, _count(context, state, _entry(context, state, i).count, c),
+                              [page for _, _, page in pages])] if state is not None else []
+            steps += _once([thunk for a, b, page in pages for thunk in _pointwise(0, flat[a:b], flat[a:b], page)])
         return steps
     places = ir.places[ir.device]
     if local == 'copy' and places[reads[0]][:4] != places[key][:4]:
-        thunks = _assign(placed(key), operands[0])
-        return [lambda env, inputs, t: _each(thunks)]
+        return [_Thunks(_assign(placed(key), operands[0]))]
     return _filled(placed(key), 0) if local == 'fill' else []
 
 
 # torch 2.14.0 torch/_tensor_docs.py, fill_; design/torch-source-lowering-change-request.md item 1
 def _filled(part, fill):
-    thunks = _fill(part, fill)
-    return [lambda env, inputs, t: _each(thunks)]
+    return [_Thunks(_fill(part, fill))]
 
 
-# torch 2.14.0 torch/distributed/_functional_collectives.py, wait_tensor; MPI 4.1 section 7.1; libfabric
-# man/fi_cntr.3.md, fi_cntr_readerr; man/fi_endpoint.3.md, fi_cancel
-def _sent(context, plan, transfer, t, counter):
-    def ready():
-        status = mesh.LIB.mesh_host_sent(C.byref(context), plan, transfer, t)
-        if status == mesh.FAILED:
-            raise OSError(errno.ECANCELED, 'execution %d of declared transfer %d: a send cancelled '
-                                           '(mesh-collective.h mesh_host_sent)' % (t, transfer))
-        return status == 1
-    _wait(ready, lambda: counter[0] + counter[1],
-          'execution %d of declared transfer %d: no send completion for MESH_PLATFORM_NS' % (t, transfer))
+# mesh-collective.h struct mesh_declared `value` and its `to`/`from` view (design/compilation-composition-change-request.md
+# item 6.4): the placed bytes of execution c's copy a declared transfer lands in or sends from, the bytes its arrival
+# writes and its publication and send read: of a paged value the pages its view touches (_touched), of a run value the
+# view itself over the value's own storage (torch 2.14.0 torch/_torch_docs.py as_strided: storage-relative, no copy).
+# The value placed for `ir.at[i]` is its owner's home, offset 0 of the value, in the owner's dtype, whose element the
+# view's byte offset and strides are multiples of (_strided)
+def _ranges(ir, placed, i):
+    value = placed(ir.at[i]) if i in ir.at else None
+    if isinstance(value, _Paged):
+        return [value.pages[q] for q in _touched(ir, i, ir.page)]
+    if not isinstance(value, torch.Tensor):
+        return []
+    declared, size = ir.declared[i], value.element_size()
+    view = declared.to if declared.destination == ir.index else declared.from_
+    dims = [(view.pairs[2 * d], view.pairs[2 * d + 1] // size) for d in range(view.dims)]
+    return [value.as_strided([n for n, _ in dims], [s for _, s in dims], value.storage_offset() + view.offset // size)]
 
 
-def _completed(ir, context, plan, state, c, collective):
+def _completed(ir, context, plan, state, c, collective, placed=lambda key: None):
     steps = []
     for i in ir.declares[collective]:
-        entry = _entry(context, state, i)
+        entry, ranges = _entry(context, state, i), _ranges(ir, placed, i)
         if entry.pages:
-            steps.append(lambda env, inputs, t, i=i, count=_count(context, state, entry.count, c):
-                         _arrived(context, plan, i, t, count))
+            steps.append(_Bridge(ARRIVED, i, _count(context, state, entry.count, c), ranges))
         if entry.sends:
-            steps.append(lambda env, inputs, t, i=i, counter=(C.c_uint64 * 2).from_address(
-                context.M + entry.completion + 16 * (c % state.copies)): _sent(context, plan, i, t, counter))
+            steps.append(_Bridge(SENT_TASK, i, (C.c_uint64 * 2).from_address(
+                context.M + entry.completion + 16 * (c % state.copies)), ranges))
     return steps
 
 
@@ -2716,41 +2875,39 @@ def _copied(ir, read, key, cut, source, target):
     if isinstance(source, _Dynamic):
         _assign(target, part(_Stand(ir)[read]))
         return [lambda env, inputs, t: _each(_assign(target, part(env[read])))]
-    thunks = _assign(target, part(source))
-    return [lambda env, inputs, t: _each(thunks)]
+    return [_Thunks(_assign(target, part(source)))]
 
 
-# design/torch-source-lowering-change-request.md items 1 and 3; torch 2.14.0 torch/mps/event.py, Event.record and
-# Event.synchronize; MTLBuffer.h contents; MTLResource.h storageMode
-def _moved(value, device, hull):
-    if not isinstance(value, torch.Tensor) or device is None or value.device.type == device:
+# design/torch-source-lowering-change-request.md items 1 and 3; MTLBuffer.h contents; MTLResource.h storageMode: a
+# statically bound operand of a call seen on its function's backend, at the same placed addresses; its order against
+# its producer is the program's synchronization, not a wait here.  Before the plan places it (mapping None) the
+# operand is the capture's stand-in, the binding its MPS consumers' captures read
+def _viewed_on(value, device, mapping):
+    if not isinstance(value, torch.Tensor) or device is None or value.device.type == device or mapping is None:
         return value
     span = value.element_size() * (1 + sum((s - 1) * t for s, t in zip(value.shape, value.stride()))) \
         if value.numel() else 0
-    base, anchor, mapping = hull or (None, None, _Mapping(mesh.View()))
     if device == 'cpu':
-        event = torch.mps.Event()
-        event.record()
-        event.synchronize()
         storage = value.untyped_storage().data_ptr()
         return _dlpack_tensor('cpu', OBJECT(storage, _SEL(b'contents')) + value.data_ptr() - storage, 0, None,
-                              torch.uint8, (span,), mapping).view(value.dtype).as_strided(value.shape, value.stride())
-    address = value.data_ptr()
-    if anchor is None or not base <= address <= address + span <= base + anchor.numel():
-        raise OSError(errno.EFAULT, 'a value of %d bytes at %#x moved to the GPU from outside the program\'s pages'
-                      % (span, address))
-    return anchor[address - base:address - base + span].view(value.dtype).as_strided(value.shape, value.stride())
+                              torch.uint8, (span,), mapping).view(value.dtype).as_strided(
+                                  value.shape, value.stride())
+    raise NotImplementedError('a CPU tensor bound to an MPS operand of a replayed call: the replay binds every MPS '
+                              'operand to the program\'s placed buffer by its capture')
 
 
 def _specialized(ir, context, plan, state, devices, placed, c, item, operands, steps):
     kind, reads, key, operand = item
     value = placed(key)
-    for collective in ir.waits.get(ir.producer[key], ()) if state is not None else ():
-        steps += _completed(ir, context, plan, state, c, collective)
-    if kind == 'input':
+    for collective in ir.waits.get(ir.producer[key], ()):
+        steps += _completed(ir, context, plan, state, c, collective, placed) if state is not None else []
+    device = key[0].meta['val'].device.type if isinstance(key[0].meta.get('val'), torch.Tensor) else None
+    if kind == 'input' and ir.given is not None:
+        value = _viewed_on(ir.given[operand], device, ir.hull[2] if ir.hull else None)
+    elif kind == 'input':
         value = _Dynamic(key)
-        device = key[0].meta['val'].device.type if isinstance(key[0].meta.get('val'), torch.Tensor) else None
-        steps.append(lambda env, inputs, t: env.__setitem__(key, _moved(inputs[operand], device, ir.hull)))
+        steps.append(lambda env, inputs, t: env.__setitem__(key, _viewed_on(inputs[operand], device,
+                                                                            ir.hull[2] if ir.hull else None)))
     elif kind == 'constant' and value is None:
         value = operator.attrgetter(operand)(ir.gm)
     elif kind == 'copy':
@@ -2774,7 +2931,8 @@ def _specialized(ir, context, plan, state, devices, placed, c, item, operands, s
     elif kind == 'collective':
         steps += _collected(ir, context, plan, state, placed, c, item, operands)
     if state is not None:
-        steps += _publishes(context, plan, devices, ir.publishes.get(ir.producer[key], ()))
+        steps += _publishes(context, plan, ir.publishes.get(ir.producer[key], ()),
+                            lambda i: _ranges(ir, placed, i))
     return value
 
 
@@ -2787,70 +2945,48 @@ def _instantiate(ir, context, plan, devices, tensors, c, spec):
     values = mesh_graph.forward(list(items), lambda key: items[key][1],
                                 lambda key, operands: _specialized(ir, context, plan, state, devices, placed, c,
                                                                    items[key], operands, steps))
-    for collective in ir.waits.get(len(ir.program) - 1, ()) if state is not None else ():
-        steps += _completed(ir, context, plan, state, c, collective)
+    for collective in ir.waits.get(len(ir.program) - 1, ()):
+        steps += _completed(ir, context, plan, state, c, collective, placed) if state is not None else []
     node, keys = next(item[3] for item in ir.program if item[0] == 'output')
     arguments = _bound(node.args[0], lambda n: values[keys[n]])[0]
     return steps, lambda env: pytree.tree_unflatten(list(arguments(env)), spec)
 
 
-def _steps(ir, context, plan, tensors, devices, spec):
-    if ir.device is None:
-        return [[]], [lambda env: None]
-    made = [_instantiate(ir, context, plan, devices, tensors, c, spec)
-            for c in range(math.lcm(1, *(len(x) for x in tensors.values())))]
-    return [steps for steps, _ in made], [result for _, result in made]
-
-
 
 # design/disjoint-pages-change-request.md C3.4; design/aot-compilation-change-request.md, appendix item 7; P. E.
-# McKenney and J. D. Slingwine, Read-copy update, PDCS 1998; mesh-dataflow.h mesh_retire; rdma/mesh-torch.mm
-# mesh_torch_retire and mesh_torch_notifying; mesh-collective.h mesh_plan
-def _retire(context, state, deadline):
-    if state['replay'] is not None:
-        _unreplayed(context, state, deadline)
-    elif 'mps' in state['devices']:
-        mesh.check(TORCH.mesh_torch_retire(RETIRE, context.M, context.client))
-    else:
-        mesh.LIB.mesh_retire(context.M, context.client)
-    while TORCH.mesh_torch_notifying():
-        if time.clock_gettime_ns(time.CLOCK_MONOTONIC) > deadline:
-            raise OSError(errno.ETIMEDOUT, 'a notification after torch\'s work not run by the preparation\'s deadline: '
-                                           'the program\'s operand may stand (rdma/mesh-torch.mm)')
+# McKenney and J. D. Slingwine, Read-copy update, PDCS 1998; mesh-dataflow.h mesh_retire; mesh-collective.h mesh_plan
+def _retire(context, state):
+    replay = state['replay']
+    if replay is not None:
+        status = replay['lib'].MetalProgramEnd(replay['program'], replay['ended'], replay['error'], len(replay['error']))
+        if status:
+            raise OSError(status, replay['error'].value.decode())
+    mesh.LIB.mesh_retire(context.M, context.client)
+    _released(state['owned'])
     mapping = state['mapping']
-    mapping.retired = True
-    state.update(mapping=None, runs=None, devices=(), stale=True)
-    mapping.release()
+    state.update(replay=None, mapping=None, devices=(), executions=0, stale=True)
+    if mapping is not None:
+        mapping.retired = True
+        mapping.release()
+
+
+# the preparation's resources, each with its release, made in order and released in the reverse order, on retirement
+# or on a preparation that raised
+def _owned(owned, made):
+    if made:
+        owned[made] = lambda: PUT(made, SELECTOR[b'release'])
+    return made
+
+
+def _released(owned):
+    while owned:
+        owned.popitem()[1]()
 
 
 # Python documentation, weakref.finalize; Lib/weakref.py, finalize
 def _dropped(context, state):
-    if state['mapping'] is not None:
-        _retire(context, state, time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-                + (0 if state['timeout'] is not None else mesh.PLATFORM_NS))
-
-
-# design/aot-compilation-change-request.md, appendix item 6; design/disjoint-pages-change-request.md C3.7; mesh-call.h
-# mesh_transfers_start; torch 2.14.0 torch/fx/graph.py _PyTreeCodeGen, torch/utils/_pytree.py; MPI 4.1 section 3.9,
-# MPI_START; NCCL User Guide, CUDA Stream Semantics
-def _started(context, plan, metal):
-    if metal:
-        array = (mesh.U * 1)(0)
-        return lambda t: mesh.check(TORCH.mesh_torch_publish(STARTED, C.addressof(context), plan, array, 1, t))
-    return lambda t: mesh.LIB.mesh_host_started(C.byref(context), plan, 0, t)
-
-
-def _execute(context, run, args, kwargs):
-    t, k = run['executions'], run['state'].submissions
-    status = mesh.LIB.mesh_transfers_start(C.byref(context), run['plan'], t + 1)
-    if run['state'].submissions > k:
-        run['executions'] = t + 1
-    mesh.check(status)
-    run['started'](t)
-    c, env, inputs = t % len(run['steps']), {}, pytree.arg_tree_leaves(*args, **kwargs)
-    for step in run['steps'][c]:
-        step(env, inputs, t)
-    return run['results'][c](env)
+    if state['mapping'] is not None or state['owned']:
+        _retire(context, state)
 
 
 # MTLDevice.h newBufferWithLength:options:; MTLResource.h `label`; metal-microbench metal_recording.m
@@ -2870,65 +3006,153 @@ def _label(buffer, name):
     PUT(text, SELECTOR[b'release'])
 
 
+# design/torch-capture-change-request.md items 3 and 9; design/plan-to-bridge-change-request.md R4; NCCL User Guide
+# 2.32.3, "NCCL operations can be captured by CUDA Graphs"; metal-microbench tools/e2b_replay.m, its receive:page: and
+# publish: marks
+def _endpoints(ir):
+    receives = [i for _, landed in ir.roles.values() for i, _ in landed if ir.declared[i].value != mesh.ABSENT]
+    sends = [i for g in sorted(ir.publishes) for i in ir.publishes[g] if ir.declared[i].value != mesh.ABSENT]
+    return receives, sends
+
+
+# design/torch-capture-change-request.md items 3 and 9; design/plan-to-bridge-change-request.md R1, R2 and R4;
+# mesh-collective.h mesh_strided_extents: the rows (blocks of `row` bytes) of value `ir.declared[i].value` that
+# transfer i lands in here (its `to` view) or sends from here (its `from` view)
+def _touched(ir, i, row):
+    declared = ir.declared[i]
+    view = declared.to if declared.destination == ir.index else declared.from_
+    return sorted({q for offset, length in mesh.extents(view)
+                   for q in range(offset // row, (offset + length - 1) // row + 1)})
+
+
 # torch 2.14.0 torch/export/__init__.py, aten/src/ATen/mps/MPSStream.mm, aten/src/ATen/native/mps/OperationUtils.mm;
-# metal-microbench metal_recording.h capture:, metal_recording.m MetalDelegateValues and MetalMaskReaders;
-# design/torch-source-lowering-change-request.md item 1
-def _captured(context, irs, compiled, gm, of, constants, holders):
+# metal-microbench metal_recording.h capture:, receive:page:, publish:, metal_recording.m MetalDelegateValues and
+# MetalMaskReaders; design/torch-source-lowering-change-request.md item 1; design/aot-compilation-change-request.md,
+# appendix item 6; MPI 4.1 §4.2.3: a range's pages are one partitioned operand, its buffers' touched pages
+def _captured(context, irs, compiled, gm, of, constants, holders, owned):
     lib, made = _recorder()
     _library()
     error = C.create_string_buffer(4096)
     device = made()
-    recorder = lib.MetalRecorderOpen(device, error, len(error))
+    recorder = _owned(owned, lib.MetalRecorderOpen(device, error, len(error)))
     PUT(device, SELECTOR[b'release'])
     if not recorder:
         raise OSError(errno.ENODEV, 'the recorder: %s' % error.value.decode())
-    owners, standins, counted = {}, {}, _Mapping(mesh.View())
+    owners, held, raw, standins, counted, groups, pages = {}, {}, {}, {}, _Mapping(mesh.View()), {}, {}
+    delivered = {}
+    rated = {k: {v for v, _ in ir.inputs.values()} for k, ir in enumerate(irs)}
+    ordinals = {}
+    native = {k for k, ir in enumerate(irs) if {layout[2] for layout in ir.layouts} == {'cpu'}}
+    read = {k: {ir.homes[key][0] for key in next(item[3] for item in ir.program if item[0] == 'output')[1].values()
+                if key in ir.homes} | rated[k] | {v for v, _ in ir.landed.values()} for k, ir in enumerate(irs)
+            if k in native}
 
     def standin(owned, bytes, dtype, numel):
-        buffer = _labelled(_metal_device(), bytes, 'function %d value %d' % owned[:2]
-                           + (' page %d' % owned[2] if len(owned) > 2 else ''))
+        if owned[0] in native and owned[1] not in read[owned[0]]:
+            return torch.empty(numel, dtype=dtype, device='meta')
+        buffer = _labelled(_metal_device(), bytes, 'function %d value %d call %d' % owned[:3]
+                           + (' page %d' % owned[3] if owned[3] is not None else ''))
         owners[buffer] = owned
+        held.setdefault(owned[:3], []).append(buffer)
         made = _dlpack_tensor('mps', buffer, 0, buffer, dtype, (numel,), counted)
         PUT(buffer, SELECTOR[b'release'])
         return made
-    for k, ir in enumerate(irs):
-        if ir.device is None:
-            continue
-        copies = []
-        for v, (dtype, numel, _) in enumerate(ir.layouts):
-            n = ir.page // dtype.itemsize
-            copies.append([standin((k, v), dtype.itemsize * numel, dtype, numel)] if ir.values[v].run else
-                          [_Paged([standin((k, v, p), ir.page, dtype, min(n, numel - p * n))
-                                   for p in range(-(-numel // n))])])
-        standins[k] = _homes(ir, copies)
+
+    def instance(k, j):
+        if (k, j) not in standins:
+            ir, copies = irs[k], []
+            for v, (dtype, numel, _) in enumerate(ir.layouts):
+                n = ir.page // dtype.itemsize
+                copies.append(raw[k, 0][v] if j and v in rated[k] else
+                              [standin((k, v, j, None), dtype.itemsize * numel, dtype, numel)] if ir.values[v].run else
+                              [_Paged([standin((k, v, j, p), ir.page, dtype, min(n, numel - p * n))
+                                       for p in range(-(-numel // n))])])
+            raw[k, j], standins[k, j] = copies, _homes(ir, copies)
+        return standins[k, j]
     calls = []
+
+    def buffer(k, v, j):
+        return held[k, v, 0 if v in rated[k] else j]
+
+    def grouped(k, j, i):
+        ir = irs[k]
+        v = ir.declared[i].value
+        pages[k, j, i] = _touched(ir, i, ir.page) if not ir.values[v].run else None
+        members = buffer(k, v, j) if pages[k, j, i] is None else [buffer(k, v, j)[q] for q in pages[k, j, i]]
+        if len(members) == 1:
+            groups[k, j, i] = members[0]
+        else:
+            groups[k, j, i] = _owned(owned, OBJECTS(OBJECT(OBJC.objc_getClass(b'NSArray'), _SEL(b'alloc')),
+                                                    _SEL(b'initWithObjects:count:'),
+                                                    (C.c_void_p * len(members))(*members), len(members)))
+        return members
 
     def capture(node, args, kwargs):
         k = of[node]
+        j = ordinals[k] = ordinals.get(k, -1) + 1
         ir = irs[k]
+        inputs = pytree.arg_tree_leaves(*args, **kwargs)
         if ir.device is None:
-            calls.append((node, k, None, None, 0, []))
-            return None
-        steps, results = _steps(ir, context, 0, standins[k][0], {}, compiled[k].spec)
-        inputs, env, result, failure = pytree.arg_tree_leaves(*args, **kwargs), {}, [], []
+            # design/compilation-composition-change-request.md items 1 and 6 (unit 6E): at a node with no section of
+            # the function, its call's result is its delivered leaves (_deliver `ir.landed`), each over its landing
+            # value's standin, so the consumers here bind them as any cross-function operand (owners, _expanded), and
+            # its passed-through leaves (an output that is its placeholder q) the call's own input q here
+            output, keys = next(item[3] for item in ir.program if item[0] == 'output')
+            given = {n: q for q, n in enumerate(n for n in ir.gm.graph.nodes if n.op == 'placeholder')}
+            places = instance(k, j)[0] if ir.landed else {}
+            leaves = [places[keys[leaf]][0] if o in ir.landed else inputs[given[leaf]] if leaf in given else None
+                      for o, leaf in enumerate(pytree.tree_leaves(output.args))]
+            result = pytree.tree_unflatten(leaves, compiled[k].spec) \
+                if any(leaf is not None for leaf in leaves) else None
+            calls.append((node, k, None, result, 0, [], None, None, j))
+            return result
+        if k in native:
+            ir.given = inputs
+            try:
+                result = _instantiate(ir, context, 0, {}, instance(k, j)[0], 0, compiled[k].spec)[1]({})
+            finally:
+                ir.given = None
+            calls.append((node, k, None, result, 0, [], None, 'cpu', j))
+            return result
+        steps, results = _instantiate(ir, context, 0, {}, instance(k, j)[0], 0, compiled[k].spec)
+        receives, sends = _endpoints(ir)
+        env, result, failure = {}, [], []
 
         def encode(_):
             try:
-                for step in steps[0]:
+                for i in receives:
+                    for page in grouped(k, j, i):
+                        MARK_RECEIVED(recorder, _SEL(b'receive:page:generation:'), page, ir.page, Generation())
+                # design/compilation-composition-change-request.md items 1 and 6: each result of call r (function f)
+                # delivered here lands in f's value v by f's transfer i; its buffers (copy of r's ordinal) are this
+                # capture's received operands, the pages f's transfer view touches of a paged landing, read at r's
+                # generation (metal_recording.h struct MetalGeneration from E's static call identities)
+                for _, r, f, _, v, i, generation in ir.delivered.get(j, ()):
+                    members = buffer(f, v, calls[r][-1])
+                    touched = None if irs[f].values[v].run else _touched(irs[f], i, irs[f].page)
+                    delivered.setdefault((k, j), []).append((r, f, i, v, members, touched))
+                    for member in members if touched is None else [members[q] for q in touched]:
+                        MARK_RECEIVED(recorder, _SEL(b'receive:page:generation:'), member, irs[f].page,
+                                      Generation(*generation))
+                for i in sends:
+                    grouped(k, j, i)
+                    SET(recorder, _SEL(b'publish:'), groups[k, j, i])
+                for step in steps:
                     step(env, inputs, 0)
-                result.append(results[0](env))
+                result.append(results(env))
                 for leaf in pytree.tree_leaves(result[0]):
-                    buffer = leaf.untyped_storage().data_ptr() if isinstance(leaf, torch.Tensor) else None
-                    if buffer is not None and buffer not in owners:
-                        owners[buffer] = (k, ir.value(leaf.dtype, leaf.untyped_storage().nbytes() // leaf.element_size(),
-                                                      'mps', 0, 0, 0))
-                        _label(buffer, 'function %d value %d' % owners[buffer])
+                    storage = leaf.untyped_storage().data_ptr() if isinstance(leaf, torch.Tensor) else None
+                    if storage is not None and storage not in owners:
+                        owners[storage] = (k, ir.value(leaf.dtype, leaf.untyped_storage().nbytes() // leaf.element_size(),
+                                                       'mps', 0, 0, 0), j, None)
+                        held.setdefault(owners[storage][:3], []).append(storage)
+                        _label(storage, 'function %d value %d call %d' % owners[storage][:3])
                 torch.mps.synchronize()
             except BaseException as raised:
                 failure.append(raised)
         torch.mps.synchronize()
         callback = ENCODE(encode)
-        handle = lib.MetalRecorderCapture(recorder, callback, None, error, len(error))
+        handle = _owned(owned, lib.MetalRecorderCapture(recorder, callback, None, error, len(error)))
         if failure:
             raise failure[0]
         if not handle:
@@ -2939,74 +3163,290 @@ def _captured(context, irs, compiled, gm, of, constants, holders):
         count = VALUES(recorder, _SEL(b'values:level:into:'), handle, 0, C.cast(own, C.c_void_p))
         calls.append((node, k, handle, result[0], levels, [mesh.Value(
             section=mesh.Section(bytes=v.bytes), kind=v.kind, state=v.state, begin=v.begin, end=v.end, run=1)
-            for v in own[:count]], env, steps))
+            for v in own[:count]], env, steps, j))
         return result[0]
-    _Program(gm, capture).run(*[standins[k][1][i][0] if k is not None else constant
+    _Program(gm, capture).run(*[instance(k, 0)[1][i][0] if k is not None else constant
                                 for i, (constant, k) in enumerate(zip(constants, holders))])
-    return {'lib': lib, 'recorder': recorder, 'owners': owners, 'calls': calls}
+    return {'lib': lib, 'recorder': recorder, 'owners': owners, 'held': held, 'rated': rated,
+            'calls': calls, 'buffer': buffer, 'groups': groups, 'pages': pages, 'delivered': delivered}
+
+
+# design/aot-compilation-change-request.md, appendix item 6; design/disjoint-pages-change-request.md C3.3; ExecuTorch,
+# "Concepts", Memory planning: copy c of a value written by call j of the n calls of its function in the block is the
+# copy of its plan's execution t n + j, and a reader whose function the block calls m times runs at executions t m + i,
+# so its offsets repeat with period m x copies; a block input's copy is the block's execution t
+def _expanded(captured, owned, reader, addresses, base):
+    k, v, j, p = owned
+    at, m, n = addresses[k][v], captured['every'][reader], captured['every'][k]
+    block = v in captured['rated'][k]
+    picked = [at[(x // m) % len(at) if block else ((x // m) * n + j) % len(at)] for x in range(m * len(at))]
+    picked = [copy[p] if p is not None else copy for copy in picked]
+    return (C.c_uint64 * len(picked))(*[a - base for a in picked]), len(picked)
+
+
+# metal_recording.h received:operand:remote:fields:, published:operand:supplied:, sent:operand:counter:extents:,
+# state:buffer:status:; mesh-metal.h mesh_metal_transport_create (one view of the program's plan states),
+# mesh_metal_receive_prepare, mesh_metal_receive_fields (its rows the region's blocks, ir.page),
+# mesh_metal_publication_prepare, mesh_metal_sent_prepare and mesh_metal_status_prepare, each of the range's plan:
+# capture (k, j)'s ranges bound to their plans' words. A received range's field names its row's
+# index in the buffer it lands in, UINT32_MAX in every other member buffer; a sent range's supplied word is given once,
+# with its first buffer; every range a send of this node reads (its sent ranges and the received ranges it forwards)
+# has its completion counter, so a later overlapping writer follows the send's read (problems-of-14b9a757, third
+# stops 7), and the bytes its SEND hops read (mesh-metal.h mesh_metal_sent_extents, copy-0 rows: a paged value's row
+# its member in the range's touched pages, a run value's its block in the one buffer; design/compilation-composition-
+# change-request.md item 6.4)
+def _transfers(captured, context, transports, owned, plan, handle, ir, k, j, values):
+    receives, sends = _endpoints(ir)
+    delivered = captured['delivered'].get((k, j), ())
+    if not receives and not sends and not delivered:
+        return
+    recorder, metal, words = captured['recorder'], _transport(), mesh.State.from_address(context.M + plan)
+    if 'program' not in transports:
+        transports['program'] = Transport()
+        mesh.check(metal.mesh_metal_transport_create(C.byref(context), C.byref(captured['planned']),
+                                                     OBJECT(recorder, _SEL(b'device')), C.byref(transports['program'])))
+        owned[id(transports['program'])] = lambda made=transports['program']: \
+            metal.mesh_metal_transport_destroy(C.byref(made))
+    transport, pool = transports['program'], OBJC.objc_autoreleasePoolPush()
+
+    # metal_recording.h received:operand:remote:fields: transfer i of the plan `at` (function f's) landing in f's value
+    # v's members (their generation given at receive:page:generation:)
+    def received(at, f, i, v, members, touched):
+        remote = Remote()
+        mesh.check(metal.mesh_metal_receive_prepare(C.byref(context), C.byref(transport), at, i, C.byref(remote)))
+        partition = (mesh.U * remote.pages)()
+        mesh.check(metal.mesh_metal_receive_fields(C.byref(context), C.byref(transport), at, C.byref(remote),
+                                                   values[f][v].section, partition))
+        for q, member in [(None, members[0])] if touched is None else [(q, members[q]) for q in touched]:
+            named = partition if q is None else (mesh.U * remote.pages)(*[0 if p == q else UNNAMED for p in partition])
+            fields = DATA(OBJECT(OBJC.objc_getClass(b'NSData'), _SEL(b'alloc')), _SEL(b'initWithBytes:length:'),
+                          C.addressof(named), C.sizeof(named))
+            RECEIVED(recorder, _SEL(b'received:operand:remote:fields:'), handle, member, remote, fields)
+            PUT(fields, SELECTOR[b'release'])
+    try:
+        for i in receives:
+            v = ir.declared[i].value
+            received(plan, k, i, v, captured['buffer'](k, v, j), captured['pages'][k, j, i])
+        # design/compilation-composition-change-request.md items 1 and 6: a result of call r (function f) delivered
+        # here (`_deliver`), its readiness f's transfer i in f's plan
+        for r, f, i, v, members, touched in delivered:
+            received(captured['planned'].call[r].plan, f, i, v, members, touched)
+        for i in sends:
+            supplied, touched = Supplied(), captured['pages'][k, j, i]
+            mesh.check(metal.mesh_metal_publication_prepare(C.byref(context), C.byref(transport), plan, i,
+                                                            C.byref(supplied)))
+            members = captured['buffer'](k, ir.declared[i].value, j)
+            PUBLISHED(recorder, _SEL(b'published:operand:supplied:'), handle,
+                      members[0] if touched is None else members[touched[0]], supplied.supplied)
+        for i in receives + sends:
+            if _entry(context, words, i).sends:
+                counter, section, touched = MetalSent(), values[k][ir.declared[i].value].section, captured['pages'][k, j, i]
+                mesh.check(metal.mesh_metal_sent_prepare(C.byref(context), C.byref(transport), plan, i,
+                                                         C.byref(counter)))
+                count = C.c_size_t()
+                status = metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, None, 0,
+                                                       C.byref(count))
+                mesh.check(0 if status == errno.ERANGE else status)
+                read, member = (Access * max(count.value, 1))(), {q: n for n, q in enumerate(touched or ())}
+                mesh.check(metal.mesh_metal_sent_extents(C.byref(context), C.byref(transport), plan, i, section, read,
+                                                         count.value, C.byref(count)))
+                for extent in read[:count.value]:
+                    at = 0 if touched is not None else extent.key * ir.page
+                    extent.key, extent.start, extent.end = (member[extent.key] if touched is not None else 0,
+                                                            extent.start + at, extent.end + at)
+                extents = DATA(OBJECT(OBJC.objc_getClass(b'NSData'), _SEL(b'alloc')), _SEL(b'initWithBytes:length:'),
+                               C.addressof(read), C.sizeof(Access) * count.value)
+                SENT(recorder, _SEL(b'sent:operand:counter:extents:'), handle, captured['groups'][k, j, i], counter,
+                     extents)
+                PUT(extents, SELECTOR[b'release'])
+        status = mesh.Q()
+        mesh.check(metal.mesh_metal_status_prepare(C.byref(context), C.byref(transport), plan, C.byref(status)))
+        PUBLISHED(recorder, _SEL(b'state:buffer:status:'), handle, transport.state, status.value)
+    finally:
+        OBJC.objc_autoreleasePoolPop(pool)
 
 
 # ExecuTorch, "Concepts", Memory planning; torch 2.14.0 torch/_inductor/cudagraph_trees.py; M. Lam, PLDI 1988, §2.3;
 # metal_recording.h place:value:; mesh-collective.h mesh_view_values; MTL4CommandQueue.h addResidencySet:; mesh.h struct
-# mesh_state; design/torch-capture-change-request.md item 6; design/torch-source-lowering-change-request.md item 1
-def _replays(captured, functions, states, values, addresses, base, buffer):
+# mesh_state; design/torch-capture-change-request.md items 3, 6 and 9; design/torch-source-lowering-change-request.md
+# item 1; design/aot-compilation-change-request.md, appendix item 6; design/compilation-composition-change-request.md
+# item 6, units 6C and 6D: row j is the plan's call j, its plan, lead, every and ordinal `planned.call[j]`'s, and the
+# plan's results (mesh-collective.h struct mesh_planned: its calls, tasks and order at this node) the operand of the
+# program's preparation (metal_recording.h MetalRecorderProgram)
+def _replays(captured, context, irs, planned, horizon, values, addresses, base, buffer, natives, period, owned):
     lib, recorder, error = captured['lib'], captured['recorder'], C.create_string_buffer(4096)
-    queue, replays = OBJECT(recorder, _SEL(b'queue')), []
+    queue, replays, transports = OBJECT(recorder, _SEL(b'queue')), [], {}
 
     def offsets(at):
         return (C.c_uint64 * len(at))(*[a - base for a in at])
-    for node, k, handle, _, _, own, *_ in captured['calls']:
+    for row, (node, k, handle, _, _, own, *_, j) in enumerate(captured['calls']):
         if handle is None:
             replays.append(None)
             continue
-        for operand, owned in captured['owners'].items():
-            value, at = values[owned[0]][owned[1]], addresses[owned[0]][owned[1]]
+        for operand, held in captured['owners'].items():
+            at, width = _expanded(captured, held, k, addresses, base)
             PLACE_OPERAND(recorder, _SEL(b'place:operand:in:offsets:copies:ahead:shares:'), handle, operand, buffer,
-                          offsets(at if len(owned) == 2 else [pages[owned[2]] for pages in at]), value.section.count,
-                          0, bool(value.shares))
-        first = len(values[k]) - len(own)
+                          at, width, 0, bool(values[held[0]][held[1]].shares))
+        first = captured['firsts'][k, j]
         for i in range(len(own)):
             value = values[k][first + i]
             PLACE_VALUE(recorder, _SEL(b'place:value:in:offsets:copies:shares:'), handle, i, buffer,
                         offsets(addresses[k][first + i]), value.section.count, bool(value.shares))
+        step = values[k][captured['steps'][k]]
+        PLACE_STEP(recorder, _SEL(b'place:step:offsets:copies:shares:'), handle, buffer,
+                   offsets(addresses[k][captured['steps'][k]]), step.section.count, bool(step.shares))
+        _transfers(captured, context, transports, owned, planned.call[row].plan, handle, irs[k], k, j, values)
         replay = Replay()
         status = lib.MetalRecorderReplay(recorder, handle, C.byref(replay), error, len(error))
-        PUT(handle, SELECTOR[b'release'])
+        owned.pop(handle)()
         if status:
             raise OSError(status, 'call %s of compiled function %d: the replay: %s' % (node.name, k,
                                                                                          error.value.decode()))
         SET(queue, _SEL(b'addResidencySet:'), replay.residency)
+        owned[id(replay)] = lambda replay=replay: (SET(queue, _SEL(b'removeResidencySet:'), replay.residency),
+                                                   lib.MetalReplayDestroy(C.byref(replay)))
         replays.append(replay)
-    calls = (Call * len(replays))(*[Call(C.pointer(replay) if replay is not None else None, functions[k].plan, 0, None,
-                                         states[k].copies - 1)
-                                    for replay, (_, k, *_) in zip(replays, captured['calls'])])
+    identities = [planned.call[row] for row in range(planned.calls)]
+    calls = (Call * len(replays))(*[Call(C.pointer(replay) if replay is not None else None, identity.plan,
+                                         identity.lead, identity.every, identity.ordinal,
+                                         C.cast(natives[row], C.POINTER(Native)) if row in natives else None,
+                                         len(natives[row]) if row in natives else 0)
+                                    for row, (replay, identity) in enumerate(zip(replays, identities))])
+    program = _owned(owned, lib.MetalRecorderProgram(recorder, calls, len(calls), horizon, C.byref(planned), error,
+                                                     len(error)))
+    if not program:
+        raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
+    # design/synchronization-signature-change-request.md items 1 and 2: the compiled program's one signature over its
+    # warm-up and one period of its residues, the plan's composed in by its producer (MetalProgramSignature), kept with
+    # the compiled program as the graph module's forms and its record's bytes
+    replayed = mesh_graph.Signature()
+    status = lib.MetalProgramSignature(program, C.addressof(context), horizon + period, C.byref(replayed), error,
+                                       len(error))
+    if status:
+        raise OSError(status, 'the program\'s signature: %s' % error.value.decode())
+    try:
+        signed = dict(mesh_graph.forms(replayed), record=mesh_graph.record(replayed))
+    finally:
+        mesh_graph.free(replayed)
     gpu = OBJECT(queue, _SEL(b'device'))
-    allocators = (C.c_void_p * HOST_LAG)(*[OBJECT(gpu, _SEL(b'newCommandAllocator')) for _ in range(HOST_LAG)])
-    return {'lib': lib, 'recorder': recorder, 'queue': queue, 'replays': replays, 'calls': calls,
-            'allocators': allocators, 'ended': OBJECT(gpu, _SEL(b'newSharedEvent')), 'error': error}
+    allocators = (C.c_void_p * horizon)(*[_owned(owned, OBJECT(gpu, _SEL(b'newCommandAllocator')))
+                                          for _ in range(horizon)])
+    return {'lib': lib, 'queue': queue, 'calls': calls, 'program': program, 'allocators': allocators,
+            'ended': _owned(owned, OBJECT(gpu, _SEL(b'newSharedEvent'))), 'error': error, 'signature': signed,
+            'natives': natives}
 
 
-# torch 2.14.0 torch/_inductor/cudagraph_trees.py
-def _outputs(captured, copies, gm, constants, inputs):
-    period = math.lcm(HOST_LAG, *(len(c) for function in copies.values() for c in function))
+# design/aot-compilation-change-request.md, appendix item 6: block execution p's copy of a call's result, the copy of
+# its plan's execution p every + ordinal (a block input's: p)
+def _period(copies, horizon):
+    return math.lcm(horizon, *(len(c) for function in copies.values() for c in function))
+
+
+# design/torch-source-lowering-change-request.md items 1 and 3; N. D. Jones, C. K. Gomard and
+# P. Sestoft, 1993, Definition 4.1: each CPU call's lowered steps specialized to block execution p's bound operands, its
+# residual the native tasks (compiled entry, operand addresses, grid) and bridge words of that execution, with the
+# accesses the program's synchronization graph orders it by against the other rows
+# metal_recording.h struct MetalNative: key 1, the absolute CPU address ranges of the operand's bytes,
+# MetalRowAccesses's form; mesh-collective.h mesh_strided_extents (design/compilation-composition-change-request.md
+# item 6.4): the view's maximal contiguous ranges, its dimensions by decreasing stride (the same addresses), those of
+# one index or stride 0 adding none
+def _access(value, write):
+    size = value.element_size()
+    dims = sorted(((n, s * size) for n, s in zip(value.shape, value.stride()) if n > 1 and s), key=lambda d: -d[1])
+    view = mesh.Strided(offset=value.data_ptr(), element=size, dims=len(dims),
+                        pairs=(mesh.Q * max(2 * len(dims), 1))(*[x for d in dims for x in d]))
+    return [Access(1, offset, offset + length, 0, write) for offset, length in mesh.extents(view)]
+
+
+# design/compilation-composition-change-request.md item 6 (unit 6E), the delivered-result correspondence;
+# metal_recording.h struct MetalNativeTask `count`: a delivered range's readiness in its consumer's row, transfer i of
+# program row `owner` - 1's plan at that row's execution (its producer's generation), the landing read
+class _Arrival(_Bridge):
+    def __init__(self, transfer, word, ranges, owner):
+        super().__init__(ARRIVED, transfer, word, ranges)
+        self.owner = owner
+
+
+def _native(steps):
+    tasks, accesses, held = [], [], []
+    for step in steps:
+        if isinstance(step, _Thunks):
+            for thunk in step.thunks:
+                if not isinstance(thunk, _Task):
+                    raise NotImplementedError('%r in a CPU call: a task of another backend\'s lowering' % (thunk,))
+                tasks.append(Task(TASK, 0, thunk.address, C.addressof(thunk.pointers), thunk.count))
+                for j, value in enumerate(thunk.held):
+                    if isinstance(value, torch.Tensor) and value.numel():
+                        accesses += _access(value, thunk.written >> j & 1)
+        elif isinstance(step, _Bridge):
+            owner = step.owner if isinstance(step, _Arrival) else 0
+            tasks.append(Task(step.kind, step.transfer, None, C.addressof(step.word) if step.word is not None else None,
+                              owner))
+            accesses += [a for value in step.ranges if value.numel()
+                         for a in _access(value, int(step.kind == ARRIVED and not owner))]
+        else:
+            raise NotImplementedError('%r in a CPU call: a step specialized to no native operand' % (step,))
+        held.append(step)
+    made = (Task * max(len(tasks), 1))(*tasks), (Access * max(len(accesses), 1))(*accesses)
+    return Native(made[0], made[1], len(tasks), len(accesses)), (made, held)
+
+
+# N. D. Jones, C. K. Gomard and P. Sestoft, 1993, Definition 4.1; design/aot-compilation-change-request.md, appendix
+# item 6; torch 2.14.0 torch/_inductor/cudagraph_trees.py: the block's call graph specialized once to each block
+# execution residue p, its placed operands static: each call's results at p (an MPS call's captured results at the
+# copies of its execution p every + ordinal, a block input's at p), each CPU call's native operations at p, and the
+# block's outputs at p, with the operands they hold; a row's plan, ordinal and every its call's in `planned`
+# (mesh-collective.h struct mesh_planned_call)
+def _specialize(captured, context, irs, planned, horizon, compiled, bound, gm, constants, inputs):
+    copies = {k: b[3] for k, b in enumerate(bound)}
+    rows = {node: (row, k, kind == 'cpu', result, planned.call[row])
+            for row, (node, k, _, result, _, _, _, kind, _) in enumerate(captured['calls'])}
+    natives, kept, outputs = {}, [], []
 
     def leaf(x, p):
         if not isinstance(x, torch.Tensor):
             return x
-        k, v = captured['owners'][x.untyped_storage().data_ptr()]
-        copy = copies[k][v][p % len(copies[k][v])]
+        k, v, j, _ = captured['owners'][x.untyped_storage().data_ptr()]
+        at = copies[k][v]
+        copy = at[(p if v in captured['rated'][k] else p * captured['every'][k] + j) % len(at)]
         return copy.as_strided(x.shape, x.stride(), copy.storage_offset() + x.storage_offset())
-    results = {node: result for node, _, _, result, *_ in captured['calls']}
-    return [_Program(gm, lambda node, args, kwargs, p=p: pytree.tree_map(lambda x: leaf(x, p), results[node])).run(
-        *[placed[0][p % len(placed[0])] if placed is not None else constant for constant, placed in zip(constants, inputs)])
-        for p in range(period)]
+
+    for p in range(_period(copies, horizon)):
+        def call(node, args, kwargs, p=p):
+            row, k, native, result, identity = rows[node]
+            if not native:
+                return pytree.tree_map(lambda x: leaf(x, p), result)
+            ir = irs[k]
+            ir.given = pytree.arg_tree_leaves(*args, **kwargs)
+            try:
+                steps, results = _instantiate(ir, context, identity.plan, bound[k][1], bound[k][0],
+                                              p * identity.every + identity.ordinal, compiled[k].spec)
+            finally:
+                ir.given = None
+            # design/compilation-composition-change-request.md items 1 and 6 (unit 6E), the delivered-result
+            # correspondence: a CPU consumer's delivered operand (`ir.delivered`: leaf o of call r, function f,
+            # landed in f's value v by transfer i of r's plan) is ready by its own row's wait on that transfer
+            # (metal_recording.h MetalNativeTask `count` = r + 1) at r's execution e_f = p producer + ordinal (its
+            # MetalGeneration), the landed copy e_f mod copies read, the count word copy e_f mod the plan's copies;
+            # an MPS consumer's is its capture's received range of the same transfer and generation (_transfers)
+            arrivals = []
+            for _, r, f, _, v, i, (_, producer, ordinal) in ir.delivered.get(identity.ordinal, ()):
+                e, state = p * producer + ordinal, mesh.State.from_address(context.M + planned.call[r].plan)
+                arrivals.append(_Arrival(i, _count(context, state, _entry(context, state, i).count, e),
+                                         [copies[f][v][e % len(copies[f][v])]], r + 1))
+            made, held = _native(arrivals + steps)
+            natives.setdefault(row, []).append(made)
+            kept.append(held)
+            return results({})
+        outputs.append(_Program(gm, call).run(*[placed[0][p % len(placed[0])] if placed is not None else constant
+                                                for constant, placed in zip(constants, inputs)]))
+    return outputs, {row: (Native * len(made))(*made) for row, made in natives.items()}, kept
 
 
 # mesh-call.h mesh_transfers_start; MPI 4.1 §3.9, MPI_START; NCCL User Guide, CUDA Stream Semantics
 def _replayed(context, replay, b):
-    status = replay['lib'].MetalRecorderRun(replay['recorder'], replay['allocators'], HOST_LAG, replay['calls'],
-                                            len(replay['calls']), b, replay['ended'], C.addressof(context), START,
-                                            STARTED, replay['error'], len(replay['error']))
+    status = replay['lib'].MetalProgramRun(replay['program'], replay['allocators'], b, 1, replay['ended'],
+                                           C.addressof(context), START, STARTED, replay['error'], len(replay['error']))
     if status:
         raise OSError(status, 'execution %d of the program: %s' % (b, replay['error'].value.decode()))
     return replay['outputs'][b % len(replay['outputs'])]
@@ -3015,26 +3455,6 @@ def _replayed(context, replay, b):
 # MTLEvent.h `signaledValue`
 def _ended(replay):
     return VALUE(replay['ended'], _SEL(b'signaledValue'))
-
-
-# MTL4CommandQueue.h signalEvent:value:; MTLEvent.h waitUntilSignaledValue:timeoutMS:; mesh-dataflow.h mesh_retire
-def _unreplayed(context, state, deadline):
-    replay, last = state['replay'], state['executions'] + 1
-    SIGNAL(replay['queue'], _SEL(b'signalEvent:value:'), replay['ended'], last)
-    while _ended(replay) < last:
-        left = deadline - time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-        if left <= 0 or not WAIT(replay['ended'], _SEL(b'waitUntilSignaledValue:timeoutMS:'), last,
-                                 max(left // 1000000, 1)) and _ended(replay) < last:
-            raise OSError(errno.ETIMEDOUT, 'the replay\'s work not ended by the deadline: the program\'s operand may '
-                                           'stand')
-    mesh.LIB.mesh_retire(context.M, context.client)
-    for made in replay['replays']:
-        if made is not None:
-            SET(replay['queue'], _SEL(b'removeResidencySet:'), made.residency)
-            replay['lib'].MetalReplayDestroy(C.byref(made))
-    for held in (*replay['allocators'], replay['ended'], replay['recorder']):
-        PUT(held, SELECTOR[b'release'])
-    state['replay'] = None
 
 
 # design/aot-compilation-change-request.md A1 to A3 and A10, "The calls' graph"; P. Barham et al., MLSys 2022, section
@@ -3111,9 +3531,11 @@ def _commutes(module, k):
 
 
 # design/aot-compilation-change-request.md A10, "Its bound", and appendix item 6; A. J. Bernstein, Analysis of programs
-# for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966; Rinard and Diniz, section 2; R. P. Dilworth,
-# Annals of Math., 1950; D. R. Fulkerson, Proc. AMS, 1956
-def _analyse(gm, of, modules):
+# for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966; Rinard and Diniz, section 2;
+# `sources[j]` call j's flat input leaves' producers
+# (_Export), `horizon` the block executions the program issues ahead
+def _analyse(gm, of, compiled, sources, horizon):
+    modules = [record.function.module for record in compiled]
     nodes = list(gm.graph.nodes)
     callee = {node: of.get(node) for node in nodes}
     calls = [node for node in nodes if callee[node] is not None]
@@ -3139,15 +3561,48 @@ def _analyse(gm, of, modules):
             if i in step and step[i][-1] is i:
                 found |= set(step[i])
         return found
-    held, ordered = mesh_graph.closure(nodes, lambda node: node.all_input_nodes), mesh_graph.closure(nodes, inputs)
-    orders = frozenset((place[a], place[b]) for b in calls for a in ordered[b] if a in place)
-    commuting = tuple(tuple(place[node] for node in chain) for chain in chains)
-    entries = {}
-    for f in dict.fromkeys(callee[node] for node in calls):
-        mine = [node for node in calls if callee[node] == f]
-        entries[f] = Calls(tuple(place[node] for node in mine),
-                           mesh_graph.width(mine, lambda a: [b for b in mine if a in held[b]]), orders, commuting)
-    return entries
+    ordered = mesh_graph.closure(nodes, inputs)
+    pairs = {(place[a], place[b]) for b in calls for a in ordered[b] if a in place}
+    # Bernstein's conditions on a call's writes of its inputs (Compiled `mutated`): ordered against every other call
+    # reading the same leaf, in program order
+    for j, b in enumerate(calls):
+        for q in compiled[callee[b]].mutated:
+            written = sources[j][q]
+            pairs |= {(min(c, j), max(c, j)) for c, read in enumerate(sources)
+                      if c != j and written is not None and written in read}
+    pairs = sorted(pairs)
+    # the effects that persist between executions (Compiled `written`, `read`): every call of the functions sharing a
+    # storage one of them writes is one chain in program order, which mesh_plan keeps and closes from one block's last
+    # call to the next block's first (delay 1, mesh-collective.h `chains`), with the commuting chains merged into it
+    head = list(range(len(calls)))
+
+    def find(x):
+        while head[x] != x:
+            head[x] = head[head[x]]
+            x = head[x]
+        return x
+
+    def join(group):
+        for a, b in zip(group, group[1:]):
+            head[max(find(a), find(b))] = min(find(a), find(b))
+    for chain in chains:
+        join([place[node] for node in chain])
+    for storage in {s for record in compiled for s in record.written}:
+        join([j for j, node in enumerate(calls)
+              if storage in compiled[callee[node]].written | compiled[callee[node]].read])
+    # A10, "Its output": the calls of a function the program issues ahead: `horizon` block executions, each all
+    # `every` calls of the function, so horizon x every. It is an issue capacity and also the lifetime bound of a
+    # result read outside its function's plan (another function's call, a delivery, the block's outputs): such a read
+    # has no later write in the plan's graph, so mesh_plan sizes its copies by this bound (mesh-collective.c
+    # plan_unroll), and the native program lets the bridge land execution e only after the block that read copy
+    # e - copies ended (MetalProgramExecute's `started` notice, mesh_host_started): with copies >= horizon x every
+    # that block is at least horizon blocks earlier, which the program's own `ended` wait already requires. A smaller
+    # bound (the block order's width, or 1 for a chain) would put e and e - copies in one block, its landing waiting
+    # for its own block's end. The orders the calls' effects impose (A10's pairs, the chains above, persistent
+    # storage's placed effects across executions in the native program) are edges, not this bound
+    outstanding = {f: horizon * sum(callee[node] == f for node in calls) for f in dict.fromkeys(map(callee.get, calls))}
+    return Calls(outstanding, (mesh.U * max(2 * len(pairs), 1))(*[j for pair in pairs for j in pair]), len(pairs),
+                 (mesh.U * max(len(calls), 1))(*[find(j) for j in range(len(calls))]))
 
 
 # design/aot-compilation-change-request.md A10; P. Barham et al., MLSys 2022, section 4.2; torch v2.14.0
@@ -3166,7 +3621,31 @@ class _Program(torch.fx.Interpreter):
         return super().run_node(n)
 
 
-Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec moves')
+# torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature buffers_to_mutate, parameters_to_mutate,
+# user_inputs_to_mutate: `written` and `read` the storages of the module state the function writes and reads (its
+# effects that persist from one execution to the next), `mutated` the flat input leaves it writes
+Compiled = collections.namedtuple('Compiled', 'function signature gm examples result spec moves written read mutated')
+
+
+# a flat leaf of a value of the traced program: leaf `leaf` of call `call`'s result, or of block input leaf `leaf`
+# (call None)
+class _Produced:
+    __slots__ = ('call', 'leaf')
+
+    def __init__(self, call, leaf):
+        self.call, self.leaf = call, leaf
+
+    def __eq__(self, other):
+        return isinstance(other, _Produced) and (self.call, self.leaf) == (other.call, other.leaf)
+
+    def __hash__(self):
+        return hash((self.call, self.leaf))
+
+
+# torch 2.14.0 torch/export/graph_signature.py: the storages of a function's state named by `names` (fully qualified
+# names in the exported module, as torch/nn/modules/module.py get_submodule resolves them)
+def _storages(module, names):
+    return frozenset(operator.attrgetter(name)(module).untyped_storage().data_ptr() for name in names)
 # design/torch-source-lowering-change-request.md item 2; PyTorch docs/source/notes/cuda.md L1683; torch 2.14.0
 # torch/_higher_order_ops/cond.py and torch/_higher_order_ops/while_loop.py
 CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop)
@@ -3208,7 +3687,13 @@ def _metadata(value):
 class _Export(torch.fx.Interpreter):
     def __init__(self, gm, mode):
         super().__init__(gm)
-        self.mode, self.compiled, self.of, self.origin, self.calls, self.reads = mode, [], {}, {}, [], []
+        self.mode, self.compiled, self.of, self.origin, self.calls = mode, [], {}, {}, []
+        self.marks, self.sources, self.inputs = {}, [], 0
+
+    # each node's value with every flat leaf replaced by the _Produced naming it
+    def marked(self, n, produced):
+        leaves, spec = pytree.tree_flatten(self.env[n])
+        self.marks[n] = pytree.tree_unflatten([produced(o) for o in range(len(leaves))], spec)
 
     def fake(self, value, device=None):
         if not isinstance(value, torch.Tensor):
@@ -3225,8 +3710,15 @@ class _Export(torch.fx.Interpreter):
         source = n.args[0] if n.op == 'call_function' and n.target is operator.getitem and n.args else None
         if isinstance(source, Node) and source in self.origin and not isinstance(self.env[source], torch.Tensor):
             self.origin[n] = self.origin[source]
+            self.marks[n] = self.marks[source][n.args[1]]
             return super().run_node(n)
-        if n.op in ('placeholder', 'output'):
+        if n.op == 'placeholder':
+            value = super().run_node(n)
+            self.env[n], first = value, self.inputs
+            self.marked(n, lambda o: _Produced(None, first + o))
+            self.inputs += len(pytree.tree_leaves(value))
+            return value
+        if n.op == 'output':
             return super().run_node(n)
         raise NotImplementedError(
             '%s (%s %s): a node of the traced program that is no placeholder, no call of a compiled function, no '
@@ -3251,19 +3743,39 @@ class _Export(torch.fx.Interpreter):
                                           % (n.name,))
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
             result = pytree.tree_unflatten([self.fake(v) for v in out], exported.call_spec.out_spec)
+            given = exported.graph_signature
+            mutated = set(given.user_inputs_to_mutate.values())
             self.compiled.append(Compiled(function, signature, gm, pytree.tree_flatten((args, kwargs))[0], result,
-                                          exported.call_spec.out_spec, moves))
+                                          exported.call_spec.out_spec, moves,
+                                          _storages(function.module, [*given.buffers_to_mutate.values(),
+                                                                      *given.parameters_to_mutate.values()]),
+                                          _storages(function.module, [*given.inputs_to_buffers.values(),
+                                                                      *given.inputs_to_parameters.values()]),
+                                          frozenset(q for q, name in enumerate(given.user_inputs) if name in mutated)))
             found = [len(self.compiled) - 1]
         self.of[n], self.origin[n] = found[0], len(self.calls)
-        self.reads.append({self.origin[a] for a in n.all_input_nodes if a in self.origin})
+        # design/compilation-composition-change-request.md item 6, unit 6E: each flat input leaf's producer
+        self.sources.append([leaf if isinstance(leaf, _Produced) else None
+                             for leaf in pytree.tree_leaves(map_arg((n.args, n.kwargs), lambda a: self.marks[a]))])
+        origin, result, body = len(self.calls), self.compiled[found[0]].result, self.compiled[found[0]].gm.graph
+        leaves, spec = pytree.tree_flatten(result)
+        # a result leaf that is the function's own input (an output that is its placeholder q, placeholders being the
+        # flat input leaves in order) is that input's value: its producer is the input's
+        given = {node: q for q, node in enumerate(node for node in body.nodes if node.op == 'placeholder')}
+        read = self.sources[-1]
+        self.marks[n] = pytree.tree_unflatten(
+            [read[given[out]] if out in given and read[given[out]] is not None else _Produced(origin, o)
+             for o, out in enumerate(pytree.tree_leaves(body.output_node().args))], spec)
         self.calls.append(found[0])
-        return self.compiled[found[0]].result
+        return result
 
 
 # design/aot-compilation-change-request.md A1 to A3, A8 to A10 and appendix item 7;
 # design/disjoint-pages-change-request.md C3.1, D.3.2 and D.3.3; mesh-collective.h mesh_plan, struct mesh_function and
-# struct mesh_value; mesh-dataflow.h mesh_nodes_read, mesh_retire and struct mesh_ctx; rdma/mesh-torch.mm mesh_torch_end
-def program(block, *example_inputs):
+# struct mesh_value; mesh-dataflow.h mesh_nodes_read, mesh_retire and struct mesh_ctx
+# `horizon`: the block executions the program issues ahead of their ends, the one operand of the analysis's bound
+# (outstanding), the storage's copies of block inputs and step words, the native program's lag and its allocators
+def program(block, *example_inputs, horizon=HOST_LAG):
     tracer = Tracer()
     graph = tracer.trace(block)
     gm = torch.fx.GraphModule(tracer.root, graph)
@@ -3273,83 +3785,122 @@ def program(block, *example_inputs):
         _split(gm, exporter)
         exporter = _Export(gm, FakeTensorMode())
         exporter.run(*[exporter.fake(x) for x in example_inputs])
-    compiled, of, calls, reads = exporter.compiled, exporter.of, exporter.calls, exporter.reads
-    entries = _analyse(gm, of, [record.function.module for record in compiled])
+    compiled, of, calls, sources = exporter.compiled, exporter.of, exporter.calls, exporter.sources
+    analysed = _analyse(gm, of, compiled, sources, horizon)
+    # the traced block's calls of each function (`every`) and each call's ordinal among them (`place`): the static
+    # call identities the capture's generations and step words take (mesh_plan publishes the same, planned.call)
+    every = collections.Counter(calls)
+    place = [sum(calls[s] == calls[r] for s in range(r)) for r in range(len(calls))]
     operands = [record.function.placement(record.gm, record.examples) for record in compiled]
     placeholders = [n for n in gm.graph.nodes if n.op == 'placeholder']
-    readers = [[of[n] for n in gm.graph.nodes if n in of and p in n.all_input_nodes] for p in placeholders]
+    # each block input's reading functions, through passed-through results too (_Export `sources`)
+    readers = [[calls[j] for j, read in enumerate(sources)
+                if any(leaf is not None and leaf.call is None and leaf.leaf == i for leaf in read)]
+               for i in range(len(placeholders))]
     given = [(x.dtype, x.numel(), x.device.type, tuple(x.shape)) if isinstance(x, torch.Tensor) else None
              for x in example_inputs]
     constants = [None if isinstance(x, torch.Tensor) else x for x in example_inputs]
-    context, state = _context(), {'stale': True, 'mapping': None, 'runs': None, 'devices': (), 'executions': 0,
-                                  'ended': 0, 'inputs': [None] * len(given), 'timeout': None, 'replay': None}
+    context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0,
+                                  'inputs': [None] * len(given), 'timeout': None, 'replay': None, 'owned': {}}
 
     def make():
+        deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
+        if state['mapping'] is not None or state['owned']:
+            _retire(context, state)
         nodes, header = mesh.Nodes(), mesh.Header.from_address(context.M)
         mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
-        irs, page = [], header.pgsz * header.block
-        for k, (record, operand) in enumerate(zip(compiled, operands)):
-            ir = partition(record.gm, operand, nodes, page)
-            ir.calls = entries[k]
+        page = header.pgsz * header.block
+        irs = [partition(record.gm, operand, nodes, page) for record, operand in zip(compiled, operands)]
+        # design/compilation-composition-change-request.md items 1 and 6 (unit 6E); design/aot-compilation-change-
+        # request.md A4: a function's results are whole at every node of its map (_partition), so a consumer at a node
+        # outside its producer's map reads the producer's delivery there (_deliver). wanted[f, o]: the functions of the
+        # calls reading function f's flat result leaf o (_Export `sources`), the same at every node
+        wanted = {}
+        for j, read in enumerate(sources):
+            for leaf in read:
+                if leaf is not None and leaf.call is not None:
+                    wanted.setdefault((calls[leaf.call], leaf.leaf), set()).add(calls[j])
+        _deliver(irs, wanted)
+        for ir, record in zip(irs, compiled):
             lower(ir)
             ir.weights = _weighed(ir, record.function)
-            irs.append(ir)
-        for j, k in enumerate(calls):
-            absent = sorted(r for r in reads[j] if irs[calls[r]].device is None)
-            if irs[k].device is not None and absent:
-                raise ValueError('call %d of the program, of compiled function %d, has its section at map index %d '
-                                 'and reads the result of call %d, whose function has none there: such a node "has '
-                                 'no value for any program code to read" (design/aot-compilation-change-request.md '
-                                 'A4, withdrawn text)' % (j, k, nodes.self, absent[0]))
+            ir.delivered = {}
+        # each consumer call's delivered operands here, before capture (the recorder's masked readers are emitted
+        # there): ir.delivered[ordinal] = [(q, r, f, o, v, i, generation)], its flat input leaf q the leaf o of call r
+        # (function f) landed in f's value v by f's transfer i (`irs[f].landed`), and the range's generation
+        # (metal_recording.h struct MetalGeneration) {every, producer, ordinal} = {the consumer's calls of its
+        # function a block, the producer's, call r's ordinal}: the consumer's execution t reads r's execution
+        # (t div every) producer + ordinal (`every`, `place`)
+        for j, (k, read) in enumerate(zip(calls, sources)):
+            irs[k].delivered[place[j]] = [
+                (q, leaf.call, calls[leaf.call], leaf.leaf, *irs[calls[leaf.call]].landed[leaf.leaf],
+                 (every[k], every[calls[leaf.call]], place[leaf.call]))
+                for q, leaf in enumerate(read)
+                if leaf is not None and leaf.call is not None and leaf.leaf in irs[calls[leaf.call]].landed
+                and irs[calls[leaf.call]].landed[leaf.leaf][1] is not None]
         holders = []
         for i, (x, functions) in enumerate(zip(given, readers)):
             k = next((k for k in functions if irs[k].device is not None), None)
             if x is not None and k is not None:
-                irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=HOST_LAG), x[3])
+                irs[k].inputs[i] = (irs[k].value(*x[:3], 0, 0, 0, lag=horizon), x[3])
             holders.append(k if x is not None else None)
-        here = {layout[2] for ir in irs for layout in ir.layouts}
-        replayed = here == {'mps'} and not any(d.value != mesh.ABSENT for ir in irs for d in ir.declared)
-        if replayed and len(set(calls)) != len(calls):
-            raise NotImplementedError('a compiled function called more than once in the block: its replay binds its '
-                                      'values by its plan\'s executions, the block\'s inputs by the block\'s')
-        captured = _captured(context, irs, compiled, gm, of, constants, holders) if replayed else None
-        own = [[] for _ in irs]
-        # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; torch/fx/graph.py:1498–1502; TensorFlow
-        # Lite arena_planner.cc:334–335; metal_recording.h MetalRecorderOperand
-        buffers = {}
-        for buffer, owned in captured['owners'].items() if captured else ():
-            buffers.setdefault(owned[:2], []).append(buffer)
-
-        def interval(handle, buffer, levels, result):
-            first, last = mesh.U(), mesh.U()
-            bound = captured['lib'].MetalRecorderOperand(handle, buffer, C.byref(first), C.byref(last))
-            if result or bound & 4:
-                return first.value if bound & 2 else 0, max(levels, 1) - 1 if result else last.value
-            return 0, max(levels, 1) - 1
-        for _, k, handle, result, levels, values, *_ in captured['calls'] if captured else ():
-            results = {captured['owners'].get(leaf.untyped_storage().data_ptr()) for leaf in pytree.tree_leaves(result)
-                       if isinstance(leaf, torch.Tensor)}
-            for v, value in enumerate(irs[k].values) if handle is not None else ():
-                if value.kind == mesh.EXECUTION and not value.lag:
-                    spans = [interval(handle, buffer, levels, (k, v) in results) for buffer in buffers.get((k, v), ())]
-                    value.begin, value.end = (min(s for s, _ in spans), max(e for _, e in spans)) if spans else \
-                        (0, max(levels, 1) - 1)
-            own[k] = values
-        arrays = [((mesh.Declared * len(ir.declared))(*ir.declared), (mesh.Weight * len(ir.weights))(*ir.weights),
-                   (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
-                   (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir, mine in zip(irs, own)]
-        functions = (mesh.Function * len(irs))(*[
-            mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
-                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
-                          len(e), 0, ir.calls.outstanding, 0)
-            for ir, (d, w, v, e) in zip(irs, arrays)])
-        deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
-        if state['mapping'] is not None:
-            _retire(context, state, deadline)
-        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
-                                      (mesh.U * len(calls))(*calls), len(calls), deadline))
-        state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
+        # design/torch-capture-change-request.md item 9: "every node runs its captured program by replay, its
+        # collectives included"; design/aot-compilation-change-request.md, appendix item 6
+        # design/compilation-composition-change-request.md item 5
         try:
+            captured = _captured(context, irs, compiled, gm, of, constants, holders, state['owned'])
+            own = [[] for _ in irs]
+            # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; torch/fx/graph.py:1498–1502;
+            # TensorFlow Lite arena_planner.cc:334–335; metal_recording.h MetalRecorderOperand; each value's interval
+            # the union of its calls' intervals, every call being an execution of the one plan
+            def interval(handle, buffer, levels, result):
+                first, last = mesh.U(), mesh.U()
+                bound = captured['lib'].MetalRecorderOperand(handle, buffer, C.byref(first), C.byref(last))
+                if result or bound & 4:
+                    return first.value if bound & 2 else 0, max(levels, 1) - 1 if result else last.value
+                return 0, max(levels, 1) - 1
+            spanned = {}
+            for _, k, handle, result, levels, values, *_, j in captured['calls']:
+                results = {captured['owners'].get(leaf.untyped_storage().data_ptr(), (None,) * 4)[:2]
+                           for leaf in pytree.tree_leaves(result) if isinstance(leaf, torch.Tensor)}
+                for v, value in enumerate(irs[k].values) if handle is not None else ():
+                    if value.kind == mesh.EXECUTION and not value.lag:
+                        spans = [interval(handle, buffer, levels, (k, v) in results)
+                                 for buffer in captured['held'].get((k, v, j), ())] or [(0, max(levels, 1) - 1)]
+                        spans += [spanned[k, v]] if (k, v) in spanned else []
+                        spanned[k, v] = value.begin, value.end = min(s for s, _ in spans), max(e for _, e in spans)
+                if handle is not None:
+                    captured.setdefault('firsts', {})[k, j] = len(irs[k].values) + len(own[k])
+                    own[k] += values
+            # metal_recording.h place:step:; metal_recording.m mesh_publish and the later passes: each function's step
+            # word, its rows' plan execution e = b every + ordinal, which the native program writes before row
+            # execution e; lag copies (mesh-collective.c plan copies of a lagged value), horizon every of them, so
+            # each of the horizon block executions in flight owns copy e mod copies; 8 bytes, e's 64 bits as the
+            # host's executions, generations and count targets are
+            for k in dict.fromkeys(k for _, k, handle, *_ in captured['calls'] if handle is not None):
+                captured.setdefault('steps', {})[k] = len(irs[k].values) + len(own[k])
+                own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION,
+                                         lag=horizon * every[k], run=1))
+            arrays = [((mesh.Declared * len(ir.declared))(*ir.declared),
+                       (mesh.Weight * len(ir.weights))(*ir.weights),
+                       (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
+                       (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir, mine in zip(irs, own)]
+            functions = (mesh.Function * len(irs))(*[
+                mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
+                              C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
+                              len(e), 0, analysed.outstanding[k], 0)
+                for k, (d, w, v, e) in enumerate(arrays)])
+            # design/compilation-composition-change-request.md item 6, unit 6D: the plan's results for native
+            # preparation (mesh-collective.h struct mesh_planned), each call's plan, lead, ordinal and every the
+            # identities the specialization and the program's rows take, kept until the program is retired
+            planned = mesh.Planned()
+            mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
+                                          (mesh.U * len(calls))(*calls), len(calls), analysed.orders,
+                                          analysed.norders, analysed.chains, deadline, C.byref(planned)))
+            state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
+            captured['every'] = {planned.call[j].function: planned.call[j].every for j in range(planned.calls)}
+            captured['planned'] = planned
+            state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
             # JGroups ViewId.java
             views = [mesh.State.from_address(context.M + f.plan) for f in functions]
             if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
@@ -3365,15 +3916,20 @@ def program(block, *example_inputs):
                     if buffer else None
                 for ir in irs:
                     ir.hull = hull.address, anchor, state['mapping']
-                if captured:
-                    state['replay'] = _replays(captured, functions, views, listed, addresses, hull.address, buffer)
+                state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
+                outputs, natives, kept = _specialize(captured, context, irs, planned, horizon, compiled, bound, gm,
+                                                     constants, state['inputs'])
+                state['replay'] = _replays(captured, context, irs, planned, horizon, listed, addresses, hull.address,
+                                           buffer,
+                                           natives, len(outputs), state['owned'])
+                state['replay'].update(outputs=outputs, kept=kept)
             finally:
                 if buffer:
                     PUT(buffer, SELECTOR[b'release'])
-            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5; Megatron-LM core_r0.12.0
-            # megatron/core/tensor_parallel/layers.py:156–165; design/problems-of-14b9a757-change-request.md, "Sources
-            # for the second stops", 8, and "Sources for the third stops", 8; design/torch-source-lowering-change-
-            # request.md item 1
+            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5; Megatron-LM
+            # core_r0.12.0 megatron/core/tensor_parallel/layers.py:156–165; design/problems-of-14b9a757-change-
+            # request.md, "Sources for the second stops", 8, and "Sources for the third stops", 8;
+            # design/torch-source-lowering-change-request.md item 1
             launched = False
             for ir, (places, _, _, _) in zip(irs, bound):
                 loaded = ir.loads & places.keys()
@@ -3386,20 +3942,10 @@ def program(block, *example_inputs):
                     launched = launched or places[key][0].device.type == 'mps'
             if launched:
                 torch.mps.synchronize()
-            runs = None if captured else [
-                dict(zip(('steps', 'results'), _steps(ir, context, f.plan, places, devices, record.spec)),
-                     plan=f.plan, executions=0, state=mesh.State.from_address(context.M + f.plan),
-                     started=_started(context, f.plan, any(layout[2] == 'mps' for layout in ir.layouts)))
-                for ir, f, record, (places, devices, _, _) in zip(irs, functions, compiled, bound)]
-            if captured:
-                state['replay']['outputs'] = _outputs(captured, {k: b[3] for k, b in enumerate(bound)}, gm, constants,
-                                                      [next((b[2][i] for b in bound if i in b[2]), None)
-                                                       for i in range(len(given))])
         except BaseException:
-            _retire(context, state, deadline)
+            _retire(context, state)
             raise
-        state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
-        state.update(stale=False, runs=runs)
+        state.update(stale=False)
 
     def timed(work):
         if state['timeout'] is not None:
@@ -3414,48 +3960,28 @@ def program(block, *example_inputs):
     timed(make)
 
     def ended():
-        if state['replay'] is not None:
-            return _ended(state['replay'])
-        return TORCH.mesh_torch_ended() if 'mps' in state['devices'] else state['ended']
-
-    def end(b):
-        if 'mps' in state['devices']:
-            mesh.check(TORCH.mesh_torch_end(b))
-        else:
-            state['ended'] = b + 1
+        return _ended(state['replay']) if state['replay'] is not None else 0
 
     def writable():
         if state['stale']:
             make()
         b = state['executions']
-        _wait(lambda: ended() + HOST_LAG > b, ended, 'execution %d of the program: execution %d not ended, no end for '
-              'MESH_PLATFORM_NS, so its inputs\' copy is not free (D.3.3)' % (b, b - HOST_LAG))
+        _wait(lambda: ended() + horizon > b, ended, 'execution %d of the program: execution %d not ended, no end for '
+              'MESH_PLATFORM_NS, so its inputs\' copy is not free (D.3.3)' % (b, b - horizon))
         return tuple(None if placed is None else placed[1][b % len(placed[1])] for placed in state['inputs'])
 
+    # design/compilation-composition-change-request.md item 5
     def execution():
         if state['stale']:
             make()
         b = state['executions']
         state['executions'] = b + 1
-        if state['replay'] is not None:
-            try:
-                return _replayed(context, state['replay'], b)
-            except OSError as failure:
-                if failure.errno in (errno.ESTALE, errno.ECANCELED):
-                    state['stale'] = True
-                raise
-        arguments = [constant if placed is None else placed[0][b % len(placed[0])]
-                     for constant, placed in zip(constants, state['inputs'])]
         try:
-            result = _Program(gm, lambda node, args, kwargs: _execute(context, state['runs'][of[node]], args,
-                                                                      kwargs)).run(*arguments)
-        except BaseException as failure:
-            if isinstance(failure, OSError) and failure.errno in (errno.ESTALE, errno.ECANCELED):
+            return _replayed(context, state['replay'], b)
+        except OSError as failure:
+            if failure.errno in (errno.ESTALE, errno.ECANCELED):
                 state['stale'] = True
-            end(b)
             raise
-        end(b)
-        return result
 
     def inputs():
         return timed(writable)
@@ -3464,5 +3990,6 @@ def program(block, *example_inputs):
         return timed(execution)
     # MTL4CommandQueue.h signalEvent:value:
     run.inputs, run.ended = inputs, ended
+    run.signature = lambda: state['replay']['signature'] if state['replay'] is not None else None
     weakref.finalize(run, _dropped, context, state)
     return run

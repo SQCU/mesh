@@ -33,6 +33,11 @@ enum { MESH_JOIN, MESH_PAGES };
 struct mesh_strided { uint64_t offset,element; uint32_t dims,padding; const uint64_t *pairs; };
 _Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,dims)==16 &&
                offsetof(struct mesh_strided,pairs)==24,"mesh_strided: rdma/mesh.py Strided");
+/* design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY: the view's maximal contiguous
+   byte ranges in order, each `visit(context, offset, length)`, the innermost dimensions contiguous with their
+   elements merged into one run */
+void mesh_strided_extents(const struct mesh_strided *view,void (*visit)(void *context,uint64_t offset,uint64_t length),
+                          void *context);
 struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; struct mesh_strided from,to; };
 _Static_assert(sizeof(struct mesh_declared)==88 && offsetof(struct mesh_declared,from)==24 &&
                offsetof(struct mesh_declared,to)==56,"mesh_declared: rdma/mesh.py Declared");
@@ -61,8 +66,35 @@ _Static_assert(sizeof(struct mesh_function)==64 && offsetof(struct mesh_function
    P. E. McKenney and J. D. Slingwine, Read-copy update, 1998;
    L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986;
    os/os_sync_wait_on_address.h:268 os_sync_wait_on_address_with_timeout; _time.h:185 clock_gettime_nsec_np */
+/* design/aot-compilation-change-request.md A10 ("Its output": "the order constraints between calls"; A. J. Bernstein,
+   IEEE Trans. Electronic Computers EC-15(5), 1966; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997): `orders`
+   norders pairs (a, b), a < b, call a before call b; `chains[j]` the first call of call j's commuting chain */
+/* design/compilation-composition-change-request.md item 6, unit 6D; design/aot-compilation-change-request.md, appendix
+   item 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1: the plan's
+   results for the program's native preparation, the caller's to free by mesh_planned_free. `call[j]` for call j of
+   `calls`: `plan` its function's state (struct mesh_function `plan`), `lead` that plan's copies - 1, `function`
+   calls[j], `ordinal` its place among its function's `every` calls a block, so that block execution b runs the plan's
+   execution b every + ordinal; `function` is also the signature's MESH_GRAPH_PLAN_SUBMISSION + function. `task[x]`,
+   x < tasks, the calls' graph's vertices, the same tasks the plan's signature records (mesh-graph.h struct
+   mesh_graph_task: `label` the call; `processor` 2v node v's host, 2v + 1 its bridge). `order[0, orders)` that
+   graph's edges (its added synchronization excluded) whose ends are both this node's, each a call's submission (a
+   host task: its mesh_transfers_start, the row's start) or its part (a bridge task: the call's work here), `from` and
+   `to` those vertices, `delay` in block executions: the head at block t follows the tail at t - delay. They are the
+   submission order, each submission before its part, each function's outstanding lag from a part to a later call's
+   submission, and A10's orders and commuting chains from part to part. The graph's edges between nodes and its added
+   synchronization are the transport's (mesh_transfers_start waits, the bridge's tells) */
+struct mesh_graph_task;
+struct mesh_graph_dependence;
+struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,padding; };
+struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_task *task; struct mesh_graph_dependence *order;
+                      uint32_t calls,tasks; size_t orders; };
+_Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_planned_call,function)==16 &&
+               sizeof(struct mesh_planned)==40 && offsetof(struct mesh_planned,calls)==24 &&
+               offsetof(struct mesh_planned,orders)==32,"mesh_planned: rdma/mesh.py Planned");
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
-              const uint32_t *calls,uint32_t ncalls,uint64_t deadline);
+              const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,uint32_t norders,const uint32_t *chains,
+              uint64_t deadline,struct mesh_planned *planned);
+void mesh_planned_free(struct mesh_planned *);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

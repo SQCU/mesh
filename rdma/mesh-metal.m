@@ -1,9 +1,9 @@
 #import <Metal/Metal.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "mesh-metal.h"
+#include "mesh-collective.h"
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
 static int state_area(uint64_t from,uint64_t at,uint64_t count,uint64_t size,uint64_t align,uint64_t len,uint64_t *end){
@@ -12,177 +12,160 @@ static int state_area(uint64_t from,uint64_t at,uint64_t count,uint64_t size,uin
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
-/* design/aot-compilation-change-request.md, appendix item 6 */
-int mesh_metal_transport_create(struct mesh_ctx *context,uint64_t plan,void *device,struct mesh_metal_transport *transport){
+/* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7: one plan state's section, [at, *end) */
+static int state_section(const struct mesh_ctx *context,uint64_t at,uint64_t *end){
+  const struct hdr *m=context->M;
+  const uint64_t len=context->len;
+  if(!at || at%m->pgsz || at<m->data_off || at>len || len-at<sizeof(struct mesh_state))return EINVAL;
+  const struct mesh_state *words=(const struct mesh_state *)((const char *)m+at);
+  const uint64_t from=at+sizeof *words,copies=words->copies,ranges=words->ranges,word=sizeof(uint64_t);
+  *end=from;
+  if(!copies || state_area(from,words->status,1,sizeof(struct mesh_status),sizeof(uint64_t),len,end) ||
+     (ranges && state_area(from,words->phases,0,1,MESH_LANE_BYTES,len,end)) ||
+     (ranges && state_area(from,words->counts,ranges*copies,word,word,len,end)) ||
+     (words->releases && state_area(from,words->supplied,words->releases,word,word,len,end)))
+    return EINVAL;
+  return 0;
+}
+/* design/aot-compilation-change-request.md, appendix item 6; design/compilation-composition-change-request.md item 6
+   (a delivered range read by another function's capture): every plan state of the program in one view, every word
+   offset relative to its lowest state (mesh-collective.c plan_layout: one item a function, all in region M) */
+int mesh_metal_transport_create(struct mesh_ctx *context,const struct mesh_planned *planned,void *device,
+  struct mesh_metal_transport *transport){
   *transport=(struct mesh_metal_transport){0};
   struct hdr *m=context->M;
-  const uint64_t at=plan,page=m->pgsz,len=context->len;
-  if(!at || at%page || at<m->data_off || at>len || len-at<sizeof(struct mesh_state))return EINVAL;
-  struct mesh_state *words=(struct mesh_state *)((char *)m+at);
-  const uint64_t from=at+sizeof *words,copies=words->copies,ranges=words->ranges,word=sizeof(uint64_t);
-  uint64_t end=from;
-  if(!copies || state_area(from,words->status,1,sizeof(struct mesh_status),sizeof(uint32_t),len,&end) ||
-     (ranges && state_area(from,words->phases,0,1,MESH_LANE_BYTES,len,&end)) ||
-     (ranges && state_area(from,words->counts,ranges*copies,word,word,len,&end)) ||
-     (words->releases && state_area(from,words->supplied,words->releases,word,word,len,&end)))
-    return EINVAL;
-  const uint64_t bytes=(end-at+page-1)/page*page;
-  if(bytes>len-at)return EINVAL;
-  id<MTLBuffer> state=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)m+at length:bytes
+  const uint64_t page=m->pgsz;
+  uint64_t low=UINT64_MAX,high=0;
+  for(uint32_t j=0;j<planned->calls;j++){
+    const uint64_t at=planned->call[j].plan;
+    uint64_t end;
+    const int status=state_section(context,at,&end);
+    if(status)return status;
+    if(at<low)low=at;
+    if(end>high)high=end;
+  }
+  if(!high)return EINVAL;
+  const uint64_t bytes=(high-low+page-1)/page*page;
+  if(bytes>context->len-low)return EINVAL;
+  id<MTLBuffer> state=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)m+low length:bytes
     options:MTLResourceStorageModeShared deallocator:nil];
   if(!state)return ENOMEM;
-  *transport=(struct mesh_metal_transport){.state=state,.words=words,.offset=at,.bytes=bytes};
+  *transport=(struct mesh_metal_transport){.state=state,.offset=low,.bytes=bytes};
   return 0;
+}
+static const struct mesh_state *plan_words(const struct mesh_ctx *context,uint64_t plan){
+  return (const struct mesh_state *)((const char *)context->M+plan);
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.7 */
-int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint32_t transfer,
-  struct mesh_metal_input *input){
-  const struct mesh_publication *entry=mesh_transfer_at(context->M,transport->words,transfer);
+int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  uint32_t transfer,struct mesh_metal_input *input){
+  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
   const uint64_t at=transport->offset;
   *input=(struct mesh_metal_input){.phases=entry->phases-at,.group=mesh_group_bytes(entry->pages),.count=entry->count-at,
-    .pages=entry->pages,.copies=transport->words->copies,
-    .time=((const double *)(const void *)((const char *)context->M+transport->words->times))[transfer]};
+    .pages=entry->pages,.copies=words->copies,
+    .time=((const double *)(const void *)((const char *)context->M+words->times))[transfer]};
   return 0;
+}
+
+/* design/torch-capture-change-request.md item 3; mesh.h struct mesh_hop, mesh_hops; mesh-call.h mesh_section_address */
+static int row_order(const void *a,const void *b){
+  const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;
+  return (x>y)-(x<y);
+}
+/* copy 0's rows of `section`, {region offset, q} pairs ordered by offset */
+static uint64_t *rows_sorted(struct mesh_ctx *context,struct mesh_section section){
+  uint64_t *rows=malloc(2*sizeof *rows*(section.stride?section.stride:1));
+  for(uint32_t q=0;rows && q<section.stride;q++)
+    rows[2*q]=(uint64_t)((char *)mesh_section_address(context,section,q)-(char *)context->M),rows[2*q+1]=q;
+  if(rows)qsort(rows,section.stride,2*sizeof *rows,row_order);
+  return rows;
+}
+/* the copy-0 row whose block holds the hop's byte data_off + page x pgsz + offset, *at the byte's place in it */
+static const uint64_t *row_of(const struct hdr *m,const uint64_t *rows,uint32_t count,const struct mesh_hop *hop,
+  uint64_t *at){
+  const uint64_t landed=m->data_off+(uint64_t)hop->page*m->pgsz+hop->offset;
+  const uint64_t key=landed-(landed-m->data_off)%((uint64_t)m->block*m->pgsz);
+  *at=landed-key;
+  return bsearch(&key,rows,count,2*sizeof *rows,row_order);
+}
+int mesh_metal_receive_fields(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  const struct mesh_metal_input *input,struct mesh_section section,uint32_t *fields){
+  struct hdr *m=context->M;
+  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_hop *hops=mesh_hops(m,words);
+  const uint64_t group=transport->offset+input->phases,count=transport->offset+input->count;
+  uint64_t *rows=rows_sorted(context,section),at;
+  if(!rows)return ENOMEM;
+  memset(fields,0,(size_t)input->pages*sizeof *fields);
+  for(uint64_t e=0;e<words->entries;e++){
+    const struct mesh_hop *hop=hops+e;
+    if(hop->direction!=MESH_RECEIVE || hop->count!=count)continue;
+    const uint64_t *found=row_of(m,rows,section.stride,hop,&at);
+    if(!found){free(rows);return EINVAL;}
+    fields[(hop->word-group)/sizeof(uint64_t)*32+hop->field/2]=(uint32_t)found[1];
+  }
+  free(rows);
+  return 0;
+}
+
+/* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3; rdma/mesh-collective.c mesh_plan's
+   SEND hops (count the transfer's completion word of the hop's copy) */
+int mesh_metal_sent_extents(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  uint32_t transfer,struct mesh_section section,struct mesh_graph_access *extents,size_t room,size_t *count){
+  (void)transport;
+  struct hdr *m=context->M;
+  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_hop *hops=mesh_hops(m,words);
+  const uint64_t completion=mesh_transfer_at(m,words,transfer)->completion;
+  uint64_t *rows=rows_sorted(context,section),at;
+  if(!rows)return ENOMEM;
+  size_t made=0;
+  for(uint64_t e=0;e<words->entries;e++){
+    const struct mesh_hop *hop=hops+e;
+    if(hop->direction!=MESH_SEND || hop->count!=completion)continue;
+    const uint64_t *found=row_of(m,rows,section.stride,hop,&at);
+    if(!found){free(rows);return EINVAL;}
+    if(made<room)extents[made]=(struct mesh_graph_access){.key=found[1],.start=at,.end=at+hop->bytes};
+    made++;
+  }
+  free(rows);
+  *count=made;
+  return made>room?ERANGE:0;
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.2 and C3.7 */
-int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint32_t transfer,
-  struct mesh_metal_publication *publication){
-  publication->supplied=mesh_transfer_at(context->M,transport->words,transfer)->targets[0].word-transport->offset;
+int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  uint32_t transfer,struct mesh_metal_publication *publication){
+  publication->supplied=mesh_transfer_at(context->M,plan_words(context,plan),transfer)->targets[0].word-transport->offset;
   return 0;
 }
 
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.6 */
-#define MESH_METAL_SLICE_NS UINT64_C(10000000)
-struct mesh_metal_waiter {
-  pthread_t thread;
-  void *event;
-  char *words,*region;
-  uint32_t passes;
-  _Atomic uint32_t stop,freed;
-  int cause;
-  _Atomic uint64_t *_Atomic waiting;
-  size_t waits;
-  struct mesh_metal_wait wait[];
-};
-
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1 and C3.6 */
-/* os_sync_wait_on_address.h os_sync_wait_on_address_with_timeout */
-/* MPI 4.1 §3.9 and p. 110; rdma/mesh-dataflow.c mesh_transfers_start; D. P. Reed and R. K. Kanodia, CACM 22(2), 1979,
-   p. 116; Linux v6.12 kernel/sched/completion.c:52-78, complete_all, and Documentation/scheduler/completion.rst:252;
-   MPI Forum ULFM chapter draft, 2022, §16.3.1; W. Bland et al., IJHPCA 27(3), 2013, §5.4 */
-static void *waits_run(void *argument){
-  struct mesh_metal_waiter *waiter=argument;
-  @autoreleasepool{
-    id<MTLSharedEvent> event=(id<MTLSharedEvent>)waiter->event;
-    const struct mesh_state *state=(const struct mesh_state *)(const void *)waiter->words;
-    const struct mesh_submission *queue=(const struct mesh_submission *)(const void *)(waiter->region+state->submits);
-    _Atomic uint64_t *plans=&((struct hdr *)(void *)waiter->region)->plans;
-    const uint64_t passes=waiter->passes,room=state->submit_room;
-    uint64_t since=0,set=0,last=0;
-    const _Atomic uint64_t *read=NULL;
-    int cause=0,freed=0;
-    for(uint64_t t=0;!cause && !freed;t++){
-      while(!cause){
-        const uint32_t ended=atomic_load_explicit(&waiter->freed,memory_order_acquire);
-        const uint64_t notice=atomic_load_explicit(plans,memory_order_acquire),
-                       k=atomic_load_explicit(&state->submissions,memory_order_acquire);
-        if(k && queue[(k-1)%room].end>t)break;
-        atomic_store_explicit(&waiter->waiting,plans,memory_order_release);
-        if(atomic_load_explicit(&waiter->stop,memory_order_acquire))cause=ECANCELED;
-        else if(ended){freed=1;break;}
-        else if(os_sync_wait_on_address_with_timeout(plans,notice,sizeof *plans,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-                  OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_METAL_SLICE_NS)<0 && errno==EINVAL)
-          cause=EINVAL;
-      }
-      for(size_t i=0;i<waiter->waits && !cause && !freed;){
-        const struct mesh_metal_wait *wait=waiter->wait+i;
-        const uint64_t value=t*passes+wait->pass+1,target=(t/wait->copies+1)*wait->pages;
-        if(value-1>set){[event setSignaledValue:value-1];set=value-1;}
-        _Atomic uint64_t *word=(_Atomic uint64_t *)(waiter->words+wait->count+sizeof(uint64_t)*(t%wait->copies));
-        const uint64_t seen=atomic_load_explicit(word,memory_order_acquire);
-        if(seen>=target){i++;continue;}
-        const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-        if(word!=read || seen!=last){read=word;last=seen;since=now;}
-        const uint64_t spent=now-since;
-        const uint64_t left=spent<MESH_PLATFORM_NS?MESH_PLATFORM_NS-spent:0;
-        atomic_store_explicit(&waiter->waiting,word,memory_order_release);
-        if(atomic_load_explicit(&waiter->stop,memory_order_acquire))cause=ECANCELED;
-        else if(!left)cause=ETIMEDOUT;
-        else if(os_sync_wait_on_address_with_timeout(word,seen,sizeof *word,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-                  OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_METAL_SLICE_NS?left:MESH_METAL_SLICE_NS)<0 && errno==EINVAL)
-          cause=EINVAL;
-      }
-      if(!cause && !freed && (t+1)*passes>set){[event setSignaledValue:(t+1)*passes];set=(t+1)*passes;}
-    }
-    if(cause)[event setSignaledValue:UINT64_MAX];
-    waiter->cause=cause;
-  }
-  return NULL;
-}
-
-int mesh_metal_waits_start(struct mesh_metal_transport *transport,void *event,const struct mesh_metal_wait *waits,
-  size_t count,uint32_t passes,struct mesh_metal_waiter **out){
-  *out=NULL;
-  if(!transport->state || !event || transport->bytes<sizeof(uint64_t))return EINVAL;
-  const uint64_t last=transport->bytes-sizeof(uint64_t);
-  for(size_t i=0;i<count;i++){
-    const struct mesh_metal_wait *wait=waits+i;
-    if(!wait->copies || !wait->pages || wait->pass>=passes || (i && wait->pass<waits[i-1].pass) ||
-       wait->count%sizeof(uint64_t) || wait->count>last || wait->copies-1>(last-wait->count)/sizeof(uint64_t))
-      return EINVAL;
-  }
-  if(count>(SIZE_MAX-sizeof(struct mesh_metal_waiter))/sizeof *waits)return ENOMEM;
-  struct mesh_metal_waiter *waiter=malloc(sizeof *waiter+count*sizeof *waits);
-  if(!waiter)return ENOMEM;
-  waiter->event=[(id)event retain];
-  waiter->words=(char *)transport->words;
-  waiter->region=(char *)transport->words-transport->offset;
-  waiter->passes=passes;
-  waiter->cause=0;
-  waiter->waits=count;
-  atomic_init(&waiter->stop,0);
-  atomic_init(&waiter->freed,0);
-  atomic_init(&waiter->waiting,NULL);
-  if(count)memcpy(waiter->wait,waits,count*sizeof *waits);
-  const int status=pthread_create(&waiter->thread,NULL,waits_run,waiter);
-  if(status){[(id)waiter->event release];free(waiter);return status;}
-  *out=waiter;
+/* design/problems-of-14b9a757-change-request.md, third stops 7; rdma/mesh-collective.c mesh_host_sent */
+int mesh_metal_sent_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  uint32_t transfer,struct mesh_metal_sent *sent){
+  (void)transport;
+  const struct mesh_state *words=plan_words(context,plan);
+  const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
+  *sent=(struct mesh_metal_sent){.counter=(char *)context->M+entry->completion,.sends=entry->sends,.copies=words->copies};
   return 0;
 }
 
-void mesh_metal_waits_stop(struct mesh_metal_waiter *waiter){
-  const int saved=errno;
-  atomic_store_explicit(&waiter->stop,1,memory_order_release);
-  _Atomic uint64_t *word=atomic_load_explicit(&waiter->waiting,memory_order_acquire);
-  if(word)os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-  errno=saved;
+/* design/disjoint-pages-change-request.md, Appendix C, C3.1; metal_recording.h state:buffer:status: */
+int mesh_metal_status_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
+  uint64_t *status){
+  *status=plan_words(context,plan)->status-transport->offset;
+  return 0;
 }
-
-int mesh_metal_waits_end(struct mesh_metal_waiter *waiter){
-  if(!waiter)return 0;
-  atomic_store_explicit(&waiter->freed,1,memory_order_release);
-  _Atomic uint64_t *word=atomic_load_explicit(&waiter->waiting,memory_order_acquire);
-  if(word)os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-  pthread_join(waiter->thread,NULL);
-  const int cause=waiter->cause;
-  [(id)waiter->event release];
-  free(waiter);
-  return cause;
-}
-
-/* design/disjoint-pages-change-request.md, Appendix C, C3.1 */
-int mesh_metal_status(struct mesh_metal_transport *transport,int cause,uint64_t *first){
+int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t *first){
   if(first)*first=UINT64_MAX;
-  struct mesh_state *words=transport->words;
-  if(!words)return EINVAL;
-  struct mesh_status *status=(struct mesh_status *)((char *)words+(words->status-transport->offset));
+  if(!plan)return EINVAL;
+  struct mesh_status *status=(struct mesh_status *)((char *)context->M+plan_words(context,plan)->status);
   const uint32_t ahead=atomic_load_explicit(&status->ahead,memory_order_acquire);
   const uint32_t behind=atomic_load_explicit(&status->behind,memory_order_acquire);
-  const uint32_t failed=atomic_load_explicit(&status->first,memory_order_acquire);
-  if(failed && first)*first=(uint32_t)~failed;
+  const uint64_t failed=atomic_load_explicit(&status->first,memory_order_acquire);
+  if(failed && first)*first=~failed;
   if(behind)return cause?cause:ENOLINK;
   if(ahead)return EPROTO;
   return 0;

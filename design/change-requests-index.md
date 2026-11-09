@@ -1,15 +1,26 @@
 # Change requests: which are outstanding
 
-As of 2026-11-08, after mesh e8cd57e0 and metal-microbench 21c44310. Each entry names a change request, whether it is
+As of 2026-11-09, including the composition implementation and review recorded in metal-microbench
+`output_data/claude-ir-handoffs-20261109T051956Z`. Each entry names a change request, whether it is
 outstanding, and what of it is outstanding. The standard every change request follows is
 [change-requests.md](change-requests.md).
 
 ## Outstanding
 
-- [compilation-composition-change-request.md](compilation-composition-change-request.md): outstanding, items 1–4.
+- [compilation-composition-change-request.md](compilation-composition-change-request.md): outstanding, items 1–6.
   Composes the nine requests below through cited compiler roles, complete lowering, shared representations and
   module ownership. Their individual implementation records do not establish that this composition is complete.
-- [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding, items 1–6.
+  Item 5 records the operator's native Apple Silicon execution and implementation deduplication correction and
+  assigns replacement of duplicated specialization, command orchestration and representation bodies.
+  Item 6 requires completing IR handoffs before helper extraction and divides that connected refactoring into
+  eight implementation units. The implementation now carries plan identities and edges into native preparation,
+  capture dependencies into replay, and typed effects through transformations. The connected source changes,
+  revisions, direct builds and remaining work are recorded in that run's `integration.md` and review records;
+  these do not establish completion of the full assigned domain or runtime and performance requirements.
+- [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
+  The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
+  in the composition implementation. The review records distinguish remaining representation and observation gaps
+  from implemented source; no monitored workload has established completion of items 1–6.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh
     56e33484, e34e7a5e and b482a825. A received operand's reader is masked, the threadgroups whose pages have not
@@ -19,10 +30,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
     (integration-finishing item 1).
   - Open, a stop: item 2's execution-time estimates t(v), on which its buffer bound depends. `HOST_LAG` stands until
     then.
-  - In the torch scope, item 9 remains outstanding: rdma/mesh_compile.py `program()` selects replay only for an
-    MPS-only node with no declared transfer naming a value (`replayed`). The requirement is that every node replays,
-    its collectives included. The lowering request's withdrawn item 4 points to item 1 for the consumer's lowering;
-    its withdrawal does not complete or withdraw item 9.
+  - In the torch scope, item 9 remains outstanding across the full assigned domain. The composition implementation
+    removes `program()`'s MPS-only/no-transfer selection and connects CPU tasks, MPS replay and declared transfers
+    through the native program. Its cross-placement results carry source-call readiness to their consumers.
+    Full coverage and operational evidence remain unfinished. The lowering request's withdrawn item 4 points to
+    item 1 for the consumer's lowering; its withdrawal does not complete or withdraw item 9.
   - Implemented: items 1 (metal-microbench a3792f13), 4 (mesh 992f6389), 5, 6 (mesh a2c1532c and b880b808,
     metal-microbench 6b3c29e5, completed in mesh 356bed56) and 7, and item 2's first write. Item 8 is written by the lowering
     request's items 1–3.

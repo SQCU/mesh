@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <CommonCrypto/CommonDigest.h>
 /* design/plan-to-bridge-change-request.md R5, Code; HiGHS 1.15.1, highs/interfaces/highs_c_api.h */
 #include <interfaces/highs_c_api.h>
 
@@ -64,11 +65,6 @@ int mesh_graph_tree_visit(uint32_t vertices, const size_t *first, uint32_t (*hea
   for (uint32_t k = 0; !status && k < count; k++) status = visit(consumer, order[k], parent[order[k]]);
   free(parent); free(order); free(next); free(color);
   return status;
-}
-
-void mesh_graph_neighbours(size_t edges, uint32_t (*end)(const void *context, size_t e, uint32_t side), const void *context,
-                           uint32_t from, void (*visit)(void *consumer, uint32_t to), void *consumer) {
-  for (size_t e = 0; e < edges; e++) if (end(context, e, 0) == from) visit(consumer, end(context, e, 1));
 }
 
 struct within { uint32_t N,root,depth; const uint32_t *from,*order,*into; const uint32_t *in; const double *weight,*rest;
@@ -194,15 +190,6 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
   return UINT32_MAX;
 }
 
-static void climb_return(void *consumer, uint32_t at, uint32_t step) {
-  uint32_t *found = consumer;
-  if (step && at == found[0] && !found[1]) found[1] = step;
-}
-uint32_t mesh_graph_cycle_length(const uint32_t *parent, uint32_t vertices, uint32_t from) {
-  uint32_t found[2] = {from, 0};
-  mesh_graph_climb(parent, vertices, UINT32_MAX, from, climb_return, found);
-  return found[1];
-}
 
 static uint32_t depth_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth) {
@@ -438,15 +425,6 @@ done:
   return written;
 }
 
-void mesh_graph_tree_loads(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
-                           const double *weight, double *load){
-  for(uint32_t k=0;k<trees;k++)
-    for(uint32_t v=0;v<vertices;v++){
-      const uint32_t u=parent[(size_t)k*vertices+v];
-      if(v!=root[k] && u!=UINT32_MAX)load[(size_t)u*vertices+v]+=weight[k];
-    }
-}
-
 uint32_t mesh_graph_grid_cut(uint64_t first, uint64_t length, uint64_t cell, uint64_t *start, uint64_t *count, uint64_t *index){
   const uint64_t g=cell?cell:1,end=first+length;
   uint32_t made=0;
@@ -472,18 +450,6 @@ uint32_t mesh_graph_tree_depth(uint32_t vertices, uint32_t root, const uint32_t 
   }
   free(first);free(head);free(depth);free(marked);
   return most;
-}
-double mesh_graph_trees_rate(uint32_t vertices, uint32_t trees, const uint32_t *root, const uint32_t *parent,
-                             const double *weight, const double *capacity){
-  double *load=calloc((size_t)vertices*vertices+1,sizeof *load),rate=INFINITY;
-  if(!load)return 0;
-  mesh_graph_tree_loads(vertices,trees,root,parent,weight,load);
-  for(size_t e=0;e<(size_t)vertices*vertices;e++)if(load[e]>0){
-    if(!(capacity[e]>0)){rate=0;break;}
-    if(capacity[e]/load[e]<rate)rate=capacity[e]/load[e];
-  }
-  free(load);
-  return isfinite(rate)?rate:0;
 }
 double mesh_graph_fill(uint32_t parts, const double *latency, const double *rate, uint64_t units, uint64_t *count){
   for(uint32_t p=0;p<parts;p++)count[p]=0;
@@ -568,13 +534,13 @@ static void heap_down(uint32_t *heap, uint32_t *position, int (*before)(const vo
   position[v] = (uint32_t)i;
 }
 static int lags_before(const void *context, uint32_t a, uint32_t b) {
-  const uint32_t *distance = context;
+  const uint64_t *distance = context;
   return distance[a] < distance[b] || (distance[a] == distance[b] && a < b);
 }
-static size_t lags_relax(uint32_t *heap, uint32_t *place, uint32_t *distance, size_t count, uint32_t v,
-                         uint64_t through) {
-  if (through >= distance[v]) return count;
-  distance[v] = (uint32_t)through;
+static size_t lags_relax(uint32_t *heap, uint32_t *place, uint64_t *distance, size_t count, uint32_t v, uint64_t at,
+                         uint64_t weight) {
+  if (weight == UINT64_MAX || at > UINT64_MAX - 1 - weight || at + weight >= distance[v]) return count;
+  distance[v] = at + weight;
   if (place[v] == UINT32_MAX) {
     heap[count] = v;
     heap_up(heap, place, lags_before, distance, count);
@@ -583,14 +549,16 @@ static size_t lags_relax(uint32_t *heap, uint32_t *place, uint32_t *distance, si
   heap_up(heap, place, lags_before, distance, place[v]);
   return count;
 }
-/* E. W. Dijkstra, Numerische Mathematik 1, 1959, problem 2 */
+/* E. W. Dijkstra, Numerische Mathematik 1, 1959, problem 2: lags[s * targets + x] the least sum of lags over a walk of
+   at least one edge from source[s] to target[x], UINT64_MAX where there is none; an edge of lag UINT64_MAX is absent,
+   and a walk's sum is kept below UINT64_MAX */
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
-                    uint32_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
-                    const uint32_t *source,uint32_t targets,const uint32_t *target,uint32_t *lags) {
+                    uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
+                    const uint32_t *source,uint32_t targets,const uint32_t *target,uint64_t *lags) {
   const size_t edges = first[vertices];
-  if (edges >= SIZE_MAX / sizeof(uint32_t)) return ENOMEM;
-  uint32_t *heads = malloc((edges + 1) * sizeof *heads), *weights = malloc((edges + 1) * sizeof *weights);
-  uint32_t *distance = malloc(((size_t)vertices + 1) * sizeof *distance);
+  if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
+  uint32_t *heads = malloc((edges + 1) * sizeof *heads);
+  uint64_t *weights = malloc((edges + 1) * sizeof *weights), *distance = malloc(((size_t)vertices + 1) * sizeof *distance);
   uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap), *place = malloc(((size_t)vertices + 1) * sizeof *place);
   unsigned char *wanted = calloc((size_t)vertices + 1, 1);
   const int result = !heads || !weights || !distance || !heap || !place || !wanted ? ENOMEM : 0;
@@ -599,18 +567,18 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
   for (uint32_t x = 0; !result && x < targets; x++)
     if (!wanted[target[x]]) { wanted[target[x]] = 1; distinct++; }
   for (uint32_t s = 0; !result && distinct && s < sources; s++) {
-    for (uint32_t v = 0; v < vertices; v++) { distance[v] = UINT32_MAX; place[v] = UINT32_MAX; }
+    for (uint32_t v = 0; v < vertices; v++) { distance[v] = UINT64_MAX; place[v] = UINT32_MAX; }
     const uint32_t from = source[s];
     size_t count = 0;
     for (size_t k = first[from]; k < first[from + 1]; k++)
-      count = lags_relax(heap, place, distance, count, heads[k], weights[k]);
+      count = lags_relax(heap, place, distance, count, heads[k], 0, weights[k]);
     for (uint32_t left = distinct; count;) {
       const uint32_t at = heap[0];
       place[at] = UINT32_MAX;
       if (--count) { heap[0] = heap[count]; heap_down(heap, place, lags_before, distance, count, 0); }
       if (wanted[at] && !--left) break;
       for (size_t k = first[at]; k < first[at + 1]; k++)
-        count = lags_relax(heap, place, distance, count, heads[k], (uint64_t)distance[at] + weights[k]);
+        count = lags_relax(heap, place, distance, count, heads[k], distance[at], weights[k]);
     }
     for (uint32_t x = 0; x < targets; x++) lags[(size_t)s * targets + x] = distance[target[x]];
   }
@@ -1354,24 +1322,22 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
 /* BSL §4.3 (6) and §9, Fig. 8 (DetermineDelays) */
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
                                 const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
-                                const uint32_t *added_to, uint64_t *added_delay) {
+                                const uint32_t *added_to, double lambda, uint64_t *added_delay) {
   int result = graph_check(vertices, time, edges, from, to);
   if (!result) result = graph_check(vertices, NULL, added, added_from, added_to);
+  if (!result && !(lambda >= 0 && lambda <= DBL_MAX)) result = EINVAL;
   if (result) return result;
   if (edges >= SIZE_MAX / sizeof(uint64_t) - added) return ENOMEM;
   const size_t total = edges + added;
   uint32_t *all_from = malloc((total + 1) * sizeof *all_from), *all_to = malloc((total + 1) * sizeof *all_to);
   uint64_t *all_delay = malloc((total + 1) * sizeof *all_delay);
   result = all_from && all_to && all_delay ? 0 : ENOMEM;
-  double lambda = 0;
   if (!result) {
     for (size_t e = 0; e < edges; e++) { all_from[e] = from[e]; all_to[e] = to[e]; all_delay[e] = delay[e]; }
     for (uint32_t i = 0; i < added; i++) {
       all_from[edges + i] = added_from[i]; all_to[edges + i] = added_to[i]; all_delay[edges + i] = UINT64_MAX;
     }
-    result = mesh_graph_cycle_mean(vertices, time, total, all_from, all_to, all_delay, &lambda);
   }
-  if (!result && lambda == INFINITY) result = EDEADLK;
   if (!result) {
     const double quotient = lambda > 0 ? time_sum(vertices, time) / lambda : 0;
     uint64_t bound = quotient < 0x1p64 ? (uint64_t)quotient : UINT64_MAX;
@@ -1398,12 +1364,16 @@ static int access_before(const void *a, const void *b) {
   if (x->start != y->start) return x->start < y->start ? -1 : 1;
   return (x->vertex > y->vertex) - (x->vertex < y->vertex);
 }
-int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, size_t room, uint32_t *from, uint32_t *to,
-                           size_t *edges) {
+int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, size_t supplied,
+                           const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
+                           uint32_t *to, size_t *edges) {
+  for (size_t e = 0; e < supplied; e++) if (supplied_from[e] >= supplied_to[e]) return EINVAL;
+  if (supplied >= SIZE_MAX / sizeof(uint64_t) - 64) return ENOMEM;
   if (accesses) qsort(access, accesses, sizeof *access, access_before);
-  size_t made = 0, held = 0, count = 0;
-  uint64_t *pair = NULL;
-  int result = 0;
+  size_t made = 0, held = supplied + 64, count = 0;
+  uint64_t *pair = malloc(held * sizeof *pair);
+  int result = pair ? 0 : ENOMEM;
+  for (size_t e = 0; !result && e < supplied; e++) pair[made++] = (uint64_t)supplied_from[e] << 32 | supplied_to[e];
   for (size_t i = 0; !result && i < accesses; i++)
     for (size_t j = i + 1; j < accesses && access[j].key == access[i].key && access[j].start < access[i].end; j++) {
       if (access[j].vertex == access[i].vertex || !access_conflict(access + i, access + j) || access[j].end <= access[j].start)
@@ -1512,86 +1482,792 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
 
 /* design/torch-source-lowering-change-request.md item 3; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans.
    Signal Processing 45(6), 1997, §7, Fig. 4 */
-int mesh_graph_synchronization(uint32_t vertices, size_t accesses, struct mesh_graph_access *access, size_t room,
-                               uint32_t *from, uint32_t *to, size_t *edges, size_t *dependences) {
-  for (size_t a = 0; a < accesses; a++) if (access[a].vertex >= vertices) return EINVAL;
-  size_t held = accesses + 1, made = 0;
-  uint32_t *tail = NULL, *head = NULL;
-  int result = ERANGE;
-  while (result == ERANGE) {
-    free(tail); free(head);
-    tail = malloc((held + 1) * sizeof *tail); head = malloc((held + 1) * sizeof *head);
-    result = tail && head ? mesh_graph_dependences(accesses, access, held, tail, head, &made) : ENOMEM;
-    held = made;
-  }
-  uint64_t *delay = result ? NULL : calloc(made + 1, sizeof *delay);
-  unsigned char *synchronization = result ? NULL : malloc(made + 1), *redundant = result ? NULL : malloc(made + 1);
-  if (!result && (!delay || !synchronization || !redundant)) result = ENOMEM;
+int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+                               unsigned char *redundant, size_t *kept) {
+  if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
+  uint64_t *delay = calloc(edges + 1, sizeof *delay);
+  unsigned char *synchronization = malloc(edges + 1);
+  int result = delay && synchronization ? 0 : ENOMEM;
   if (!result) {
-    memset(synchronization, 1, made + 1);
-    result = mesh_graph_redundant(vertices, made, tail, head, delay, synchronization, redundant);
+    memset(synchronization, 1, edges + 1);
+    result = mesh_graph_redundant(vertices, edges, from, to, delay, synchronization, redundant);
   }
-  size_t kept = 0;
-  for (size_t e = 0; !result && e < made; e++) {
-    if (redundant[e]) continue;
-    if (kept < room) { from[kept] = tail[e]; to[kept] = head[e]; }
-    kept++;
-  }
-  if (!result) { *edges = kept; *dependences = made; if (kept > room) result = ERANGE; }
-  free(tail); free(head); free(delay); free(synchronization); free(redundant);
+  size_t made = 0;
+  for (size_t e = 0; !result && e < edges; e++) made += !redundant[e];
+  if (!result) *kept = made;
+  free(delay); free(synchronization);
   return result;
 }
 
 /* design/torch-source-lowering-change-request.md item 3; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
-int mesh_graph_schedule(uint32_t vertices, size_t accesses, struct mesh_graph_access *access, const unsigned char *after,
-                        int self_timed, uint32_t *level, uint32_t *place, size_t *dependences, size_t *synchronizations) {
-  if (vertices == UINT32_MAX || accesses >= SIZE_MAX / 4) return ENOMEM;
-  const size_t reserve = 2 * (size_t)vertices + 1;
-  size_t room = accesses + reserve, edges = 0, made = 0;
-  uint32_t *from = malloc((room + 1) * sizeof *from), *to = malloc((room + 1) * sizeof *to);
-  uint32_t *weight = malloc((room + 1) * sizeof *weight);
-  size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((room + 1) * sizeof *order);
+int mesh_graph_schedule(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+                        const unsigned char *after, int self_timed, uint32_t *level, uint32_t *place) {
+  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
+  if (vertices == UINT32_MAX || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
   double *priority = malloc(((size_t)vertices + 1) * sizeof *priority);
-  int result = from && to && weight && first && order && priority ? 0 : ENOMEM;
-  while (!result) {
-    result = self_timed ? mesh_graph_synchronization(vertices, accesses, access, room - reserve, from, to, &edges, &made)
-                        : mesh_graph_dependences(accesses, access, room - reserve, from, to, &edges);
-    if (result != ERANGE) break;
-    room = edges + reserve;
-    uint32_t *f = realloc(from, (room + 1) * sizeof *f), *t = f ? realloc(to, (room + 1) * sizeof *t) : NULL;
-    uint32_t *w = t ? realloc(weight, (room + 1) * sizeof *w) : NULL;
-    size_t *o = w ? realloc(order, (room + 1) * sizeof *o) : NULL;
-    if (f) from = f;
-    if (t) to = t;
-    if (w) weight = w;
-    if (o) order = o;
-    result = o ? 0 : ENOMEM;
+  int result = first && order && priority ? 0 : ENOMEM;
+  if (!result) mesh_graph_rows(vertices, edges, depth_head, to, first, order);
+  uint32_t chained = UINT32_MAX;
+  for (uint32_t v = 0; !result && v < vertices; v++) {
+    const unsigned char a = after ? after[v] : 0;
+    const int ordered = !self_timed && a != MESH_GRAPH_UNORDERED;
+    level[v] = ordered && chained != UINT32_MAX ? chained + (a == 1) : 0;
+    for (size_t k = first[v]; !result && k < first[v + 1]; k++) {
+      const uint32_t u = from[order[k]];
+      if (u >= v) result = EDEADLK;
+      else if (level[u] + 1 > level[v]) level[v] = level[u] + 1;
+    }
+    if (ordered) chained = level[v];
+    priority[v] = -(double)level[v];
   }
-  if (!result && !self_timed) made = edges;
-  for (size_t e = 0; !result && e < edges; e++) weight[e] = 1;
-  const size_t dependent = edges;
-  for (uint32_t v = 1; !result && !self_timed && v < vertices; v++) {
-    from[edges] = v - 1; to[edges] = v; weight[edges++] = 0;
-    if (after && after[v]) { from[edges] = v - 1; to[edges] = v; weight[edges++] = 1; }
+  if (!result && self_timed) result = mesh_graph_heap_order(vertices, priority, edges, from, to, place);
+  for (uint32_t v = 0; !result && !self_timed && v < vertices; v++) place[v] = v;
+  free(first); free(order); free(priority);
+  return result;
+}
+
+/* design/synchronization-signature-change-request.md items 1, 4 and 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee,
+   IEEE Trans. Signal Processing 45(6), 1997, §4.1, §5.1 and §7, Fig. 4; D. P. Reed and R. K. Kanodia, CACM 22(2),
+   1979; MTLEvent.h waitUntilSignaledValue:timeoutMS:; MTL4CommandQueue.h waitForEvent:value: */
+static int signature_signal(uint32_t p) {
+  return p == MESH_GRAPH_QUEUE_SIGNAL || p == MESH_GRAPH_FENCE_UPDATE || p == MESH_GRAPH_BRIDGE_START ||
+         p == MESH_GRAPH_BRIDGE_RAISE || p == MESH_GRAPH_INITIAL || p == MESH_GRAPH_HOST_PUBLISH ||
+         p == MESH_GRAPH_HOST_SIGNAL;
+}
+/* design/synchronization-signature-change-request.md item 6: a static count in the compiled kernel, `value` of them,
+   UINT64_MAX where the kernel's source is not known, `object` the commands so counted */
+static int signature_static(uint32_t p) {
+  return p == MESH_GRAPH_THREADGROUP_BARRIER || p == MESH_GRAPH_SIMDGROUP_BARRIER || p == MESH_GRAPH_ATOMIC ||
+         p == MESH_GRAPH_KERNEL_FENCE;
+}
+static int signature_wait(uint32_t p) {
+  return p == MESH_GRAPH_QUEUE_WAIT || p == MESH_GRAPH_FENCE_WAIT || p == MESH_GRAPH_HOST_WAIT || p == MESH_GRAPH_HOST_NOTIFY;
+}
+static uint32_t signature_class(uint32_t p) {
+  return p == MESH_GRAPH_FENCE_UPDATE || p == MESH_GRAPH_FENCE_WAIT ? 1 : p == MESH_GRAPH_INITIAL ? 2 :
+         p == MESH_GRAPH_HOST_PUBLISH ? 3 : 0;
+}
+static size_t graph_lower(const void *base, size_t count, size_t size, const void *probe,
+                          int (*before)(const void *, const void *)) {
+  size_t low = 0, high = count;
+  while (low < high) {
+    const size_t mid = low + (high - low) / 2;
+    if (before((const char *)base + mid * size, probe) < 0) low = mid + 1; else high = mid;
   }
+  return low;
+}
+struct signature_key { uint32_t class, object; uint64_t value; size_t index; };
+static int signature_key_before(const void *a, const void *b) {
+  const struct signature_key *x = a, *y = b;
+  if (x->class != y->class) return x->class < y->class ? -1 : 1;
+  if (x->object != y->object) return x->object < y->object ? -1 : 1;
+  if (x->value != y->value) return x->value < y->value ? -1 : 1;
+  return (x->index > y->index) - (x->index < y->index);
+}
+static int signature_dependence_before(const void *a, const void *b) {
+  const struct mesh_graph_dependence *x = a, *y = b;
+  if (x->from != y->from) return x->from < y->from ? -1 : 1;
+  if (x->to != y->to) return x->to < y->to ? -1 : 1;
+  return (x->delay > y->delay) - (x->delay < y->delay);
+}
+struct signature_task { uint32_t processor, place, task; };
+static int signature_task_before(const void *a, const void *b) {
+  const struct signature_task *x = a, *y = b;
+  if (x->processor != y->processor) return x->processor < y->processor ? -1 : 1;
+  if (x->place != y->place) return x->place < y->place ? -1 : 1;
+  return (x->task > y->task) - (x->task < y->task);
+}
+struct signature_graph { uint32_t vertices; size_t edges, held, skip; uint32_t *from, *to; uint64_t *delay; size_t *first, *order; };
+static int signature_edge(struct signature_graph *g, uint32_t a, uint32_t b, uint64_t d) {
+  if (g->edges == g->held) {
+    const size_t grown = g->held ? 2 * g->held : 64;
+    uint32_t *f = realloc(g->from, grown * sizeof *f);
+    if (f) g->from = f;
+    uint32_t *t = f ? realloc(g->to, grown * sizeof *t) : NULL;
+    if (t) g->to = t;
+    uint64_t *y = t ? realloc(g->delay, grown * sizeof *y) : NULL;
+    if (!y) return ENOMEM;
+    g->delay = y; g->held = grown;
+  }
+  g->from[g->edges] = a; g->to[g->edges] = b; g->delay[g->edges++] = d;
+  return 0;
+}
+static uint32_t signature_tail(const void *context, size_t k) { return ((const struct signature_graph *)context)->from[k]; }
+static uint32_t signature_head(const void *context, size_t k) {
+  const struct signature_graph *g = context;
+  return g->to[g->order[k]];
+}
+static uint64_t signature_lag(const void *context, size_t k) {
+  const struct signature_graph *g = context;
+  const size_t e = g->order[k];
+  return e == g->skip ? UINT64_MAX : g->delay[e];
+}
+static uint32_t signature_processor(const void *context, size_t k) {
+  return ((const struct mesh_graph_operation *)context)[k].processor;
+}
+struct signature_image { uint32_t from, to; uint64_t delay; size_t edge; };
+static int signature_image_before(const void *a, const void *b) {
+  const struct signature_image *x = a, *y = b;
+  if (x->from != y->from) return x->from < y->from ? -1 : 1;
+  if (x->to != y->to) return x->to < y->to ? -1 : 1;
+  if (x->delay != y->delay) return x->delay < y->delay ? -1 : 1;
+  return (x->edge > y->edge) - (x->edge < y->edge);
+}
+static int signature_enforces(const struct mesh_graph_operation *operation, const struct mesh_graph_synchronized *e) {
+  return e->signal != MESH_GRAPH_NONE && operation[e->signal].vertex != MESH_GRAPH_NONE &&
+         operation[e->wait].vertex != MESH_GRAPH_NONE && operation[e->signal].execution <= operation[e->wait].execution;
+}
+
+void mesh_graph_signature_free(struct mesh_graph_signature *s) {
+  free(s->processor); free(s->task); free(s->operation); free(s->dependence); free(s->edge); free(s->position);
+  free(s->count); free(s->least); free(s->previous); free(s->waited); free(s->first); free(s->order); free(s->unknown);
+  free(s->alias);
+  memset(s, 0, sizeof *s);
+}
+
+static int signature_digest(struct mesh_graph_signature *s) {
+  size_t made = 0;
+  int result = mesh_graph_matrix_market(s, NULL, 0, &made);
+  if (result != ERANGE) return result ? result : EINVAL;
+  char *text = malloc(made);
+  if (!text) return ENOMEM;
+  result = mesh_graph_matrix_market(s, text, made, &made);
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, to, first, order);
-    for (uint32_t v = 0; v < vertices; v++) {
-      level[v] = 0;
-      for (size_t k = first[v]; k < first[v + 1]; k++) {
-        const size_t e = order[k];
-        if (from[e] >= v) { result = EDEADLK; break; }
-        if (level[from[e]] + weight[e] > level[v]) level[v] = level[from[e]] + weight[e];
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    for (size_t at = 0; at + 1 < made;) {
+      const size_t step = made - 1 - at < (size_t)1 << 30 ? made - 1 - at : (size_t)1 << 30;
+      CC_SHA256_Update(&context, text + at, (CC_LONG)step);
+      at += step;
+    }
+    CC_SHA256_Final(s->digest, &context);
+  }
+  free(text);
+  return result;
+}
+/* everything a signature holds beyond its processors, tasks, dependences, operations, pairs, least delays and aliases,
+   from those: each operation's place in its processor's order, the pair it waits in, the counts, states and digest */
+static int signature_derive(struct mesh_graph_signature *s) {
+  const size_t cells = (size_t)s->processors * MESH_GRAPH_PRIMITIVES + 1, n = s->operations;
+  s->position = malloc((n + 1) * sizeof *s->position);
+  s->previous = malloc((n + 1) * sizeof *s->previous);
+  s->waited = malloc((n + 1) * sizeof *s->waited);
+  s->first = malloc(((size_t)s->processors + 2) * sizeof *s->first);
+  s->order = malloc((n + 1) * sizeof *s->order);
+  s->count = calloc(cells, sizeof *s->count);
+  s->unknown = calloc(cells, sizeof *s->unknown);
+  unsigned char *used = calloc(n + 1, 1);
+  int result = s->position && s->previous && s->waited && s->first && s->order && s->count && s->unknown && used ? 0 : ENOMEM;
+  if (!result) {
+    mesh_graph_rows(s->processors, n, signature_processor, s->operation, s->first, s->order);
+    for (uint32_t p = 0; p < s->processors; p++)
+      for (size_t k = s->first[p]; k < s->first[p + 1]; k++) {
+        const size_t o = s->order[k];
+        s->position[o] = k - s->first[p];
+        s->previous[o] = k > s->first[p] ? s->order[k - 1] : SIZE_MAX;
       }
-      if (result) break;
-      priority[v] = -(double)level[v];
+    for (size_t o = 0; o < n; o++) {
+      const struct mesh_graph_operation *x = s->operation + o;
+      const size_t cell = (size_t)x->processor * MESH_GRAPH_PRIMITIVES + x->primitive;
+      s->waited[o] = SIZE_MAX;
+      if (!signature_static(x->primitive)) s->count[cell]++;
+      else if (x->value == UINT64_MAX) s->unknown[cell] += x->object;
+      else s->count[cell] += x->value;
+    }
+    memset(s->states, 0, sizeof s->states);
+    s->redundant = s->unwaited = s->uncovered = 0;
+    for (size_t k = 0; k < s->synchronized; k++) {
+      const struct mesh_graph_synchronized *e = s->edge + k;
+      s->waited[e->wait] = k;
+      if (e->signal != MESH_GRAPH_NONE) used[e->signal] = 1;
+      s->states[e->state]++;
+      s->redundant += e->redundant;
+    }
+    for (size_t o = 0; o < n; o++)
+      s->unwaited += signature_signal(s->operation[o].primitive) && signature_class(s->operation[o].primitive) != 2 && !used[o];
+    for (size_t k = 0; k < s->dependences; k++) s->uncovered += s->least[k] > s->dependence[k].delay;
+    result = signature_digest(s);
+  }
+  free(used);
+  return result;
+}
+
+int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
+                         const struct mesh_graph_task *task, size_t dependences,
+                         const struct mesh_graph_dependence *dependence, size_t operations,
+                         const struct mesh_graph_operation *operation, struct mesh_graph_signature *s) {
+  memset(s, 0, sizeof *s);
+  for (uint32_t p = 0; p < processors; p++) if (processor[p].kind >= MESH_GRAPH_KINDS) return EINVAL;
+  for (uint32_t t = 0; t < tasks; t++) if (task[t].processor >= processors) return EINVAL;
+  for (size_t k = 0; k < dependences; k++) if (dependence[k].from >= tasks || dependence[k].to >= tasks) return EINVAL;
+  for (size_t o = 0; o < operations; o++)
+    if (operation[o].processor >= processors || operation[o].primitive >= MESH_GRAPH_PRIMITIVES ||
+        (operation[o].vertex != MESH_GRAPH_NONE && operation[o].vertex >= tasks)) return EINVAL;
+  if (tasks == UINT32_MAX || operations >= SIZE_MAX / (4 * sizeof(struct signature_key)) ||
+      dependences >= SIZE_MAX / (4 * sizeof *dependence) || (size_t)processors >= SIZE_MAX / (MESH_GRAPH_PRIMITIVES * 8))
+    return ENOMEM;
+  s->processors = processors; s->tasks = tasks; s->operations = operations; s->dependences = dependences;
+  s->processor = malloc(((size_t)processors + 1) * sizeof *s->processor);
+  s->task = malloc(((size_t)tasks + 1) * sizeof *s->task);
+  s->operation = malloc((operations + 1) * sizeof *s->operation);
+  s->dependence = malloc((dependences + 1) * sizeof *s->dependence);
+  s->edge = malloc((operations + 1) * sizeof *s->edge);
+  s->least = malloc((dependences + 1) * sizeof *s->least);
+  s->alias = malloc((operations + 1) * sizeof *s->alias);
+  struct signature_key *key = malloc((operations + 1) * sizeof *key);
+  struct signature_task *row = malloc(((size_t)tasks + 1) * sizeof *row);
+  struct signature_image *image = malloc((operations + 1) * sizeof *image);
+  size_t *slot = malloc((operations + 1) * sizeof *slot), *pair = NULL;
+  uint32_t *sinks = malloc((dependences + 1) * sizeof *sinks);
+  uint64_t *lags = malloc((dependences + 1) * sizeof *lags);
+  unsigned char *barred = NULL, *flag = NULL, *redundant = NULL;
+  struct signature_graph g = {tasks, 0, 0, SIZE_MAX, NULL, NULL, NULL, malloc(((size_t)tasks + 2) * sizeof(size_t)), NULL};
+  uint32_t *rf = NULL, *rt = NULL;
+  uint64_t *rd = NULL;
+  int result = s->processor && s->task && s->operation && s->dependence && s->edge && s->least && s->alias && key &&
+               row && image && slot && sinks && lags && g.first ? 0 : ENOMEM;
+  if (!result) {
+    memcpy(s->processor, processor, (size_t)processors * sizeof *processor);
+    memcpy(s->task, task, (size_t)tasks * sizeof *task);
+    memcpy(s->operation, operation, operations * sizeof *operation);
+    memcpy(s->dependence, dependence, dependences * sizeof *dependence);
+    qsort(s->dependence, dependences, sizeof *s->dependence, signature_dependence_before);
+  }
+  size_t signals = 0;
+  for (size_t o = 0; !result && o < operations; o++) {
+    s->alias[o] = MESH_GRAPH_NONE;
+    if (signature_signal(operation[o].primitive))
+      key[signals++] = (struct signature_key){signature_class(operation[o].primitive), operation[o].object, operation[o].value, o};
+  }
+  if (!result) qsort(key, signals, sizeof *key, signature_key_before);
+  for (size_t o = 0; !result && o < operations; o++) {
+    const struct mesh_graph_operation *w = operation + o;
+    if (!signature_wait(w->primitive)) continue;
+    const uint32_t class = signature_class(w->primitive);
+    struct mesh_graph_synchronized *e = s->edge + s->synchronized++;
+    *e = (struct mesh_graph_synchronized){MESH_GRAPH_NONE, (uint32_t)o, MESH_GRAPH_UNMATCHED, 0, MESH_GRAPH_NONE,
+                                          MESH_GRAPH_NONE, 0};
+    if (!class) {
+      const struct signature_key initial = {2, w->object, 0, 0};
+      const size_t i = graph_lower(key, signals, sizeof *key, &initial, signature_key_before);
+      if (i < signals && key[i].class == 2 && key[i].object == w->object && key[i].value >= w->value) {
+        e->state = MESH_GRAPH_SATISFIED; e->signal = (uint32_t)key[i].index;
+        continue;
+      }
+    }
+    const struct signature_key probe = {class, w->object, w->value, 0};
+    const size_t low = graph_lower(key, signals, sizeof *key, &probe, signature_key_before);
+    size_t chosen = SIZE_MAX;
+    for (size_t k = low; k < signals && key[k].class == class && key[k].object == w->object &&
+                         key[k].value == key[low].value && (class || key[k].value >= w->value) &&
+                         (!class || key[k].value == w->value); k++)
+      if (key[k].index < o || chosen == SIZE_MAX) chosen = k;
+    if (chosen == SIZE_MAX) continue;
+    const struct mesh_graph_operation *x = operation + key[chosen].index;
+    e->signal = (uint32_t)key[chosen].index;
+    e->state = MESH_GRAPH_FALSE;
+    if (!signature_enforces(operation, e)) continue;
+    e->delay = w->execution - x->execution;
+    const struct mesh_graph_dependence want = {x->vertex, w->vertex, e->delay};
+    const size_t at = graph_lower(s->dependence, dependences, sizeof *s->dependence, &want, signature_dependence_before);
+    if (at < dependences && s->dependence[at].from == want.from && s->dependence[at].to == want.to) {
+      e->dependence = (uint32_t)at;
+      e->state = s->dependence[at].delay == want.delay ? MESH_GRAPH_IMAGE : MESH_GRAPH_STRONGER;
     }
   }
-  if (!result && self_timed) result = mesh_graph_heap_order(vertices, priority, dependent, from, to, place);
-  for (uint32_t v = 0; !result && !self_timed && v < vertices; v++) place[v] = v;
-  if (!result) { *dependences = made; *synchronizations = dependent; }
-  free(from); free(to); free(weight); free(first); free(order); free(priority);
+  for (uint32_t t = 0; !result && t < tasks; t++) row[t] = (struct signature_task){task[t].processor, task[t].place, t};
+  if (!result) qsort(row, tasks, sizeof *row, signature_task_before);
+  for (uint32_t a = 0, b; !result && a < tasks; a = b) {
+    for (b = a; b < tasks && row[b].processor == row[a].processor; b++) {}
+    if (processor[row[a].processor].kind == MESH_GRAPH_HOST && b - a > 1)
+      for (uint32_t k = a; !result && k < b; k++) result = signature_edge(&g, row[k].task, row[k + 1 < b ? k + 1 : a].task, k + 1 == b);
+  }
+  if (!result && !(barred = calloc((size_t)tasks + 1, 1))) result = ENOMEM;
+  for (size_t o = 0; !result && o < operations; o++) {
+    const uint32_t b = operation[o].vertex, primitive = operation[o].primitive, mark = primitive == MESH_GRAPH_QUEUE_BARRIER ? 1 : 2;
+    if ((primitive != MESH_GRAPH_QUEUE_BARRIER && primitive != MESH_GRAPH_PRODUCER_BARRIER) || b == MESH_GRAPH_NONE ||
+        barred[b] & mark) continue;
+    barred[b] |= mark;
+    for (uint32_t a = 0; !result && a < tasks; a++) {
+      if (task[a].processor != task[b].processor) continue;
+      if (mark == 1) result = signature_edge(&g, a, b, task[a].place >= task[b].place);
+      else if (task[a].place <= task[b].place)
+        for (uint32_t c = 0; !result && c < tasks; c++)
+          if (task[c].processor == task[b].processor && c != a) result = signature_edge(&g, a, c, task[c].place <= task[b].place);
+    }
+  }
+  size_t images = 0;
+  for (size_t k = 0; !result && k < s->synchronized; k++) {
+    const struct mesh_graph_synchronized *e = s->edge + k;
+    slot[k] = SIZE_MAX;
+    if (e->state == MESH_GRAPH_SATISFIED || !signature_enforces(operation, e)) continue;
+    slot[k] = g.edges;
+    image[images++] = (struct signature_image){operation[e->signal].vertex, operation[e->wait].vertex, e->delay, g.edges};
+    result = signature_edge(&g, operation[e->signal].vertex, operation[e->wait].vertex, e->delay);
+  }
+  if (!result) {
+    g.order = malloc((g.edges + 1) * sizeof *g.order);
+    pair = malloc((g.edges + 1) * sizeof *pair);
+    rf = malloc((g.edges + 1) * sizeof *rf); rt = malloc((g.edges + 1) * sizeof *rt); rd = malloc((g.edges + 1) * sizeof *rd);
+    flag = malloc(g.edges + 1); redundant = calloc(g.edges + 1, 1);
+    if (!g.order || !pair || !rf || !rt || !rd || !flag || !redundant) result = ENOMEM;
+  }
+  if (!result) mesh_graph_rows(tasks, g.edges, signature_tail, &g, g.first, g.order);
+  size_t kept = 0, flagged = 0;
+  for (size_t e = 0; !result && e < g.edges; e++) {
+    pair[e] = SIZE_MAX;
+    if (g.from[e] == g.to[e]) continue;
+    rf[kept] = g.from[e]; rt[kept] = g.to[e]; rd[kept] = g.delay[e]; flag[kept] = 0;
+    pair[e] = kept++;
+  }
+  if (!result) qsort(image, images, sizeof *image, signature_image_before);
+  for (size_t k = 0; !result && k < images; k++)
+    if (image[k].from != image[k].to && (!k || image[k - 1].from != image[k].from || image[k - 1].to != image[k].to)) {
+      flag[pair[image[k].edge]] = 1; flagged++;
+    }
+  if (!result && flagged) result = mesh_graph_redundant(tasks, kept, rf, rt, rd, flag, redundant);
+  for (size_t k = 0; !result && k < s->synchronized; k++) {
+    struct mesh_graph_synchronized *x = s->edge + k;
+    const size_t e = slot[k];
+    if (e == SIZE_MAX) continue;
+    if (g.from[e] == g.to[e]) {
+      uint64_t least = UINT64_MAX;
+      g.skip = e;
+      result = mesh_graph_lags(tasks, g.first, signature_head, signature_lag, &g, 1, g.from + e, 1, g.to + e, &least);
+      g.skip = SIZE_MAX;
+      x->redundant = least <= g.delay[e];
+    } else x->redundant = !flag[pair[e]] || redundant[pair[e]];
+  }
+  for (size_t k = 0, j; !result && k < dependences; k = j) {
+    for (j = k; j < dependences && s->dependence[j].from == s->dependence[k].from; j++) sinks[j - k] = s->dependence[j].to;
+    result = mesh_graph_lags(tasks, g.first, signature_head, signature_lag, &g, 1, &s->dependence[k].from,
+                             (uint32_t)(j - k), sinks, lags);
+    for (size_t q = k; !result && q < j; q++) s->least[q] = lags[q - k];
+  }
+  if (!result) result = signature_derive(s);
+  free(key); free(row); free(image); free(slot); free(pair); free(sinks); free(lags); free(barred);
+  free(g.from); free(g.to); free(g.delay); free(g.first); free(g.order); free(rf); free(rt); free(rd);
+  free(flag); free(redundant);
+  if (result) mesh_graph_signature_free(s);
   return result;
+}
+
+/* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §3, §9, Theorem 4, Figs. 6
+   and 8; design/aot-compilation-change-request.md, appendix item 2, BS-4 */
+static int resync_connected(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, size_t skip,
+                            uint32_t *f, uint32_t *t, uint32_t *component, uint32_t *count) {
+  size_t m = 0;
+  for (size_t e = 0; e < edges; e++) if (e != skip) { f[m] = from[e]; t[m++] = to[e]; }
+  return mesh_graph_components(vertices, m, f, t, component, count);
+}
+struct resync_end { uint32_t from, to, edge; };
+static int resync_end_before(const void *a, const void *b) {
+  const struct resync_end *x = a, *y = b;
+  if (x->from != y->from) return x->from < y->from ? -1 : 1;
+  if (x->to != y->to) return x->to < y->to ? -1 : 1;
+  return (x->edge > y->edge) - (x->edge < y->edge);
+}
+int mesh_graph_resynchronized(struct mesh_graph_signature *s, const double *time, size_t edges, const uint32_t *from,
+                              const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
+                              const uint32_t *added_to, const uint64_t *added_delay, double lambda,
+                              const uint64_t *offset) {
+  const uint32_t T = s->tasks;
+  if (!T) return 0;
+  int result = graph_check(T, time, edges, from, to);
+  if (!result) result = graph_check(T, NULL, added, added_from, added_to);
+  if (!result && !(lambda >= 0 && lambda <= DBL_MAX)) result = EINVAL;
+  if (result) return result;
+  const size_t total = edges + added;
+  uint32_t *all_from = malloc((total + 1) * sizeof *all_from), *all_to = malloc((total + 1) * sizeof *all_to);
+  uint32_t *f = malloc((total + 1) * sizeof *f), *t = malloc((total + 1) * sizeof *t);
+  uint32_t *component = malloc(((size_t)T + 1) * sizeof *component), *alone = malloc(((size_t)T + 1) * sizeof *alone);
+  uint64_t *all_delay = malloc((total + 1) * sizeof *all_delay);
+  struct resync_end *end = malloc(((size_t)added + 1) * sizeof *end);
+  unsigned char *ok = malloc((size_t)added + 1);
+  struct graph_scratch g;
+  result = scratch_alloc(&g, T, total);
+  if (!result && !(all_from && all_to && f && t && component && alone && all_delay && end && ok)) result = ENOMEM;
+  uint32_t count = 0;
+  for (size_t e = 0; !result && e < edges; e++) { all_from[e] = from[e]; all_to[e] = to[e]; all_delay[e] = delay[e]; }
+  for (uint32_t i = 0; !result && i < added; i++) {
+    all_from[edges + i] = added_from[i]; all_to[edges + i] = added_to[i]; all_delay[edges + i] = UINT64_MAX;
+    end[i] = (struct resync_end){added_from[i], added_to[i], i};
+  }
+  if (!result) result = mesh_graph_components(T, edges, from, to, alone, &count);
+  for (uint32_t i = 0; !result && i < added; i++) ok[i] = alone[added_from[i]] != alone[added_to[i]];
+  if (!result) result = resync_connected(T, total, all_from, all_to, SIZE_MAX, f, t, component, &count);
+  const int strong = !result && count == 1;
+  for (uint32_t i = 0; !result && i < added; i++) {
+    ok[i] &= strong;
+    if (ok[i] && !(result = resync_connected(T, total, all_from, all_to, edges + i, f, t, component, &count)))
+      ok[i] &= count > 1;
+  }
+  const double tolerance = cycle_tolerance(T, time);
+  for (uint32_t i = 0; !result && i < added; i++) {
+    all_delay[edges + i] = added_delay[i];
+    ok[i] &= delays_pass(&g, T, time, total, all_from, all_to, all_delay, lambda, tolerance);
+    if (ok[i] && added_delay[i]) {
+      all_delay[edges + i] = added_delay[i] - 1;
+      ok[i] &= !delays_pass(&g, T, time, total, all_from, all_to, all_delay, lambda, tolerance);
+      all_delay[edges + i] = added_delay[i];
+    }
+  }
+  if (!result) qsort(end, added, sizeof *end, resync_end_before);
+  for (size_t k = 0; !result && k < s->synchronized; k++) {
+    struct mesh_graph_synchronized *e = s->edge + k;
+    if (e->state != MESH_GRAPH_FALSE || !signature_enforces(s->operation, e)) continue;
+    const struct resync_end probe = {s->operation[e->signal].vertex, s->operation[e->wait].vertex, 0};
+    for (size_t low = graph_lower(end, added, sizeof *end, &probe, resync_end_before);
+         low < added && end[low].from == probe.from && end[low].to == probe.to; low++) {
+      const uint32_t i = end[low].edge;
+      if (e->delay < offset[probe.from] || e->delay - offset[probe.from] != added_delay[i]) continue;
+      e->witness = i;
+      if (ok[i]) e->state = MESH_GRAPH_TRANSFORMED;
+      break;
+    }
+  }
+  if (!result) {
+    memset(s->states, 0, sizeof s->states);
+    for (size_t k = 0; k < s->synchronized; k++) s->states[s->edge[k].state]++;
+    result = signature_digest(s);
+  }
+  scratch_free(&g);
+  free(all_from); free(all_to); free(f); free(t); free(component); free(alone); free(all_delay); free(end); free(ok);
+  return result;
+}
+
+/* design/synchronization-signature-change-request.md item 1 */
+static size_t record_align(size_t at) { return (at + 7) / 8 * 8; }
+struct record_part { void *data; size_t size; };
+static size_t record_parts(const struct mesh_graph_signature *s, struct record_part part[7]) {
+  part[0] = (struct record_part){s->processor, (size_t)s->processors * sizeof *s->processor};
+  part[1] = (struct record_part){s->task, (size_t)s->tasks * sizeof *s->task};
+  part[2] = (struct record_part){s->dependence, s->dependences * sizeof *s->dependence};
+  part[3] = (struct record_part){s->operation, s->operations * sizeof *s->operation};
+  part[4] = (struct record_part){s->edge, s->synchronized * sizeof *s->edge};
+  part[5] = (struct record_part){s->least, s->dependences * sizeof *s->least};
+  part[6] = (struct record_part){s->alias, s->operations * sizeof *s->alias};
+  size_t at = sizeof(struct mesh_graph_record);
+  for (int k = 0; k < 7; k++) at = record_align(at + part[k].size);
+  return at;
+}
+int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t room, size_t *made) {
+  struct record_part part[7];
+  *made = record_parts(s, part);
+  if (*made > room) return ERANGE;
+  struct mesh_graph_record *head = record;
+  memset(record, 0, *made);
+  *head = (struct mesh_graph_record){.bytes = *made, .processors = s->processors, .tasks = s->tasks,
+                                     .operations = s->operations, .dependences = s->dependences,
+                                     .synchronized = s->synchronized};
+  memcpy(head->digest, s->digest, sizeof head->digest);
+  size_t at = sizeof *head;
+  for (int k = 0; k < 7; k++) { memcpy((char *)record + at, part[k].data, part[k].size); at = record_align(at + part[k].size); }
+  return 0;
+}
+int mesh_graph_record_read(const void *record, struct mesh_graph_signature *s) {
+  const struct mesh_graph_record *head = record;
+  memset(s, 0, sizeof *s);
+  s->processors = head->processors; s->tasks = head->tasks; s->operations = head->operations;
+  s->dependences = head->dependences; s->synchronized = head->synchronized;
+  s->processor = malloc(((size_t)s->processors + 1) * sizeof *s->processor);
+  s->task = malloc(((size_t)s->tasks + 1) * sizeof *s->task);
+  s->dependence = malloc((s->dependences + 1) * sizeof *s->dependence);
+  s->operation = malloc((s->operations + 1) * sizeof *s->operation);
+  s->edge = malloc((s->synchronized + 1) * sizeof *s->edge);
+  s->least = malloc((s->dependences + 1) * sizeof *s->least);
+  s->alias = malloc((s->operations + 1) * sizeof *s->alias);
+  int result = s->processor && s->task && s->dependence && s->operation && s->edge && s->least && s->alias ? 0 : ENOMEM;
+  struct record_part part[7];
+  if (!result && record_parts(s, part) != head->bytes) result = EINVAL;
+  size_t at = sizeof *head;
+  for (int k = 0; !result && k < 7; k++) { memcpy(part[k].data, (const char *)record + at, part[k].size); at = record_align(at + part[k].size); }
+  if (!result) result = signature_derive(s);
+  if (result) mesh_graph_signature_free(s);
+  return result;
+}
+
+/* design/synchronization-signature-change-request.md item 1; L. Lamport, CACM 21(7), 1978 */
+struct compose_key { uint32_t processor, object; uint64_t value; size_t index; };
+static int compose_key_before(const void *a, const void *b) {
+  const struct compose_key *x = a, *y = b;
+  if (x->processor != y->processor) return x->processor < y->processor ? -1 : 1;
+  if (x->object != y->object) return x->object < y->object ? -1 : 1;
+  if (x->value != y->value) return x->value < y->value ? -1 : 1;
+  return (x->index > y->index) - (x->index < y->index);
+}
+static uint32_t compose_processor(struct mesh_graph_signature *s, struct mesh_graph_processor p) {
+  for (uint32_t q = 0; q < s->processors; q++)
+    if (s->processor[q].kind == p.kind && s->processor[q].index == p.index) return q;
+  s->processor[s->processors] = p;
+  return s->processors++;
+}
+int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_graph_signature *b,
+                       struct mesh_graph_signature *s) {
+  memset(s, 0, sizeof *s);
+  if ((uint64_t)a->tasks + b->tasks >= UINT32_MAX) return ENOMEM;
+  const size_t operations = a->operations + b->operations, dependences = a->dependences + b->dependences;
+  s->processor = malloc(((size_t)a->processors + b->processors + 1) * sizeof *s->processor);
+  s->task = malloc(((size_t)a->tasks + b->tasks + 1) * sizeof *s->task);
+  s->dependence = malloc((dependences + 1) * sizeof *s->dependence);
+  s->least = malloc((dependences + 1) * sizeof *s->least);
+  s->operation = malloc((operations + 1) * sizeof *s->operation);
+  s->alias = malloc((operations + 1) * sizeof *s->alias);
+  s->edge = malloc((a->synchronized + b->synchronized + 1) * sizeof *s->edge);
+  uint32_t *pa = malloc(((size_t)a->processors + 1) * sizeof *pa), *pb = malloc(((size_t)b->processors + 1) * sizeof *pb);
+  size_t *ia = malloc((a->operations + 1) * sizeof *ia), *ib = malloc((b->operations + 1) * sizeof *ib);
+  size_t *matched = malloc((b->operations + 1) * sizeof *matched), *cursor = calloc((size_t)a->processors + 1, sizeof *cursor);
+  struct compose_key *key = malloc((a->operations + 1) * sizeof *key);
+  unsigned char *taken = calloc(a->operations + 1, 1);
+  int result = s->processor && s->task && s->dependence && s->least && s->operation && s->alias && s->edge && pa && pb &&
+               ia && ib && matched && cursor && key && taken ? 0 : ENOMEM;
+  for (uint32_t p = 0; !result && p < a->processors; p++) pa[p] = compose_processor(s, a->processor[p]);
+  for (uint32_t p = 0; !result && p < b->processors; p++) pb[p] = compose_processor(s, b->processor[p]);
+  s->tasks = a->tasks + b->tasks; s->dependences = dependences;
+  for (uint32_t t = 0; !result && t < a->tasks; t++) { s->task[t] = a->task[t]; s->task[t].processor = pa[a->task[t].processor]; }
+  for (uint32_t t = 0; !result && t < b->tasks; t++) {
+    s->task[a->tasks + t] = b->task[t]; s->task[a->tasks + t].processor = pb[b->task[t].processor];
+  }
+  for (size_t k = 0; !result && k < a->dependences; k++) { s->dependence[k] = a->dependence[k]; s->least[k] = a->least[k]; }
+  for (size_t k = 0; !result && k < b->dependences; k++) {
+    s->dependence[a->dependences + k] = (struct mesh_graph_dependence){b->dependence[k].from + a->tasks,
+                                                                       b->dependence[k].to + a->tasks, b->dependence[k].delay};
+    s->least[a->dependences + k] = b->least[k];
+  }
+  size_t keys = 0;
+  for (size_t o = 0; !result && o < a->operations; o++)
+    if (a->operation[o].primitive == MESH_GRAPH_BRIDGE_START)
+      key[keys++] = (struct compose_key){pa[a->operation[o].processor], a->operation[o].object, a->operation[o].value, o};
+  if (!result) qsort(key, keys, sizeof *key, compose_key_before);
+  for (size_t o = 0; !result && o < b->operations; o++) {
+    const struct mesh_graph_operation *x = b->operation + o;
+    matched[o] = SIZE_MAX;
+    if (x->primitive != MESH_GRAPH_BRIDGE_START) continue;
+    const struct compose_key probe = {pb[x->processor], x->object, x->value, 0};
+    for (size_t k = graph_lower(key, keys, sizeof *key, &probe, compose_key_before);
+         k < keys && key[k].processor == probe.processor && key[k].object == probe.object && key[k].value == probe.value; k++)
+      if (!taken[key[k].index]) { taken[key[k].index] = 1; matched[o] = key[k].index; break; }
+  }
+  size_t n = 0;
+  for (size_t o = 0; !result && o < b->operations; o++) {
+    const size_t y = matched[o];
+    if (y != SIZE_MAX) {
+      const uint32_t p = a->operation[y].processor;
+      for (; cursor[p] < a->position[y]; cursor[p]++) {
+        const size_t z = a->order[a->first[p] + cursor[p]];
+        if (taken[z]) continue;
+        s->operation[n] = a->operation[z]; s->operation[n].processor = pa[p]; s->alias[n] = a->alias[z]; ia[z] = n++;
+      }
+      if (cursor[p] == a->position[y]) cursor[p]++;
+    }
+    const struct mesh_graph_operation *x = b->operation + o;
+    s->operation[n] = *x;
+    s->operation[n].processor = pb[x->processor];
+    s->operation[n].vertex = x->vertex == MESH_GRAPH_NONE ? MESH_GRAPH_NONE : x->vertex + a->tasks;
+    s->alias[n] = y != SIZE_MAX ? a->operation[y].vertex : b->alias[o] == MESH_GRAPH_NONE ? MESH_GRAPH_NONE : b->alias[o] + a->tasks;
+    if (y != SIZE_MAX) ia[y] = n;
+    ib[o] = n++;
+  }
+  for (uint32_t p = 0; !result && p < a->processors; p++)
+    for (; cursor[p] < a->first[p + 1] - a->first[p]; cursor[p]++) {
+      const size_t z = a->order[a->first[p] + cursor[p]];
+      if (taken[z]) continue;
+      s->operation[n] = a->operation[z]; s->operation[n].processor = pa[p]; s->alias[n] = a->alias[z]; ia[z] = n++;
+    }
+  s->operations = n;
+  for (size_t k = 0; !result && k < a->synchronized; k++) {
+    struct mesh_graph_synchronized e = a->edge[k];
+    e.signal = e.signal == MESH_GRAPH_NONE ? MESH_GRAPH_NONE : (uint32_t)ia[e.signal];
+    e.wait = (uint32_t)ia[e.wait];
+    s->edge[s->synchronized++] = e;
+  }
+  for (size_t k = 0; !result && k < b->synchronized; k++) {
+    struct mesh_graph_synchronized e = b->edge[k];
+    e.signal = e.signal == MESH_GRAPH_NONE ? MESH_GRAPH_NONE : (uint32_t)ib[e.signal];
+    e.wait = (uint32_t)ib[e.wait];
+    if (e.dependence != MESH_GRAPH_NONE) e.dependence += (uint32_t)a->dependences;
+    s->edge[s->synchronized++] = e;
+  }
+  if (!result) result = signature_derive(s);
+  free(pa); free(pb); free(ia); free(ib); free(matched); free(cursor); free(key); free(taken);
+  if (result) mesh_graph_signature_free(s);
+  return result;
+}
+
+/* design/synchronization-signature-change-request.md item 2 */
+static const char *const signature_kind[MESH_GRAPH_KINDS] = {"queue", "host", "bridge", "kernel"};
+static const char *const signature_primitive[MESH_GRAPH_PRIMITIVES] = {
+  "submit", "queue_signal", "queue_wait", "fence_update", "fence_wait", "pass_barrier", "queue_barrier", "host_wait",
+  "host_notify", "bridge_start", "threadgroup_barrier", "simdgroup_barrier", "atomic", "producer_barrier",
+  "bridge_raise", "initial", "host_publish", "kernel_fence", "host_signal"};
+static const char *const signature_state[MESH_GRAPH_STATES] = {"image", "stronger", "false", "unmatched", "satisfied",
+                                                              "transformed"};
+struct graph_sink { char *text; size_t room, at; int status; };
+static int graph_put(struct graph_sink *t, const char *format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  const int made = vsnprintf(t->at < t->room ? t->text + t->at : NULL, t->at < t->room ? t->room - t->at : 0, format,
+                             arguments);
+  va_end(arguments);
+  if (made < 0) t->status = EINVAL; else t->at += (size_t)made;
+  return t->status ? t->status : t->at >= t->room ? ERANGE : 0;
+}
+static int graph_end(struct graph_sink *t, size_t *made) {
+  *made = t->at + 1;
+  return t->status ? t->status : t->at >= t->room ? ERANGE : 0;
+}
+static void signature_number(struct graph_sink *t, uint32_t x) {
+  if (x == MESH_GRAPH_NONE) graph_put(t, " -"); else graph_put(t, " %u", x);
+}
+static void signature_value(struct graph_sink *t, const struct mesh_graph_operation *x) {
+  if (signature_static(x->primitive) && x->value == UINT64_MAX) graph_put(t, " value unknown");
+  else graph_put(t, " value %llu", (unsigned long long)x->value);
+}
+static int signature_ordered(const struct mesh_graph_signature *s, size_t o) {
+  const size_t k = s->waited[o];
+  return s->previous[o] != SIZE_MAX && (k == SIZE_MAX || s->edge[k].signal != s->previous[o]);
+}
+static int signature_drawn(const struct mesh_graph_synchronized *e) {
+  return e->signal != MESH_GRAPH_NONE && e->state != MESH_GRAPH_SATISFIED;
+}
+int mesh_graph_matrix_market(const struct mesh_graph_signature *s, char *text, size_t room, size_t *made) {
+  struct graph_sink t = {text, room, 0, 0};
+  size_t entries = 0;
+  for (size_t o = 0; o < s->operations; o++) entries += signature_ordered(s, o);
+  for (size_t k = 0; k < s->synchronized; k++) entries += signature_drawn(s->edge + k);
+  graph_put(&t, "%%%%MatrixMarket matrix coordinate integer general\n"
+                "%% synchronization signature: row and column i are operation i; entry (i, j) is an edge from "
+                "operation i to operation j, its value the edge's delay in executions\n");
+  for (uint32_t p = 0; p < s->processors; p++) {
+    graph_put(&t, "%% processor %u %s %u", p, signature_kind[s->processor[p].kind], s->processor[p].index);
+    for (uint32_t q = 0; q < MESH_GRAPH_PRIMITIVES; q++)
+      if (s->count[(size_t)p * MESH_GRAPH_PRIMITIVES + q])
+        graph_put(&t, " %s=%llu", signature_primitive[q], (unsigned long long)s->count[(size_t)p * MESH_GRAPH_PRIMITIVES + q]);
+    for (uint32_t q = 0; q < MESH_GRAPH_PRIMITIVES; q++)
+      if (s->unknown[(size_t)p * MESH_GRAPH_PRIMITIVES + q])
+        graph_put(&t, " %s_unknown_commands=%llu", signature_primitive[q],
+                  (unsigned long long)s->unknown[(size_t)p * MESH_GRAPH_PRIMITIVES + q]);
+    graph_put(&t, "\n");
+  }
+  for (uint32_t k = 0; k < s->tasks; k++)
+    graph_put(&t, "%% task %u processor %u place %u label %u copy %u\n", k, s->task[k].processor, s->task[k].place,
+              s->task[k].label, s->task[k].copy);
+  for (size_t o = 0; o < s->operations; o++) {
+    const struct mesh_graph_operation *x = s->operation + o;
+    graph_put(&t, "%% operation %zu processor %u position %llu %s task", o + 1, x->processor,
+              (unsigned long long)s->position[o], signature_primitive[x->primitive]);
+    signature_number(&t, x->vertex);
+    graph_put(&t, " object %u execution %llu", x->object, (unsigned long long)x->execution);
+    signature_value(&t, x);
+    if (s->alias[o] != MESH_GRAPH_NONE) graph_put(&t, " alias %u", s->alias[o]);
+    graph_put(&t, "\n");
+  }
+  for (size_t k = 0; k < s->synchronized; k++) {
+    const struct mesh_graph_synchronized *e = s->edge + k;
+    graph_put(&t, "%% synchronized wait %u signal", e->wait + 1);
+    signature_number(&t, e->signal == MESH_GRAPH_NONE ? MESH_GRAPH_NONE : e->signal + 1);
+    graph_put(&t, " %s %s delay %llu dependence", signature_state[e->state], e->redundant ? "redundant" : "kept",
+              (unsigned long long)e->delay);
+    signature_number(&t, e->dependence);
+    graph_put(&t, " witness");
+    signature_number(&t, e->witness);
+    graph_put(&t, "\n");
+  }
+  for (size_t k = 0; k < s->dependences; k++) {
+    const struct mesh_graph_dependence *d = s->dependence + k;
+    graph_put(&t, "%% dependence %zu task %u task %u delay %llu least", k, d->from, d->to, (unsigned long long)d->delay);
+    if (s->least[k] == UINT64_MAX) graph_put(&t, " -"); else graph_put(&t, " %llu", (unsigned long long)s->least[k]);
+    graph_put(&t, " %s\n", s->least[k] <= d->delay ? "covered" : "uncovered");
+  }
+  graph_put(&t, "%% totals operations %zu synchronized %zu image %zu stronger %zu false %zu unmatched %zu satisfied %zu "
+                "transformed %zu redundant %zu uncovered %zu unwaited %zu\n", s->operations, s->synchronized,
+            s->states[MESH_GRAPH_IMAGE], s->states[MESH_GRAPH_STRONGER], s->states[MESH_GRAPH_FALSE],
+            s->states[MESH_GRAPH_UNMATCHED], s->states[MESH_GRAPH_SATISFIED], s->states[MESH_GRAPH_TRANSFORMED],
+            s->redundant, s->uncovered, s->unwaited);
+  graph_put(&t, "%zu %zu %zu\n", s->operations, s->operations, entries);
+  for (size_t o = 0; o < s->operations; o++)
+    if (signature_ordered(s, o)) graph_put(&t, "%zu %zu 0\n", s->previous[o] + 1, o + 1);
+  for (size_t k = 0; k < s->synchronized; k++)
+    if (signature_drawn(s->edge + k))
+      graph_put(&t, "%u %u %llu\n", s->edge[k].signal + 1, s->edge[k].wait + 1, (unsigned long long)s->edge[k].delay);
+  return graph_end(&t, made);
+}
+
+int mesh_graph_dot(const struct mesh_graph_signature *s, char *text, size_t room, size_t *made) {
+  struct graph_sink t = {text, room, 0, 0};
+  graph_put(&t, "digraph signature {\n  node [shape=box];\n");
+  for (uint32_t p = 0; p < s->processors; p++) {
+    graph_put(&t, "  subgraph cluster_%u {\n    label=\"%u %s %u\";\n", p, p, signature_kind[s->processor[p].kind],
+              s->processor[p].index);
+    for (size_t k = s->first[p]; k < s->first[p + 1]; k++) {
+      const size_t o = s->order[k];
+      const struct mesh_graph_operation *x = s->operation + o;
+      graph_put(&t, "    o%zu [label=\"%zu %s\\ntask", o + 1, o + 1, signature_primitive[x->primitive]);
+      signature_number(&t, x->vertex);
+      graph_put(&t, " execution %llu\\nobject %u", (unsigned long long)x->execution, x->object);
+      signature_value(&t, x);
+      graph_put(&t, "\"];\n");
+      if (s->previous[o] != SIZE_MAX) graph_put(&t, "    o%zu -> o%zu [style=dotted];\n", s->previous[o] + 1, o + 1);
+    }
+    graph_put(&t, "  }\n");
+  }
+  for (size_t k = 0; k < s->synchronized; k++) {
+    const struct mesh_graph_synchronized *e = s->edge + k;
+    if (e->signal == MESH_GRAPH_NONE) continue;
+    graph_put(&t, "  o%u -> o%u [label=\"%llu %s%s\"%s];\n", e->signal + 1, e->wait + 1, (unsigned long long)e->delay,
+              signature_state[e->state], e->redundant ? " redundant" : "", e->redundant ? " style=dashed" : "");
+  }
+  graph_put(&t, "}\n");
+  return graph_end(&t, made);
+}
+
+int mesh_graph_space_time(const struct mesh_graph_signature *s, char *text, size_t room, size_t *made) {
+  struct graph_sink t = {text, room, 0, 0};
+  const size_t n = s->operations, width = s->processors ? 2 * (size_t)s->processors - 1 : 0;
+  uint32_t *from = malloc((2 * n + 1) * sizeof *from), *to = malloc((2 * n + 1) * sizeof *to);
+  uint32_t *place = malloc((n + 1) * sizeof *place), *at = malloc((n + 1) * sizeof *at);
+  double *priority = malloc((n + 1) * sizeof *priority);
+  char *line = malloc(width + 1);
+  size_t edges = 0;
+  int result = from && to && place && at && priority && line && n < UINT32_MAX ? 0 : ENOMEM;
+  for (size_t o = 0; !result && o < n; o++) {
+    priority[o] = -(double)o;
+    if (s->previous[o] != SIZE_MAX) { from[edges] = (uint32_t)s->previous[o]; to[edges++] = (uint32_t)o; }
+  }
+  for (size_t k = 0; !result && k < s->synchronized; k++)
+    if (signature_drawn(s->edge + k) && !s->edge[k].delay) { from[edges] = s->edge[k].signal; to[edges++] = s->edge[k].wait; }
+  if (!result && (result = mesh_graph_heap_order((uint32_t)n, priority, edges, from, to, place)) == EINVAL) result = EDEADLK;
+  for (size_t o = 0; !result && o < n; o++) at[place[o]] = (uint32_t)o;
+  for (uint32_t p = 0; !result && p < s->processors; p++)
+    graph_put(&t, "%*s%u %s %u\n", 2 * (int)p, "", p, signature_kind[s->processor[p].kind], s->processor[p].index);
+  for (size_t r = 0; !result && r < n; r++) {
+    const size_t o = at[r];
+    const struct mesh_graph_operation *x = s->operation + o;
+    const size_t k = s->waited[o];
+    if (k != SIZE_MAX && signature_drawn(s->edge + k)) {
+      const struct mesh_graph_synchronized *e = s->edge + k;
+      const size_t a = 2 * (size_t)s->operation[e->signal].processor, b = 2 * (size_t)x->processor;
+      for (size_t c = 0; c < width; c++) line[c] = c % 2 ? ' ' : '|';
+      for (size_t c = (a < b ? a : b) + 1; c < (a < b ? b : a); c++) line[c] = e->delay ? '~' : '-';
+      line[a] = '+';
+      line[b] = a < b ? '>' : a > b ? '<' : '*';
+      line[width] = 0;
+      graph_put(&t, "%s  %u -> %zu %s delay %llu%s\n", line, e->signal + 1, o + 1, signature_state[e->state],
+                (unsigned long long)e->delay, e->redundant ? " redundant" : "");
+    }
+    for (size_t c = 0; c < width; c++) line[c] = c % 2 ? ' ' : '|';
+    line[2 * (size_t)x->processor] = 'o';
+    line[width] = 0;
+    graph_put(&t, "%s  %zu %s task", line, o + 1, signature_primitive[x->primitive]);
+    signature_number(&t, x->vertex);
+    graph_put(&t, " execution %llu object %u", (unsigned long long)x->execution, x->object);
+    signature_value(&t, x);
+    if (k != SIZE_MAX && !signature_drawn(s->edge + k)) graph_put(&t, " %s", signature_state[s->edge[k].state]);
+    graph_put(&t, "\n");
+  }
+  free(from); free(to); free(place); free(at); free(priority); free(line);
+  return result ? result : graph_end(&t, made);
 }
 
 static int intersect_before(const void *a, const void *b) {
@@ -1713,40 +2389,52 @@ int mesh_graph_compaction_source(uint32_t items, uint32_t simds, char *text, siz
   return made < 0 ? EINVAL : (size_t)made >= room ? ERANGE : 0;
 }
 
-static int graph_text(char *text, size_t room, size_t *at, const char *format, ...) {
-  if (*at >= room) return ERANGE;
-  va_list arguments;
-  va_start(arguments, format);
-  const int made = vsnprintf(text + *at, room - *at, format, arguments);
-  va_end(arguments);
-  if (made < 0) return EINVAL;
-  if ((size_t)made >= room - *at) return ERANGE;
-  *at += (size_t)made;
-  return 0;
-}
 /* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
    RISC-V V 1.0, the mask register v0; R. M. Russell, CACM 21(1), 1978, the vector mask register; Metal Shading Language
-   Specification 4.1, §6.10.1 and §6.10.2 simd_ballot; MTL4ComputeCommandEncoder.h:90-112 */
+   Specification 4.1, §6.10.1 and §6.10.2 simd_ballot; MTL4ComputeCommandEncoder.h:90-112; MPI 4.1 §4.2.2
+   MPI_PARRIVED; design/disjoint-pages-change-request.md C3.1, "Landings and cancellations both arrive on the count";
+   rdma/mesh-flow.c count_raise */
 int mesh_graph_worklist_source(uint32_t later, const uint32_t groups[3], const uint32_t block[3], const uint32_t *extent,
                                uint32_t simds, uint32_t operands, uint32_t classes, const uint32_t *slots,
-                               const char *const builtin[5], char *parameters, size_t parameters_room, char *code,
-                               size_t code_room) {
-  size_t p = 0, c = 0;
-  int status = graph_text(code, code_room, &c, "threadgroup uint mesh_mask_votes[%u];uint mesh_mask_tl=%s;uint3 mesh_mask_tg=%s;",
-                          simds, builtin[0], builtin[1]);
-  if (!status) status = later ? graph_text(code, code_room, &c, "uint mesh_mask_group=mesh_mask_list[mesh_mask_tg.x];"
+                               const struct mesh_graph_generation *generation, const char *const builtin[5],
+                               char *parameters, size_t parameters_room, char *code, size_t code_room) {
+  for (uint32_t d = 0; later && d < operands; d++) if (!generation[d].every) return EINVAL;
+  struct graph_sink p = {parameters, parameters_room, 0, 0}, c = {code, code_room, 0, 0};
+  graph_put(&c, "threadgroup uint mesh_mask_votes[%u];uint mesh_mask_tl=%s;uint3 mesh_mask_tg=%s;", simds, builtin[0],
+            builtin[1]);
+  if (later) graph_put(&c, "uint mesh_mask_group=mesh_mask_list[mesh_mask_tg.x];"
     "uint3 mesh_mask_origin=uint3(mesh_mask_group%%%uu,(mesh_mask_group/%uu)%%%uu,mesh_mask_group/%uu);",
-    groups[0], groups[0], groups[1], groups[0] * groups[1]) : graph_text(code, code_room, &c, "uint3 mesh_mask_origin=mesh_mask_tg;");
-  if (!status) status = classes > 1 ? graph_text(code, code_room, &c, "uint mesh_mask_class=mesh_mask_select[%uu+mesh_mask_origin.x];",
-    classes * operands * 2) : graph_text(code, code_room, &c, "uint mesh_mask_class=0u;");
-  if (!status && extent) status = graph_text(code, code_room, &c, "uint3 mesh_mask_extent=metal::min(uint3(%uu,%uu,%uu),"
+    groups[0], groups[0], groups[1], groups[0] * groups[1]);
+  else graph_put(&c, "uint3 mesh_mask_origin=mesh_mask_tg;");
+  if (classes > 1) graph_put(&c, "uint mesh_mask_class=mesh_mask_select[%uu+mesh_mask_origin.x];", classes * operands * 2);
+  else graph_put(&c, "uint mesh_mask_class=0u;");
+  if (extent) graph_put(&c, "uint3 mesh_mask_extent=metal::min(uint3(%uu,%uu,%uu),"
     "uint3(%uu,%uu,%uu)-mesh_mask_origin*uint3(%uu,%uu,%uu));", block[0], block[1], block[2], extent[0], extent[1], extent[2],
     block[0], block[1], block[2]);
-  if (!status) status = extent && !later ?
-    graph_text(code, code_room, &c, "uint mesh_mask_lanes=mesh_mask_extent.x*mesh_mask_extent.y*mesh_mask_extent.z;") :
-    graph_text(code, code_room, &c, "uint mesh_mask_lanes=%uu;", block[0] * block[1] * block[2]);
-  if (!status) status = graph_text(code, code_room, &c, "uint mesh_mask_vote=0u;");
-  for (uint32_t d = 0; !status && d < operands; d++) status = graph_text(code, code_room, &c,
+  if (extent && !later) graph_put(&c, "uint mesh_mask_lanes=mesh_mask_extent.x*mesh_mask_extent.y*mesh_mask_extent.z;");
+  else graph_put(&c, "uint mesh_mask_lanes=%uu;", block[0] * block[1] * block[2]);
+  for (uint32_t d = 0; later && d < operands; d++)
+    graph_put(&c, "ulong mesh_mask_generation_%u=(mesh_mask_repetition/%uul)*%uul+%uul;", d, generation[d].every,
+              generation[d].producer, generation[d].ordinal);
+  if (later) for (uint32_t d = 0; d < operands; d++) graph_put(&c,
+    "uint4 mesh_mask_row_%u=mesh_mask_expect_%u[0];"
+    "ulong2 mesh_mask_offset_%u=as_type<ulong2>(mesh_mask_expect_%u[1]);"
+    "volatile coherent(system) device const ulong *mesh_mask_count_%u="
+    "reinterpret_cast<volatile coherent(system) device const ulong *>("
+    "reinterpret_cast<volatile coherent(system) device const uchar *>(mesh_mask_phases_%u)+"
+    "as_type<long>(mesh_mask_offset_%u.x)-long(mesh_mask_generation_%u%%mesh_mask_row_%u.w)*long(mesh_mask_offset_%u.y));",
+    d, d, d, d, d, d, d, d, d, d);
+  graph_put(&c, "uint mesh_mask_vote=0u;%s", later ? "for(;;){mesh_mask_vote=0u;" : "{");
+  if (later) {
+    for (uint32_t d = 0; d < operands; d++)
+      graph_put(&c, "bool mesh_mask_due_%u="
+                    "mesh_mask_count_%u[mesh_mask_generation_%u%%mesh_mask_row_%u.w]>="
+                    "(ulong(mesh_mask_generation_%u)/mesh_mask_row_%u.w+1ul)*ulong(mesh_mask_row_%u.z);", d, d, d, d, d, d, d);
+    graph_put(&c,
+      "metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,static_cast<metal::thread_scope>(3));");
+  }
+  for (uint32_t d = 0; d < operands; d++) {
+    graph_put(&c,
     "{uint4 mesh_mask_row=mesh_mask_expect_%u[0];"
     "uint2 mesh_mask_span=uint2(mesh_mask_select[(mesh_mask_class*%uu+%uu)*2u],"
     "mesh_mask_select[(mesh_mask_class*%uu+%uu)*2u+1u]);"
@@ -1765,29 +2453,38 @@ int mesh_graph_worklist_source(uint32_t later, const uint32_t groups[3], const u
     "mesh_mask_unequal=(mesh_mask_unequal|(mesh_mask_unequal>>1u))&mesh_mask_fields;"
     "uint4 mesh_mask_ahead=mesh_mask_word^uint4(mesh_mask_row.y);"
     "mesh_mask_ahead=(mesh_mask_ahead|(mesh_mask_ahead>>1u))&mesh_mask_unequal;"
-    "mesh_mask_vote|=metal::select(0u,1u,metal::any(mesh_mask_unequal!=0u))|metal::select(0u,2u,metal::any(mesh_mask_ahead!=0u));}}",
+    "mesh_mask_vote|=metal::select(0u,1u,metal::any(mesh_mask_unequal!=0u))|metal::select(0u,2u,metal::any(mesh_mask_ahead!=0u));",
     d, operands, d, operands, d, d);
-  if (!status) status = graph_text(code, code_room, &c,
+    if (later) graph_put(&c, "mesh_mask_vote|=metal::select(0u,4u,mesh_mask_due_%u&&metal::any(mesh_mask_unequal!=0u));", d);
+    graph_put(&c, "}}");
+  }
+  graph_put(&c,
     "mesh_mask_vote=metal::select(0u,1u,metal::simd_ballot((mesh_mask_vote&1u)!=0u).any())|"
-    "metal::select(0u,2u,metal::simd_ballot((mesh_mask_vote&2u)!=0u).any());"
+    "metal::select(0u,2u,metal::simd_ballot((mesh_mask_vote&2u)!=0u).any())|"
+    "metal::select(0u,4u,metal::simd_ballot((mesh_mask_vote&4u)!=0u).any());"
     "if(%s==0u)mesh_mask_votes[%s]=mesh_mask_vote;metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
     "mesh_mask_vote=0u;for(uint mesh_mask_s=0u;mesh_mask_s<%s;mesh_mask_s++)mesh_mask_vote|=mesh_mask_votes[mesh_mask_s];",
     builtin[2], builtin[3], builtin[4]);
-  if (!status) status = later ? graph_text(code, code_room, &c, "if((mesh_mask_vote&1u)!=0u){if(mesh_mask_tl==0u){"
+  if (later) graph_put(&c, "metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);"
+    "if((mesh_mask_vote&1u)==0u)break;"
+    "if((mesh_mask_vote&6u)!=0u){if(mesh_mask_tl==0u){"
     "metal::atomic_fetch_add_explicit(mesh_mask_status+metal::select(0u,1u,(mesh_mask_vote&2u)!=0u),1u,metal::memory_order_relaxed);"
-    "metal::atomic_fetch_max_explicit(mesh_mask_status+2,~mesh_mask_repetition,metal::memory_order_relaxed);}return;}") :
-    graph_text(code, code_room, &c, "if(mesh_mask_tl==0u)mesh_mask_flags[mesh_mask_tg.x+%uu*(mesh_mask_tg.y+%uu*mesh_mask_tg.z)]="
+    "metal::atomic_max_explicit(reinterpret_cast<device metal::atomic_ulong *>(mesh_mask_status+2),~mesh_mask_repetition,"
+    "metal::memory_order_relaxed);}return;}}");
+  else graph_put(&c, "}if(mesh_mask_tl==0u)mesh_mask_flags[mesh_mask_tg.x+%uu*(mesh_mask_tg.y+%uu*mesh_mask_tg.z)]="
     "metal::select(0u,1u,(mesh_mask_vote&1u)==0u);if((mesh_mask_vote&1u)!=0u)return;", groups[0], groups[1]);
-  if (!status) status = graph_text(code, code_room, &c,
+  graph_put(&c,
     "metal::atomic_thread_fence(metal::mem_flags::mem_device,metal::memory_order_seq_cst,static_cast<metal::thread_scope>(3));");
-  for (uint32_t d = 0; !status && d < operands; d++) status = graph_text(parameters, parameters_room, &p,
+  for (uint32_t d = 0; d < operands; d++) graph_put(&p,
     "%svolatile coherent(system) device const uint4 *mesh_mask_phases_%u [[buffer(%u)]], "
     "device const uint4 *mesh_mask_expect_%u [[buffer(%u)]]", d ? ", " : "", d, slots[2 * d], d, slots[2 * d + 1]);
-  if (!status) status = graph_text(parameters, parameters_room, &p, "%sdevice const uint *mesh_mask_select [[buffer(%u)]]",
-    operands ? ", " : "", slots[2 * operands + 3]);
-  if (!status) status = later ? graph_text(parameters, parameters_room, &p, ", device const uint *mesh_mask_list [[buffer(%u)]], "
-    "device metal::atomic_uint *mesh_mask_status [[buffer(%u)]], constant uint &mesh_mask_repetition [[buffer(%u)]]",
-    slots[2 * operands], slots[2 * operands + 1], slots[2 * operands + 2]) :
-    graph_text(parameters, parameters_room, &p, ", device uint *mesh_mask_flags [[buffer(%u)]]", slots[2 * operands]);
-  return status;
+  graph_put(&p, "%sdevice const uint *mesh_mask_select [[buffer(%u)]]", operands ? ", " : "", slots[2 * operands + 3]);
+  if (later) {
+    graph_put(&p, ", device const uint *mesh_mask_list [[buffer(%u)]], "
+      "device metal::atomic_uint *mesh_mask_status [[buffer(%u)]], constant ulong &mesh_mask_repetition [[buffer(%u)]]",
+      slots[2 * operands], slots[2 * operands + 1], slots[2 * operands + 2]);
+  } else graph_put(&p, ", device uint *mesh_mask_flags [[buffer(%u)]]", slots[2 * operands]);
+  size_t made;
+  const int status = graph_end(&p, &made);
+  return status ? status : graph_end(&c, &made);
 }
