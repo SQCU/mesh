@@ -295,6 +295,46 @@ The operator, during the integrated review, verbatim:
 
 > commit first before 'finishing' anyof this stuff. commits aren't special breakpoints.
 
+## Correction: generated target source is the final emission
+
+The operator, during the structural review, verbatim:
+
+> "do not carry enough provenance" say it more plainly: is typed data being retyped by a second implicity parser after being 'sorta serialized' for consumers from a previous IR?
+
+> then this is a broad structural requirement which needs to be fixed by psasing annotation into lowering instead of treating lowering as a blackbox operation which acts upon 'strings'. that's absurd; worst possible way to write a compiler? find literally any reference compiler which deosn't use string latents and then code review to find out what went stinky and stupid and foul and stupid
+
+> we don't want or need incremental pity-ports which pretend the current behavior of the data flow is adherent with a spec or system of requirements merely beacuse it runs; the 'lets turn things into text hten blindly parse them' is *simply wrong* as a lowering. it is *simply not correct*. why would compiled proglang output source be anything but the *final* lowering stage in any representation we are using if we were following the requirements in the change request documents? where does this come from?
+
+- **Applies to:** items 1–6, especially 2, 3, 5 and 6F; source-lowering 1–3; capture 3/8/9;
+  synchronization-signature 1/6. S1 and S2 already assign structured operations and typed operands/results to lowering.
+- **Reference implementation:** MLIR's
+  [Toy-to-Affine lowering](https://github.com/llvm/llvm-project/blob/main/mlir/examples/toy/Ch5/mlir/LowerToAffineLoops.cpp)
+  consumes operation objects, their result types and operand values, constructs lower-level operations with a rewriter,
+  and replaces the source operations. MLIR's [Linalg representation](https://mlir.llvm.org/docs/Dialects/Linalg/)
+  carries indexing maps, iterator kinds, shaped operands and computation regions through transformations.
+  [BufferizableOpInterface](https://mlir.llvm.org/docs/Bufferization/#extending-one-shot-bufferize) supplies memory
+  read/write and alias relations to analysis and rewriting. These are concrete methods for the roles S1/S2 assign.
+- **Replaces:** recorder transformations whose semantic operands are shader strings: scalar/quantization
+  specialization, operand promotion, epilogue/map/row fusion, reduction/packed-weight rewriting, coherent-store
+  insertion and masked-pass construction. `MetalEntry`, `MetalRowFootprint` and `MetalMaskedPass` are instances
+  of this boundary failure; replacing their parsers alone does not complete the requirement.
+- **Write:** the producing Torch and LiteRT compiler interfaces supply the operation, binding, type, shape,
+  indexing, effect, alias and transfer/generation facts required by their consumers. Lowerings transform those
+  representations, preserving or updating the corresponding identities, accesses and dependencies when they fuse,
+  split, specialize or rebind operations. Consumers query the resulting annotations and relations. A plan edge
+  retains the value/effect/transfer relation that makes it necessary until the consuming lowering has represented
+  that obligation in the target execution.
+- **Emission boundary:** generated MSL or native target source is the final source emission of the mesh lowering
+  pipeline, passed to the target compiler. Subsequent mesh transformations do not infer semantics by parsing or
+  matching that output. Source spelling, generated identifier names and pretty-printing are not optimization
+  preconditions. Retaining tokens for some consumers while the other passes continue rewriting emitted strings
+  leaves this requirement incomplete.
+- **Replacement and evidence:** retain the numerical, fusion, communication and synchronization behavior required
+  by the cited requests while replacing the bodies that implement it through text. Finish the connected producer,
+  transformation and consumer before claiming completion. A successful build or workload does not establish that
+  these representation and ownership requirements were followed. Review the actual dataflow, then use the existing
+  numerical and performance measurements to evaluate its execution.
+
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:

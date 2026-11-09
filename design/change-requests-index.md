@@ -21,6 +21,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   storage. The connected source changes,
   revisions, direct builds and remaining work are recorded in that run's `integration.md` and review records;
   these do not establish completion of the full assigned domain or runtime and performance requirements.
+  The subsequent structural review found active semantic transformations over emitted shader strings throughout
+  the recorder, beyond the three previously listed parsers. Generated target source must become the final mesh
+  emission; the producers' annotations must reach those lowerings. E2B still selects the recorder's non-self-timed
+  mode, which omits replay footprints and bypasses native dependency/fence preparation. Sharing the emitter has
+  not completed that synchronization-policy handoff.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
   in the composition implementation. The review records distinguish remaining representation and observation gaps
@@ -48,8 +53,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
     third stops' collective over a view of an invariant, by GSPMD §3.1 and §3.5. They are in mesh 2155c2b8 and
     60f43ddb, completed in 76d26e3b.
   - Settled: the second stops' u copies, by its appendix item 14. Superseded: the first stops' item 8.
-  - Problems 4 and 11: their sections of sources say what is written. The request records no commit implementing
-    them.
+  - Problem 4: mesh 30afa696 implements the replicated window without halo exchange and the middle's local copy
+    where needed; the former blanket statement that no implementation commit exists was stale. The request's
+    multi-spatial-dimension composition gap still needs reconciliation with the cited method and current lowering.
+  - Problem 11: mesh 028b27d6 removes cancelled plans before replacement children can load them, with an acquire
+    read of `removed` in `plans_load`; that implementation remains in the current source. The former no-commit
+    statement was stale. This structural review did not perform a link-loss workload.
 - [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md): outstanding in part.
   - R4's consumption of a received operand one partition at a time: implemented, in the torch scope by the lowering
     request's item 1 and in the LiteRT scope by the torch-capture request's item 3.
@@ -76,8 +85,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   7. Implemented in metal-microbench 32cda1e1: one MTL4CommitOptions a commit, its handler added for that commit, in
      tools/e2b_replay.m and metal_recording.m; with mesh 792cbb7c and metal-microbench faa18aba for C9's finding on
      32cda1e1. Every rank's prefill timeout of 2026-11-08 does not recur.
-- [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): implemented; checked on this Mac,
-  and built on the five mesh machines.
+- [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md): implementations in the cited
+  revisions were checked on this Mac and built on the five mesh machines. Full-domain completion and preservation
+  of typed annotations through the whole program remain under compilation-composition; the historical entries
+  below do not close those requirements.
   1. Each function typed and scheduled as plan-to-bridge R3 and R4 write it, on every Apple silicon backend, the CPU
      included (rewritten 2026-11-08). Implemented in mesh 502bf42c and 8cac6d69 and metal-microbench 3bc0e2a4: the IR's
      kinds, one task per page for the asynchronous consumer, the same source compiled for the CPU, and A3's weighting
@@ -94,10 +105,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
      item 2).
   4. Withdrawn 2026-11-08: plan-to-bridge R4 writes this consumer, and item 1 lowers it. Its code is deleted
      (metal-microbench 5d5efc09).
-- [aot-compilation-change-request.md](aot-compilation-change-request.md): A1–A10 are implemented, A3's operand as
+- [aot-compilation-change-request.md](aot-compilation-change-request.md): A1–A10 have implementations, A3's operand as
   integration-finishing item 3 writes it (mesh 01632014), and its appendix's departures were addressed in commits of
   2026-11-05. Appendix item 7, the torch path on torch's existing kernels, is
   superseded by the lowering request's item 1.
+  The composition review's remaining representation, source-domain and execution-path findings still apply.
 
 ## Superseded or closed
 
