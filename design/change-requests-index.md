@@ -142,7 +142,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
   programs remain numerically correct in the checked cases. Separate pure decoder producers still reach Core ML
   as runtime operations: plain/zero/ragged neural compilation fails with region access other than a struct member.
   Completing the retained producer-definition closure is assigned; rejecting these operands is not completion.
-  Literal F16 neural weights also remain CPU-preferred after staging, and the historical artifact doubles because
+  Literal F16 neural weights also remain CPU-preferred after staging, and the larger F16 artifact doubles because
   both source and materialized weights are retained. Target preparation and storage ownership remain under revision.
   No ANE execution or throughput closure follows. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
@@ -206,7 +206,8 @@ outstanding, and what of it is outstanding. The standard every change request fo
   The initial external observation fails before execution with DTrace's program-size diagnostic. Individual
   actions were small; the evidence points to aggregate observer load size. Mesh201f2a89 shares20 typed matching
   rules across128 masked transition rows and retains all transition identities as data. The generated observer
-  falls from181,732 to63,338bytes and from43,109 to14,429 DIF instructions. This completes a representation handoff,
+  falls from181,732bytes to69,699bytes in the actual enabled runs; the private disassembly comparison records
+  43,109 to14,429 DIF instructions. This completes a representation handoff,
   rather than merely packaging the same repeated checks into smaller clauses. Actual build26 observation now
   enables: outer3/inner2,0,2 passes with85 observed program operations,11 image edges and no false/redundant edge.
   The first outer-zero observation fails because completion names a lexical task that did not activate.
