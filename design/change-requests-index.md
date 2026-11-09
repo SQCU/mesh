@@ -140,15 +140,20 @@ outstanding, and what of it is outstanding. The standard every change request fo
   Build27 replaces the native scalar constant evaluator with one compiled preparation task. Build28 retains
   demanded whole producer definitions, orders them through existing member order/shared graph traversal, and saves
   materialization provenance in artifact v20. CPU plain/rotation/Hadamard/zero/ragged coded cases preserve their
-  numerical results. Plain/zero/ragged neural compilation still fails with region access other than a struct member:
-  review now identifies missing immutable-source annotations/bytes before lowering. The production path assigns
-  all planned invariants STATE, while the diagnostic supplies attribute bytes only as later input files. The
-  frontend must pass proven immutable definitions through the same initialization owner; ordinary mutable
-  parameters/buffers must retain state semantics. Rejecting these operands is not completion.
+  numerical results. Review identifies missing immutable-source annotations/bytes before lowering: the production
+  path assigned all planned invariants STATE, while the diagnostic supplied attribute bytes only as later input
+  files. Mesh5942f839 carries export constants and explicitly immutable coded definitions through the same initial
+  storage owner before lowering, excluding captured mutation and compiled writes. Ordinary mutable parameters and
+  buffers retain state semantics. Fresh CPU/GPU preservation results pass against unchanged references, but
+  plain/zero/ragged neural compilation still fails with region access other than a struct member. The compiler's
+  retained producer/preparation proof is under examination; supplying annotations alone does not close the handoff.
   Both F16 literal-weight cases remain exact but CPU-preferred, including the convolution itself. Build28 removes
   the duplicated preparation payload: the larger artifact falls from8,410,794 to4,204,077bytes. The zero-operation
   alias/constant diagnostic also remains exact with its existing externally supplied literal initialization;
   that does not establish the still-pending public outer save/load path. Target preparation remains under revision.
+  A further F16 R128/K3840/N4096 artifact restores exactly for its supplied power-of-two inputs, and all eleven
+  nonconstant MIL operations, including convolution, are Neural Engine-preferred. This establishes preferred
+  placement at that larger geometry; no device trace or historical row-tiling throughput comparison was taken.
   No ANE execution or throughput closure follows. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
