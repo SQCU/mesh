@@ -38,12 +38,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
   evidence. Commands, revisions, binary hashes, observations and superseded development findings are retained in
   metal-microbench `output_data/claude-typed-replacement-20261109T085408Z`.
 
-  Mesh cf7a94a4 adds shared typed LU/triangular/Cholesky, Householder QR, Padé matrix exponential, Hermitian
-  eigendecomposition and one-sided SVD producers. Exported real and complex programs reach C IR; numerical accuracy,
-  convergence/extreme scales and performance remain unmeasured. Metal-microbench a8b5ac31 extends the existing native
-  diagnostic to execute saved artifacts with explicit input/output storage; source and syntax checks alone do not
-  establish these numerical families. Checked factorization error effects are an open frontend/compiler/executor
-  handoff; returning `info` alone does not implement a checked operator.
+  The shared typed LU/triangular/Cholesky, Householder QR, Padé matrix exponential, Hermitian eigendecomposition and
+  one-sided SVD producers now have limited runtime evidence through the existing native artifact diagnostic.
+  At metal2f845c87 / mesh9186b1f8, restored CPU inverse has relative RMS3.942e-8 and the matrix exponential2.667e-6;
+  each numerical region compiles to one native CPU task, including the exponential's loop. The inverse retains a
+  separate typed CHECK operation. Restored GPU inverse and matrix exponential have the same accuracy; full real3x2
+  QR has reconstruction error7.006e-8 and orthogonality error1.681e-7. Singular CPU inverse reports typed info2/EDOM
+  instead of numerical success. Public Torch exception translation still needs operational evidence.
+  These cases do not establish all shapes, complex algorithms, convergence/extreme scales or performance.
+  Complex eigendecomposition exposed an Acquire null dereference during finalization: indirect compute kernels
+  were misclassified as transport later passes. Its typed Later-identity correction awaits rebuilt execution.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -57,8 +61,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   from implemented source. The existing external monitor observes the restored CPU projection's one expected
   host signal at mesh 53bc3b17, with numerical agreement. The restored GPU projection also passes external
   observation of five program operations; its three kernel records are static compiler data. Bridge and
-  structured-control observation, multi-span identities and fail-stop interception remain open; these limited
-  observations do not close items1–6.
+  structured-control observation and fail-stop interception remain open. Typed invocation spans are emitted and
+  consumed. The three-span argmax observation stops at preflight on four genuinely redundant synchronization
+  edges: allocator completion and GPU fences duplicate the same cross-execution dependences. Removing the
+  redundant fence through the retained allocator-completion fact remains assigned; observation has not passed.
+  These limited observations do not close items1–6.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh
     56e33484, e34e7a5e and b482a825. A received operand's reader is masked, the threadgroups whose pages have not

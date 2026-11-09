@@ -110,6 +110,8 @@ def load(path):
         metadata = {'controls': [mesh_graph.Control.from_buffer_copy(c) for c in made.control[:made.controls]],
                     'events': [mesh_graph.Event.from_buffer_copy(e) for e in made.event[:made.events]],
                     'spans': [mesh_graph.Span.from_buffer_copy(x) for x in made.span[:made.spans]],
+                    'selections': [mesh_graph.Selection.from_buffer_copy(x) for x in made.selection[:made.selections]],
+                    'guards': [mesh_graph.Guard.from_buffer_copy(x) for x in made.guard[:made.guards]],
                     'scopes': [mesh_graph.Scope.from_buffer_copy(x) for x in made.scope[:made.operations]] if made.scope else []}
     finally:
         mesh_graph.free(made)
@@ -155,12 +157,12 @@ def counter_rules(operations, program, scopes=()):
 
 def control_walk(operations, program, metadata):
     scopes, links = metadata.get('scopes', ()), collections.defaultdict(list)
-    for control in metadata.get('controls', ()):
+    for c, control in enumerate(metadata.get('controls', ())):
         body, end = (bisect.bisect_left(program, getattr(control, name)) for name in ('body', 'end'))
         if control.kind == 1:
             if body != end:
                 links[body].append((end, None))
-                links[end].append((body, None))
+                links[end].append((body, ('repeat', c, control.bound)))
         elif control.kind == 2:
             entry = bisect.bisect_left(program, control.entry)
             links[entry].append((end, None))
@@ -171,8 +173,12 @@ def control_walk(operations, program, metadata):
         group = groups.setdefault(key, len(groups) + 1) if owner else 0
         once.append(group)
         if group:
-            links[k].append((k + 1, group))
+            links[k].append((k + 1, ('once', group)))
             last[group] = k
+    for guard in metadata.get('guards', ()):
+        k = bisect.bisect_left(program, guard.operation)
+        if k < len(program) and program[k] == guard.operation:
+            links[k].append((k + 1, ('selection', guard.selection, not guard.taken)))
     alternatives = {}
     for start in list(links):
         paths = mesh_graph.walk([(start, frozenset())],
@@ -186,6 +192,36 @@ def generate(operations, program, observe, point=None, metadata=None):
     metadata = metadata or {}
     rules = counter_rules(operations, program, metadata.get('scopes', ()))
     alternatives, once, once_last = control_walk(operations, program, metadata)
+    guards = collections.defaultdict(list)
+    for guard in metadata.get('guards', ()):
+        guards[bisect.bisect_left(program, guard.operation)].append(guard)
+    def selected(index):
+        choice = metadata['selections'][index]
+        if choice.bytes not in (1, 2, 4, 8):
+            raise ValueError('selection %d has unsupported scalar width %d' % (index, choice.bytes))
+        table = '*(uint64_t *)copyin(self->argument%d + %d, 8)' % (choice.argument, choice.table)
+        word = '*(uint64_t *)copyin((%s) + %d, 8)' % (table, choice.index * 8)
+        return '(*(uint%d_t *)copyin(%s, %d) != 0)' % (choice.bytes * 8, word, choice.bytes)
+    def condition(needed):
+        clauses = []
+        for requirement in sorted(needed):
+            kind, number, *rest = requirement
+            if kind == 'once': clauses.append('seenOnce[%d]' % number)
+            elif kind == 'selection': clauses.append('%s == %d' % (selected(number), rest[0]))
+            elif rest[0]: clauses.append('loopTrips[%d] < %d' % (number, rest[0]))
+        return ' && '.join(clauses) or '1'
+    def repeat_actions(needed):
+        actions = []
+        for requirement in sorted(needed):
+            if requirement[0] != 'repeat': continue
+            c = requirement[1]
+            actions.append('loopTrips[%d]++;' % c)
+            for k, control in enumerate(metadata.get('controls', ())):
+                parent = control.parent
+                while parent != NONE and parent != c:
+                    parent = metadata['controls'][parent].parent
+                if parent == c: actions.append('loopTrips[%d] = 1;' % k)
+        return ' '.join(actions)
     completion = next((e for e in metadata.get('events', ()) if e.role == 1), None)
     spans = metadata.get('spans', ())
     act = 'ustack(); exit(1);' if observe else 'ustack(); stop(); exit(1);'
@@ -197,6 +233,7 @@ def generate(operations, program, observe, point=None, metadata=None):
               'int64_t om[uint64_t], ko[int64_t], lm[uint64_t], kl[int64_t];',
               'int64_t family[int64_t], delta[int64_t], eventcount[int64_t];',
               'int64_t once[int64_t], onceLast[int64_t], seenOnce[int64_t];',
+              'uint64_t loopTrips[int64_t];',
               'uint64_t spanEvent[uint64_t], spanFirst[uint64_t], spanEnd[uint64_t];', 'BEGIN { cur = 0; }']
     for start in range(0, total, 64):
         lines.append('BEGIN { %s }' % ' '.join(
@@ -210,6 +247,11 @@ def generate(operations, program, observe, point=None, metadata=None):
         if group:
             lines.append('BEGIN { once[%d] = %d; onceLast[%d] = %d; }' % (k, group, k, k in once_last))
     argument = completion.argument if completion else 4
+    for number in sorted({x.argument for x in metadata.get('selections', ())}):
+        lines.append('self uint64_t argument%d;' % number)
+        lines.append('pid$target::MetalProgramRun:entry { self->argument%d = arg%d; }' % (number, number))
+    for c, control in enumerate(metadata.get('controls', ())):
+        lines.append('BEGIN { loopTrips[%d] = 1; }' % c)
     if spans:
         lines += ['uint64_t invocation, runFirst[uint64_t], runCount[uint64_t], runBegin[uint64_t], runEnd[uint64_t];']
         for k, span in enumerate(spans):
@@ -227,10 +269,9 @@ def generate(operations, program, observe, point=None, metadata=None):
                      '{ this->spanok = cur == runEnd[invocation]; }')
         for origin, choices in alternatives.items():
             for target, needed in choices:
-                condition = ' && '.join('seenOnce[%d]' % group for group in sorted(needed)) or '1'
                 lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && !this->spanok && '
                              'cur == %d && runEnd[invocation] == %d && (%s)/ { this->spanok = 1; }' %
-                             (origin, target, condition))
+                             (origin, target, condition(needed)))
         lines.append('pid$target::MetalProgramRun:return /self->inrun && arg1 == 0 && !this->spanok/ '
                      '{ printf("mesh-sync-monitor: unexpected invocation end %%d at operation %%d expected %%d\\n", '
                      'invocation, cur, runEnd[invocation]); %s }' % act)
@@ -257,31 +298,38 @@ def generate(operations, program, observe, point=None, metadata=None):
                 f'(this->va > spanFirst[{slot}] && this->va <= spanEnd[{slot}] ? spanEvent[{slot}] : 0) : self->ended)')
             ordinary = f'(o[{index}] == {completion.object} ? this->ob == {expected} : ({ordinary}))'
         bound = f'{index} < runEnd[invocation] && ' if spans else ''
+        conditional = ' && '.join('(%s != %d || (%s))' % (index, k,
+            ' && '.join('%s == %d' % (selected(g.selection), g.taken) for g in choices)) for k, choices in guards.items())
+        conditional = f' && ({conditional})' if conditional else ''
         return (f'{index} < {total} && {bound}(!once[{index}] || !seenOnce[once[{index}]]) && '
                 f'(e[{index}] == this->c || (this->c == {wait} && e[{index}] == {trip})) && '
                 f'x[{index}] >= self->exec && (!this->hasva || '
                 f'(family[{index}] ? eventcount[family[{index}]] + delta[{index}] : v[{index}]) == this->va) && '
                 f'(!this->hasob || ({ordinary})) && (!this->hasln || '
                 f'((lm[this->ln] == 0 || lm[this->ln] == q[{index}] + 1) && '
-                f'(kl[q[{index}]] == 0 || kl[q[{index}]] == this->ln + 1)))')
+                f'(kl[q[{index}]] == 0 || kl[q[{index}]] == this->ln + 1))){conditional}')
 
     def check(probe, name, obj, val, lane, point, predicate):
         guard = '/this->checked && %s/'
         lines.append('%s%s { this->checked = 0; }' % (probe, point))
         lines.append('%s%s %s { this->checked = 1; this->c = %d; this->ob = %s; this->hasob = %d; this->va = %s; '
-                     'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->ok = %s%s; }' % (
+                     'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->picked = -1; this->ok = %s%s; }' % (
                          probe, point, predicate, PRIMITIVES.index(name), obj or '0', obj is not None, val or '0', val is not None,
                          lane or '0', lane is not None, match('this->i'),
                          ' && arg1 == 0' if name == 'bridge_start' else ''))
+        route = 0
         for origin, choices in alternatives.items():
             for target, needed in choices:
                 if target >= total:
                     continue
-                condition = ' && '.join('seenOnce[%d]' % group for group in sorted(needed)) or '1'
                 lines.append('%s /this->checked && !this->ok && cur == %d && (%s)/ '
-                    '{ this->i = %d; this->ok = %s%s; shifted = this->ok ? 1 : shifted; }' %
-                    (probe + point, origin, condition, target, match('this->i'),
-                     ' && arg1 == 0' if name == 'bridge_start' else ''))
+                    '{ this->i = %d; this->ok = %s%s; this->picked = this->ok ? %d : -1; shifted = this->ok ? 1 : shifted; }' %
+                    (probe + point, origin, condition(needed), target, match('this->i'),
+                     ' && arg1 == 0' if name == 'bridge_start' else '', route))
+                if repeat_actions(needed):
+                    lines.append('%s /this->checked && this->ok && this->picked == %d/ { %s }' %
+                                 (probe + point, route, repeat_actions(needed)))
+                route += 1
         mapped = 'this->hasob' if completion is None else 'this->hasob && o[this->i] != %d' % completion.object
         lines.append('%s %s { this->mapped = %s; }' % (probe + point, guard % 'this->ok', mapped))
         lines.append('%s %s { om[this->mapped ? this->ob : 0] = this->mapped ? o[this->i] + 1 : om[0]; '
@@ -516,7 +564,7 @@ def main(argv):
             failures.append('MetalProgramRun returned %s' % m.group(1))
     if done.returncode:
         failures.append('dtrace exited %d' % done.returncode)
-    looped = bool(metadata['controls'])
+    looped = bool(metadata['controls'] or metadata.get('guards'))
     if not looped and len(observed) != len(program):
         failures.append('%d of %d compiled program operations observed' % (len(observed), len(program)))
     if looped and program and (not walk or walk[-1] != len(program) - 1):

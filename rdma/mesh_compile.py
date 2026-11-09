@@ -3235,7 +3235,7 @@ def _linalg_active(app, aqq, magnitude, tolerance, ops):
     return active
 
 
-def _linalg_rotation(app, aqq, apq, ops, tolerance=None):
+def _linalg_rotation(app, aqq, apq, ops, tolerance=None, active=None):
     batch, real = app.shape, app.dtype
     magnitude, delta = _temporary(batch, real), _temporary(batch, real)
     d, g, scale = (_temporary(batch, real) for _ in range(3))
@@ -3262,7 +3262,8 @@ def _linalg_rotation(app, aqq, apq, ops, tolerance=None):
     ops += _elementwise('lt', zero, delta, 0)
     ops += _elementwise('neg', square, tangent)
     ops += _elementwise('where', tangent, zero, square, tangent)
-    active = _linalg_active(app, aqq, magnitude, tolerance or torch.finfo(real).eps, ops)
+    if active is None:
+        active = _linalg_active(app, aqq, magnitude, tolerance or torch.finfo(real).eps, ops)
     ops += _elementwise('where', tangent, active, tangent, 0)
     ops += _elementwise('mul', cosine, tangent, tangent)
     ops += _elementwise('add', cosine, cosine, 1)
@@ -3454,15 +3455,41 @@ def _singular(target, given, outs):
             body += _elementwise('where', scale, zero, 1, scale)
             body += _elementwise('div', app, lp[..., 0], scale)
             body += _elementwise('div', aqq, lq[..., 0], scale)
+            ratio, magnitude = _temporary(batch, real), _temporary(batch, real)
+            normal, active, tiny, larger = (_temporary(batch, torch.bool) for _ in range(4))
+            body += _elementwise('minimum', ratio, app, aqq)
+            body += _elementwise('ge', normal, ratio, torch.finfo(real).tiny / torch.finfo(real).eps)
+            body += _elementwise('abs', magnitude, correlation[..., 0, 0])
+            body += _elementwise('gt', active, magnitude, tolerance)
+            body += _elementwise('logical_not', tiny, normal)
+            body += _elementwise('logical_and', tiny, tiny, active)
+            body += _elementwise('logical_and', normal, normal, active)
+            body += _elementwise('ge', larger, lp[..., 0], lq[..., 0])
             body += _elementwise('mul', apq, correlation[..., 0, 0], app)
             body += _elementwise('mul', apq, apq, aqq)
             body += _elementwise('mul', app, app, app)
             body += _elementwise('mul', aqq, aqq, aqq)
-            c, s, _, _, active = _linalg_rotation(app, aqq, apq, body, tolerance)
+            c, s, _, _, _ = _linalg_rotation(app, aqq, apq, body, active=normal)
             body += _elementwise('logical_or', changed, changed, active)
             _linalg_rotate_columns(matrix, p, q, c, s, body)
             if vectors is not None:
                 _linalg_rotate_columns(vectors, p, q, c, s, body)
+            correction, candidate = _temporary(up.shape, a.dtype), _temporary(up.shape, a.dtype)
+            selected = _temporary(batch, torch.bool)
+            conjugate = _linalg_transpose(correlation, body, False, True)
+            body += _elementwise('mul', correction, uq, conjugate)
+            body += _elementwise('sub', candidate, up, correction)
+            body += _elementwise('mul', candidate, candidate, lp.unsqueeze(-1))
+            body += _elementwise('logical_not', selected, larger)
+            body += _elementwise('logical_and', selected, selected, tiny)
+            body += _elementwise('where', matrix[..., :, p:p + 1], selected[..., None, None],
+                                  candidate, matrix[..., :, p:p + 1])
+            body += _elementwise('mul', correction, up, correlation)
+            body += _elementwise('sub', candidate, uq, correction)
+            body += _elementwise('mul', candidate, candidate, lq.unsqueeze(-1))
+            body += _elementwise('logical_and', selected, larger, tiny)
+            body += _elementwise('where', matrix[..., :, q:q + 1], selected[..., None, None],
+                                  candidate, matrix[..., :, q:q + 1])
     body += _fold(A.any.default, {'self': changed, 'dim': None, 'keepdim': False}, [predicate])
     ops += _jacobi_sweeps(body, predicate, n)
     lengths = _temporary(singular.shape, real)
