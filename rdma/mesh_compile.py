@@ -422,6 +422,26 @@ def _attention_rule(node, local, operands, shapes, out):
                 None, lambda sharded: ())
 
 
+def _factory_rule(node, local, out):
+    names, given = _names(local), _given(local, _names(local))
+    template = given.get('self')
+    operands = []
+    map_arg({name: value for name, value in given.items() if name != 'self'}, operands.append)
+    def configure(sharded):
+        shape = tuple(sharded.get(d, size) for d, size in enumerate(out))
+        changes = {'size': shape} if 'size' in names else {}
+        if 'device' in names:
+            changes['device'] = torch.device('meta')
+        if isinstance(template, Node):
+            source = _value(template)
+            order = sorted(range(len(shape)), key=lambda d: (-source.stride(d), d)) \
+                if len(shape) == source.dim() and is_non_overlapping_and_dense_or_false(source) \
+                else tuple(range(len(shape)))
+            changes['self'] = torch.empty_permuted(shape, order, dtype=source.dtype, device='meta')
+        return ((node, _with(local, names, changes)),)
+    return Rule('factory', 0, operands, [()] * len(operands), tuple(range(len(out))), (), (), (), False, None, configure)
+
+
 # design/aot-compilation-change-request.md A2 and A4; GSPMD sections 3.1, 3.2, 3.5, 4.3 to 4.6 and Appendix A.2; torch
 # 2.14.0 torch/_export/verifier.py
 def _operator(node, local):
@@ -438,7 +458,9 @@ def _operator(node, local):
         return general
     out, shapes = tuple(_value(node).shape), [tuple(_value(o).shape) for o in operands]
     packet, rule = local.target.overloadpacket, None
-    if (packet in POINTWISE or packet is A.copy_) and all(len(s) <= len(out) for s in shapes):
+    if packet in FILLS or packet in EMPTY:
+        rule = _factory_rule(node, local, out)
+    elif (packet in POINTWISE or packet is A.copy_) and all(len(s) <= len(out) for s in shapes):
         rule = Rule('elementwise', 0, operands,
                     [tuple(len(out) - len(s) + i if size == out[len(out) - len(s) + i] else ('broadcast', k, i)
                            for i, size in enumerate(s)) for k, s in enumerate(shapes)],
@@ -710,7 +732,7 @@ def _partition(ir, operators):
                     _reshard(ir, node, whole, sharding)
                 continue
             out, labels = rule.out, rule.labels
-            free = {label for label in out if not any(label in own for own in labels)}
+            free = set() if rule.kind == 'factory' else {label for label in out if not any(label in own for own in labels)}
             target = tuple(-1 if label in free else s for s, label in zip(sharding, out))
             used, partial, contracted = {m for m in target if m >= 0}, [], {}
             for label in rule.contracting:
