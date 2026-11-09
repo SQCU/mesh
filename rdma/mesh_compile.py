@@ -961,6 +961,7 @@ def _port_values(ir):
             ir.exit_ports.update((port, result(operand[1][port.node], port)) for port in ir.region.outputs
                                  if port.node is not None)
         elif kind == 'call' and ir.locals[operand].target in CONTROL:
+            ir.ports.update((port, result(key, port)) for port in ir.region.ports[operand])
             nodes = []
             map_arg((ir.locals[operand].args, ir.locals[operand].kwargs), nodes.append)
             for node, read in zip(nodes, reads):
@@ -7079,7 +7080,8 @@ def _specialized(ir, placed, item, operands, ops, given):
         for start, extent in ((0, below), (above, length - above)):
             ops += _fill(value.narrow(dim, start, extent), fill) if fill is not None and extent else []
     elif kind in ('slice', 'narrow', 'window') and value is None:
-        value = operands[0].narrow(*_cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device))
+        cut = _cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device)
+        value = pytree.tree_map(lambda tensor: tensor.narrow(*cut), operands[0])
     elif kind == 'call':
         operands = list(operands)
         for at, dim, m, size in ir.trims.get(key, ()):
