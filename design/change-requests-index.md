@@ -154,9 +154,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   alias/constant diagnostic also remains exact with its existing externally supplied literal initialization;
   that does not establish the still-pending public outer save/load path. Target preparation remains under revision.
   A further F16 R128/K3840/N4096 artifact restores exactly for its supplied power-of-two inputs, and all eleven
-  nonconstant MIL operations, including convolution, are Neural Engine-preferred. This establishes preferred
-  placement at that larger geometry; no device trace or historical row-tiling throughput comparison was taken.
-  No ANE execution or throughput closure follows. Online KV attention,
+  nonconstant MIL operations, including convolution, are Neural Engine-preferred. One subsequent existing
+  native_bench saved/restore invocation under Instruments records an actual ANE inference prediction, with output
+  bytes identical to the earlier numerical result. This establishes ANE execution for that geometry; no historical
+  row-tiling throughput comparison or broader target-coverage closure follows. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
   relative error 2.217e-7, including an exactly zero fully masked row; causal attention has error 6.092e-8. The two
