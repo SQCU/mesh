@@ -33,6 +33,7 @@ class Matrix(torch.nn.Module):
         self.register_buffer('input_order', permutation)
         self.register_buffer('columns', torch.arange(nc) if 'rotation' in fields or 'signs' in fields else selected[permutation])
         self.shape = (rows.numel(), columns.numel())
+        self._mesh_constants = tuple(self._buffers)
 
     def select(self, rows=None, columns=None):
         return Matrix({name: getattr(self, name) for name in self.fields}, rows, columns)

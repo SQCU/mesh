@@ -144,6 +144,7 @@ class IR:
         self.given, self.landed = None, {}
         self.trims = {}
         self.transfer_sites = {}
+        self.initial, self.constant_values = None, set()
 
     def emit(self, item):
         self.program.append(item)
@@ -874,10 +875,10 @@ def _partition(ir, operators):
 
 
 # design/aot-compilation-change-request.md A2 and A4; GSPMD sections 3, 3.1 and 4.6
-def partition(gm, placement, nodes, page):
+def partition(gm, placement, nodes, page, region=None):
     if not isinstance(placement, Placement):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
-    ir, operators, annotated = IR(gm, placement, nodes), {}, set()
+    ir, operators, annotated = IR(gm, placement, nodes, region), {}, set()
     ir.page = page
     for node in ir.order:
         if node.op == 'call_function':
@@ -6950,6 +6951,42 @@ def _hosted(ir, item, values):
     return values[0].narrow(*_cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device))
 
 
+# torch/export/graph_signature.py InputKind.CONSTANT_TENSOR; mesh_code.Matrix._mesh_constants
+def _constant_origins(exported, module):
+    values = [exported.constants[name] for name in exported.graph_signature.lifted_tensor_constants]
+    values += [operator.attrgetter(name)(child) for child in module.modules()
+               for name in getattr(child, '_mesh_constants', ())]
+    written = _storages(module, [*exported.graph_signature.buffers_to_mutate.values(),
+                                 *exported.graph_signature.parameters_to_mutate.values()])
+    return frozenset(value.untyped_storage().data_ptr() for value in values if isinstance(value, torch.Tensor)) - written
+
+
+# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff;
+# torch/export/graph_signature.py ExportGraphSignature.buffers_to_mutate, parameters_to_mutate
+def _initial_values(ir, immutable):
+    if ir.initial is not None:
+        return ir.initial
+    loaded = ir.loads & ir.homes.keys()
+    needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
+    order = [key for key in ir.attributes if key in needed]
+    host = mesh_graph.forward(order, lambda key: ir.attributes[key][1],
+                              lambda key, values: _hosted(ir, ir.attributes[key], values))
+    fixed = mesh_graph.forward(order, lambda key: ir.attributes[key][1],
+                               lambda key, values: _key(host[key]) in immutable
+                               if ir.attributes[key][0] == 'constant' else all(values))
+    initial, mutable = {}, set()
+    for key in loaded:
+        v, offset, sizes, strides = ir.homes[key]
+        if v not in initial:
+            dtype, numel, _ = ir.layouts[v]
+            initial[v] = torch.zeros(numel, dtype=dtype, device='cpu')
+        initial[v].as_strided(sizes, strides, offset).copy_(host[key])
+        if not fixed[key]:
+            mutable.add(v)
+    ir.initial, ir.constant_values = initial, set(initial) - mutable
+    return initial
+
+
 # MPICH allgather_intra_ring.c, MPIR_Localcopy; torch 2.14.0 torch/_tensor_docs.py, copy_
 def _copied(ir, read, key, cut, source, target):
     if ir.places[ir.device][key].writer != key:
@@ -7093,9 +7130,10 @@ def _array(kind, values):
 
 
 class _Builder:
-    def __init__(self, lib, owners, role, row, identity):
+    def __init__(self, lib, owners, role, row, identity, constants=None):
         self.lib, self.p, self.owners, self.role, self.row = lib, lib.metal_ir_program_new(), owners, role, row
         self.values, self.roots, self.roles, self.planned, self.builtins = {}, {}, {}, {}, {}
+        self.constants = {} if constants is None else constants
         self.base = self.identity = identity
 
     def root(self, t):
@@ -7106,7 +7144,7 @@ class _Builder:
         base = torch.view_as_real(base) if base.is_complex() else base
         numel = base.untyped_storage().nbytes() // base.element_size()
         owner = self.owners.get(key)
-        role = self.role(owner) if owner is not None else STATE if key in GENERATORS else \
+        role = CONSTANT if key in self.constants else self.role(owner) if owner is not None else STATE if key in GENERATORS else \
             CONSTANT if base.device.type != 'meta' else TEMPORARY
         v = self.lib.metal_ir_value(self.p, role, SCALAR[base.dtype], 1, _array(mesh.Q, [numel]), 1,
                                     _array(Term, [Term(0, 0, 1, 1, 0)]), 0, self.identity)
@@ -7116,7 +7154,8 @@ class _Builder:
             if pages:
                 self.lib.metal_ir_value_paged(self.p, v, row, pages)
             self.planned[v] = owner
-        elif base.device.type != 'meta':
+        if key in self.constants or owner is None and base.device.type != 'meta':
+            base = self.constants.get(key, base)
             storage = base.untyped_storage()
             HOLDERS[id(base)] = base
             buffer = storage.data_ptr() if base.device.type == 'mps' else None
@@ -7425,7 +7464,8 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
         if compiled[k].target is not None:
             for g in ops:
                 _placed([g], compiled[k].target, g.node)
-        builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32))
+        fixed = {_key(storage(k, v, j)): ir.initial[v] for v in ir.constant_values}
+        builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32), fixed)
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[GPU]), C.byref(machines[CPU]))
         owned[id(builder)] = lambda p=builder.p: compiler.metal_ir_program_free(p)
@@ -7532,6 +7572,76 @@ def _lifetimes(programs, irs):
                                          begin=value.begin, end=value.end, run=1))
         row['levels'] = levels
     return own
+
+
+# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
+Segment = collections.namedtuple('Segment', 'id scope first end inputs outputs transfers')
+Boundary = collections.namedtuple('Boundary', 'scope position before after children')
+Segmented = collections.namedtuple('Segmented', 'segments items boundaries')
+
+
+def _segments(root):
+    regions = root.region.regions
+    if any(region.ir is None for region in regions):
+        raise ValueError('communication segmentation requires every retained region to be partitioned')
+    communicating = mesh_graph.forward(regions[::-1], lambda region: region.children,
+                                        lambda region, children: bool(region.ir.declared) or any(children))
+    segments, items, boundaries = [], {}, {}
+
+    def visit(region, inherited=None):
+        ir = region.ir
+        if inherited is not None:
+            items[region.id] = (inherited,) * len(ir.program)
+            for child in region.children:
+                visit(child, inherited)
+            return
+        children = collections.defaultdict(list)
+        for child in region.children:
+            children[child.control].append(child)
+        cuts = {g: tuple(children[item[3]]) for g, item in enumerate(ir.program)
+                if item[0] == 'call' and item[3] in children and any(communicating[c] for c in children[item[3]])}
+        uses, exits = collections.defaultdict(list), set()
+        for g, (kind, reads, _, _) in enumerate(ir.program):
+            for key in reads:
+                uses[key].append(g)
+            if kind == 'output':
+                exits.update(reads)
+        if set(ir.transfer_sites) != set(range(len(ir.declared))):
+            raise ValueError('region %d has a declaration without its retained producer site' % region.id)
+        sites = collections.defaultdict(list)
+        for i, site in ir.transfer_sites.items():
+            if not 0 <= site.position < len(ir.program):
+                raise ValueError('region %d has a transfer outside its retained program' % region.id)
+            sites[site.position].append(i)
+        at, first = [None] * len(ir.program), 0
+        for end in [*cuts, len(ir.program)]:
+            index = len(segments)
+            made = {item[2] for item in ir.program[first:end] if item[2] is not None}
+            inputs = tuple(dict.fromkeys(key for item in ir.program[first:end]
+                                         for key in ((item[2],) if item[0] == 'input' else item[1])
+                                         if item[0] == 'input' or key not in made))
+            outputs = tuple(item[2] for item in ir.program[first:end] if item[2] is not None
+                            and (item[2] in exits or any(g < first or g >= end for g in uses[item[2]])))
+            transfers = tuple(i for g in range(first, end) for i in sites[g])
+            segments.append(Segment(index, region.id, first, end, inputs, outputs, transfers))
+            at[first:end] = [index] * (end - first)
+            if first:
+                position = first - 1
+                before = boundaries[region.id, position]
+                boundaries[region.id, position] = before._replace(after=index)
+            if end in cuts:
+                boundaries[region.id, end] = Boundary(region.id, end, index, None,
+                                                       tuple(c.id for c in cuts[end]))
+            first = end + 1
+        items[region.id] = tuple(at)
+        if any(at[site.position] is None for site in ir.transfer_sites.values()):
+            raise ValueError('region %d has a transfer assigned to a control boundary' % region.id)
+        owners = {item[3]: at[g] for g, item in enumerate(ir.program) if item[0] == 'call' and item[3] in children}
+        for child in region.children:
+            visit(child, owners[child.control])
+
+    visit(regions[0])
+    return Segmented(tuple(segments), items, boundaries)
 
 
 # design/compilation-composition-change-request.md, "Complete replacement workgroup" (6's stage D): each row's received
@@ -7956,7 +8066,7 @@ class _Program(torch.fx.Interpreter):
 # leaves that are its own inputs, {flat output leaf: flat input leaf} (an output that is placeholder q, the
 # placeholders being the flat input leaves in order)
 Compiled = collections.namedtuple('Compiled', 'function signature target source_device gm examples result spec written read mutated '
-                                              'passed')
+                                              'passed immutable')
 
 
 # a flat leaf of a value of the traced program: leaf `leaf` of call `call`'s result, or of block input leaf `leaf`
@@ -8158,7 +8268,8 @@ class _Export(torch.fx.Interpreter):
                                                                       *given.inputs_to_parameters.values()]),
                                           frozenset(q for q, name in enumerate(given.user_inputs) if name in mutated),
                                           {o: inputs.index(a) for o, a in enumerate(gm.graph.output_node().args[0])
-                                           if isinstance(a, Node) and a in inputs}))
+                                           if isinstance(a, Node) and a in inputs},
+                                          _constant_origins(exported, function.module)))
             found = [len(self.compiled) - 1]
         self.of[n], self.origin[n] = found[0], len(self.calls)
         # design/compilation-composition-change-request.md item 6, unit 6E: each flat input leaf's producer
@@ -8244,15 +8355,11 @@ def _bound(context, state, retained, deadline):
                     C.memmove(at, data, value.section.bytes)
         return
     launched = False
-    for ir, (places, _, _, _) in zip(irs, bound):
-        loaded = ir.loads & places.keys()
-        needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
-        host = mesh_graph.forward([key for key in ir.attributes if key in needed],
-                                  lambda key: ir.attributes[key][1],
-                                  lambda key, values: _hosted(ir, ir.attributes[key], values))
-        for key in loaded:
-            places[key][0].copy_(host[key])
-            launched = launched or places[key][0].device.type == 'mps'
+    for ir, (_, _, _, copies) in zip(irs, bound):
+        for v, data in ir.initial.items():
+            for target in copies[v]:
+                target.copy_(data)
+                launched = launched or target.device.type == 'mps'
     if launched:
         torch.mps.synchronize()
     retained['initial'] = _initial(retained)
@@ -8325,6 +8432,7 @@ def program(block, *example_inputs):
         _deliver(irs, wanted, returned, _program())
         for ir, record in zip(irs, compiled):
             lower(ir)
+            _initial_values(ir, record.immutable - frozenset().union(*(c.written for c in compiled)))
             ir.weights = _weighed(ir, record.function)
             ir.delivered = {}
         # each consumer call's delivered operands here, before capture (the recorder's masked readers are emitted
