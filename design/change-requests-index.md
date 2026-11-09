@@ -50,9 +50,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
   1.8e-7. Restored I64/F64/BOOL sort and gather preserve exact values and stable indices, including wide values;
   direct binary64 FMA preserves single rounding, overflow cancellation, subnormals and special values in eight
   concrete lanes. A zero-operation graph preserves transposed/sliced input aliases and a constant across restore.
-  These cases do not establish all shapes, convergence/extreme scales or performance. GPU eigendecomposition now
-  passes repaired Later identity and typed symbol allocation, but crashes inside AGX pipeline creation during
-  concurrent final compilation. Compiler/serializer ownership and duplicate compilation remain under revision.
+  At metalfb8c3ffa / meshf7b77d43, GPU eigendecomposition and both SVD cases execute after retained IR handles,
+  unique-target compilation and compiler/archive ownership changes; the earlier AGX crash does not reproduce.
+  GPU complex Hermitian reconstruction error is4.284e-8; the SVD errors match the CPU cases above. This does not
+  isolate which change removed the driver failure. CPU determinant/slogdet/pseudoinverse composition also executes
+  for a singular2x2, preserving the expected nonfinite log determinant and pseudoinverse error1.133e-8.
+  At metal012f52bd / meshc4fbcac8, native CPU LDL factor/solve executes a batch containing a2x2 pivot and nontrivial
+  swap, with solve relative error3.274e-8 and residual3.377e-8. Mesh-produced factors work in Torch's solve, and the
+  compiled solve consumes Torch-produced factors. These cases do not establish all shapes, convergence/extreme
+  scales or performance. The tiny GPU eig still expands to153 scheduled commands: internal storage consumption
+  alone has not completed target-owned control fusion. Its remaining fusion veto is under investigation.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -70,6 +77,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   consumed. At metalcc3618ff / mesh69a971ce, three-span argmax passes observation of17 program operations, with9
   static kernel records,2 image edges and no redundant edges. Retained allocator-completion facts remove the
   GPU fences that duplicated its required completion waits; argmax numerical mismatch counts remain0.
+  At metal012f52bd, the GPU eig's CHECK wait consumes the same commit-completion fact as allocator reuse, removing
+  its two redundant synchronization edges. External observation of this161-operation program is still prevented
+  by the generated DTrace program exceeding DIF's size limit; smaller initializer chunks alone did not fix it.
+  A deliberate mismatched existing CPU client/signature could not exercise fail-stop: macOS denied destructive
+  DTrace before client execution. No stopped client remained and no machine security configuration was changed.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
