@@ -517,8 +517,12 @@ These bind implementation methods to the existing complete-conversion and repres
 replace the assigned domain with the operations exercised by a diagnostic.
 
 - **Compact effects — source:** William Pugh, [The Omega Test](https://www.cs.umd.edu/~pugh/papers/omega.pdf), the
-  author's expanded 1992 version, §§2.1–2.3: normalization, equality elimination, and integer inequality elimination
-  using real/dark shadows and splintering. **Role:** decide whether two bounded affine byte-access sets intersect.
+  author's expanded 1992 version, §§2.1–2.3, establishes exact dependence analysis as integer feasibility.
+  **Implementation source:** Sven Verdoolaege, [Integer Set Library manual](https://libisl.sourceforge.io/manual.pdf),
+  Introduction, Creating New Sets and Relations, and Properties: construct affine constraints through the typed
+  `isl_constraint` API and query `isl_basic_set_is_empty`, using exact arbitrary-precision arithmetic. ISL's algorithms
+  differ from Omega's; linking ISL is not an implementation of Pugh's elimination steps.
+  **Role:** decide whether two bounded affine byte-access sets intersect.
   The compiler supplies the access relations; `mesh-graph` owns their exact integer feasibility calculation and
   returns dependence causes. Scheduling, fusion and lifetime consumers use that relation. Enumerating tensor
   elements or replacing a strided set by its bounding interval is not this method. Exact arithmetic must survive
