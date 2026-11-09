@@ -251,8 +251,11 @@ The operator, continuing the same assignment, verbatim:
   calls, interleaved computation/transport, exact copy lifetimes, placed CPU/MPS work, the full assigned numerical
   domain and the LiteRT path. Do not replace them with blanket order, waits, whole-buffer effects or another runtime.
 
-The implementation is divided into these eight connected units. File ownership coordinates concurrent writes;
-it does not divide the compiler's semantics. Session assignments and progress belong in `output_data`.
+The initial handoff revision was divided into the eight connected units below. The subsequent source/performance
+reviews found that their implementation did not finish numerical lowering. The
+[complete replacement workgroup](#complete-replacement-workgroup) below supersedes this work division for the
+remaining implementation; these identifiers remain here for existing source citations. File ownership coordinates
+concurrent writes; it does not divide the compiler's semantics. Session assignments and progress belong in `output_data`.
 
 | Unit | Complete handoff | Source boundary and displaced work |
 |---|---|---|
@@ -384,6 +387,129 @@ The operator, 2026-11-09, verbatim:
   compiling a generic interpreter of metadata, or replaying unchanged per-operation kernels does not accomplish
   these transformations. The same final kernel, bindings and execution schedule can be emitted from structured
   operations; source matching adds no execution capability. The existing measurement standard remains applicable.
+
+### Complete replacement workgroup
+
+The operator, 2026-11-09, verbatim:
+
+> okay then lay out how
+
+> the upstream compiler interface is going to be finished and all of the 'downstream' defective code removed all in one commit workgroup all at once, removal *by supremacy* of osme other different code that has all of the same feature coverage, and the same performance or better, so it's impossible to feign to revert the downstream slopcode yet again
+
+- **Applies to:** items 1–6 and both corrections above, composing the nine requests in their existing cited roles.
+  This specifies the replacement assignment. It does not record an implemented interface or measured replacement.
+- **Sources and roles:** S1/S2 supply typed progressive lowering and completed conversion; S3/S4 supply joint
+  transformation of computation and communication; S5 supplies ownership; S6/S7 supply specialization and execution.
+  The fusion, bufferization, reduction and target methods in the performance correction remain the methods to use.
+  Three upstream source boundaries make their application concrete:
+  - ML Drift's [GpuModelBuilder](https://github.com/google-ai-edge/ml-drift/blob/main/ml_drift/common/gpu_model_builder.h)
+    accepts tensor handles, operation attributes, reduction axes and weight/quantization descriptions.
+    [GpuModel](https://github.com/google-ai-edge/ml-drift/blob/main/ml_drift/common/gpu_model.h) retains node inputs,
+    outputs and tensor descriptors. Preserve these facts where they are produced. Its node names are optional
+    debugging fields, not an operation contract. Its
+    [GPUOperation](https://github.com/google-ai-edge/ml-drift/blob/main/ml_drift/common/task/gpu_operation.h)
+    still contains `code_`, and its elementwise/linkable descriptors contain code strings. Wrapping those objects
+    does not supply the missing structured body. Revise the producing lowering to construct typed operation
+    regions and instructions instead of making those strings the interchange representation.
+  - Dawn's [Metal translation](https://github.com/google/dawn/blob/main/src/dawn/native/metal/ShaderModuleMTL.mm)
+    has the concrete `ProgramToLoweredIR` → `msl::writer::Generate` seam. Tint's
+    [writer](https://github.com/google/dawn/blob/main/src/tint/lang/msl/writer/writer.cc) raises an IR module before
+    printing MSL. Mesh transformations belong before final printing. Extend the target representation/emitter
+    where required operations are missing; system-scope publication is not permission to splice the printed text.
+  - LiteRT's [GPU accelerator build](https://github.com/google-ai-edge/LiteRT/blob/main/litert/runtime/accelerators/gpu/BUILD)
+    defines the ML Drift WebGPU accelerator and its delegate dependencies, including a macOS dynamic-library target.
+    These are source components to connect and build, not an exported whole-program mesh compiler API. No cited
+    source already supplies that complete API; its construction is the integration work assigned here.
+- **Replaces:** metal-microbench's production E2B linkage to the wheel's `liblitert-lm`, its generated-source
+  interception as an optimization interface, the source transformations listed below, and their alternative
+  preparation paths. The current Makefile builds SDK headers from local LiteRT/Dawn checkouts but links the
+  packaged provider. The local Dawn header revision has not been established as the wheel's embedded compiler
+  revision. Compiling headers or an adapter beside that binary does not connect its internal IR.
+
+**Write the connected compiler interface.** Build a compatible source provider with the LiteRT runtime, delegate,
+ML Drift and Dawn/Tint dependencies that actually execute these lowerings. Track the adapter, build description and
+upstream changes in canonical source, not hand edits under `.build`. Resolve API/ABI compatibility and record the
+built dependency revisions with the existing measurement record. The production E2B link must use those artifacts;
+the packaged executable can remain an external numerical/performance reference. Building a host executable while
+still loading a prebuilt GPU provider leaves the assignment unfinished.
+
+Both frontends supply the existing program composition with the following connected operands. These are roles of
+the representation, not a prescription to create five duplicate object models:
+
+| Operand | Producer → consumer |
+|---|---|
+| Numerical operations | Torch FX/decompositions and LiteRT's typed model/operation construction → regions with typed values, shapes, layouts, indexing maps, reduction axes, quantization and numerical precision semantics → specialization and fusion. Retain constants separately from varying inputs. |
+| Kernel instructions | Numerical lowering → owned typed shader modules/regions, including explicit operand and result bindings → target lowering and final emission. Construct the mesh path directly through IR builders; emitting generated WGSL or MSL and reparsing it as the missing interface does not finish this handoff. |
+| Values and effects | The same value identities → views, aliases, ranges/pages, reads/writes and generation/lifetime facts → allocation, collective/transport planning, masking and publication. Bind model values to kernel operands to placed storage explicitly. |
+| Program relations | Existing call, dependence and collective-plan results → remapped relations through fusion, splitting and placement → the shared graph algorithms and native program. Retain the value/effect/transfer cause of an edge. Update affected results when transformation changes their operands. |
+| Executable artifact | Completed lowering → compiled CPU work, GPU pipelines, bindings, dispatches, transfers and synchronization plus their derived signature → the existing native executor and bridge. CPU execution is native Apple Silicon work; Python preparation is not the CPU target. |
+
+The compiler owns these operands until finalization, including every module and constant used by later passes.
+A callback borrowing one shader during `newLibraryWithSource` cannot supply that ownership or fuse its dispatch
+with another one. The provider publishes the program and its bodies before execution; finalization occurs after
+the program's calls and transport relations are available. An identity correspondence can be many-to-many after
+fusion or splitting. A tensor's reduction or quantization meaning is supplied by its producer, not guessed from
+an arbitrary Tint instruction sequence. Authored kernel sources may be compiler inputs and terminal emitter
+templates; emitted source is never subsequently inspected to recover operands, effects or optimization decisions.
+Tuned projection/argmax arithmetic is retained through typed parameters and computation regions, including their
+map/epilogue operands. A template hole filled by extracting somebody else's generated source is not such a region.
+The C++ compiler owns Tint objects; C/Objective-C/Python consumers use owned handles and typed operand/binding
+records through the existing program boundary. They do not serialize an operation into a string to cross it.
+Provider cache hits must preserve this handoff too: Dawn's translation runs inside a compilation-cache lookup,
+so publishing IR only from the cache-miss callback is insufficient. Cache the required representation or completed
+artifact with its compilation inputs; a cached shader string cannot substitute for the program and its relations.
+
+**Displace the downstream bodies with their completed consumers.** This is a feature-preservation map for the
+replacement, not a list of optional fast paths. Existing common graph algorithms stay in `mesh-graph`/`mesh_graph`.
+Numerical transformations belong to the compiler; recording and execution consume their results.
+
+| Displaced implementation | Replacement consuming typed operands; performance mechanism retained |
+|---|---|
+| `MetalSpecializeScalars`, `MetalLiteralLanes`, `MetalFoldQuantization`; Torch's interpretation of static operator/layout metadata | Constant propagation and specialization before target emission; remove repeated static loads, branches and index arithmetic while preserving numerical semantics. |
+| `MetalPromoteOperand`, `MetalFuseEpilogue`, `MetalInlineMaps`, `MetalFuseRows` and their `MetalMapShape`/`MetalEntry`/`MetalRowFootprint`/`MetalRowKernel` recognizers | Compose computation regions and indexing maps, remap uses and eliminate dead intermediates. Preserve observable stores and dependencies; remove eligible launches and materialization without introducing repeated expensive producer work. |
+| `MetalNativeProjection`/`MetalNativeArgmax` source recognition and extraction, `MetalPackedWeights`, `MetalProjectionReduction`, `MetalNormalizationReduction` | Select/construct the retained tuned algorithms from typed operations, layouts and reduction domains. Preserve packed arithmetic, parallel reductions and split work; propagate `MetalNativePlan` facts directly instead of rereading `MN_*` defines. |
+| `MetalCoherentStores`, source-spliced publication/acquisition and `MetalMaskedPass` | Lower typed memory effects and page readiness to coherent access, publication, worklists and later-pass kernels. Preserve computation/transport overlap and fused publication. Carry any required target extension through the IR and emitter. |
+| `MetalParsedSpace` and `MetalCommandAccesses` as semantic reconstruction from emitted source | Use the compiler's instruction call/use-def and access relations. Remove the parser and its dead helpers once both scheduling and signature consumers use those relations. |
+| Replay-footprint reconstruction and the default/non-self-timed preparation bypass | Prepare one native program from retained plan relations and actual lowered effects. Emit its required synchronization regardless of the caller; remove the bypass and displaced orchestration. Preserve the existing shared executor. |
+
+**Eight connected implementation responsibilities.** This replaces the earlier 6A–6H division for this revision.
+The supervisor assigns Claude Opus 5.5 workers and records sessions, handoffs, corrective steering and results in
+`output_data`. Adjacent workers co-design and consume the interface immediately. They do not independently invent
+parallel schemas and ask an integration worker to reconcile them at the end. A shared file has one editing owner;
+that owner incorporates the adjacent worker's required changes.
+
+| Worker | Complete responsibility and adjacent handoff |
+|---|---|
+| 1. Upstream producer and build | Own the source provider, tracked upstream adapter/build changes and production library linkage. Supply the typed model/operation and kernel-construction interfaces to 2–4; preserve buffer binding, initialization and zero-copy imports for 8. Finish the actual provider's coverage, including generated-body producers, rather than exporting strings. |
+| 2. Representation and ownership | Own the shared compiler interface and module/value lifetime. Connect 1 and 5 to existing program composition, with the binding/identity/effect correspondence consumed by 3, 4, 6 and 7. No unused metadata fields or parallel plan schema. |
+| 3. Numerical transformations | Own specialization, region/index-map fusion, promotion and intermediate elimination, using 2's operands and producing 4's regions plus remapped effects for 6. Replace the source transformations' behavior across the assigned domain. |
+| 4. Target lowering | Own typed instruction construction and target emission, including tuned projection/argmax, packed arithmetic, parallel reductions and the target operations needed by 6. Revise `metal_native` and its templates; emit final source only after transformations. |
+| 5. Torch frontend and native CPU | Own `mesh_compile.py`'s numerical/program handoff and target calls. Feed the same compiler from typed FX/decompositions; finish native CPU and GPU lowering instead of prematurely committing to generic per-operation dispatches. Preserve the complete assigned Torch domain, repeated calls, mutations and structured results. |
+| 6. Collective, transport and effects | Own the connection through `mesh-collective`, `mesh-graph` and `mesh-metal`: supplied dependencies, range/page effects, lifetime, readiness, masking and publication. Consume transformed relations and provide 4/7 the exact obligations; add genuinely new target constraints without rebuilding discarded equivalents. |
+| 7. Native preparation and deletion | Own `metal_recording`'s conversion to an executor of the compiled artifact, the emitted synchronization/signature connection and removal of every displaced parser/rewrite/preparation body above. Consume 2/4/6 and supply the same native program API to 5/8. |
+| 8. E2B integration and operational evidence | Own `tools/e2b_replay.m` and the existing diagnostic/measurement callers, including `tools/native_bench.m`, through the new interfaces. Work with 1/7 on the executable throughout; coordinate combined builds, numerical/performance records and final coverage/deletion review with all workers. |
+
+**One replacement landing.** The finished change includes producer, representations, transformations, all callers,
+the production build and the deletions together. Metal-microbench and mesh are separate Git repositories, so the
+landing is one coordinated changeset with one integration commit in each affected repository; no Git commit spans
+both. Working commits can record and synchronize development under the existing workflow. They are not separate
+deployments of a partial compiler. Source synchronization uses commits/checkouts, never copied uncommitted source.
+
+Before calling that landing complete, record in the existing integration document: the live producer → IR →
+consumer paths; every displaced body's replacement and deletion; direct builds of all affected callers; numerical
+divergences using the existing workload tools; and the prescribed performance evidence. E2B must complete prefill
+and decode on all five nodes. Use the existing Torch/collective operational workloads for their corresponding
+behavior. Measure decode throughput after prefill and transport overhead/bandwidth as `docs/measurement.md`
+requires, relating observations to launches, materialization, arithmetic and synchronization. Retain the fastest
+applicable recorded behavior and the required bandwidth/overhead tradeoffs; no new evaluator or search grid.
+Workload evidence does not narrow the assigned domain to those examples. Any missing lowering or performance
+mechanism is repaired in this replacement before completion, not hidden by retaining the old execution path.
+
+The landed source has no legacy source-rewrite fallback, dual compiler mode or exception path back to the removed
+implementation. Source text may be retained as a final diagnostic artifact; source matching is no longer an
+execution dependency. Git history can of course be reverted, but restoring the old bodies would then be an explicit
+architectural reversal: they would have no unique supported operation or demonstrated performance advantage left
+to justify their restoration. This is the operator's removal by a complete replacement, not deletion of capability.
 
 ## Reusable form
 

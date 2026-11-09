@@ -29,6 +29,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   dtype and layout facts interpreted by the Torch path's generic shaders, serial reduction bodies, and native
   projection facts emitted as defines then read back despite their presence in `MetalNativePlan`. Completing
   source coverage alone has not completed specialization, fusion or the required execution mapping.
+  The [complete replacement workgroup](compilation-composition-change-request.md#complete-replacement-workgroup)
+  specifies the connected source-built provider, typed numerical/shader interfaces, eight implementation
+  responsibilities and deletion of the downstream source-rewrite path in one coordinated landing. It supersedes
+  the initial 6A–6H work division, not the requirements or completed reusable work. This is an outstanding
+  implementation assignment; the interface, replacement and performance closure have not been demonstrated.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
   in the composition implementation. The review records distinguish remaining representation and observation gaps
