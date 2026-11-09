@@ -137,13 +137,18 @@ outstanding, and what of it is outstanding. The standard every change request fo
   coded definitions remains open. Build26 verifies selected packed projection (algorithm1) for a signed I4 view
   with offset5 and strides[1033,2], with exact output. The repaired F16 neural convolution executes exactly at
   8x128x64 and 1x2048x1024 for the supplied power-of-two inputs, but both preferred plans still select CPU.
-  Build27 replaces the native scalar constant evaluator with one compiled preparation task and retains the
-  materialized argument's axes and source bindings in artifact v19. CPU plain/rotation/Hadamard/ragged coded
-  programs remain numerically correct in the checked cases. Separate pure decoder producers still reach Core ML
-  as runtime operations: plain/zero/ragged neural compilation fails with region access other than a struct member.
-  Completing the retained producer-definition closure is assigned; rejecting these operands is not completion.
-  Literal F16 neural weights also remain CPU-preferred after staging, and the larger F16 artifact doubles because
-  both source and materialized weights are retained. Target preparation and storage ownership remain under revision.
+  Build27 replaces the native scalar constant evaluator with one compiled preparation task. Build28 retains
+  demanded whole producer definitions, orders them through existing member order/shared graph traversal, and saves
+  materialization provenance in artifact v20. CPU plain/rotation/Hadamard/zero/ragged coded cases preserve their
+  numerical results. Plain/zero/ragged neural compilation still fails with region access other than a struct member:
+  review now identifies missing immutable-source annotations/bytes before lowering. The production path assigns
+  all planned invariants STATE, while the diagnostic supplies attribute bytes only as later input files. The
+  frontend must pass proven immutable definitions through the same initialization owner; ordinary mutable
+  parameters/buffers must retain state semantics. Rejecting these operands is not completion.
+  Both F16 literal-weight cases remain exact but CPU-preferred, including the convolution itself. Build28 removes
+  the duplicated preparation payload: the larger artifact falls from8,410,794 to4,204,077bytes. The zero-operation
+  alias/constant diagnostic also remains exact with its existing externally supplied literal initialization;
+  that does not establish the still-pending public outer save/load path. Target preparation remains under revision.
   No ANE execution or throughput closure follows. Online KV attention,
   local result layouts and global dropout coordinates now have source checkpoints. Build21 restores a two-block
   grouped-query attention case with query shape [1,4,3,128], KV length 35 and value width 96. Masked attention has
