@@ -89,6 +89,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   operations become five GPU dispatches or one native CPU task. Forward relative errors are 8.270e-8 and 7.236e-8;
   all gradient errors are below 2.020e-7 and the loss error is 2.362e-7. The artifacts are 521,972 and 378,827 bytes.
   This establishes those joint numerical paths and restoration, not distributed public-program execution.
+  Mesh4269c977 completes nested decomposition discovery and source-metadata handoffs through the same owners.
+  With build25 libraries, branch-only bucketize inside a loop executes exactly on GPU; conditional det/pinv/GELS
+  executes on native CPU with exact determinant and relative errors 1.999e-7 / 1.088e-7 for the latter two outputs.
+  Two dynamic WHILEs also execute exactly, including alternating inner trip counts 2/0/2 and an outer-zero case.
 
   Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
   and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
@@ -188,6 +192,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
   that family, and actual nested-WHILE/inner-zero-trip evidence, remain assigned. Compiler feedback also repeats
   exact conflict analysis already performed for ordinary edges; the owners are completing one retained conflict
   result consumed by ordinary ordering, feedback and predicate reads.
+  Mesh67792fda preserves the finite family of complete accepting state paths. The actual two-WHILE artifacts
+  (31 operations, 282,897 bytes) have exact numerical results and four static image edges with no false edge.
+  External observation fails before execution because the generated DTrace program exceeds its DIF instruction
+  size limit. Emission-size reduction is assigned; no nested-loop runtime observation is claimed from that failure.
   Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
   bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
   the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
