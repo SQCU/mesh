@@ -143,18 +143,36 @@ def role(processors, node, name):
     raise ValueError('no %s processor of node %s in the record' % (want, node))
 
 
+# metal_recording.m MetalDrain/MetalSubmit: global test and commit eventcounts, advanced by their queue signals.
+def counter_rules(operations, program):
+    counters, rules = [0, 0, 0], []
+    signal = PRIMITIVES.index('queue_signal')
+    for i in program:
+        o = operations[i]
+        family = 1 if mesh_graph.LOOP <= o.object < mesh_graph.PLAN_SUBMISSION else 2 if o.object == 0x3FFFFFFF else 0
+        rules.append((family, o.value - counters[family] if family else 0))
+        if family and o.primitive == signal:
+            counters[family] = o.value
+    return rules
+
+
 def generate(operations, program, observe, point=None):
     total, executions = len(program), 1 + max((operations[i].execution for i in program), default=0)
+    rules = counter_rules(operations, program)
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
     lines += ['self int inrun, inapi, bs;', 'self uint64_t exec, ended, bsob, bsva;', 'int64_t cur;',
               'int64_t e[int64_t], o[int64_t], v[int64_t], x[int64_t], q[int64_t];',
-              'int64_t om[uint64_t], ko[int64_t], lm[uint64_t], kl[int64_t];', 'BEGIN { cur = 0; }']
+              'int64_t om[uint64_t], ko[int64_t], lm[uint64_t], kl[int64_t];',
+              'int64_t family[int64_t], delta[int64_t], eventcount[int64_t];', 'BEGIN { cur = 0; }']
     for start in range(0, total, 64):
         lines.append('BEGIN { %s }' % ' '.join(
             'e[%d] = %d; o[%d] = %d; v[%d] = %d; x[%d] = %d; q[%d] = %d;' % (
                 k, operations[i].primitive, k, operations[i].object, k, operations[i].value, k, operations[i].execution, k,
                 operations[i].processor) for k, i in enumerate(program[start:start + 64], start)))
+    for start in range(0, total, 64):
+        lines.append('BEGIN { %s }' % ' '.join('family[%d] = %d; delta[%d] = %d;' % (k, rules[k][0], k, rules[k][1])
+                                             for k in range(start, min(start + 64, total))))
     lines.append('pid$target::MetalProgramRun:entry { self->inrun = 1; self->exec = arg2; self->ended = arg4; }')
     lines.append('pid$target::MetalProgramRun:return /self->inrun/ { self->inrun = 0; '
                  'printf("mesh-sync-monitor: run %d\\n", (int)arg1); }')
@@ -164,8 +182,7 @@ def generate(operations, program, observe, point=None):
     # a WHILE of no bound (mesh-graph.h MESH_GRAPH_TRIP_TEST, object MESH_GRAPH_LOOP + loop): its compiled signature takes
     # one trip, between the loop's two tests in an execution; a run takes the trips its data gives, so after the second
     # test the walk may return to after the first (another trip) and after the first it may go on after the second (no
-    # trip). Counter-valued objects then carry other values than the compiled ones: values are not checked after such a
-    # step (the run reports it, a scoped observation, not a pass)
+    # trip). Test/commit eventcounts retain their compiled recurrence under that walk (counter_rules).
     trip, wait = PRIMITIVES.index('trip_test'), PRIMITIVES.index('host_wait')
     tests = {}
     for k, i in enumerate(program):
@@ -179,26 +196,27 @@ def generate(operations, program, observe, point=None):
     for start in range(0, len(alt), 64):
         lines.append('BEGIN { %s }' % ' '.join('alt[%d] = %d;' % (k, t + 1) for k, t in sorted(alt.items())[start:start + 64]))
 
-    def match(index, valued):
+    def match(index):
         return ('%s < %d && (e[%s] == this->c || (this->c == %d && e[%s] == %d)) && x[%s] >= self->exec && (!this->hasva || '
                 '%s) && (!this->hasob || ((om[this->ob] == 0 || om[this->ob] == o[%s] + 1) && (ko[o[%s]] == 0 || '
                 'ko[o[%s]] == this->ob + 1))) && (!this->hasln || ((lm[this->ln] == 0 || lm[this->ln] == q[%s] + 1) && '
                 '(kl[q[%s]] == 0 || kl[q[%s]] == this->ln + 1)))' % (
                     index, total, index, wait, index, trip, index,
-                    ('v[%s] == this->va || shifted' % index) if valued else '1', index, index, index, index, index, index))
+                    '(family[%s] ? eventcount[family[%s]] + delta[%s] : v[%s]) == this->va' % (index, index, index, index), index, index, index, index, index, index))
 
     def check(probe, name, obj, val, lane, point, predicate):
         guard = '/this->checked && %s/'
         lines.append('%s%s %s { this->checked = 1; this->c = %d; this->ob = %s; this->hasob = %d; this->va = %s; '
                      'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->ok = %s%s; }' % (
                          probe, point, predicate, PRIMITIVES.index(name), obj or '0', obj is not None, val or '0', val is not None,
-                         lane or '0', lane is not None, match('this->i', True),
+                         lane or '0', lane is not None, match('this->i'),
                          ' && arg1 == 0' if name == 'bridge_start' else ''))
         lines.append('%s %s { this->i = alt[cur] - 1; this->ok = %s%s; shifted = this->ok ? 1 : shifted; }' % (
-            probe + point, guard % '!this->ok && alt[cur]', match('this->i', False),
+            probe + point, guard % '!this->ok && alt[cur]', match('this->i'),
             ' && arg1 == 0' if name == 'bridge_start' else ''))
         lines.append('%s %s { om[this->hasob ? this->ob : 0] = this->hasob ? o[this->i] + 1 : om[0]; '
                      'ko[this->hasob ? o[this->i] : -1] = this->hasob ? this->ob + 1 : ko[-1]; '
+                     'eventcount[family[this->i]] = family[this->i] && this->c == 1 ? this->va : eventcount[family[this->i]]; '
                      'lm[this->hasln ? this->ln : 0] = this->hasln ? q[this->i] + 1 : lm[0]; '
                      'kl[this->hasln ? q[this->i] : -1] = this->hasln ? this->ln + 1 : kl[-1]; cur = this->i + 1; '
                      'printf("mesh-sync-monitor: observed %%d %%d %%d %%d %%d %%d\\n", this->i, this->c, this->hasob ? '
@@ -391,8 +409,7 @@ def main(argv):
     sys.stdout.write(done.stdout)
     sys.stderr.write(done.stderr)
     # the walk: the compiled operation each observed one matched, in order (a WHILE's trips repeat or skip a span of
-    # it). A trip test is observed as the host wait it is (the compiled primitive kept); after a data-dependent trip
-    # count the counter-valued objects' values are not the compiled ones, so they are taken as compiled and reported
+    # it). A trip test is observed as the host wait it is; eventcount operands stay observed values.
     observed, failures, walk, shifted = [], [], [], 0
     trip = PRIMITIVES.index('trip_test')
     for line in done.stdout.splitlines():
@@ -407,7 +424,7 @@ def main(argv):
             c = trip if compiled_op.primitive == trip else c
             observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[c]), c, compiled_op.vertex,
                                                  NONE if obj < 0 else obj, execution,
-                                                 compiled_op.value if value < 0 or shifted else value))
+                                                 compiled_op.value if value < 0 else value))
         if 'mesh-sync-monitor: unexpected' in line:
             failures.append(line)
         m = re.match(r'mesh-sync-monitor: run (-?\d+)$', line)
@@ -422,8 +439,6 @@ def main(argv):
         failures.append('the walk of %d observed operations ended at compiled operation %s of %d'
                         % (len(walk), walk[-1] if walk else None, len(program)))
     blind = {c: n for c, n in coverage.items() if c not in ('program', 'static')}
-    if shifted:
-        blind['values after a data-dependent trip count'] = len(walk)
     if bridge:
         made, missing = bridge_match([i for i, c in enumerate(which) if c == 'bridge'], operations, raised)
         if missing:
@@ -431,8 +446,18 @@ def main(argv):
         blind.pop('bridge', None)
         observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, operations[i].vertex,
                                           operations[i].object, operations[i].execution, count) for i, count in made]
-    expected_ops = [operations[program[k]] for k in (walk if looped else range(len(program)))] + (
-        [operations[i] for i, c in enumerate(which) if c == 'bridge'] if bridge else [])
+    expected_ops, counters = [], [0, 0, 0]
+    rules = counter_rules(operations, program)
+    for k in (walk if looped else range(len(program))):
+        source = operations[program[k]]
+        family, delta = rules[k]
+        value = counters[family] + delta if family else source.value
+        expected_ops.append(mesh_graph.Operation(source.processor, source.primitive, source.vertex, source.object,
+                                                 source.execution, value))
+        if family and source.primitive == PRIMITIVES.index('queue_signal'):
+            counters[family] = value
+    if bridge:
+        expected_ops += [operations[i] for i, c in enumerate(which) if c == 'bridge']
     expected = mesh_graph.signature(processors, tasks, dependences, expected_ops)
     watched = mesh_graph.signature(processors, tasks, dependences, observed)
     if expected['digest'] != watched['digest']:
