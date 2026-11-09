@@ -1558,6 +1558,9 @@ REAL = tuple(SCALAR)
 COMPLEXES = (torch.complex64, torch.complex128)
 FLOATING = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
 INTEGRAL = tuple(dtype for dtype in REAL if dtype not in FLOATING)
+# torch 2.14.0 aten/src/ATen/native/LinearAlgebra.cpp addmm_impl_cpu_ (AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND2(kBFloat16,
+# kHalf)): the contractions' result kinds, every number kind but bool
+CONTRACTED = FLOATING + COMPLEXES + tuple(dtype for dtype in INTEGRAL if dtype is not torch.bool)
 # metal_ir.h: linalg iterator kinds, combiners, starts, precision, placement, Tint core::BinaryOp and core::UnaryOp
 PARALLEL, REDUCTION = 0, 1
 ASSIGN, SUM, REGION = 0, 1, 9
@@ -1782,9 +1785,9 @@ def _temporary(shape, dtype=torch.float32):
 def _typed(target, operands, outs, results=FLOATING):
     found = [value.dtype for value in operands if isinstance(value, torch.Tensor) and value.dtype not in REAL] \
         + [value.dtype for value in outs if value.dtype not in results]
-    if found and found[0].is_complex:
-        raise NotImplementedError('%s of %s: PyTorch 2.14 defines no complex form of it (its CPU kernel admits no '
-                                  'complex type)' % (target, found[0]))
+    if found and (found[0].is_complex or results is CONTRACTED and found[0] is torch.bool):
+        raise NotImplementedError('%s of %s: PyTorch 2.14 defines no form of it for that type (its CPU kernel admits '
+                                  'none)' % (target, found[0]))
     if found:
         raise NotImplementedError('%s of %s: its lowering into the structured basis is unfinished '
                                   '(design/compilation-composition-change-request.md item 1)' % (target, found[0]))
@@ -1962,7 +1965,8 @@ POINTWISE = {A.add: 'add', A.sub: 'sub', A.mul: 'mul', A.div: 'div', A.floor_div
                  'asinh', 'acosh', 'atanh', 'erf', 'atan2', 'reciprocal', 'exp2', 'log2', 'log10', 'log1p', 'expm1',
                  'isnan',
                  'isinf', 'sign', 'maximum', 'minimum', 'fmod', 'remainder', 'bitwise_and', 'bitwise_or', 'bitwise_xor',
-                 'bitwise_not', 'logical_and', 'logical_or', 'logical_xor', 'logical_not')}}
+                 'bitwise_not', 'logical_and', 'logical_or', 'logical_xor', 'logical_not')},
+             A.__and__: 'bitwise_and', A.__or__: 'bitwise_or', A.__xor__: 'bitwise_xor'}
 # PyTorch 2.14 documentation, torch.nn.functional.leaky_relu, hardtanh and elu, and torch.nan_to_num (its infinities'
 # defaults the dtype's finite extremes): their scalar parameters the region's literals, a composition of the pointwise
 # basis
@@ -2585,7 +2589,7 @@ def _contract(out, operands, labels, output, addend=None, alpha=1, beta=0):
     at = {label: d for d, label in enumerate(domain)}
     if out.is_complex():
         return _complex_contract(out, operands, labels, output, sizes, summed, addend, alpha, beta)
-    t = _compute(out.dtype, *[value.dtype for value in operands], torch.float32)
+    t = _compute(out.dtype, *[value.dtype for value in operands], *[torch.float32] * out.dtype.is_floating_point)
     direct = alpha == 1 and (addend is None or beta == 0)
     acc = out if direct else _temporary(out.shape, STORED[t])
     r = _Region()
@@ -2662,11 +2666,11 @@ def _product(target, given, outs):
     packet, (out,) = target.overloadpacket, outs
     if packet is A.addmm:
         c, a, b, alpha, beta = given['self'], given['mat1'], given['mat2'], given['alpha'], given['beta']
-        _typed(target, [], outs, FLOATING + COMPLEXES)
+        _typed(target, [], outs, CONTRACTED)
         return _contract(out, [a, b], [('n', 'k'), ('k', 'm')], ('n', 'm'), c if beta != 0 else None, alpha, beta)
     if packet is A.linear:
         x, w, bias = given['input'], given['weight'], given['bias']
-        _typed(target, [], outs, FLOATING + COMPLEXES)
+        _typed(target, [], outs, CONTRACTED)
         rows, folded = _folded(x), _folded(out)
         if w.dim() == 2 and rows is not None and folded is not None:
             return _matrix(folded, rows, w.t(), bias)
@@ -2674,7 +2678,7 @@ def _product(target, given, outs):
         return _contract(out, [x, w], [lead + ('k',), ('m', 'k')[2 - w.dim():]], lead + ('m',) * (w.dim() == 2), bias,
                          1, int(bias is not None))
     a, b = given['self'], given['mat2'] if packet in (A.mm, A.bmm) else given['other']
-    _typed(target, [], outs, FLOATING + COMPLEXES)
+    _typed(target, [], outs, CONTRACTED)
     if packet is A.mm or packet is A.matmul and a.dim() == b.dim() == 2:
         return _matrix(out, a, b)
     if packet is A.matmul and a.dim() > 2 and b.dim() == 2 and _folded(a) is not None and _folded(out) is not None:
@@ -2693,7 +2697,7 @@ def _product(target, given, outs):
 # result keeping the labels a later operand or the output uses (no product loop over every summed label at once)
 def _summation(target, given, outs):
     (out,), operands = outs, list(given['tensors'])
-    _typed(target, [], outs, FLOATING + COMPLEXES)
+    _typed(target, [], outs, CONTRACTED)
     left, arrow, right = given['equation'].replace(' ', '').partition('->')
     terms = left.split(',')
     covered = max([value.dim() - len(term.replace('...', '')) for term, value in zip(terms, operands) if '...' in term],
@@ -2910,6 +2914,40 @@ def _pooled_backward(target, given, outs):
     r.done(r('select', t, _all(r, tests), r('div', t, g, divisor), r.const(0, t)))
     return [_Generic([*x.shape, *kernel], [(gy, None)], [(gx, _rows(x.dim() + 2, range(x.dim())))], r,
                      [PARALLEL] * x.dim() + [REDUCTION] * 2, [SUM], [t], precision=REASSOCIATE)]
+
+
+# PyTorch 2.14 documentation, torch.nn.AdaptiveMaxPool2d and AdaptiveMaxPool3d (aten/src/ATen/native/cpu
+# AdaptiveMaxPoolKernel.cpp: `(val > maxval) || std::isnan(val)`, the index flat over the spatial plane): the
+# adaptive windows of _adaptive, REGION (value, index) states joined by max pooling's order (_ordered, NaN later), a
+# position past its window's end an absent state
+def _adaptive_max(target, given, outs):
+    (out, indices), x = outs, given['self']
+    _typed(target, [x], outs[:1])
+    sizes = list(given['output_size'])
+    k, t = len(sizes), _class(x)
+    lead = x.dim() - k
+    spans = [-(-x.shape[lead + d] // sizes[d]) + 1 for d in range(k)]
+    r, tests, at = _Region(), [], []
+    for d in range(k):
+        o, n, m = r.index(lead + d), x.shape[lead + d], sizes[d]
+        start = r('div', I32, r('mul', I32, o, r.const(n, I32)), r.const(m, I32))
+        end = r('div', I32, r('add', I32, r('mul', I32, r('add', I32, o, r.const(1, I32)), r.const(n, I32)),
+                                r.const(m - 1, I32)), r.const(m, I32))
+        p = r('add', I32, start, r.index(x.dim() + d))
+        tests.append(r('lt', BOOL, p, end))
+        at.append(r('select', I32, tests[-1], p, start))
+    flat = r.const(0, I32)
+    for d in range(k):
+        flat = r('add', I32, r('mul', I32, flat, r.const(x.shape[lead + d], I32)), at[d])
+    v = r('extract', t, *[r.index(j) for j in range(lead)], *at, integer=0)
+    r.done(v, r('select', I32, _all(r, tests), flat, r.const(-1, I32)))
+    lowest = -math.inf if _floating(t) else torch.iinfo(x.dtype).min
+    states = [(t, lowest), (I32, -1)]
+    omap = _rows(x.dim() + k, range(x.dim()))
+    return [_Generic([*out.shape, *spans], [(x, None)], [(out, omap), (indices, omap)], r,
+                     [PARALLEL] * x.dim() + [REDUCTION] * k, [REGION] * 2, [t, I32], None, states,
+                     _joined(states, lambda c, a, b: _ordered(c, a, b, t, True, True)), _identities(states),
+                     REASSOCIATE)]
 
 
 # PyTorch 2.14 documentation, torch.nn.AdaptiveAvgPool3d (aten/src/ATen/native/AdaptiveAveragePooling3d.cpp,
@@ -3285,13 +3323,16 @@ def _complex_fold(packet, x, out, dims, keepdim):
 def _extreme(target, given, outs):
     packet, x = target.overloadpacket, given['self']
     _typed(target, [x], outs[-1:] if packet in (A.argmax, A.argmin) else outs[:1], REAL)
+    if packet in (A.argmax, A.argmin) and x.dtype is torch.bool:
+        raise NotImplementedError('%s of torch.bool: PyTorch 2.14 defines no bool form of it ("does not support bool '
+                                  'input")' % target)
     larger, dim = packet in (A.argmax, A.max), given.get('dim')
     if not x.dim():
         x = x.view(1)
     d = None if dim is None else dim % x.dim()
     order = list(range(x.dim())) if d is None else _lines(x, d)
     free = 0 if d is None else x.dim() - 1
-    t = _class(x)
+    t = I32 if x.dtype is torch.bool else _class(x)
     r = _Region()
     r.done(_load(r, 0, x, t), _linear(r, x.shape) if d is None else r.index(x.dim() - 1))
     lowest = -math.inf if _floating(t) else 0 if x.dtype is torch.bool else torch.iinfo(x.dtype).min
@@ -3411,6 +3452,7 @@ def _softened(target, given, outs):
 # structured operation over strided views
 def _blelloch(buffers, t, identities, combine):
     buffer, k = buffers[0], len(buffers)
+    kinds = list(t) if isinstance(t, (list, tuple)) else [t] * k
     lead, size = buffer.dim() - 1, buffer.shape[-1]
     levels, ops = size.bit_length() - 1, []
 
@@ -3428,7 +3470,7 @@ def _blelloch(buffers, t, identities, combine):
         r.done(*combine(r, a, b))
         ops.append(_Generic([*buffer.shape[:-1], size >> (d + 1)], inputs, [(x, right) for x in buffers], r))
     r = _Region()
-    r.done(*[r.const(v, t) for v in identities])
+    r.done(*[r.const(v, kind) for v, kind in zip(identities, kinds)])
     ops.append(_Generic([*buffer.shape[:-1]], [], [(x, _rows(lead, [*range(lead), {None: size - 1}])) for x in buffers],
                         r))
     for d in reversed(range(levels)):
@@ -3440,25 +3482,34 @@ def _blelloch(buffers, t, identities, combine):
 
 
 # the inclusive scan of the components xs of x's lines along d into outs: each component padded with its identity to
-# a power-of-two buffer, the exclusive tree scan, each element combined after its prefix
+# a power-of-two buffer, the exclusive tree scan, each element combined after its prefix; a component None the
+# element's position along d (an extremum's index), `t` one kind or each component's
 def _scan(xs, d, outs, t, identities, combine):
-    x = xs[0]
+    x = next(v for v in xs if v is not None)
+    kinds = list(t) if isinstance(t, (list, tuple)) else [t] * len(xs)
     order, n = _lines(x, d), x.dim()
     length = x.shape[d]
     size = 1 << max(length - 1, 0).bit_length()
-    buffers = [_temporary([*[x.shape[j] for j in order[:-1]], size], STORED[t]) for _ in xs]
+    buffers = [_temporary([*[x.shape[j] for j in order[:-1]], size], STORED[kind]) for kind in kinds]
+    tensors = [v for v in xs if v is not None]
     r = _Region()
     inside, at = _bounded(r, r.index(n - 1), length)
     index = [r.index(order.index(j)) if j != d else at for j in range(n)]
-    r.done(*[r('select', t, inside, _convert(r, r('extract', _class(v), *index, integer=q), _class(v), t), r.const(e, t))
-             for q, (v, e) in enumerate(zip(xs, identities))])
-    ops = [_Generic(buffers[0].shape, [(v, None) for v in xs], [(b, _same(n)) for b in buffers], r)]
-    ops += _blelloch(buffers, t, identities, combine)
+
+    slots = iter(range(len(tensors)))
+
+    def element(v, kind):
+        return at if v is None else _convert(r, r('extract', _class(v), *index, integer=next(slots)), _class(v), kind)
+    r.done(*[r('select', kind, inside, element(v, kind), r.const(e, kind)) for v, e, kind in zip(xs, identities, kinds)])
+    ops = [_Generic(buffers[0].shape, [(v, None) for v in tensors], [(b, _same(n)) for b in buffers], r)]
+    ops += _blelloch(buffers, kinds, identities, combine)
     e = _Region()
-    made = combine(e, [e.arg(q, b) for q, b in enumerate(buffers)], [_load(e, len(xs) + q, v, t) for q, v in enumerate(xs)])
-    e.done(*[_store(e, m, t, o) for m, o in zip(made, outs)])
+    own = iter(range(len(buffers), len(buffers) + len(tensors)))
+    made = combine(e, [e.arg(q, b) for q, b in enumerate(buffers)],
+                   [e.index(n - 1) if v is None else _load(e, next(own), v, kind) for v, kind in zip(xs, kinds)])
+    e.done(*[_store(e, m, kind, o) for m, kind, o in zip(made, kinds, outs)])
     xmap = _rows(n, [order.index(j) for j in range(n)])
-    return ops + [_Generic([x.shape[j] for j in order], [(b, _same(n)) for b in buffers] + [(v, xmap) for v in xs],
+    return ops + [_Generic([x.shape[j] for j in order], [(b, _same(n)) for b in buffers] + [(v, xmap) for v in tensors],
                            [(o, xmap) for o in outs], e)]
 
 
@@ -3516,6 +3567,63 @@ def _scanned(target, given, outs):
                  lambda r, a, b: [_log_add_exp(r, t, a[0], b[0]) if op is None else r(op, t, a[0], b[0])])
 
 
+# PyTorch 2.14 documentation, torch.cummax and torch.cummin: the running extremum and its index, the scan of the
+# (value, index) monoid of the later winning ties and a NaN (torch 2.14.0 aten ReduceOps.cpp cummax_cummin_helper:
+# `x >= out || isnan(x)` for cummax, `<=` for cummin), the max of one total order and so associative (Blelloch)
+def _cumulative(target, given, outs):
+    packet, x, (values, indices) = target.overloadpacket, given['self'], outs
+    _typed(target, [x], outs[:1], REAL)
+    d = given['dim'] % max(x.dim(), 1)
+    if not x.dim():
+        x, values, indices, d = x.view(1), values.view(1), indices.view(1), 0
+    t, larger = _compute(values.dtype, x.dtype), packet is A.cummax
+    worst = (-math.inf if larger else math.inf) if _floating(t) else \
+        (torch.iinfo(STORED[t]).min if larger else torch.iinfo(STORED[t]).max) if t != BOOL else int(not larger)
+
+    def combine(c, a, b):
+        win = c('ge' if larger else 'le', BOOL, b[0], a[0])
+        if _floating(t):
+            win = c('or', BOOL, c('isnan', BOOL, b[0]), c('and', BOOL, c('not', BOOL, c('isnan', BOOL, a[0])), win))
+        return [c('select', t, win, b[0], a[0]), c('select', I32, win, b[1], a[1])]
+    return _scan([x, None], d, [values, indices], [t, I32], [worst, -1], combine)
+
+
+# PyTorch 2.14 documentation, torch.searchsorted (and torch.bucketize, its decomposition): each value's insertion
+# point in its sorted line by binary search (D. E. Knuth, TAOCP vol. 3, 6.2.1 Algorithm B), ceil(log2(m + 1)) halvings
+# unrolled in the region, each probe an extraction at the computed midpoint (through `sorter` where given); NaN ordered
+# above every number, as torch's sort orders it (a NaN value's point m)
+def _searched(target, given, outs):
+    (out,), line, x = outs, given['sorted_sequence'], given['self']
+    sorter, right = given.get('sorter'), given.get('right', False) or given.get('side') == 'right'
+    m = line.shape[-1]
+    t = _compute(line.dtype, *([x.dtype] if isinstance(x, torch.Tensor) else []))
+    r, inputs = _Region(), [(line, None)]
+    if sorter is not None:
+        inputs.append((_indexing(sorter), None))
+    lead = [r.index(j) for j in range(out.dim() - 1)] if line.dim() > 1 else []
+    if isinstance(x, torch.Tensor):
+        v = _load(r, len(inputs), x, t)
+        inputs.append((x, _same(out.dim())))
+    else:
+        v = r.const(x, t)
+
+    def less(p, q):
+        if not _floating(t):
+            return r('lt', BOOL, p, q)
+        return r('and', BOOL, r('not', BOOL, r('isnan', BOOL, p)), r('or', BOOL, r('isnan', BOOL, q), r('lt', BOOL, p, q)))
+    lo, hi = r.const(0, I32), r.const(m, I32)
+    for _ in range(m.bit_length()):
+        active = r('lt', BOOL, lo, hi)
+        mid = r('select', I32, active, r('div', I32, r('add', I32, lo, hi), r.const(2, I32)), r.const(0, I32))
+        at = r('extract', I32, *lead, mid, integer=1) if sorter is not None else mid
+        probe = _convert(r, r('extract', _class(line), *lead, at, integer=0), _class(line), t)
+        go = r('not', BOOL, less(v, probe)) if right else less(probe, v)
+        lo = r('select', I32, r('and', BOOL, active, go), r('add', I32, mid, r.const(1, I32)), lo)
+        hi = r('select', I32, r('and', BOOL, active, r('not', BOOL, go)), mid, hi)
+    r.done(_store(r, lo, I32, out))
+    return [_Generic(out.shape, inputs, [(out, _same(out.dim()))], r)]
+
+
 # PyTorch 2.14 documentation, torch.sort and torch.topk: the compiler's one sort expansion (metal_ir.h metal_ir_sort,
 # K. E. Batcher's bitonic network; NaN last ascending, first descending, ties by index), the first k of the order
 class _Sort:
@@ -3533,6 +3641,140 @@ def _ranked(target, given, outs):
     k, descending = (given['k'], given['largest']) if target.overloadpacket is A.topk else \
         (x.shape[d], given['descending'])
     return [_Sort(x, d, k, bool(descending), values, indices)]
+
+
+# PyTorch 2.14 documentation, torch.kthvalue, torch.median and torch.mode: order statistics of each line from its
+# stable ascending sort (_Sort, NaN last): the k-th entry; the median the entry (n - 1) // 2, a line holding a NaN its
+# NaN and the first NaN's index (the max extremum, _extreme); the mode the longest run of equal sorted values (ties the
+# smaller value, the first run) and its last occurrence: run starts by a max scan of the boundary marks (_scan),
+# lengths at the run ends, their first-index argmax (_extreme), the sorted entry there by extraction
+SELECTIONS = (A.kthvalue, A.median, A.nanmedian, A.mode)
+
+
+def _selected(target, given, outs):
+    packet, x, ops = target.overloadpacket, given['self'], []
+    _typed(target, [x], outs[:1], REAL)
+    if packet in (A.median, A.nanmedian) and 'dim' not in given:
+        flat = _temporary([x.numel()], x.dtype)
+        ops, x, d, outs = _copy(flat, x), flat, 0, [outs[0].reshape(()), None]
+    else:
+        d = given.get('dim', -1) % max(x.dim(), 1)
+        x = x.view(1) if not x.dim() else x
+    shaped = [o.squeeze(d) if o is not None and given.get('keepdim') and o.dim() else o for o in outs]
+    t, n = _class(x), x.shape[d]
+    sv, si = _temporary(x.shape, x.dtype), _temporary(x.shape, torch.int64)
+    ops += [_Sort(x, d, n, False, sv, si)]
+
+    def picked(values, indices, nan=None):
+        r, inputs = _Region(), [(values, _same(values.dim())), (indices, _same(values.dim()))]
+        made = [_load(r, 0, values, t), _load(r, 1, indices, I64)]
+        if nan is not None:
+            inputs += [(nan[0], _same(values.dim())), (nan[1], _same(values.dim()))]
+            top, where = _load(r, 2, nan[0], t), _load(r, 3, nan[1], I64)
+            hit = r('isnan', BOOL, top)
+            made = [r('select', t, hit, top, made[0]), r('select', I64, hit, where, made[1])]
+        results = [_store(r, made[0], t, shaped[0])] + ([_store(r, made[1], I64, shaped[1])] if shaped[1] is not None
+                                                        else [])
+        outputs = [(o, _same(values.dim())) for o in shaped if o is not None]
+        r.done(*results)
+        return [_Generic(values.shape, inputs, outputs, r)]
+    if packet is A.kthvalue:
+        return ops + picked(sv.select(d, given['k'] - 1), si.select(d, given['k'] - 1))
+    if packet is A.nanmedian and _floating(t):
+        return ops + _ranked_at(x, d, sv, si, shaped, t)
+    if packet in (A.median, A.nanmedian):
+        k = (n - 1) // 2
+        if not _floating(t):
+            return ops + picked(sv.select(d, k), si.select(d, k))
+        lines = list(sv.select(d, k).shape)
+        top, where = _temporary(lines, x.dtype), _temporary(lines, torch.int64)
+        ops += _extreme(A.max.dim, {'self': x, 'dim': d, 'keepdim': False}, [top, where])
+        return ops + picked(sv.select(d, k), si.select(d, k), (top, where))
+    order, m = _lines(x, d), x.dim()
+    marks, starts, counts = (_temporary(x.shape, torch.int32) for _ in range(3))
+    smap = _rows(m, [order.index(j) for j in range(m)])
+
+    def neighbour(r, shift):
+        inside, at = _bounded(r, r('add', I32, r.index(m - 1), r.const(shift, I32)), n)
+        other = r('extract', t, *[r.index(order.index(j)) if j != d else at for j in range(m)], integer=0)
+        return r('and', BOOL, inside, r('eq', BOOL, other, r.arg(1, sv)))
+    r = _Region()
+    r.done(r('select', I32, neighbour(r, -1), r.const(-1, I32), r.index(m - 1)))
+    ops.append(_Generic([x.shape[j] for j in order], [(sv, None), (sv, smap)], [(marks, smap)], r))
+    ops += _scan([marks], d, [starts], I32, [-1], lambda c, a, b: [c('select', I32, c('ge', BOOL, b[0], a[0]), b[0], a[0])])
+    r = _Region()
+    length = r('add', I32, r('sub', I32, r.index(m - 1), r.arg(2, starts)), r.const(1, I32))
+    r.done(r('select', I32, neighbour(r, 1), r.const(0, I32), length))
+    ops.append(_Generic([x.shape[j] for j in order], [(sv, None), (sv, smap), (starts, smap)], [(counts, smap)], r))
+    lines = [x.shape[j] for j in order[:-1]]
+    best, end = _temporary(lines, torch.int32), _temporary(lines, torch.int64)
+    ops += _extreme(A.max.dim, {'self': counts, 'dim': d, 'keepdim': False}, [best, end])
+    r = _Region()
+    at = _convert(r, r.arg(2, end), I64, I32)
+    coords = [r.index(j if j < d else j - 1) if j != d else at for j in range(m)]
+    r.done(_store(r, r('extract', t, *coords, integer=0), t, shaped[0]),
+           _store(r, _convert(r, r('extract', I32, *coords, integer=1), I32, I64), I64, shaped[1]))
+    return ops + [_Generic(shaped[0].shape, [(sv, None), (_indexing(si), None), (end, _same(len(lines)))],
+                           [(shaped[0], _same(len(lines))), (shaped[1], _same(len(lines)))], r)]
+
+
+# PyTorch 2.14 documentation, torch.nanmedian: the lower median of a line's c numbers, the sorted entry
+# max((c - 1) // 2, 0) (NaN last, so an all-NaN line its first NaN), c one SUM of the line's numbers, the entry by
+# extraction at that computed position
+def _ranked_at(x, d, sv, si, shaped, t):
+    order, m = _lines(x, d), x.dim()
+    lines = [x.shape[j] for j in order[:-1]]
+    count = _temporary(lines, torch.int32)
+    loops, iterators, xmap, omap = _reducing(x, [d])
+    r = _Region()
+    r.done(_convert(r, r('not', BOOL, r('isnan', BOOL, _load(r, 0, x, t))), BOOL, I32))
+    ops = [_Generic(loops, [(x, xmap)], [(count, omap)], r, iterators, [SUM], [I32])]
+    r = _Region()
+    half = r('div', I32, r('sub', I32, r.arg(2, count), r.const(1, I32)), r.const(2, I32))
+    at = r('select', I32, r('lt', BOOL, half, r.const(0, I32)), r.const(0, I32), half)
+    coords = [r.index(j if j < d else j - 1) if j != d else at for j in range(m)]
+    results = [_store(r, r('extract', t, *coords, integer=0), t, shaped[0])]
+    outputs = [(shaped[0], _same(len(lines)))]
+    if shaped[1] is not None:
+        results.append(_store(r, _convert(r, r('extract', I32, *coords, integer=1), I32, I64), I64, shaped[1]))
+        outputs.append((shaped[1], _same(len(lines))))
+    r.done(*results)
+    return ops + [_Generic(lines, [(sv, None), (_indexing(si), None), (count, _same(len(lines)))], outputs, r)]
+
+
+# PyTorch 2.14 documentation, torch.histc (torch 2.14.0 aten SummaryOps.cpp histogramdd and histc: min == max takes
+# the data's extremes, still equal widens them by 1; pos = (x - min) / (max - min) bins, max into the last bin, NaN and
+# outside [min, max] left out): each element's bin, then the counts by the scatter-add reduction (_scatter), an element
+# left out at bin `bins`, which no output position matches
+def _histogram(target, given, outs):
+    (out,), x, bins = outs, given['self'], given['bins']
+    _typed(target, [x], outs)
+    t = _compute(out.dtype, x.dtype, torch.float32)
+    low, high, ops = float(given['min']), float(given['max']), []
+    r, inputs = _Region(), [(x, _same(x.dim()))]
+    v = _load(r, 0, x, t)
+    if low == high:
+        extremes = [_temporary([], STORED[t]) for _ in range(2)]
+        every = list(range(x.dim()))
+        ops += [_reduction(A.amin, x, every, extremes[0], t), _reduction(A.amax, x, every, extremes[1], t)]
+        lo, hi = (_load(r, 1 + j, e, t) for j, e in enumerate(extremes))
+        inputs += [(e, _rows(x.dim(), [])) for e in extremes]
+    else:
+        lo, hi = r.const(low, t), r.const(high, t)
+    same = r('eq', BOOL, lo, hi)
+    lo = r('select', t, same, r('sub', t, lo, r.const(1, t)), lo)
+    hi = r('select', t, same, r('add', t, hi, r.const(1, t)), hi)
+    scaled = r('mul', t, r('div', t, r('sub', t, v, lo), r('sub', t, hi, lo)), r.const(bins, t))
+    position = _convert(r, r('trunc', t, scaled), t, I32)
+    position = r('select', I32, r('eq', BOOL, position, r.const(bins, I32)), r.const(bins - 1, I32), position)
+    inside = r('and', BOOL, r('ge', BOOL, v, lo), r('le', BOOL, v, hi))
+    r.done(r('select', I32, inside, position, r.const(bins, I32)))
+    index = _temporary([x.numel()], torch.int32)
+    ops.append(_Generic(x.shape, inputs, [(index.view(x.shape), _same(x.dim()))], r))
+    zeros = _temporary([bins], out.dtype)
+    ops += _fill(zeros, 0)
+    targets = [(index.as_strided([bins, x.numel()], [0, 1], 0), 0, bins, [0], [1])]
+    return ops + _scatter(out, zeros, 1.0, targets, [x.numel()], [bins], [0], [0], SCATTERS['sum'], True)
 
 
 # PyTorch 2.14 documentation, torch.nn.LayerNorm, torch.nn.GroupNorm and torch.nn.BatchNorm2d; torch 2.14.0
@@ -4010,6 +4252,29 @@ def _random(target, given, outs):
     return [_Generic(out.shape, inputs, [(out, _same(out.dim()))], r)]
 
 
+# PyTorch 2.14 documentation, torch.nn.RReLU (B. Xu, N. Wang, T. Chen and M. Li, Empirical evaluation of rectified
+# activations in convolutional network, arXiv:1505.00853, 2015): training, an element x <= 0 its slope a Philox draw
+# a ~ U(lower, upper), out = a x and noise = a, other elements x and 1; evaluation, the slope (lower + upper) / 2, the
+# noise passed through (torch 2.14.0 aten rrelu_with_noise_functional)
+def _rrelu(target, given, outs):
+    x, noise, lower, upper = given['self'], given['noise'], float(given['lower']), float(given['upper'])
+    (out, kept), same = outs, _same(outs[0].dim())
+    _typed(target, [x, noise], outs)
+    t = _compute(out.dtype, x.dtype, torch.float32)
+    r, inputs = _Region(), [(x, same)]
+    v = _load(r, 0, x, t)
+    if not given['training']:
+        made = r('select', t, r('ge', BOOL, v, r.const(0, t)), v, r('mul', t, v, r.const((lower + upper) / 2, t)))
+        r.done(_store(r, made, t, out))
+        return [_Generic(out.shape, inputs, [(out, same)], r)] + _copy(kept, noise)
+    drawn = _convert(r, _uniform(r, _draws(r, out, inputs)[0]), F32, t)
+    slope = r('add', t, r.const(lower, t), r('mul', t, drawn, r.const(upper - lower, t)))
+    low = r('le', BOOL, v, r.const(0, t))
+    r.done(_store(r, r('select', t, low, r('mul', t, v, slope), v), t, out),
+           _store(r, r('select', t, low, slope, r.const(1, t)), t, kept))
+    return [_Generic(out.shape, inputs, [(out, same), (kept, same)], r)]
+
+
 # the generator's advance: its execution word incremented once an execution, after the program's draws
 def _stepped(state):
     r = _Region()
@@ -4189,11 +4454,14 @@ def _interpreted(module, given):
         elif node.op == 'call_function':
             args, kwargs = map_arg((node.args, node.kwargs), env.__getitem__)
             local = Local(node.op, node.target, args, kwargs)
+            if node.target in SYMBOLIC and not any(isinstance(a, torch.Tensor) for a in args):
+                env[node] = node.target(*args)
+                continue
             if _aliases(local):
                 env[node] = _call(local, args, kwargs)
                 continue
             made, spec = pytree.tree_flatten(node.meta['val'])
-            outs = [torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device='meta') for m in made]
+            outs = [_held(m) for m in made]
             ops += _lowering(local)(args, kwargs, outs)
             env[node] = pytree.tree_unflatten(outs, spec)
         elif node.op == 'output':
@@ -4249,7 +4517,7 @@ def _iterated(target, args, kwargs, outs):
     test, body, carried, additional = args
     flag, ops = _temporary([], torch.int32), []
     for out, value in zip(outs, carried):
-        ops += _copy(out, value)
+        ops += _copy(out, value) if isinstance(value, torch.Tensor) else _fill(out, value)
 
     def tested():
         made, (verdict,) = _interpreted(test, [*outs, *additional])
@@ -4257,8 +4525,28 @@ def _iterated(target, args, kwargs, outs):
     ops += tested()
     made, results = _interpreted(body, [*outs, *additional])
     for out, value in zip(outs, results):
-        made += _copy(out, value)
-    return ops + [_Control(WHILE, [made + tested()], flag)]
+        made += _copy(out, value) if isinstance(value, torch.Tensor) else _fill(out, value)
+    return ops + [_Control(WHILE, [made + tested()], flag, _trips(test, body, carried, additional))]
+
+
+# N. D. Jones, C. K. Gomard and P. Sestoft, Partial Evaluation and Automatic Program Generation, 1993, Definition 4.1:
+# a loop whose test reads only static scalars (the carried Python numbers and what the body computes from them) has
+# its trip count computed at compilation, the WHILE's known `bound`; a test reading tensor data, 0 (none known)
+def _trips(test, body, carried, additional):
+    if all(isinstance(v, torch.Tensor) for v in carried):
+        return 0
+    state, trips = list(carried), 0
+    try:
+        while True:
+            verdict = torch.fx.Interpreter(test).run(*state, *additional)
+            if isinstance(verdict, torch.Tensor):
+                return 0
+            if not verdict:
+                return trips
+            results = torch.fx.Interpreter(body).run(*state, *additional)
+            state, trips = [r if not isinstance(c, torch.Tensor) else c for r, c in zip(results, carried)], trips + 1
+    except (RuntimeError, NotImplementedError, TypeError):
+        return 0
 
 # design/torch-source-lowering-change-request.md item 1; design/compilation-composition-change-request.md, "Complete
 # replacement workgroup": each call's structured operations, a view's materialization its copy
@@ -4281,7 +4569,10 @@ SOURCES = {**dict.fromkeys(POINTWISE, _arithmetic), **dict.fromkeys((A.clone, A.
            A._adaptive_avg_pool3d: _adaptive, A.masked_scatter: _masked, A.randperm: _permuted,
            A._embedding_bag: _bagged, A._cdist_forward: _distances, A._adaptive_avg_pool2d_backward: _adaptive_backward,
            A._pdist_forward: _paired, **dict.fromkeys(COMPLEX, _complexed),
-           **dict.fromkeys((A._fft_r2c, A._fft_c2r, A._fft_c2c), _transformed)}
+           **dict.fromkeys((A._fft_r2c, A._fft_c2r, A._fft_c2c), _transformed),
+           A.rrelu_with_noise_functional: _rrelu, A.cummax: _cumulative, A.cummin: _cumulative,
+           A.searchsorted: _searched, **dict.fromkeys(SELECTIONS, _selected),
+           A.adaptive_max_pool2d: _adaptive_max, A.adaptive_max_pool3d: _adaptive_max, A.histc: _histogram}
 # PyTorch 2.14 documentation, Tensor Views
 VIEWS = {A.as_strided, A.detach, A.diagonal, A.expand, A.expand_as, A.movedim, A.narrow, A.permute, A.select,
          A.squeeze, A.transpose, A.t, A.adjoint, A.real, A.imag, A.view_as_real, A.unflatten, A.unfold, A.unsqueeze,
@@ -4323,8 +4614,19 @@ def _lifted(target, lower, given, outs):
     return ops
 
 
+# Python's operator module on a held scalar (torch.fx symbolic arithmetic of SymInt/SymBool/SymFloat): the pointwise
+# operation of the same semantics (floor division and modulo as Python's, torch.floor_divide and torch.remainder)
+SYMBOLIC = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', operator.truediv: 'div',
+            operator.floordiv: 'floordiv', operator.mod: 'remainder', operator.neg: 'neg', operator.lt: 'lt',
+            operator.le: 'le', operator.gt: 'gt', operator.ge: 'ge', operator.eq: 'eq', operator.ne: 'ne',
+            operator.and_: 'logical_and', operator.or_: 'logical_or', operator.not_: 'logical_not',
+            torch.sym_not: 'logical_not'}
+
+
 def _lowering(local):
     packet = getattr(local.target, 'overloadpacket', local.target)
+    if local.target in SYMBOLIC:
+        return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)
     if packet in LINEAR:
         def lifted(args, kwargs, outs):
             given = _operands(local.target, args, kwargs)
@@ -4524,7 +4826,17 @@ def _called(ir, key, operands, local, form, placed):
 def _made(ir, key, local, args, kwargs):
     made, spec = pytree.tree_flatten(_call(local, args, kwargs) if isinstance(local.target, torch._ops.OpOverload)
                                      else key[0].meta['val'])
-    return [torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device='meta') for m in made], spec
+    return [_held(m) for m in made], spec
+
+
+# torch/__init__.py SymInt, SymBool and SymFloat (Python int, bool and float semantics): a scalar a higher-order
+# operator carries, its 0-d value in the program (int64, bool, float64)
+def _held(m):
+    if isinstance(m, torch.Tensor):
+        return torch.empty_strided(m.shape, m.stride(), dtype=m.dtype, device='meta')
+    kind = torch.bool if isinstance(m, (bool, torch.SymBool)) else \
+        torch.int64 if isinstance(m, (int, torch.SymInt)) else torch.float64
+    return torch.empty((), dtype=kind, device='meta')
 
 
 # OpenXLA operation semantics, CollectivePermute; MPICH alltoall_intra_pairwise.c, MPIR_Localcopy
@@ -4885,13 +5197,12 @@ MACHINES = []
 
 
 # Roofline (S. Williams, A. Waterman and D. Patterson, CACM 52(4), 2009, §3) operands of this node's resources, the
-# configuration's record (rdma/mesh-metal.h mesh_metal_machines over etc/mesh-capacity.json), read once; ENOENT: no
-# record of this node's model, so no estimate
+# configuration's record (rdma/mesh-metal.h mesh_metal_machines, no path: the etc/mesh-capacity.json of the mesh
+# checkout whose libmesh the process loaded), read once; ENOENT: no record of this node's model, so no estimate
 def _machines():
     if not MACHINES:
         gpu, cpu = mesh_graph.Machine(), mesh_graph.Machine()
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'etc', 'mesh-capacity.json')
-        status = _transport().mesh_metal_machines(path.encode(), C.byref(gpu), C.byref(cpu))
+        status = _transport().mesh_metal_machines(None, C.byref(gpu), C.byref(cpu))
         if status not in (0, errno.ENOENT):
             mesh.check(status)
         MACHINES.append({GPU: gpu, CPU: cpu} if status == 0 else {})
@@ -5090,27 +5401,6 @@ def _actors(programs, irs):
             host[0] += spent
         made[k] = host, work, edges, parts.value, count.value, complete
     return made
-
-# S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE TSP 45(6), 1997, §4.3 (6), as mesh_plan derives it
-# (mesh-collective.h mesh_plan, mesh-graph.h mesh_graph_buffer_bound): the calls' parts in call order at this node,
-# each call's edges offset into that order, the largest buffer bound the executions in flight A10's bound spans; no
-# part of any time (no machine record): one
-def _bound(actors, calls):
-    host, work, local = [], [], []
-    for f in calls:
-        if f in actors:
-            h, w, e, parts, count, _ = actors[f]
-            local.append((len(host), parts, [(d.source, d.sink, d.delay) for d in e[:count]]))
-            host += list(h[:parts])
-            work += list(w[:parts])
-    total = len(host)
-    if not total or not any(host) and not any(work):
-        return 1
-
-    def vertex(v, before, parts):
-        return before + v if v < parts else total + before + v - parts
-    edges = [(vertex(a, before, parts), vertex(b, before, parts), d) for before, parts, made in local for a, b, d in made]
-    return max(max(mesh_graph.buffer_bound(host, work, edges)), 1)
 
 # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; metal_recording.h levels: and
 # values:level:into:: each row's schedule's lifetimes, a plan value's interval the union of its calls' (every call an
@@ -5408,9 +5698,8 @@ def _commutes(module, k):
 # design/aot-compilation-change-request.md A10, "Its bound", and appendix item 6; A. J. Bernstein, Analysis of programs
 # for parallel processing, IEEE Trans. Electronic Computers EC-15(5), 1966; Rinard and Diniz, section 2; R. P. Dilworth,
 # Annals of Math., 1950; D. R. Fulkerson, Proc. AMS, 1956; `sources[j]` call j's flat input leaves' producers,
-# `every[f]` the block's calls of function f
-# (_Export), `horizon` the block executions the program issues ahead
-def _analyse(gm, of, compiled, sources, every, horizon):
+# `every[f]` the block's calls of function f (_Export)
+def _analyse(gm, of, compiled, sources, every):
     modules = [record.function.module for record in compiled]
     nodes = list(gm.graph.nodes)
     callee = {node: of.get(node) for node in nodes}
@@ -5463,12 +5752,13 @@ def _analyse(gm, of, compiled, sources, every, horizon):
     for j, c in enumerate(label):
         least.setdefault(c, j)
     head = [least[c] for c in label]
-    # A10, "Its bound": the most calls of a function outstanding at once is the width (Dilworth and Fulkerson,
-    # mesh_graph.width) of its calls in the order the program issues them over its `horizon` block executions:
-    # vertices (b, j), b < horizon; inside a block A10's pairs and each chain's successive calls; across blocks each
-    # closed chain's (two calls or more, or calls writing persistent state) last call of block b before its first of
-    # block b + 1, as mesh_plan closes chains; that order's transitive closure by mesh_graph.closure. Storage for the
-    # executions in flight is mesh_plan's from `horizon` (plan_unroll), not this bound
+    # A10, "Its bound": "The traced block is finite, so each function has finitely many calls in it", the most of them
+    # outstanding at once "the number of its calls in the block, or fewer where Bernstein's conditions order them": the
+    # width (Dilworth and Fulkerson, mesh_graph.width) of a function's calls in the block under A10's pairs and each
+    # chain's successive calls, that order's transitive closure by mesh_graph.closure. No clause extends this bound
+    # across blocks; the block executions in flight and a host-written value's locations are item 2's Bff(e)
+    # (design/torch-capture-change-request.md item 2 and its 2026-11-09 source), which mesh_plan derives from each
+    # Function's t(v) (_actors), planned.horizon
     members = {}
     for j, h in enumerate(head):
         members.setdefault(h, []).append(j)
@@ -5476,14 +5766,10 @@ def _analyse(gm, of, compiled, sources, every, horizon):
     for chain in members.values():
         for a, b in zip(chain, chain[1:]):
             before[b].add(a)
-    closed = {h: chain[-1] for h, chain in members.items()
-              if len(chain) > 1 or any(compiled[callee[calls[j]]].written for j in chain)}
-    unrolled = [(b, j) for b in range(horizon) for j in range(len(calls))]
-    after = mesh_graph.closure(unrolled, lambda v: [(v[0], a) for a in before[v[1]]] +
-                               ([(v[0] - 1, closed[v[1]])] if v[0] and v[1] in closed else []))
+    after = mesh_graph.closure(range(len(calls)), lambda j: before[j])
     outstanding = {}
     for f in every:
-        mine = [v for v in unrolled if callee[calls[v[1]]] == f]
+        mine = [j for j in range(len(calls)) if callee[calls[j]] == f]
         outstanding[f] = mesh_graph.width(mine, lambda a: [x for x in mine if a in after[x]])
     return Calls(outstanding, (mesh.U * max(2 * len(pairs), 1))(*[j for pair in pairs for j in pair]),
                  (mesh.U * max(len(pairs), 1))(*[mesh.ORDER_CONFLICT if pair in conflicts else mesh.ORDER_FLOW
@@ -5690,9 +5976,9 @@ class _Export(torch.fx.Interpreter):
 # design/aot-compilation-change-request.md A1 to A3, A8 to A10 and appendix item 7;
 # design/disjoint-pages-change-request.md C3.1, D.3.2 and D.3.3; mesh-collective.h mesh_plan, struct mesh_function and
 # struct mesh_value; mesh-dataflow.h mesh_nodes_read, mesh_retire and struct mesh_ctx
-# The executions in flight are derived, not given: mesh_plan's Bff over the calls' compiled parts (planned.horizon, the
-# native program's lag through MetalProgramHorizon, sizing its allocators, copies and input waits); A10's outstanding
-# bound is the width of each function's calls over that many block executions (_analyse over _bound)
+# Two quantities, two owners: A10's outstanding bound, the width of each function's calls in the one traced block
+# (_analyse); the executions in flight, item 2's Bff(e) that mesh_plan derives from each Function's t(v) (planned.horizon,
+# the native program's lag through MetalProgramHorizon, sizing its allocators, copies and input waits); neither given
 def program(block, *example_inputs):
     tracer = Tracer()
     graph = tracer.trace(block)
@@ -5725,10 +6011,10 @@ def program(block, *example_inputs):
     context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0, 'horizon': 1,
                                   'inputs': [None] * len(given), 'timeout': None, 'replay': None, 'owned': {}}
 
-    def make():
-        deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
-        if state['mapping'] is not None or state['owned']:
-            _retire(context, state)
+    # design/aot-compilation-change-request.md A1 ("serialized objects we can resume without needing to repeatedly
+    # re-compile anything"): the compilation's results at this node (_built), what an artifact retains, and what plan,
+    # placement and binding derive from them each time (_bound)
+    def _built():
         nodes, header = mesh.Nodes(), mesh.Header.from_address(context.M)
         mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
         page = header.pgsz * header.block
@@ -5769,89 +6055,101 @@ def program(block, *example_inputs):
         # design/torch-capture-change-request.md item 9: "every node runs its captured program by replay, its
         # collectives included"; design/aot-compilation-change-request.md, appendix item 6
         # design/compilation-composition-change-request.md item 5
+        # design/compilation-composition-change-request.md, "Complete replacement workgroup", 6's stages A to C:
+        # each call's program declared, lowered and prepared, its schedule's lifetimes the plan's operands
+        programs = _programs(context, irs, compiled, gm, of, constants, holders, state['owned'], calls)
+        own = _lifetimes(programs, irs)
+        # metal_recording.h place:step:; the later passes: each function's step word, its rows' plan execution
+        # e = b every + ordinal, which the native program writes before row execution e; lag copies
+        # (mesh-collective.c plan copies of a lagged value), horizon every of them, so each of the horizon block
+        # executions in flight owns copy e mod copies; 8 bytes, e's 64 bits as the host's executions,
+        # generations and count targets are
+        steps = {}
+        for k in dict.fromkeys(row['k'] for row in programs['rows'] if row['builder'] is not None):
+            steps[k] = len(irs[k].values) + len(own[k])
+            own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION, lag=1, run=1))
+        arrays = [((mesh.Declared * len(ir.declared))(*ir.declared),
+                   (mesh.Weight * len(ir.weights))(*ir.weights),
+                   (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
+                   (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir, mine in zip(irs, own)]
+        # design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: each function's t(v) at this
+        # node part by part (_actors), mesh_plan's Bff of their edges the horizon and host copies
+        # (mesh-graph.h mesh_graph_actor_time ENODATA: a time over the measured operands alone, a lower bound the
+        # plan keeps; the functions whose estimate is such a bound reported as `incomplete`, never a zero cost)
+        actors = _actors(programs, irs)
+        state['incomplete'] = sorted(k for k, actor in actors.items() if not actor[5])
+        analysed = _analyse(gm, of, compiled, sources, every)
+        return {'nodes': nodes, 'page': page, 'irs': irs, 'holders': holders, 'programs': programs, 'steps': steps,
+                'arrays': arrays, 'actors': actors, 'analysed': analysed}
+
+    def _bound(retained, deadline):
+        nodes, page, irs, programs = retained['nodes'], retained['page'], retained['irs'], retained['programs']
+        steps, arrays, actors, analysed = retained['steps'], retained['arrays'], retained['actors'], retained['analysed']
+        functions = (mesh.Function * len(irs))(*[
+            mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
+                          C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
+                          len(e), 0, analysed.outstanding[k], 0,
+                          *((C.cast(actors[k][0], C.POINTER(C.c_double)), C.cast(actors[k][1], C.POINTER(C.c_double)),
+                             C.cast(actors[k][2], C.POINTER(mesh_graph.Dependence)), actors[k][3], actors[k][4])
+                            if k in actors else (None, None, None, 0, 0)))
+            for k, (d, w, v, e) in enumerate(arrays)])
+        # design/compilation-composition-change-request.md item 6, unit 6D: the plan's results for native
+        # preparation (mesh-collective.h struct mesh_planned), each call's plan, lead, ordinal and every the
+        # identities the specialization and the program's rows take, kept until the program is retired
+        planned = mesh.Planned()
+        mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
+                                      (mesh.U * len(calls))(*calls), len(calls), analysed.orders,
+                                      analysed.causes, analysed.norders, analysed.chains, deadline,
+                                      C.byref(planned)))
+        state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
+        state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
+        # JGroups ViewId.java
+        views = [mesh.State.from_address(context.M + f.plan) for f in functions]
+        if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
+            raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
+        listed = [values for _, _, values, _ in arrays]
+        # 6's stage D: the plan's transport words into each row's program, then its final emission
+        made = _finalized(programs, context, irs, planned, listed, state['owned'])
+        view, addresses = _mapped(context, functions, len(irs), listed, page)
+        state['mapping'].view, hull = view, _hull(listed, addresses, page)
+        buffer = _placed_buffer(hull)
         try:
-            # design/compilation-composition-change-request.md, "Complete replacement workgroup", 6's stages A to C:
-            # each call's program declared, lowered and prepared, its schedule's lifetimes the plan's operands
-            programs = _programs(context, irs, compiled, gm, of, constants, holders, state['owned'], calls)
-            own = _lifetimes(programs, irs)
-            # metal_recording.h place:step:; the later passes: each function's step word, its rows' plan execution
-            # e = b every + ordinal, which the native program writes before row execution e; lag copies
-            # (mesh-collective.c plan copies of a lagged value), horizon every of them, so each of the horizon block
-            # executions in flight owns copy e mod copies; 8 bytes, e's 64 bits as the host's executions,
-            # generations and count targets are
-            steps = {}
-            for k in dict.fromkeys(row['k'] for row in programs['rows'] if row['builder'] is not None):
-                steps[k] = len(irs[k].values) + len(own[k])
-                own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION, lag=1, run=1))
-            arrays = [((mesh.Declared * len(ir.declared))(*ir.declared),
-                       (mesh.Weight * len(ir.weights))(*ir.weights),
-                       (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
-                       (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir, mine in zip(irs, own)]
-            # design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: each function's t(v) at this
-            # node part by part (_actors), mesh_plan's Bff of their edges the horizon and host copies
-            # (mesh-graph.h mesh_graph_actor_time ENODATA: a time over the measured operands alone, a lower bound the
-            # plan keeps; the functions whose estimate is such a bound reported as `incomplete`, never a zero cost)
-            actors = _actors(programs, irs)
-            state['incomplete'] = sorted(k for k, actor in actors.items() if not actor[5])
-            analysed = _analyse(gm, of, compiled, sources, every, _bound(actors, calls))
-            functions = (mesh.Function * len(irs))(*[
-                mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
-                              C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
-                              len(e), 0, analysed.outstanding[k], 0,
-                              *((C.cast(actors[k][0], C.POINTER(C.c_double)), C.cast(actors[k][1], C.POINTER(C.c_double)),
-                                 C.cast(actors[k][2], C.POINTER(mesh_graph.Dependence)), actors[k][3], actors[k][4])
-                                if k in actors else (None, None, None, 0, 0)))
-                for k, (d, w, v, e) in enumerate(arrays)])
-            # design/compilation-composition-change-request.md item 6, unit 6D: the plan's results for native
-            # preparation (mesh-collective.h struct mesh_planned), each call's plan, lead, ordinal and every the
-            # identities the specialization and the program's rows take, kept until the program is retired
-            planned = mesh.Planned()
-            mesh.check(mesh.LIB.mesh_plan(C.byref(context), _group(), _program(), functions, len(irs),
-                                          (mesh.U * len(calls))(*calls), len(calls), analysed.orders,
-                                          analysed.causes, analysed.norders, analysed.chains, deadline,
-                                          C.byref(planned)))
-            state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
-            state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
-            # JGroups ViewId.java
-            views = [mesh.State.from_address(context.M + f.plan) for f in functions]
-            if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
-                raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
-            listed = [values for _, _, values, _ in arrays]
-            # 6's stage D: the plan's transport words into each row's program, then its final emission
-            made = _finalized(programs, context, irs, planned, listed, state['owned'])
-            view, addresses = _mapped(context, functions, len(irs), listed, page)
-            state['mapping'].view, hull = view, _hull(listed, addresses, page)
-            buffer = _placed_buffer(hull)
-            try:
-                bound = [_bind(ir, values, at, buffer, hull.address, page, state['mapping'])
-                         for ir, values, at in zip(irs, listed, addresses)]
-                state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
-                # 6's stage E: each row bound to its placed storage and replayed into the one native program, its
-                # outputs specialized over the program's horizon
-                state['replay'] = _replays(programs, context, irs, planned, listed, addresses, hull.address, buffer,
-                                           bound, state['owned'], made, steps, every)
-                state['horizon'] = state['replay']['horizon']
-                state['replay'].update(outputs=_specialize(programs, state['horizon'], bound, gm, constants,
-                                                           state['inputs'], every))
-            finally:
-                if buffer:
-                    PUT(buffer, SELECTOR[b'release'])
-            # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5; Megatron-LM
-            # core_r0.12.0 megatron/core/tensor_parallel/layers.py:156–165; design/problems-of-14b9a757-change-
-            # request.md, "Sources for the second stops", 8, and "Sources for the third stops", 8;
-            # design/torch-source-lowering-change-request.md item 1
-            launched = False
-            for ir, (places, _, _, _) in zip(irs, bound):
-                loaded = ir.loads & places.keys()
-                needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
-                host = mesh_graph.forward([key for key in ir.attributes if key in needed],
-                                          lambda key: ir.attributes[key][1],
-                                          lambda key, values: _hosted(ir, ir.attributes[key], values))
-                for key in loaded:
-                    places[key][0].copy_(host[key])
-                    launched = launched or places[key][0].device.type == 'mps'
-            if launched:
-                torch.mps.synchronize()
+            bound = [_bind(ir, values, at, buffer, hull.address, page, state['mapping'])
+                     for ir, values, at in zip(irs, listed, addresses)]
+            state['inputs'] = [next((b[2][i] for b in bound if i in b[2]), None) for i in range(len(given))]
+            # 6's stage E: each row bound to its placed storage and replayed into the one native program, its
+            # outputs specialized over the program's horizon
+            state['replay'] = _replays(programs, context, irs, planned, listed, addresses, hull.address, buffer,
+                                       bound, state['owned'], made, steps, every)
+            state['horizon'] = state['replay']['horizon']
+            state['replay'].update(outputs=_specialize(programs, state['horizon'], bound, gm, constants,
+                                                       state['inputs'], every))
+        finally:
+            if buffer:
+                PUT(buffer, SELECTOR[b'release'])
+        # torch 2.14.0 torch/export/exported_program.py, ExportedProgram; GSPMD section 4.5; Megatron-LM
+        # core_r0.12.0 megatron/core/tensor_parallel/layers.py:156–165; design/problems-of-14b9a757-change-
+        # request.md, "Sources for the second stops", 8, and "Sources for the third stops", 8;
+        # design/torch-source-lowering-change-request.md item 1
+        launched = False
+        for ir, (places, _, _, _) in zip(irs, bound):
+            loaded = ir.loads & places.keys()
+            needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
+            host = mesh_graph.forward([key for key in ir.attributes if key in needed],
+                                      lambda key: ir.attributes[key][1],
+                                      lambda key, values: _hosted(ir, ir.attributes[key], values))
+            for key in loaded:
+                places[key][0].copy_(host[key])
+                launched = launched or places[key][0].device.type == 'mps'
+        if launched:
+            torch.mps.synchronize()
+    def make():
+        deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
+        if state['mapping'] is not None or state['owned']:
+            _retire(context, state)
+        try:
+            state['built'] = _built()
+            _bound(state['built'], deadline)
         except BaseException:
             _retire(context, state)
             raise

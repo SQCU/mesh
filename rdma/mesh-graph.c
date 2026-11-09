@@ -1831,7 +1831,8 @@ static int signature_static(uint32_t p) {
          p == MESH_GRAPH_KERNEL_FENCE;
 }
 static int signature_wait(uint32_t p) {
-  return p == MESH_GRAPH_QUEUE_WAIT || p == MESH_GRAPH_FENCE_WAIT || p == MESH_GRAPH_HOST_WAIT || p == MESH_GRAPH_HOST_NOTIFY;
+  return p == MESH_GRAPH_QUEUE_WAIT || p == MESH_GRAPH_FENCE_WAIT || p == MESH_GRAPH_HOST_WAIT || p == MESH_GRAPH_HOST_NOTIFY ||
+         p == MESH_GRAPH_TRIP_TEST;
 }
 static uint32_t signature_class(uint32_t p) {
   return p == MESH_GRAPH_FENCE_UPDATE || p == MESH_GRAPH_FENCE_WAIT ? 1 : p == MESH_GRAPH_INITIAL ? 2 :
@@ -2389,7 +2390,7 @@ static const char *const signature_kind[MESH_GRAPH_KINDS] = {"queue", "host", "b
 static const char *const signature_primitive[MESH_GRAPH_PRIMITIVES] = {
   "submit", "queue_signal", "queue_wait", "fence_update", "fence_wait", "pass_barrier", "queue_barrier", "host_wait",
   "host_notify", "bridge_start", "threadgroup_barrier", "simdgroup_barrier", "atomic", "producer_barrier",
-  "bridge_raise", "initial", "host_publish", "kernel_fence", "host_signal"};
+  "bridge_raise", "initial", "host_publish", "kernel_fence", "host_signal", "trip_test"};
 static const char *const signature_state[MESH_GRAPH_STATES] = {"image", "stronger", "false", "unmatched", "satisfied",
                                                               "transformed"};
 struct graph_sink { char *text; size_t room, at; int status; };

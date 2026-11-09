@@ -161,20 +161,46 @@ def generate(operations, program, observe, point=None):
     act = 'ustack(); exit(1);' if observe else 'ustack(); stop(); exit(1);'
     ended = (PRIMITIVES.index('queue_signal'), PRIMITIVES.index('host_signal'))
 
+    # a WHILE of no bound (mesh-graph.h MESH_GRAPH_TRIP_TEST, object MESH_GRAPH_LOOP + loop): its compiled signature takes
+    # one trip, between the loop's two tests in an execution; a run takes the trips its data gives, so after the second
+    # test the walk may return to after the first (another trip) and after the first it may go on after the second (no
+    # trip). Counter-valued objects then carry other values than the compiled ones: values are not checked after such a
+    # step (the run reports it, a scoped observation, not a pass)
+    trip, wait = PRIMITIVES.index('trip_test'), PRIMITIVES.index('host_wait')
+    tests = {}
+    for k, i in enumerate(program):
+        if operations[i].primitive == trip:
+            tests.setdefault((operations[i].execution, operations[i].object), []).append(k)
+    alt = {}
+    for ks in tests.values():
+        for a, b in zip(ks[0::2], ks[1::2]):
+            alt[b + 1], alt[a + 1] = a + 1, b + 1
+    lines.append('int64_t alt[int64_t]; int shifted;')
+    for start in range(0, len(alt), 64):
+        lines.append('BEGIN { %s }' % ' '.join('alt[%d] = %d;' % (k, t + 1) for k, t in sorted(alt.items())[start:start + 64]))
+
+    def match(index, valued):
+        return ('%s < %d && (e[%s] == this->c || (this->c == %d && e[%s] == %d)) && x[%s] >= self->exec && (!this->hasva || '
+                '%s) && (!this->hasob || ((om[this->ob] == 0 || om[this->ob] == o[%s] + 1) && (ko[o[%s]] == 0 || '
+                'ko[o[%s]] == this->ob + 1))) && (!this->hasln || ((lm[this->ln] == 0 || lm[this->ln] == q[%s] + 1) && '
+                '(kl[q[%s]] == 0 || kl[q[%s]] == this->ln + 1)))' % (
+                    index, total, index, wait, index, trip, index,
+                    ('v[%s] == this->va || shifted' % index) if valued else '1', index, index, index, index, index, index))
+
     def check(probe, name, obj, val, lane, point, predicate):
         guard = '/this->checked && %s/'
         lines.append('%s%s %s { this->checked = 1; this->c = %d; this->ob = %s; this->hasob = %d; this->va = %s; '
-                     'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->ok = this->i < %d && '
-                     'e[this->i] == this->c && x[this->i] >= self->exec && (!this->hasva || v[this->i] == this->va) && '
-                     '(!this->hasob || ((om[this->ob] == 0 || om[this->ob] == o[this->i] + 1) && (ko[o[this->i]] == 0 || '
-                     'ko[o[this->i]] == this->ob + 1))) && (!this->hasln || ((lm[this->ln] == 0 || lm[this->ln] == '
-                     'q[this->i] + 1) && (kl[q[this->i]] == 0 || kl[q[this->i]] == this->ln + 1)))%s; }' % (
+                     'this->hasva = %d; this->ln = %s; this->hasln = %d; this->i = cur; this->ok = %s%s; }' % (
                          probe, point, predicate, PRIMITIVES.index(name), obj or '0', obj is not None, val or '0', val is not None,
-                         lane or '0', lane is not None, total, ' && arg1 == 0' if name == 'bridge_start' else ''))
+                         lane or '0', lane is not None, match('this->i', True),
+                         ' && arg1 == 0' if name == 'bridge_start' else ''))
+        lines.append('%s %s { this->i = alt[cur] - 1; this->ok = %s%s; shifted = this->ok ? 1 : shifted; }' % (
+            probe + point, guard % '!this->ok && alt[cur]', match('this->i', False),
+            ' && arg1 == 0' if name == 'bridge_start' else ''))
         lines.append('%s %s { om[this->hasob ? this->ob : 0] = this->hasob ? o[this->i] + 1 : om[0]; '
                      'ko[this->hasob ? o[this->i] : -1] = this->hasob ? this->ob + 1 : ko[-1]; '
                      'lm[this->hasln ? this->ln : 0] = this->hasln ? q[this->i] + 1 : lm[0]; '
-                     'kl[this->hasln ? q[this->i] : -1] = this->hasln ? this->ln + 1 : kl[-1]; cur++; '
+                     'kl[this->hasln ? q[this->i] : -1] = this->hasln ? this->ln + 1 : kl[-1]; cur = this->i + 1; '
                      'printf("mesh-sync-monitor: observed %%d %%d %%d %%d %%d %%d\\n", this->i, this->c, this->hasob ? '
                      'o[this->i] : -1, this->hasva ? (int64_t)this->va : -1, self->exec, tid); '
                      'self->exec = x[this->i]; self->exec = this->hasob && this->ob == self->ended && (this->c == %d || '
@@ -205,7 +231,8 @@ def generate(operations, program, observe, point=None):
     lines.append('%s /self->inrun && self->inapi == 0 && self->exec < %d/ { printf("mesh-sync-monitor: unexpected %%s %%s '
                  'execution %%d thread %%d\\n", probeprov, probefunc, self->exec, tid); %s }' % (
                      ',\n'.join(UNLISTED), executions, act))
-    lines.append('END { printf("mesh-sync-monitor: program %%d of %d\\n", cur); }' % total)
+    lines.append('END { printf("mesh-sync-monitor: program %%d of %d\\n", cur); printf("mesh-sync-monitor: shifted %%d\\n", '
+                 'shifted); }' % total)
     return '\n'.join(lines) + '\n', executions
 
 
@@ -363,15 +390,24 @@ def main(argv):
                    for line in bridge_text.splitlines()) if m]
     sys.stdout.write(done.stdout)
     sys.stderr.write(done.stderr)
-    observed, failures = [], []
+    # the walk: the compiled operation each observed one matched, in order (a WHILE's trips repeat or skip a span of
+    # it). A trip test is observed as the host wait it is (the compiled primitive kept); after a data-dependent trip
+    # count the counter-valued objects' values are not the compiled ones, so they are taken as compiled and reported
+    observed, failures, walk, shifted = [], [], [], 0
+    trip = PRIMITIVES.index('trip_test')
     for line in done.stdout.splitlines():
+        m = re.match(r'mesh-sync-monitor: shifted (\d+)$', line)
+        if m:
+            shifted = int(m.group(1))
         m = re.match(r'mesh-sync-monitor: observed (\d+) (\d+) (-?\d+) (-?\d+) (\d+) \d+$', line)
         if m:
             k, c, obj, value, execution = map(int, m.groups())
             compiled_op = operations[program[k]]
+            walk.append(k)
+            c = trip if compiled_op.primitive == trip else c
             observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[c]), c, compiled_op.vertex,
                                                  NONE if obj < 0 else obj, execution,
-                                                 compiled_op.value if value < 0 else value))
+                                                 compiled_op.value if value < 0 or shifted else value))
         if 'mesh-sync-monitor: unexpected' in line:
             failures.append(line)
         m = re.match(r'mesh-sync-monitor: run (-?\d+)$', line)
@@ -379,9 +415,15 @@ def main(argv):
             failures.append('MetalProgramRun returned %s' % m.group(1))
     if done.returncode:
         failures.append('dtrace exited %d' % done.returncode)
-    if len(observed) != len(program):
+    looped = any(operations[i].primitive == trip for i in program)
+    if not looped and len(observed) != len(program):
         failures.append('%d of %d compiled program operations observed' % (len(observed), len(program)))
+    if looped and program and (not walk or walk[-1] != len(program) - 1):
+        failures.append('the walk of %d observed operations ended at compiled operation %s of %d'
+                        % (len(walk), walk[-1] if walk else None, len(program)))
     blind = {c: n for c, n in coverage.items() if c not in ('program', 'static')}
+    if shifted:
+        blind['values after a data-dependent trip count'] = len(walk)
     if bridge:
         made, missing = bridge_match([i for i, c in enumerate(which) if c == 'bridge'], operations, raised)
         if missing:
@@ -389,7 +431,7 @@ def main(argv):
         blind.pop('bridge', None)
         observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, operations[i].vertex,
                                           operations[i].object, operations[i].execution, count) for i, count in made]
-    expected_ops = [operations[i] for i in program] + (
+    expected_ops = [operations[program[k]] for k in (walk if looped else range(len(program)))] + (
         [operations[i] for i, c in enumerate(which) if c == 'bridge'] if bridge else [])
     expected = mesh_graph.signature(processors, tasks, dependences, expected_ops)
     watched = mesh_graph.signature(processors, tasks, dependences, observed)

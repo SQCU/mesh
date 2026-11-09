@@ -113,8 +113,8 @@ NONE = 2 ** 32 - 1
 KINDS = ('queue', 'host', 'bridge', 'kernel')
 PRIMITIVES = ('submit', 'queue_signal', 'queue_wait', 'fence_update', 'fence_wait', 'pass_barrier', 'queue_barrier',
               'host_wait', 'host_notify', 'bridge_start', 'threadgroup_barrier', 'simdgroup_barrier', 'atomic',
-              'producer_barrier', 'bridge_raise', 'initial', 'host_publish', 'kernel_fence', 'host_signal')
-NODES, PLAN_COUNT, PLAN_SUBMISSION = 64, 0x80000000, 0xC0000000
+              'producer_barrier', 'bridge_raise', 'initial', 'host_publish', 'kernel_fence', 'host_signal', 'trip_test')
+NODES, PLAN_COUNT, LOOP, PLAN_SUBMISSION = 64, 0x80000000, 0xA0000000, 0xC0000000
 STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed')
 
 

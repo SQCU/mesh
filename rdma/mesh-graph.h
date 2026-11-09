@@ -213,16 +213,19 @@ enum { MESH_GRAPH_SUBMIT, MESH_GRAPH_QUEUE_SIGNAL, MESH_GRAPH_QUEUE_WAIT, MESH_G
        MESH_GRAPH_PASS_BARRIER, MESH_GRAPH_QUEUE_BARRIER, MESH_GRAPH_HOST_WAIT, MESH_GRAPH_HOST_NOTIFY,
        MESH_GRAPH_BRIDGE_START, MESH_GRAPH_THREADGROUP_BARRIER, MESH_GRAPH_SIMDGROUP_BARRIER, MESH_GRAPH_ATOMIC,
        MESH_GRAPH_PRODUCER_BARRIER, MESH_GRAPH_BRIDGE_RAISE, MESH_GRAPH_INITIAL, MESH_GRAPH_HOST_PUBLISH,
-       MESH_GRAPH_KERNEL_FENCE, MESH_GRAPH_HOST_SIGNAL, MESH_GRAPH_PRIMITIVES };
+       MESH_GRAPH_KERNEL_FENCE, MESH_GRAPH_HOST_SIGNAL, MESH_GRAPH_TRIP_TEST, MESH_GRAPH_PRIMITIVES };
 enum { MESH_GRAPH_IMAGE, MESH_GRAPH_STRONGER, MESH_GRAPH_FALSE, MESH_GRAPH_UNMATCHED, MESH_GRAPH_SATISFIED,
        MESH_GRAPH_TRANSFORMED, MESH_GRAPH_STATES };
 struct mesh_graph_processor { uint32_t kind, index; };
 /* one program's identities across its producers: a processor's `index` is thread * MESH_GRAPH_NODES + node (the host's
    program thread 0 and its event listener 1; a queue's ordinal; the bridge 0), node its map index; a plan count word
    is object MESH_GRAPH_PLAN_COUNT + its added edge, a compiled function's submissions MESH_GRAPH_PLAN_SUBMISSION + its
-   index in mesh_plan's `functions`, each submission's value the plan's executions after it (mesh_transfers_start) */
+   index in mesh_plan's `functions`, each submission's value the plan's executions after it (mesh_transfers_start); a
+   WHILE of no bound's trip test (MESH_GRAPH_TRIP_TEST, a host wait on the queue signal of the same object) object
+   MESH_GRAPH_LOOP + its control (metal_ir.h metal_ir_controls), value the test's count */
 #define MESH_GRAPH_NODES 64u
 #define MESH_GRAPH_PLAN_COUNT UINT32_C(0x80000000)
+#define MESH_GRAPH_LOOP UINT32_C(0xA0000000)
 #define MESH_GRAPH_PLAN_SUBMISSION UINT32_C(0xC0000000)
 struct mesh_graph_task { uint32_t processor, place, label, copy; };
 struct mesh_graph_dependence { uint32_t from, to; uint64_t delay; };
