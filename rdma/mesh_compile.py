@@ -50,7 +50,8 @@ Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 Calls = collections.namedtuple('Calls', 'outstanding orders causes norders chains')
 # GSPMD section 4.1, "Static operator configurations"
 Local = collections.namedtuple('Local', 'op target args kwargs annotation', defaults=(None,))
-AttentionOrigin = collections.namedtuple('AttentionOrigin', 'query key page cuts', defaults=(0, 0, ()))
+AttentionOrigin = collections.namedtuple('AttentionOrigin', 'query key page cuts shape offsets',
+                                         defaults=(0, 0, (), (), ()))
 # GSPMD sections 3.2, 3.5, 4 and 4.6
 Rule = collections.namedtuple('Rule', 'kind level operands labels out propagate contracting windows fused merged '
                                       'configure')
@@ -722,7 +723,11 @@ def _partition(ir, operators):
                     if part >= 0 and ir.device is not None else 0
                 keycuts = tuple(range(0, _value(key).shape[-2], max(1, ir.local(key, ir.sharding[key])[-2]))) \
                     if part >= 0 else ()
-                ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(start, owned, ir.page, keycuts))
+                query = rule.operands[0]
+                offsets = tuple(ir.coords[ir.device][m] * extent if m >= 0 and ir.device is not None else 0
+                                for m, extent in zip(wants[0], ir.local(query, wants[0])))
+                ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(
+                    start, owned, ir.page, keycuts, tuple(_value(query).shape), offsets))
             reads = tuple(keys)
             if rule.merged is not None:
                 ir.emit(('call', reads, (rule.merged, 'merged', node), rule.merged))
@@ -5883,8 +5888,14 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=Att
                    r('exp', t, r('sub', t, score, top)))
         if dropout:
             at = r.const(0, I32)
-            for d, n in [*zip(range(b), qs.shape[:b]), (b, length), (b + 2, other)]:
-                index = r('add', I32, r.index(d), r.const(lo if d == b + 2 else 0, I32))
+            logical = origin.shape or tuple(q.shape)
+            offsets = origin.offsets or (0,) * (q.dim() - 2) + (origin.query, 0)
+            indices = [r.index(d) for d in range(q.dim() - 2)]
+            if q.dim() >= 3:
+                indices[-1] = r('add', I32, r('mul', I32, r.index(b - 2), r.const(group, I32)), r.index(b - 1))
+            indices += [r.index(b), r.index(b + 2)]
+            for index, n, offset in zip(indices, (*logical[:-1], other), (*offsets[:-1], lo)):
+                index = r('add', I32, index, r.const(offset, I32))
                 at = r('add', I32, r('mul', I32, at, r.const(n, I32)), index)
             keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, b + 3, at, generator)[0]), r.const(1 - dropout, F32))
             kept = r('mul', t, weight, r.const(1 / (1 - dropout), t)) if dropout < 1 else r.const(0, t)
