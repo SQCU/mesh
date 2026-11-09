@@ -893,7 +893,11 @@ def partition(gm, placement, nodes, page, region=None):
             operators[node], operators[pad] = _merged(pad, operators[pad], rule), None
     names = {node.name: node for node in ir.order if node.op != 'output' and ir.sharding[node] is not None}
     names.update({node.target: node for node in ir.order if node.op == 'get_attr'})
+    prefix = len(ir.region.path) + bool(ir.region.path)
+    nested = {child: child.path[prefix:] + '.' for child in ir.region.children}
     for name, mapping in placement.splits.items():
+        if name not in names and any(name.startswith(path) for path in nested.values()):
+            continue
         node, mapping = names.get(name), tuple(mapping)
         if node is None or ir.sharding[node] is None or len(mapping) != len(ir.sharding[node]) \
                 or not all(isinstance(m, int) and -1 <= m < len(ir.shape) for m in mapping) \
@@ -927,6 +931,14 @@ def partition(gm, placement, nodes, page, region=None):
     ir.places = {device: _places(ir, device) for device in ir.coords}
     _over(ir)
     _kinds(ir)
+    for child, path in nested.items():
+        splits = {name[len(path):]: mapping for name, mapping in placement.splits.items() if name.startswith(path)}
+        for link in ir.region.links:
+            if link.target.scope == child.id and link.kind in ('initial', 'borrowed'):
+                mapping = ir.sharding.get(link.source.node)
+                if mapping is not None and any(m >= 0 for m in mapping):
+                    splits.setdefault(link.target.node.name, mapping)
+        partition(child.gm, placement._replace(splits=splits), nodes, page, region=child)
     return ir
 
 
@@ -1438,6 +1450,8 @@ def lower(ir):
             ir.waits.setdefault(firsts[key], []).append(collective)
     ir.dependences = _dependences(ir)
     _place(ir)
+    for child in ir.region.children:
+        lower(child.ir)
 
 
 # design/compilation-composition-change-request.md requirement 1 and item 6, unit 6D; design/aot-compilation-change-
@@ -6961,7 +6975,7 @@ def _constant_origins(exported, module):
     return frozenset(value.untyped_storage().data_ptr() for value in values if isinstance(value, torch.Tensor)) - written
 
 
-# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff;
+# metal-microbench docs/provider.md#source-constants-before-target-preparation;
 # torch/export/graph_signature.py ExportGraphSignature.buffers_to_mutate, parameters_to_mutate
 def _initial_values(ir, immutable):
     if ir.initial is not None:
