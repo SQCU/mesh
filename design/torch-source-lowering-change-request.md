@@ -103,6 +103,13 @@ Turns are named by their local time.
 
 (2026-11-08 00:09)
 
+The operator, 2026-11-10:
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+
 ## The stages
 
 Each requirement is a function of one stage of the compilation, as the reference program `~/schedule-emit` composes
@@ -152,14 +159,14 @@ Item 3's ordering is the schedule stage's.
 - **Write:** no torch Metal kernel is ever submitted or recorded again.
   - The data structure is the task graph G = (V, E, w, c) of design/plan-to-bridge-change-request.md R3 (O. Sinnen,
     Task Scheduling for Parallel Systems, Wiley, 2007), carried in the IR of design/aot-compilation-change-request.md
-    A8. A vertex is a function: a node of the graph the operator lowering produces. An edge is a page passed between
-    functions.
+    A8. A vertex is a task: a node of the graph the operator lowering produces. An edge is a page passed between
+    tasks.
   - The operator lowering produces these vertices and edges, for each function on whichever Apple silicon backend it
     is placed, the CPU included. Placement and the schedule (item 3) consume them. They are typed and scheduled as
     design/plan-to-bridge-change-request.md R3 and R4 write it:
-    - the synchronous, complete, contiguous consumer is one function with an edge from every page of its operand, and
+    - the synchronous, complete, contiguous consumer is one task with an edge from every page of its operand, and
       only its operand, typed `contiguous_input` or `contiguous_output`, is one run of pages;
-    - the asynchronous, incomplete, noncontiguous consumer is one function per page, each with an edge from its own
+    - the asynchronous, incomplete, noncontiguous consumer is one task per page, each with an edge from its own
       page, and its outputs are pages that leave as each is produced;
     - the IR carries which of the two each consumer is (design/aot-compilation-change-request.md A8).
 
@@ -237,9 +244,8 @@ Item 3's ordering is the schedule stage's.
     completion times C_j (C.-Y. Chen, arXiv 2205.02474, 2022; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein,
     Math. Oper. Res. 22(3), 1997; M. Queyranne, Math. Programming 58, 1993; H. Isermann, OR Spektrum 4, 1982),
     followed by the heap order by those completion times (M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2). These are the
-    sources design/joint-compilation.md lists in its row 8. Each function's length is from the weighting operand. In
-    rdma/mesh-graph.c the two are `mesh_graph_completion_times` and `mesh_graph_heap_order`. The order is published
-    with the AOT compiled static link schedule. Each processor's commands are written in that order.
+    sources design/joint-compilation.md lists in its row 8. Each task's length is from the weighting operand. The order
+    is published with the AOT compiled static link schedule. Each processor's commands are written in that order.
   - The data structure for the orderings is Sriram's synchronization graph. Only the edges of a synchronization graph
     that preserves the inter-processor communication graph are written: "the synchronization edges alone determine
     the interaction between processors".
@@ -293,10 +299,12 @@ what "them" names)
   - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
   - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.
   - `torch.linalg.matrix_exp` has no such function in LAPACK. Item 6 writes it.
-  - An operator whose lowering would repeat a body a number of times that tensor data decides gets, at export, one
-    plain message that names the operator and says that an iteration depth that depends on data is not compiled (the
-    operator, above: "as long as we emit boring ah ah errors which tell the user in boring ah ah terms that data
-    dependent iteration depth isn't compilable with meshlib").
+  - Every operator whose method, on the processor the placement names, needs an iteration depth that tensor data
+    decides gets, at export, one plain message that names the operator and says that an iteration depth that depends
+    on data is not compiled (the operator, above: "as long as we emit boring ah ah errors which tell the user in
+    boring ah ah terms that data dependent iteration depth isn't compilable with meshlib"). Off the CPU that includes
+    `eigh`, what is composed from it, and the polar decomposition's Halley continuation, while item 6 states no fixed
+    depth for them.
   - The functions cited above are the CPU's. Placement is an operand (the operator, quoted in
     design/aot-compilation-change-request.md A2: "we simply need to consume operands which choose these placements,
     letting us define and implement an optimizing chooser function *later*"). Item 6 states what these operators are
