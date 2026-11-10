@@ -86,12 +86,14 @@ The types the cited code names for the values that pass between these functions:
 - `mesh_plan`'s operand is an array of `struct mesh_function` (rdma/mesh-collective.h). Its transfers are `struct
   mesh_declared`, whose two ends `from` and `to` are each a `struct mesh_strided`. Its values are `struct mesh_value`,
   with the fields `begin`, `end` and `lag`;
-- a send's record in the port's child process is `struct prepared_send` (rdma/mesh-flow.c), with its count at `count`
-  and its error count at `count+1`;
+- a send's record in the port's child process is `struct prepared_send` (rdma/mesh-flow.c). At mesh 36bd7cbd, which
+  item 13 cites, it has the field `count`, with its count at `count` and its error count at `count+1`; at mesh
+  576a3159 it has no `count` field;
+- the persistent request's state is `struct mesh_state` (rdma/mesh.h), which holds its `serial`;
 - a membership view's record is `struct mesh_group_view` (rdma/mesh-records.c).
 
-No cited code or source names a type for the persistent request's state, for an interval's colors in the memory
-schedule, or for the structure the load reads in item 11.
+No cited code or source names a type for an interval's colors in the memory schedule, or for the structure the load
+reads in item 11.
 
 What `mesh_plan` writes, each part with the name of its source:
 - **Persistent requests:** one for each compiled function at each node, started once per execution. MPI
@@ -388,7 +390,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   6. The program's wait returns ECANCELED once the error count is nonzero, after the count and the error count
      together reach the execution's total.
   7. No buffer is reused before the completion of its posted send is retrieved.
-- **Composition:** `mesh_plan` writes the counters into the persistent request's state. The port's child process
+- **Composition:** `mesh_plan` writes the counters into the persistent request's state (`struct mesh_state`). The
+  port's child process
   writes their values, through each send's `struct prepared_send`. The program's `wait_tensor` reads them.
 - **Source:**
   - rdma-core, libibverbs/man/ibv_post_send.3
@@ -521,7 +524,7 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   2. A persistent request's `serial` is that pair, and every comparison compares the pair.
 - **Composition:** rdma/mesh-records.c writes the pair where it makes a membership view (`struct mesh_group_view`).
   `mesh_plan` writes it as the
-  persistent request's `serial`. The comparisons of rdma/mesh-flow.c read it.
+  persistent request's `serial`, in its `struct mesh_state`. The comparisons of rdma/mesh-flow.c read it.
 - **Code:**
   - rdma/mesh-records.c:741 makes a membership view `.view=greatest+1`, which is 1 again after every bridge restarts.
   - rdma/mesh-flow.c:1922, 2089 and 2523 compare a persistent request's `serial` with the counter alone.
