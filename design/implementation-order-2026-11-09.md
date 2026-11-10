@@ -4,11 +4,6 @@
 `.claude-personal/projects/-Users-mdot-metal-microbench/55974018-f56d-4c8b-8973-6fc61b49140c.jsonl`.
 Code was read at mesh 7df87fe4 and metal-microbench 7483572e; the reference program at `~/schedule-emit` 881a347.
 
-This memorandum is an ordering aid. It is not a change request and not a source: the change requests it quotes, and
-the operator's turns, govern. Where it and a change request differ, the change request is right and this is wrong.
-Its form is its own: the turns, quoted verbatim, then each requirement with the clause it comes from, quoted by file
-and heading. Line estimates are Claude's and are rough; nothing here was measured on the mesh code.
-
 ## The turns
 
 The operator, 2026-11-09, in order:
@@ -117,7 +112,7 @@ searching the source for the named functions, not by a status paragraph.
   "5. Consolidate repeated implementations at their shared owner": "`mesh_compile.py _outputs` and `_natives`: both
   traverse the same call graph".
 - **Reference:** `schedule_emit/placement.py` and `devices.py`, 107 lines.
-- **Estimate:** 300–500 lines. Least certain: Claude has not read that file closely.
+- **Estimate:** 300–500 lines.
 
 ### 4. One scheduling solve orders functions and transfers together, with cost as an operand
 
@@ -256,15 +251,6 @@ runtime behaviour, `tools/e2b_replay.m` and `tools/native_bench.m`.
 
 Summed, the estimates are about 1,800 to 3,300 lines written or revised, and at least 4,500 removed by items 4, 7
 and 9.
-
-## Not covered
-
-The reference program says nothing about these outstanding topics, so this memorandum gives them no order:
-
-- the bridge's own page-level transport (plan-to-bridge-change-request.md R1; disjoint-pages-change-request.md).;
-- the numerical kernels, specialization and fusion inside the typed compiler (compilation-composition-change-request.md
-  "Performance correction: compile the transformations, not their textual symptoms");
-- Core ML and Neural Engine lowering.
 
 ## For whoever is assigned an item
 

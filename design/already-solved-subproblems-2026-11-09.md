@@ -3,8 +3,7 @@
 2026-11-09. Written by Claude at the operator's request, from the session
 `.claude-personal/projects/-Users-mdot-metal-microbench/55974018-f56d-4c8b-8973-6fc61b49140c.jsonl`. It accompanies
 [implementation-order-2026-11-09.md](implementation-order-2026-11-09.md) and
-[interface-boundaries-2026-11-09.md](interface-boundaries-2026-11-09.md). Like them it is an aid and not a source:
-the change requests and the operator's turns govern.
+[interface-boundaries-2026-11-09.md](interface-boundaries-2026-11-09.md).
 
 Code was read at mesh 7df87fe4 and at the metal-microbench working tree on 7483572e.
 

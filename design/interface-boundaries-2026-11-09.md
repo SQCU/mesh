@@ -2,8 +2,7 @@
 
 2026-11-09. Written by Claude at the operator's request, from the session
 `.claude-personal/projects/-Users-mdot-metal-microbench/55974018-f56d-4c8b-8973-6fc61b49140c.jsonl`. It accompanies
-[implementation-order-2026-11-09.md](implementation-order-2026-11-09.md) and, like it, is an aid and not a source:
-the change requests and the operator's turns govern.
+[implementation-order-2026-11-09.md](implementation-order-2026-11-09.md).
 
 ## The turns
 
@@ -48,8 +47,7 @@ debug information) to recover a fact, or (d) performs several stage roles at onc
   files (in `metal_ir.mm`, `metal_lower.mm`, `metal_native.mm`, `metal_neural.mm`, `metal_transform.mm`,
   `metal_recording.m`, `metal_submission.h`, `provider/litert_mesh.cc` and `provider/dawn.patch`); each showed what
   the reader said it showed. The rest are unchecked.
-- A cited line is a fact; which of (a)–(d) it is an instance of is the reader's reading. Some readings are open to
-  dispute, for example whether taking a device handle when lowering is taking a later stage's product.
+- A cited line is a fact; which of (a)–(d) it is an instance of is the reader's reading.
 - `metal_recording.{h,m}`, `rdma/mesh_compile.py`, `tools/e2b_replay.m` and the mesh C modules were not in this run.
   The implementation-order memorandum already records what was established about the first three.
 

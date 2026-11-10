@@ -1,7 +1,7 @@
 # Metal 4 commit feedback: sources, quoted verbatim, and a measurement
 
 Retrieved 2026-11-08. Each excerpt in §1 and §2 was copied by script from the cited lines of the file named; nothing
-in a block is retyped. §3 is a measurement, not a source: the program and its output are copied by the same script,
+in a block is retyped. §3 is a measurement: the program and its output are copied by the same script,
 which built and ran it.
 
 - **Source:** Apple, Metal.framework headers, macOS SDK 26.4.1 (`/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk`),

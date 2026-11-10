@@ -6,7 +6,7 @@
 
 This is a list from which change requests could be written. It is not a change request: a change request's body is
 the operator's turns, and each of its requirements quotes the source's own words
-([change-requests.md](change-requests.md)). Like every document Claude wrote, this one is not a source.
+([change-requests.md](change-requests.md)).
 
 ## The turn
 

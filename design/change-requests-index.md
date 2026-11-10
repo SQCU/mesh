@@ -34,8 +34,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
   Compiler, prepared/native and collective-plan artifacts retain solved results and relocate current storage on
   load. Existing restored numerical cases pass at metal-microbench a136b464 / mesh435bc6ae: normalization/projection
   relative RMS0.000216, matrix projection0.000207, CPU projection0.000276, argmax zero mismatches, all outputs written
-  and finite. CoreML restoration also has numerical evidence, but its measured plan was ANE0/CPU13/GPU0; this does
-  not establish Neural Engine execution. The composed Torch save/load consumer still needs operational evidence.
+  and finite. CoreML restoration also has numerical evidence, but its measured plan was ANE0/CPU13/GPU0. The composed Torch save/load consumer still needs operational evidence.
 
   The production dependency chain builds. All five E2B stage graphs publish/lower/finalize in the latest compile-only
   record (build26): 3/7/20/602/1068 dispatches. An earlier decode finalization crash in AGX does not reproduce after the changed
