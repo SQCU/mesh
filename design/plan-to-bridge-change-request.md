@@ -1911,13 +1911,24 @@ design/aot-compilation-change-request.md, and are held here once.
 
 > mostly i want the work done and i care far less about ceremony or ritualization than about the delivery of source which meets several strict qualitative and several strict quantitative requirements. agreement is not as important as those requirements; they are raised by the user repeatedly because claude opus 5.5 in the c laude code harness at long contexts is constitutionally incapable of remembering or self-regulating the requirements thus mentioned...
 
+**The operator, 2026-11-10:**
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+
 ## Claude's proposal
 
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
 code, and each method is used as its source states it.
 
-**The data flow.** The stages are functions from a value to a value, composed as the reference program ~/schedule-emit
-composes them (schedule_emit/driver.py `compile_module`): export; then placement, which adds send and receive nodes to
+The operator, 2026-11-10, verbatim:
+
+> for example we have a literal second repository iwth a priced and measured linecount which demonstrates the exact data flow mesh must have. what is that repo and are we using the exact same data flow yet? if we aren't, what's the cope? what's the excuse? who made up a limit saying we have to underperform our own examples to ourselves?
+
+**The data flow.** That repository is ~/schedule-emit. Its stages are functions from a value to a value
+(schedule_emit/driver.py `compile_module`): export; then placement, which adds send and receive nodes to
 the graph; then devices; then one schedule, whose result is the scheduled value (schedule_emit/ir.py `Scheduled`).
 Lowering, the runtime and the archive each take the scheduled value.
 
@@ -1957,8 +1968,9 @@ consumes it.
     flattens a type map.
 - **Where it composes.**
   - Takes: each transfer's two views. A transfer is a send node and a receive node that placement adds to the graph. Its
-    record in the code is `struct mesh_declared`, whose `from` and `to` are each a `struct mesh_strided`
-    (rdma/mesh-collective.h).
+    type in the code is `struct mesh_declared`, whose `from` and `to` are each a `struct mesh_strided`
+    (rdma/mesh-collective.h, rdma/mesh-graph.h). `mesh_plan` takes them as the `declared` array of each
+    `struct mesh_function`.
   - Writes: the blocks, as the entries of each cable's list (R5): `struct mesh_hop` `page`, `offset` and `bytes`
     (rdma/mesh.h). These are MSCCL-IR's steps with offset and count (aot-compilation A9).
   - Produced by the schedule, `mesh_plan`. Consumed by the bridge (rdma/mesh-flow.c), which sends each block from the
@@ -2097,9 +2109,12 @@ consumes it.
     - At a source, any number of ranges read the same blocks. A halo wider than a shard, or two halos over one shard, is
       then sent with no copy.
 - **Where it composes.**
-  - Takes: the exported program's values with their lifetimes, and which consumers see a value as one run (R4).
+  - Takes: the exported program's values with their lifetimes, and which consumers see a value as one run (R4). In the
+    code a value is a `struct mesh_value`, in the `value` array of each `struct mesh_function` that `mesh_plan` takes
+    (rdma/mesh-collective.h).
   - Writes: u; for each value and copy, its page-table rows; for each operand seen as one run, the map from its
-    consecutive virtual pages to its pages. Each is a constant of the static schedule.
+    consecutive virtual pages to its pages. Each is a constant of the static schedule. This item's sources name no type
+    for the rows as written or for a run's map.
   - Produced when the static schedule is made: `mesh_plan` (rdma/mesh-collective.c) calls `mesh_graph_lags` and
     `mesh_graph_chains` (rdma/mesh-graph.h). The rows are part of the scheduled value.
   - Consumed by R5's lists, whose entries name each page by its row (R1), and by the GPU, which translates each run
@@ -2130,9 +2145,14 @@ consumes it.
 - **The algorithm that takes it is R5's.** The task graph is built here and solved there.
 - **Where it composes.**
   - Takes: the compilation's IR (aot-compilation A8), which is the captured graph with each task at its node by the
-    placement operand (aot-compilation A2), and the weighting operand (aot-compilation A3).
-  - Produced by `mesh_plan`: rdma/mesh-collective.{h,c} builds the task graph from the IR.
+    placement operand (aot-compilation A2), and the weighting operand (aot-compilation A3). In the code their type is
+    the array of `struct mesh_function` that `mesh_plan` takes: each has its `declared` (`struct mesh_declared`), its
+    `weights` (`struct mesh_weight`) and its `dependence` (`struct mesh_dependence`) (rdma/mesh-collective.h).
+  - Produced by `mesh_plan`: rdma/mesh-collective.{h,c} builds the task graph from the IR. No header names a type for
+    the task graph.
   - Consumed by R5's linear program, whose variables are the graph's tasks and each hop of each page's route.
+    `mesh_graph_completion_times` (rdma/mesh-graph.h) takes them as arrays: each instruction's `length` and `resource`,
+    and the edges' `from` and `to`.
 
 ### R4. Functions that need an operand whole and functions that take pages in any order
 
@@ -2227,9 +2247,10 @@ consumes it.
   consumer's operands and on every transfer, which the operator's typing forbids: "function B requires set of pages
   operand_b to be complete but not contiguous", "domain:Async,noncontiguous,incomplete" (above).
 - **Where it composes.**
-  - Takes: each consumer's kind, which the IR carries (aot-compilation A8).
+  - Takes: each consumer's kind, which the IR carries (aot-compilation A8): `struct mesh_declared` `kind`, `MESH_JOIN`
+    or `MESH_PAGES` (rdma/mesh-collective.h).
   - Writes: the kind as the task graph's edges (R3), from which R5's program orders each cable's sends. The lists carry
-    no kind, only which entries are a set's (aot-compilation, appendix item 5).
+    no kind, only which entries are a set's (aot-compilation, appendix item 5): `struct mesh_hop` `set` (rdma/mesh.h).
   - Produced by the schedule, `mesh_plan`. Consumed by the bridge, which reads the lists and the supplied words.
 
 ### R5. The order of transfers is a static schedule with costs
@@ -2335,7 +2356,8 @@ consumes it.
   - Writes: for each copy, each cable's sends in schedule order, each entry with its page and its bytes (`struct
     mesh_hop`, rdma/mesh.h). The lists are part of the scheduled value.
   - Produced by `mesh_plan` (rdma/mesh-collective.c), which calls `mesh_graph_completion_times` and
-    `mesh_graph_heap_order` (rdma/mesh-graph.h).
+    `mesh_graph_heap_order` (rdma/mesh-graph.h). The first writes each instruction's C̄_j (`double *completion`). The
+    second takes them as `priority` and writes each instruction's place in the order (`uint32_t *place`).
   - Consumed by the bridge. rdma/mesh-flow.c `link_prepare` spreads each cable's list, in list order, over what its
     devices give it (R7), by `mesh_graph_list_schedule`, and sends each entry's `bytes`.
 - **Changes by file:**
@@ -2368,8 +2390,10 @@ consumes it.
   Hoefler, C. Siebert and A. Lumsdaine, Scalable communication protocols for dynamic sparse data exchange, PPoPP 2010).
   Its run-time protocols learn who sends to whom. Here it is answered at compile time: every rank computes every
   transfer of the static schedule (R5).
-- **Where it composes.** Produced by placement and by the schedule (R5). Consumed by the bridge at each node, which
-  reads its own lists. This requirement has no code of its own.
+- **Where it composes.** Produced by placement, as `struct mesh_declared` with its `source` and `destination`
+  (rdma/mesh-collective.h), and by the schedule (R5), as `struct mesh_hop` with its `node` and `direction`
+  (rdma/mesh.h). Consumed by the bridge at each node, which reads its own lists. This requirement has no code of its
+  own.
 
 ### R7. Nothing outside the bridge knows the transport
 
@@ -2380,12 +2404,12 @@ consumes it.
 
 - The code must keep every transport object and count inside the bridge, and the bridge takes whatever the devices
   report on each run.
-- **No data structure or algorithm of the literature is cited for this requirement.** Its source is code:
-  rdma/mesh-verbs.h at tag pre-return-20261103. The count for a cable is each device's `max_qp` less the provider's own,
-  the smaller of the two ends'.
-- **Where it composes.** The bridge computes the count on each run (rdma/mesh-verbs.h), and the bridge consumes it,
-  where it spreads a cable's list over what its devices give it (R5). The scheduled value carries no transport object
-  and no count.
+- **No cited source states a data structure, an algorithm or the count rule for this requirement.** As a fact of the
+  code at tag pre-return-20261103 (rdma/mesh-verbs.h), the queue-pair count for a cable is each device's `max_qp` less
+  the provider's own, the smaller of the two ends'.
+- **Where it composes.** The bridge computes that count on each run (rdma/mesh-verbs.h: a device's `max_pairs`, a
+  `uint32_t`), and the bridge consumes it, where it spreads a cable's list over what its devices give it (R5). The
+  scheduled value carries no transport object and no queue-pair count.
 
 ### R8. A program is its function calls
 
