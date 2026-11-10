@@ -86,7 +86,8 @@ searching the source for the named functions, not by a status paragraph.
   - plan-to-bridge-change-request.md, "R3. An execution is a task graph"; "R8. A program is its function calls".
   - torch-capture-change-request.md, "9. Every node replays": "every node runs its captured program by replay, its
     collectives included."
-  - The operator's third turn above, for any copy this stage adds: a copy is a node the scheduler sees.
+  - The operator's third turn above, for any copy this stage adds: "contiguity is a scheduled operation that must be
+    justified by a solver". A copy is added only where the solver justifies it, and it is then a scheduled operation.
 - **Replaces:** compilation-composition-change-request.md, "1. Finish lowering the whole assigned domain": "the split
   in `rdma/mesh_compile.py program()` where `replayed` excludes nodes whose declarations name transferred values";
   "5. Consolidate repeated implementations at their shared owner": "`mesh_compile.py _outputs` and `_natives`: both
@@ -118,7 +119,8 @@ searching the source for the named functions, not by a status paragraph.
 
 ### 5. Storage decisions are made by the compile side and reach the runtime as data
 
-- **Clauses:** disjoint-pages-change-request.md, "C3. Claude's proposal: the consolidated revision";
+- **Clauses:** disjoint-pages-change-request.md, "D.3 Claude's proposal", which that request names as the unit of
+  work and which holds over C3, leaving out D.3.1, which plan-to-bridge-change-request.md supersedes;
   plan-to-bridge-change-request.md, "R2. Every page is placed at compile time and named by the page table";
   compilation-composition-change-request.md, "4.": "Readiness determines firing under the compiled order" and
   "Replay and host/bridge execution use the emitted decisions; they do not independently choose replacements for
@@ -191,9 +193,12 @@ searching the source for the named functions, not by a status paragraph.
 - **Clauses:** compilation-composition-change-request.md, "Complete replacement workgroup": "E2B must complete prefill
   and decode on all five nodes"; "Measure decode throughput after prefill and transport overhead/bandwidth as
   `docs/measurement.md` requires"; integration-finishing-change-request.md, "1. Every mesh machine's bridge runs".
-- **Before timing:** a structural comparison, as in the reference program's samples: the scheduled program holds
-  exactly the exported functions plus one send and one receive per value that crosses, and nothing else; what a
-  compiler generates for a one-processor scheduled program equals what it generates for the exported program.
+- **Before timing:** a comparison of structure against compilation-composition-change-request.md requirement 7:
+  "Graph transformations may fuse vertices, remove edges made internal to fused work, and replace storage
+  representations. The contract preserves the required observations and ordering, not a literal source graph or one
+  runtime action per vertex." The scheduled program is compared with the exported one for what that sentence
+  requires: every required observation and ordering is kept, and each function, send, receive, copy or wait the
+  scheduled program has beyond the exported one is one a clause or the solver justifies.
 - **Estimate:** about 100 lines for the structural comparison, in the existing client tools; none for measurement.
 
 ## Why this order
