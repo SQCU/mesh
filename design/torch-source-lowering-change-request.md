@@ -265,11 +265,17 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
   with an edge from its own page", and item 1 lowers it so. Nothing waits inside a function.
 ### 5. An operator whose method iterates until it converges is one call of a supplier's function
 
-The operator, 2026-11-09, in order:
+The operator, in order:
 
 > okay so we do'nt need them if they use a data-dependent control flow, and anyone who wants something like them can write their own fixed depth solver as long as we emit boring ah ah errors which tell the user in boring ah ah terms that data dependent iteration depth isn't compilable with meshlib. do you have any counterexamples of graph compilation libraries which give users a sneaky way to run divergent iterators forever with a better approach than this?
 
+(2026-11-09 19:50, in part: the turn opens by quoting Claude's report that the lowerings "for matrix_exp, eigh, eig,
+eigvals, svd, pinv, and lstsq with the gelss/gelsd drivers iterated with a WHILE on a convergence test", which is
+what "them" names)
+
 > then choose any counterexample from the literature as the lowering approach
+
+(2026-11-09 19:51)
 
 - **Replaces:** the lowerings mesh 199eb9c3 deleted from rdma/mesh_compile.py (`_matrix_exp`, `_jacobi_sweeps`,
   `_linalg_schur`, `_eigen_hermitian`, `_eigen`, `_singular`, `_pseudoinverse`, the gelss and gelsd branch of
@@ -292,9 +298,11 @@ The operator, 2026-11-09, in order:
     (:6-8) already includes Accelerate with its LAPACK interface.
 - **Write:**
   - `torch.linalg.svd`, `eigh`, `eig` and `eigvals`, and `lstsq` with the gelsd and gelss drivers, are each one node
-    of the graph, with fixed shapes, that calls the LAPACK driver of that problem which Accelerate declares (the
-    divide-and-conquer SVD; the symmetric and Hermitian eigensolvers; the general eigensolver; `gelsd` and `gelss`
-    by name). The iteration is inside that one function. Nothing in the graph branches or repeats on tensor data.
+    of the graph, with fixed shapes, that calls one LAPACK driver for that problem through Accelerate. The iteration
+    is inside that one function. Nothing in the graph branches or repeats on tensor data.
+  - For `lstsq` the quoted page names the routine: `gelsd` and `gelss`. For `svd`, `eigh`, `eig` and `eigvals` no
+    quoted source names the LAPACK routine PyTorch or JAX calls on a CPU; the header lines above show only which
+    drivers Accelerate declares.
   - The routine's `INFO` is a value the node returns; a positive `INFO` is reported through the check the compiler
     already has for a numerical operation's status.
   - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
@@ -302,7 +310,87 @@ The operator, 2026-11-09, in order:
   - `torch.linalg.matrix_exp` has no such function in LAPACK. It, and any operator whose method needs a number of
     iterations that depends on tensor data and for which no supplier's function is cited on the processor the
     placement names, is refused at export with one plain message that names the operator and says that an iteration
-    depth that depends on data is not compiled. The functions cited above are the CPU's; none is cited for another
-    processor. Placement is an operand: the node is not moved to a processor the placement did not name.
+    depth that depends on data is not compiled. The functions cited above are the CPU's. Placement is an operand
+    (the operator, quoted in design/aot-compilation-change-request.md A2: "we simply need to consume operands which
+    choose these placements, letting us define and implement an optimizing chooser function *later*"): the node is
+    not moved to a processor the placement did not name. Item 6 states what these operators are on the other
+    processors.
   - No lowering written by mesh repeats a body a number of times that tensor data decides.
+
+### 6. The same operators as matrix multiplications and QR factorizations, placed on every processor
+
+The operator:
+
+> "- The cited functions are the CPU's. Accelerate's LAPACK is the only supplier function cited for these operators. Nothing is cited for the GPU or the Neural Engine." then write a better backend which allows for the full saturation of the full resources available on apple silicon
+> i don't care what other topics this sounds like it countermands; i am not patient with arbitrary waste of silicon lifespan
+
+(2026-11-09 19:55)
+
+- **Replaces:** item 5's refusal of `svd`, `eigh`, `pinv` and `lstsq`'s gelsd and gelss on a processor other than the
+  CPU, and its refusal of `matrix_exp`.
+- **Source:**
+  - Y. Nakatsukasa and N. J. Higham, "Stable and efficient spectral divide and conquer algorithms for the symmetric
+    eigenvalue decomposition and the SVD", SIAM J. Sci. Comput. 35(3), 2013, pp. A1325–A1349
+    (https://people.maths.ox.ac.uk/nakatsukasa/publishedpdf/pub13.pdf), §1: the algorithms "are based on the polar
+    decomposition", "require just the building blocks of matrix multiplication and QR factorization (without
+    pivoting)", and "asymptotically minimize communication". "For an n×n matrix A, the dominant cost of QDWH-eig is
+    in performing six or fewer QR factorizations of 2n × n matrices." §3.1: "We describe how to compute an invariant
+    subspace of A corresponding to the positive (or negative) eigenvalues using the polar decomposition." §4:
+    "Algorithm 2. QDWH-SVD: compute the SVD A = UΣV∗ of A ∈ R^{m×n} with m ≥ n. 1 Compute the polar decomposition
+    A = UpH via QDWH. 2 Compute the symmetric eigendecomposition H = VΣV∗ via QDWH-eig. 3 Form U = UpV."
+  - JAX, `jax/_src/tpu/linalg/qdwh.py` (https://github.com/jax-ml/jax/blob/main/jax/_src/tpu/linalg/qdwh.py): "QDWH is
+    short for QR-based dynamically weighted Halley iteration." "The Halley iteration implemented through QR
+    decmopositions does not require matrix inversion." It cites Nakatsukasa, Bai and Gygi, "Optimizing Halley's
+    iteration for computing the matrix polar decomposition", SIAM J. Matrix Anal. Appl. 31(5), 2010. `max_iterations
+    = 10` where none is given. A step is `_use_qr` ("QDWH iteration using QR decomposition.") or `_use_cholesky`
+    ("QDWH iteration using Cholesky decomposition."), chosen by `CHOLESKY_CUTOFF = 100`.
+  - JAX, `jax.lax.linalg.qdwh`, https://docs.jax.dev/en/latest/_autosummary/jax.lax.linalg.qdwh.html: "QR-based
+    dynamically weighted Halley iteration for polar decomposition." `max_iterations`: "Iterations will terminate
+    after this many steps even if the above is unsatisfied." Returns: "A four-tuple of (u, h, num_iters,
+    is_converged) containing the polar decomposition of x = u * h, the number of iterations to compute u, and
+    is_converged, whose value is True when the convergence is achieved within the maximum number of iterations."
+  - JAX, `jax/_src/tpu/linalg/eigh.py` (https://github.com/jax-ml/jax/blob/main/jax/_src/tpu/linalg/eigh.py):
+    "Symmetric (Hermitian) eigendecomposition using QDWH" "This implementation is primarily used on TPU, but it can
+    in principle work on CPU and GPU also." `split_spectrum`: "The Hermitian matrix `H` is split into two matrices
+    `H_minus` `H_plus`, respectively sharing its eigenspaces beneath and above its `split_point`th eigenvalue."
+    "H: The `n x n` Hermitian input, padded to `N x N`." "n: the true (dynamic) size of the matrix."
+    "termination_size: Recursion ends once the blocks reach this linear size." "for those platforms this algorithm
+    will only do the right thing if termination_size == 1."
+  - JAX, `jax.scipy.linalg.expm`, https://docs.jax.dev/en/latest/_autosummary/jax.scipy.linalg.expm.html:
+    `expm(A, *, upper_triangular=False, max_squarings=16)`. "This uses the scaling-and-squaring approximation method,
+    with computational complexity controlled by the optional `max_squarings` argument. Theoretically, the number of
+    required squarings is `max(0, ceil(log2(norm(A))) - c)` where `norm(A)` is the L1 norm and `c=2.42` for
+    float64/complex128, or `c=1.97` for float32/complex64."
+  - PyTorch 2.15, `torch.linalg.pinv` and `torch.linalg.lstsq`, as quoted in item 5: `pinv` "uses
+    torch.linalg.svd() if hermitian= False and torch.linalg.eigh() if hermitian= True"; "'gelss' (full SVD)".
+  - A. G. M. Lewis et al., "Large Scale Distributed Linear Algebra With Tensor Processing Units", arXiv:2112.09017
+    (https://ar5iv.labs.arxiv.org/html/2112.09017), §I: "they essentially only multiply matrices, but are very good
+    at doing so." §III.4: "Since TPUs are natively optimized for matrix multiplication, it is most natural to
+    consider also tasks based on matrix multiplication". Appendix B, of an eigensolver made from its own polynomial
+    iteration: "We have implemented such an eigensolver, but have found it to be lacking in both stability and
+    efficiency in practice". That polynomial iteration is not the method taken here.
+  - JAX, `jax.numpy.linalg.eig`, https://docs.jax.dev/en/latest/_autosummary/jax.numpy.linalg.eig.html: "At present,
+    non-symmetric eigendecomposition is only implemented on the CPU and GPU backends."
+- **Write:**
+  - The polar decomposition is QDWH: `max_iterations` iterations, an operand whose default is JAX's 10, each a QR
+    factorization, or a Cholesky factorization and two triangular solves, with matrix multiplications. The number of
+    iterations run is that operand. Whether the iteration converged within it is a value returned with the result.
+  - `eigh` is QDWH-eig: a polar decomposition splits the matrix into two blocks that share its eigenspaces below and
+    above a split point, and the same is done to each block, to the depth at which blocks reach the termination
+    size, an operand. A block has a compiled size, padded, and its true size is a value.
+  - `svd` is Algorithm 2: the polar decomposition, the eigendecomposition of its Hermitian factor, and one product.
+  - `pinv` and `lstsq` with gelsd and gelss are the compositions PyTorch states, of that `svd` or `eigh`.
+  - `matrix_exp` is scaling and squaring with `max_squarings` squarings, an operand whose default is JAX's 16.
+  - Each matrix multiplication, QR factorization, Cholesky factorization and triangular solve in these is an
+    ordinary node of the graph. The placement operand names its processor, on the GPU, the CPU or the Neural
+    Engine, and its sharding across nodes, as for any other function; they are scheduled with everything else. No
+    node of these compositions is confined to one kind of processor by this request.
+  - Where the placement names the CPU for the whole operator, item 5's one call of a LAPACK driver stands.
+  - `eig` and `eigvals` of a matrix that is not Hermitian stay as item 5 states them.
+  - No lowering here repeats a body a number of times that tensor data decides.
+- **Stops.** No quoted source says what to write for these:
+  - what `matrix_exp` returns when more than `max_squarings` squarings would be needed;
+  - the eigendecomposition of a block at the termination size when that size is more than 1;
+  - `eig` and `eigvals` of a matrix that is not Hermitian on the GPU or the Neural Engine;
+  - which of these nodes the Neural Engine's supplier offers, and at what precision.
 
