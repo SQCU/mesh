@@ -450,7 +450,7 @@ The functions the requirements are stated against are those of the reference pro
   binary search from (6)'s value, the maximum cycle mean computed at each step.
 - **It takes** the IPC graph and each vertex's execution time estimate t(v) ("Source for item 2's execution-time
   estimates", below). **It writes** Bff(e) for each feedforward edge e, which is that value's number of locations.
-  - In rdma/mesh-graph.h, `mesh_graph_cycle_mean` writes λ_max as a `double`, and `mesh_graph_buffer_bound` writes
+  - In rdma/mesh-graph.h at mesh 57d9f06e, `mesh_graph_cycle_mean` writes λ_max as a `double`, and `mesh_graph_buffer_bound` writes
     Bff(e) as `uint64_t bound[]`; rdma/mesh-collective.c calls it.
   - The IPC graph is a function of the static schedule: in the reference program, `schedule.argument_buffers` takes
     `schedule.schedule`'s graphs, classes each processor's arguments edge as feedback or feedforward by the same
@@ -696,7 +696,7 @@ The functions the requirements are stated against are those of the reference pro
 - **The algorithm** is Greedy by Size for Offset Calculation (Pisarchyk and Lee 2020, §5.2), as TensorFlow Lite's
   `GreedyBySizeAssignment` states it, its intersection test being `do_arcs_overlap` on the ring of the u executions.
 - **It takes** one usage record for each of the u locations (item 2) of each operand of a function typed
-  `contiguous_input` or `contiguous_output`, the record's interval being that location's lifetime (item 7). **It
+  `contiguous_input` or `contiguous_output`, the record's interval being that location's lifetime. **It
   writes** each record's offset and `total_size`. The interval is over the u executions of the unrolled steady
   state, which is the static schedule's (Lam 1988), so the records are a function of `schedule.schedule`'s result.
   The item names no function that writes the offsets and none that reads them.
@@ -759,7 +759,7 @@ The functions the requirements are stated against are those of the reference pro
 - **The algorithm** is the lifetime computation of ExecuTorch's exir/memory_planning.py and TensorFlow Lite's
   arena_planner.cc: a buffer's interval runs from its first write to its last read, an input's starts at the first
   position, and a result's ends at the last.
-- **It writes** one interval for each buffer. Item 6's usage records take them.
+- **It writes** one interval for each buffer.
 - The positions are those of the capture's commands, so this item is placed only in a flow in which the program is
   executed and recorded before its static schedule exists.
 - **Replaces:** rdma/mesh_compile.py `program()`, which gives a call's inputs and its results the capture's whole range
@@ -841,7 +841,7 @@ The functions the requirements are stated against are those of the reference pro
   "once per multicore computer, not once per kernel".
 - **It takes** each compiled function's operations, the bytes it reads and writes and its execution mapping, which
   the target lowering supplies, and the machine's rates and primitive costs as operands. **It writes** t(v), which
-  item 2's computation of λ_max and Bff(e) takes. In rdma/mesh-graph.h, `mesh_graph_actor_time` takes a `struct
+  item 2's computation of λ_max and Bff(e) takes. In rdma/mesh-graph.h at mesh 57d9f06e, `mesh_graph_actor_time` takes a `struct
   mesh_graph_machine` and a `struct mesh_graph_actor` and writes the time as a `double`.
 - **Applies to:** item 2's t(v), and aot-compilation-change-request.md A3's weighting operand.
 - **Replaces:** the absence of a producer for t(v), and the consequent constant `HOST_LAG`.
