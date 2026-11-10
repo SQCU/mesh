@@ -1620,7 +1620,7 @@ PLACE_STEP = _message(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_b
 STATE_BUFFER = _message(None, C.c_void_p, C.c_void_p, C.c_ulong)
 
 
-# metal_recording.h struct MetalReplay, struct MetalCall and struct MetalValue
+# metal_recording.h struct MetalReplay and struct MetalCall
 class Replay(C.Structure):
     _fields_ = [('commands', C.c_void_p), ('residency', C.c_void_p), ('owner', C.c_void_p), ('count', mesh.U),
                 ('buffers', C.c_uint16), ('memory', C.c_uint16)]
@@ -1633,10 +1633,6 @@ class Replay(C.Structure):
 # execution e
 class Call(C.Structure):
     _fields_ = [('replay', C.POINTER(Replay)), ('call', mesh.Q), ('native', C.c_void_p), ('residues', mesh.Q)]
-
-
-class MetalValue(C.Structure):
-    _fields_ = [('bytes', C.c_ulong), ('kind', mesh.U), ('state', mesh.U), ('begin', mesh.U), ('end', mesh.U)]
 
 
 # rdma/mesh-metal.h struct mesh_metal_transport, struct mesh_metal_input (metal_recording.h struct MetalRemote), struct
@@ -7081,7 +7077,7 @@ def _lifetimes(programs, irs):
             continue
         k, recorder, prepared = row['k'], programs['recorder'], row['prepared']
         levels = LEVELS(recorder, _SEL(b'levels:'), prepared)
-        made = (MetalValue * max(VALUES(recorder, _SEL(b'values:level:into:'), prepared, 0, None), 1))()
+        made = (mesh.Value * max(VALUES(recorder, _SEL(b'values:level:into:'), prepared, 0, None), 1))()
         count = VALUES(recorder, _SEL(b'values:level:into:'), prepared, 0, C.cast(made, C.c_void_p))
         row['own'] = {}
         for vi in range(count):
@@ -7093,10 +7089,10 @@ def _lifetimes(programs, irs):
                     spans = [(value.begin, value.end)] + ([spanned[f, v]] if (f, v) in spanned else [])
                     spanned[f, v] = irs[f].values[v].begin, irs[f].values[v].end = \
                         min(s for s, _ in spans), max(e for _, e in spans)
-            elif value.bytes:
+            elif value.section.bytes:
                 row['own'][vi] = len(irs[k].values) + len(own[k])
-                own[k].append(mesh.Value(section=mesh.Section(bytes=value.bytes), kind=value.kind, state=value.state,
-                                         begin=value.begin, end=value.end, run=1))
+                own[k].append(mesh.Value.from_buffer_copy(value))
+                own[k][-1].run = 1
         row['levels'] = levels
     return own
 
