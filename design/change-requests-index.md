@@ -255,8 +255,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
   items 1, 15 and 3 are `Shard` (an entry of `splits[name]`: the mesh dimension with its tuple), `_sizes` and
   `IR.counts`, read by a slice, by the narrowing of a contraction's operands and by `IR.local`; an all-gather, an
   all-to-all and a reduce-scatter carry the counts (`Collective.counts`) and rank j's block is `counts[j]` elements,
-  placed after the blocks of the ranks before it. Not written: item 2's gather and scatter, item 4's mask, item 10 (a
-  window's halos over a dimension that has a tuple are still equal blocks), and items 5 to 9 and 11 to 14.
+  placed after the blocks of the ranks before it. 2026-11-10, later, items 2, 12, 9 and 10: a rank's buffer is the
+  `max(counts)` elements of the dimension from its base and its shard the subarray at `starts[rank]` (`IR.bases`,
+  `IR.starts`); `Collective` carries `counts`, `displs` and `starts`, and each lowering sends and places the subarray;
+  the slice of a replicated dimension is a view at the rank's base; `_partition_pad`, the `pad` item and the `narrow`
+  item are deleted; `_region` exchanges the halo from the rank j places away by one collective permute at the largest
+  size over the ranks, and a rank copies its own part where a sender's shard is smaller than that size. Not written:
+  item 2's gather and scatter (no function of the program emits either), item 12's other form, whole padded buffers
+  through an equal-size collective, and its choice (item 6, which decides it, is not written), a collective permute
+  in `_reshard` (a sharding names a mesh dimension, not an order of devices), item 4's mask, and items 5 to 8, 11, 13
+  and 14.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,
