@@ -4,6 +4,7 @@ import collections
 import ctypes as C
 import ctypes.util
 import errno
+import itertools
 import math
 import operator
 import os
@@ -37,8 +38,9 @@ MAXIMUM = {A.max_pool1d: 1, A.max_pool2d: 2, A.max_pool3d: 3}
 AVERAGE = {A.avg_pool1d: 1, A.avg_pool2d: 2, A.avg_pool3d: 3}
 PAD = {A.pad, A.constant_pad_nd}
 # design/aot-compilation-change-request.md A2; GSPMD section 3.1; L. Zheng et al., Alpa, OSDI 2022, section 4.1;
-# mesh-dataflow.h mesh_nodes_read
-Placement = collections.namedtuple('Placement', 'mesh nodes splits')
+# mesh-dataflow.h mesh_nodes_read; design/unequal-shards-change-request.md item 1; pytorch/pytorch#169320, RaggedShard
+# `local_units`: `units[m]` the tuple of integers of mesh dimension m, one per rank
+Placement = collections.namedtuple('Placement', 'mesh nodes splits units', defaults=({},))
 # GSPMD sections 2.1, 3.2, 4.2 and 4.5
 Collective = collections.namedtuple('Collective', 'kind node dims dim position')
 # design/aot-compilation-change-request.md A10, "Its output": "the order constraints between calls, which the program
@@ -91,9 +93,17 @@ class IR:
             self.metas[key] = result
         return result
 
+    # design/unequal-shards-change-request.md item 3; MPI 4.1 sections 7.5, 7.7 and 7.10.2: the counts of an extent
+    # sharded on mesh dimension m, the same arrays at every rank
+    def counts(self, m, extent):
+        return _sizes(self.placement.units.get(m), self.shape[m], extent)
+
+    def start(self, m, extent, device):
+        return sum(self.counts(m, extent)[:self.coords[device][m]])
+
     # GSPMD section 3.1
     def local(self, node, sharding):
-        return tuple(-(-s // self.shape[m]) if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
+        return tuple(max(self.counts(m, s)) if m >= 0 else s for s, m in zip(_value(node).shape, sharding))
 
     # mesh-collective.h struct mesh_declared; design/plan-to-bridge-change-request.md R2 and R4;
     # design/aot-compilation-change-request.md, appendix item 5; design/compilation-composition-change-request.md item
@@ -114,6 +124,24 @@ class IR:
                                       begin=begin, end=end, lag=lag, run=1))
         self.layouts.append((dtype, numel, device))
         return len(self.values) - 1
+
+
+# design/unequal-shards-change-request.md items 1 and 15. With a tuple, pytorch/pytorch#169320, RaggedShard
+# `local_units`, and Zhang et al., HAP, EuroSys 2024, section 5.1: each rank's fraction of the extent set to the nearest
+# integer, then, while the sizes do not sum to the extent, the size whose change adds the least rounding error reduced
+# or increased by one. With none, PyTorch 2.15 torch.chunk, which `Shard(dim)` follows: every rank the same size except
+# the last, trailing ranks empty
+def _sizes(units, parts, extent):
+    if units is None:
+        size = -(-extent // parts)
+        return tuple(max(0, min(size, extent - r * size)) for r in range(parts))
+    total = sum(units)
+    sizes = [(2 * extent * u + total) // (2 * total) for u in units]
+    while sum(sizes) != extent:
+        step = 1 if sum(sizes) < extent else -1
+        r = min(range(parts), key=lambda r: abs((sizes[r] + step) * total - extent * units[r]))
+        sizes[r] += step
+    return tuple(sizes)
 
 
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1; design/aot-compilation-change-request.md A1 and
@@ -607,14 +635,14 @@ def _reshard(ir, node, have, want):
         target, size = (node, after), ir.local(node, after)[i]
         if target in ir.made:
             return after
-        source = _partition_pad(ir, (node, have), j, -(-shape[j] // ir.shape[m]) * ir.shape[m])
+        counts = ir.counts(m, shape[j])
+        source = _partition_pad(ir, (node, have), j, max(counts) * ir.shape[m])
         made = target if padded == size else target + ('exchange', m)
-        ir.shapes[made] = tuple(padded if k == i else -(-n // ir.shape[m]) if k == j else n
-                               for k, n in enumerate(shape))
+        ir.shapes[made] = tuple(padded if k == i else max(counts) if k == j else n for k, n in enumerate(shape))
         own = (node, after, 'own')
-        ir.shapes[own] = tuple(-(-n // ir.shape[m]) if k == j else n for k, n in enumerate(shape))
+        ir.shapes[own] = tuple(max(counts) if k == j else n for k, n in enumerate(shape))
         ir.inside[own] = (made, i, {e: ir.coords[e][m] * shape[i] for e in ir.coords})
-        step(('copy', (source,), own, (j, m)))
+        step(('copy', (source,), own, (j, m, counts)))
         step(('collective', (source,), made,
               Collective('all-to-all', node, (m,), (i, j), len(ir.program))))
         if made != target:
@@ -637,8 +665,9 @@ def _reshard(ir, node, have, want):
         if m in want and m not in have:
             after = tuple(m if k == want.index(m) else s for k, s in enumerate(have))
             d = want.index(m)
-            source = _partition_pad(ir, (node, have), d, -(-ir.local(node, have)[d] // ir.shape[m]) * ir.shape[m])
-            step(('slice', (source,), (node, after), (d, m)))
+            counts = ir.counts(m, _value(node).shape[d])
+            source = _partition_pad(ir, (node, have), d, sum(counts[:-1]) + max(counts))
+            step(('slice', (source,), (node, after), (d, m, counts)))
             have = after
     return node, have
 
@@ -767,16 +796,14 @@ def _partition(ir, operators):
                 ir.locals[n] = configured
             if rule.kind == 'attention':
                 q, m = len(local) - 2, local[-2]
-                start = ir.coords[ir.device][m] * ir.local(node, local)[q] if m >= 0 and ir.device is not None else 0
+                start = ir.start(m, _value(node).shape[q], ir.device) if m >= 0 and ir.device is not None else 0
                 key = rule.operands[1]
-                part = ir.sharding[key][-2]
-                owned = ir.coords[ir.device][part] * ir.local(key, ir.sharding[key])[-2] \
-                    if part >= 0 and ir.device is not None else 0
-                keycuts = tuple(range(0, _value(key).shape[-2], max(1, ir.local(key, ir.sharding[key])[-2]))) \
-                    if part >= 0 else ()
+                part, span = ir.sharding[key][-2], _value(key).shape[-2]
+                owned = ir.start(part, span, ir.device) if part >= 0 and ir.device is not None else 0
+                keycuts = tuple(itertools.accumulate(ir.counts(part, span)[:-1], initial=0)) if part >= 0 else ()
                 query = rule.operands[0]
-                offsets = tuple(ir.coords[ir.device][m] * extent if m >= 0 and ir.device is not None else 0
-                                for m, extent in zip(wants[0], ir.local(query, wants[0])))
+                offsets = tuple(ir.start(m, extent, ir.device) if m >= 0 and ir.device is not None else 0
+                                for m, extent in zip(wants[0], _value(query).shape))
                 ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(
                     start, owned, ir.page, keycuts, tuple(_value(query).shape), offsets))
             reads = tuple(keys)
@@ -785,10 +812,11 @@ def _partition(ir, operators):
                 reads = ((rule.merged, 'merged', node),)
             key = (node, local, 'partial') if partial else (node, local)
             made = [key + ('cut', j) for j in range(len(cuts))] + [key]
-            ir.trims[made[0]] = [(k, own.index(label), m, _value(rule.operands[k]).shape[own.index(label)])
+            ir.trims[made[0]] = [(k, own.index(label), m, counts)
                                  for label, m in contracted.items() if m >= 0
                                  for k, own in enumerate(labels) if label in own
-                                 and _value(rule.operands[k]).shape[own.index(label)] % ir.shape[m]]
+                                 for counts in [ir.counts(m, _value(rule.operands[k]).shape[own.index(label)])]
+                                 if min(counts) < max(counts)]
             ir.emit(('call', reads, made[0], node))
             for j, (at, m, after, o) in enumerate(cuts):
                 ir.emit(('window', (made[j],), made[j + 1], (at, m, after, o, None, None, None)))
@@ -811,6 +839,11 @@ def partition(gm, placement, nodes, page):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
     ir, operators, annotated = IR(gm, placement, nodes), {}, set()
     ir.page = page
+    for m, units in placement.units.items():
+        if not isinstance(m, int) or not 0 <= m < len(ir.shape) or len(units) != ir.shape[m] \
+                or not all(isinstance(u, int) for u in units):
+            raise ValueError('units[%r] = %r: no tuple of integers, one per rank of a mesh dimension, over a mesh of '
+                             'shape %s (pytorch/pytorch#169320, RaggedShard local_units)' % (m, units, ir.shape))
     for node in ir.order:
         if node.op == 'call_function':
             ir.locals[node] = Local(node.op, node.target, node.args, {k: v for k, v in node.kwargs.items() if k != 'device'}
@@ -842,6 +875,13 @@ def partition(gm, placement, nodes, page):
     annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
     _partition(ir, operators)
+    for kind, _, _, operand in ir.program:
+        over = operand.dims if kind == 'collective' and operand.kind != 'all-reduce' else \
+            operand[1:2] if kind == 'window' else ()
+        if any(m in placement.units for m in over):
+            raise NotImplementedError('%s over mesh dimension %s, which has a tuple of units: no lowering at each '
+                                      'rank\'s own counts (design/unequal-shards-change-request.md items 2, 9 and 10)'
+                                      % (operand.kind if kind == 'collective' else 'a window', over))
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
     ir.sent = mesh_graph.reach([item[1][0] for item in ir.program if item[0] == 'collective'],
@@ -1074,11 +1114,10 @@ def _part(ir, key, j):
 
 
 # GSPMD section 4.5
-def _cut(ir, kind, operand, sizes, device):
+def _cut(ir, kind, operand, device):
     if kind == 'slice':
-        d, m = operand
-        n = -(-sizes[d] // ir.shape[m])
-        return d, ir.coords[device][m] * n, n
+        d, m, counts = operand
+        return d, sum(counts[:ir.coords[device][m]]), max(counts)
     if kind == 'narrow':
         return operand
     return operand[0], operand[2][ir.coords[device][operand[1]]], operand[3]
@@ -1099,15 +1138,14 @@ def _placement(ir, item, reads, device, added):
         place = _inside_of(ir, key, device)
         if kind != 'copy' or reads[0] is None:
             return place
-        source = reads[0] if operand is None else _narrowed(reads[0], *_cut(ir, 'slice', operand, reads[0].sizes,
-                                                                            device))
+        source = reads[0] if operand is None else _narrowed(reads[0], *_cut(ir, 'slice', operand, device))
         return source if source[:4] == place[:4] else place
     if key in ir.taken:
         return added[ir.taken[key]]
     if key in ir.loads:
         return _own(ir, key)
     if _sliced(item) and reads[0] is not None:
-        return _narrowed(reads[0], *_cut(ir, kind, operand, reads[0].sizes, device))
+        return _narrowed(reads[0], *_cut(ir, kind, operand, device))
     form = ir.forms.get(key)
     if kind == 'call' and form is None and isinstance(ir.locals[operand].target, torch._ops.OpOverload) \
             and _aliases(ir.locals[operand]):
@@ -6412,11 +6450,10 @@ def _collected(ir, placed, item, operands):
     return _fill(placed(key), 0) if local == 'fill' else []
 
 
-# GSPMD section 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram; Megatron-LM core_r0.12.0
-# megatron/core/tensor_parallel/layers.py:125–169, _initialize_affine_weight_cpu;
+# GSPMD section 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram;
 # design/problems-of-14b9a757-change-request.md, "Sources for the second stops", 8, and "Sources for the third stops", 8
 def _hosted(ir, item, values):
-    kind, reads, _, operand = item
+    kind, _, _, operand = item
     if kind == 'constant':
         return operator.attrgetter(operand)(ir.gm)
     if kind == 'call':
@@ -6427,12 +6464,7 @@ def _hosted(ir, item, values):
         padding = [0] * (2 * values[0].dim())
         padding[2 * (values[0].dim() - dim) - 1] = extent - values[0].shape[dim]
         return A.constant_pad_nd.default(values[0], padding, 0)
-    if kind == 'slice':
-        (partition_dim, m), world_size = operand, ir.shape[operand[1]]
-        weight_list = torch.split(values[0], -(-_layout(ir, reads[0])[1][partition_dim] // world_size), dim=partition_dim)
-        (piece,) = weight_list[ir.coords[ir.device][m]::world_size]
-        return piece
-    return values[0].narrow(*_cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device))
+    return values[0].narrow(*_cut(ir, kind, operand, ir.device))
 
 
 # torch/export/graph_signature.py InputKind.CONSTANT_TENSOR; mesh_code.Matrix._mesh_constants
@@ -6473,11 +6505,10 @@ def _initial_values(ir, immutable):
 
 
 # MPICH allgather_intra_ring.c, MPIR_Localcopy; torch 2.14.0 torch/_tensor_docs.py, copy_
-def _copied(ir, read, key, cut, source, target):
+def _copied(ir, key, cut, source, target):
     if ir.places[ir.device][key].writer != key:
         return []
-    return _assign(target, source if cut is None else source.narrow(*_cut(ir, 'slice', cut, _layout(ir, read)[1],
-                                                                            ir.device)))
+    return _assign(target, source if cut is None else source.narrow(*_cut(ir, 'slice', cut, ir.device)))
 
 
 # N. D. Jones, C. K. Gomard and P. Sestoft, 1993, Definition 4.1: one item of the function's program over its placed
@@ -6492,7 +6523,7 @@ def _specialized(ir, placed, item, operands, ops, given):
     elif kind == 'constant' and value is None:
         value = operator.attrgetter(operand)(ir.gm)
     elif kind == 'copy':
-        ops += _copied(ir, reads[0], key, operand, operands[0], value)
+        ops += _copied(ir, key, operand, operands[0], value)
     elif kind == 'pad' and key not in ir.loads:
         source = operands[0]
         ops += _fill(value, 0)
@@ -6504,14 +6535,12 @@ def _specialized(ir, placed, item, operands, ops, given):
         for start, extent in ((0, below), (above, length - above)):
             ops += _fill(value.narrow(dim, start, extent), fill) if fill is not None and extent else []
     elif kind in ('slice', 'narrow', 'window') and value is None:
-        cut = _cut(ir, kind, operand, _layout(ir, reads[0])[1], ir.device)
+        cut = _cut(ir, kind, operand, ir.device)
         value = pytree.tree_map(lambda tensor: tensor.narrow(*cut), operands[0])
     elif kind == 'call':
         operands = list(operands)
-        for at, dim, m, size in ir.trims.get(key, ()):
-            extent = -(-size // ir.shape[m])
-            valid = max(0, min(extent, size - ir.coords[ir.device][m] * extent))
-            operands[at] = operands[at].narrow(dim, 0, valid)
+        for at, dim, m, counts in ir.trims.get(key, ()):
+            operands[at] = operands[at].narrow(dim, 0, counts[ir.coords[ir.device][m]])
         value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed)
         ops += made
     elif kind == 'collective':

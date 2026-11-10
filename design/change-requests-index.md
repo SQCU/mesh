@@ -251,7 +251,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
     source changes do not close R4.
 
 - [unequal-shards-change-request.md](unequal-shards-change-request.md): outstanding, items 1–15. Written 2026-11-09
-  from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4.
+  from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4. 2026-11-10, `rdma/mesh_compile.py`:
+  items 1, 15 and 3 are `Placement.units`, `_sizes` and `IR.counts`, read by a slice, by the narrowing of a
+  contraction's operands and by `IR.local`. A collective other than an all-reduce, or a window, over a mesh dimension
+  that has a tuple is refused at `partition`: items 2, 9 and 10 are not written.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,
