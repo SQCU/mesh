@@ -13,7 +13,7 @@ The operator, 2026-11-10:
 
 ## Results
 
-- The pair decoding Gemma 4 E2B at 252.2 tok/s on the d6dceac bridge (mesh 0b3e78d7 returns to it).
+- That collectives had run end to end on these machines.
   > collectives have definitely run
 
   (session 66e06aa7, line 7139, 2026-11-05 17:24 UTC)
