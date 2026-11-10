@@ -6923,8 +6923,7 @@ def _endpoints(ir):
 # design/compilation-composition-change-request.md items 1 and 6, "Complete replacement workgroup" (A and B): each
 # call of the block, in the block's order (row j of the program is the plan's call j), its structured operations over
 # meta stand-ins of its function's plan values (copy j of a call's values, a block input's the holder's), declared in
-# its own program with the transport's declared ranges and releases (mesh-metal.h mesh_metal_range_declare), lowered,
-# and prepared by the executor for its schedule and lifetimes
+# its own program with the transport's declared ranges and releases (mesh-metal.h mesh_metal_range_declare), and lowered
 def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
     lib, made = _recorder()
     compiler, transport, machines = _compiler(), _transport(), _machines()
