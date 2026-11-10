@@ -129,7 +129,7 @@ The rows identify the work being composed. They are not nine independent compile
 - **Source:** S3's PCG and graph substitutions; S4's computation/communication transformations; S1's progressive
   representations. The numerical and graph algorithms are those selected in the requests' applicable clauses.
 - **Applies to:** all nine rows of the table.
-- **Write:** revise the existing `IR`/`mesh_function` path and its producers and consumers so that a value's sharding,
+- **Write:** A value's sharding,
   consumer kind, accesses, lifetimes, transfers and dependences describe the same program through lowering. Numerical
   decomposition, fusion and communication transformations keep the information needed by subsequent scheduling,
   allocation and synchronization. The output of each analysis or lowering is the operand its consumers actually use.
@@ -431,7 +431,7 @@ Numerical transformations belong to the compiler; recording and execution consum
 | `MetalNativeProjection`/`MetalNativeArgmax` source recognition and extraction, `MetalPackedWeights`, `MetalProjectionReduction`, `MetalNormalizationReduction` | Select/construct the retained tuned algorithms from typed operations, layouts and reduction domains. Preserve packed arithmetic, parallel reductions and split work; propagate `MetalNativePlan` facts directly instead of rereading `MN_*` defines. |
 | `MetalCoherentStores`, source-spliced publication/acquisition and `MetalMaskedPass` | Lower typed memory effects and page readiness to coherent access, publication, worklists and later-pass kernels. Preserve computation/transport overlap and fused publication. Carry any required target extension through the IR and emitter. |
 | `MetalParsedSpace` and `MetalCommandAccesses` as semantic reconstruction from emitted source | Use the compiler's instruction call/use-def and access relations. Remove the parser and its dead helpers once both scheduling and signature consumers use those relations. |
-| Replay-footprint reconstruction and the default/non-self-timed preparation bypass | Prepare one native program from retained plan relations and actual lowered effects. Emit its required synchronization regardless of the caller; remove the bypass and displaced orchestration. |
+| Replay-footprint reconstruction and the default/non-self-timed preparation bypass | Emit its required synchronization regardless of the caller; remove the bypass and displaced orchestration. |
 
 **One replacement landing.** The finished change includes producer, representations, transformations, all callers,
 the production build and the deletions together. Metal-microbench and mesh are separate Git repositories, so the
