@@ -295,14 +295,14 @@ The operator, 2026-11-09, in order:
     of the graph, with fixed shapes, that calls the LAPACK driver of that problem which Accelerate declares (the
     divide-and-conquer SVD; the symmetric and Hermitian eigensolvers; the general eigensolver; `gelsd` and `gelss`
     by name). The iteration is inside that one function. Nothing in the graph branches or repeats on tensor data.
-  - Such a node is offered by the CPU's supplier only. A placement that names another processor for it is refused.
   - The routine's `INFO` is a value the node returns; a positive `INFO` is reported through the check the compiler
     already has for a numerical operation's status.
   - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
   - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.
   - `torch.linalg.matrix_exp` has no such function in LAPACK. It, and any operator whose method needs a number of
-    iterations that depends on tensor data and for which no supplier's function is cited, is refused at export with
-    one plain message that names the operator and says that an iteration depth that depends on data is not
-    compiled.
+    iterations that depends on tensor data and for which no supplier's function is cited on the processor the
+    placement names, is refused at export with one plain message that names the operator and says that an iteration
+    depth that depends on data is not compiled. The functions cited above are the CPU's; none is cited for another
+    processor. Placement is an operand: the node is not moved to a processor the placement did not name.
   - No lowering written by mesh repeats a body a number of times that tensor data decides.
 
