@@ -200,10 +200,10 @@ This section is Claude's, not the operator's.
 
 ### The schedule that writes the page lists
 
-- **The algorithm** is the ported packing and the ported concurrent-flow solve (Garg–Könemann, as the statement under
-  "Interleaving every transfer" names it), run ahead of time over every transfer of a program together: every
-  collective call and pipeline hand-off, over the map's Thunderbolt-5-connected nodes, for any node count. It puts the
-  transfers that block a pipeline stage first.
+- **The algorithm** is the ported concurrent-flow solve (Garg–Könemann, as the statement under "Interleaving every
+  transfer" names it), with the ported packing, for which this document cites no source. It runs ahead of time over
+  every transfer of a program together: every collective call and pipeline hand-off, over the map's
+  Thunderbolt-5-connected nodes, for any node count. It puts the transfers that block a pipeline stage first.
 - **It takes** the program's declared transfers (operand ranges and destination ranks) and, from the map, node-level
   adjacency and each node pair's capacity, the sum of that pair's cables. It takes no cable, queue pair or link
   identity.
@@ -218,7 +218,8 @@ This section is Claude's, not the operator's.
 ### The assignment of pages to cables and queue pairs
 
 - **The algorithm** is Graham's list scheduling over the cables and queue pairs between two adjacent nodes. Each of the
-  two bridges computes it when the lists are loaded.
+  two bridges computes it when the lists are loaded. This document cites no paper of Graham's, and no source for the
+  division by a cable's bandwidth or for the tie-break.
 - **It takes**, for an ordered pair of adjacent nodes (a → b):
   - the ordered list of a's sends to b, which the schedule gives b as the same ordered list of its receives from a;
   - the cables between a and b, from the map, and each cable's bandwidth;
@@ -236,8 +237,8 @@ This section is Claude's, not the operator's.
   reads its `position`, and store each completed receive's `position` in its `word`.
   - The process lifecycle is the code of tag `pre-return-20261103`, verbatim (`rdma/mesh-heartbeat.c`;
     `rdma/mesh-link.c` per-port children, their stop, reaping, flush and exit; the holder table).
-  - A cable's queue-pair count is `max_qp` − `MESH_PROVIDER_RESERVED_QPS`, the smaller of the two ends' (mesh
-    bd85613e).
+  - A cable's queue-pair count is `max_qp` − `MESH_PROVIDER_RESERVED_QPS`, the smaller of the two ends', as the code of
+    tag `pre-return-20261103` has it (mesh bd85613e).
 - **The collective** (`mesh-collective.{c,h}`, `mesh-dataflow.h`, `mesh-call.h`):
   - one function takes a program's declared transfers (operand ranges and destination ranks) and the map, and writes
     the page lists;
