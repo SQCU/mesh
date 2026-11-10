@@ -166,6 +166,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
   retained resource/control cost DAG; dispatch projections share one DAG evaluation per supplied machine.
   Missing machine operands remain explicit in cost estimates. No corresponding operational/performance closure is
   recorded. Claude quota exhausted during this workgroup; the operator-authorized Codex continuation remains active.
+
+  Recorded 2026-11-10, in the request's
+  [Outstanding, 2026-11-10](compilation-composition-change-request.md#outstanding-2026-11-10):
+  - metal-microbench `MetalProgramPrepare` still computes a dependence relation from placed accesses, with
+    `MetalPlannedOrder`, `MetalRowAccesses`, `MetalPositionAccesses`, `MetalHostSide`, `MetalWaitRow` and
+    `MetalNewest`. `mesh_plan` does not make that relation. No quoted sentence states the form of four kinds of
+    access it would need as operands (frame tables, the transport's state words, storage the plan does not place, and
+    the mark on shared pages), and this request's table and the memorandum's item 4 differ on whether the function
+    stays.
+  - Nothing of the memorandum's items 4 and 7 has been run: no mesh region is on the machine they were written on.
 - [synchronization-signature-change-request.md](synchronization-signature-change-request.md): outstanding.
   The graph schema, serialization and printers, plan/native emission, composition and external monitor are present
   in the composition implementation. The review records distinguish remaining representation and observation gaps

@@ -1726,3 +1726,145 @@ The source path covers ordinary and continued distributed prefill, not imported
 leader-only prefix-cache snapshots. Numerical KV equivalence, public decode,
 latency and speedup are still unmeasured. It implements E1d's replicated cache
 preparation, not F11's separate sequence partition; F11 remains open.
+
+## The plan's results for native preparation
+
+`rdma/mesh-collective.h` `struct mesh_function`, `struct mesh_planned_call`, `struct mesh_planned`, and the `orders`,
+`causes` and `chains` operands of `mesh_plan`. The text here was in that header's comments until 2026-11-10.
+
+A function's compiled parts. `parts` is the number of one call's compiled parts at this node, in program order (none:
+one part of no time). Part p has a host part (its CPU tasks, host-input writes and encoding) of estimate t(v) `host[p]`
+ns, and a device part (its GPU dispatches) of `work[p]` ns, both `mesh_graph_actor_time` over the compiled actors
+(design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix). `edge` holds the `edges` dependences
+between them inside one call, each pair of different vertices once. Host part p is vertex p and device part p is vertex
+parts + p, which is `mesh_graph_buffer_bound`'s numbering.
+
+The calls' operands (design/aot-compilation-change-request.md A10, "Its output": "the order constraints between
+calls"; A. J. Bernstein, 1966; M. C. Rinard and P. C. Diniz, 1997). `orders` is `norders` pairs (a, b), a < b: call a
+before call b. `causes[q]` is the condition of order pair q: FLOW where call b reads a result of call a, CONFLICT where
+one writes storage the other reads or writes. `chains[j]` is the first call of call j's commuting chain.
+`struct mesh_function` `outstanding` is A10's bound on the function's calls outstanding at once.
+
+The horizon. `planned->horizon` is the number of block executions the program issues ahead of their ends. It is the
+largest Bff of the calls' host -> device edges (`mesh_graph_buffer_bound` over the calls' `host` and `work`). With each
+function's calls a block it sizes the copies of the function's values (`plan_unroll`). Each function's values that its
+host writes (`lag` nonzero) take its calls' largest Bff as their lag, the number of their locations.
+
+A planned call. `call[j]` describes call j of `calls`: `plan` is its function's state (`struct mesh_function` `plan`);
+`lead` is that plan's copies - 1; `function` is `calls[j]`, and is also the signature's
+`MESH_GRAPH_PLAN_SUBMISSION + function`; `ordinal` is its place among its function's `every` calls a block, so block
+execution b runs the plan's execution b every + ordinal; `parts` is its function's `parts`; `waits` is the number of
+synchronization edges its start waits on at this node (the entries of its row in `struct mesh_state` `rows`, which
+`mesh_transfers_start` waits on before its raise). The caller frees the result with `mesh_planned_free`.
+
+The signature. `signature` is the plan's synchronization signature as `plan_signature` made it. Its `task[x]`, x <
+tasks, are the vertices of the calls' graph in that graph's numbering: `label` is the call, and `processor` is 2v for
+node v's host and 2v + 1 for its bridge. The region's record at `struct mesh_state` `signature` is its serialized form
+for readers outside the compilation.
+
+The order. `order[0, orders)` holds the edges of the calls' graph, without its added synchronization, whose two ends
+are both this node's. An end is a call's submission (a host task: its `mesh_transfers_start`, the row's start) or its
+part (a bridge task: the call's work here). `delay` is in block executions: the head at block t follows the tail at
+t - delay. After them come each call's dependences between its compiled parts, `struct mesh_function` `edge` as given:
+call j's vertex x of that numbering is signature->tasks + 2 (the parts of the calls before j) + x. The graph's edges
+between nodes and its added synchronization belong to the transport (`mesh_transfers_start`'s waits, the bridge's
+tells).
+
+The causes (design/compilation-composition-change-request.md, "Complete replacement workgroup", Program relations:
+"Retain the value/effect/transfer cause of an edge"). `cause[e]` is the cause of `order[e]`:
+
+- FLOW or CONFLICT, with `pair` q: the edge implementing order pair q at a node both calls' parts share.
+- PROGRAM: a node's submission order, or its parts' call order.
+- SUBMIT: a submission before its part.
+- OUTSTANDING: A10's bound, a part before a later call's submission.
+- CHAIN: a commuting chain's order, or a persistent storage's.
+- TRANSFER: a demand's tree edge between nodes, with `pair` the demand.
+- PART: a dependence between two compiled parts of one call.
+
+`pair` is UINT32_MAX except for FLOW, CONFLICT and TRANSFER.
+
+## Relations over copies and classes
+
+`rdma/mesh-graph.h` `mesh_graph_contract`, `mesh_graph_contract_unrolled` and `mesh_graph_quotient`.
+
+`mesh_graph_contract` takes a relation whose edges carry delays in executions and contracts every vertex v that is not
+`kept[v]`. For kept u and w it gives one output {u, w, d} where a walk u -> ... -> w of at least one edge has every
+interior vertex contracted; d is the least sum of the walk's delays (E. W. Dijkstra, 1959, through `mesh_graph_lags`).
+A kept -> kept edge is its own walk, chains of any length through contracted vertices accumulate, and u = w is a cycle
+through contracted vertices. The outputs are ordered by (u, w). It returns ERANGE, with `*made` the count, where the
+count exceeds `room` (at most the kept vertices squared). The least delay implies the larger ones only where u's
+executions are ordered among themselves.
+
+`mesh_graph_contract_unrolled` is for a relation whose executions may overlap. It unrolls the relation over `copies`
+executions (M. Lam, PLDI 1988, §2.3): vertex v of copy c is c vertices + v, and an edge {u, w, d} with d < copies is,
+for each copy c from d to copies - 1, the edge from u of copy c - d to w of copy c, of delay 0. An edge with d >=
+copies has no copy. `kept` is given for one copy and holds for every copy. The unrolled relation is then contracted by
+`mesh_graph_contract`, so every pair of copies is its own output, in the unrolled numbering, of delay 0.
+
+`mesh_graph_quotient` gives the image of a relation under a map of its vertices to classes (S. S. Bhattacharyya, S.
+Sriram and E. A. Lee, 1997, §4.1: the IPC graph's edges are the dataflow edges between actors on different
+processors). For each edge (from[e], to[e]) whose ends have different classes it gives {class_of[from[e]],
+class_of[to[e]], 0}, each distinct pair once, ordered by (from, to). It returns EINVAL for an end that is not below
+`vertices`, and ERANGE, with `*count` the count, where the count exceeds `room`.
+
+## The native program's record
+
+metal-microbench `metal_recording.h` and `metal_recording.m`: `MetalRecorderActors`, `struct MetalCall`,
+`MetalRecorderProgram`, `MetalProgramSignature`, `MetalProgramRun`, `MetalProgramEnd` and the `MetalProgram` object.
+The text here was in those files' comments until 2026-11-10.
+
+`MetalRecorderActors` gives a lowered program's actors part by part (`metal_ir_parts`). `host[p]` is the
+`mesh_graph_actor_time` of part p's CPU tasks on `cpu`, and `work[p]` that of its GPU dispatches on `gpu`; neither has
+a time where a machine is NULL. `edges` holds the dependences between different actors inside one execution, each pair
+once, of delay 0: the compiled dispatch relation (`metal_ir_dependences`) under `mesh_graph_quotient`, host p vertex p
+and device p vertex parts + p. That is `struct mesh_function` `edge`, which `mesh_plan` returns in `struct
+mesh_planned` `order`. It returns ERANGE where `room` or `edge_room` is short, with `*parts` and `*made` set, and
+ENODATA, keeping the partial costs, where a machine's operands are absent.
+
+A row. `struct MetalCall` `call` is the plan's call j + 1, so row k's plan call is `planned->call[calls[k].call - 1]`:
+its plan, lead, function, and its `ordinal` among its function's `every` calls a block, which runs plan execution
+b every + ordinal at block execution b. The row's native operations at block execution b are `native[e mod residues]`,
+e that execution. A row whose replay is a compiled program with CPU entries between its GPU parts runs as one program
+row a part, in order: the first starts the call's transfers and the last reads its sent ranges.
+
+`MetalRecorderProgram`. `planned` is the rows' `mesh_plan` result and outlives the program. A program given no plan, or
+a row that is no call of it, is an error. The program's horizon `lag`, the block executions it issues ahead of their
+ends, is `planned->horizon`. An order edge x -> y of delay d below `lag` is read by the kinds of its two ends:
+
+- From a part to a part: a dependence of row y's work at block execution t on row x's at t - d. It is supplied, with
+  the rows' placed effects (footprints, sent ranges, native ranges), to the one dependence relation and its
+  synchronization.
+- From a part to a submission: row y's start at t follows row x's work of t - d.
+- From a submission: the rows' start order, and nothing is added.
+
+A delay of `lag` or more is the wait on `ended`. The parts of rows with no work here (a section-less producer's
+landing) are contracted over the unrolled copies by `mesh_graph_contract_unrolled`: a walk of any length through them
+from a work part to a work part or a submission is that edge. A planned call's `waits` says whether the program
+submits its open command buffer before that call's start.
+
+The object's fields. `calls` is the program's rows, each caller row's parts in order; `rows` is the caller row of each
+and `parts` its part; `natives` is the rows' resolved CPU entries; `steps` is each row's step words. `window` is the
+number of executions the dependence relation is unrolled over and the number of fence slots of a position; it is the
+plan's horizon, whose `ended` wait orders executions `lag` apart. `commits` is the command buffers committed so far.
+`stepStates` is each replay's execution-index state words, and `indexed` is set once a run has written them. Each
+issued span retains its completion event in `completionSpans`. `key` is the key of the inputs the program's
+synchronization was solved from. `allocators[t mod lag]` is execution t's command allocator, `residency` the rows'
+residency sets on the queue, `optimizing` the allocator of the optimization's command buffer, and `optimized` that
+commit's GPU start and end times. The step word of a placed copy is 8 bytes holding the execution e; the program's
+STEP site writes it, and the release dispatches, later passes and CPU tasks of execution e read it at copy e mod
+copies. Site s of the lowered program has mark `marks[s]`: its position, source, step kind and stage.
+
+`MetalProgramSignature`. `context` is the program's `struct mesh_ctx`; its node and plans name the signature's
+processors and submissions. The signature is that of the program's sites as `LowerProgram` is given them, for
+executions [0, executions), composed with `planned->signature`.
+
+`MetalProgramRun` runs block executions [first, first + executions) in one native call. `start(context, plan, e + 1)`
+is each row's start of its execution e, and `started` is a row's notice of its copy's last use. `ended` is signalled
+t + 1 at the end of execution t. Consecutive spans may give different events: a history sized by the compiled horizon
+keeps them, and a wait or notice uses the event of the span that contains the completion value it needs. For
+`mesh-sync-monitor.py`, `first`, `executions` and `ended` are arguments 2, 3 and 4.
+
+`MetalProgramEnd` ends a span. It returns 0 once executions [0, executions) ended, or EIO with a commit's error. With
+no progress for `MESH_PLATFORM_NS` it raises every received range of the executions in flight to its final count,
+which is the cancellation the later passes read; it then returns ECANCELED once that work and the callbacks drained
+(the operands may be retired), or ETIMEDOUT where they did not (the operands stay live).

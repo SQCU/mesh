@@ -1246,8 +1246,7 @@ static int plan_graph(struct plan *plans,const struct mesh_function *functions,u
   for(uint32_t f=0;f<count;f++)for(size_t q=row[f];q<row[f+1];q++)place[order[q]]=(uint32_t)(q-row[f]);
   const size_t built=graph.edges;
   /* design/compilation-composition-change-request.md item 6, unit 6D, and "6. Carry compilation results through
-     their consumers", Replaces item 2: each call's relation between its compiled parts (struct mesh_function `edge`)
-     follows the graph's edges, its vertices past the graph's V */
+     their consumers", Replaces item 2 */
   size_t within=0;
   for(uint32_t j=0;j<J;j++)within+=functions[calls[j]].edges;
   planned->call=malloc(((size_t)J+1)*sizeof *planned->call);
@@ -1305,6 +1304,7 @@ static int plan_graph(struct plan *plans,const struct mesh_function *functions,u
     p->wait_row=malloc(((size_t)p->calls+1)*sizeof *p->wait_row);
     if(!p->sync || !p->wait_row){status=ENOMEM;goto done;}
     for(uint32_t r=0;r<=p->calls;r++)p->wait_row[r]=(uint32_t)(waits[r]-waits[0]);
+    for(size_t q=row[f];q<row[f+1];q++)planned->call[order[q]].waits=(uint32_t)(waits[q-row[f]+1]-waits[q-row[f]]);
     for(uint32_t k=0;k<p->waits;k++){
       const uint32_t a=(uint32_t)wait_order[waits[0]+k],tail=added_from[a],j=call[tail];
       const uint32_t every=plans[calls[j]].calls;
@@ -2147,7 +2147,7 @@ struct plan_saved {
   unsigned char inputs[32];
 };
 struct plan_saved_function { uint64_t page,bytes; uint32_t values,transfers; };
-#define PLAN_SAVED_MAGIC UINT64_C(0x314e414c5048534d)
+#define PLAN_SAVED_MAGIC UINT64_C(0x324e414c5048534d)
 static const size_t plan_addresses[]={offsetof(struct mesh_state,phases),offsetof(struct mesh_state,counts),
   offsetof(struct mesh_state,supplied),offsetof(struct mesh_state,status),offsetof(struct mesh_state,completions),
   offsetof(struct mesh_state,hops),offsetof(struct mesh_state,deliveries),offsetof(struct mesh_state,submits),

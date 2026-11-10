@@ -229,16 +229,18 @@ struct mesh_graph_synchronized { uint32_t signal, wait, state, redundant, depend
 _Static_assert(sizeof(struct mesh_graph_processor) == 8 && sizeof(struct mesh_graph_task) == 16 &&
                sizeof(struct mesh_graph_dependence) == 16 && sizeof(struct mesh_graph_operation) == 32 &&
                sizeof(struct mesh_graph_synchronized) == 32, "rdma/mesh_graph.py");
-/* design/compilation-composition-change-request.md item 6.2; E. W. Dijkstra, 1959 (mesh_graph_lags): the relation
-   (edge, delays in executions) with every vertex v not `kept[v]` contracted. For kept u and w, one output {u, w, d} where
-   a walk u -> ... -> w of at least one edge has every interior vertex contracted, d the least sum of its delays (so a
-   kept -> kept edge is its own walk, and chains of any length through contracted vertices accumulate); u = w is a
-   cycle through contracted vertices. Ordered by (u, w); ERANGE with *made the count where it exceeds room (at most
-   kept vertices squared). The least delay alone implies the larger ones only where u's executions are ordered among
-   themselves; where they may overlap, the caller unrolls the executions as vertices with delay 0 (metal_recording.m
-   MetalPlannedOrder), so every copy pair is its own output */
+/* design/algorithm-sources.md#relations-over-copies-and-classes; design/compilation-composition-change-request.md item 6.2;
+   E. W. Dijkstra, Numerische Mathematik 1, 1959 */
 int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
                         const unsigned char *kept, size_t room, struct mesh_graph_dependence *contracted, size_t *made);
+/* design/algorithm-sources.md#relations-over-copies-and-classes; M. Lam, PLDI 1988, §2.3 */
+int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
+                                 const unsigned char *kept, uint32_t copies, size_t room,
+                                 struct mesh_graph_dependence *contracted, size_t *made);
+/* design/algorithm-sources.md#relations-over-copies-and-classes;
+   S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1 */
+int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edges, const uint32_t *from, const uint32_t *to,
+                        size_t room, struct mesh_graph_dependence *made, size_t *count);
 enum { MESH_GRAPH_COMPLETION_EVENT = 1 };
 struct mesh_graph_event { uint32_t object, role, argument, padding; uint64_t lookback; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };

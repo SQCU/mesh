@@ -48,12 +48,8 @@ struct mesh_weight { double produced,consumed,read,page; };
 struct mesh_dependence { uint32_t from,to,lag,kinds; };
 /* design/aot-compilation-change-request.md A8, A10 ("Its output") and appendix items 2 and 6;
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1);
-   design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: one call's compiled parts at this node in
-   program order, `parts` of them (none: one part of no time), part p's host part (its CPU tasks, host-input writes and
-   encoding) of estimate t(v) host[p] ns and its device part (its GPU dispatches) of work[p] ns, mesh-graph.h
-   mesh_graph_actor_time over the compiled actors, and the `edges` dependences `edge` between them inside one call
-   (host part p vertex p, device part p vertex parts + p: mesh_graph_buffer_bound's numbering), each pair of
-   different vertices once */
+   design/torch-capture-change-request.md item 2 and "Source for item 2's execution-time estimates (2026-11-09)";
+   design/algorithm-sources.md#the-plans-results-for-native-preparation */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; const double *host,*work; const struct mesh_graph_dependence *edge;
@@ -70,53 +66,23 @@ _Static_assert(sizeof(struct mesh_function)==96 && offsetof(struct mesh_function
    P. E. McKenney and J. D. Slingwine, Read-copy update, 1998;
    L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986;
    os/os_sync_wait_on_address.h:268 os_sync_wait_on_address_with_timeout; _time.h:185 clock_gettime_nsec_np */
-/* design/aot-compilation-change-request.md A10 ("Its output": "the order constraints between calls"; A. J. Bernstein,
-   IEEE Trans. Electronic Computers EC-15(5), 1966; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997): `orders`
-   norders pairs (a, b), a < b, call a before call b; `chains[j]` the first call of call j's commuting chain;
-   struct mesh_function `outstanding` A10's bound on the function's calls outstanding at once (the issue bound);
-   the horizon, the block executions the program issues ahead of their ends (its native lag), which with each
-   function's calls a block sizes the copies of its values (mesh-collective.c plan_unroll), is the largest Bff of the
-   calls' host -> device edges (mesh-graph.h mesh_graph_buffer_bound over the calls' `host` and `work`; design/torch-
-   capture-change-request.md item 2), given as `planned->horizon`; each function's values its host writes (`lag`
-   nonzero) take its calls' largest Bff as their lag, the number of their locations */
-/* design/compilation-composition-change-request.md item 6, unit 6D; design/aot-compilation-change-request.md, appendix
-   item 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1: the plan's
-   results for the program's native preparation, the caller's to free by mesh_planned_free. `call[j]` for call j of
-   `calls`: `plan` its function's state (struct mesh_function `plan`), `lead` that plan's copies - 1, `function`
-   calls[j], `ordinal` its place among its function's `every` calls a block, so that block execution b runs the plan's
-   execution b every + ordinal; `function` is also the signature's MESH_GRAPH_PLAN_SUBMISSION + function.
-   `signature` the plan's synchronization signature as plan_signature made it (mesh-graph.h struct mesh_graph_signature,
-   owned here, freed by mesh_planned_free; the region's record at struct mesh_state `signature` is its serialized form
-   for readers outside the compilation): its `task[x]`, x < tasks, are the calls' graph's vertices (`label` the call;
-   `processor` 2v node v's host, 2v + 1 its bridge), in the graph's numbering. `order[0, orders)` that
-   graph's edges (its added synchronization excluded) whose ends are both this node's, each a call's submission (a
-   host task: its mesh_transfers_start, the row's start) or its part (a bridge task: the call's work here), `from` and
-   `to` those vertices, `delay` in block executions: the head at block t follows the tail at t - delay. They are the
-   submission order, each submission before its part, each function's outstanding lag from a part to a later call's
-   submission, and A10's orders and commuting chains from part to part. The graph's edges between nodes and its added
-   synchronization are the transport's (mesh_transfers_start waits, the bridge's tells).
-   design/compilation-composition-change-request.md, "6. Carry compilation results through their consumers", Replaces
-   item 2: after them, each call's relation between its compiled parts, struct mesh_function `edge` as given: call j's
-   vertex x of that numbering (`call[j].parts` its function's `parts`) is signature->tasks + 2 (the parts of the calls
-   before j) + x, the cause PART */
+/* design/aot-compilation-change-request.md A10 ("Its output" and "Its bound"); A. J. Bernstein, IEEE Trans. Electronic
+   Computers EC-15(5), 1966; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997;
+   design/compilation-composition-change-request.md item 6, unit 6D, "6. Carry compilation results through their
+   consumers" and "Complete replacement workgroup", Program relations; design/aot-compilation-change-request.md,
+   appendix item 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1 and §9;
+   design/algorithm-sources.md#the-plans-results-for-native-preparation */
 struct mesh_graph_signature;
 struct mesh_graph_dependence;
-/* design/compilation-composition-change-request.md, "Complete replacement workgroup", program relations ("Retain the
-   value/effect/transfer cause of an edge"); A. J. Bernstein, IEEE Trans. Electronic Computers EC-15(5), 1966: `causes[q]`
-   the condition of order pair q, FLOW where call b reads a result of call a, CONFLICT where one writes storage the
-   other reads or writes. `cause[e]` of order[e]: FLOW or CONFLICT with `pair` q, the edge implementing pair q at a node
-   both calls' parts share; PROGRAM a node's submission order or its parts' call order; SUBMIT a submission before its
-   part; OUTSTANDING A10's bound, a part before a later call's submission; CHAIN a commuting chain's or a persistent
-   storage's order; TRANSFER a demand's tree edge between nodes (`pair` the demand); PART a dependence between two
-   compiled parts of one call; `pair` UINT32_MAX but for FLOW, CONFLICT and TRANSFER */
 enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_SUBMIT, MESH_PLANNED_OUTSTANDING,
        MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER, MESH_PLANNED_PART };
 struct mesh_planned_cause { uint32_t kind,pair; };
-struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,parts; };
+struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,parts,waits,padding; };
 struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
                       struct mesh_planned_cause *cause; uint64_t horizon; };
-_Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_planned_call,function)==16 &&
+_Static_assert(sizeof(struct mesh_planned_call)==40 && offsetof(struct mesh_planned_call,function)==16 &&
+               offsetof(struct mesh_planned_call,waits)==32 &&
                sizeof(struct mesh_planned)==56 && offsetof(struct mesh_planned,calls)==24 &&
                offsetof(struct mesh_planned,orders)==32 && offsetof(struct mesh_planned,cause)==40 &&
                offsetof(struct mesh_planned,horizon)==48 &&

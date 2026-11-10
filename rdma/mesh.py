@@ -94,13 +94,11 @@ class View(C.Structure):
     _fields_ = [('address', C.c_void_p), ('bytes', Z)]
 
 
-# design/compilation-composition-change-request.md item 6, unit 6D: mesh-collective.h struct mesh_planned_call and struct
-# mesh_planned, mesh_plan's results for the program's native preparation (each call's plan, lead, function, ordinal
-# and every; the plan's signature as mesh-graph.h struct mesh_graph_signature, whose tasks are the calls' graph's
-# vertices; its edges between this node's submissions and parts as struct mesh_graph_dependence over those vertices),
-# freed by mesh_planned_free.  What must stay: the fields in the header's order and of its types
+# design/compilation-composition-change-request.md item 6, unit 6D; mesh-collective.h struct mesh_planned_call, struct
+# mesh_planned; design/algorithm-sources.md#the-plans-results-for-native-preparation
 class PlannedCall(C.Structure):
-    _fields_ = [('plan', Q), ('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('parts', U)]
+    _fields_ = [('plan', Q), ('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('parts', U), ('waits', U),
+                ('padding', U)]
 
 
 class PlannedCause(C.Structure):

@@ -662,6 +662,48 @@ Not to be written, extended, observed or measured under any request: IF or WHILE
 predicate reads and drains, trip counts and trip observers, regions scoped to a branch or a loop body, and their
 entries in signatures, archives and monitors.
 
+## Outstanding, 2026-11-10
+
+Recorded by Claude on 2026-11-10, from the review of the commits made for items 4 and 7 of
+[implementation-order-2026-11-09.md](implementation-order-2026-11-09.md). Nothing here is a new requirement. Each entry
+names work that requirements 3, 4, 6 and 7 already ask for and that is not written, and says what is missing.
+
+1. **`MetalProgramPrepare` still computes a dependence relation of its own.**
+   - **Place:** metal-microbench `metal_recording.m`. `MetalProgramPrepare` reads each row's accesses at placed
+     addresses (`metal_ir_accesses`, `metal_ir_sent_reads`), unrolls them over the horizon, and calls
+     `mesh_graph_dependences_views` and `mesh_graph_synchronization`. `MetalPlannedOrder`, `MetalRowAccesses`,
+     `MetalPositionAccesses`, `MetalHostSide`, `MetalWaitRow` and `MetalNewest` exist for it.
+   - **Sentences:** requirement 3, "The second scheduling solve, copied graph walks, runtime placement of program
+     values and alternative execution paths are the existing requests' named replacements". The operator, 2026-11-10,
+     quoted in the memorandum: the solvers produce "exactly the data structures needed to produce indices of which
+     pages (literally, an abstraction over pointers) are 'safe' or 'available' for reading or writing at any
+     particular moment in execution".
+   - **Written on 2026-11-10:** the two graph walks of that code are in the graph module
+     (`mesh_graph_contract_unrolled`, `mesh_graph_quotient`); whether a call's start has waits is a result of the plan
+     (`struct mesh_planned_call` `waits`), not a test at run time; the E2B plan is given the order pair between the
+     index commands' call and the decode's call with its cause.
+   - **Not written:** `mesh_plan` making the relation between the compiled parts, and the deletion of the six
+     functions above. For that, `mesh_plan` has to be given the values each compiled part reads and writes before it
+     places pages. The forms for most of that operand exist already:
+     - a part is a vertex of `struct mesh_function` `edge`'s numbering (host part p is p, device part p is parts + p);
+     - an access to bytes of a value is `struct mesh_graph_view` (the compiler has them before placement:
+       `metal_ir_effect_views`, with each value's plan identity from `metal_ir_value_planned`);
+     - which execution's copy an access uses is `struct mesh_graph_generation`.
+   - **No quoted sentence states the form** of four kinds of access that the present relation includes:
+     - an access to a value's frame table (`METAL_IR_PAGES`);
+     - an access to the transport's state words (`METAL_IR_TRANSPORT`), whose offsets are known only after the plan;
+     - an access to storage the plan does not place (a fixed buffer);
+     - the mark that makes every GPU access to a value on shared pages conflict with every other (`shares`).
+   - **Two documents differ.** This request's table of displaced implementations says "Prepare one native program
+     from retained plan relations and actual lowered effects", which describes the present function. The memorandum's
+     item 4 says "Which pages may be read or written at a position of the schedule is this solve's result; it is not a
+     separate record". The memorandum says that this request is right where the two differ; the operator's turn it
+     quotes is later than this request's table.
+2. **Nothing of items 4 and 7 has been run.** No mesh region or bridge is on the machine the code was written on.
+   `mesh_plan`, the plan archive with the new `waits` field, the native program built from it, `e2b_replay`,
+   `native_bench` and the programs of `mesh_compile.py` were built, and not executed. The two new graph functions
+   were called in process on small relations.
+
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:

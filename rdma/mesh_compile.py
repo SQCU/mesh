@@ -7374,11 +7374,8 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             'device': device, 'inputs': [ir.inputs for ir in irs]}
 
 
-# design/torch-capture-change-request.md, appendix (actor costs); metal_recording.h MetalRecorderActors: each
-# function's call at this node part by part (host p its CPU tasks', work p its GPU dispatches' mesh_graph_actor_time on
-# this node's machines; the edges between its parts inside one execution, which mesh_plan returns in Planned `order`),
-# the host's writes of the block inputs it holds added to its first host part (a CPU actor writing their bytes); no
-# machine record: its parts of no time
+# design/torch-capture-change-request.md, "Source for item 2's execution-time estimates (2026-11-09)";
+# metal_recording.h MetalRecorderActors; design/algorithm-sources.md#the-plans-results-for-native-preparation
 def _actors(programs, irs):
     machines, lib, made = _machines(), programs['lib'], {}
     for row in programs['rows']:
@@ -7560,13 +7557,10 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
                      if 'solved' in programs else lib.MetalRecorderProgram(*arguments, error, len(error)))
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
-    # metal_recording.h MetalProgramHorizon: the program's lag (the plan's horizon), the
-    # executions in flight its signature window covers
+    # metal_recording.h MetalProgramHorizon
     horizon = lib.MetalProgramHorizon(program)
     period = _period({k: b[3] for k, b in enumerate(bound)}, horizon)
-    # design/synchronization-signature-change-request.md items 1 and 2: the compiled program's one signature over its
-    # warm-up and one period of its residues, the plan's composed in by its producer (MetalProgramSignature), kept with
-    # the compiled program as the graph module's forms and its record's bytes
+    # design/synchronization-signature-change-request.md items 1 and 2; metal_recording.h MetalProgramSignature
     if 'signature' in programs:
         signed = programs['signature']
     else:
@@ -7579,8 +7573,7 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
             signed = dict(mesh_graph.forms(replayed), record=mesh_graph.record(replayed))
         finally:
             mesh_graph.free(replayed)
-    # tools/e2b_replay.m signature_write: the record and its three printed forms beside the prefix MESH_SIGNATURE names,
-    # the mesh-sync-monitor.py operand
+    # tools/e2b_replay.m signature_write; bin/mesh-sync-monitor.py
     prefix = os.environ.get('MESH_SIGNATURE')
     if prefix:
         written = True

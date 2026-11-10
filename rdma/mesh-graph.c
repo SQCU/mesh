@@ -733,6 +733,51 @@ int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph
   free(first); free(order); free(source); free(target); free(lags);
   return result;
 }
+/* design/algorithm-sources.md#relations-over-copies-and-classes; M. Lam, PLDI 1988, §2.3 */
+int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
+                                 const unsigned char *kept, uint32_t copies, size_t room,
+                                 struct mesh_graph_dependence *contracted, size_t *made) {
+  for (size_t e = 0; e < edges; e++) if (edge[e].from >= vertices || edge[e].to >= vertices) return EINVAL;
+  if ((uint64_t)vertices * copies >= UINT32_MAX / 2 || (copies && edges >= SIZE_MAX / sizeof *edge / copies)) return ENOMEM;
+  size_t count = 0, at = 0;
+  for (size_t e = 0; e < edges; e++) if (edge[e].delay < copies) count += copies - (size_t)edge[e].delay;
+  struct mesh_graph_dependence *unrolled = malloc((count + 1) * sizeof *unrolled);
+  unsigned char *keep = malloc((size_t)vertices * copies + 1);
+  int result = unrolled && keep ? 0 : ENOMEM;
+  for (size_t e = 0; !result && e < edges; e++)
+    for (uint64_t c = edge[e].delay; c < copies; c++)
+      unrolled[at++] = (struct mesh_graph_dependence){(uint32_t)(c - edge[e].delay) * vertices + edge[e].from,
+                                                      (uint32_t)c * vertices + edge[e].to, 0};
+  for (uint32_t c = 0; !result && c < copies; c++) memcpy(keep + (size_t)c * vertices, kept, vertices);
+  if (!result) result = mesh_graph_contract(vertices * copies, count, unrolled, keep, room, contracted, made);
+  free(unrolled); free(keep);
+  return result;
+}
+/* design/algorithm-sources.md#relations-over-copies-and-classes;
+   S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1 */
+static int quotient_before(const void *a, const void *b) {
+  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+  return (x > y) - (x < y);
+}
+int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edges, const uint32_t *from, const uint32_t *to,
+                        size_t room, struct mesh_graph_dependence *made, size_t *count) {
+  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
+  if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
+  uint64_t *pair = malloc((edges + 1) * sizeof *pair);
+  if (!pair) return ENOMEM;
+  size_t pairs = 0, kept = 0;
+  for (size_t e = 0; e < edges; e++)
+    if (class_of[from[e]] != class_of[to[e]]) pair[pairs++] = (uint64_t)class_of[from[e]] << 32 | class_of[to[e]];
+  if (pairs) qsort(pair, pairs, sizeof *pair, quotient_before);
+  for (size_t k = 0; k < pairs; k++) {
+    if (k && pair[k] == pair[k - 1]) continue;
+    if (kept < room) made[kept] = (struct mesh_graph_dependence){(uint32_t)(pair[k] >> 32), (uint32_t)pair[k], 0};
+    kept++;
+  }
+  free(pair);
+  *count = kept;
+  return kept > room ? ERANGE : 0;
+}
 
 /* design/plan-to-bridge-change-request.md R2; design/disjoint-pages-change-request.md, A3 and C3.3 */
 struct chains_net {
