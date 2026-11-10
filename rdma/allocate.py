@@ -1,4 +1,6 @@
 """design/joint-compilation.md §3, row 9"""
+import bisect
+import fractions
 import math
 
 
@@ -103,3 +105,40 @@ def shift(shares, upper, load):
             shares[valley] = upper[valley]
             free.remove(valley)
     return shares
+
+
+# design/unequal-shards-change-request.md item 13; A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008, section 4,
+# LR-PROBE, "BINSEARCH(W, w) refers to a binary search algorithm that searches W for the largest index m, such that
+# W1,m ≤ w": each rank in order is given the longest run of rows whose weight does not exceed `load` times its speed,
+# `offsets` the prefix sums of the rows' weights; the separator indices that follow, the last the number of rows where
+# `load` is a largest load some separators have
+def probe(offsets, speeds, load):
+    cuts = [0]
+    for speed in speeds:
+        cuts.append(bisect.bisect_right(offsets, offsets[cuts[-1]] + load * speed) - 1)
+    return cuts
+
+
+# design/unequal-shards-change-request.md item 13; Pınar, Tabak and Aykanat 2008, sections 2, 3.3 and 3.3.1: the
+# separator indices s_0 = 0 ≤ s_1 ≤ ... ≤ s_P = N of N rows over P ranks in their given order that minimise the largest
+# load, a rank's load the weight of its rows over its speed, a row's weight its length and `offsets` item 11's, the
+# weights' prefix sums. Nicol's search, "considering each processor in order as a candidate bottleneck processor. For
+# each processor Pp, the algorithm does a binary search for the smallest index that will make Pp the bottleneck
+# processor", "keeping the smallest B that succeeded and the largest B that failed": a rank that is not the bottleneck
+# holds the rows before that index. The loads are fractions, so a candidate times its rank's speed is its rows' weight
+def separators(offsets, speeds):
+    rows, speeds = len(offsets) - 1, [fractions.Fraction(speed) for speed in speeds]
+    succeeded, failed, first = (offsets[rows] - offsets[0]) / speeds[0], -1, 0
+    for speed in speeds:
+        low, high = first + 1, rows + 1
+        while low < high:
+            end = (low + high) // 2
+            load = (offsets[end] - offsets[first]) / speed
+            if failed < load < succeeded:
+                if probe(offsets, speeds, load)[-1] == rows:
+                    succeeded = load
+                else:
+                    failed = load
+            low, high = (low, end) if load >= succeeded else (end + 1, high)
+        first = low - 1
+    return probe(offsets, speeds, succeeded)

@@ -299,6 +299,14 @@ outstanding, and what of it is outstanding. The standard every change request fo
     `rdma/allocate.py` `min_max`'s `shared` argument are deleted.
   - Item 7: `rdma/allocate.py` `speed(times, x)` is x / t(x) from one node's measured times of one kind of function;
     `stage_times` takes it at x = n / p, the constant model of Lastovetsky et al.'s step 2.
+  - Items 11 and 13: `Ragged(values, offsets)` is a tensor whose rows differ in length, the values of all rows
+    concatenated and nrows+1 offsets; for a second ragged dimension its `values` is a `Ragged`. `rdma/allocate.py`
+    `separators(offsets, speeds)` gives the nranks+1 separator indices that minimise the largest load, a rank's load
+    the weight of its rows over its speed, by `probe` (each rank in order the longest run of rows whose weight does
+    not exceed the candidate times its speed, a binary search in the offsets) and Nicol's search over the ranks in
+    order, with the smallest candidate that succeeded and the largest that failed. `rows(m, ragged, speeds)` gives
+    the placements (`Shard`) of the rows' lengths, of each inner dimension's rows' lengths, and of the values, each
+    tuple the ranks' counts between the separators; a slice and the collectives read them as items 1, 3 and 12 write.
 
   Outstanding:
   - Item 2's gather and scatter. No quoted sentence says where the program emits either: every input and constant is
@@ -323,7 +331,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
   - Items 6, 7 and 14: a run. None was made; `tp.py` and `pl.py` were partitioned in process at two ranks with times
     made up for the purpose, a tuple solved, and a tuple shifted from given shares, for each attention and
     feed-forward block.
-  - Items 8, 11 and 13.
+  - Items 11 and 13: no client program holds a tensor whose rows differ in length, so `rows` has no caller. No quoted
+    sentence says which of a program's operators take such a tensor sharded by rows, nor how a program's offsets (as
+    `embedding_bag` takes them) become each rank's row lengths; neither is written. A run: none was made;
+    `separators` was compared in process with an exhaustive search, and a two-tensor program was partitioned in
+    process by `rows`' placements at two and three ranks.
+  - Item 8.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,

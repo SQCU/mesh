@@ -239,6 +239,30 @@ def shard(m, extent, comm, comp, upper, shares=None):
     return Shard(m, _sizes(shares, len(shares), extent))
 
 
+# design/unequal-shards-change-request.md item 11; TensorFlow, tf.RaggedTensor, `values` and `row_splits`; Apache Arrow,
+# Columnar Format, List layout: a tensor whose rows differ in length is two tensors, `values` the values of all rows
+# concatenated and `offsets` nrows + 1 nondecreasing integers, row i `values[offsets[i]:offsets[i + 1]]`. No row is
+# padded. For a second ragged dimension `values` is a Ragged, "a nested `RaggedTensor` for the `values` tensor": the
+# outer offsets are over the inner's rows
+Ragged = collections.namedtuple('Ragged', 'values offsets')
+
+
+# design/unequal-shards-change-request.md item 13; PETSc MatCreateAIJ, "the first m0 rows belong to process 0, the next
+# m1 rows belong to process 1", and MatGetOwnershipRanges; A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008,
+# sections 2 to 4 (allocate.separators): the placements over mesh dimension m of a Ragged whose rows the ranks hold in
+# consecutive ranges, `speeds` each rank's speed in rank order. The ranges are the separator indices of the rows'
+# lengths; each placement's tuple is the ranks' counts between them, the same at every rank (item 3). The first is the
+# placement of the rows' lengths (tf.RaggedTensor `row_lengths`), then one for each inner dimension's rows' lengths,
+# and the last that of the values: rank p holds the lengths of rows s_p to s_p+1 and
+# `values[offsets[s_p]:offsets[s_p+1]]`
+def rows(m, ragged, speeds):
+    cuts, shards = allocate.separators(ragged.offsets.tolist(), speeds), []
+    while isinstance(ragged, Ragged):
+        shards.append(Shard(m, [b - a for a, b in itertools.pairwise(cuts)]))
+        cuts, ragged = ragged.offsets[cuts].tolist(), ragged.values
+    return (*shards, Shard(m, [b - a for a, b in itertools.pairwise(cuts)]))
+
+
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1; design/aot-compilation-change-request.md A1 and
 # appendix item 7; torch 2.14.0 torch/fx/experimental/proxy_tensor.py set_meta; torch/_subclasses/fake_tensor.py
 # FakeTensor
