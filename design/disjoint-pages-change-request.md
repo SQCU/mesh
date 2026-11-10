@@ -367,15 +367,21 @@ Every item of A3, C3 and D.3 says which of these functions writes a value and wh
 the reference program (~/schedule-emit, `schedule_emit/driver.py`): export, placement, devices and one schedule produce
 the scheduled value, and lowering, the runtime and the archive each take it.
 
-- **Schedule.** `mesh_plan` (mesh `rdma/mesh-collective.c`) takes the program's values with their sizes in pages and its
-  dependence graph. It writes the static schedule: the page table, each adjacent node's lists of transfer entries
-  (`struct mesh_hop`), and the state section, a contiguous section of the region apart from the data pages. The static
-  schedule is the scheduled value.
-- **Runtime.** The bridge (mesh `rdma/mesh-flow.c`) reads the transfer entries and the state section's words for sends,
-  and writes the state section's phases and counts. `tools/e2b_replay.m` passes the dependences to `mesh_plan`, commits
-  the command buffers and reads each execution's status.
-- **Lowering.** The kernels `metal_recording.m` records (`mesh_read_N`) read the pages the page table names and the
-  state section's phases.
+- **Schedule.** `mesh_plan` (mesh `rdma/mesh-collective.c`) takes the program's values and its dependence graph and
+  writes the static schedule, which is the scheduled value. The types, as mesh db17c3ad defines them:
+  - what it takes (`rdma/mesh-collective.h`): an array of `struct mesh_function`, with each value as a `struct mesh_value` (its `section` with its pages; its
+    `kind`, `MESH_INVARIANT` or `MESH_EXECUTION`; its `lag`), and each edge of the dependence graph as a `struct
+    mesh_dependence` `{from, to, lag, kinds}`;
+  - what it writes (`rdma/mesh.h`): the page table, rows of `struct mesh_page_entry` `{mapping, address, device}`; each
+    adjacent node's lists of transfer entries, `struct mesh_hop` (`page`, `node`, `direction`, `pages`, `bytes`, and for
+    the state section `field`, `word` and `count`); and the state section, a contiguous section of the region apart from
+    the data pages, headed by `struct mesh_state` (`copies`; the offsets `phases`, `counts`, `supplied` and `status`;
+    `executions`), with the status a `struct mesh_status` `{behind, ahead, first}`.
+- **Runtime.** The bridge (mesh `rdma/mesh-flow.c`) reads the `struct mesh_hop` entries and, for sends, the words at
+  `word`, and writes the phases at `field` and the counts at `count`. `tools/e2b_replay.m` passes the `struct
+  mesh_function` array to `mesh_plan`, commits the command buffers and reads the `struct mesh_status`.
+- **Lowering.** The kernels `metal_recording.m` records (`mesh_read_N`) read the pages the `struct mesh_page_entry` rows
+  name and the state section's phases. No source this document cites names the type of the recorded kernels' bindings.
 
 ## Appendix A: the allocator
 
@@ -819,7 +825,7 @@ functions that read it.
   1. For each value, L is the smallest lag at which every read of it in execution t happens before its write in
      execution t + L.
   2. u is the largest L. Tensor-parallel decode gives u = 1; recurrent state updated in place, 2; 1F1B pipelines, up to
-     the number of stages.
+     the number of stages. No cited source states what is written for a value with no such L.
   3. One execution's graph is unrolled into u copies, and execution t runs copy t mod u.
 - **Written by, read by.** `mesh_plan` computes u and the copies, and A3's allocator places the copies' pages.
   `executions` is not an input of `mesh_plan`: a static schedule runs any number of executions. For execution t, the
@@ -1378,7 +1384,7 @@ functions that read it.
 - **The algorithm** is one commit per later pass (C3.1):
   1. the commands before the later pass are committed;
   2. `waitForEvent:value:` waits on the event at p + 1 (MTL4CommandQueue.h:274), and the wait is the GPU queue's, not a
-     CPU thread's;
+     CPU thread's. No source in this document's turns defines p;
   3. the later pass and what follows go in the next command buffer.
 - A completion is the queue's `signalEvent:value:` (MTL4CommandQueue.h:266) and a bounded wait on that event, or an
   `MTL4CommitFeedback`.
