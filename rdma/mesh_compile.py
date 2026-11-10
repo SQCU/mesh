@@ -1607,7 +1607,6 @@ def _message(restype, *argtypes):
 
 _SEL = OBJC.sel_registerName
 OBJC.objc_getClass.restype, OBJC.objc_getClass.argtypes = C.c_void_p, [C.c_char_p]
-SET = _message(None, C.c_void_p)
 OBJECT = _message(C.c_void_p)
 VALUE = _message(C.c_uint64)
 # metal_recording.h state:buffer:status:
@@ -1723,8 +1722,8 @@ def _recorder():
         lib.MetalProgramLoad.restype = C.c_void_p
         lib.MetalProgramLoad.argtypes = lib.MetalRecorderProgram.argtypes[:-2] + [C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalProgramRun.restype = C.c_int
-        lib.MetalProgramRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.Q, mesh.Q, C.c_void_p, C.c_void_p,
-                                        C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalProgramRun.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, mesh.Q, C.c_void_p, C.c_void_p, C.c_void_p,
+                                        C.c_char_p, C.c_size_t]
         lib.MetalProgramHorizon.restype, lib.MetalProgramHorizon.argtypes = mesh.U, [C.c_void_p]
         lib.MetalProgramEnd.restype = C.c_int
         lib.MetalProgramEnd.argtypes = [C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
@@ -7172,7 +7171,7 @@ def _expanded(selection, owned, reader, addresses, base):
 
 # ExecuTorch, "Concepts", Memory planning; torch 2.14.0 torch/_inductor/cudagraph_trees.py; M. Lam, PLDI 1988, §2.3;
 # metal_ir.h metal_ir_value_placed, metal_ir_step_placed, metal_ir_place; metal_recording.h state:buffer:status:,
-# replay: and MetalReplayNative; MTL4CommandQueue.h addResidencySet:; design/compilation-composition-change-request.md, "Complete
+# replay: and MetalReplayNative; design/compilation-composition-change-request.md, "Complete
 # replacement workgroup" (6's stage E): each row's values bound to their placed copies (a plan value's copies as its
 # reader's executions select them, _expanded; a realized value's own copies), its step word and transport view, its
 # replay and compiled CPU entries the row (MetalCall `call` = j + 1) of the one native program, prepared with the
@@ -7208,10 +7207,7 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
         if status:
             raise OSError(status, 'call %s of compiled function %d: the replay: %s'
                           % (entry['node'].name, k, error.value.decode()))
-        if replay.commands:
-            SET(queue, _SEL(b'addResidencySet:'), replay.residency)
-        owned[id(replay)] = lambda replay=replay: (SET(queue, _SEL(b'removeResidencySet:'), replay.residency)
-                                                   if replay.commands else None, lib.MetalReplayDestroy(C.byref(replay)))
+        owned[id(replay)] = lambda replay=replay: lib.MetalReplayDestroy(C.byref(replay))
         rows.append(replay)
     calls = (Call * len(rows))(*[Call(C.pointer(r) if r is not None else None, row + 1, None, 0)
                                  for row, r in enumerate(rows)])
@@ -7222,7 +7218,7 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
     # metal_recording.h MetalProgramHorizon: the program's lag (the plan's horizon), the
-    # executions in flight its allocator ring and signature window cover
+    # executions in flight its signature window covers
     horizon = lib.MetalProgramHorizon(program)
     period = _period({k: b[3] for k, b in enumerate(bound)}, horizon)
     # design/synchronization-signature-change-request.md items 1 and 2: the compiled program's one signature over its
@@ -7251,9 +7247,7 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
         if written:
             print('prepared signature %s digest %s' % (prefix, signed['digest']), flush=True)
     gpu = OBJECT(queue, _SEL(b'device'))
-    allocators = (C.c_void_p * horizon)(*[_owned(owned, OBJECT(gpu, _SEL(b'newCommandAllocator')))
-                                          for _ in range(horizon)])
-    return {'lib': lib, 'queue': queue, 'calls': calls, 'program': program, 'allocators': allocators, 'horizon': horizon,
+    return {'lib': lib, 'queue': queue, 'calls': calls, 'program': program, 'horizon': horizon,
             'ended': _owned(owned, OBJECT(gpu, _SEL(b'newSharedEvent'))), 'error': error, 'signature': signed}
 
 
@@ -7328,8 +7322,8 @@ def _execution_error(replay, status, message):
 
 
 def _replayed(context, replay, b):
-    status = replay['lib'].MetalProgramRun(replay['program'], replay['allocators'], b, 1, replay['ended'],
-                                           C.addressof(context), START, STARTED, replay['error'], len(replay['error']))
+    status = replay['lib'].MetalProgramRun(replay['program'], C.addressof(context), b, 1, replay['ended'],
+                                           START, STARTED, replay['error'], len(replay['error']))
     if status:
         raise _execution_error(replay, status, 'execution %d of the program: %s' % (b, replay['error'].value.decode()))
     return replay['outputs'][b % len(replay['outputs'])]
@@ -7847,7 +7841,7 @@ def _bound(context, state, retained, deadline):
 # struct mesh_value; mesh-dataflow.h mesh_nodes_read, mesh_retire and struct mesh_ctx
 # Two quantities, two owners: A10's outstanding bound, the width of each function's calls in the one traced block
 # (_analyse); the executions in flight, item 2's Bff(e) that mesh_plan derives from each Function's t(v) (planned.horizon,
-# the native program's lag through MetalProgramHorizon, sizing its allocators, copies and input waits); neither given
+# the native program's lag through MetalProgramHorizon, sizing its copies and input waits); neither given
 def program(block, *example_inputs):
     tracer = Tracer()
     graph = tracer.trace(block)
