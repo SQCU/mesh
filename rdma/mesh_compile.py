@@ -104,7 +104,7 @@ class IR:
         self.attributes, self.loads, self.kinds, self.page, self.hull = {}, set(), {}, None, None
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
         self.given, self.landed = None, {}
-        self.trims = {}
+        self.masks = {}
         self.initial, self.constant_values = None, set()
 
     def emit(self, item):
@@ -904,7 +904,9 @@ def _partition(ir, operators):
                 reads = ((rule.merged, 'merged', node),)
             key = (node, local, 'partial') if partial else (node, local)
             made = [key + ('cut', j) for j in range(len(cuts))] + [key]
-            ir.trims[made[0]] = [(k, own.index(label), m, ir.starts(m, extent), counts)
+            # design/unequal-shards-change-request.md item 4; GSPMD section 4.1, "Static shapes": each operand of the
+            # call that holds a contracted dimension whose ranks' shards differ, with each rank's `starts` and `counts`
+            ir.masks[made[0]] = [(k, own.index(label), m, ir.starts(m, extent), counts)
                                  for label, m in contracted.items() if m >= 0
                                  for k, own in enumerate(labels) if label in own
                                  for extent in [_value(rule.operands[k]).shape[own.index(label)]]
@@ -2868,6 +2870,24 @@ def _fill(out, value, step=0):
         made = r('add', t, made, r('mul', t, _convert(r, _linear(r, out.shape), I32, t), r.const(step, t)))
     r.done(_store(r, made, t, out))
     return [_Generic(out.shape, [], [(out, _same(out.dim()))], r)]
+
+
+# design/unequal-shards-change-request.md item 4; GSPMD section 4.1, "Static shapes": "data in the padding area needs to
+# be masked off", "GSPMD first replaces them with the identity value of the reduction", "a Select according to a mask
+# calculated by comparing Iota and an offset based on PartitionId". `out` is `value` with the elements along `dim`
+# outside the rank's shard, `count` elements from `start` of its buffer, replaced by 0, the identity of the sum
+def _shard_select(out, value, dim, start, count):
+    if value.is_complex():
+        return _shard_select(torch.view_as_real(out), torch.view_as_real(value), dim, start, count)
+    _typed('a select of a shard', [value], [out], REAL)
+    t = _compute(value.dtype)
+    r = _Region()
+    x, at = _load(r, 0, value, t), r.index(dim)
+    own = r('lt', BOOL, at, r.const(start + count, I32))
+    if start:
+        own = r('and', BOOL, r('ge', BOOL, at, r.const(start, I32)), own)
+    r.done(_store(r, r('select', t, own, x, r.const(0, t)), t, out))
+    return [_Generic(out.shape, [(value, _same(out.dim()))], [(out, _same(out.dim()))], r)]
 
 
 def _copying(target, given, outs):
@@ -6628,8 +6648,12 @@ def _specialized(ir, placed, item, operands, ops, given):
         value = pytree.tree_map(lambda tensor: tensor.narrow(*cut), operands[0])
     elif kind == 'call':
         operands = list(operands)
-        for at, dim, m, starts, counts in ir.trims.get(key, ()):
-            operands[at] = operands[at].narrow(dim, starts[ir.coords[ir.device][m]], counts[ir.coords[ir.device][m]])
+        for at, dim, m, starts, counts in ir.masks.get(key, ()):
+            q = ir.coords[ir.device][m]
+            if counts[q] < operands[at].shape[dim]:
+                masked = _temporary(operands[at].shape, operands[at].dtype)
+                ops += _shard_select(masked, operands[at], dim, starts[q], counts[q])
+                operands[at] = masked
         value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed)
         ops += made
     elif kind == 'collective':

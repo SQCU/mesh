@@ -269,7 +269,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
   `_collective_permute` sends and places the subarray. Still not written: item 2's gather and scatter. No quoted
   sentence says where the program emits either: every input and constant is held at every node, a resharding
   replicates on every device (GSPMD §4.5), and the one transfer from a single device is `_deliver`'s, of a whole
-  output.
+  output. 2026-11-10, later, item 4: before a call that contracts a dimension whose ranks' shards differ, each operand
+  holding the dimension is written through `_shard_select`, a select on the index along the dimension compared with
+  the rank's `starts` and `counts`, 0 outside the shard, at a rank whose shard is smaller than its buffer (`IR.masks`);
+  the narrowing of a contraction's operands (`IR.trims`) is deleted. The select is its own operation writing a
+  temporary; it is not part of the contraction's region. Item 5: `examples/tp.py` `placement` cuts the feed-forward
+  block's first weights along dimension 0 and its second along dimension 1 by one entry, `Shard(0, units)` where the
+  environment gives `UNITS`; `_partition` then contracts each rank's shard and emits one all-reduce, with no collective
+  before the second product. Not written for item 5: `examples/pl.py`'s placement has no tuple; metal-microbench
+  `tools/prepare_e2b.py` `column_cuts` and `partition` are kept as they are, and `column_cuts` floors cumulative
+  shares, which is not item 1's rounding. No run was made of either item.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,

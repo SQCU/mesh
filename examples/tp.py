@@ -63,17 +63,24 @@ class Training(torch.nn.Module):
         return out.sum(), out.detach()
 
 
-# M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, Figure 3; V. Korthikanti et al., arXiv:2205.05198
-def placement(nodes, sequence_parallel):
+# M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, Figure 3; V. Korthikanti et al., arXiv:2205.05198;
+# design/unequal-shards-change-request.md item 5; Megatron-LM section 3: the feed-forward block's first weights are cut
+# along their columns (a torch.nn.Linear weight's dimension 0) and its second along its rows (dimension 1) by one
+# entry, mesh dimension 0 with `units`, the tuple of item 1, or with none
+def placement(nodes, sequence_parallel, units=None):
     def choose(gm, examples):
-        splits = {}
+        splits, cut = {}, 0 if units is None else mesh.Shard(0, units)
         for node in gm.graph.nodes:
             if node.op == 'get_attr' and node.target.endswith('.weight'):
                 layer = node.target.rsplit('.', 2)[-2]
-                if layer in ('wq', 'wk', 'wv', 'w1', 'w3'):
+                if layer in ('wq', 'wk', 'wv'):
                     splits[node.target] = (0, -1)
-                elif layer in ('wo', 'w2'):
+                elif layer == 'wo':
                     splits[node.target] = (-1, 0)
+                elif layer in ('w1', 'w3'):
+                    splits[node.target] = (cut, -1)
+                elif layer == 'w2':
+                    splits[node.target] = (-1, cut)
             elif node.op == 'placeholder' and sequence_parallel:
                 splits[node.name] = (-1, 0, -1)
         return mesh.Placement(list(range(len(nodes))), nodes, splits)
@@ -138,7 +145,8 @@ def main():
     block = None
     if not args.load:
         model = Training().to(device=args.device, dtype=torch.float32)
-        block = Calls(mesh.Function(model, placement(args.nodes, os.environ.get('SP', '1') == '1'), mesh.unit,
+        units = tuple(int(u) for u in os.environ['UNITS'].split(',')) if 'UNITS' in os.environ else None
+        block = Calls(mesh.Function(model, placement(args.nodes, os.environ.get('SP', '1') == '1', units), mesh.unit,
                                     device=args.device, loss=0))
     return execute(block, (x,), args)
 
