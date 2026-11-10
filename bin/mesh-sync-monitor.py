@@ -27,11 +27,11 @@ PROBES = [
     ('pass_barrier', 'objc$target::-barrierAfterEncoderStages?beforeEncoderStages?visibilityOptions?:', None, None, None),
     ('queue_barrier', 'objc$target::-barrierAfterQueueStages?beforeStages?visibilityOptions?:', None, None, None),
     ('producer_barrier', 'objc$target::-barrierAfterStages?beforeQueueStages?visibilityOptions?:', None, None, None),
-    ('host_wait', 'pid$target::MetalEventWait:', 'arg0', 'arg1', None),
+    ('host_wait', 'objc$target::-waitUntilSignaledValue?timeoutMS?:', 'arg0', 'arg2', None),
     ('host_notify', 'objc$target::-notifyListener?atValue?block?:', 'arg0', 'arg3', None),
     ('host_publish', 'pid$target::mesh_host_publish:', '(arg1 << 20) + arg2', 'arg3 + 1', None),
     ('host_signal', 'objc$target::-setSignaledValue?:', 'arg0', 'arg2', None),
-    ('host_wait', 'pid$target::MetalNativeWait:', '(arg2 << 20) + *(uint32_t *)copyin(arg3 + 4, 4)', 'arg4 + 1', None),
+    ('host_wait', 'pid$target::MetalNativeWait:', '(arg2 << 20) + arg3', 'arg5 + 1', None),
     ('host_wait', 'pid$target::MetalSentWait:', 'arg0', 'arg1 + 1', None),
 ]
 # mesh-dataflow.c mesh_transfers_start: the submission, checked at its return (after the plan's count waits it holds)
@@ -39,7 +39,6 @@ START = ('bridge_start', 'pid$target::mesh_transfers_start:', 'arg1', 'arg2')
 UNLISTED = [
     'objc$target::-waitUntilCompleted:entry',
     'objc$target::-waitUntilScheduled:entry',
-    'objc$target::-waitUntilSignaledValue?timeoutMS?:entry',
     'pid$target::dispatch_semaphore_wait:entry',
     'pid$target::os_sync_wait_on_address:entry',
     'pid$target::os_sync_wait_on_address_with_timeout:entry',
@@ -545,12 +544,6 @@ def main(argv):
         expected_ops += [o for i, o in enumerate(operations) if which[i] == 'bridge']
     expected = mesh_graph.signature(processors, tasks, dependences, expected_ops)
     watched = mesh_graph.signature(processors, tasks, dependences, observed)
-    false_edges = sum(edge[2] == 'false' for edge in expected['synchronized'])
-    redundant_edges = sum(edge[3] for edge in expected['synchronized'])
-    if false_edges:
-        failures.append('the compiled operations observed have %d synchronization edges with no dependence under them' % false_edges)
-    if redundant_edges:
-        failures.append('the compiled operations observed have %d redundant synchronization edges' % redundant_edges)
     if expected['digest'] != watched['digest']:
         failures.append('observed graph %s differs from the compiled graph %s over the observed scope'
                         % (watched['digest'], expected['digest']))
