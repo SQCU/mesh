@@ -76,8 +76,8 @@ class Shard(int):
 
 # GSPMD section 4.1, "Static operator configurations"
 Local = collections.namedtuple('Local', 'op target args kwargs annotation', defaults=(None,))
-AttentionOrigin = collections.namedtuple('AttentionOrigin', 'query key page cuts shape offsets',
-                                         defaults=(0, 0, (), (), ()))
+AttentionOrigin = collections.namedtuple('AttentionOrigin', 'key page cuts shape offsets stripes',
+                                         defaults=(0, 0, (), (), (), ()))
 # GSPMD sections 3.2, 3.5, 4 and 4.6
 Rule = collections.namedtuple('Rule', 'kind level operands labels out propagate contracting windows fused merged '
                                       'configure')
@@ -106,6 +106,7 @@ class IR:
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
         self.given, self.landed = None, {}
         self.masks = {}
+        self.striped = set()
         self.initial, self.constant_values = None, set()
 
     def emit(self, item):
@@ -983,7 +984,9 @@ def _partition(ir, operators):
                 q, m = len(local) - 2, local[-2]
                 def base(m, extent):
                     return ir.bases(m, extent)[ir.coords[ir.device][m]] if m >= 0 and ir.device is not None else 0
-                start = base(m, _value(node).shape[q])
+                rank = ir.coords[ir.device][m] if ir.device is not None else 0
+                stripes = (ir.counts(m, _value(node).shape[q]), rank,
+                           ir.starts(m, _value(node).shape[q])[rank]) if node in ir.striped else ()
                 key = rule.operands[1]
                 part, span = ir.sharding[key][-2], _value(key).shape[-2]
                 owned = ir.start(part, span, ir.device) if part >= 0 and ir.device is not None else 0
@@ -991,7 +994,7 @@ def _partition(ir, operators):
                 query = rule.operands[0]
                 offsets = tuple(base(m, extent) for m, extent in zip(wants[0], _value(query).shape))
                 ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(
-                    start, owned, ir.page, keycuts, tuple(_value(query).shape), offsets))
+                    owned, ir.page, keycuts, tuple(_value(query).shape), offsets, stripes))
             reads = tuple(keys[:-1] if biased else keys)
             if rule.merged is not None:
                 ir.emit(('call', reads, (rule.merged, 'merged', node), rule.merged))
@@ -1025,6 +1028,60 @@ def _partition(ir, operators):
                 ir.emit(('call', (reduced, keys[-1]), (node, target), (node, 'bias')))
             if target != sharding:
                 _reshard(ir, node, target, sharding)
+
+
+# design/unequal-shards-change-request.md item 8; W. Brandon et al., Striped Attention, arXiv:2311.09431, "we permute
+# the sequence so that every device always operates on a discontiguous subset of tokens distributed approximately
+# uniformly throughout the original sequence": the places in the sequence of the tokens the ranks hold, rank after
+# rank, `counts[rank]` tokens a rank. Token j of a rank of c tokens lies at (2 j + 1) / (2 c) of the sequence, and the
+# tokens take the sequence's places in that order, equal ones in rank order; with equal counts over p ranks, token j of
+# rank r is at place p j + r
+def striped(counts):
+    return torch.tensor([j + sum(((2 * j + 1) * count + own - (other > rank)) // (2 * own)
+                                 for other, count in enumerate(counts) if other != rank)
+                         for rank, own in enumerate(counts) for j in range(own)], dtype=torch.int64)
+
+
+# design/unequal-shards-change-request.md item 8; Striped Attention, "we exploit the permutation equivariance of the
+# core attention computation to ensure that our decision to internally permute the input sequence does not affect the
+# final output of the model"; item 9 and GSPMD section 4.5, AllGather and DynamicSlice: an attention under a causal mask
+# whose sequence dimension is sharded takes its queries at `striped`'s places (torch.index_select), each rank the
+# queries of its own tokens, and its output is put back at those places (torch.index_copy). The three calls it adds are
+# nodes of a graph of their own, beside the exported graph
+def _stripe(ir, operators):
+    added = torch.fx.Graph()
+    for node in list(ir.order):
+        rule = operators.get(node)
+        if rule is None or rule.kind != 'attention' or ir.sharding[node][-2] < 0:
+            continue
+        local = ir.locals[node]
+        given = _given(local, _names(local))
+        if not given.get('is_causal'):
+            continue
+        query, out = given['query'], _value(node)
+        m, d, at = ir.sharding[node][-2], out.dim() - 2, _value(query).dim() - 2
+        places, taken, attended = (added.create_node('call_function', target, name='%s_%s' % (node.name, part))
+                                   for target, part in ((striped, 'places'), (A.index_select.default, 'striped'),
+                                                        (local.target, 'attended')))
+        places.meta['val'] = _value(query).new_empty((out.shape[d],), dtype=torch.int64)
+        taken.meta['val'], attended.meta['val'] = query.meta['val'], node.meta['val']
+        ir.locals[places] = Local('call_function', striped, (ir.counts(m, out.shape[d]),), {})
+        ir.locals[taken] = Local('call_function', A.index_select.default, (query, at, places), {})
+        ir.locals[attended] = _with(local, _names(local), {'query': taken})
+        ir.locals[node] = Local('call_function', A.index_copy.default, (attended, d, places, attended), {})
+        ir.sharding[places] = (-1,)
+        ir.sharding[taken] = _carry(ir.sharding[node], rule.out, rule.labels[0])
+        ir.sharding[attended] = ir.sharding[node]
+        whole = [tuple(('sequence',) if k == dim else k for k in range(rank))
+                 for dim, rank in ((at, _value(query).dim()), (d, out.dim()))]
+        operators[places] = _operator(places, ir.locals[places])
+        operators[taken] = Rule('take', 1, [query, places], [whole[0], (at,)], tuple(range(_value(query).dim())),
+                                (0, 1), (), (), False, None, lambda sharded: ())
+        operators[attended] = _operator(attended, ir.locals[attended])
+        operators[node] = Rule('take', 1, [attended, places, attended], [whole[1], (('sequence',),), whole[1]],
+                               tuple(range(out.dim())), (0, 2), (), (), False, None, lambda sharded: ())
+        ir.striped.add(attended)
+        ir.order[ir.order.index(node):ir.order.index(node)] = [places, taken, attended]
 
 
 # design/aot-compilation-change-request.md A2 and A4; GSPMD sections 3, 3.1 and 4.6
@@ -1066,6 +1123,7 @@ def partition(gm, placement, nodes, page):
                                     and bool(operands) and all(operands) and _aliases(ir.locals[node]))
     annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
+    _stripe(ir, operators)
     _partition(ir, operators)
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
@@ -5899,6 +5957,33 @@ def _fragment(target, given, outs):
     return [_Generic(out.shape, [(x, None) for x in fields], [(out, _same(out.dim()))], r)]
 
 
+# design/unequal-shards-change-request.md item 8; `striped`: the place in the sequence of token j of `rank`
+def _place(r, j, counts, rank):
+    own, odd = counts[rank], r('add', I32, r('mul', I32, j, r.const(2, I32)), r.const(1, I32))
+    at = j
+    for other, count in enumerate(counts):
+        if other != rank and count:
+            at = r('add', I32, at, r('div', I32, r('add', I32, r('mul', I32, odd, r.const(count, I32)),
+                                                  r.const(own - (other > rank), I32)), r.const(2 * own or 1, I32)))
+    return at
+
+
+def _striped(out, counts):
+    t, ops = _compute(out.dtype), []
+    for rank, (first, count) in enumerate(zip(itertools.accumulate(counts, initial=0), counts)):
+        if count:
+            block, r = out.narrow(0, first, count), _Region()
+            r.done(_store(r, _convert(r, _place(r, r.index(0), counts, rank), I32, t), t, block))
+            ops.append(_Generic(block.shape, [], [(block, _same(1))], r))
+    return ops
+
+
+# row `index` of a rank's buffer of queries is its token `index - start`, the rank's shard from `start` of its buffer
+def _striped_query(r, index, origin):
+    counts, rank, start = origin.stripes
+    return _place(r, r('sub', I32, index, r.const(start, I32)), counts, rank)
+
+
 # T. Dao et al., FlashAttention, NeurIPS 2022, Algorithms 1 and 2;
 # H. Liu et al., Ring Attention, arXiv:2310.01889, section 3 and Algorithm 1
 def _heads(x, group, kv):
@@ -5910,7 +5995,7 @@ def _heads(x, group, kv):
     return x.as_strided(shape, stride, x.storage_offset())
 
 
-def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=AttentionOrigin(0)):
+def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=AttentionOrigin()):
     length, size, other, value = q.shape[-2], q.shape[-1], k.shape[-2], v.shape[-1]
     t = _compute(q.dtype, k.dtype, v.dtype, torch.float32)
     qs, ks, vs = _heads(q, group, False), _heads(k, group, True), _heads(v, group, True)
@@ -5948,7 +6033,7 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=Att
             score = r('select', t, given, score, r.const(-math.inf, t)) if mask.dtype is torch.bool else \
                 r('add', t, score, _convert(r, given, _class(mask), t))
         if causal:
-            query = r('add', I32, r.index(b), r.const(origin.query, I32))
+            query = _striped_query(r, r.index(b), origin) if origin.stripes else r.index(b)
             key = r('add', I32, r.index(b + 1), r.const(lo, I32))
             score = r('select', t, r('gt', BOOL, key, query), r.const(-math.inf, t), score)
         r.done(score)
@@ -5974,13 +6059,15 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=Att
         if dropout:
             at = r.const(0, I32)
             logical = origin.shape or tuple(q.shape)
-            offsets = origin.offsets or (0,) * (q.dim() - 2) + (origin.query, 0)
+            offsets = origin.offsets or (0,) * q.dim()
             indices = [r.index(d) for d in range(q.dim() - 2)]
             if q.dim() >= 3:
                 indices[-1] = r('add', I32, r('mul', I32, r.index(b - 2), r.const(group, I32)), r.index(b - 1))
-            indices += [r.index(b), r.index(b + 2)]
-            for index, n, offset in zip(indices, (*logical[:-1], other), (*offsets[:-1], lo)):
-                index = r('add', I32, index, r.const(offset, I32))
+            indices = [r('add', I32, index, r.const(offset, I32)) for index, offset in zip(indices, offsets)]
+            indices += [_striped_query(r, r.index(b), origin) if origin.stripes else
+                        r('add', I32, r.index(b), r.const(offsets[-2], I32)),
+                        r('add', I32, r.index(b + 2), r.const(lo, I32))]
+            for index, n in zip(indices, (*logical[:-1], other)):
                 at = r('add', I32, r('mul', I32, at, r.const(n, I32)), index)
             keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, b + 3, at, generator)[0]), r.const(1 - dropout, F32))
             kept = r('mul', t, weight, r.const(1 / (1 - dropout), t)) if dropout < 1 else r.const(0, t)
@@ -6004,7 +6091,7 @@ def _attending(given):
             mask.expand(*lead, q.shape[-2], k.shape[-2]) if mask is not None else None), given['is_causal'], scale, group
 
 
-def _attended(target, given, outs, origin=AttentionOrigin(0)):
+def _attended(target, given, outs, origin=AttentionOrigin()):
     _typed(target, [given['query'], given['key'], given['value'], given['attn_mask']], outs)
     operands, causal, scale, group = _attending(given)
     return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), origin)
@@ -6402,8 +6489,10 @@ SYMBOLIC = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', opera
 def _lowering(local, page):
     packet = getattr(local.target, 'overloadpacket', local.target)
     if packet is A.scaled_dot_product_attention:
-        origin = local.annotation if isinstance(local.annotation, AttentionOrigin) else AttentionOrigin(0, 0, page)
+        origin = local.annotation if isinstance(local.annotation, AttentionOrigin) else AttentionOrigin(0, page)
         return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kwargs), outs, origin)
+    if local.target is striped:
+        return lambda args, kwargs, outs: _striped(outs[0], *args)
     if packet in (A._linalg_det, A._linalg_slogdet):
         metadata = _given(local, _names(local))['A'].meta['val']
         transpose = metadata.is_contiguous() and not metadata.is_complex()
@@ -8101,7 +8190,7 @@ def _compared(retained, signed):
     def named(kind, key):
         return [kind, key[0].name, [part.name if isinstance(part, Node) else part for part in key[1:]]]
     for ir, (_, _, _, copies) in zip(irs, retained['bound']):
-        exported = [node for node in ir.order if node.op == 'call_function']
+        exported = [node for node in ir.gm.graph.nodes if node.op == 'call_function']
         called = {item[3] for item in ir.program if item[0] == 'call'}
         places = ir.places.get(ir.device, {})
         collective = {i: c.kind for c, declared in ir.declares.items() for i in declared}
