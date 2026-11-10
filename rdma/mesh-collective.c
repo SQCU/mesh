@@ -1245,8 +1245,7 @@ static int plan_graph(struct plan *plans,const struct mesh_function *functions,u
   for(uint32_t j=0;j<J;j++)if(plan_chain(chains,j)==j && place[j]!=j)plan_ordered(&graph,plans,calls,actor,place[j],j,1);
   for(uint32_t f=0;f<count;f++)for(size_t q=row[f];q<row[f+1];q++)place[order[q]]=(uint32_t)(q-row[f]);
   const size_t built=graph.edges;
-  /* design/compilation-composition-change-request.md item 6, unit 6D, and "6. Carry compilation results through
-     their consumers", Replaces item 2 */
+  /* design/compilation-composition-change-request.md item 6, unit 6D, and item 6.2 */
   size_t within=0;
   for(uint32_t j=0;j<J;j++)within+=functions[calls[j]].edges;
   planned->call=malloc(((size_t)J+1)*sizeof *planned->call);
