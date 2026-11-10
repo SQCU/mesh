@@ -2404,12 +2404,11 @@ consumes it.
 
 - The code must keep every transport object and count inside the bridge, and the bridge takes whatever the devices
   report on each run.
-- **No cited source states a data structure, an algorithm or the count rule for this requirement.** As a fact of the
-  code at tag pre-return-20261103 (rdma/mesh-verbs.h), the queue-pair count for a cable is each device's `max_qp` less
-  the provider's own, the smaller of the two ends'.
-- **Where it composes.** The bridge computes that count on each run (rdma/mesh-verbs.h: a device's `max_pairs`, a
-  `uint32_t`), and the bridge consumes it, where it spreads a cable's list over what its devices give it (R5). The
-  scheduled value carries no transport object and no queue-pair count.
+- **No cited source states a data structure, an algorithm or a count rule for this requirement.** As a fact of the code
+  (rdma/mesh-verbs.h `device_up`, at tag pre-return-20261103 and now), each device's `max_pairs` is its `max_qp` less
+  `MESH_PROVIDER_RESERVED_QPS`.
+- **Where it composes.** The bridge computes `max_pairs`, a `uint32_t`, for each device on each run, and only the bridge
+  reads it. The scheduled value carries no transport object and no queue-pair count.
 
 ### R8. A program is its function calls
 
