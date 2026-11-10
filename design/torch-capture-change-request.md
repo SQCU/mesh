@@ -345,6 +345,13 @@ be captured yet;»)
 
 (2026-11-07 20:48)
 
+The operator, 2026-11-10:
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+
 ## Requirements
 
 The functions the requirements are stated against are those of the reference program ~/schedule-emit, composed by
@@ -532,7 +539,8 @@ The functions the requirements are stated against are those of the reference pro
     59b3a3d4), whose fields are a pipeline, buffers, offsets and a grid; the `source` of the recorded
     `newLibraryWithSource:options:error:` call; the presence bits; and the transfers' completion times, which
     `mesh_plan`'s linear program computes. **It writes** the mask, the worklist, the worklist's length in the
-    indirect buffer of the dispatch that executes it, and the task list.
+    indirect buffer of the dispatch that executes it, and the task list. The item names no type for the presence
+    bits' word, the completion times, the mask, the worklist or the task list.
   - Its input is the recorded dispatch, so in the LiteRT scope this item is placed only in a flow in which the
     program is executed and recorded before its static schedule exists.
   - **Source:**
@@ -624,7 +632,7 @@ The functions the requirements are stated against are those of the reference pro
 - **The algorithms** are await(E, v) (Reed and Kanodia 1979) and, at a failure, `complete_all` (Linux v6.12,
   kernel/sched/completion.c).
 - **It takes** each execution's start, which `mesh_transfers_start` (rdma/mesh-dataflow.c:734–736) writes as its
-  store of `submissions`. **It writes** the event's value, which the command queue's `waitForEvent:value:` reads.
+  store of `submissions`, a field of `struct mesh_state`. **It writes** the event's value, which the command queue's `waitForEvent:value:` reads.
 - **Replaces:** rdma/mesh-metal.m `waits_run`, which walks executions 0 to R − 1 and then sets the event that the
   command queue's `waitForEvent:value:` waits on to R × `passes` (:218, :222). `mesh_metal_waits_start` takes R as
   `repetitions` (:258), and e2b passes its `steps` (tools/e2b_replay.m:2094–2095).
@@ -699,7 +707,7 @@ The functions the requirements are stated against are those of the reference pro
   `contiguous_input` or `contiguous_output`, the record's interval being that location's lifetime. **It
   writes** each record's offset and `total_size`. The interval is over the u executions of the unrolled steady
   state, which is the static schedule's (Lam 1988), so the records are a function of `schedule.schedule`'s result.
-  The item names no function that writes the offsets and none that reads them.
+  The item names no function that writes the offsets and none that reads them, and no type for an offset.
 - **Replaces:** rdma/mesh-dataflow.c `mesh_view_compose` (:187–208 at mesh f55c541c), which reserves an address range
   and remaps operands' page-table rows over it with `mach_vm_remap`.
 - **Source:**
@@ -759,7 +767,7 @@ The functions the requirements are stated against are those of the reference pro
 - **The algorithm** is the lifetime computation of ExecuTorch's exir/memory_planning.py and TensorFlow Lite's
   arena_planner.cc: a buffer's interval runs from its first write to its last read, an input's starts at the first
   position, and a result's ends at the last.
-- **It writes** one interval for each buffer.
+- **It writes** one interval for each buffer. The item names no type for it and no function that reads it.
 - The positions are those of the capture's commands, so this item is placed only in a flow in which the program is
   executed and recorded before its static schedule exists.
 - **Replaces:** rdma/mesh_compile.py `program()`, which gives a call's inputs and its results the capture's whole range
