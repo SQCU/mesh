@@ -1,9 +1,5 @@
 # Change request: unequal shards and ragged tensors
 
-2026-11-09. This is `design/heterogeneity.md` rewritten as a change request: each requirement states what its source
-says to write, in the source's words. Code is cited at mesh 7df87fe4 and metal-microbench 7483572e; history at the
-commits named. Papers are quoted from their arXiv PDFs, standards and documentation from their pages.
-
 ## The turns
 
 The operator, in `design/heterogeneity.md`:
@@ -34,11 +30,26 @@ The operator, 2026-11-10:
 > "which adds two whole-sequence all-gathers per attention'
 > hm, stinky, and neither grounded in citation nor a requirement
 
+## The stages
+
+Each requirement composes into the stages of the reference program `~/schedule-emit` (`schedule_emit/driver.py`,
+`compile_module`), each a function from a value to a value:
+
+- `export` writes an `Exported`;
+- `place` takes its graph and the placement operand and writes the placed graph, in which a communication is a `send`
+  node and a `recv` node (`schedule_emit/placement.py`);
+- `on_devices` takes the placed graph and writes it with each node's device;
+- `schedule` takes that graph and writes each processor's nodes in order;
+- the result is one `Scheduled`, which lowering, the runtime and the archive each take.
+
+A sharding is part of the placement operand. Items 1, 5, 8, 13 and 15 state what the operand carries for a sharded
+dimension. Items 6, 7 and 14 produce it before `place` runs. Items 2, 3, 4, 9, 10 and 12 state nodes that `place` adds
+to the graph. Item 11 states the form of a value.
+
 ## Requirements
 
-### 1. A sharded dimension carries one integer per rank
+### 1. A sharded dimension carries one integer per device of the mesh dimension
 
-- **Applies to:** `design/heterogeneity.md` §1 ("Parts", "Share") and R6.
 - **Source:** pytorch/pytorch#169320, "[DTensor] A new placement: RaggedShard",
   https://github.com/pytorch/pytorch/issues/169320:
   - "`RaggedShard` is defined by two parameters, `dims` and `local_units`"
@@ -48,22 +59,24 @@ The operator, 2026-11-10:
   - "The length of the tuple must equal ``mesh.size(dim)``."
   - "The existing Shard placement only supports even sharding and does not meet the needs of many modern
     applications"
-- **Replaces:** in `rdma/mesh_compile.py`, the one extent ceil(n / P) that every rank of a mesh dimension is given
+- **Replaces:** in `rdma/mesh_compile.py`, the one extent ceil(n / P) that every device of a mesh dimension is given
   (`IR.local`, :198; `_reshard`, :717 and :720).
 - **Source for whole sizes:** Zhang et al., "HAP", EuroSys 2024, arXiv:2401.05965, §5.1: "After obtaining the optimal
   fractional solutions, we round the sharded sizes of each tensor to integers and ensure they add up to the total
   length of the dimension that is sharded on. We first set the sharded sizes to their nearest integers. If the sum is
   larger or smaller than the original size, we repeatedly reduce/increase the size by one for a shard that introduces
   smallest rounding errors, until the sizes of the sharded tensors sum to the original tensor."
-- **Write:** a sharded dimension's placement carries a tuple of integers, its length the size of the mesh dimension.
-  Rank r's shard of the dimension is its integer's fraction of the tuple's sum, set to the nearest integer; while
-  the sizes do not sum to the extent, the size whose change adds the least rounding error is reduced or increased by
-  one. Equal integers are the even sharding. In history: `rdma/torch-mesh/torch_mesh/partition.py` `RaggedShard`,
-  mesh be5d8920.
+- **Data structure:** a tuple of integers for each sharded dimension, RaggedShard's `local_units`, its length the
+  size of the mesh dimension. Equal integers are the even sharding.
+- **Algorithm:** HAP §5.1's rounding. It takes the tuple and the dimension's extent. Device j's size is its integer's
+  fraction of the tuple's sum, of the extent, set to the nearest integer; while the sizes do not sum to the extent,
+  the size whose change adds the least rounding error is reduced or increased by one. It writes one whole size per
+  device, the sizes summing to the extent.
+- **Stage:** the placement operand carries the tuple. `place` consumes it with the dimension's extent and writes the
+  sizes, which are the `counts` of items 2 and 3.
 
-### 2. A collective sends each rank's block at its own size
+### 2. A collective sends each device's block at its own size
 
-- **Applies to:** `design/heterogeneity.md` R8.
 - **Source:** MPI Forum, *MPI: A Message-Passing Interface Standard*, version 4.1, chapter 7 "Collective
   Communication", https://mpi-forum.org/docs/mpi-4.1/mpi41-report/node122.htm and the pages after it:
   - §7.5: "MPI_GATHERV extends the functionality of MPI_GATHER by allowing a varying count of data from each MPI
@@ -85,14 +98,17 @@ The operator, 2026-11-10:
   bandwidth and extra memory access."
 - **Replaces:** in `rdma/mesh_compile.py`, the padding of a dimension to a multiple of the mesh extent before a
   collective: `_reshard` (:715, :745) and `_partition` (:903), through `_partition_pad` (:673).
-- **Write:** an all-gather, a reduce-scatter, an all-to-all, a gather and a scatter over a dimension sharded by
-  item 1 each carry an array of counts, one per rank, and an array of displacements, one per rank. The block of
-  rank j is sent at `counts[j]` elements and placed at `displs[j]`. A reduce-scatter's result is n consecutive
-  blocks, block i of `counts[i]` elements, sent to rank i.
+- **Data structure:** MPI's two arrays, `counts` (MPI's `recvcounts` and `sendcounts`) and `displs`, each with one
+  entry per device of the mesh dimension.
+- **Algorithm:** MPI 4.1's collectives of varying count, §7.5 to §7.10.2 as quoted. An all-gather, a reduce-scatter,
+  an all-to-all, a gather and a scatter over a dimension sharded by item 1 each carry the two arrays. The block of
+  device j is sent at `counts[j]` elements and placed at `displs[j]`. A reduce-scatter's result is n consecutive
+  blocks, block i of `counts[i]` elements, sent to device i.
+- **Stage:** the sends and receives of each of these collectives are nodes `place` adds to the graph, with `counts`
+  and `displs`. `on_devices` and `schedule` take the graph with those nodes.
 
-### 3. Every rank holds the same counts
+### 3. Every device holds the same counts
 
-- **Applies to:** `design/heterogeneity.md` R4.
 - **Source:** MPI 4.1, the same pages:
   - §7.5: "The type signature implied by sendcount, sendtype on MPI process i must be equal to the type signature
     implied by recvcounts[i], recvtype at the root."
@@ -100,13 +116,14 @@ The operator, 2026-11-10:
     signature associated with recvcounts[j], recvtype at any other MPI process."
   - §7.10.2: "The routine is called by all group members using the same arguments for recvcounts, datatype, op and
     comm."
-- **Write:** the counts of item 2 are computed from the tuple of item 1 and the dimension's extent, and every rank
-  of the collective is given the same arrays. What rank j sends is `counts[j]` elements at every rank's reading of
-  it.
+- **Data structure:** the `counts` and `displs` of item 2.
+- **Algorithm:** item 1's rounding. The counts of item 2 are computed from the tuple of item 1 and the dimension's
+  extent, and every device of the collective is given the same arrays. What device j sends is `counts[j]` elements
+  at every device's reading of it.
+- **Stage:** `place` writes the arrays once for a collective; that collective's nodes on every device carry them.
 
-### 4. A rank's buffer keeps one shape: it is padded, and the padding is masked
+### 4. A device's buffer keeps one shape: it is padded, and the padding is masked
 
-- **Applies to:** `design/heterogeneity.md` R14.
 - **Source:** Xu et al., "GSPMD: General and Scalable Parallelization for ML Computation Graphs", 2021,
   arXiv:2105.04663, §4.1 "Static constraints", "Static shapes.":
   - "It's not always the case that all partitions have the same input/output shapes" ... "dimensions may not be
@@ -121,28 +138,30 @@ The operator, 2026-11-10:
   - "The amount of padding can vary between different partitions."
 - **Replaces:** in `rdma/mesh_compile.py`, `_partition_pad` (:673-681), which emits a pad of a dimension and an
   extent and nothing that masks it.
-- **Write:** the buffer a rank holds for a sharded dimension has one size for all ranks, rounded up; what lies past
-  a rank's own shard is arbitrary. Before an operator that reduces over that dimension, the elements past the rank's
-  shard are replaced by the identity of the reduction, by a select on a mask that compares the index along the
-  dimension with an offset computed from the rank. The padding differs by rank.
+- **Data structure:** GSPMD §4.1's padded shape and mask. The buffer a device holds for a sharded dimension has one
+  size for all devices, rounded up; what lies past a device's own shard is arbitrary. The mask compares the index
+  along the dimension (GSPMD's Iota) with an offset computed from the device (GSPMD's PartitionId).
+- **Algorithm:** GSPMD §4.1's masking. Before an operator that reduces over that dimension, the elements past the
+  device's shard are replaced by the identity of the reduction, by a select on the mask. The padding differs by
+  device.
+- **Stage:** the select is a node `place` adds before the reducing operator, on each device, from that device's size
+  of item 1.
 
 ### 5. Tensors that meet in one operation are split alike
 
-- **Applies to:** `design/heterogeneity.md` R6.
 - **Source:** Shoeybi et al., "Megatron-LM", 2019, arXiv:1909.08053, §3: "Hence, we partition the first GEMM in this
   column parallel fashion and split the second GEMM along its rows so it takes the output of the GeLU layer directly
   without requiring any communication as shown in Figure 3a. The output of the second GEMM is then reduced across
   the GPUs before passing the output to the dropout layer."
-- **Keeps:** metal-microbench `tools/prepare_e2b.py` `column_cuts` (:466) and `partition` (:817), which cut both
-  weights of an FFN at the same columns.
-- **Write:** the first weight of a two-layer block is cut along its columns and the second along its rows by the
-  same tuple of item 1, so the second takes the first's shard without a collective; the second's output is reduced
-  across ranks.
+- **Data structure:** the tuple of item 1, one tuple for both weights.
+- **Algorithm:** Megatron-LM §3's split. The first weight of a two-layer block is cut along its columns and the second
+  along its rows by the same tuple, so the second takes the first's shard without a collective; the second's output
+  is reduced across devices.
+- **Stage:** the placement operand carries the one tuple on the first weight's column dimension and the second
+  weight's row dimension. `place` consumes it and adds the nodes of the reduction.
 
-### 6. The time of a collective is taken at the largest shard, and shares are chosen for each part of the model
+### 6. The time of a collective is taken at the largest shard, and sharding ratios are chosen for each part of the model
 
-- **Applies to:** `design/heterogeneity.md` R7, and its "Limits of this module" ("One set of parts per mesh
-  dimension").
 - **Source:** HAP, §2.4 "Optimal Sharding Ratios":
   - "In these communication operations, the devices send and receive tensor shards of sizes proportional to the
     sharding ratios. The communication time therefore depends on the size of the largest shard. Minimal
@@ -169,9 +188,8 @@ The operator, 2026-11-10:
   - §5.2 "Different Sharding Ratios across the Model": "If the DNN model contains many layers and the
     computation-communication ratio differs across layers, using the same sharding ratios throughout the model may
     not be ideal."
-- **Source for the stages and their times** (added 2026-11-10; the passages the quotations above cite as "Sec. 3.2",
-  copied from the text of the arXiv PDF, line-break hyphens joined and the times' sub- and superscripts written
-  inline):
+- **Source for the stages and their times** (the passages the quotations above cite as "Sec. 3.2", with line-break
+  hyphens joined and the times' sub- and superscripts written inline):
   - HAP, §3.2 "Cost Modeling": "This allows us to divide the execution of a distributed program into stages, with
     each stage starting with a communication operation followed by a series of computation operations (except for
     the first stage which only contains computation), as illustrated in Fig. 6."
@@ -193,14 +211,19 @@ The operator, 2026-11-10:
     sharding ratios for tensors in that segment."
 - **Replaces:** `rdma/allocate.py` `min_max`'s `shared` argument (:67), which no caller supplies; and one tuple per
   mesh dimension.
-- **Write:** the shares B_j of the m ranks minimise, summed over the program's stages, the stage's collective time,
-  a linear function of the largest B_j, plus the largest over ranks of rank j's computation time at B_j; subject to
-  the B_j being nonnegative and summing to 1. It is solved as a linear program. The whole sizes follow by item 1's
-  rounding. A tuple is chosen for each part of the model, not one for the whole mesh dimension.
+- **Data structure:** HAP's sharding ratios B, one B_j for each of the m devices, one B for each segment of the model
+  (HAP §5.2); and HAP §3.2's stages of the program, each with its communication time comm(i)(B) and each device's
+  computation time comp(i)_j(B_j).
+- **Algorithm:** HAP's linear program (3). The B_j minimise, summed over the segment's stages, the stage's
+  communication time, a linear function of the largest B_j, plus the largest over devices of device j's computation
+  time at B_j; subject to the B_j being nonnegative and summing to 1. It is solved as a linear program. The whole
+  sizes follow by item 1's rounding. A tuple is chosen for each segment of the model, not one for the whole mesh
+  dimension.
+- **Stage:** the solve runs before `place`. It takes the program's stages and their times and writes, for each
+  segment, the tuple of item 1 in the placement operand, which `place` consumes.
 
 ### 7. A node's speed is a function of the size of the problem
 
-- **Applies to:** `design/heterogeneity.md` R3.
 - **Source:** Lastovetsky, Reddy, Rychkov and Clarke, "Design and implementation of self-adaptable parallel
   algorithms for scientific computing on highly heterogeneous HPC platforms", 2011, arXiv:1109.3074:
   - §1: "The fundamental assumption of the conventional algorithms based on the constant performance models (CPMs) is
@@ -210,17 +233,19 @@ The operator, 2026-11-10:
     a function of problem size, has been recently proposed."
   - "A set of p (p < n) processors P1,…,Pp, whose speeds of processing x units, si = si(x), can be obtained by
     measuring the execution time, ti(x), of a computational kernel, si(x) = x/ti(x)"
-- **Source for the x at which a speed is first taken** (added 2026-11-10, from the text of the same arXiv PDF, its
-  algorithm's steps 1 and 2): "All the p processors execute n / p computation units in parallel." "processor P1
+- **Source for the x at which a speed is first taken** (the same paper, its algorithm's steps 1 and 2): "All the p
+  processors execute n / p computation units in parallel." "processor P1
   calculates the absolute speeds of the processors, si(n / p) = (n / p) / ti(n / p) for 1 ≤ i ≤ p and builds the
   first approximation of their functional performance models in the form of constant models, si(x) = si(n / p)".
-- **Write:** for each node and each kind of function, the speed used to choose shares is s(x) = x / t(x), t(x) the
-  measured time of that function at x units. It is not one number per node. In history: the node lines of
-  metal-microbench `configs/links/pair-ring.txt` (parent of 8375cb22).
+- **Data structure:** the functional performance model of Lastovetsky et al.: for each node and each kind of
+  function, a speed s(x) = x / t(x), t(x) the measured time of that function at x units. It is not one number per
+  node.
+- **Algorithm:** the measurement of the paper's steps 1 and 2 as quoted: the speed is first taken at x = n / p.
+- **Stage:** the speeds are taken before `place`. Item 6's solve consumes them as the speeds its sharding ratios are
+  chosen with.
 
-### 8. Under a causal mask, a rank holds tokens spread through the sequence
+### 8. Under a causal mask, a device holds tokens spread through the sequence
 
-- **Applies to:** `design/heterogeneity.md` R10.
 - **Source:** Brandon et al., "Striped Attention: Faster Ring Attention for Causal Transformers", 2023,
   arXiv:2311.09431:
   - "identify a key workload imbalance due to triangular structure of causal attention computations."
@@ -241,26 +266,30 @@ The operator, 2026-11-10:
     sequence".
   - Section 3.1: "the algorithm computes the attention interactions for the tile if and only if it contains at least
     one unmasked element".
-- **Write:** where attention under a causal mask is sharded along the sequence, the input tokens are permuted before
-  the first embedding so that rank r of N holds the tokens whose index is r modulo N. The sequence keeps that layout
-  through every function of the program, forward and backward. Position ids, and the target ids of a loss, are
-  permuted the same way. Each attention's mask is causal in the tokens' original order. A block of queries and keys
-  that the mask inhibits entirely is not computed. No communication is added at an attention to bring the sequence
-  into or out of this layout.
-- **Replaces:** `rdma/mesh_compile.py` `_stripe`'s `index_select` before and `index_copy` after each attention
-  , which gather the whole query and the whole output at every attention.
-- **Not stated by the source read** (the HTML text through section 5.3): a step that puts a returned per-token
-  result back in the original order; the stripes where the ranks' counts differ (item 1); the layout where the
-  sequence is not the program's input. These are in Stops.
+- **Data structure:** Striped Attention §2.2.1's stripes: device r of N holds the tokens whose index in the original
+  sequence is r modulo N.
+- **Algorithm:** Striped Attention's permutation. Where attention under a causal mask is sharded along the sequence,
+  the input tokens are permuted before the first embedding into the stripes. The sequence keeps that layout through
+  every function of the program, forward and backward. Position ids, and the target ids of a loss, are permuted the
+  same way. Each attention's mask is causal in the tokens' original order. A block of queries and keys that the mask
+  inhibits entirely is not computed.
+- **Stage:** the stripes are the sharding of the sequence dimension in the placement operand, which `place` consumes.
+  `place` adds no communication at an attention to bring the sequence into or out of this layout.
+- **Replaces:** `rdma/mesh_compile.py` `_stripe`'s `index_select` before and `index_copy` after each attention, which
+  gather the whole query and the whole output at every attention.
+- The source read (the HTML text through section 5.3) does not state: a step that puts a returned per-token result
+  back in the original order; the stripes where the devices' counts differ (item 1); the layout where the sequence is
+  not the program's input.
 
 ### 9. Changing a tensor from one sharding to another
 
-- **Applies to:** `design/heterogeneity.md` R6 and R13.
 - **Source:** GSPMD, §4.5 "Resharding": "It uses AllGather to replicate data along sharded dimensions, AllToAll to
   switch sharded dimensions, CollectivePermute to change device order, and DynamicSlice to shard replicated
   dimensions."
-- **Keeps:** `rdma/mesh_compile.py` `_reshard` (:684-752), with item 2's counts in place of its padding.
-- **Write:** each of the four is emitted with the counts of item 2 where its dimension is sharded by item 1.
+- **Data structure:** the `counts` and `displs` of item 2.
+- **Algorithm:** GSPMD §4.5's resharding by its four operators: AllGather, AllToAll, CollectivePermute and
+  DynamicSlice. Each of the four carries the counts of item 2 where its dimension is sharded by item 1.
+- **Stage:** the four are nodes `place` adds to the graph.
 
 ### 10. A window that crosses the boundary between shards
 
@@ -268,13 +297,13 @@ The operator, 2026-11-10:
 - **Source:** GSPMD, §4.3 "Halo exchange with dynamic bounds": "We use the CollectivePermute operator to exchange
   halo data between partitions." "GSPMD uses maximum halo size across partitions, then uses DynamicSlice to remove
   excessive data in the halos."
-- **Write:** halos are exchanged by a collective permute at the largest halo over the ranks, and each rank slices
-  off what exceeds its own.
+- **Data structure:** a halo size for each device, and their maximum.
+- **Algorithm:** GSPMD §4.3's halo exchange. Halos are exchanged by a collective permute at the largest halo over the
+  devices, and each device slices off what exceeds its own.
+- **Stage:** the collective permute's sends and receives and the slice are nodes `place` adds to the graph.
 
 ### 11. A tensor whose rows differ in length is a values array and an array of row boundaries
 
-- **Applies to:** mesh 444d4fd9, "Input domains are ragged relations: each rotated coordinate sums its own sources,
-  no -1 padding" (history).
 - **Source:**
   - TensorFlow, `tf.RaggedTensor`, https://www.tensorflow.org/api_docs/python/tf/RaggedTensor: "A `values` tensor,
     which concatenates the variable-length rows into a flattened list." "A `row_splits` vector, which indicates how
@@ -285,11 +314,13 @@ The operator, 2026-11-10:
     two buffers, a validity bitmap and an offsets buffer, and a child array." "Offsets must be monotonically
     increasing, that is `offsets[j+1] >= offsets[j]` for `0 <= j < length`, even for null slots." "The offsets
     buffer contains `length + 1` signed integers"
-- **Write:** a tensor with rows of differing length is two tensors: the values of all rows concatenated, and nrows+1
+- **Data structure:** `tf.RaggedTensor`'s `values` and `row_splits`, which are Arrow's child array and offsets
+  buffer. A tensor with rows of differing length is two tensors: the values of all rows concatenated, and nrows+1
   nondecreasing offsets, row i being `values[offsets[i]:offsets[i+1]]`. A second ragged dimension is a second array
   of offsets over the first. No row is padded.
+- **Stage:** item 13 consumes the offsets.
 
-### 12. A collective sends a rank's own shard out of its padded buffer
+### 12. A collective sends a device's own shard out of its padded buffer
 
 - **Applies to:** items 2 and 4 together.
 - **Source:**
@@ -313,14 +344,17 @@ The operator, 2026-11-10:
     performance." "As performance of the two implementations depends on the sharding ratios, when we optimize the
     sharding ratios, the communication methods should be updated accordingly to achieve the optimal overall
     performance."
-- **Write:** a rank's buffer of item 4 is the full array and its shard of item 1 is a subarray of it: the buffer's
-  size along the sharded dimension is at least the number of elements the rank owns, as a local array's leading
-  dimension is at least LOCr. A collective of item 2 is given, for each rank, the sizes of the full array, the sizes
-  of the subarray and where it starts, and sends the subarray: `counts[j]` is the subarray's number of elements.
-  The padding is not sent. Sending whole padded buffers through an equal-size collective is the other form; which
-  of the two a collective uses is decided with the shares of item 6, since which is faster depends on them.
+- **Data structure:** MPI's subarray, three arrays for each device: `array_of_sizes`, `array_of_subsizes` and
+  `array_of_starts`. A device's buffer of item 4 is the full array and its shard of item 1 is a subarray of it: the
+  buffer's size along the sharded dimension is at least the number of elements the device owns, as a local array's
+  leading dimension is at least LOCr.
+- **Algorithm:** a collective of item 2 is given, for each device, the sizes of the full array, the sizes of the
+  subarray and where it starts, and sends the subarray: `counts[j]` is the subarray's number of elements. The padding
+  is not sent. HAP §2.5.1 names a second way, sending the whole padded buffer through an equal-size collective, and
+  says which is faster depends on the sharding ratios. No source states the rule that chooses between the two.
+- **Stage:** the three arrays are carried by the collective's nodes that `place` adds (item 2).
 
-### 13. Which rank holds which rows of a tensor whose rows differ in length
+### 13. Which device holds which rows of a tensor whose rows differ in length
 
 - **Applies to:** item 11 with item 1.
 - **Source:**
@@ -370,19 +404,23 @@ The operator, 2026-11-10:
   - §1: "The CP problem on the other hand, is NP-complete as we prove in this paper."
   - TensorFlow, `tf.RaggedTensor`, "Alternative Row-Partitioning Schemes": `row_lengths`: "a vector with shape
     `[nrows]`, which specifies the length of each row."
-- **Write:** the rows are held in consecutive ranges, the first range by rank 0, the next by rank 1, and so on. The
-  ranges are one array of nranks+1 separator indices, s_0 = 0 ≤ s_1 ≤ ... ≤ s_P = N, the same at every rank. A rank
-  holds the values of its rows, concatenated, and the length of each of its rows. A row's weight is its length;
-  rank p's load is the total weight of its rows divided by its speed; the separators minimise the largest load.
-  They are found by a probe and a search: the probe, given a candidate largest load, gives each rank in order the
-  longest run of rows whose weight does not exceed the candidate times its speed, by binary search in the weights'
-  prefix sums; the search is Nicol's, over the ranks in order, keeping the smallest candidate that succeeded and the
-  largest that failed. The ranks' order is given; it is not searched. The weights' prefix sums are item 11's
-  offsets.
+- **Data structure:** one array of P+1 separator indices for P devices, s_0 = 0 ≤ s_1 ≤ ... ≤ s_P = N, the same at
+  every device (PETSc's ownership ranges; the partition Π of Pınar, Tabak and Aykanat). The rows are held in
+  consecutive ranges, the first range by device 0, the next by device 1, and so on. A device holds the values of its
+  rows, concatenated, and the length of each of its rows (`row_lengths`).
+- **Algorithm:** chain-on-chain partitioning for processors of different speeds (Pınar, Tabak and Aykanat 2008, §2 to
+  §4). A row's weight is its length; device p's load is the total weight of its rows divided by its speed; the
+  separators minimise the largest load. They are found by a probe and a search: the probe, given a candidate largest
+  load, gives each device in order the longest run of rows whose weight does not exceed the candidate times its
+  speed, by binary search in the weights' prefix sums; the search is Nicol's, over the devices in order, keeping the
+  smallest candidate that succeeded and the largest that failed. The devices' order is given; it is not searched.
+  The weights' prefix sums are item 11's offsets.
+- **Stage:** the partitioning takes item 11's offsets and the devices' speeds in their order and writes the
+  separators. They are the sharding of the row dimension in the placement operand, which `place` consumes.
 
-### 14. A rank's share does not exceed what the rank can hold
+### 14. A device's sharding ratio does not exceed what the device can hold
 
-- **Applies to:** `design/heterogeneity.md` R9; item 6.
+- **Applies to:** item 6.
 - **Source:**
   - Jia et al., "Whale: Efficient Giant Model Training over Heterogeneous GPUs", USENIX ATC 2022,
     https://www.usenix.org/conference/atc22/presentation/jia-xianyan, Algorithm 1 "Memory-Constraint Load Balancing"
@@ -393,14 +431,17 @@ The operator, 2026-11-10:
     oom_devices, then it finds a valley_device with available memory space and the lowest" computation load.
   - HiGHS 1.15.1, `README.md` (the solver mesh builds against, `rdma/.build/highs/HiGHS-1.15.1/README.md`): "linear
     optimization problems of the form min 1/2 x^T Q x + c^T x s.t. L ≤ Ax ≤ U; l ≤ x ≤ u"
-- **Write:** each rank has an upper bound on its share: what it can hold, as a fraction of the dimension. In item 6's
-  program the bound is the variable's upper bound, B_j ≤ u_j. Where shares are given and not solved for, a rank
-  whose memory use at its share exceeds 1 gives up load to the rank with free memory and the lowest computation
-  load, repeatedly, until none exceeds 1.
+- **Data structure:** an upper bound u_j for each device j on its sharding ratio B_j: what the device can hold, as a
+  fraction of the dimension.
+- **Algorithm:** in item 6's linear program the bound is the variable's upper bound, B_j ≤ u_j. Where the tuple of
+  item 1 is given and not solved for, Whale's Algorithm 1: a device whose memory use at its part of the dimension
+  exceeds 1 gives up load to the device with free memory and the lowest computation load, repeatedly, until none
+  exceeds 1.
+- **Stage:** both run before `place` and write the tuple of item 1 in the placement operand, which `place` consumes.
 
-### 15. With no tuple, a dimension is sharded as stock PyTorch shards it
+### 15. With no tuple, a dimension is sharded as `torch.chunk` splits it
 
-- **Applies to:** `design/heterogeneity.md` R1; item 1.
+- **Applies to:** item 1.
 - **Source:**
   - PyTorch 2.15, `torch.distributed.tensor`, https://docs.pytorch.org/docs/2.15/distributed.tensor.html: "The
     `Shard(dim)` placement follows the `torch.chunk(dim)` semantic, where the last few shards on the DeviceMesh
@@ -410,38 +451,15 @@ The operator, 2026-11-10:
     tensor size along the given dimension `dim` is not divisible by `chunks`, all returned chunks will be the same
     size, except the last one. If such division is not possible, this function may return fewer than the specified
     number of chunks."
-- **Write:** a sharded dimension with no tuple of item 1 has `torch.chunk`'s sizes: every rank the same size except
-  the last, and trailing ranks empty where the extent does not allow more. Item 1's rounding applies only where a
-  tuple is given.
+- **Algorithm:** `torch.chunk`'s sizes. A sharded dimension with no tuple of item 1 has them: every device the same
+  size except the last, and trailing devices empty where the extent does not allow more. Item 1's rounding applies
+  only where a tuple is given.
+- **Stage:** `place` writes these sizes where the placement operand carries no tuple for a sharded dimension; they
+  are the `counts` of items 2 and 3.
 
-## Stops
+## Dropped
 
-Item 8, three, each with no quoted sentence: where a program returns one result per token, the step that returns
-them in the original order; which tokens a rank holds where the ranks' counts differ, since the source's stripes are
-residues modulo the device count; and a causal attention whose sequence is not an input of the program.
-
-Every other requirement above states what its quoted source says to write.
-
-Settled on 2026-11-09, each by the sources named in its item: item 1's whole sizes (HAP §5.1's rounding); item 6's
-program (HAP §5.1, eq. 3); items 2 and 4 together (item 12: ScaLAPACK's local leading dimension, MPI's subarray
-datatype, HAP §2.5.1); item 11 with item 1 (item 13: PETSc's row ownership; chains-on-chains partitioning for ranks
-of different speeds, Pınar, Tabak and Aykanat 2008, §2–§4); `design/heterogeneity.md` R9 (item 14: Whale's
-Algorithm 1; the bounds of a linear program); R1 (item 15: `Shard` and `torch.chunk`).
-
-Dropped as not needed to implement the requirements above: `design/heterogeneity.md` R11, changing the tuples while
-a program runs. A program's shapes are fixed when it is compiled
-(`aot-compilation-change-request.md` A1, the operator: "the use of cudagraphs style 'shapes are compiled but indexes
-inside of shapes might not need to be'"); a different tuple is a different compilation.
-
-## Not in this request
-
-- How operands travel over links of different cost (`design/heterogeneity.md` R2): `plan-to-bridge-change-request.md`
-  R5 and R6 state it.
-- The order of functions on a node: `integration-finishing-change-request.md` item 2 and
-  `torch-source-lowering-change-request.md` item 3 state it.
-- Overlap of a collective with other work (`design/heterogeneity.md` R12).
-
-## Corrections to `design/heterogeneity.md`'s citations
-
-- R14 cites GSPMD §3.3; the passage is §4.1.
-- R4 and R8 cite MPI 4.1 §6.5–6.10; in the 4.1 report the collectives are §7.5–7.10.
+Dropped as not needed to implement the requirements above (the operator: "if any of them are optional, drop them"):
+`design/heterogeneity.md` R11, changing the tuples while a program runs; a program's shapes are fixed when it is
+compiled (`aot-compilation-change-request.md` A1, the operator: "the use of cudagraphs style 'shapes are compiled but
+indexes inside of shapes might not need to be'"), and a different tuple is a different compilation.
