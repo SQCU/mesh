@@ -393,8 +393,8 @@ the scheduled value, and lowering, the runtime and the archive each take it.
     the state section `field`, `word` and `count`); and the state section, a contiguous section of the region apart from
     the data pages, headed by `struct mesh_state` (`copies`; the offsets `phases`, `counts`, `supplied` and `status`;
     `executions`), with the status a `struct mesh_status` `{behind, ahead, first}`; and, to its caller, a `struct
-    mesh_planned` (`rdma/mesh-collective.h`). No source this document cites states what `struct mesh_weight`, `calls`,
-    `orders`, `causes`, `chains` or `struct mesh_planned` are for.
+    mesh_planned` (`rdma/mesh-collective.h`). No source this document cites states what `calls`, `orders`, `causes` or
+    `struct mesh_planned` are for.
 - **Runtime.** The bridge (mesh `rdma/mesh-flow.c`) reads the `struct mesh_hop` entries and, for sends, the words at
   `word`, and writes the phases at `field` and the counts at `count`. `tools/e2b_replay.m` passes the `struct
   mesh_function` array to `mesh_plan`, commits the command buffers and reads the `struct mesh_planned` and the `struct
@@ -827,7 +827,7 @@ functions that read it.
   pass (`mesh_read_N`, `metal_recording.m`) reads the phases and writes the threadgroup count, and Metal's indirect
   dispatch reads that count. The later pass writes the status word, which only the GPU writes, and `e2b_replay` reads it
   after the run. The phases are at each `struct mesh_hop`'s `field`, the counts at its `count`, and the status is a
-  `struct mesh_status` (`rdma/mesh.h`). No cited code names a type for the threadgroup count.
+  `struct mesh_status` (`rdma/mesh.h`). The threadgroup count is Metal's `MTLDispatchThreadgroupsIndirectArguments`.
 - Both waits in `mesh_read_N` are deleted: the wait on the execution's mask, and the local countdown. A producer on the
   same command queue comes before its consumer by the command buffer's order or a memory barrier.
 
@@ -1441,8 +1441,9 @@ functions that read it.
   node of the static schedule then reads ENOLINK, with no case for relays.
 - **Written by, read by.** mesh-records.c `map_put` writes the map and its serial. The bridge (`rdma/mesh-flow.c`)
   compares the serial with the static schedule's and cancels. The recorded kernels' later pass reads the counts and the
-  phases (C3.1). The static schedule's serial is `struct mesh_state`'s `serial` (`rdma/mesh.h`). No source this document
-  cites names the map's type.
+  phases (C3.1). The map is an array of `struct mesh_record` (`rdma/mesh-map.h`), with its serial at hdr `map_serial`.
+  At mesh db17c3ad `plan_stale` (`rdma/mesh-bridge.h`) compares the static schedule's `struct mesh_view_id` (`rdma/mesh.h`
+  `mesh_plan_view`) with hdr `view`, not the map's serial.
 
 ### D.4 The changes, by file
 
