@@ -3706,9 +3706,7 @@ def _eigen_hermitian(target, given, outs):
             _Check(info, 3, 'linalg.eigh')]
 
 
-# Reference-LAPACK SRC/dgeev.f, WR, WI and VR: "If the j-th and (j+1)-st eigenvalues form a complex conjugate pair, then
-# v(j) = VR(:,j) + i*VR(:,j+1) and v(j+1) = VR(:,j) - i*VR(:,j+1)", "with the eigenvalue having the positive imaginary
-# part first"
+# Reference-LAPACK SRC/dgeev.f
 def _eigen(target, given, outs):
     a, values = given['self'], outs[0]
     batch, n = a.shape[:-2], a.shape[-1]
@@ -7448,8 +7446,7 @@ def _storages(module, names):
 # design/compilation-composition-change-request.md, "Withdrawn, 2026-11-09"
 CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop, torch.ops.higher_order.map_impl,
            torch.ops.higher_order.scan, torch.ops.higher_order.switch)
-# design/torch-source-lowering-change-request.md item 5, as item 6 leaves it: "`eig` and `eigvals` of a matrix that is
-# not Hermitian stay as item 5 states them"
+# design/torch-source-lowering-change-request.md items 5 and 6
 ITERATED = (A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals)
 
 
