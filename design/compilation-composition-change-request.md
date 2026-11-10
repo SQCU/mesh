@@ -1,10 +1,5 @@
 # Change request: compose the existing requests as one compilation
 
-2026-11-08. The work is the nine requests named below, composed through their representations and existing modules.
-Their clauses identify work; the external sources define the methods and the roles in the composition. The algorithms
-already selected by those clauses retain their cited definitions. The table uses their corrections and withdrawals.
-Code locations below were read at mesh 9c9f8f3c.
-
 ## The turns
 
 The operator, 2026-11-08, excerpts in order:
@@ -26,28 +21,18 @@ Compiler Construction*, 2022, [§2.1](https://arxiv.org/html/2202.03293v1#S2.SS1
 
 > tiling and fusion transformations are both fully generic in the operations and data types they operate upon.
 
-Sections 2.1 and 3 describe progressive lowering through structured tensor operations, tiled operations, vectors and
-buffers, with transformations applied while their required structure remains available. Section 2.1 also identifies
-the limits of that particular lowering path: its representation is not a claim to cover every computation by itself.
-
 ### S2. Complete conversion and composition of lowering rules
 
 MLIR, [Dialect Conversion](https://mlir.llvm.org/docs/DialectConversion/), “Modes of Conversion”:
 
 > A full conversion legalizes all input operations, and is only successful if all operations are properly legalized to the given conversion target.
 
-“Rewrite Pattern Specification” constructs a graph of conversions: a rule from `bar.add` to `baz.add` and another
-from `baz.add` to `foo.add` supply the composed lowering. The data structures are operations, typed operands/results,
-rewrite patterns and a conversion target. This supplies the distinction between an intermediate conversion and a
-completed lowering.
-
 ### S3. One representation of computation, parallelization and communication
 
 C. Unger et al., *Unity: Accelerating DNN Training Through Joint Optimization of Algebraic Transformations and
 Parallelization*, OSDI 2022, [§1, “Unified graph representation”](https://www.cs.cmu.edu/~zhihaoj2/papers/unity_osdi22.pdf).
 Its parallel computation graph (PCG) represents computation, parallelism and data movement together; transformations
-are graph substitutions. This is the role of a common representation, not a requirement to replace the selected mesh
-algorithms with Unity's search algorithm.
+are graph substitutions.
 
 ### S4. Transformations across computation and communication
 
@@ -56,19 +41,12 @@ Workloads*, ASPLOS 2022, [CoCoNet, abstract](https://arxiv.org/abs/2105.05720v5)
 
 > fusion or overlapping of communication and computation
 
-The program represents both kinds of operation; semantics-preserving transformations operate on them and the compiler
-generates their combined execution. These are the roles of the numerical and collective lowerings in one program.
-
 ### S5. Modules own decisions across processing stages
 
 D. L. Parnas, *On the Criteria To Be Used in Decomposing Systems into Modules*, CACM 15(12), 1972,
 [“The Criteria”](https://www.cs.lafayette.edu/~gexia/cs301/resources/parnas.html), DOI 10.1145/361598.361623:
 
 > Every module in the second decomposition is characterized by its knowledge of a design decision which it hides from all others.
-
-“Improvement in Circular Shift Module,” items 1–2, groups a data structure with its access/modification procedures,
-and a routine with the generation of its calling sequence. Module boundaries therefore follow responsibility for the
-representation or decision, including when several stages use it.
 
 ### S6. Static inputs become a residual program
 
@@ -84,9 +62,6 @@ S. S. Bhattacharyya, S. Sriram and E. A. Lee, *Optimizing Synchronization in Mul
 Ha's self-timed strategy:
 
 > retain the processor assignment and actor ordering specified by the fully static schedule
-
-Actor firing depends on actual input availability. The data structures are the dataflow graph, processor assignments,
-per-processor actor orders and the communication/synchronization graphs.
 
 ### S8. Analysis results become lower IR; abstract operations disappear
 
@@ -119,12 +94,6 @@ for representation-changing compilation. Citing it does not prove Mesh's transfo
 C/assembly theorem to distributed execution. Required numerical, control and communication properties must be
 established for Mesh's own lowerings. Behavior preservation alone also does not establish performance preservation.
 
-S1, S2, S4 and S5 were read on their linked pages on 2026-11-08; S3 and S7 from the linked PDFs. S6 was reread in the
-previously downloaded author's book, §4.2.2; its extraction is also recorded in
-[specialization-sources-2026-11-07.md](specialization-sources-2026-11-07.md). MLIR supplies the cited compiler methods;
-the implementation sites are the existing mesh and metal-microbench modules below. S8–S10 were checked against
-the linked primary documentation, implementation and paper on 2026-11-09.
-
 ## The nine requests and their roles
 
 The rows identify the work being composed. They are not nine independent compilers or an execution order for passes.
@@ -151,8 +120,7 @@ The rows identify the work being composed. They are not nine independent compile
   transferred values; also its rejection of repeated calls to a compiled function in the replayed block.
 - **Write:** reuse the source lowerings and their composable representations to complete the assigned program domain.
   Compile both each numerical function and the graph of calls between functions. Lowering covers every rank and its
-  collectives, and each placed CPU or GPU function. The source-lowering and capture requests retain their different
-  Torch and LiteRT mechanisms. An intermediate conversion is completed before execution; its unfinished operations
+  collectives, and each placed CPU or GPU function. An intermediate conversion is completed before execution; its unfinished operations
   do not become a second execution regime. A missing lowering within the assigned domain is unfinished work, not a
   new restriction on that domain.
 
@@ -168,16 +136,13 @@ The rows identify the work being composed. They are not nine independent compile
   Changes to the graph are reflected in those dependent results before emission. The signature describes that
   emitted program. Each row's work is completed in this composition, including its specified deletion or replacement.
 
-### 3. Put each representation and decision in its existing owner
+### 3. Put each representation and decision in its owner
 
 - **Source:** S5's information hiding and ownership of data-structure procedures and calling sequences; the operator's
   centralization requirement above.
 - **Applies to:** aot-compilation A10, plan-to-bridge R7, source-lowering 3 and integration-finishing 2–5.
 - **Write:**
   - `rdma/mesh_graph.py` and `rdma/mesh-graph.{h,c}` supply the shared graph operations through caller operands.
-  - `rdma/mesh_compile.py` and `rdma/mesh-collective.c` compose the program and its plan through those operations.
-  - `metal_recording.m` consumes the compiled order and lowers it to its backend's execution primitives.
-  - `rdma/mesh-flow.c` and the bridge retain physical transport objects and device binding.
   - Revise callers to use those owners and remove the displaced copies of their decisions. The second scheduling
     solve, copied graph walks, runtime placement of program values and alternative execution paths are the existing
     requests' named replacements, not independent facilities to maintain beside their replacements.
@@ -231,12 +196,12 @@ The operator, continuing the implementation assignment, verbatim:
   - `mesh-collective.c plan_extents`: consumers needing the same strided-view traversal use this traversal through
     its owning module. They do not implement their own enumeration. Signature producers/consumers likewise use
     `mesh-graph`'s schema and printers; a copied Python structure or second scheduling solve is displaced.
-- **Write:** centralize each repeated behavior in its existing owner, make closed-over inputs explicit operands
+- **Write:** centralize each repeated behavior in its owner, make closed-over inputs explicit operands
   where consumers need to share it, reconnect all callers, and remove the duplicate bodies and their dead helpers.
   Sharing a wrapper while retaining two implementations does not perform this replacement. Preserve the assigned
   numerical domain, collectives, page placement and lifetime semantics. Complete producer-to-consumer connections
   in the same revision: page groups and sent counters, native result bindings, and signature identities must agree
-  at both ends. File assignments coordinate edits; they do not create new execution boundaries or owners.
+  at both ends.
   Report deleted/replaced bodies and the direct build results separately from runtime or performance evidence.
 
 ## Correction: complete the IR handoffs first
@@ -256,8 +221,7 @@ The operator, continuing the same assignment, verbatim:
 - **Source:** S1's transformations preserve the structured operands required by subsequent lowerings; S3 represents
   computation and communication in the same graph; S5 assigns the representation and its calling sequence to the
   same owner; S7 executes the compiled assignment and order. The specific graph algorithms remain those cited by
-  aot-compilation A4/A6–A10 and source-lowering item 3. This clause applies those existing methods, rather than
-  proposing another algorithm or framework.
+  aot-compilation A4/A6–A10 and source-lowering item 3.
 - **Applies to:** requirements 1–5 here; aot-compilation A1/A4/A6–A10; plan-to-bridge R2–R8;
   source-lowering 1–3; capture 3/6/8/9; integration-finishing 2–5; synchronization-signature 1–6.
 - **Replaces:** these concrete incomplete handoffs in the current implementation, in priority order:
@@ -283,44 +247,10 @@ The operator, continuing the same assignment, verbatim:
   calls, interleaved computation/transport, exact copy lifetimes, placed CPU/MPS work, the full assigned numerical
   domain and the LiteRT path. Do not replace them with blanket order, waits, whole-buffer effects or another runtime.
 
-The initial handoff revision was divided into the eight connected units below. The subsequent source/performance
-reviews found that their implementation did not finish numerical lowering. The
-[complete replacement workgroup](#complete-replacement-workgroup) below supersedes this work division for the
-remaining implementation; these identifiers remain here for existing source citations. File ownership coordinates
-concurrent writes; it does not divide the compiler's semantics. Session assignments and progress belong in `output_data`.
-
-| Unit | Complete handoff | Source boundary and displaced work |
-|---|---|---|
-| 6A. Retained graph results | Existing dependence construction → reduction/order → retained results consumed by 6B/6C | `mesh-graph.c/h` graph construction/reduction/schedule APIs; remove rebuilding of a caller's already supplied edge relation. Interface work is complete only with its real callers. |
-| 6B. Capture to replay | Captured command graph → transformed/reordered command graph → later-pass ordering and encoding | `metal_recording.m` capture ownership, `MetalSchedule`, `MetalOrder`, replay's later-pass graph/cuts; retain and remap edges instead of rescanning the same commands. |
-| 6C. Plan to native program | Plan/call graph plus genuinely new placed effects → compiled native synchronization and execution | `metal_recording.h` program API and `metal_recording.m` native program preparation/execution; consume 6D/6E operands and 6A results, remove repeated analysis and independent reconstruction of supplied constraints. |
-| 6D. Planning result publication | `plan_graph`/`plan_schedule` results → owned plan data → native and transport consumers | `mesh-collective.c/h`, `mesh.h`, `mesh.py`; preserve existing solves and make their relevant results and identities available to 6C/6E. Do not introduce a second solve or change the bridge protocol. |
-| 6E. Torch program composition | Exported functions and call graph → plan inputs/results → native program input | `mesh_compile.py` `_Export`, call analysis, `program`, `_specialize`, `_native`, `_replays`; connect 6D to 6C, preserving repeated calls and actual placed operands. |
-| 6F. Access/effect continuity | Source/typed view effects → recorded dispatch effects → scheduling footprints | `mesh_compile.py` numerical lowering/capture/transfer preparation, `operator_shaders.metal`, recorder access analysis/footprints; preserve existing typed and affine results and connect them to 6B/6C instead of discarding precision or reparsing available facts. |
-| 6G. Compilation to signature | The retained compilation graph and emitted primitives → signature record → existing consumers | `mesh-graph.c` signature section, `mesh_graph.py`, recorder signature/emitter section, `mesh-sync-monitor.py`; retain provenance and identity through 6A–6F, removing reconstruction that duplicates preparation. No separate evaluator. |
-| 6H. LiteRT and transport consumers | Prepared E2B program and transport operands → the same native program API and completion | `tools/e2b_replay.m`, `mesh-metal.m/h`; adopt 6C/6D interfaces and remove caller-side replicas of decisions now owned by the compiler. Preserve the existing operational measurement path. |
-
-Every unit identifies the actual producer and consumer before changing their interface, publishes the exact contract
-to the adjacent unit, and finishes the connection in this revision. Existing source is revised in place; temporary
-compatibility paths are removed once their callers are converted. Direct builds establish buildability; runtime and
-performance claims require the existing operational evidence. The supervisor coordinates these units and checks the
-combined changes; these units are implementation assignments to Claude workers.
-
 The operator clarifies the same lowering obligation, verbatim:
 
 > its the job of a lowerer to fuse those vertices together, which of course means we need to be co-designing the IR with the consumeres who need to be getting ready to  consume type annoations and graph contents in these manners.
 > " still rejects received operands" the idea that a consuming function can 'reject' operands is a claudelish decadence and doesn't come from any cited literature, does it?
-
-For requirements 1, 2 and 6, retaining identities means retaining the correspondence through transformation;
-it does not require one runtime operation per source vertex. S3's graph substitutions and S4's joint computation
-and communication transformations supply the cited roles for fusion. Producers and consumers must agree on the
-typed operands, effects, readiness and execution identities that let the lowerer combine vertices and discharge
-internal dependencies, while preserving externally observable dependencies and value lifetimes. Endpoint types
-guide that transformation; they do not freeze the source graph into separate launches or blanket waits.
-S2's full-conversion criterion diagnoses unfinished conversion; it does not authorize an implementer to remove
-received operands from the operator's assigned domain. In this revision, the received-operand refusal is repaired
-by completing the representation and its consuming lowering, including later-pass identity remapping and the
-native execution-step binding. Deleting the refusal without those consumers is not completion.
 
 The operator, during the integrated review, verbatim:
 
@@ -408,8 +338,7 @@ The operator, 2026-11-09, verbatim:
   as operation regions, retain values across their uses, and lower reductions and packed data to the selected
   target operations. Preserve each actual effect and observable result while removing unnecessary materialization.
   Compile producer publication and consumer acquisition from the same range/page dependencies used by transport
-  scheduling. Retain the existing tuned numerical bodies where they implement these operations; supply their
-  parameters and bindings from typed operands before emission. Operation equivalence and applicability follow
+  scheduling. Operation equivalence and applicability follow
   the structured operands and effects, not an entry-point name, generated variable name or operator spelling.
   Carry static facts as compiler operands and keep genuinely varying values as runtime inputs.
 - **Performance obligation:** complete the execution mapping as well as operation coverage. Fusion removes
@@ -465,7 +394,7 @@ built dependency revisions with the existing measurement record. The production 
 the packaged executable can remain an external numerical/performance reference. Building a host executable while
 still loading a prebuilt GPU provider leaves the assignment unfinished.
 
-Both frontends supply the existing program composition with the following connected operands. These are roles of
+Both frontends supply the program composition with the following connected operands. These are roles of
 the representation, not a prescription to create five duplicate object models:
 
 | Operand | Producer → consumer |
@@ -474,7 +403,7 @@ the representation, not a prescription to create five duplicate object models:
 | Kernel instructions | Numerical lowering → owned typed shader modules/regions, including explicit operand and result bindings → target lowering and final emission. Construct the mesh path directly through IR builders; emitting generated WGSL or MSL and reparsing it as the missing interface does not finish this handoff. |
 | Values and effects | The same value identities → views, aliases, ranges/pages, reads/writes and generation/lifetime facts → allocation, collective/transport planning, masking and publication. Bind model values to kernel operands to placed storage explicitly. |
 | Program relations | Existing call, dependence and collective-plan results → remapped relations through fusion, splitting and placement → the shared graph algorithms and native program. Retain the value/effect/transfer cause of an edge. Update affected results when transformation changes their operands. |
-| Executable artifact | Completed lowering → compiled CPU work, GPU pipelines, bindings, dispatches, transfers and synchronization plus their derived signature → the existing native executor and bridge. CPU execution is native Apple Silicon work; Python preparation is not the CPU target. |
+| Executable artifact | Completed lowering → compiled CPU work, GPU pipelines, bindings, dispatches, transfers and synchronization plus their derived signature → the native executor and bridge. CPU execution is native Apple Silicon work; Python preparation is not the CPU target. |
 
 The compiler owns these operands until finalization, including every module and constant used by later passes.
 A callback borrowing one shader during `newLibraryWithSource` cannot supply that ownership or fuse its dispatch
@@ -486,7 +415,7 @@ templates; emitted source is never subsequently inspected to recover operands, e
 Tuned projection/argmax arithmetic is retained through typed parameters and computation regions, including their
 map/epilogue operands. A template hole filled by extracting somebody else's generated source is not such a region.
 The C++ compiler owns Tint objects; C/Objective-C/Python consumers use owned handles and typed operand/binding
-records through the existing program boundary. They do not serialize an operation into a string to cross it.
+records through the program boundary. They do not serialize an operation into a string to cross it.
 Provider cache hits must preserve this handoff too: Dawn's translation runs inside a compilation-cache lookup,
 so publishing IR only from the cache-miss callback is insufficient. Cache the required representation or completed
 artifact with its compilation inputs; a cached shader string cannot substitute for the program and its relations.
@@ -502,24 +431,7 @@ Numerical transformations belong to the compiler; recording and execution consum
 | `MetalNativeProjection`/`MetalNativeArgmax` source recognition and extraction, `MetalPackedWeights`, `MetalProjectionReduction`, `MetalNormalizationReduction` | Select/construct the retained tuned algorithms from typed operations, layouts and reduction domains. Preserve packed arithmetic, parallel reductions and split work; propagate `MetalNativePlan` facts directly instead of rereading `MN_*` defines. |
 | `MetalCoherentStores`, source-spliced publication/acquisition and `MetalMaskedPass` | Lower typed memory effects and page readiness to coherent access, publication, worklists and later-pass kernels. Preserve computation/transport overlap and fused publication. Carry any required target extension through the IR and emitter. |
 | `MetalParsedSpace` and `MetalCommandAccesses` as semantic reconstruction from emitted source | Use the compiler's instruction call/use-def and access relations. Remove the parser and its dead helpers once both scheduling and signature consumers use those relations. |
-| Replay-footprint reconstruction and the default/non-self-timed preparation bypass | Prepare one native program from retained plan relations and actual lowered effects. Emit its required synchronization regardless of the caller; remove the bypass and displaced orchestration. Preserve the existing shared executor. |
-
-**Eight connected implementation responsibilities.** This replaces the earlier 6A–6H division for this revision.
-The supervisor assigns Claude Opus 5.5 workers and records sessions, handoffs, corrective steering and results in
-`output_data`. Adjacent workers co-design and consume the interface immediately. They do not independently invent
-parallel schemas and ask an integration worker to reconcile them at the end. A shared file has one editing owner;
-that owner incorporates the adjacent worker's required changes.
-
-| Worker | Complete responsibility and adjacent handoff |
-|---|---|
-| 1. Upstream producer and build | Own the source provider, tracked upstream adapter/build changes and production library linkage. Supply the typed model/operation and kernel-construction interfaces to 2–4; preserve buffer binding, initialization and zero-copy imports for 8. Finish the actual provider's coverage, including generated-body producers, rather than exporting strings. |
-| 2. Representation and ownership | Own the shared compiler interface and module/value lifetime. Connect 1 and 5 to existing program composition, with the binding/identity/effect correspondence consumed by 3, 4, 6 and 7. No unused metadata fields or parallel plan schema. |
-| 3. Numerical transformations | Own specialization, region/index-map fusion, promotion and intermediate elimination, using 2's operands and producing 4's regions plus remapped effects for 6. Replace the source transformations' behavior across the assigned domain. |
-| 4. Target lowering | Own typed instruction construction and target emission, including tuned projection/argmax, packed arithmetic, parallel reductions and the target operations needed by 6. Revise `metal_native` and its templates; emit final source only after transformations. |
-| 5. Torch frontend and native CPU | Own `mesh_compile.py`'s numerical/program handoff and target calls. Feed the same compiler from typed FX/decompositions; finish native CPU and GPU lowering instead of prematurely committing to generic per-operation dispatches. Preserve the complete assigned Torch domain, repeated calls, mutations and structured results. |
-| 6. Collective, transport and effects | Own the connection through `mesh-collective`, `mesh-graph` and `mesh-metal`: supplied dependencies, range/page effects, lifetime, readiness, masking and publication. Consume transformed relations and provide 4/7 the exact obligations; add genuinely new target constraints without rebuilding discarded equivalents. |
-| 7. Native preparation and deletion | Own `metal_recording`'s conversion to an executor of the compiled artifact, the emitted synchronization/signature connection and removal of every displaced parser/rewrite/preparation body above. Consume 2/4/6 and supply the same native program API to 5/8. |
-| 8. E2B integration and operational evidence | Own `tools/e2b_replay.m` and the existing diagnostic/measurement callers, including `tools/native_bench.m`, through the new interfaces. Work with 1/7 on the executable throughout; coordinate combined builds, numerical/performance records and final coverage/deletion review with all workers. |
+| Replay-footprint reconstruction and the default/non-self-timed preparation bypass | Prepare one native program from retained plan relations and actual lowered effects. Emit its required synchronization regardless of the caller; remove the bypass and displaced orchestration. |
 
 **One replacement landing.** The finished change includes producer, representations, transformations, all callers,
 the production build and the deletions together. Metal-microbench and mesh are separate Git repositories, so the
@@ -545,9 +457,6 @@ to justify their restoration. This is the operator's removal by a complete repla
 
 ### Source bindings for compact effects and scalar lowering
 
-These bind implementation methods to the existing complete-conversion and representation requirements; they do not
-replace the assigned domain with the operations exercised by a diagnostic.
-
 - **Compact effects — source:** William Pugh, [The Omega Test](https://www.cs.umd.edu/~pugh/papers/omega.pdf), the
   author's expanded 1992 version, §§2.1–2.3, establishes exact dependence analysis as integer feasibility.
   **Implementation source:** Sven Verdoolaege, [Integer Set Library manual](https://libisl.sourceforge.io/manual.pdf),
@@ -567,11 +476,6 @@ replace the assigned domain with the operations exercised by a diagnostic.
   conversions, special values and the required rounding semantics. SoftFloat supplies basic arithmetic, comparison
   and conversion algorithms; it is not a source for every transcendental function. Retain the upstream notices for
   derived source. Authored library source is a compiler input; generated target source remains terminal output.
-
-### Nested communication regions: producer and consumer handoff
-
-Struck in whole; see "Withdrawn, 2026-11-09". This section specified regions for IF and WHILE whose condition is
-tensor data, and quoted no operator turn.
 
 ### 7. Preserve the properties while compiling away the abstract machinery
 
@@ -595,17 +499,11 @@ The operator, 2026-11-09:
 - **Replaces:** the residual position/task/guard/loop-stack interpreter in `MetalProgramExecute`/`MetalNativeStep`,
   `MetalLoopTest` and its drains, which are deleted and not replaced (Withdrawn, 2026-11-09), and repeated static
   command-kind, cut, pass and binding discovery inside `MetalRowEncode`/`MetalReplayRun`. Compiling an outer caller
-  which still invokes those generic decoders does not complete their replacement. These are implementation sites
-  to revise; the external references above define the methods.
-- **Write:** pass the solved schedule and effects into the existing compiler's native target
-  lowering and persistence owner. Emit fixed target/API operations with bound operands, in the scheduled order;
+  which still invokes those generic decoders does not complete their replacement.
+- **Write:** pass the solved schedule and effects into native target
+  lowering. Emit fixed target/API operations with bound operands, in the scheduled order;
   compose and optimize CPU bodies with them, and fuse target-local work where legal. Preserve lowerable
-  CPU bodies until composition rather than reducing them prematurely to opaque function pointers. Reuse the
-  existing native compilation/load owner; remove the displaced executor bodies when the complete consumer lands.
-
-The preservation and elimination obligations apply at every scope: numerical functions, their call graph,
-and the placed collective/transport program. These are applications of the cited methods to Mesh's existing
-contracts, not claims that the reference systems implement Mesh's interfaces.
+  CPU bodies until composition rather than reducing them prematurely to opaque function pointers. Remove the displaced executor bodies when the complete consumer lands.
 
 | Compiler operand or solved result | Property preserved in the emitted program | Representation that execution need not interpret |
 |---|---|---|
@@ -662,48 +560,6 @@ Not to be written, extended, observed or measured under any request: IF or WHILE
 predicate reads and drains, trip counts and trip observers, regions scoped to a branch or a loop body, and their
 entries in signatures, archives and monitors.
 
-## Outstanding, 2026-11-10
-
-Recorded by Claude on 2026-11-10, from the review of the commits made for items 4 and 7 of
-[implementation-order-2026-11-09.md](implementation-order-2026-11-09.md). Nothing here is a new requirement. Each entry
-names work that requirements 3, 4, 6 and 7 already ask for and that is not written, and says what is missing.
-
-1. **`MetalProgramPrepare` still computes a dependence relation of its own.**
-   - **Place:** metal-microbench `metal_recording.m`. `MetalProgramPrepare` reads each row's accesses at placed
-     addresses (`metal_ir_accesses`, `metal_ir_sent_reads`), unrolls them over the horizon, and calls
-     `mesh_graph_dependences_views` and `mesh_graph_synchronization`. `MetalPlannedOrder`, `MetalRowAccesses`,
-     `MetalPositionAccesses`, `MetalHostSide`, `MetalWaitRow` and `MetalNewest` exist for it.
-   - **Sentences:** requirement 3, "The second scheduling solve, copied graph walks, runtime placement of program
-     values and alternative execution paths are the existing requests' named replacements". The operator, 2026-11-10,
-     quoted in the memorandum: the solvers produce "exactly the data structures needed to produce indices of which
-     pages (literally, an abstraction over pointers) are 'safe' or 'available' for reading or writing at any
-     particular moment in execution".
-   - **Written on 2026-11-10:** the two graph walks of that code are in the graph module
-     (`mesh_graph_contract_unrolled`, `mesh_graph_quotient`); whether a call's start has waits is a result of the plan
-     (`struct mesh_planned_call` `waits`), not a test at run time; the E2B plan is given the order pair between the
-     index commands' call and the decode's call with its cause.
-   - **Not written:** `mesh_plan` making the relation between the compiled parts, and the deletion of the six
-     functions above. For that, `mesh_plan` has to be given the values each compiled part reads and writes before it
-     places pages. The forms for most of that operand exist already:
-     - a part is a vertex of `struct mesh_function` `edge`'s numbering (host part p is p, device part p is parts + p);
-     - an access to bytes of a value is `struct mesh_graph_view` (the compiler has them before placement:
-       `metal_ir_effect_views`, with each value's plan identity from `metal_ir_value_planned`);
-     - which execution's copy an access uses is `struct mesh_graph_generation`.
-   - **No quoted sentence states the form** of four kinds of access that the present relation includes:
-     - an access to a value's frame table (`METAL_IR_PAGES`);
-     - an access to the transport's state words (`METAL_IR_TRANSPORT`), whose offsets are known only after the plan;
-     - an access to storage the plan does not place (a fixed buffer);
-     - the mark that makes every GPU access to a value on shared pages conflict with every other (`shares`).
-   - **Two documents differ.** This request's table of displaced implementations says "Prepare one native program
-     from retained plan relations and actual lowered effects", which describes the present function. The memorandum's
-     item 4 says "Which pages may be read or written at a position of the schedule is this solve's result; it is not a
-     separate record". The memorandum says that this request is right where the two differ; the operator's turn it
-     quotes is later than this request's table.
-2. **Nothing of items 4 and 7 has been run.** No mesh region or bridge is on the machine the code was written on.
-   `mesh_plan`, the plan archive with the new `waits` field, the native program built from it, `e2b_replay`,
-   `native_bench` and the programs of `mesh_compile.py` were built, and not executed. The two new graph functions
-   were called in process on small relations.
-
 ## Reusable form
 
 The same change-request form can name several existing requests in one requirement:
@@ -718,8 +574,5 @@ The same change-request form can name several existing requests in one requireme
   away; performance obligations and their existing measurement path>`.
 - **Replaces:** `<existing split, duplicated decision or incomplete producer/consumer connection>`.
 - **Write:** implement those clauses as `<the cited composition>`, with `<producer>` supplying `<representation>`
-  to `<consumer>` through `<responsible existing module>`; revise the callers and remove the displaced implementation
+  to `<consumer>` through `<responsible module>`; revise the callers and remove the displaced implementation
   as the named clauses require. State the coverage and property that must hold through the complete composition.
-
-The source establishes the method; the request references identify its application. An author of a compiler method
-does not need to have named these repositories or their change-request filenames.

@@ -91,7 +91,7 @@ searching the source for the named functions, not by a status paragraph.
 
 ### 2. The values that pass between stages have their types in one shared header
 
-- **Clauses:** compilation-composition-change-request.md, "3. Put each representation and decision in its existing
+- **Clauses:** compilation-composition-change-request.md, "3. Put each representation and decision in its
   owner"; "6. Carry compilation results through their consumers": "finish each producer → representation → consumer
   connection before extracting auxiliary helpers"; the operator's turn quoted there: "are w running into integratino
   errors where two interfaces 'don't line up well' because they are literally serializing and deserializing
@@ -122,8 +122,7 @@ searching the source for the named functions, not by a status paragraph.
 ### 4. One scheduling solve orders functions and transfers together, with cost as an operand
 
 - **Clauses:**
-  - compilation-composition-change-request.md, "3.": "`metal_recording.m` consumes the compiled order and lowers it to
-    its backend's execution primitives"; "The second scheduling solve, copied graph walks, runtime placement of
+  - compilation-composition-change-request.md, "3.": "The second scheduling solve, copied graph walks, runtime placement of
     program values and alternative execution paths are the existing requests' named replacements, not independent
     facilities to maintain beside their replacements."
   - "4. Execute the compiled decisions with the specified runtime semantics": "placement and costs arrive as
