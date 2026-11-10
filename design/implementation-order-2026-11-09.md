@@ -30,6 +30,10 @@ e2b_replay, and the plan runs before pages are placed, so it cannot take the job
 
 > well our task here isn't to rehabilitate code but to categorically replace it, including categorically replacing inverted control flows e.g. situatinos wehre we pretend client prgorams are running 'before' 'pages' are 'placed'
 
+The operator, 2026-11-09, later, of a report that item 4 stopped on "Programs that are given no plan":
+
+> return an error and halt? we don't need a fallback path and hte good faith reading of our requirements is to cull code paths that interact with 'fallbacks'.
+
 ## The reference program
 
 `~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
