@@ -400,7 +400,9 @@ The operator:
     `while l + tol_l < 1 and k < max_iterations:`; `max_iterations` is an operand whose default is JAX's 10. Each of
     those steps is a QR factorization where `c > CHOLESKY_CUTOFF`, or a Cholesky factorization and two triangular
     solves otherwise, with matrix multiplications. Their number is known at compilation. Whether the iteration
-    converged is a value returned with the result. What the source runs after those steps is a stop, below.
+    converged is a value returned with the result. The Halley steps the source then runs under `lax.while_loop` are
+    a stop, below. After them the refinement `u = 1.5 * u - 0.5 * u @ (u.T.conj() @ u)` and the Hermitian factor
+    `h = u.T.conj() @ x`, `h = (h + h.T.conj()) / 2` follow as `_qdwh` states them.
   - Held by the stops below on `eigh`, and not written until they are lifted: `eigh` is QDWH-eig, in which a polar
     decomposition splits the matrix into two blocks that share its eigenspaces below and above a split point, and
     the same is done to each block; `svd` is Algorithm 2, the polar decomposition, the eigendecomposition of its

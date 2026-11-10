@@ -3881,9 +3881,8 @@ def _polar(x, max_iterations=10):
     for a_minus_e_by_sqrt_c, sqrt_c, e in qr_coefs:
         q = torch.linalg.qr(torch.cat([sqrt_c * current, identity.expand(*batch, n, n)], -2)).Q
         current = e * current + a_minus_e_by_sqrt_c * torch.matmul(q[..., :m, :], q[..., m:, :].mH)
-    halley = max_iterations - len(qr_coefs) - len(chol_coefs)
     previous = None
-    for a_minus_e, c, e in chol_coefs + [(3 - 1 / 3, 3, 1 / 3)] * halley:
+    for a_minus_e, c, e in chol_coefs:
         uh = current.mH
         y = torch.linalg.cholesky_ex(c * torch.matmul(uh, current) + identity).L
         z = torch.linalg.solve_triangular(y, uh, upper=False)
@@ -7549,7 +7548,8 @@ def _storages(module, names):
 CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop, torch.ops.higher_order.map_impl,
            torch.ops.higher_order.scan, torch.ops.higher_order.switch)
 # design/torch-source-lowering-change-request.md items 5 and 6
-ITERATED = (A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals)
+ITERATED = (A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals, A.linalg_svd, A.linalg_svdvals, A._linalg_svd,
+            A.linalg_eigh, A.linalg_eigvalsh, A._linalg_eigh, A.linalg_pinv)
 
 
 def _static(exported, target):
@@ -7557,7 +7557,9 @@ def _static(exported, target):
         if node.op == 'call_function' and node.target in CONTROL:
             raise ValueError('%s (%s): a program with dynamic control flow is not compiled '
                              '(design/torch-source-lowering-change-request.md item 2)' % (node.name, node.target))
-        if node.op == 'call_function' and getattr(node.target, 'overloadpacket', None) in ITERATED:
+        packet = getattr(node.target, 'overloadpacket', None) if node.op == 'call_function' else None
+        if packet in ITERATED or packet is A.linalg_lstsq and _lstsq_driver(
+                node.args[0].meta['val'], node.kwargs.get('driver')) in ('gelsd', 'gelss'):
             device = next((value.device.type for value in pytree.tree_leaves(node.meta.get('val'))
                            if isinstance(value, torch.Tensor)), 'cpu')
             if (target if target is not None else CPU if device == 'cpu' else GPU) != CPU:
