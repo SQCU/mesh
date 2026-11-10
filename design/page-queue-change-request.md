@@ -153,11 +153,9 @@ On how parity is shown:
   `mesh_allreduce_bind` (binds the steps onto `mesh_transfer_bind`).
 - The E2B programs are prepared for two ranks: `tools/mesh/run_pair.py`'s `--split-dir` default
   `.build/e2b-ffn/arms-20260923/decode-tp2-{split}`.
-- Nothing of this change is in progress. The resident bridge that pairs its own ports and keeps a map, and the
-  failport's process lifecycle (tag `pre-return-20261103`: `rdma/mesh-heartbeat.c`, and in `rdma/mesh-link.c` the
-  per-port child processes, their stop, reaping, flush and exit, and the holder table), are both to be brought in by
-  this change. An earlier agent's partial attempt was stopped and set aside in mesh's git stash
-  (`stopped-agent-partial-2026-11-03`). It is not main and not part of this change.
+- At mesh b89e6362, main has neither a resident bridge that pairs its own ports and keeps a map of the fabric, nor the
+  process lifecycle code of tag `pre-return-20261103` (`rdma/mesh-heartbeat.c`, and in `rdma/mesh-link.c` the per-port
+  child processes, their stop, reaping, flush and exit, and the holder table).
 
 ## Scope
 
@@ -180,95 +178,84 @@ Their callers in metal-microbench:
 
 ## Claude's proposal (2026-11-03)
 
-This section is Claude's, not the operator's. With it, this document is the unit of work.
+This section is Claude's, not the operator's.
 
 ### The page lists (the queue)
 
-- Each node's region holds its page lists. The collective writes them, once a plan, and the bridge alone reads them.
-  They replace the per-link, per-queue transfer lists (`mesh.h` `mesh_order_length`, the geometry's `links` × `qps`).
-- An entry is one hop of one page: `{ page, node, direction, word, position, serial }`.
-  - `page`: a page of this node's region. It is the page sent, the page a receive lands in, or a relay's page.
-  - `node`: the adjacent node of this hop, by its index in the map: the next hop for a send, the previous hop for a
-    receive.
+- **The data structure** is a list of entries held in each node's region: the zero-copy queue of the operator's
+  statement under "The page queue". An entry is one transfer of one page between this node and an adjacent node:
+  `{ page, node, direction, word, position, serial }`.
+  - `page`: a page of this node's region: the page sent, or the page a receive lands in.
+  - `node`: the adjacent node, by its index in the map: the node a send goes to, or the node a receive comes from.
   - `direction`: send or receive.
-  - `word`, `position`: the readiness word and the value that releases a send (a supplied word, or the landed word of
-    the hop it relays), or that a receive's landing advances.
-  - `serial`: the map serial the plan was made against.
-- Entries refer to pages already in the region. Nothing is copied. They are not a ring: a plan's lists are written once
-  and replayed by every execution of the plan.
-- A plan whose `serial` is not the map's current serial is refused when it is loaded. The call fails by error and its
-  caller plans again on the map as it is.
+  - `word`, `position`: a word of the region and a value. A send is posted once its word reads its value. The page's
+    producer stores that value, or, at an intermediate node, the completion of the receive of that page stores it. A
+    receive's completion stores its value in its word.
+  - `serial`: the serial of the map the lists were written against.
+- Entries refer to pages already in the region. Nothing is copied. The lists are not a ring: they are written once for
+  a compiled program and read again by every execution of it.
+- **Produced by** the collective's function that computes a program's static schedule (the next section), in
+  `mesh-collective.{c,h}`. **Consumed by** the bridge alone, in `mesh-flow.c`. The lists replace the per-link,
+  per-queue transfer lists (`mesh.h` `mesh_order_length`, the geometry's `links` × `qps`).
 
-### What the collective decides, and what the bridge decides
+### The schedule that writes the page lists
 
-- **The collective** plans every transfer of a program together: every collective call and pipeline hand-off, over
-  the map's Thunderbolt-5-connected nodes, for any node count. It does this ahead of time with the ported packing and
-  concurrent-flow solve, and puts the transfers that block a pipeline stage first. Its output is per-hop page lists on
-  every node a page passes through:
+- **The algorithm** is the ported packing and the ported concurrent-flow solve (Garg–Könemann, as the statement under
+  "Interleaving every transfer" names it), run ahead of time over every transfer of a program together: every
+  collective call and pipeline hand-off, over the map's Thunderbolt-5-connected nodes, for any node count. It puts the
+  transfers that block a pipeline stage first.
+- **It takes** the program's declared transfers (operand ranges and destination ranks) and, from the map, node-level
+  adjacency and each node pair's capacity, the sum of that pair's cables. It takes no cable, queue pair or link
+  identity.
+- **It writes** page-list entries on every node a page passes through:
   - the source node's sends;
-  - each relay's receive into a relay page, and a send released by that receive's landed word;
+  - each intermediate node's receive into a page of its own region, and its send of that page, whose `word` is the one
+    that receive's completion stores;
   - the destination's receive into the destination page.
-- **Why the collective fixes the node-level path:** a SEND can only fill a receive already posted on that hop, so every
-  node a page passes through must hold that page's entries before the call.
-- **Relays are members.** Every live node of the Thunderbolt-5-connected collective runs a rank, so each node's
-  collective writes its own relay entries. No node outside the collective takes part.
-- **The collective sees** node-level adjacency and each node pair's capacity, the sum of that pair's cables, read from
-  the map. It sees no cable, queue pair or link identity.
-- **The bridge** decides, for each hop between two adjacent nodes, which cable and which queue pair carry each page,
-  and posts and sends accordingly.
+- Every live node of the Thunderbolt-5-connected collective runs a rank, so an intermediate node's entries are written
+  on that node. No node outside the collective takes part.
 
-### The rule both ends compute
+### The assignment of pages to cables and queue pairs
 
-- For each ordered pair of adjacent nodes (a → b), the plan gives both a and b the same ordered list of a's sends to b
-  and b's receives from a.
-- Both bridges know the cables between a and b from the map, each cable's bandwidth, and the queue-pair count
-  negotiated at that cable's pairing, which is the same at both ends.
-- Both assign the list's pages, in the list's order, to the (cable, queue pair) whose cumulative bytes over the cable's
-  bandwidth finishes earliest, ties broken by cable id and then queue-pair index. This is Graham's list scheduling over
-  the pair's links. It is weighted by capacity, so unequal parallel cables both finish together (the failport's grid
-  spread, ea247333, split equally).
-- b posts each queue pair's receives in that order, and a sends in that order as each page's word releases it. Both
-  ends compute the assignment from the same inputs when the plan is loaded, so nothing is negotiated per page.
-- Any ready page waits only behind earlier pages of its own queue pair, so spreading over every cable and queue pair is
-  what keeps a ready page from waiting.
+- **The algorithm** is Graham's list scheduling over the cables and queue pairs between two adjacent nodes. Each of the
+  two bridges computes it when the lists are loaded.
+- **It takes**, for an ordered pair of adjacent nodes (a → b):
+  - the ordered list of a's sends to b, which the schedule gives b as the same ordered list of its receives from a;
+  - the cables between a and b, from the map, and each cable's bandwidth;
+  - the queue-pair count negotiated at each cable's pairing, which is the same at both ends.
+- **Its step:** each page of the list, in the list's order, is assigned to the (cable, queue pair) whose cumulative
+  bytes over the cable's bandwidth finishes earliest, ties broken by cable id and then queue-pair index.
+- **It writes** each queue pair's pages in that order. b posts each queue pair's receives in that order, and a sends in
+  that order as each page's `word` reads its `position`. Both ends compute the assignment from the same inputs, so
+  nothing is negotiated per page.
 
-### The functions
+### The changes, by file
 
 - **The bridge** (`mesh-flow.c` `link_prepare`, `link_send_progress`, `link_receive_progress`, `link_run`, `link_close`):
-  load the page lists, apply the rule, post receives ahead, send on release, advance landed words, forward relay pages.
-  - The process lifecycle is the failport's, verbatim (tag `pre-return-20261103`: `rdma/mesh-heartbeat.c`;
+  load the page lists, compute the assignment above, post each queue pair's receives, post each send once its `word`
+  reads its `position`, and store each completed receive's `position` in its `word`.
+  - The process lifecycle is the code of tag `pre-return-20261103`, verbatim (`rdma/mesh-heartbeat.c`;
     `rdma/mesh-link.c` per-port children, their stop, reaping, flush and exit; the holder table).
-  - The queue-pair budget is the failport's rule (`max_qp` − `MESH_PROVIDER_RESERVED_QPS`, both ends' smaller,
+  - A cable's queue-pair count is `max_qp` − `MESH_PROVIDER_RESERVED_QPS`, the smaller of the two ends' (mesh
     bd85613e).
-  - `down_pair` stays deleted.
 - **The collective** (`mesh-collective.{c,h}`, `mesh-dataflow.h`, `mesh-call.h`):
-  - a plan call takes a program's declared transfers (operand ranges and destination ranks) and the map, and writes the
-    page lists;
+  - one function takes a program's declared transfers (operand ranges and destination ranks) and the map, and writes
+    the page lists;
   - `mesh_peer_channel`, `mesh_publish_bind`'s queue argument, `mesh_transfer_bind`, `mesh_link_map`,
-    `mesh_link_map_read`, `mesh_allreduce_plan` and `mesh_allreduce_bind` are replaced by that call.
+    `mesh_link_map_read`, `mesh_allreduce_plan` and `mesh_allreduce_bind` are replaced by that function.
 - **The callers** (metal-microbench):
   - `tools/e2b_replay.m` lines 497-500 pass the program's declared receives and sends (operands.json's names, ranks
-    and ranges) to the plan call instead of binding transfers;
+    and ranges) to that function instead of binding transfers;
   - `tools/mesh/run_pair.py`'s `discover_link`, `links`, `start_bridge0`, `start_bridge1`, `bridges_up` and
     `bridges_down` go: the driver starts no bridge, chooses no link, and runs one rank on every node of the collective;
   - `tools/mesh/grid.py` prepares the programs for the collective's rank count with an explicit placement operand
-    (shares per rank, even by default). Placement chosen by topology is separate work.
+    (shares per rank).
 
-### Order, and what judges it
+### Order
 
 - The replacement above is finished until it covers everything the `--link` form and the old calls did. Then the
   `--link` form (`-I`, `--link`, `oob`, `dial`, `listener_up`, the per-session exchange) and the replaced calls are
   removed.
 - One configuration runs in a runtime. No call site handles both forms.
-- Parity is shown by the normal program, the E2B decode on the collective, in an end-to-end run when the operator
-  authorizes runs. No tests are written.
-- `make -C rdma` and `make -C rdma native-audit` build clean in mesh, and `make .build/e2b_replay` in
-  metal-microbench.
+- Parity is shown by the normal program, the E2B decode on the collective, in an end-to-end run.
 - Every wait is bounded, and every failure is an error value, never a hardware fault.
-
-## Superseded in part
-
-design/disjoint-pages-change-request.md (2026-11-03) replaces two things the implementation of this change built: the
-plan's ring (`depth` slots, `t mod depth`, the receive window, the forwards gate) and the per-page readiness cells.
-Pages are assigned by the one allocator of its Appendix A, and landings are read by mask from a contiguous landed list
-in its own section of the region. Everything else here stands.
