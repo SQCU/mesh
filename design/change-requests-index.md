@@ -249,6 +249,12 @@ outstanding, and what of it is outstanding. The standard every change request fo
 - [unequal-shards-change-request.md](unequal-shards-change-request.md): outstanding, items 1–15. Written 2026-11-09
   from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4.
 
+- [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
+  Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,
+  pseudoinverse and the gelss and gelsd least-squares drivers, which repeated on a tensor predicate. What this
+  index says above of their numerical evidence describes code that no longer exists. Item 5 states what replaces
+  them.
+
 ## Implemented
 
 - [integration-finishing-change-request.md](integration-finishing-change-request.md): implemented.

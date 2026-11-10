@@ -62,6 +62,9 @@ searching the source for the named functions, not by a status paragraph.
   drains (`MetalLoopTest`, `MetalDrain`), trip-count observation, and the scoped regions of
   compilation-composition-change-request.md "Nested communication regions: producer and consumer handoff", struck
   on 2026-11-09 ("Withdrawn, 2026-11-09" in that request).
+- **With it:** torch-source-lowering-change-request.md item 5 (2026-11-09), for the operators whose lowerings repeated
+  a body while a predicate on tensor data held: each is one call of a supplier's function, or is refused with a plain
+  message.
 - **Reference:** `schedule_emit/export.py`, 62 lines.
 - **Estimate:** 60–120 lines. It removes scope, so every later item is smaller once it is done.
 

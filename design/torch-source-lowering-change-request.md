@@ -263,3 +263,46 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
     k-dimension by choosing appropriate chunk size in k (called k-tile or tilek)"
 - **Withdrawn** (2026-11-08). design/plan-to-bridge-change-request.md R4 writes this consumer, "one task per page, each
   with an edge from its own page", and item 1 lowers it so. Nothing waits inside a function.
+### 5. An operator whose method iterates until it converges is one call of a supplier's function
+
+The operator, 2026-11-09, in order:
+
+> okay so we do'nt need them if they use a data-dependent control flow, and anyone who wants something like them can write their own fixed depth solver as long as we emit boring ah ah errors which tell the user in boring ah ah terms that data dependent iteration depth isn't compilable with meshlib. do you have any counterexamples of graph compilation libraries which give users a sneaky way to run divergent iterators forever with a better approach than this?
+
+> then choose any counterexample from the literature as the lowering approach
+
+- **Replaces:** the lowerings mesh 199eb9c3 deleted from rdma/mesh_compile.py (`_matrix_exp`, `_jacobi_sweeps`,
+  `_linalg_schur`, `_eigen_hermitian`, `_eigen`, `_singular`, `_pseudoinverse`, the gelss and gelsd branch of
+  `_least_squares`), each of which repeated a body while a predicate computed from tensor data held; and that
+  commit's narrowing of `_lstsq_metadata` to "driver must be gels or gelsy".
+- **Source:**
+  - PyTorch 2.15, `torch.linalg.lstsq`, https://docs.pytorch.org/docs/2.15/generated/torch.linalg.lstsq.html: `driver`:
+    "name of the LAPACK/MAGMA method to be used." "For CPU inputs the valid values are 'gels', 'gelsy', 'gelsd,
+    'gelss'." "'gelsd' (tridiagonal reduction and SVD)" "'gelss' (full SVD)."
+  - PyTorch 2.15, `torch.linalg.pinv`, https://docs.pytorch.org/docs/2.15/generated/torch.linalg.pinv.html: "This
+    function uses torch.linalg.svd() if hermitian= False and torch.linalg.eigh() if hermitian= True."
+  - PyTorch 2.15, `torch.linalg.svd`, https://docs.pytorch.org/docs/2.15/generated/torch.linalg.svd.html: `driver`:
+    "name of the cuSOLVER method to be used." "Available options are: None, gesvd, gesvdj, and gesvda."
+  - LAPACK, `dgesdd`: it computes the singular value decomposition, and its `INFO` argument, when positive, means
+    "DBDSDC did not converge, updating process failed."
+  - Apple, Accelerate, https://developer.apple.com/accelerate: "LAPACK includes support for eigenvalue and
+    singular-value problems, matrix factorization, as well as solving systems of linear equations and linear least
+    squares." The macOS SDK's `vecLib.framework/Headers/clapack.h` declares `dgesdd_` (:2725), `dsyevd_` (:4817),
+    `zheevd_` (:8602), `dgeev_` (:2549), `dgelsd_` (:2629) and `dgelss_` (:2638); metal-microbench `metal_native.mm`
+    (:6-8) already includes Accelerate with its LAPACK interface.
+- **Write:**
+  - `torch.linalg.svd`, `eigh`, `eig` and `eigvals`, and `lstsq` with the gelsd and gelss drivers, are each one node
+    of the graph, with fixed shapes, that calls the LAPACK driver of that problem which Accelerate declares (the
+    divide-and-conquer SVD; the symmetric and Hermitian eigensolvers; the general eigensolver; `gelsd` and `gelss`
+    by name). The iteration is inside that one function. Nothing in the graph branches or repeats on tensor data.
+  - Such a node is offered by the CPU's supplier only. A placement that names another processor for it is refused.
+  - The routine's `INFO` is a value the node returns; a positive `INFO` is reported through the check the compiler
+    already has for a numerical operation's status.
+  - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
+  - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.
+  - `torch.linalg.matrix_exp` has no such function in LAPACK. It, and any operator whose method needs a number of
+    iterations that depends on tensor data and for which no supplier's function is cited, is refused at export with
+    one plain message that names the operator and says that an iteration depth that depends on data is not
+    compiled.
+  - No lowering written by mesh repeats a body a number of times that tensor data decides.
+
