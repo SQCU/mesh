@@ -909,8 +909,9 @@ algorithm its citation gives, and the change.
     (rdma/mesh-flow.c `set_draw`), which is Lemire's multiply-and-shift. With Lemire's rejection step, which the code
     must add, the integer is exactly uniform (D. Lemire, Fast random integer generation in an interval, ACM Trans.
     Model. Comput. Simul. 29(1), 2019).
-- **Produced by, consumed by.** rdma/mesh-collective.c writes each entry's `set`, a field of the entry's
-  `struct mesh_hop` (A9). The bridge at each end of a cable takes the sets and draws the same permutation.
+- **Produced by, consumed by.** rdma/mesh-collective.c writes each entry's `set` into its `struct plan_entry`
+  and copies it from there into the entry's `struct mesh_hop` (A9). The bridge at each end of a cable takes the sets
+  from the `struct mesh_hop` lists and draws the same permutation.
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
 - **One permutation of the whole set per execution, as one renaming on every channel the set crosses.**
