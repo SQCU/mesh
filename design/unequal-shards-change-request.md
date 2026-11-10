@@ -37,8 +37,8 @@ The operator, 2026-11-10:
 
 ## The stages
 
-Each requirement composes into the stages of the reference program `~/schedule-emit` (`schedule_emit/driver.py`,
-`compile_module`), each a function from a value to a value:
+Each requirement composes into the stages of the reference program `~/schedule-emit` at f41c64a
+(`schedule_emit/driver.py`, `compile_module`), each a function from a value to a value:
 
 - `export(module, args)` writes an `Exported` (`schedule_emit/ir.py`), whose `graph_module` is a
   `torch.fx.GraphModule`;
@@ -53,7 +53,8 @@ Each requirement composes into the stages of the reference program `~/schedule-e
 
 A sharding is part of the placement operand. Items 1, 5, 8, 13 and 15 state what the operand carries for a sharded
 dimension. Items 6, 7 and 14 produce it before `place` runs. Items 2, 3, 4, 9, 10 and 12 state nodes that `place` adds
-to the graph. Item 11 states the form of a value.
+to the graph. Item 11 states the form of a value. The Stage line of each item rests on these functions; no quoted
+source of an item names a stage.
 
 The reference program's placement operand is a function from an fx node to a processor name, and has no field for a
 sharding. Its operators are `send(value: Tensor, channel: int)` and `recv(channel: int) -> Tensor`, and have no
@@ -336,7 +337,8 @@ and `displs`, each an integer array of length the group size; MPI's `array_of_si
   buffer. A tensor with rows of differing length is two tensors: the values of all rows concatenated, and nrows+1
   nondecreasing offsets, row i being `values[offsets[i]:offsets[i+1]]`. A second ragged dimension is a second array
   of offsets over the first. No row is padded.
-- **Stage:** item 13 consumes the offsets.
+- **Stage:** item 13 consumes the offsets. No quoted source states an algorithm or which stage produces the two
+  tensors.
 
 ### 12. A collective sends a device's own shard out of its padded buffer
 
