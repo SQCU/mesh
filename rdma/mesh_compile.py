@@ -5958,7 +5958,7 @@ def _fragment(target, given, outs):
 
 
 # design/unequal-shards-change-request.md item 8; `striped`: the place in the sequence of token j of `rank`
-def _place(r, j, counts, rank):
+def _striped_place(r, j, counts, rank):
     own, odd = counts[rank], r('add', I32, r('mul', I32, j, r.const(2, I32)), r.const(1, I32))
     at = j
     for other, count in enumerate(counts):
@@ -5973,7 +5973,7 @@ def _striped(out, counts):
     for rank, (first, count) in enumerate(zip(itertools.accumulate(counts, initial=0), counts)):
         if count:
             block, r = out.narrow(0, first, count), _Region()
-            r.done(_store(r, _convert(r, _place(r, r.index(0), counts, rank), I32, t), t, block))
+            r.done(_store(r, _convert(r, _striped_place(r, r.index(0), counts, rank), I32, t), t, block))
             ops.append(_Generic(block.shape, [], [(block, _same(1))], r))
     return ops
 
@@ -5981,7 +5981,7 @@ def _striped(out, counts):
 # row `index` of a rank's buffer of queries is its token `index - start`, the rank's shard from `start` of its buffer
 def _striped_query(r, index, origin):
     counts, rank, start = origin.stripes
-    return _place(r, r('sub', I32, index, r.const(start, I32)), counts, rank)
+    return _striped_place(r, r('sub', I32, index, r.const(start, I32)), counts, rank)
 
 
 # T. Dao et al., FlashAttention, NeurIPS 2022, Algorithms 1 and 2;
