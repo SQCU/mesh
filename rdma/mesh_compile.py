@@ -7032,16 +7032,17 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
 
 # design/torch-capture-change-request.md, appendix (actor costs); metal_recording.h MetalRecorderActors: each
 # function's call at this node part by part (host p its CPU tasks', work p its GPU dispatches' mesh_graph_actor_time on
-# this node's machines; the cross-processor edges inside one execution), the host's writes of the block inputs it
-# holds added to its first host part (a CPU actor writing their bytes); no machine record: one part of no time
+# this node's machines; the edges between its parts inside one execution, which mesh_plan returns in Planned `order`),
+# the host's writes of the block inputs it holds added to its first host part (a CPU actor writing their bytes); no
+# machine record: its parts of no time
 def _actors(programs, irs):
     machines, lib, made = _machines(), programs['lib'], {}
     for row in programs['rows']:
         k = row['k']
-        if row['builder'] is None or k in made or not machines:
+        if row['builder'] is None or k in made:
             continue
         parts, count = mesh.U(), C.c_size_t()
-        gpu, cpu = C.byref(machines[GPU]), C.byref(machines[CPU])
+        gpu, cpu = (C.byref(machines[GPU]), C.byref(machines[CPU])) if machines else (None, None)
         lib.MetalRecorderActors.restype = C.c_int
         lib.MetalRecorderActors.argtypes = [C.c_void_p, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine),
                                             C.POINTER(C.c_double), C.POINTER(C.c_double), mesh.U, C.POINTER(mesh.U),
@@ -7056,7 +7057,7 @@ def _actors(programs, irs):
         if status not in (0, errno.ENODATA):
             mesh.check(status)
         written, complete = sum(irs[k].values[v].section.bytes for v, _ in irs[k].inputs.values()), status == 0
-        if parts.value and written:
+        if parts.value and written and machines:
             spent, measured = mesh_graph.actor_time(machines[CPU], mesh_graph.Actor(0.0, 1, 1, written, 0, 0, None))
             complete &= measured
             host[0] += spent

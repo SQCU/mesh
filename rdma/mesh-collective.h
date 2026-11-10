@@ -52,7 +52,8 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    program order, `parts` of them (none: one part of no time), part p's host part (its CPU tasks, host-input writes and
    encoding) of estimate t(v) host[p] ns and its device part (its GPU dispatches) of work[p] ns, mesh-graph.h
    mesh_graph_actor_time over the compiled actors, and the `edges` dependences `edge` between them inside one call
-   (host part p vertex p, device part p vertex parts + p: mesh_graph_buffer_bound's numbering) */
+   (host part p vertex p, device part p vertex parts + p: mesh_graph_buffer_bound's numbering), each pair of
+   different vertices once */
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; const double *host,*work; const struct mesh_graph_dependence *edge;
@@ -93,7 +94,11 @@ _Static_assert(sizeof(struct mesh_function)==96 && offsetof(struct mesh_function
    `to` those vertices, `delay` in block executions: the head at block t follows the tail at t - delay. They are the
    submission order, each submission before its part, each function's outstanding lag from a part to a later call's
    submission, and A10's orders and commuting chains from part to part. The graph's edges between nodes and its added
-   synchronization are the transport's (mesh_transfers_start waits, the bridge's tells) */
+   synchronization are the transport's (mesh_transfers_start waits, the bridge's tells).
+   design/compilation-composition-change-request.md, "6. Carry compilation results through their consumers", Replaces
+   item 2: after them, each call's relation between its compiled parts, struct mesh_function `edge` as given: call j's
+   vertex x of that numbering (`call[j].parts` its function's `parts`) is signature->tasks + 2 (the parts of the calls
+   before j) + x, the cause PART */
 struct mesh_graph_signature;
 struct mesh_graph_dependence;
 /* design/compilation-composition-change-request.md, "Complete replacement workgroup", program relations ("Retain the
@@ -102,12 +107,12 @@ struct mesh_graph_dependence;
    other reads or writes. `cause[e]` of order[e]: FLOW or CONFLICT with `pair` q, the edge implementing pair q at a node
    both calls' parts share; PROGRAM a node's submission order or its parts' call order; SUBMIT a submission before its
    part; OUTSTANDING A10's bound, a part before a later call's submission; CHAIN a commuting chain's or a persistent
-   storage's order; TRANSFER a demand's tree edge between nodes (`pair` the demand); `pair` UINT32_MAX but for FLOW,
-   CONFLICT and TRANSFER */
+   storage's order; TRANSFER a demand's tree edge between nodes (`pair` the demand); PART a dependence between two
+   compiled parts of one call; `pair` UINT32_MAX but for FLOW, CONFLICT and TRANSFER */
 enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_SUBMIT, MESH_PLANNED_OUTSTANDING,
-       MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER };
+       MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER, MESH_PLANNED_PART };
 struct mesh_planned_cause { uint32_t kind,pair; };
-struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,padding; };
+struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,parts; };
 struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
                       struct mesh_planned_cause *cause; uint64_t horizon; };

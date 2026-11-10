@@ -1112,9 +1112,10 @@ static void plan_ordered(struct plan_room_edges *graph,const struct plan *plans,
 static int plan_here(const uint32_t *key,const uint32_t *node,uint32_t J,uint32_t n,uint32_t self,uint32_t x){
   return node[x]==self && ((x>=2*J && key[x]==n) || key[x]==self);
 }
-static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,uint32_t ncalls,uint64_t program,
-                      uint32_t self,const size_t *row,const size_t *order,const uint32_t *orders,const uint32_t *causes,
-                      uint32_t norders,const uint32_t *chains,struct mesh_planned *planned){
+static int plan_graph(struct plan *plans,const struct mesh_function *functions,uint32_t count,const uint32_t *calls,
+                      uint32_t ncalls,uint64_t program,uint32_t self,const size_t *row,const size_t *order,
+                      const uint32_t *orders,const uint32_t *causes,uint32_t norders,const uint32_t *chains,
+                      struct mesh_planned *planned){
   const uint32_t s=(uint32_t)__builtin_ctzll(program),J=ncalls,n=plans[0].n;
   uint64_t vertices=2*(uint64_t)J,edges=0;
   uint32_t *place=malloc(((size_t)J+1)*sizeof *place),*actor=malloc(((size_t)J+1)*sizeof *actor);
@@ -1255,22 +1256,34 @@ static int plan_graph(struct plan *plans,uint32_t count,const uint32_t *calls,ui
   for(uint32_t j=0;j<J;j++)if(plan_chain(chains,j)==j && place[j]!=j)plan_ordered(&graph,plans,calls,actor,place[j],j,1);
   for(uint32_t f=0;f<count;f++)for(size_t q=row[f];q<row[f+1];q++)place[order[q]]=(uint32_t)(q-row[f]);
   const size_t built=graph.edges;
-  /* design/compilation-composition-change-request.md item 6, unit 6D */
+  /* design/compilation-composition-change-request.md item 6, unit 6D, and "6. Carry compilation results through
+     their consumers", Replaces item 2: each call's relation between its compiled parts (struct mesh_function `edge`)
+     follows the graph's edges, its vertices past the graph's V */
+  size_t within=0;
+  for(uint32_t j=0;j<J;j++)within+=functions[calls[j]].edges;
   planned->call=malloc(((size_t)J+1)*sizeof *planned->call);
-  planned->order=malloc((built+1)*sizeof *planned->order);
-  planned->cause=malloc((built+1)*sizeof *planned->cause);
+  planned->order=malloc((built+within+1)*sizeof *planned->order);
+  planned->cause=malloc((built+within+1)*sizeof *planned->cause);
   if(!planned->call || !planned->order || !planned->cause){status=ENOMEM;goto done;}
   planned->calls=J;
   for(uint32_t j=0;j<J;j++){
     const struct plan *p=plans+calls[j];
     planned->call[j]=(struct mesh_planned_call){.lead=p->start_lead,.function=calls[j],.ordinal=place[j],
-                                                .every=p->calls};
+                                                .every=p->calls,.parts=functions[calls[j]].parts};
   }
   for(size_t e=0;e<built;e++)
     if(plan_here(key,node,J,n,self,from[e]) && plan_here(key,node,J,n,self,to[e])){
       planned->cause[planned->orders]=cause[e];
       planned->order[planned->orders++]=(struct mesh_graph_dependence){from[e],to[e],delay[e]};
     }
+  for(uint32_t j=0,base=V;j<J;base+=2*functions[calls[j++]].parts){
+    const struct mesh_function *f=functions+calls[j];
+    for(uint32_t e=0;e<f->edges;e++){
+      planned->cause[planned->orders]=(struct mesh_planned_cause){MESH_PLANNED_PART,UINT32_MAX};
+      planned->order[planned->orders++]=(struct mesh_graph_dependence){base+f->edge[e].from,base+f->edge[e].to,
+                                                                       f->edge[e].delay};
+    }
+  }
   double lambda;
   uint32_t added;
   /* design/compilation-composition-change-request.md item 6, unit 6A: the program graph's cycle mean, BSL Fig. 8's
@@ -1864,7 +1877,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
       for(uint32_t e=0;e<f->edges;e++)if(f->edge[e].from>=2*(uint64_t)f->parts || f->edge[e].to>=2*(uint64_t)f->parts)return EINVAL;
       actors+=f->parts?f->parts:1;dependences+=f->edges;
     }
-    if(actors>=UINT32_MAX/2 || dependences>=SIZE_MAX/sizeof(struct mesh_graph_dependence))return ENOMEM;
+    if(actors>=UINT32_MAX/4 || dependences>=SIZE_MAX/sizeof(struct mesh_graph_dependence))return ENOMEM;
     const uint32_t A=(uint32_t)actors;
     double *host=calloc((size_t)A+1,sizeof *host),*work=calloc((size_t)A+1,sizeof *work);
     uint64_t *bff=malloc(((size_t)A+1)*sizeof *bff),*lagged=calloc((size_t)count+1,sizeof *lagged);
@@ -1923,7 +1936,8 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     if((uint64_t)horizon*p->calls>=UINT32_MAX){status=ENOMEM;goto done;}
     if((status=plan_function(p,functions+f,&nodes,program)))goto done;
   }
-  if((status=plan_graph(plans,count,calls,ncalls,program,nodes.self,row,order,orders,causes,norders,chains,planned)))
+  if((status=plan_graph(plans,functions,count,calls,ncalls,program,nodes.self,row,order,orders,causes,norders,chains,
+                        planned)))
     goto done;
   planned->horizon=horizon;
   uint64_t rows=0;

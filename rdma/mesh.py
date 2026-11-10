@@ -100,7 +100,7 @@ class View(C.Structure):
 # vertices; its edges between this node's submissions and parts as struct mesh_graph_dependence over those vertices),
 # freed by mesh_planned_free.  What must stay: the fields in the header's order and of its types
 class PlannedCall(C.Structure):
-    _fields_ = [('plan', Q), ('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('padding', U)]
+    _fields_ = [('plan', Q), ('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('parts', U)]
 
 
 class PlannedCause(C.Structure):
@@ -114,7 +114,8 @@ class Planned(C.Structure):
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
-ORDER_FLOW, ORDER_CONFLICT, PLANNED_PROGRAM, PLANNED_SUBMIT, PLANNED_OUTSTANDING, PLANNED_CHAIN, PLANNED_TRANSFER = range(7)
+(ORDER_FLOW, ORDER_CONFLICT, PLANNED_PROGRAM, PLANNED_SUBMIT, PLANNED_OUTSTANDING, PLANNED_CHAIN, PLANNED_TRANSFER,
+ PLANNED_PART) = range(8)
 INVARIANT, EXECUTION = 0, 1
 JOIN, PAGES = 0, 1
 FROM_PRODUCED, TO_PRODUCED, FROM_SOURCE_READ, TO_SOURCE_READ = 1, 2, 4, 8
