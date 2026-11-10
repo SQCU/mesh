@@ -234,19 +234,9 @@ _Static_assert(sizeof(struct mesh_graph_processor) == 8 && sizeof(struct mesh_gr
    MetalPlannedOrder), so every copy pair is its own output */
 int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
                         const unsigned char *kept, size_t room, struct mesh_graph_dependence *contracted, size_t *made);
-enum { MESH_GRAPH_COMPLETION_EVENT = 1, MESH_GRAPH_COUNTER_EVENT = 2 };
-struct mesh_graph_event { uint32_t object, role, counter, argument; uint64_t lookback; };
-struct mesh_graph_scope { uint32_t once, counter; int64_t delta; };
+enum { MESH_GRAPH_COMPLETION_EVENT = 1 };
+struct mesh_graph_event { uint32_t object, role, argument, padding; uint64_t lookback; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };
-enum mesh_graph_instruction_kind { MESH_GRAPH_OPERATION, MESH_GRAPH_ACTION, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END,
-  MESH_GRAPH_TASK };
-struct mesh_graph_submission { uint32_t lag, positions, window, flags, queue, host, drained, ended, progress, padding; unsigned char policy[16]; };
-enum { MESH_GRAPH_ACTION_ISSUE = 1, MESH_GRAPH_ACTION_QUEUE = 2, MESH_GRAPH_ACTION_CURRENT = 4, MESH_GRAPH_ACTION_COMPLETE = 8 };
-struct mesh_graph_action { uint32_t kind, submission, object, primitive, vertex, provenance; uint64_t execution, value, begin, end; };
-struct mesh_graph_ownership { uint32_t current, issued, completed, padding; uint64_t execution, issued_execution, completed_execution; };
-void mesh_graph_action_owner(struct mesh_graph_action *, struct mesh_graph_ownership *,
-                             struct mesh_graph_action *prefix, struct mesh_graph_action *completed);
-struct mesh_graph_instruction { uint32_t kind, index, once, submission; uint64_t execution, position; };
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
@@ -254,21 +244,14 @@ struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dep
                               struct mesh_graph_synchronized *edge; uint64_t *position, *count, *least;
                               size_t *previous, *waited, *first, *order; uint64_t *unknown; uint32_t *alias;
                               unsigned char digest[32]; size_t events; struct mesh_graph_event *event;
-                              struct mesh_graph_scope *scope; size_t spans; struct mesh_graph_span *span;
-                              size_t submissions, actions, instructions;
-                              struct mesh_graph_submission *submission; struct mesh_graph_action *action;
-                              struct mesh_graph_instruction *instruction; };
+                              size_t spans; struct mesh_graph_span *span; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
                          const struct mesh_graph_operation *operation, struct mesh_graph_signature *signature);
 void mesh_graph_signature_free(struct mesh_graph_signature *signature);
-int mesh_graph_signature_program(struct mesh_graph_signature *, size_t events, const struct mesh_graph_event *,
-                                 const struct mesh_graph_scope *);
+int mesh_graph_signature_program(struct mesh_graph_signature *, size_t events, const struct mesh_graph_event *);
 int mesh_graph_signature_spans(struct mesh_graph_signature *, size_t spans, const struct mesh_graph_span *);
-int mesh_graph_signature_execution(struct mesh_graph_signature *, size_t submissions, const struct mesh_graph_submission *,
-                                   size_t actions, const struct mesh_graph_action *, size_t instructions,
-                                   const struct mesh_graph_instruction *);
 
 /* design/synchronization-signature-change-request.md item 1, "its SHA-256 is part of the compiled artifact": the
    signature's one serialized form, its header then processor, task, dependence, operation, edge, least and alias in

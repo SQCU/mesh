@@ -1,7 +1,5 @@
 #!/usr/bin/env mesh-python
 """design/synchronization-signature-change-request.md items 3, 4 and 5"""
-import bisect
-import collections
 import datetime
 import hashlib
 import json
@@ -108,11 +106,7 @@ def load(path):
         operations = [mesh_graph.Operation.from_buffer_copy(o) for o in made.operation[:made.operations]]
         lane = {p: [made.order[k] for k in range(made.first[p], made.first[p + 1])] for p in range(made.processors)}
         metadata = {'events': [mesh_graph.Event.from_buffer_copy(e) for e in made.event[:made.events]],
-                    'spans': [mesh_graph.Span.from_buffer_copy(x) for x in made.span[:made.spans]],
-                    'submissions': [mesh_graph.Submission.from_buffer_copy(x) for x in made.submission[:made.submissions]],
-                    'actions': [mesh_graph.Action.from_buffer_copy(x) for x in made.action[:made.actions]],
-                    'instructions': [mesh_graph.Instruction.from_buffer_copy(x) for x in made.instruction[:made.instructions]],
-                    'scopes': [mesh_graph.Scope.from_buffer_copy(x) for x in made.scope[:made.operations]] if made.scope else []}
+                    'spans': [mesh_graph.Span.from_buffer_copy(x) for x in made.span[:made.spans]]}
     finally:
         mesh_graph.free(made)
     return compiled, processors, tasks, dependences, operations, lane, metadata
@@ -151,103 +145,6 @@ def role(processors, node, name):
     raise ValueError('no %s processor of node %s in the record' % (want, node))
 
 
-def counter_rules(operations, program, scopes=()):
-    return [(scopes[i].counter, scopes[i].delta) if scopes else (0, 0) for i in program]
-
-
-class SubmissionOwner:
-    def __init__(self, metadata, operations, program, objects, lanes, object_primitives, lane_primitives, completion):
-        C = mesh_graph.C
-        class Config(C.Structure):
-            _fields_ = [(name, C.c_uint32) for name in ('lag', 'positions', 'window')]
-        class State(C.Structure):
-            _fields_ = [(name, C.c_uint64) for name in
-                        ('commits', 'encoded', 'signalled', 'completedCommits', 'pending', 'issued')] + \
-                       [('progressCommits', C.POINTER(C.c_uint64))]
-        class Effect(C.Structure):
-            _fields_ = [(name, C.c_uint64) for name in
-                        ('wait', 'signal', 'slot', 'stored', 'completedCommits', 'encoded')] + \
-                       [(name, C.c_uint32) for name in ('action', 'submitted', 'array')]
-        library = os.path.abspath(os.path.join(HERE, '..', '..', '..', 'metal-microbench', '.build', 'libmetal_recording.dylib'))
-        self.library = C.CDLL(library)
-        self.library.MetalSubmissionIdentity.argtypes = [C.POINTER(C.c_ubyte)]
-        self.library.MetalSubmissionIdentity.restype = C.c_int
-        identity = (C.c_ubyte * 16)()
-        status = self.library.MetalSubmissionIdentity(identity)
-        if status:
-            raise ValueError('cannot identify loaded submission owner: %s' % os.strerror(status))
-        for config in metadata['submissions']:
-            if bytes(config.policy) != bytes(identity):
-                raise ValueError('saved submission policy %s differs from loaded recorder %s; regenerate the compiled signature' %
-                                 (bytes(config.policy).hex(), bytes(identity).hex()))
-        self.library.MetalSubmissionAdvance.argtypes = [C.POINTER(Config), C.POINTER(State), C.c_uint32, C.c_uint64, C.POINTER(Effect)]
-        self.library.MetalSubmissionAdvance.restype = C.c_int
-        self.library.MetalSubmissionApply.argtypes = [C.POINTER(State), C.POINTER(Effect)]
-        self.library.MetalSubmissionApply.restype = None
-        self.library.MetalSubmissionNormalize.argtypes = [C.POINTER(Config), C.POINTER(State)]
-        self.library.MetalSubmissionNormalize.restype = None
-        self.library.MetalSubmissionEvents.argtypes = [C.POINTER(mesh_graph.Submission), C.POINTER(mesh_graph.Action),
-            C.POINTER(mesh_graph.Action), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
-        self.library.MetalSubmissionEvents.restype = C.c_size_t
-        self.Config, self.State, self.Effect = Config, State, Effect
-        self.metadata, self.operations, self.program = metadata, operations, program
-        self.objects = {x.progress for x in metadata['submissions']} | \
-                       {x.object for x in metadata['actions'] if x.object != NONE}
-        if completion:
-            self.objects.discard(completion.object)
-        self.lanes = {x.queue for x in metadata['submissions']}
-        self.object_map, self.lane_map = objects, lanes
-        self.object_primitives, self.lane_primitives, self.completion = object_primitives, lane_primitives, completion
-        self.initial = tuple((0,) * (6 + x.positions * x.window) + (NONE, 0, NONE, 0, NONE, 0) for x in metadata['submissions'])
-        self.cache, self.catalog = {}, {}
-
-    def task(self, vertex, execution, values):
-        return values[:-6] + (vertex, execution) + values[-4:]
-
-    def step(self, index, values):
-        key = index, values
-        if key in self.cache:
-            return self.cache[key]
-        C = mesh_graph.C
-        action = mesh_graph.Action.from_buffer_copy(self.metadata['actions'][index])
-        owner = mesh_graph.Ownership(values[-6], values[-4], values[-2], 0, values[-5], values[-3], values[-1])
-        prefix, completed = mesh_graph.Action(), mesh_graph.Action()
-        mesh_graph.LIB.mesh_graph_action_owner(C.byref(action), C.byref(owner), C.byref(prefix), C.byref(completed))
-        source = self.metadata['submissions'][action.submission]
-        config = self.Config(source.lag, source.positions, source.window)
-        progress = (C.c_uint64 * (source.positions * source.window))(*values[6:-6])
-        state, effect = self.State(*values[:6], progress), self.Effect()
-        status = self.library.MetalSubmissionAdvance(C.byref(config), C.byref(state), action.kind, action.value, C.byref(effect))
-        if status:
-            raise ValueError('compiled submission action %d: %s' % (index, os.strerror(status)))
-        emitted, scopes = (mesh_graph.Operation * 3)(), (mesh_graph.Scope * 3)()
-        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(prefix), C.byref(effect), emitted, scopes)
-        if count > 3:
-            raise ValueError('submission owner exceeded its event record')
-        outputs = []
-        for i in range(count):
-            op, scope = mesh_graph.Operation.from_buffer_copy(emitted[i]), mesh_graph.Scope.from_buffer_copy(scopes[i])
-            if scope.counter:
-                op.value = 0
-            signature = bytes(op), bytes(scope)
-            if signature not in self.catalog:
-                k = len(self.program)
-                self.catalog[signature] = k
-                self.program.append(len(self.operations))
-                self.operations.append(op)
-                self.metadata['scopes'].append(scope)
-                if op.primitive in self.object_primitives and (not self.completion or op.object != self.completion.object):
-                    self.object_map[k] = op.object
-                if op.primitive in self.lane_primitives:
-                    self.lane_map[k] = op.processor
-            outputs.append(self.catalog[signature])
-        self.library.MetalSubmissionApply(C.byref(state), C.byref(effect))
-        self.library.MetalSubmissionNormalize(C.byref(config), C.byref(state))
-        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:6]) + tuple(progress) + (owner.current, owner.execution, owner.issued, owner.issued_execution, owner.completed, owner.completed_execution)
-        self.cache[key] = changed, tuple(outputs)
-        return self.cache[key]
-
-
 def generate(operations, program, observe, point=None, metadata=None):
     metadata = metadata or {}
     completion = next((e for e in metadata.get('events', ()) if e.role == 1), None)
@@ -258,24 +155,14 @@ def generate(operations, program, observe, point=None, metadata=None):
     objects = {k: operations[i].object for k, i in enumerate(program)
                if operations[i].primitive in object_primitives and (not completion or operations[i].object != completion.object)}
     lanes = {k: operations[i].processor for k, i in enumerate(program) if operations[i].primitive in lane_primitives}
-    owner = SubmissionOwner(metadata, operations, program, objects, lanes, object_primitives, lane_primitives, completion) \
-        if metadata.get('instructions') else None
-    machine = mesh_graph.trace_machine(operations, program, metadata, objects, lanes, owner)
-    metadata['_machine'] = machine
-    rules = counter_rules(operations, program, metadata.get('scopes', ()))
-    family_objects = collections.defaultdict(set)
-    for event in metadata.get('events', ()):
-        if event.counter:
-            family_objects[event.counter].add(event.object)
+    machine = mesh_graph.trace_machine(operations, program, metadata, objects, lanes)
     spans = machine['spans']
     labels = {}
     for source, _, kind, index, _, _ in machine['transitions']:
         if kind == 'op':
-            operation, (family, delta) = operations[program[index]], rules[index]
-            bindings = tuple(ordinal for logical, ordinal in zip(machine['objects'], machine['states'][source][2])
-                             if logical in family_objects[family] and ordinal)
+            operation = operations[program[index]]
             labels[(source, kind, index)] = (operation.primitive, operation.object, operation.value, operation.execution,
-                                             operation.processor, family, delta, bindings)
+                                             operation.processor)
         else:
             labels[(source, kind, index)] = (index,)
     matches = mesh_graph.trace_matches(machine, labels)
@@ -286,10 +173,9 @@ def generate(operations, program, observe, point=None, metadata=None):
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
     lines += ['self int inrun, inapi, bs;', 'self uint64_t exec, ended, bsob, bsva, spanfirst, spanend;',
               'uint64_t epoch, invocation, objectcount, lanecount;',
-              'uint64_t active[uint64_t, uint64_t], stamp[uint64_t, uint64_t], om[uint64_t], lm[uint64_t], signals[uint64_t];',
+              'uint64_t active[uint64_t, uint64_t], stamp[uint64_t, uint64_t], om[uint64_t], lm[uint64_t];',
               'uint64_t spanEvent[uint64_t], spanFirst[uint64_t], spanEnd[uint64_t];',
               'BEGIN { epoch = 1, active[1, 0] = 1, stamp[1, 0] = 1; }']
-    signal = PRIMITIVES.index('queue_signal')
 
     def check(probe, point, predicate, kind, name=None, obj=None, val=None, lane=None):
         at = probe + point
@@ -309,7 +195,7 @@ def generate(operations, program, observe, point=None, metadata=None):
         for group, ((token, _, ob, ln), rows, words) in enumerate(matches):
             if token != kind:
                 continue
-            source, _, _, index, _, _, _ = rows[0]
+            _, _, _, index, _, _, _ = rows[0]
             clause = []
             if kind == 'op':
                 operation = operations[program[index]]
@@ -328,29 +214,21 @@ def generate(operations, program, observe, point=None, metadata=None):
                         clause.append('!this->completion && this->obid == %d' % ob)
                 if lane is not None:
                     clause.append('this->lnid == %d' % ln)
-                family, delta = rules[index]
-                value = 'this->tally + (%d)' % delta if family else str(operation.value)
                 if val is not None:
-                    value_clause = 'this->va == (%s)' % value
+                    value_clause = 'this->va == (%d)' % operation.value
                 else:
                     value_clause = '1'
                 printed = (index, operation.primitive, operation.object if obj is not None else -1, operation.execution)
             else:
-                span, family = spans[index], 0
+                span = spans[index]
                 clause.append('invocation == %d' % index)
                 if kind == 'enter':
                     clause.extend(('arg2 == %d' % span.first, 'arg3 == %d' % span.count))
                 else:
                     clause.append('arg1 == 0')
                 value_clause, printed = '1', (-1 - index * 2 - (kind == 'leave'), -1, -1, span.first)
-            lines.append('%s /this->checked/ { this->matching = %s, this->tally = 0; }' %
+            lines.append('%s /this->checked/ { this->matching = %s; }' %
                          (at, ' && '.join(clause) or '1'))
-            if family:
-                bindings = machine['states'][source][2]
-                for logical, ordinal in zip(machine['objects'], bindings):
-                    if logical in family_objects[family] and ordinal:
-                        lines.append('%s /this->checked && this->matching && signals[%d] > this->tally/ '
-                                     '{ this->tally = signals[%d]; }' % (at, ordinal, ordinal))
             if value_clause != '1':
                 lines.append('%s /this->checked && this->matching/ { this->matching = %s; }' % (at, value_clause))
             for word, targets in words.items():
@@ -376,8 +254,6 @@ def generate(operations, program, observe, point=None, metadata=None):
         if obj is not None:
             lines.append('%s /this->checked && this->ok && this->ordinary/ '
                 '{ om[this->ob] = this->obid, objectcount = this->obid > objectcount ? this->obid : objectcount; }' % at)
-            if primitive == signal:
-                lines.append('%s /this->checked && this->ok && this->ordinary/ { signals[this->obid] = this->va; }' % at)
         if lane is not None:
             lines.append('%s /this->checked && this->ok/ '
                 '{ lm[this->ln] = this->lnid, lanecount = this->lnid > lanecount ? this->lnid : lanecount; }' % at)
@@ -644,25 +520,16 @@ def main(argv):
     if done.returncode:
         failures.append('dtrace exited %d' % done.returncode)
     try:
-        paths = mesh_graph.trace_paths(records, accepting)
-        witness = paths[0]
+        witness = mesh_graph.trace_paths(records, accepting)[0]
     except ValueError as failure:
         failures.append(str(failure))
-        witness, paths = [], None
-    try:
-        realized_tasks, realized_dependences, vertices, symbolic_tasks, task_map = mesh_graph.trace_occurrences(tasks, dependences, operations,
-            program, metadata['_machine'], witness, paths)
-    except ValueError as failure:
-        failures.append(str(failure))
-        realized_tasks, realized_dependences, vertices, symbolic_tasks, task_map = tasks, dependences, [NONE] * len(witness), set(), dict(enumerate(range(len(tasks))))
-    realized_vertices = []
-    for occurrence, (_, _, _, k, primitive, obj, value, execution, _) in zip(vertices, witness):
+        witness = []
+    for _, _, _, k, primitive, obj, value, execution, _ in witness:
         if k < 0:
             continue
         compiled_op = operations[program[k]]
         walk.append(k)
-        realized_vertices.append(occurrence)
-        observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[primitive]), primitive, occurrence,
+        observed.append(mesh_graph.Operation(role(processors, node, PRIMITIVES[primitive]), primitive, compiled_op.vertex,
                                              NONE if obj < 0 else obj, execution,
                                              compiled_op.value if value < 0 else value))
     blind = {c: n for c, n in coverage.items() if c not in ('program', 'static')}
@@ -671,35 +538,19 @@ def main(argv):
         if missing:
             failures.append('%d compiled bridge raises not observed (%d observed)' % (len(missing), len(made)))
         blind.pop('bridge', None)
-        observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, task_map[operations[i].vertex],
+        observed += [mesh_graph.Operation(operations[i].processor, operations[i].primitive, operations[i].vertex,
                                           operations[i].object, operations[i].execution, count) for i, count in made]
-    expected_ops, counters = [], [0, 0, 0]
-    rules = counter_rules(operations, program, metadata['scopes'])
-    for k, occurrence in zip(walk, realized_vertices):
-        source = operations[program[k]]
-        family, delta = rules[k]
-        value = counters[family] + delta if family else source.value
-        expected_ops.append(mesh_graph.Operation(source.processor, source.primitive, occurrence, source.object,
-                                                 source.execution, value))
-        if family and source.primitive == PRIMITIVES.index('queue_signal'):
-            counters[family] = value
+    expected_ops = [operations[program[k]] for k in walk]
     if bridge:
-        expected_ops += [mesh_graph.Operation(o.processor, o.primitive, task_map[o.vertex], o.object, o.execution, o.value)
-                         for i, o in enumerate(operations) if i < len(which) and which[i] == 'bridge']
-    expected = mesh_graph.signature(processors, realized_tasks, realized_dependences, expected_ops)
-    watched = mesh_graph.signature(processors, realized_tasks, realized_dependences, observed)
-    unknown_edges = [(signal, wait) for signal, wait, *_ in expected['synchronized']
-                     if (signal != NONE and expected_ops[signal].vertex in symbolic_tasks) or expected_ops[wait].vertex in symbolic_tasks]
-    known_edges = [edge for edge in expected['synchronized'] if edge[:2] not in unknown_edges]
-    false_edges = sum(edge[2] == 'false' for edge in known_edges)
-    redundant_edges = sum(edge[3] for edge in known_edges)
+        expected_ops += [o for i, o in enumerate(operations) if which[i] == 'bridge']
+    expected = mesh_graph.signature(processors, tasks, dependences, expected_ops)
+    watched = mesh_graph.signature(processors, tasks, dependences, observed)
+    false_edges = sum(edge[2] == 'false' for edge in expected['synchronized'])
+    redundant_edges = sum(edge[3] for edge in expected['synchronized'])
     if false_edges:
-        failures.append('realized compiled alternative has %d synchronization edges with no dependence under them' % false_edges)
+        failures.append('the compiled operations observed have %d synchronization edges with no dependence under them' % false_edges)
     if redundant_edges:
-        failures.append('realized compiled alternative has %d redundant synchronization edges' % redundant_edges)
-    if unknown_edges:
-        failures.append('synchronization classification remains unproved for %d observed edges affected by hidden task activations: %s' %
-                        (len(unknown_edges), unknown_edges))
+        failures.append('the compiled operations observed have %d redundant synchronization edges' % redundant_edges)
     if expected['digest'] != watched['digest']:
         failures.append('observed graph %s differs from the compiled graph %s over the observed scope'
                         % (watched['digest'], expected['digest']))
@@ -722,7 +573,6 @@ def main(argv):
     sys.stderr.write('mesh-sync-monitor: %s; runtime-observed operations %s; %d kernel records from compiled IR '
                      '(not runtime-observed); other unobserved classes %s\n' % (result, runtime, static, blind or 'none'))
     record.update(result=result, reasons=failures[:16], blind=blind, runtime_observed=runtime, compiled_kernel_records=static,
-                  unclassified_edges=unknown_edges,
                   observed_sha256=watched['digest'],
                   expected_sha256=expected['digest'], counts_differing=len(differing), dtrace_status=done.returncode,
                   bridge=bool(bridge), bridge_raises=len(raised))
