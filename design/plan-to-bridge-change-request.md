@@ -2,13 +2,12 @@
 
 This change request states what the code must do after the operator's turns of 2026-11-04, since
 design/disjoint-pages-change-request.md Appendix C, whose C3 revision the operator endorsed. Each requirement quotes the
-operator, then names the method the code uses: what it is, and where it comes from in the literature. The method is used
-as its source states it.
+operator, then names the data structure and the algorithm the code uses, where each comes from in the literature, and
+which function produces it and which consumes it. Each method is used as its source states it.
 
 It replaces design/transfer-schedule-change-request.md, which is removed, and design/disjoint-pages-change-request.md
-D.2's model of a transfer, D.3.1 and D.5. Everything else in that change request stands as implemented (mesh 1fd0cca0,
-metal-microbench 3135184e). How a program becomes this plan, including the operands it consumes, is
-design/aot-compilation-change-request.md.
+D.2's model of a transfer, D.3.1 and D.5. How a program becomes this static schedule, including the operands the
+compilation consumes, is design/aot-compilation-change-request.md.
 
 ## Scope
 
@@ -55,10 +54,9 @@ So:
 - **Claude's proposal** follows the turns, in a section labelled Claude's. Each of its clauses is one of three things:
   the operator's words, a cited source's own statement ("what is x and where does x come from in the literature"), or a
   fact of the code.
-- **The document is the whole instruction to an implementer.** A brief adds nothing to it.
+- **The document is the whole instruction to an implementer.**
 - **Where the document is silent, the implementer takes the minimal decision that follows from the document and the
-  code, and records it as its own choice, with its reason, apart from the document's requirements.** Where no decision
-  follows, it stops at that point and reports it.
+  code, and records it as its own choice, with its reason, apart from the document's requirements.**
   > "take the minimal decision … and record it" broadly fine if you really think about it especially if agents are
   > strongly segmenting 'i made an apparnetly required or apparently free choice... and i'm *documenting* it as my
   > choice rather than preordained fate': this is more honest and makes revision and acceptance of corresponding code,
@@ -1918,6 +1916,18 @@ design/aot-compilation-change-request.md, and are held here once.
 This section is Claude's (T178). Each clause is the operator's words, a cited source's own statement, or a fact of the
 code, and each method is used as its source states it.
 
+**The data flow.** The stages are functions from a value to a value, composed as the reference program ~/schedule-emit
+composes them (schedule_emit/driver.py `compile_module`): export; then placement, which adds send and receive nodes to
+the graph; then devices; then one schedule, whose result is the scheduled value (schedule_emit/ir.py `Scheduled`).
+Lowering, the runtime and the archive each take the scheduled value.
+
+Here the scheduled value is the compiled program's static schedule (M. Lam, Software pipelining, PLDI 1988; S. S.
+Bhattacharyya, S. Sriram and E. A. Lee, Optimizing synchronization in multiprocessor DSP systems, IEEE Trans. Signal
+Processing 45(6), 1997): at each node, its lists of pages in schedule order, its state section and its page-table rows.
+The turns call it "the plan", and `mesh_plan` (rdma/mesh-collective.h) is the function that writes it. Each requirement
+below names its data structure and its algorithm, then says which stage's function produces which type and which
+consumes it.
+
 ### R1. Transfers are pages by view, from queues of desired transfers
 
 > the only way to use the dma drivers is to submit work to a queue by view, (reference), not by copy or by value.
@@ -1925,78 +1935,73 @@ code, and each method is used as its source states it.
 > scheduled transfers which happen from an opaque driver consuming queues of desired transfers.
 
 - The code must move every page from the page that holds it to the page it lands in, with nothing copied on the way.
-- **Method:** user-level, zero-copy communication through queues of descriptors that name registered memory. U-Net
-  introduced it (T. von Eicken, A. Basu, V. Buch and W. Vogels, U-Net: a user-level network interface for parallel and
-  distributed computing, SOSP 1995). The Virtual Interface Architecture standardized it (D. Dunning et al., The Virtual
-  Interface Architecture, IEEE Micro, 1998). The region is registered once (data-model §2), and the receiver fixes where
-  each page lands before it comes (data-model §3).
-- **Code:** as now. The plan's lists name pages, and the bridge's records name the same pages.
-- (Corrected 2026-11-06: design/compilation-coordination.md, "Review of 55b9cbad".) **A transfer is a list of byte
-  ranges of its source's pages, landing in byte ranges of its destination's pages.**
-  - A part of any view of a value, whether a slice, a narrow along any dimension, a window or a halo, is the bytes it
-    covers in its base's pages. That is one or more ranges of (page, offset, bytes), described by the view's shape and
-    strides.
-  - Communication describes noncontiguous data this way. MPI's derived datatypes give a type map, a sequence of (basic
-    type, displacement) pairs, which a send or a receive reads or writes in place. VIA's descriptors carry a list of
-    data segments over registered memory (Dunning et al., above). The coordinator cites both from memory.
-  - So a part is sent from its producer's pages, whatever its layout, with no copy, and it lands at its byte ranges in
-    its destination value's layout (R2).
+- **The data structure is a list of blocks.** A transfer is a list of byte ranges of its source's pages, landing in byte
+  ranges of its destination's pages. Each range is one block: (page-table row, offset, bytes).
+  - MPI's derived datatypes give a type map, a sequence of (basic type, displacement) pairs, which a send or a receive
+    reads or writes in place. MPI implementations flatten a derived datatype into a list of (offset, length) blocks and
+    send from those blocks in place, or pack where the transport cannot take the list (R. Ross, N. Miller and W. D.
+    Gropp, Implementing fast and reusable datatype processing, EuroPVM/MPI 2003; J. Wu, P. Wyckoff and D. K. Panda, High
+    performance implementation of MPI derived datatype communication over InfiniBand, IPDPS 2004).
+  - VIA's descriptors carry a list of data segments over registered memory (D. Dunning et al., The Virtual Interface
+    Architecture, IEEE Micro, 1998). The descriptors are in queues that name registered memory, which is user-level,
+    zero-copy communication (T. von Eicken, A. Basu, V. Buch and W. Vogels, U-Net: a user-level network interface for
+    parallel and distributed computing, SOSP 1995). The region is registered once (data-model §2), and the receiver
+    fixes where each page lands before it comes (data-model §3).
+  - The type map, VIA's data segments and the two MPI implementation papers are cited from memory.
+- **The algorithm is the flattening of a type map.**
+  - A transfer's source and destination are each a view (offset, sizes, strides) of a value. A view is torch's strided
+    array: one storage, with an offset, sizes and strides (c10/core/TensorImpl.h, `Storage storage_`,
+    `sizes_and_strides_`). A slice, a narrow, a permutation, a window or a halo is the same storage under a new offset,
+    sizes and strides. Its elements are in general not contiguous in the storage.
+  - Each view is flattened into its list of (row, offset, bytes) blocks, adjacent blocks merged, as datatype processing
+    flattens a type map.
+- **Where it composes.**
+  - Takes: each transfer's two views. A transfer is a send node and a receive node that placement adds to the graph. Its
+    record in the code is `struct mesh_declared`, whose `from` and `to` are each a `struct mesh_strided`
+    (rdma/mesh-collective.h).
+  - Writes: the blocks, as the entries of each cable's list (R5): `struct mesh_hop` `page`, `offset` and `bytes`
+    (rdma/mesh.h). These are MSCCL-IR's steps with offset and count (aot-compilation A9).
+  - Produced by the schedule, `mesh_plan`. Consumed by the bridge (rdma/mesh-flow.c), which sends each block from the
+    page that holds it to the page it lands in.
+- **A value's layout is the program's own, torch's strides.**
+  - A value is its page-table rows, and two values' rows may name one frame, as R2 states.
+  - A part is sent from its producer's pages, whatever its layout, and it lands at its byte ranges in its destination
+    value's layout (R2).
+  - A consumer that needs one strided progression gets it from the mapping (R2).
   - A change of layout exists only where a consumer's operand cannot take the landed layout as its view. It is then an
     operator of the consumer's own, run as its out variant (design/aot-compilation-change-request.md appendix item 7),
     never part of a transfer.
-  - **Why the code copies, in data-structural terms (2026-11-06).**
-    > stop describing this in idiomatic terms. why does this happen in algorithmic terms. in data structural terms. in
-    > terms of reference literature. once this is said, what we *should* be doing will be a lot more clear, esp with
-    > al lof theo ther 'partial fixes', which all sound like invented problems and idiomatic sourceless code...
-    - **Torch's structure.** A torch tensor is a strided array: one storage, with an offset, sizes and strides
-      (c10/core/TensorImpl.h, `Storage storage_`, `sizes_and_strides_`). A view (a slice, a narrow, a permutation)
-      is the same storage under a new offset, sizes and strides. Its elements are in general not contiguous in the
-      storage.
-    - **The plan's structures** (rdma/mesh-collective.h, mesh-section.h at 327df606):
-      - `struct mesh_section { first, pages, … }`: a value is one run of page-table rows;
-      - `struct mesh_declared { …, value, first; bytes }`: a transfer is one contiguous extent of one value;
-      - `struct mesh_share { value, first, of, at, blocks }`: an alias is one run of one value's blocks placed inside
-        another.
-    - **The mismatch.** A part of a view is an affine subset of its storage, and the descriptor names one extent. So the
-      compiler maps each part to an extent. Where a part is not one, it makes a value of its own and copies the part
-      into it before every send, and unpacks on the other side. This is packing: what communication libraries do for
-      noncontiguous datatypes when their descriptor cannot describe them. MPI implementations flatten a derived
-      datatype into a list of (offset, length) blocks and send from those blocks in place, or pack where the transport
-      cannot take the list (R. Ross, N. Miller and W. D. Gropp, Implementing fast and reusable datatype processing,
-      EuroPVM/MPI 2003; J. Wu, P. Wyckoff and D. K. Panda, High performance implementation of MPI derived datatype
-      communication over InfiniBand, IPDPS 2004; the coordinator cites both from memory).
-    - **The patches it produced, each from the one-extent descriptor:**
-      - the per-execution copies of slices, narrows, windows and arrivals;
-      - a value's layout "fixed by the first collective that names it", and the copy where a second collective needs
-        another order;
-      - the padded most-major layout below (R2), the coordinator's own patch at the landing side;
-      - the share record with its rules, and the copies where they refuse;
-      - AllToAll's pieces landing in a buffer and copied into the result.
-  - **What the code must do instead.**
-    - A value is its page-table rows, and two values' rows may name one frame, as R2 states.
-    - A transfer's source and destination are each a view (offset, sizes, strides) of a value. The compilation flattens
-      each view into its list of (row, offset, bytes) blocks, adjacent blocks merged, as datatype processing flattens a
-      type map. The bridge's instructions are those blocks (aot A9: MSCCL-IR's steps with offset and count).
-    - Then there is no packing and no unpacking, no layout chosen for a transfer's sake, and no share record. A value's
-      layout is the program's own, torch's strides.
-    - A consumer that needs one strided progression gets it from the mapping, fixed when the plan is made (R2). A
-      layout change happens only where a consumer's operand needs another order of strides, and then it is an operator
-      of its own.
+- **State of the code.**
+  > stop describing this in idiomatic terms. why does this happen in algorithmic terms. in data structural terms. in
+  > terms of reference literature. once this is said, what we *should* be doing will be a lot more clear, esp with
+  > al lof theo ther 'partial fixes', which all sound like invented problems and idiomatic sourceless code...
+  - At 327df606 (rdma/mesh-collective.h, mesh-section.h):
+    - `struct mesh_section { first, pages, … }`: a value is one run of page-table rows;
+    - `struct mesh_declared { …, value, first; bytes }`: a transfer is one contiguous extent of one value;
+    - `struct mesh_share { value, first, of, at, blocks }`: an alias is one run of one value's blocks placed inside
+      another.
+  - A part of a view is an affine subset of its storage, and that descriptor names one extent. So the compiler mapped
+    each part to an extent. Where a part was not one, it made a value of its own and copied the part into it before
+    every send, and unpacked on the other side. This is packing: what communication libraries do for noncontiguous
+    datatypes when their descriptor cannot describe them (Ross, Miller and Gropp; Wu, Wyckoff and Panda, above).
+  - From the one-extent descriptor came:
+    - the per-execution copies of slices, narrows, windows and arrivals;
+    - a value's layout "fixed by the first collective that names it", and the copy where a second collective needs
+      another order;
+    - the share record with its rules, and the copies where they refuse;
+    - AllToAll's pieces landing in a buffer and copied into the result.
+  - Now `struct mesh_declared` carries `from` and `to`, each a `struct mesh_strided` (rdma/mesh-collective.h), and
+    `struct mesh_hop` carries `offset` and `bytes` (rdma/mesh.h).
+- **Replaces:** packing and unpacking; a layout chosen for a transfer's sake; the share record (`struct mesh_share`).
 
 ### R2. Every page is placed at compile time and named by the page table
 
 > however, there is a memory allocation model called a 'page table' that the user keeps expecting you to use?
 
 - The code must give every value its pages at compile time and name each page by its row in the page table.
-- **Method:** the page table: names bound to frames (T. Kilburn, D. B. G. Edwards, M. J. Lanigan and F. H. Sumner,
-  One-level storage system, IRE Trans. Electronic Computers, 1962; P. J. Denning, Virtual memory, ACM Comput. Surv.,
-  1970). Binding is static, by C3's allocator. C3.3, verbatim:
-  - "For each value, L is the smallest lag at which every read of it in execution t happens before its write in
-    execution t + L. The unroll factor u is the largest L."
-  - "The template is unrolled into u copies, and execution t runs copy t mod u."
-  - "The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020)."
-  - "At run time there are no allocations and no bookkeeping; every address is a constant in the plan."
-- (Corrected 2026-11-05.) **A value is a list of pages placed anywhere. A run is a mapping, not a placement.**
+- **The data structure is the page table:** names bound to frames (T. Kilburn, D. B. G. Edwards, M. J. Lanigan and F. H.
+  Sumner, One-level storage system, IRE Trans. Electronic Computers, 1962; P. J. Denning, Virtual memory, ACM Comput.
+  Surv., 1970). A value is its ordered list of page-table rows, and its pages are placed anywhere.
   > if i say that tensors whose outputs or inputs cover arbitrary noncontiguous blocks of pages, then all functions
   > which do not explicitly require contiguity at runtime for their exact inputs and outputs do not overconstrain the
   > allocator and data movements by imposing contiguity. dfoes this mean we have to virtualize a 'a buffer of length l
@@ -2011,115 +2016,101 @@ code, and each method is used as its source states it.
   > marginal latency at runtime...?
   > "Metal 4 has exactly that for buffers:" ok so we're done with this topic because the constraints which seemed to
   > require heroic intervention were fictional and involved only idiomatic code.
-  - **The structure is the page table above.** A value's ordered list of pages is its page-table rows (Kilburn et
-    al.; Denning). The same structure for tensors is PagedAttention's: "PagedAttention allows storing continuous keys
-    and values in non-contiguous memory space" (W. Kwon et al., Efficient memory management for large language model
-    serving with PagedAttention, SOSP 2023, §4.1), with "block tables—the mapping between logical and physical KV
-    blocks of each request" (§4.2). Its known property is "near-zero waste in KV cache memory" (the abstract).
-    Functions see values only by name, and the runtime places them: Legion's logical regions and physical instances
-    (M. Bauer, S. Treichler, E. Slaughter and A. Aiken, Legion: expressing locality and independence with logical
-    regions, SC 2012).
-  - **Every value's pages are placed anywhere, by the fewest chains.**
-    - Every item is one page. Two items may share a page exactly when one's last access happens before the other's
-      first write. That is C3.3's own interference test, over Lamport's happens-before (L. Lamport, Time, clocks, and
-      the ordering of events in a distributed system, CACM 21(7), 1978).
-    - That relation is a partial order: if x ends before y begins and y ends before z begins, then x ends before z
-      begins. A page holds a chain of it, so the fewest pages is the fewest chains.
-    - By Dilworth's theorem that number equals the largest set of items no two of which are ordered (R. P. Dilworth,
-      A decomposition theorem for partially ordered sets, Annals of Mathematics 51(1), 1950). It is found by maximum
-      bipartite matching (D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered sets, Proc.
-      AMS 7(4), 1956), exactly and in polynomial time.
-    - (Corrected 2026-11-05: design/compilation-coordination.md, "The revisions of 4e78f6f4", PO-1.) **Over C3.3's u
-      copies the order needs one more clause.**
-      - The relation above holds over one execution. Over u copies, a page is written again by its chain's first item
-        u executions later, so a chain's last item must end before that write.
-      - Copies (v, c) and (w, c′) are ordered where c ≤ c′, c′ − c is at least the least lag from v to w, and c′ plus
-        w's largest least lag to a write at the node is at most u. That keeps the relation transitive.
-      - This is modulo variable expansion's premise, that a value's u copies are distinct within the unrolled body (M.
-        Lam, Software pipelining, PLDI 1988). A lifetime that wraps the period is a circular arc, the structure of
-        register allocation for such loops (L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, A register
-        allocation framework based on hierarchical cyclic interval graphs, CC 1992).
-      - The clause can cost pages, and the implementation checked it sound.
-    - No value is placed as one run. So greedy by size (Pisarchyk and Lee), and the contiguous-block problem it
-      approximates (M. R. Garey and D. S. Johnson, Computers and Intractability, 1979, problem SR2), have no use
-      here. The chains replace C3.3's colouring.
-  - **Contiguity is a type of particular operands, given as a mapping (R4).**
-    - The types are a synchronous, complete, contiguous consumer's operand, and a torch MPS operator's strided operand
-      (design/aot-compilation-change-request.md appendix item 7).
-    - Such an operand's run is address translation, fixed when the plan is made. Every page's place is a constant of
-      the plan (C3.3: "every address is a constant in the plan"), so the map from the operand's consecutive virtual
-      pages to its pages is written once.
-    - The GPU translates through its page tables, as it does for every buffer, and a buffer is already virtual memory
-      over frames placed anywhere. So a torch kernel reads the operand as any strided buffer, and no kernel reads a
-      table of its own.
-    - mesh ran this form on these machines: on 2026-11-02 "`compose` maps all their pages into one remapped view
-      (`ncclMeshPageTableCompose`, `mach_vm_remap`). So a kernel reads `mesh_effects + 3272ul`, a word's place in a
-      composed view of foreign pages, fixed at preparation" (design/page-maps-2026-11-02.md at 6255e92b).
-    - That design replaced the composed view only for mesh's own generated kernels' fields. Its reason was "Metal 4
-      binds by GPU address (`MTL4ArgumentTable setAddress:atIndex:`), so no composed view is needed", not a limit of
-      the remap.
-    - The run-time cost is the translation every access already has. Whether TLB reach differs with the mapping's
-      page size is a measurement, not shown here.
-  - (Earlier the same day, this correction gave a typed operand physical pages in one run, placed by greedy by size
-    (SR2). It then asked whether the typed values' lifetimes form an interval order, one with no induced 2 + 2 (P. C.
-    Fishburn, J. Math. Psychology 7, 1970), and named Metal 4's placement sparse buffers. With the run a mapping, none
-    of these is needed.)
-  - **A received range is pages of its destination value.** A collective's receive lands in the pages of the value it
-    belongs to, at its place in that value: "receiving data from rank `i` at offset `i*sendcount`" (NCCL, ncclAllGather);
-    "the `recvbuff` on rank `i` will contain the i-th block of the result" (NCCL, ncclReduceScatter). A range is not a
-    value of its own. This supersedes the plan call's "That value is MESH_EXECUTION and wire, its bytes the range's,
-    and one range's alone" (rdma/mesh-collective.h; design/disjoint-pages-revision-coordination.md, "The plan call"),
-    which cites nothing.
-    - (Corrected 2026-11-05: design/compilation-coordination.md, "The revisions of 4e78f6f4", stops.) **A rank's own
-      part is shared, not copied.** A value is its page-table rows, so the result's rows for the rank's own part name
-      the operand's own pages. This is sharing by reference through the page table, as fbufs (P. Druschel and L. L.
-      Peterson, Fbufs: a high-bandwidth cross-domain transfer facility, SOSP 1993) and IO-Lite (V. S. Pai, P. Druschel
-      and W. Zwaenepoel, IO-Lite: a unified I/O buffering and caching system, ACM TOCS 18(1), 2000) pass buffers
-      without copying them. Those pages are one item of the allocation, living until the later of the two values' last
-      reads.
-    - **A part that is not whole blocks is a layout to choose, not a refusal.**
-      - A value's layout is separate from its logical shape: "The order of these dimension numbers does not imply a
-        particular minor/major ordering in the layout of the shape. The layout is determined by the `LayoutProto`
-        proto", whose `minor_to_major` "describes the minor-to-major ordering of the dimensions within a shape" (XLA,
-        "Shapes and layout"; that page also has "Padding").
-      - So a collective's result takes the layout with the collective's dimension most-major, each part padded to whole
-        blocks. Each part is then a run of whole blocks.
-      - The consumer reads the result through its strided view, here (part, row, column). Where a consumer's operand
-        cannot take that view, the change of layout is an operator of its own, run as its out variant into placed
-        pages (design/aot-compilation-change-request.md appendix item 7). It is not a copy in the transfer.
-      - This is the common case: Megatron's column-parallel output, gathered along its last dimension.
-      - (Withdrawn 2026-11-06.) This answer patched the one-extent transfer descriptor at the landing side (R1, "Why
-        the code copies"). With transfers as flattened lists of blocks, a part lands at its byte ranges in the result's
-        own layout, whatever its dimension. No layout is chosen for a transfer, and no part is padded.
-    - (2026-11-06.) The share record of the implementation (`struct mesh_share`), and its rules, is a restricted form of
-      the sharing stated above. A value's rows naming another value's frames is the page table's own sharing, with no
-      record and no rules of its own. The record goes (R1).
-    - (Corrected 2026-11-06: design/compilation-coordination.md, "The revisions of 55b9cbad", stops and document
-      errors.) **Any value a transfer names is sent from its own pages, whatever its copies.**
-      - R1: "The code must move every page from the page that holds it to the page it lands in, with nothing copied on
-        the way."
-      - An invariant, written before the first execution and read by every one (C3.2: "placed once, for the plan's
-        whole life"), is placed in the registered window when a transfer names it. Every execution's send reads its
-        one copy, and its supplied word is raised once.
-      - A program's input is placed per execution, and its caller writes it there as a host producer. It is sent from
-        those pages.
-      - The plan call's rules that a lag-k value is "named by no declared transfer", that a transfer's value is
-        "MESH_EXECUTION and wire", and that a share's two values have "the same copies" are the coordination's
-        contract, not a requirement, and they go. A share whose operand is an invariant names the operand's one copy
-        from every copy of its result.
-    - **Ranges may share a block where their bytes are disjoint.**
-      - C3's rule is "Its producer or its landing writes each byte once per use", each byte, not each block. Each range
-        keeps its own landed count of each copy (design/aot-compilation-change-request.md appendix item 5).
-      - A page instruction names its bytes at their offset in its page, as MSCCL-IR's steps name a destination offset
-        and a count. The coordinator cites MSCCL-IR's step attributes from memory.
-      - At a source, any number of ranges read the same blocks. A halo wider than a shard, or two halos over one shard,
-        is then sent with no copy.
-      - The plan call's "no two ranges at this node share a block of it" goes with this.
-    - **A share's pages are one item from the earlier first write to the later last read.** Where that first write is
-      a landing, the next landing into those pages follows the last read by C3.3's lag test, as any value's does. A
-      share with no such lag fails the plan with `ENOMEM`, as C3.3 fails any value: "A value with no such L fails the
-      plan with `ENOMEM`, naming the value."
-- **Code:** as now (C3, D.3.2), but for the correction above.
+  - The same structure for tensors is PagedAttention's: "PagedAttention allows storing continuous keys and values in
+    non-contiguous memory space" (W. Kwon et al., Efficient memory management for large language model serving with
+    PagedAttention, SOSP 2023, §4.1), with "block tables—the mapping between logical and physical KV blocks of each
+    request" (§4.2). Its known property is "near-zero waste in KV cache memory" (the abstract).
+  - Functions see values only by name, and the runtime places them: Legion's logical regions and physical instances (M.
+    Bauer, S. Treichler, E. Slaughter and A. Aiken, Legion: expressing locality and independence with logical regions,
+    SC 2012).
+- **The algorithm is a decomposition of the pages' lifetimes into the fewest chains, over modulo variable expansion's
+  copies.**
+  1. The copies (M. Lam, Software pipelining, PLDI 1988). C3.3, verbatim:
+     - "For each value, L is the smallest lag at which every read of it in execution t happens before its write in
+       execution t + L. The unroll factor u is the largest L."
+     - "The template is unrolled into u copies, and execution t runs copy t mod u."
+     - "At run time there are no allocations and no bookkeeping; every address is a constant in the plan."
+  2. The order. Every item is one page. Two items may share a page exactly when one's last access happens before the
+     other's first write. That is C3.3's own interference test, over Lamport's happens-before (L. Lamport, Time, clocks,
+     and the ordering of events in a distributed system, CACM 21(7), 1978). That relation is a partial order: if x ends
+     before y begins and y ends before z begins, then x ends before z begins. A page holds a chain of it, so the fewest
+     pages is the fewest chains.
+  3. The chains. By Dilworth's theorem that number equals the largest set of items no two of which are ordered (R. P.
+     Dilworth, A decomposition theorem for partially ordered sets, Annals of Mathematics 51(1), 1950). It is found by
+     maximum bipartite matching (D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered sets,
+     Proc. AMS 7(4), 1956), exactly and in polynomial time.
+  4. Over C3.3's u copies the order has one more clause.
+     - The relation above holds over one execution. Over u copies, a page is written again by its chain's first item u
+       executions later, so a chain's last item must end before that write.
+     - Copies (v, c) and (w, c′) are ordered where c ≤ c′, c′ − c is at least the least lag from v to w, and c′ plus w's
+       largest least lag to a write at the node is at most u. That keeps the relation transitive.
+     - This is modulo variable expansion's premise, that a value's u copies are distinct within the unrolled body (Lam,
+       1988). A lifetime that wraps the period is a circular arc, the structure of register allocation for such loops
+       (L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, A register allocation framework based on hierarchical
+       cyclic interval graphs, CC 1992).
+  - Replaces C3.3's "The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020)." No value is
+    placed as one run, so greedy by size, and the contiguous-block problem it approximates (M. R. Garey and D. S.
+    Johnson, Computers and Intractability, 1979, problem SR2), have no use here.
+- **A run is a mapping, not a placement (R4).**
+  - The operands seen as one run are a synchronous, complete, contiguous consumer's operand, and a torch MPS operator's
+    strided operand (design/aot-compilation-change-request.md appendix item 7).
+  - Such an operand's run is address translation, fixed when the static schedule is made. Every page's place is a
+    constant of the static schedule (C3.3: "every address is a constant in the plan"), so the map from the operand's
+    consecutive virtual pages to its pages is written once.
+  - The GPU translates through its page tables, as it does for every buffer, and a buffer is already virtual memory over
+    frames placed anywhere. So a torch kernel reads the operand as any strided buffer, and no kernel reads a table of
+    its own.
+  - mesh ran this form on these machines: on 2026-11-02 "`compose` maps all their pages into one remapped view
+    (`ncclMeshPageTableCompose`, `mach_vm_remap`). So a kernel reads `mesh_effects + 3272ul`, a word's place in a
+    composed view of foreign pages, fixed at preparation" (design/page-maps-2026-11-02.md at 6255e92b). That design
+    replaced the composed view only for mesh's own generated kernels' fields. Its reason was "Metal 4 binds by GPU
+    address (`MTL4ArgumentTable setAddress:atIndex:`), so no composed view is needed", not a limit of the remap.
+  - The run-time cost is the translation every access already has. Whether TLB reach differs with the mapping's page
+    size is a measurement, not shown here.
+- **A received range is pages of its destination value.** A collective's receive lands in the pages of the value it
+  belongs to, at its place in that value: "receiving data from rank `i` at offset `i*sendcount`" (NCCL, ncclAllGather);
+  "the `recvbuff` on rank `i` will contain the i-th block of the result" (NCCL, ncclReduceScatter). A range is not a
+  value of its own. A part lands at its byte ranges in the result's own layout, whatever its dimension; no layout is
+  chosen for a transfer, and no part is padded (R1).
+  - **A rank's own part is shared, not copied.** A value is its page-table rows, so the result's rows for the rank's own
+    part name the operand's own pages. This is sharing by reference through the page table, as fbufs (P. Druschel and L.
+    L. Peterson, Fbufs: a high-bandwidth cross-domain transfer facility, SOSP 1993) and IO-Lite (V. S. Pai, P. Druschel
+    and W. Zwaenepoel, IO-Lite: a unified I/O buffering and caching system, ACM TOCS 18(1), 2000) pass buffers without
+    copying them. A value's rows naming another value's frames is the page table's own sharing, with no record and no
+    rules of its own.
+  - **Shared pages are one item of the allocation,** from the earlier of the two values' first writes to the later of
+    their last reads. Where that first write is a landing, the next landing into those pages follows the last read by
+    C3.3's lag test, as any value's does. Shared pages with no such lag are C3.3's case: "A value with no such L fails
+    the plan with `ENOMEM`, naming the value."
+  - **Any value a transfer names is sent from its own pages, whatever its copies.** R1: "The code must move every page
+    from the page that holds it to the page it lands in, with nothing copied on the way."
+    - An invariant, written before the first execution and read by every one (C3.2: "placed once, for the plan's whole
+      life"), is placed in the registered window when a transfer names it. Every execution's send reads its one copy,
+      and its supplied word is raised once.
+    - A program's input is placed per execution, and its caller writes it there. It is sent from those pages.
+    - A result whose rows name an invariant operand's pages names the operand's one copy from every copy of the result.
+  - **Ranges may share a block where their bytes are disjoint.**
+    - C3's rule is "Its producer or its landing writes each byte once per use", each byte, not each block. Each range
+      keeps its own landed count of each copy (design/aot-compilation-change-request.md appendix item 5).
+    - A page instruction names its bytes at their offset in its page, as MSCCL-IR's steps name a destination offset and
+      a count (MSCCL-IR's step attributes are cited from memory).
+    - At a source, any number of ranges read the same blocks. A halo wider than a shard, or two halos over one shard, is
+      then sent with no copy.
+- **Where it composes.**
+  - Takes: the exported program's values with their lifetimes, and which consumers see a value as one run (R4).
+  - Writes: u; for each value and copy, its page-table rows; for each operand seen as one run, the map from its
+    consecutive virtual pages to its pages. Each is a constant of the static schedule.
+  - Produced when the static schedule is made: `mesh_plan` (rdma/mesh-collective.c) calls `mesh_graph_lags` and
+    `mesh_graph_chains` (rdma/mesh-graph.h). The rows are part of the scheduled value.
+  - Consumed by R5's lists, whose entries name each page by its row (R1), and by the GPU, which translates each run
+    through its page tables.
+- **Replaces,** in `mesh_plan`'s rules (rdma/mesh-collective.h; design/disjoint-pages-revision-coordination.md, "The
+  plan call"):
+  - "That value is MESH_EXECUTION and wire, its bytes the range's, and one range's alone", which cites nothing;
+  - a lag-k value "named by no declared transfer";
+  - a share's two values having "the same copies";
+  - "no two ranges at this node share a block of it";
+  - the share record (`struct mesh_share`) and its rules.
 
 ### R3. An execution is a task graph
 
@@ -2129,14 +2120,19 @@ code, and each method is used as its source states it.
 > the use of cudagraphs style 'shapes are compiled but indexes inside of shapes might not need to be'
 
 - The code must represent one execution as a task graph and nothing more.
-- **Method:** the task graph G = (V, E, w, c) of the scheduling literature (O. Sinnen, Task Scheduling for Parallel
-  Systems, Wiley, 2007; Y.-K. Kwok and I. Ahmad, Static scheduling algorithms for allocating directed task graphs to
-  multiprocessors, ACM Comput. Surv., 1999).
+- **The data structure is the task graph** G = (V, E, w, c) of the scheduling literature (O. Sinnen, Task Scheduling for
+  Parallel Systems, Wiley, 2007; Y.-K. Kwok and I. Ahmad, Static scheduling algorithms for allocating directed task
+  graphs to multiprocessors, ACM Comput. Surv., 1999).
   - V are tasks, each one operation of the captured graph (aot-compilation A1) executed at its node.
   - E are the data passed between tasks: here, pages.
   - w and c are the tasks' and edges' weights. They are given, not computed by this code: the weighting operand of
     design/aot-compilation-change-request.md A3.
-- **Code:** rdma/mesh-collective.{h,c} builds the task graph from the compilation's IR (aot-compilation A8).
+- **The algorithm that takes it is R5's.** The task graph is built here and solved there.
+- **Where it composes.**
+  - Takes: the compilation's IR (aot-compilation A8), which is the captured graph with each task at its node by the
+    placement operand (aot-compilation A2), and the weighting operand (aot-compilation A3).
+  - Produced by `mesh_plan`: rdma/mesh-collective.{h,c} builds the task graph from the IR.
+  - Consumed by R5's linear program, whose variables are the graph's tasks and each hop of each page's route.
 
 ### R4. Functions that need an operand whole and functions that take pages in any order
 
@@ -2156,13 +2152,11 @@ code, and each method is used as its source states it.
 
 > "- Coflow ordering is cited but not required. R4 orders the blocking kind by R5's static schedule; Varys's smallest-bottleneck-first is named and explicitly not asked for." then review the change request, rewrite it if necessary s.t. it establishes that this optimizing solver output / scheduling / lowering property is not an evocative metaphor but is in fact a plain behavioral requirement for runtime execution. if there is no source applying this, we can simply accept that it is an outstanding requirement taht needs placement in the implementation ordering of our current data flow and architecture work
 
-(2026-11-10 UTC, session 55974018; the quoted sentence opening the turn is Claude's summary of this requirement, and
-it was wrong: see "Behaviour at run time" below.)
+(2026-11-10 UTC. The quoted sentence that opens the turn is Claude's summary of this requirement.)
 
 - The code must schedule both kinds of function, and must not tell the bridge which is which.
-- **Behaviour at run time** (added 2026-11-09, from the turn above). "Coflow" and "independent flow" here are not
-  figures of speech. They name what a run does, and each statement below is something a run either does or does not
-  do.
+- **Behaviour at run time.** "Coflow" and "independent flow" here are not figures of speech. They name what a run does,
+  and each statement below is something a run either does or does not do.
   1. A function that needs its operand whole starts when every page of that operand is present, and not before. It
      waits for nothing else. Bhattacharyya, Sriram and Lee, §2, as design/aot-compilation-change-request.md quotes
      it: "Each processor executes the actors assigned to it in the order specified at compile time. Before firing an
@@ -2178,67 +2172,65 @@ it was wrong: see "Behaviour at run time" below.)
      from its own page, so its pages are independent flows" (R5). So the order a cable sends in is computed from
      which pages a function needs together and which it needs singly.
   4. The bridge receives that order and nothing about either kind.
-  - What is and is not sourced. R5 cites Chen for the program and says of its theorem: "No theorem cited here covers
-    that case", the case of cables and devices in place of Chen's switches. No quoted source applies coflow
-    scheduling with precedence to this network. The four statements are required all the same; that no source applies
-    them here is recorded, and it changes nothing they require.
+  - No quoted source applies coflow scheduling with precedence to this network. R5 cites Chen for the program and says
+    of its theorem: "No theorem cited here covers that case", the case of cables and devices in place of Chen's
+    switches.
   - No quoted source says how a run is shown to have done 1 to 3: which record of a run gives, for each function, when
-    each page of its operand became present and when the function started, and each cable's sequence of sends. That is
-    outstanding with them.
-  - Status, 2026-11-09: outstanding. No run with a received operand has been made at the current tree. In
-    design/implementation-order-2026-11-09.md, statement 3 is written with item 4, statements 1, 2 and 4 with item 7,
-    and the record of a run with item 11.
-- **Method,** as Claude's turn that introduced the two kinds gave it:
-  - The synchronous, complete, contiguous consumer (the turns' "function A") is a blocking operator over a dense operand: databases' blocking operator, as against a pipelined one (G.
-    Graefe, Query evaluation techniques for large databases, ACM Comput. Surv., 1993). Its operand is a coflow, which
-    finishes when its last flow does (M. Chowdhury and I. Stoica, Coflow: a networking abstraction for cluster
-    applications, HotNets 2012). In this change it is ordered by R5's method, in which a join's pages carry their
-    consumer's bottom level. Ordering coflows to minimize their completion time is Varys's smallest-effective-bottleneck
-    first (M. Chowdhury, Y. Zhong and I. Stoica, Efficient coflow scheduling with Varys, SIGCOMM 2014). R5 does not
-    require it. (Corrected 2026-11-05: the first text said that consumer's operand is scheduled by Varys, which no requirement asked
-    the code to do.) (2026-11-09: "it" is Varys's heuristic. The coflow itself is required: it is a row of R5's
-    program, Chen's (1a), as "Behaviour at run time" states.)
-  - The asynchronous, incomplete, noncontiguous consumer (the turns' "function B") is a streaming homomorphism over pages: f(x ∪ y) = f(x) ⊕ f(y). Gibbons states homomorphisms over
-    lists, with ⊕ associative (J. Gibbons, The third homomorphism theorem, J. Functional Programming, 1996). Taking
-    pages in any order also needs ⊕ commutative: the bag homomorphisms of the Bird–Meertens formalism's Boom hierarchy
-    (L. Meertens, Algorithmics: towards programming as a mathematical activity, CWI Monographs 1, 1986), which Claude's
-    turn named as "Bird–Meertens". Its pages are independent flows, each worth having at once. Examples are online
-    softmax (M. Milakov and N. Gimelshein, Online normalizer calculation for softmax, arXiv 1805.02867, 2018),
-    FlashAttention over key and value blocks (T. Dao et al., NeurIPS 2022), PagedAttention over non-contiguous blocks
-    (W. Kwon et al., SOSP 2023), and reductions' partial sums.
-  - **In the task graph (R3):**
-    - The synchronous, complete, contiguous consumer is one task with an edge from every page of its operand.
-    - The asynchronous, incomplete, noncontiguous consumer is one task per page, each with an edge from its own page, and its outputs are pages that leave as each is
-      produced.
-    - **Nothing synchronizes the asynchronous, incomplete, noncontiguous consumer's outputs one page at a time, and nothing interrupts a backend when a page lands.**
-      > one at a time? who says any part of this code is synchronized s.t. there is a global sync point which
-      > interrupts numeric backends each and every time any page has been received from dma? synchronizaiton s.t. only
-      > one page at a time is ever made available to the dma bridge after any numeric backend function concludes?
-      > citation? literature? idiomaticity?
-      - An output page is available once its presence is set, as an element of an I-structure is. Each element has its
-        own presence. Its producer writes it once, in any order, and a reader waits only for the element it reads,
-        with no barrier over the structure (Arvind, R. S. Nikhil and K. K. Pingali, I-structures: data structures for
-        parallel computing, ACM TOPLAS 11(4), 1989).
-      - Here the presence is C3's supplied word: "the producer stores it after writing its pages. One store can
-        release a whole range of pages." Its store follows its pages in C3's writing order (Boehm and Adve, 2008). A
-        producer's store releases whatever pages its work has written, any number at once and in any order. The bridge
-        reads the words in place and sends each released page (R1).
-      - The receiving side reads landings by masks (C3), so a landing interrupts no backend. A backend's work and the
-        bridge's transfers overlap (aot-compilation, appendix item 2; Pathways §4.5).
-      - The release follows the producing work. The existing kernels write their pages, and the supplied store follows
-        them. No kernel is written (aot-compilation A9).
-      - (Corrected 2026-11-05: Claude's message of that day said "one at a time", which nothing requires.)
-    - Their weights come from the weighting operand.
-    - The synchronous, complete, contiguous consumer's contiguity is placement: the allocator gives each value's copy one run of pages, as greedy-by-size offset
-      assignment gives each tensor one contiguous range (Y. Pisarchyk and J. Lee, arXiv 2001.03288, 2020; C3.3;
-      rdma/mesh-collective.c).
-    - (Corrected 2026-11-05.) Only the synchronous, complete, contiguous consumer's operand, and an operand whose consumer needs one strided progression, is seen
-      as one run. That run is a mapping written when the plan is made, and its pages are placed anywhere, as every
-      value's are (R2's correction). The bullet above gave every value's copy one run of placed pages. That imposes the synchronous, complete, contiguous consumer's
-      type on the asynchronous, incomplete, noncontiguous consumer's operands and on every transfer, which the operator's typing forbids: "function B requires set of
-      pages operand_b to be complete but not contiguous", "domain:Async,noncontiguous,incomplete" (above).
-- **Code:** the IR carries each consumer's kind (aot-compilation A8). The bridge's lists carry no kind, only which
-  entries are a set's (aot-compilation, appendix item 5).
+    each page of its operand became present and when the function started, and each cable's sequence of sends.
+- **The data structure is the task graph's edges (R3).**
+  - The synchronous, complete, contiguous consumer is one task with an edge from every page of its operand.
+  - The asynchronous, incomplete, noncontiguous consumer is one task per page, each with an edge from its own page, and
+    its outputs are pages that leave as each is produced.
+  - Their weights come from the weighting operand.
+- **The algorithms are R5's linear program, for the order of the sends, and the I-structure's presence, for each task's
+  start.**
+  - In R5's program the first kind's edges, with Chen's (1c), are Chen's (1a), and the second kind's pages are
+    independent flows.
+  - An output page is available once its presence is set, as an element of an I-structure is. Each element has its own
+    presence. Its producer writes it once, in any order, and a reader waits only for the element it reads, with no
+    barrier over the structure (Arvind, R. S. Nikhil and K. K. Pingali, I-structures: data structures for parallel
+    computing, ACM TOPLAS 11(4), 1989).
+  - Here the presence is C3's supplied word: "the producer stores it after writing its pages. One store can release a
+    whole range of pages." Its store follows its pages in C3's writing order (Boehm and Adve, 2008). A producer's store
+    releases whatever pages its work has written, any number at once and in any order. The bridge reads the words in
+    place and sends each released page (R1).
+- **The two kinds,** as Claude's turn that introduced them gave them:
+  - The synchronous, complete, contiguous consumer (the turns' "function A") is a blocking operator over a dense
+    operand: databases' blocking operator, as against a pipelined one (G. Graefe, Query evaluation techniques for large
+    databases, ACM Comput. Surv., 1993). Its operand is a coflow, which finishes when its last flow does (M. Chowdhury
+    and I. Stoica, Coflow: a networking abstraction for cluster applications, HotNets 2012). The coflow is a row of R5's
+    program, Chen's (1a). Varys orders coflows by smallest effective bottleneck first (M. Chowdhury, Y. Zhong and I.
+    Stoica, Efficient coflow scheduling with Varys, SIGCOMM 2014); R5's program is Chen's, not that heuristic.
+  - The asynchronous, incomplete, noncontiguous consumer (the turns' "function B") is a streaming homomorphism over
+    pages: f(x ∪ y) = f(x) ⊕ f(y). Gibbons states homomorphisms over lists, with ⊕ associative (J. Gibbons, The third
+    homomorphism theorem, J. Functional Programming, 1996). Taking pages in any order also needs ⊕ commutative: the bag
+    homomorphisms of the Bird–Meertens formalism's Boom hierarchy (L. Meertens, Algorithmics: towards programming as a
+    mathematical activity, CWI Monographs 1, 1986), which Claude's turn named as "Bird–Meertens". Its pages are
+    independent flows, each worth having at once. Examples are online softmax (M. Milakov and N. Gimelshein, Online
+    normalizer calculation for softmax, arXiv 1805.02867, 2018), FlashAttention over key and value blocks (T. Dao et
+    al., NeurIPS 2022), PagedAttention over non-contiguous blocks (W. Kwon et al., SOSP 2023), and reductions' partial
+    sums.
+- **Nothing synchronizes the asynchronous, incomplete, noncontiguous consumer's outputs one page at a time, and nothing
+  interrupts a backend when a page lands.**
+  > one at a time? who says any part of this code is synchronized s.t. there is a global sync point which
+  > interrupts numeric backends each and every time any page has been received from dma? synchronizaiton s.t. only
+  > one page at a time is ever made available to the dma bridge after any numeric backend function concludes?
+  > citation? literature? idiomaticity?
+  - The receiving side reads landings by masks (C3), so a landing interrupts no backend. A backend's work and the
+    bridge's transfers overlap (aot-compilation, appendix item 2; Pathways §4.5).
+  - The release follows the producing work. The function's kernels write their pages, and the supplied store follows
+    them. The compilation writes no kernel (aot-compilation A9).
+- **Contiguity is a mapping (R2).** Only the synchronous, complete, contiguous consumer's operand, and an operand whose
+  consumer needs one strided progression, is seen as one run. That run is a mapping written when the static schedule is
+  made, and its pages are placed anywhere, as every value's are. Giving every value's copy one run of placed pages
+  imposes the synchronous, complete, contiguous consumer's type on the asynchronous, incomplete, noncontiguous
+  consumer's operands and on every transfer, which the operator's typing forbids: "function B requires set of pages
+  operand_b to be complete but not contiguous", "domain:Async,noncontiguous,incomplete" (above).
+- **Where it composes.**
+  - Takes: each consumer's kind, which the IR carries (aot-compilation A8).
+  - Writes: the kind as the task graph's edges (R3), from which R5's program orders each cable's sends. The lists carry
+    no kind, only which entries are a set's (aot-compilation, appendix item 5).
+  - Produced by the schedule, `mesh_plan`. Consumed by the bridge, which reads the lists and the supplied words.
 
 ### R5. The order of transfers is a static schedule with costs
 
@@ -2251,95 +2243,80 @@ it was wrong: see "Behaviour at run time" below.)
 > globally optimal btw; any approximatino measuring well in literature these properties of obvious concern is fine).
 
 - The code must order each cable's sends by a static schedule of one execution's task graph, minimizing its makespan.
-- **Method:**
-  - List scheduling (R. L. Graham, Bounds on multiprocessing timing anomalies, SIAM J. Appl. Math., 1969), with each
-    task already on its node by the placement operand (aot-compilation A2), in order of the completion times of one
-    linear program. Hall, Schulz, Shmoys and Wein: "first, we obtain an optimal solution to the linear program,
-    C̄1, ..., C̄n, and then we schedule the jobs in order of non-decreasing C̄j, where ties are broken by choosing an
-    order that is consistent with the precedence relation. We refer to this algorithm as Schedule-by-C̄j" (L. A. Hall,
-    A. S. Schulz, D. B. Shmoys and J. Wein, Scheduling to minimize average completion time: off-line and on-line
-    approximation algorithms, Math. Oper. Res. 22(3), 1997, §2). Chen schedules coflows the same way, "in
-    non-decreasing order of C̄f, breaking ties arbitrarily" (C.-Y. Chen, Scheduling coflows with precedence
+- **The data structure is one linear program over completion times.**
+  > then we need a LP solver, citing chen for why, how, and what this means.
+  - It has one variable C_j, a completion time, for each instruction j of one execution's task graph (R3): each task at
+    its node, and each hop of each page's route, on its cable (design/compilation-coordination.md GO2). It has one more
+    variable, C_max. Instruction j's length d_j is its weight from the weighting operand (aot-compilation A3): w for a
+    task, and for a hop c(e) over its cable's bandwidth.
+  - Minimize C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a) (C.-Y. Chen, Scheduling coflows with precedence
     constraints for minimizing the total weighted completion time in identical parallel networks, arXiv 2205.02474,
-    2022, Algorithm 1).
-    > then we need a LP solver, citing chen for why, how, and what this means.
-  - **Why: one linear program holds every requirement of the order at once.**
-    > is there a heirarchal decomposition of 'mscc solves first, then we use the coflow solver as some weighting upon a
-    > weighting already chosen' (seems clumsy) or is this a simple linear fit in a higher vector-dim system of
-    > equations? We should be able to find literautre on this problem of the combination of parmaetric-codomain-solvers
-    > tbh; the solution is unlikely to be inlining wacky complex code about each other subproblem into the ltieral
-    > solver we use for each stage.
-    - Chen states coflows with precedence as one linear program over completion times, and schedules by its solution.
-      Its §6 LP (14) minimizes the makespan, this requirement's objective. Theorem 6.2: "The proposed algorithm has an
-      approximation ratio of O(µ) for minimizing the makespan of a given set of multi-stage jobs", where µ is "the
-      coflow number of the longest path in the DAG".
-    - Precedence, coflows, independent flows and contention are each rows of that one program (below). No second
-      solver runs, and no weight is laid over a weighting already chosen.
-    - Theorem 6.2 is proven for Chen's network: identical non-blocking switches, with each flow on an input port and an
-      output port. Here the same rows fall on cables and devices. No theorem cited here covers that case; this is the
-      document's reading.
-  - **How: the program.** It has one variable C_j, a completion time, for each instruction j of one execution's task
-    graph (R3): each task at its node, and each hop of each page's route, on its cable
-    (design/compilation-coordination.md GO2). It has one more variable, C_max. Instruction j's length d_j is its weight
-    from the weighting operand (aot-compilation A3): w for a task, and for a hop c(e) over its cable's bandwidth.
-    - Minimize C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a). Then, over (14)'s optimal solutions,
-      minimize Σ_j C_j: Chen's (1) and Hall et al.'s (1) with unit weights. The two are one lexicographic linear
-      program (H. Isermann, Linear lexicographic optimization, OR Spektrum 4, 1982). They are solved in sequence, the
-      second with C_max held at the first's optimum. Theorem 6.2's bound holds for any optimal solution of (14). The
-      second objective fixes C̄_j off the critical path, which (14) alone leaves to whichever optimal vertex the
-      solver returns. (Corrected 2026-11-05: the text before minimized C_max alone.)
-    - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one execution.
-    - C_j ≥ C_i + d_j for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall et al.'s
-      (3). R4's edges are among them. The synchronous, complete, contiguous consumer's task has an edge from every page of its operand, which with (1c) is
-      Chen's (1a): "the completion time of coflow k is bounded by all its flows". Each of the asynchronous, incomplete, noncontiguous consumer's tasks has one
-      edge, from its own page, so its pages are independent flows.
-    - For each resource, and each set S of the instructions on it: Σ_{j∈S} d_j C_j ≥ ½(d(S)² + d²(S)), where d(S) is
-      Σ_{j∈S} d_j and d²(S) is Σ_{j∈S} d_j². A resource is a cable in one direction, or a node's device. This is Hall et
-      al.'s (5), "introduced by Queyranne (1993)". Chen's (1d) and (1e) take it for each input and output port, here
-      with one network core (m = 1).
-    - These last rows are where contention enters. Sinnen and Sousa: "In edge scheduling, communication resources are
-      treated like processors in the sense that only one communication can be active on each resource at a time" (O.
-      Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005, §5).
-  - **How: solving it.**
-    - The rows of the last kind are one for each set, so there are exponentially many. Hall et al.: "Queyranne (1993)
-      has shown that the linear program given by (1), (3) and (5) is solvable in polynomial time via the ellipsoid
-      algorithm; the key observation is that there is a polynomial-time separation algorithm for the exponentially
-      large class of constraints (5)." Queyranne's separation takes O(n log n) time, and he proposes it for
-      cutting-plane algorithms (M. Queyranne, Structure of a simple scheduling polyhedron, Math. Programming 58,
-      1993).
-    - So the program is solved by cutting planes. Solve it with the rows found so far. Find each resource's violated
-      rows by Queyranne's separation, and add them. Repeat until no row is violated.
-    - Each linear program is solved by HiGHS's dual revised simplex method, through the HiGHS library (Q. Huangfu and
-      J. A. J. Hall, Parallelizing the dual revised simplex method, Math. Program. Comput. 10(1), 2018, the paper HiGHS
-      asks its users to cite). The code builds the rows and calls the library. It writes no solver of its own.
-    - Every rank solves the same program with the same library, built from the same source with the same flags, on
-      one thread. So every rank finds the same solution and the same order (Schneider, below).
-  - **What it means.**
-    - Each instruction's priority is C̄_j, its completion time in the program's optimal solution, the least first.
-    - C̄_j is a relaxation's value, a lower bound, and not a time any schedule keeps. Only its order is used.
-    - It replaces MSCCLang's depth and reverse depth, and edge scheduling's start times, which are no longer computed
-      for the order. Edge scheduling's part, one communication at a time on each link, is now the resources' rows.
-    - (Corrected 2026-11-05, on the operator's turn above: the text before kept MSCCLang's priority, which needs no
-      solver, and cited Chen's program only for the one-system form.)
-
-- **Routes are the plan's existing ones,** as now:
-  - trees packed by Garg and Könemann's rounds (N. Garg and J. Könemann, FOCS 1998; rdma/mesh-graph.h
-    `mesh_graph_pack`);
-  - each tree's pages assigned by the existing fill (rdma/mesh-collective.c).
-- **The order of each cable's list, by the reference algorithm.** Each cable's list is a subsequence of one global
-  topological order of the instructions, built as MSCCLang §5.2 states in its step 3: "Sort instructions into a global
-  topological order with respect to their dependencies with a heap using the priority to order instructions." The
-  priority is the one above: the least C̄_j first. Where two are equal, the heap takes the lower instruction, as the
-  code breaks ties now (design/compilation-coordination.md GO3). That order is consistent with the precedence relation,
-  as Hall et al.'s ties require.
-  > what algorithm is cited here, if any? no citations? use the reference algorithm instead.
-  - A set's pages (design/aot-compilation-change-request.md, appendix item 5) keep their places in that order. The
-    set's random permutation is drawn over those places. (Corrected 2026-11-05: the first text moved a set's pages to
-    consecutive places, which nothing requires.)
-- **Executions:** execution t runs copy t mod u, and every address is a constant in the plan (C3.3, R2). Each cable's
-  list holds execution t's sends in that order, then execution t + 1's. The bridge spreads each list over what its
-  devices give it (below), so on the cable the pages of released executions interleave (aot-compilation, appendix item
-  2; T99).
+    2022, §6). Then, over (14)'s optimal solutions, minimize Σ_j C_j: Chen's (1) and Hall et al.'s (1) with unit
+    weights. The two are one lexicographic linear program (H. Isermann, Linear lexicographic optimization, OR Spektrum
+    4, 1982). They are solved in sequence, the second with C_max held at the first's optimum. The second objective fixes
+    C̄_j off the critical path, which (14) alone leaves to whichever optimal vertex the solver returns.
+  - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one execution.
+  - C_j ≥ C_i + d_j for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall et al.'s (3).
+    R4's edges are among them. The synchronous, complete, contiguous consumer's task has an edge from every page of its
+    operand, which with (1c) is Chen's (1a): "the completion time of coflow k is bounded by all its flows". Each of the
+    asynchronous, incomplete, noncontiguous consumer's tasks has one edge, from its own page, so its pages are
+    independent flows.
+  - For each resource, and each set S of the instructions on it: Σ_{j∈S} d_j C_j ≥ ½(d(S)² + d²(S)), where d(S) is
+    Σ_{j∈S} d_j and d²(S) is Σ_{j∈S} d_j². A resource is a cable in one direction, or a node's device. This is Hall et
+    al.'s (5), "introduced by Queyranne (1993)". Chen's (1d) and (1e) take it for each input and output port, here with
+    one network core (m = 1).
+  - These last rows are where contention enters. Sinnen and Sousa: "In edge scheduling, communication resources are
+    treated like processors in the sense that only one communication can be active on each resource at a time" (O.
+    Sinnen and L. A. Sousa, Communication contention in task scheduling, IEEE TPDS 16(6), 2005, §5).
+- **One program holds every requirement of the order at once.**
+  > is there a heirarchal decomposition of 'mscc solves first, then we use the coflow solver as some weighting upon a
+  > weighting already chosen' (seems clumsy) or is this a simple linear fit in a higher vector-dim system of
+  > equations? We should be able to find literautre on this problem of the combination of parmaetric-codomain-solvers
+  > tbh; the solution is unlikely to be inlining wacky complex code about each other subproblem into the ltieral
+  > solver we use for each stage.
+  - Chen states coflows with precedence as one linear program over completion times, and schedules by its solution. Its
+    §6 LP (14) minimizes the makespan, this requirement's objective. Theorem 6.2: "The proposed algorithm has an
+    approximation ratio of O(µ) for minimizing the makespan of a given set of multi-stage jobs", where µ is "the coflow
+    number of the longest path in the DAG".
+  - Precedence, coflows, independent flows and contention are each rows of that one program. No second solver runs, and
+    no weight is laid over a weighting already chosen.
+  - Theorem 6.2 is proven for Chen's network: identical non-blocking switches, with each flow on an input port and an
+    output port. Here the same rows fall on cables and devices. No theorem cited here covers that case.
+- **The algorithm is Schedule-by-C̄j.** Hall, Schulz, Shmoys and Wein: "first, we obtain an optimal solution to the
+  linear program, C̄1, ..., C̄n, and then we schedule the jobs in order of non-decreasing C̄j, where ties are broken by
+  choosing an order that is consistent with the precedence relation. We refer to this algorithm as Schedule-by-C̄j" (L.
+  A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Scheduling to minimize average completion time: off-line and on-line
+  approximation algorithms, Math. Oper. Res. 22(3), 1997, §2). Chen schedules coflows the same way, "in non-decreasing
+  order of C̄f, breaking ties arbitrarily" (Chen, Algorithm 1). It is list scheduling (R. L. Graham, Bounds on
+  multiprocessing timing anomalies, SIAM J. Appl. Math., 1969), with each task already on its node by the placement
+  operand (aot-compilation A2).
+  1. Solve the program by cutting planes. The rows of the last kind are one for each set, so there are exponentially
+     many. Hall et al.: "Queyranne (1993) has shown that the linear program given by (1), (3) and (5) is solvable in
+     polynomial time via the ellipsoid algorithm; the key observation is that there is a polynomial-time separation
+     algorithm for the exponentially large class of constraints (5)." Queyranne's separation takes O(n log n) time, and
+     he proposes it for cutting-plane algorithms (M. Queyranne, Structure of a simple scheduling polyhedron, Math.
+     Programming 58, 1993). Solve the program with the rows found so far. Find each resource's violated rows by
+     Queyranne's separation, and add them. Repeat until no row is violated.
+  2. Each linear program is solved by HiGHS's dual revised simplex method, through the HiGHS library (Q. Huangfu and J.
+     A. J. Hall, Parallelizing the dual revised simplex method, Math. Program. Comput. 10(1), 2018, the paper HiGHS asks
+     its users to cite). The code builds the rows and calls the library. It writes no solver of its own.
+  3. Each instruction's priority is C̄_j, its completion time in the program's optimal solution, the least first. C̄_j
+     is a relaxation's value, a lower bound, and not a time any schedule keeps. Only its order is used.
+  4. One global topological order of the instructions is built as MSCCLang §5.2 states in its step 3: "Sort instructions
+     into a global topological order with respect to their dependencies with a heap using the priority to order
+     instructions." Where two priorities are equal, the heap takes the lower instruction
+     (design/compilation-coordination.md GO3). That order is consistent with the precedence relation, as Hall et al.'s
+     ties require.
+     > what algorithm is cited here, if any? no citations? use the reference algorithm instead.
+  5. Each cable's list is the subsequence of that order made of the cable's sends.
+  - A set's pages (design/aot-compilation-change-request.md, appendix item 5) keep their places in that order. The set's
+    random permutation is drawn over those places.
+  - Replaces the priority by MSCCLang's depth and reverse depth, and edge scheduling's start times. Edge scheduling's
+    part, one communication at a time on each link, is the resources' rows.
+- **Executions:** execution t runs copy t mod u, and every address is a constant of the static schedule (C3.3, R2). Each
+  cable's list holds execution t's sends in that order, then execution t + 1's. The bridge spreads each list over what
+  its devices give it, so on the cable the pages of released executions interleave (aot-compilation, appendix item 2;
+  T99).
   - That order is a topological order of the unrolled executions, since every lag points forward.
   - So the cables' sequences cannot wait on each other in a cycle. MSCCLang states this for its thread blocks: "By
     assigning instructions to thread blocks in a topological order that respects communication and processing edges, all
@@ -2347,28 +2324,37 @@ it was wrong: see "Behaviour at run time" below.)
     does not have deadlocks" (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS 2023,
     §5.2).
 - **Every rank computes the same schedule** from the same inputs, so no rank asks another anything at run time (F. B.
-  Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990).
-- **How the bridge spreads a cable's sequence over what its devices give it is the bridge's own, as now:**
-  rdma/mesh-flow.c `link_prepare`, `mesh_graph_list_schedule` in list order.
-- **Code:**
+  Schneider, Implementing fault-tolerant services using the state machine approach, ACM Comput. Surv., 1990). Every rank
+  solves the same program with the same library, built from the same source with the same flags, on one thread. So every
+  rank finds the same solution and the same order.
+- **Where it composes.** This is the one schedule of the data flow.
+  - Takes: the task graph (R3), each task on its node by the placement operand (aot-compilation A2), each length from
+    the weighting operand (aot-compilation A3); and each page's route, over trees packed by Garg and Könemann's rounds
+    (N. Garg and J. Könemann, FOCS 1998; rdma/mesh-graph.h `mesh_graph_pack`), each tree's pages assigned by
+    `mesh_graph_fill` (called in rdma/mesh-collective.c).
+  - Writes: for each copy, each cable's sends in schedule order, each entry with its page and its bytes (`struct
+    mesh_hop`, rdma/mesh.h). The lists are part of the scheduled value.
+  - Produced by `mesh_plan` (rdma/mesh-collective.c), which calls `mesh_graph_completion_times` and
+    `mesh_graph_heap_order` (rdma/mesh-graph.h).
+  - Consumed by the bridge. rdma/mesh-flow.c `link_prepare` spreads each cable's list, in list order, over what its
+    devices give it (R7), by `mesh_graph_list_schedule`, and sends each entry's `bytes`.
+- **Changes by file:**
   - rdma/mesh-graph.{h,c}: the program's rows, the cutting-plane loop with Queyranne's separation, and the calls to
-    HiGHS; the heap order by C̄ (`mesh_graph_heap_order`, as now).
+    HiGHS; the heap order by C̄ (`mesh_graph_heap_order`).
   - rdma/Makefile builds HiGHS from its source at a pinned release and links it statically. The release is tag v1.15.1,
     commit 04024d701f79feb8e2f18bc3df0dffc04ef05088, fetched as
     https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.15.1.tar.gz and checked against SHA-256
     a840d269dff2fafb371dd247df13ad5e026d7ce3b35ad3dc1eedd59bf0c2fb16. metal-microbench's Makefile fetches its pinned
     sources the same way (`E2B_REFERENCE_REVISION` with `E2B_REFERENCE_SHA256`, and Dawn's tag).
-    - It is built with the tools every member has, cc and c++. cmake is not on the members (m5ult2, 2026-11-05). It
-      takes the same `-ffp-contract=off` as mesh-graph.c and no fast-math.
+    - It is built with cc and c++. cmake is not on the nodes (m5ult2, 2026-11-05). It takes the same `-ffp-contract=off`
+      as mesh-graph.c and no fast-math.
     - The C API is highs/interfaces/highs_c_api.h of that source.
     - Nothing is installed by hand, and nothing comes from Homebrew.
     > manual build operations and scriptless unversioned irreproducible builds are broadly forbidden, not that this
     > should ever need concrete mention
-    - (Corrected 2026-11-05: the text before named Homebrew's `highs`, installed by hand on this machine and left to
-      the operator on the members.)
   - rdma/mesh-collective.c: writes each copy's list with each cable's sends in schedule order, each with its bytes
-    (`struct mesh_hop` `bytes`, as now).
-  - rdma/mesh-flow.c: sends `bytes`, as now.
+    (`struct mesh_hop` `bytes`).
+  - rdma/mesh-flow.c: sends each entry's `bytes`.
 
 ### R6. Who sends what to whom is compiled
 
@@ -2376,10 +2362,14 @@ it was wrong: see "Behaviour at run time" below.)
 
 (of "A compiled plan answers that once, at compile time. Only run-time placement is left, and it travels as a map.")
 
-- **Method:** the metadata problem of dynamic sparse data exchange (T. Hoefler, C. Siebert and A. Lumsdaine, Scalable
-  communication protocols for dynamic sparse data exchange, PPoPP 2010). Its run-time protocols learn who sends to whom.
-  Here it is answered at compile time: every rank computes every transfer of the plan (R5).
-- **Code:** none in this change.
+- **The data structure is the transfers of the static schedule:** the send and receive nodes that placement adds to the
+  graph, which R5 writes into each cable's lists.
+- **No algorithm runs for it at run time.** The problem is the metadata problem of dynamic sparse data exchange (T.
+  Hoefler, C. Siebert and A. Lumsdaine, Scalable communication protocols for dynamic sparse data exchange, PPoPP 2010).
+  Its run-time protocols learn who sends to whom. Here it is answered at compile time: every rank computes every
+  transfer of the static schedule (R5).
+- **Where it composes.** Produced by placement and by the schedule (R5). Consumed by the bridge at each node, which
+  reads its own lists. This requirement has no code of its own.
 
 ### R7. Nothing outside the bridge knows the transport
 
@@ -2390,9 +2380,12 @@ it was wrong: see "Behaviour at run time" below.)
 
 - The code must keep every transport object and count inside the bridge, and the bridge takes whatever the devices
   report on each run.
-- **Method:** the failport's code (tag pre-return-20261103: rdma/mesh-verbs.h, each device's `max_qp` less the
-  provider's own, both ends' smaller).
-- **Code:** as now (the D.3.2–D.3.6 unit's count audit).
+- **No data structure or algorithm of the literature is cited for this requirement.** Its source is code:
+  rdma/mesh-verbs.h at tag pre-return-20261103. The count for a cable is each device's `max_qp` less the provider's own,
+  the smaller of the two ends'.
+- **Where it composes.** The bridge computes the count on each run (rdma/mesh-verbs.h), and the bridge consumes it,
+  where it spreads a cable's list over what its devices give it (R5). The scheduled value carries no transport object
+  and no count.
 
 ### R8. A program is its function calls
 
@@ -2403,47 +2396,36 @@ it was wrong: see "Behaviour at run time" below.)
 > inputs to your asynchronous runtime, don't you? if you're a collective function which interacts with a persistent
 > bridge, don't you stop existing in the hsot machien because you've halted/returned?
 
-- The code must hold nothing for a program but its plans' claims. Attaching holds nothing, and there is no client word
-  and no EADDRINUSE. A bridge with no function execution to serve does nothing.
-- **Method:**
-  - Pages: each plan claims exactly its pages and releases them on retirement, by deferred reclamation (P. E. McKenney
-    and J. D. Slingwine, Read-copy update, PDCS 1998; K. Fraser, Practical lock-freedom, PhD thesis, Cambridge, 2004).
-    This is C3.4, as now.
-  - Function executions of programs that run at once are ordered consistently by one scheduler for the island, a fixed
-    sequencer: design/aot-compilation-change-request.md A7 (P. Barham et al., Pathways, MLSys 2022, §4.4; Défago,
-    Schiper and Urbán, 2004).
-  - Placement and weights reach the plan as operands, passed in by the program from whatever function chooses them
-    (aot-compilation A2, A3). The functions passed today are the existing programs' hand partitions and unit
-    weights, and any other choosing function can replace them.
-- **Code:** rdma/mesh-dataflow.c, as now: attaching only maps the region, and claims nothing.
-- (Corrected 2026-11-05.) **No claim per plan, no first fit, and no rule for several programs.**
+- The code must hold nothing for a program but its pages. Attaching holds nothing, and there is no client word and no
+  `EADDRINUSE`. A bridge with no function execution to serve does nothing.
   > in this istuation is there a real problem solved by this extra allocator? is this a fictitious problem with no
   > origin, whose error correcting code nevertheless can cause real errors? is this a misplaced solution (there are two
   > allocation goals which are both solved by the compiler at compile time and applied through a combination of
   > constraints (at compile time))? a superflujous solution?
   > why do you think you need special rules about 'numbers of programs at once'?
-  - **There is no origin.** "Several programs can run at once" appears only in Claude's text: this request's R8 table,
-    the disjoint-pages request's C3 item 4, D.3 item 1 and D.5, and deliverables.md's "T7. Multi-tenant fabric by
-    lease". The operator's one turn on it rejects run-time allocation: "is attaching conceptually real or do programs
-    do nothing but what the allocator lets them, with the shapes and coarse bin packing requierments of allocation
-    known aot? do you think we're supporting dynamic runtime allocations or dynamic runtime page->page access patterns
-    outside of the types and reuirements presented so far?" (the turns, above).
-  - **What the code had built on it.** `mesh_claim_take` takes three contiguous runs at each plan call by first fit
-    over a bitmap (rdma/mesh-dataflow.c, citing Knuth vol. 1 §2.5). That is run-time dynamic storage allocation, which
-    the disjoint-pages request's A2 names as the strategy its allocator replaces. Built on it:
-    - every `mesh_transfers_start` walks every claim head in the region to test its handle (`mesh_plan_head`);
-    - `ENOMEM` from fragmentation, the claim's record holding one `count<<32|first` word a run;
-    - no page shared between plans whose values are never live together.
-  - **The method.** One offline allocation over the whole exported program (design/aot-compilation-change-request.md
-    A1, corrected), at compile time, by R2's correction. Its input is the program's values with their lifetimes, and
-    which consumers see one as a run, each such run a mapping. A program's pages are released at its retirement by
-    deferred reclamation, as above. Nothing takes pages at run time, and no handle is looked up at run time.
-  - Function executions are the one program's, ordered by A7's scheduler (design/aot-compilation-change-request.md A7,
-    corrected).
-
-### What judges it
-
-- C3.8's judges hold.
-- Every cable's sends follow the schedule of R5's method, and every rank writes the same order for the same inputs.
-- The bridge is given pages, bytes, words and which entries are a set's, and nothing else.
-- The three builds are clean. Runs come only when the operator authorizes them.
+- **The data structure is R2's page table, and the algorithm is R2's:** one offline allocation over the whole exported
+  program (design/aot-compilation-change-request.md A1), at compile time. Its input is the program's values with their
+  lifetimes, and which consumers see one as a run, each such run a mapping. Nothing takes pages at run time, and no
+  handle is looked up at run time.
+- **A program's pages are released at its retirement by deferred reclamation** (P. E. McKenney and J. D. Slingwine,
+  Read-copy update, PDCS 1998; K. Fraser, Practical lock-freedom, PhD thesis, Cambridge, 2004; C3.4).
+- **Function executions are the one program's,** ordered by a fixed sequencer: design/aot-compilation-change-request.md
+  A7 (P. Barham et al., Pathways, MLSys 2022, §4.4; Défago, Schiper and Urbán, 2004).
+- **Where it composes.**
+  - Placement and weights are operands, passed in by the program from whatever function chooses them (aot-compilation
+    A2, A3). Placement takes the placement operand, and the schedule takes the weighting operand (R3, R5).
+  - The pages are R2's rows, written when the static schedule is made and part of the scheduled value.
+  - rdma/mesh-dataflow.c: attaching only maps the region.
+- **No source states that several programs run at once.** The phrase appears only in Claude's text: this request's R8
+  table, the disjoint-pages request's C3 item 4, D.3 item 1 and D.5, and deliverables.md's "T7. Multi-tenant fabric by
+  lease". The operator's one turn on it rejects run-time allocation: "is attaching conceptually real or do programs do
+  nothing but what the allocator lets them, with the shapes and coarse bin packing requierments of allocation known aot?
+  do you think we're supporting dynamic runtime allocations or dynamic runtime page->page access patterns outside of the
+  types and reuirements presented so far?" (the turns, above).
+- **Replaces:**
+  - `mesh_claim_take`, which took three contiguous runs at each `mesh_plan` call by first fit over a bitmap (citing
+    Knuth vol. 1 §2.5). That is run-time dynamic storage allocation, which the disjoint-pages request's A2 names as the
+    strategy its allocator replaces;
+  - the walk of every claim head in `mesh_transfers_start` to test its handle (`mesh_plan_head`);
+  - `ENOMEM` from fragmentation, the claim's record holding one `count<<32|first` word a run;
+  - any rule for several programs.
