@@ -8,7 +8,6 @@ import math
 import operator
 import os
 import pickle
-import sys
 import time
 import types
 import weakref
@@ -1630,6 +1629,11 @@ class Call(C.Structure):
     _fields_ = [('replay', C.POINTER(Replay)), ('call', mesh.Q), ('native', C.c_void_p), ('residues', mesh.Q)]
 
 
+# metal_ir.h struct metal_ir_span
+class Span(C.Structure):
+    _fields_ = [('data', C.c_void_p), ('bytes', mesh.Q)]
+
+
 # rdma/mesh-metal.h struct mesh_metal_transport, struct mesh_metal_input (metal_recording.h struct MetalRemote), struct
 # mesh_metal_publication and struct mesh_metal_sent (metal_recording.h struct MetalSent); mesh.h struct mesh_hop
 class Transport(C.Structure):
@@ -1714,8 +1718,8 @@ def _recorder():
         lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, C.POINTER(mesh.Planned), C.c_char_p,
                                              C.c_size_t]
         lib.MetalProgramSave.restype = C.c_int
-        lib.MetalProgramSave.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), C.POINTER(C.c_size_t), C.c_char_p,
-                                         C.c_size_t]
+        lib.MetalProgramSave.argtypes = [C.c_void_p, C.POINTER(Span), mesh.U, C.POINTER(C.c_void_p),
+                                         C.POINTER(C.c_size_t), C.c_char_p, C.c_size_t]
         lib.MetalProgramLoad.restype = C.c_void_p
         lib.MetalProgramLoad.argtypes = lib.MetalRecorderProgram.argtypes[:-2] + [C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalProgramRun.restype = C.c_int
@@ -6863,6 +6867,7 @@ def _compiler():
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
                 ('metal_ir_archive_load', P, [P, C.c_size_t, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_solved', P, [P]),
+                ('metal_ir_archive_records', C.POINTER(Span), [P, C.POINTER(U)]),
                 ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
@@ -7965,8 +7970,9 @@ def program(block, *example_inputs):
     return _runner(context, state, make)
 
 
-# design/aot-compilation-change-request.md A1 and A8; metal_ir.h metal_ir_archive_load; metal_recording.h
-# MetalProgramSave and MetalProgramLoad; mesh-collective.h mesh_plan_save and mesh_plan_load
+# design/aot-compilation-change-request.md A1 and A8; design/implementation-order-2026-11-09.md item 8; metal_ir.h
+# metal_ir_archive_load and metal_ir_archive_records; metal_recording.h MetalProgramSave and MetalProgramLoad;
+# mesh-collective.h mesh_plan_save and mesh_plan_load
 _FREE = C.CDLL(None).free
 _FREE.restype, _FREE.argtypes = None, [C.c_void_p]
 _NEW_BUFFER = _message(C.c_void_p, C.c_ulong, C.c_ulong)
@@ -8020,14 +8026,6 @@ def _initial(retained):
                 contents.append(data)
             records.append((k, v, contents))
     return records
-
-
-def _artifact_header():
-    machines = _machines()
-    return (2, sys.byteorder, C.sizeof(C.c_void_p), torch.__version__,
-            tuple(C.sizeof(t) for t in (mesh.Declared, mesh.Weight, mesh.Value, mesh.Dependence, Range, Release,
-                                       ValueInfo, mesh_graph.Dependence)),
-            tuple((k, bytes(v)) for k, v in sorted(machines.items())))
 
 
 def _constant_storage(info):
@@ -8087,39 +8085,47 @@ def _save_program(context, state, path):
         rows.append(record)
     payload = {key: retained[key] for key in ('page', 'holders', 'steps', 'calls', 'every', 'given', 'constants',
                                              'output_recipe', 'initial')}
-    payload.update(header=_artifact_header(), plan=plan, arrays=arrays, actors=actors, rows=rows, storage=storage,
+    payload.update(arrays=arrays, actors=actors, rows=rows, storage=storage,
                    irs=[(ir.layouts, ir.inputs, ir.device) for ir in retained['irs']],
                    analysed=(analysed.outstanding, bytes(analysed.orders), bytes(analysed.causes), analysed.norders,
                              bytes(analysed.chains)),
-                   compiled=_saved_bytes(programs['lib'].MetalProgramSave, replay['program']),
                    signature=replay['signature'])
-    return mesh_disk.write(path, b'MESH-AOT\0' + pickle.dumps(payload, protocol=5), 'a compiled mesh program', 'w')
+    records = (plan, pickle.dumps(payload, protocol=5))
+    spans = (Span * len(records))(*[Span(C.cast(record, C.c_void_p), len(record)) for record in records])
+    return mesh_disk.write(path, _saved_bytes(programs['lib'].MetalProgramSave, replay['program'], spans, len(spans)),
+                           'a compiled mesh program', 'w')
 
 
-def _restore_programs(saved, owned):
+def _restore_programs(data, owned):
     lib, made = _recorder()
     compiler, error, device = _compiler(), C.create_string_buffer(4096), made()
     recorder = _owned(owned, lib.MetalRecorderOpen(device, error, len(error)))
     PUT(device, SELECTOR[b'release'])
     if not recorder:
         raise OSError(errno.ENODEV, error.value.decode())
+    archive = compiler.metal_ir_archive_load(data, len(data), device, error, len(error))
+    if not archive:
+        raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
+    owned[archive] = lambda: compiler.metal_ir_archive_free(archive)
+    count = mesh.U()
+    record = compiler.metal_ir_archive_records(archive, C.byref(count))
+    if count.value != 2:
+        raise OSError(errno.EINVAL, 'the saved program holds %d records, not a plan and a program\'s' % count.value)
+    plan, saved = C.string_at(record[0].data, record[0].bytes), pickle.loads(C.string_at(record[1].data, record[1].bytes))
     storage = []
-    for fixed, data in saved['storage']:
-        blob = C.create_string_buffer(data, max(len(data), 1))
+    for fixed, contents in saved['storage']:
+        blob = C.create_string_buffer(contents, max(len(contents), 1))
         if fixed:
-            buffer = _owned(owned, _NEW_BUFFER(device, _SEL(b'newBufferWithLength:options:'), max(len(data), 1), SHARED))
+            buffer = _owned(owned, _NEW_BUFFER(device, _SEL(b'newBufferWithLength:options:'), max(len(contents), 1),
+                                               SHARED))
             if not buffer:
                 raise OSError(errno.ENOMEM, 'saved constant storage')
             address = OBJECT(buffer, _SEL(b'contents'))
-            C.memmove(address, data, len(data))
+            C.memmove(address, contents, len(contents))
         else:
             owned[id(blob)] = lambda blob=blob: None
             address, buffer = C.addressof(blob), None
         storage.append((address, buffer))
-    archive = compiler.metal_ir_archive_load(saved['compiled'], len(saved['compiled']), device, error, len(error))
-    if not archive:
-        raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
-    owned[archive] = lambda: compiler.metal_ir_archive_free(archive)
     rows, state_data = [], {}
     for at, source in enumerate(saved['rows']):
         row = {key: source[key] for key in ('k', 'j')}
@@ -8151,19 +8157,14 @@ def _restore_programs(saved, owned):
     return {'lib': lib, 'compiler': compiler, 'device': device, 'recorder': recorder, 'rows': rows,
             'rated': {k: {v for v, _ in inputs.values()} for k, (_, inputs, _) in enumerate(saved['irs'])},
             'solved': compiler.metal_ir_archive_solved(archive), 'signature': saved['signature'],
-            'state_data': state_data}
+            'state_data': state_data, 'saved': saved, 'saved_plan': plan}
 
 
 def load(path):
     with open(path, 'rb') as stream:
-        if stream.read(9) != b'MESH-AOT\0':
-            raise ValueError('not a mesh compiled artifact')
-        saved = pickle.load(stream)
-    if saved['header'] != _artifact_header():
-        raise ValueError('the saved program has different Torch, record layout, or machine configuration; compile '
-                         'for the current configuration')
+        data = stream.read()
     context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0, 'horizon': 1,
-                                  'inputs': [None] * len(saved['given']), 'timeout': None, 'replay': None, 'owned': {}}
+                                  'inputs': [], 'timeout': None, 'replay': None, 'owned': {}}
 
     def make():
         if state['mapping'] is not None or state['owned']:
@@ -8171,6 +8172,8 @@ def load(path):
         try:
             nodes = mesh.Nodes()
             mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
+            programs = _restore_programs(data, state['owned'])
+            saved = programs['saved']
             arrays = [(_declared_restore(d), _records(mesh.Weight, w), _records(mesh.Value, v),
                        _records(mesh.Dependence, e)) for d, w, v, e in saved['arrays']]
             actors = {k: (_records(C.c_double, host), _records(C.c_double, work),
@@ -8181,9 +8184,9 @@ def load(path):
                    for (layout, inputs, device), (d, _, v, _) in zip(saved['irs'], arrays)]
             retained = {key: saved[key] for key in ('page', 'holders', 'steps', 'calls', 'every', 'given', 'constants',
                                                    'output_recipe', 'initial')}
-            retained.update(nodes=nodes, irs=irs, arrays=arrays, actors=actors, saved_plan=saved['plan'],
+            retained.update(nodes=nodes, irs=irs, arrays=arrays, actors=actors, saved_plan=programs['saved_plan'],
                             analysed=Calls(outstanding, _records(mesh.U, orders), _records(mesh.U, causes), count,
-                                           _records(mesh.U, chains)), programs=_restore_programs(saved, state['owned']))
+                                           _records(mesh.U, chains)), programs=programs)
             state['built'] = retained
             _bound(context, state, retained, time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS)
             state.update(stale=False)
