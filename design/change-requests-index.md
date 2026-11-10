@@ -262,9 +262,14 @@ outstanding, and what of it is outstanding. The standard every change request fo
   item are deleted; `_region` exchanges the halo from the rank j places away by one collective permute at the largest
   size over the ranks, and a rank copies its own part where a sender's shard is smaller than that size. Not written:
   item 2's gather and scatter (no function of the program emits either), item 12's other form, whole padded buffers
-  through an equal-size collective, and its choice (item 6, which decides it, is not written), a collective permute
-  in `_reshard` (a sharding names a mesh dimension, not an order of devices), item 4's mask, and items 5 to 8, 11, 13
-  and 14.
+  through an equal-size collective, and its choice (item 6, which decides it, is not written), item 4's mask, and
+  items 5 to 8, 11, 13 and 14. 2026-11-10, later, item 9: where a resharding keeps the sharded dimensions and their
+  counts and changes their mesh dimensions, `_reshard` emits one collective permute (XLA's
+  `ReshardWithCollectivePermute`), its record carrying each place's counts, displacements and starts, and
+  `_collective_permute` sends and places the subarray. Still not written: item 2's gather and scatter. No quoted
+  sentence says where the program emits either: every input and constant is held at every node, a resharding
+  replicates on every device (GSPMD §4.5), and the one transfer from a single device is `_deliver`'s, of a whole
+  output.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,

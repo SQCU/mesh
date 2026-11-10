@@ -43,7 +43,9 @@ Placement = collections.namedtuple('Placement', 'mesh nodes splits')
 # GSPMD sections 2.1, 3.2, 4.2 and 4.5; design/unequal-shards-change-request.md items 2, 3 and 12; MPI 4.1 sections
 # 7.5, 7.7, 7.8 and 7.10.2: `counts` the elements of each rank's block along `dim` and `displs` where each block is
 # placed in the whole extent; MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY: `starts` where each rank's block starts
-# in that rank's buffer, the full array; for an all-to-all each is the pair along `dim`'s two dimensions
+# in that rank's buffer, the full array; for an all-to-all each is the pair along `dim`'s two dimensions; for a
+# resharding's collective permute each has one entry a place of the group, that place's block as (dimension, value)
+# pairs over the sharded dimensions
 Collective = collections.namedtuple('Collective', 'kind node dims dim position counts displs starts',
                                     defaults=(None, None, None))
 # design/aot-compilation-change-request.md A10, "Its output": "the order constraints between calls, which the program
@@ -627,7 +629,8 @@ def _complete(ir, operators, annotated):
 
 
 # GSPMD section 4.5; MPICH allgather_intra_ring.c and alltoall_intra_pairwise.c, MPIR_Localcopy;
-# design/aot-compilation-change-request.md, appendix item 7: a mesh dimension the result does not shard is gathered;
+# design/aot-compilation-change-request.md, appendix item 7: a result that shards the same dimensions at the same counts
+# over other mesh dimensions is one CollectivePermute; otherwise a mesh dimension the result does not shard is gathered;
 # one it shards along another dimension moves there by an AllToAll once that dimension is free, a cycle of such moves
 # broken by gathering one of its dimensions, which the final slices shard again
 def _reshard(ir, node, have, want):
@@ -673,10 +676,34 @@ def _reshard(ir, node, have, want):
         step(('collective', ((node, have),), target,
               Collective('all-to-all', node, (int(m),), (i, j), len(ir.program), counts, displs, starts)))
         return after
+
+    # design/unequal-shards-change-request.md items 2, 9 and 12; GSPMD section 4.5, "CollectivePermute to change device
+    # order"; XLA spmd_partitioner.cc, CanReshardWithCollectivePermute and PartitionedHlo::ReshardWithCollectivePermute:
+    # each (the device holding a block, the device the result gives it); `source[h]` the mesh dimension whose coordinate
+    # at the receiver is the sender's along h. Place p sends the subarray of its `counts[p]` elements at `starts[p]`,
+    # which its receiver holds at the same start
+    def permute():
+        shape, sharded = _value(node).shape, [(d, h) for d, h in enumerate(have) if h >= 0]
+        source = {int(h): int(want[d]) for d, h in sharded}
+        spare = [w for w in source if w not in source.values()]
+        for h in sorted(set(source.values()) - set(source)):
+            source[h] = spare.pop(next(k for k, w in enumerate(spare) if ir.shape[w] == ir.shape[h]))
+        dims = tuple(sorted(h for h, w in source.items() if h != w))
+        group = _groups(ir, dims)[0]
+        at = {tuple(ir.coords[e][m] for m in dims): p for p, e in enumerate(group)}
+        pairs = tuple((at[tuple(ir.coords[e][source[m]] for m in dims)], q) for q, e in enumerate(group))
+        counts, displs, starts = (tuple(tuple((d, array(h, shape[d])[ir.coords[e][h]]) for d, h in sharded)
+                                        for e in group) for array in (ir.counts, ir.displs, ir.starts))
+        step(('collective', ((node, have),), (node, want),
+              Collective('collective-permute', node, dims, pairs, len(ir.program), counts, displs, starts)))
+        return node, want
     if (node, want) in ir.made:
         return node, want
     if node.op in ('placeholder', 'get_attr'):
         have = (-1,) * len(have)
+    if all((h >= 0) == (w >= 0) for h, w in zip(have, want)) and any(int(h) != int(w) for h, w in zip(have, want)) \
+            and all(ir.counts(h, n) == ir.counts(w, n) for h, w, n in zip(have, want, _value(node).shape) if h >= 0):
+        return permute()
     for m in sorted(m for m in have if m >= 0 and m not in want):
         have = gather(have, m)
     while True:
@@ -1399,8 +1426,14 @@ def _collective_permute(ir, c, groups, key, made):
         raise ValueError('%s: a CollectivePermute\'s pairs %s over a group of %d: each a (source, target) place, no two '
                          'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, k))
     landed = ir.inside[made][0] if made in ir.inside else made
-    _exchange(ir, c, groups, pairs, key, lambda e, p, q: ir.places[e][key],
-              lambda f, p, q: (ir.places[f][made], landed, None), _consumer(ir, {landed}),
+
+    # design/unequal-shards-change-request.md items 2 and 12; MPI 4.1 section 6.1.3: place p's block in a buffer
+    def block(place, p):
+        for (d, n), (_, start) in zip(c.counts[p], c.starts[p]) if c.counts is not None else ():
+            place = _narrowed(place, d, start, n)
+        return place
+    _exchange(ir, c, groups, pairs, key, lambda e, p, q: block(ir.places[e][key], p),
+              lambda f, p, q: (block(ir.places[f][made], p), landed, None), _consumer(ir, {landed}),
               max(3 * c.position + 1, _readers(ir, {landed}, 3 * c.position + 1)[1]))
 
 
