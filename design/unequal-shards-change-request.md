@@ -58,9 +58,8 @@ to the graph. Item 11 states the form of a value.
 A Stage line below says which of these functions produces a value and which consumes it. HAP §3.2's stages, in items
 6 and 12, are another thing: the parts a program's execution is divided into. No quoted source of an item names one
 of these functions. Where an item's quotations state where its step sits in the program, its Stage line follows
-them: item 8's Striped Attention passages ("before the model's first embedding layer", "no extra per-layer
-communication required") and item 12's HAP §2.5.1 passage ("when we optimize the sharding ratios, the communication
-methods should be updated accordingly").
+them: item 6's HAP §5 passage ("for a fixed distributed program Q") and item 8's Striped Attention passages ("before
+the model's first embedding layer", "no extra per-layer communication required").
 
 The reference program's placement operand is a function from an fx node to a processor name, and has no field for a
 sharding. Its operators are `send(value: Tensor, channel: int)` and `recv(channel: int) -> Tensor`, and have no
@@ -245,8 +244,8 @@ and `displs`, each an integer array of length the group size; MPI's `array_of_si
   sizes follow by item 1's rounding. A tuple is chosen for each segment of the model, not one for the whole mesh
   dimension.
 - **Stage:** the solve runs before `place`. It takes the program's HAP stages and their times and writes, for each
-  segment, the tuple of item 1 in the placement operand, and for each collective which of item 12's two ways it
-  uses; `place` consumes both.
+  segment, the tuple of item 1 in the placement operand, which `place` consumes. It solves "for a fixed distributed
+  program Q" (HAP §5).
 
 ### 7. A node's speed is a function of the size of the problem
 
@@ -377,14 +376,16 @@ and `displs`, each an integer array of length the group size; MPI's `array_of_si
   leading dimension is at least LOCr.
 - **Algorithm:** a collective of item 2 is given, for each device, the sizes of the full array, the sizes of the
   subarray and where it starts, and sends the subarray: `counts[j]` is the subarray's number of elements. The padding
-  is not sent. HAP §2.5.1 names a second way, sending the whole padded buffer through an equal-size collective. Each
-  collective of item 2 uses the one of the two that item 6's solve finds cheaper at the solved sharding ratios, its
-  comm(i)(B) being "determined based on the collective operation type, the sharding ratio B" and the profiled
-  network; the choice is made again whenever the sharding ratios are solved again (HAP §2.5.1: "when we optimize the
-  sharding ratios, the communication methods should be updated accordingly").
-- **Stage:** item 6's solve, before `place`, writes which of the two each collective uses, with the tuple of item 1.
-  `place` consumes it and adds the collective's `send` and `recv` nodes (item 2); for the subarray these carry the
-  three arrays, each an array of integers with one entry per dimension of the buffer.
+  is not sent. HAP §2.5.1 names two methods for an all-gather of unevenly partitioned tensors: padding the shards to
+  the same size, and broadcasting each shard separately. Which of them an all-gather uses is chosen by their times at
+  the sharding ratios, comm(i)(B) being "determined based on the collective operation type, the sharding ratio B" and
+  the profiled network, and is chosen again whenever the sharding ratios are solved again ("when we optimize the
+  sharding ratios, the communication methods should be updated accordingly"). Item 6's program solves the ratios "for
+  a fixed distributed program Q", so the choice is not a result of that program. No quoted source states the choice
+  for another collective of item 2, or between a padded buffer and a subarray.
+- **Stage:** `place` adds the collective's `send` and `recv` nodes (item 2); for the subarray these carry the three
+  arrays, each an array of integers with one entry per dimension of the buffer. No quoted source states which
+  function chooses the method, or the type of the value that records the choice.
 
 ### 13. Which device holds which rows of a tensor whose rows differ in length
 
