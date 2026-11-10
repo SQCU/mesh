@@ -56,48 +56,6 @@ Rule = collections.namedtuple('Rule', 'kind level operands labels out propagate 
                                       'configure')
 # GSPMD sections 4.1 and 4.3, Appendix A.2
 Window = collections.namedtuple('Window', 'label operand dim extent stride low transposed fill')
-TransferSite = collections.namedtuple('TransferSite', 'position')
-Allocation = collections.namedtuple('Allocation', 'root domain function index activation context',
-                                    defaults=(None, None, None, None))
-
-
-# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
-class AllocationProjection:
-    def __init__(self, root):
-        self.root, self.segmented = root, _segments(root)
-        self.numerical, self.wires, self.allocations = {}, {}, {}
-        self.standins, self.homes_by_scope, self.homes_by_segment = {}, {}, {}
-        for region in root.region.regions:
-            for value in range(len(region.ir.values)):
-                key = region.id, value, None
-                self.numerical[region.id, value] = key
-                self.allocations[key] = Allocation(key, region.id)
-        for segment in self.segmented.segments:
-            ir = root.region.regions[segment.scope].ir
-            for transfer in segment.transfers:
-                value = ir.declared[transfer].value
-                if value != mesh.ABSENT:
-                    key = segment.scope, value, segment.id
-                    self.wires[segment.id, value] = key
-                    self.allocations[key] = Allocation(key, segment.id)
-
-    def realize(self, standins, allocations):
-        self.standins, self.allocations = standins, allocations
-        for region in self.root.region.regions:
-            copies = [standins[self.numerical[region.id, value]] for value in range(len(region.ir.values))]
-            self.homes_by_scope[region.id] = _homes(region.ir, copies)
-        for segment in self.segmented.segments:
-            region = self.root.region.regions[segment.scope]
-            copies = [standins[self.wires.get((segment.id, value), self.numerical[region.id, value])]
-                      for value in range(len(region.ir.values))]
-            self.homes_by_segment[segment.id] = _homes(region.ir, copies)
-        return self
-
-
-# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
-class Region:
-    def __init__(self, ir):
-        self.regions, self.id, self.ir = [self], 0, ir
 
 
 # design/aot-compilation-change-request.md A2 to A4, A8, A10 and appendix item 7;
@@ -106,7 +64,6 @@ class Region:
 class IR:
     def __init__(self, gm, placement, nodes):
         self.gm, self.placement, self.weights = gm, placement, None
-        self.region = Region(self)
         self.order = list(gm.graph.nodes)
         self.shape, self.coords, self.map = _mesh(placement, nodes.count)
         here = [d for d, index in enumerate(self.map) if index == nodes.self]
@@ -122,7 +79,6 @@ class IR:
         self.taken, self.results, self.sent, self.contiguous = {}, {}, set(), set()
         self.given, self.landed = None, {}
         self.trims = {}
-        self.transfer_sites = {}
         self.initial, self.constant_values = None, set()
 
     def emit(self, item):
@@ -1405,7 +1361,6 @@ def lower(ir):
                 raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
             LOWERINGS[collective.kind](ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
             ir.declares[collective] = range(first, len(ir.declared))
-            ir.transfer_sites.update(dict.fromkeys(ir.declares[collective], TransferSite(collective.position)))
     firsts = mesh_graph.ends(range(len(ir.program))[::-1], lambda g: ir.program[g][1])
     for kind, _, key, collective in ir.program:
         if kind == 'collective' and key in firsts:
@@ -1433,7 +1388,7 @@ def _deliver(irs, wanted, returned, program):
         nodes = sorted(({y for k in readers for y in irs[k].map} | everywhere) - set(ir.map))
         if not nodes:
             continue
-        position, output = next((g, item[3]) for g, item in enumerate(ir.program) if item[0] == 'output')
+        output = next(item for item in ir.program if item[0] == 'output')[3]
         key, source = output[1][pytree.tree_leaves(output[0].args)[o]], min(ir.coords)
         place = ir.places[source][key]
         dtype, shape = _layout(ir, place.owner)
@@ -1444,7 +1399,6 @@ def _deliver(irs, wanted, returned, program):
             continue
         view = _strided(ir, place)
         transfers = ir.transfer(source, nodes, mesh.JOIN, view, dict.fromkeys(nodes, view), at={y: y for y in nodes})
-        ir.transfer_sites.update(dict.fromkeys(transfers.values(), TransferSite(position)))
         ir.events += _produced(ir, source, min(transfers.values()), key, 3 * len(ir.program))
         if ir.device == source:
             ir.at.update(dict.fromkeys(transfers.values(), place.owner))
@@ -3695,8 +3649,7 @@ def _lstsq_metadata(self, b, rcond=None, *, driver=None):
     torch._check(self.dtype == b.dtype and self.device == b.device,
                  lambda: 'torch.linalg.lstsq: input and other must have the same dtype and device')
     selected = _lstsq_driver(self, driver)
-    torch._check(selected in ('gels', 'gelsy', 'gelss', 'gelsd'),
-                 lambda: 'torch.linalg.lstsq: driver must be gels, gelsy, gelss or gelsd')
+    torch._check(selected in ('gels', 'gelsy'), lambda: 'torch.linalg.lstsq: driver must be gels or gelsy')
     torch._check(self.device.type != 'cuda' or selected == 'gels',
                  lambda: 'torch.linalg.lstsq: driver other than gels is not supported on CUDA')
     vector = _linalg_vector_rhs(self, b)
@@ -3708,13 +3661,9 @@ def _lstsq_metadata(self, b, rcond=None, *, driver=None):
     solution = self.new_empty((*batch, nrhs, max(m, n))).transpose(-2, -1)[..., :n, :]
     if vector:
         solution = solution.squeeze(-1)
-    residual = self.real.new_empty((*batch, nrhs) if m > n and (selected == 'gels' or n == 0 and selected != 'gelsy')
-                                   else (0,))
-    if m > n > 0 and selected in ('gelss', 'gelsd'):
-        from torch._subclasses.fake_tensor import DynamicOutputShapeException
-        raise DynamicOutputShapeException(A.linalg_lstsq.default)
+    residual = self.real.new_empty((*batch, nrhs) if m > n and selected == 'gels' else (0,))
     rank = self.new_empty(self.shape[:-2] if selected != 'gels' else (0,), dtype=torch.int64)
-    singular = self.real.new_empty((*self.shape[:-2], min(m, n)) if selected in ('gelss', 'gelsd') else (0,))
+    singular = self.real.new_empty((0,))
     return solution, residual, rank, singular
 
 
@@ -3733,77 +3682,6 @@ def _orthogonal(target, given, outs):
     if q.numel():
         ops += _linalg_householder(packed, tau, q)
     return ops + _triangular_part(A.triu.default, {'self': packed[..., :r.shape[-2], :]}, [r])
-
-
-# N. J. Higham, SIAM J. Matrix Anal. Appl. 26(4), 2005, Algorithm 2.3, equations 2.8 and 2.9, Table 2.3
-def _linalg_linear(out, terms):
-    ops = _elementwise('mul', out, terms[0][1], terms[0][0])
-    for scale, value in terms[1:]:
-        ops += _elementwise('add', out, out, value, alpha=scale)
-    return ops
-
-
-def _matrix_exp(target, given, outs):
-    a, (out,), ops = given['self'], outs, []
-    batch, real = a.shape[:-2], a.real.dtype
-    if not a.numel():
-        return _copy(out, a)
-    magnitude, largest = _temporary(a.shape, real), _temporary(batch, real)
-    ops += _elementwise('abs', magnitude, a)
-    ops += _reduced(A.amax.default, {'self': magnitude, 'dim': [-2, -1], 'keepdim': False}, [largest])
-    zero, safe = _temporary(batch, torch.bool), _temporary(batch, real)
-    ops += _elementwise('eq', zero, largest, 0)
-    ops += _elementwise('where', safe, zero, 1, largest)
-    ops += _elementwise('div', magnitude, magnitude, safe[..., None, None])
-    column, norm = _temporary(a.shape[:-2] + a.shape[-1:], real), _temporary(batch, real)
-    ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [column])
-    ops += _reduced(A.amax.default, {'self': column, 'dim': [-1], 'keepdim': False}, [norm])
-    ops += _elementwise('log2', norm, norm)
-    ops += _elementwise('log2', safe, safe)
-    ops += _elementwise('add', norm, norm, safe)
-    ops += _elementwise('sub', norm, norm, math.log2(5.371920351148152))
-    ops += _elementwise('ceil', norm, norm)
-    ops += _elementwise('maximum', norm, norm, 0)
-    ops += _elementwise('neg', safe, norm)
-    ops += _elementwise('exp2', safe, safe)
-    scaled = _temporary(a.shape, a.dtype)
-    ops += _elementwise('mul', scaled, a, safe[..., None, None])
-    powers = {0: _temporary(a.shape, a.dtype)}
-    ops += _linalg_identity(powers[0])
-    for degree, left, right in ((2, scaled, scaled), (4, None, None), (6, None, None)):
-        if degree > 2:
-            left, right = powers[2], powers[degree - 2]
-        powers[degree] = _temporary(a.shape, a.dtype)
-        ops += _product(A.matmul.default, {'self': left, 'other': right}, [powers[degree]])
-    coefficients = (64764752532480000, 32382376266240000, 7771770303897600, 1187353796428800,
-                    129060195264000, 10559470521600, 670442572800, 33522128640, 1323241920,
-                    40840800, 960960, 16380, 182, 1)
-    coefficients = [x / coefficients[0] for x in coefficients]
-    u, v = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
-    for parity, polynomial in ((1, u), (0, v)):
-        high, low = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
-        ops += _linalg_linear(high, [(coefficients[degree + parity], powers[degree - 6]) for degree in (12, 10, 8)])
-        ops += _product(A.matmul.default, {'self': powers[6], 'other': high}, [polynomial])
-        ops += _linalg_linear(low, [(coefficients[degree + parity], powers[degree]) for degree in (6, 4, 2, 0)])
-        ops += _elementwise('add', polynomial, polynomial, low)
-    odd = _temporary(a.shape, a.dtype)
-    ops += _product(A.matmul.default, {'self': scaled, 'other': u}, [odd])
-    denominator, numerator = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
-    ops += _elementwise('sub', denominator, v, odd)
-    ops += _elementwise('add', numerator, v, odd)
-    info = _temporary(batch, torch.int32)
-    ops += _factorized(A.linalg_solve_ex.default, {'A': denominator, 'B': numerator, 'left': True}, [out, info])
-    maximum, count = _temporary((), real), _temporary((), real)
-    predicate, active = _temporary((), torch.bool), _temporary(batch, torch.bool)
-    ops += _reduced(A.amax.default, {'self': norm, 'dim': None, 'keepdim': False}, [maximum])
-    ops += _fill(count, 0) + _elementwise('lt', predicate, count, maximum)
-    square = _temporary(a.shape, a.dtype)
-    body = _product(A.matmul.default, {'self': out, 'other': out}, [square])
-    body += _elementwise('lt', active, count, norm)
-    body += _elementwise('where', out, active[..., None, None], square, out)
-    body += _elementwise('add', count, count, 1)
-    body += _elementwise('lt', predicate, count, maximum)
-    return ops + [_Control(WHILE, [body], predicate)]
 
 
 # G. H. Golub and C. F. Van Loan, Matrix Computations, 3rd ed., section 8.4, Algorithms 8.4.1 and 8.4.3;
@@ -3861,273 +3739,10 @@ def _linalg_rotation(app, aqq, apq, ops, tolerance=None, active=None):
     return cosine, sine, tangent, magnitude, active
 
 
-def _linalg_rotate_columns(matrix, p, q, cosine, sine, ops):
-    first, second = matrix[..., :, p], matrix[..., :, q]
-    a, b, term = (_temporary(first.shape, first.dtype) for _ in range(3))
-    ops += _copy(a, first) + _copy(b, second)
-    conjugate = _linalg_transpose(sine[..., None, None], ops, False, True)[..., 0]
-    ops += _elementwise('mul', first, a, cosine.unsqueeze(-1))
-    ops += _elementwise('mul', term, b, conjugate)
-    ops += _elementwise('sub', first, first, term)
-    ops += _elementwise('mul', second, b, cosine.unsqueeze(-1))
-    ops += _elementwise('mul', term, a, sine.unsqueeze(-1))
-    ops += _elementwise('add', second, second, term)
-
-
 def _linalg_columns(source, indices, out):
     given = {'self': source, 'dim': -1, 'index': indices.unsqueeze(-2).expand(out.shape)}
     return _lifted(A.gather.default, _taken, given, [out]) if source.is_complex() else \
         _taken(A.gather.default, given, [out])
-
-
-def _jacobi_sweeps(body, predicate, n):
-    if n < 2:
-        return []
-    count, remaining = _temporary((), torch.int32), _temporary((), torch.bool)
-    finish = _elementwise('add', count, count, 1) + _elementwise('lt', remaining, count, 30)
-    finish += _elementwise('logical_and', predicate, predicate, remaining)
-    return _fill(count, 0) + [_Control(WHILE, [body + finish], predicate, 30)]
-
-
-def _linalg_converged(active, ops, message):
-    failed = _temporary(active.shape[:-2], torch.bool)
-    info = _temporary(failed.shape, torch.int32)
-    ops += _fold(A.any.dims, {'self': active, 'dim': [-2, -1], 'keepdim': False}, [failed])
-    ops += _elementwise('where', info, failed, 1, 0)
-    ops.append(_Check(info, 3, message))
-
-
-def _eigen_hermitian(target, given, outs):
-    a, (values, vectors), ops = given['A'], outs, []
-    batch, n = a.shape[:-2], a.shape[-1]
-    upper = given.get('UPLO', 'L').upper() == 'U'
-    matrix = _linalg_symmetric(a, ops, True, upper)
-    rotations = _temporary(a.shape, a.dtype) if vectors.numel() else None
-    if rotations is not None:
-        ops += _linalg_identity(rotations)
-    predicate, changed = _temporary((), torch.bool), _temporary(batch, torch.bool)
-    ops += _fill(predicate, n > 1)
-    body = _fill(changed, False)
-    for p in range(n):
-        for q in range(p + 1, n):
-            app, aqq = _temporary(batch, a.real.dtype), _temporary(batch, a.real.dtype)
-            apq = _temporary(batch, a.dtype)
-            body += _copy(app, matrix[..., p, p].real) + _copy(aqq, matrix[..., q, q].real)
-            body += _copy(apq, matrix[..., p, q])
-            c, s, t, magnitude, active = _linalg_rotation(app, aqq, apq, body)
-            body += _elementwise('logical_or', changed, changed, active)
-            _linalg_rotate_columns(matrix, p, q, c, s, body)
-            conjugate = _linalg_transpose(s[..., None, None], body, False, True)[..., 0, 0]
-            _linalg_rotate_columns(matrix.transpose(-2, -1), p, q, c, conjugate, body)
-            if rotations is not None:
-                _linalg_rotate_columns(rotations, p, q, c, s, body)
-            shift = _temporary(batch, a.real.dtype)
-            body += _elementwise('mul', shift, t, magnitude)
-            body += _elementwise('sub', matrix[..., p, p], app, shift)
-            body += _elementwise('add', matrix[..., q, q], aqq, shift)
-            body += _elementwise('where', matrix[..., p, q], active, 0, apq)
-            body += _copy(matrix[..., q, p],
-                           _linalg_transpose(matrix[..., p:p + 1, q:q + 1], body, False, True)[..., 0, 0])
-    body += _fold(A.any.default, {'self': changed, 'dim': None, 'keepdim': False}, [predicate])
-    ops += _jacobi_sweeps(body, predicate, n)
-    if n > 1:
-        magnitude = _temporary(matrix.shape, a.real.dtype)
-        ops += _elementwise('abs', magnitude, matrix)
-        ops += _fill(magnitude.diagonal(dim1=-2, dim2=-1), 0)
-        diagonal = matrix.diagonal(dim1=-2, dim2=-1).real
-        active = _linalg_active(diagonal.unsqueeze(-1), diagonal.unsqueeze(-2), magnitude,
-                                 torch.finfo(a.real.dtype).eps, ops)
-        _linalg_converged(active, ops, 'linalg.eigh Jacobi convergence')
-    indices = _temporary(values.shape, torch.int64)
-    ops.append(_Sort(matrix.diagonal(dim1=-2, dim2=-1).real, values.dim() - 1, n, False, values, indices))
-    if rotations is not None:
-        ops += _linalg_columns(rotations, indices, vectors)
-    return ops
-
-
-# Reference-LAPACK SRC/zgehd2.f, zlahqr.f, ztrevc.f, zlatrs.f and zgeev.f;
-# Ahues and Tisseur, LAPACK Working Note 122, 1997
-def _linalg_entry(r, source, row, column):
-    indices = [r.index(d) for d in range(source.dim() - 3)] + [row, column]
-    return tuple(r('extract', _class(source), *indices, r.const(part, I32), integer=0) for part in (0, 1))
-
-
-def _linalg_schur_deflate(matrix, end, start, active, ops):
-    source, r, batch = torch.view_as_real(matrix), _Region(), matrix.shape[:-2]
-    t, limits = _class(source), torch.finfo(source.dtype)
-    zero, one = r.const(0, t), r.const(1, t)
-    k = r('add', I32, r.index(len(batch)), r.const(1, I32))
-    before = r('sub', I32, k, r.const(1, I32))
-
-    def entry(i, j):
-        return _linalg_entry(r, source, i, j)
-
-    def norm(z):
-        return _complex_value(r, t, 'abs1', z, None, 1, None)
-
-    def extrema(a, b, largest):
-        return r('select', t, r('gt' if largest else 'lt', BOOL, a, b), a, b)
-    lower, upper = entry(k, before), entry(before, k)
-    previous, diagonal = entry(before, before), entry(k, k)
-    small = r.const(limits.tiny * (matrix.shape[-1] / limits.eps), t)
-    eps = r.const(limits.eps, t)
-    below, above, d = norm(lower), norm(upper), norm(diagonal)
-    difference = norm(_complex_value(r, t, 'sub', previous, diagonal, 1, None))
-    threshold = r('add', t, norm(previous), d)
-    left = r('select', I32, r('gt', BOOL, k, r.const(1, I32)),
-             r('sub', I32, k, r.const(2, I32)), r.const(0, I32))
-    right = r('select', I32, r('lt', BOOL, k, r.const(end, I32)),
-              r('add', I32, k, r.const(1, I32)), r.const(end, I32))
-    neighbors = r('add', t,
-                  r('select', t, r('gt', BOOL, k, r.const(1, I32)), norm(entry(before, left)), zero),
-                  r('select', t, r('lt', BOOL, k, r.const(end, I32)), norm(entry(right, k)), zero))
-    threshold = r('select', t, r('eq', BOOL, threshold, zero), neighbors, threshold)
-    ab, ba = extrema(below, above, True), extrema(below, above, False)
-    aa, bb = extrema(d, difference, True), extrema(d, difference, False)
-    total = r('add', t, aa, ab)
-    safe = r('select', t, r('eq', BOOL, total, zero), one, total)
-    lhs = r('mul', t, ba, r('div', t, ab, safe))
-    rhs = extrema(small, r('mul', t, eps, r('mul', t, bb, r('div', t, aa, safe))), True)
-    negligible = r('or', BOOL, r('le', BOOL, below, small),
-                   r('and', BOOL, r('le', BOOL, below, r('mul', t, eps, threshold)), r('le', BOOL, lhs, rhs)))
-    cuts = _temporary((*batch, end), torch.int32)
-    subdiagonal = matrix.diagonal(offset=-1, dim1=-2, dim2=-1)[..., :end]
-    r.done(*(r('select', t, negligible, zero, part) for part in lower),
-           r('select', I32, negligible, k, r.const(0, I32)))
-    outputs = [(subdiagonal.real, _same(cuts.dim())), (subdiagonal.imag, _same(cuts.dim())),
-               (cuts, _same(cuts.dim()))]
-    ops.append(_Generic(cuts.shape, [(source, None)], outputs, r))
-    ops += _reduced(A.amax.default, {'self': cuts, 'dim': [-1], 'keepdim': False}, [start])
-    ops += _elementwise('lt', active, start, end)
-
-
-def _linalg_schur_shift(matrix, end, start, count, shift, ops):
-    source, r, t = torch.view_as_real(matrix), _Region(), _class(matrix.real)
-    zero, one = r.const(0, t), r.const(1, t)
-
-    def entry(i, j):
-        return _linalg_entry(r, source, i, j)
-
-    def call(op, z, w=None):
-        return _complex_value(r, t, op, z, w, 1, None)
-
-    def select(test, a, b):
-        return tuple(r('select', t, test, x, y) for x, y in zip(a, b))
-    i, before = r.const(end, I32), r.const(end - 1, I32)
-    bottom, previous = entry(i, i), entry(before, before)
-    u = call('mul', call('sqrt', entry(before, i)), call('sqrt', entry(i, before)))
-    x = call('mul', call('sub', previous, bottom), (r.const(.5, t), zero))
-    unorm, xnorm = call('abs1', u), call('abs1', x)
-    scale = r('select', t, r('gt', BOOL, unorm, xnorm), unorm, xnorm)
-    scale = r('select', t, r('eq', BOOL, scale, zero), one, scale)
-    xs, us = call('div', x, (scale, zero)), call('div', u, (scale, zero))
-    y = call('mul', (scale, zero), call('sqrt', call('add', call('mul', xs, xs), call('mul', us, us))))
-    dot = r('add', t, r('mul', t, xs[0], y[0]), r('mul', t, xs[1], y[1]))
-    y = select(r('lt', BOOL, dot, zero), call('neg', y), y)
-    empty = r('eq', BOOL, unorm, zero)
-    denominator = select(empty, (one, zero), call('add', x, y))
-    made = select(empty, bottom, call('sub', bottom, call('mul', u, call('div', u, denominator))))
-    first = _load(r, 1, start, I32)
-    after = r('select', I32, r('lt', BOOL, first, i), r('add', I32, first, r.const(1, I32)), i)
-    iteration = r('add', I32, _load(r, 2, count, I32), r.const(1, I32))
-    tenth = r('eq', BOOL, r('rem', I32, iteration, r.const(10, I32)), r.const(0, I32))
-    twentieth = r('eq', BOOL, r('rem', I32, iteration, r.const(20, I32)), r.const(0, I32))
-    exceptional = select(twentieth, bottom, entry(first, first))
-    sub = select(twentieth, entry(i, before), entry(after, first))
-    exceptional = call('add', exceptional, (r('mul', t, r.const(.75, t), call('abs', sub)), zero))
-    made = select(tenth, exceptional, made)
-    r.done(*made)
-    shape = shift.shape
-    ops.append(_Generic(shape, [(source, None), (start, _aligned(start, shape)), (count, _aligned(count, shape))],
-                        [(shift.real, _same(shift.dim())), (shift.imag, _same(shift.dim()))], r))
-
-
-def _linalg_hessenberg(matrix, vectors, ops):
-    batch, n = matrix.shape[:-2], matrix.shape[-1]
-    if vectors is not None:
-        ops += _linalg_identity(vectors)
-    for j in range(n - 1):
-        tau, beta = _temporary(batch, matrix.dtype), _temporary(batch, matrix.real.dtype)
-        v = _linalg_reflector(matrix[..., j + 1:, j], tau, beta, ops)
-        _linalg_reflect(matrix[..., j + 1:, :], v, tau, ops, True, True)
-        _linalg_reflect(matrix[..., :, j + 1:], v, tau, ops, False)
-        if vectors is not None:
-            _linalg_reflect(vectors[..., :, j + 1:], v, tau, ops, False)
-        ops += _copy(matrix[..., j + 1, j], beta)
-        ops += _fill(matrix[..., j + 2:, j], 0)
-
-
-def _linalg_schur(matrix, vectors, ops):
-    batch, n = matrix.shape[:-2], matrix.shape[-1]
-    bound = 30 * max(10, n)
-    for end in reversed(range(1, n)):
-        start, active = _temporary(batch, torch.int32), _temporary(batch, torch.bool)
-        count, predicate = _temporary((), torch.int32), _temporary((), torch.bool)
-        shift, remaining = _temporary(batch, matrix.dtype), _temporary((), torch.bool)
-        _linalg_schur_deflate(matrix, end, start, active, ops)
-        ops += _fill(count, 0) + _fold(A.any.default, {'self': active}, [predicate])
-        body = []
-        _linalg_schur_shift(matrix, end, start, count, shift, body)
-        for j in range(end):
-            column = _temporary((*batch, 2), matrix.dtype)
-            leading, enabled = _temporary(batch, torch.bool), _temporary(batch, torch.bool)
-            first = _temporary(batch, matrix.dtype)
-            body += _elementwise('eq', leading, start, j)
-            body += _elementwise('ge', enabled, j, start)
-            body += _elementwise('logical_and', enabled, enabled, active)
-            body += _elementwise('sub', first, matrix[..., j, j], shift)
-            body += _elementwise('where', column[..., 0], leading, first, matrix[..., j, max(0, j - 1)])
-            body += _elementwise('where', column[..., 1], leading, matrix[..., j + 1, j],
-                                 matrix[..., j + 1, max(0, j - 1)])
-            tau, beta = _temporary(batch, matrix.dtype), _temporary(batch, matrix.real.dtype)
-            v = _linalg_reflector(column, tau, beta, body)
-            body += _elementwise('where', tau, enabled, tau, 0)
-            _linalg_reflect(matrix[..., j:j + 2, :], v, tau, body, True, True)
-            _linalg_reflect(matrix[..., :, j:j + 2], v, tau, body, False)
-            if vectors is not None:
-                _linalg_reflect(vectors[..., :, j:j + 2], v, tau, body, False)
-            if j:
-                body += _elementwise('logical_not', leading, leading)
-                body += _elementwise('logical_and', enabled, enabled, leading)
-                body += _elementwise('where', matrix[..., j, j - 1], enabled, beta, matrix[..., j, j - 1])
-                body += _elementwise('where', matrix[..., j + 1, j - 1], enabled, 0, matrix[..., j + 1, j - 1])
-        _linalg_schur_deflate(matrix, end, start, active, body)
-        body += _fold(A.any.default, {'self': active}, [predicate])
-        body += _elementwise('add', count, count, 1) + _elementwise('lt', remaining, count, bound)
-        body += _elementwise('logical_and', predicate, predicate, remaining)
-        ops.append(_Control(WHILE, [body], predicate, bound))
-        info = _temporary(batch, torch.int32)
-        ops += _elementwise('where', info, active, end + 1, 0)
-        ops.append(_Check(info, 3, 'linalg.eig Hessenberg QR convergence'))
-
-
-def _linalg_eigenvectors(matrix, vectors, out, ops):
-    batch, n, limits = matrix.shape[:-2], matrix.shape[-1], torch.finfo(matrix.real.dtype)
-    for j in range(n):
-        column = _temporary((*batch, n, 1), matrix.dtype)
-        ops += _fill(column, 0) + _fill(column[..., j, 0], 1)
-        if j:
-            triangle = _temporary((*batch, j, j), matrix.dtype)
-            rhs = _temporary((*batch, j, 1), matrix.dtype)
-            scale = _temporary((*batch, 1), matrix.real.dtype)
-            minimum = _linalg_pivot_magnitude(matrix[..., j, j], ops)
-            ops += _elementwise('mul', minimum, minimum, limits.eps)
-            ops += _elementwise('maximum', minimum, minimum, limits.tiny * (n / limits.eps))
-            ops += _copy(triangle, matrix[..., :j, :j])
-            diagonal = triangle.diagonal(dim1=-2, dim2=-1)
-            ops += _elementwise('sub', diagonal, diagonal, matrix[..., j, j].unsqueeze(-1))
-            magnitude = _linalg_pivot_magnitude(diagonal, ops)
-            tiny = _temporary(diagonal.shape, torch.bool)
-            ops += _elementwise('lt', tiny, magnitude, minimum.unsqueeze(-1))
-            ops += _elementwise('where', diagonal, tiny, minimum.unsqueeze(-1), diagonal)
-            ops += _elementwise('neg', rhs, matrix[..., :j, j:j + 1])
-            ops += _linalg_triangular(triangle, rhs, column[..., :j, :], True, scale=scale)
-            ops += _copy(column[..., j, :], scale)
-        transformed = _temporary(column.shape, column.dtype)
-        ops += _product(A.matmul.default, {'self': vectors, 'other': column}, [transformed])
-        lengths = _temporary((*batch, 1), matrix.real.dtype)
-        normalized = _linalg_lengths(transformed, lengths, ops)
-        ops += _copy(out[..., :, j:j + 1], normalized)
 
 
 def _linalg_range_scale(a, small, ops, maximum=None):
@@ -4145,32 +3760,6 @@ def _linalg_range_scale(a, small, ops, maximum=None):
     ops += _elementwise('minimum', desired, desired, 1 / small)
     ops += _elementwise('div', scale, desired, safe)
     return scale
-
-
-def _eigen(target, given, outs):
-    a, values, ops = given['self'], outs[0], []
-    batch, n = a.shape[:-2], a.shape[-1]
-    vectors = outs[1] if len(outs) > 1 else None
-    if not n:
-        return _copy(values, a.diagonal(dim1=-2, dim2=-1)) + ([] if vectors is None else _copy(vectors, a))
-    matrix = _temporary(a.shape, values.dtype)
-    schur = _temporary(a.shape, values.dtype) if vectors is not None else None
-    maximum = _linalg_component_maximum(a, [-2, -1], ops)
-    finite = _temporary(batch, torch.bool)
-    info = _temporary(batch, torch.int32)
-    limits = torch.finfo(a.real.dtype)
-    small = math.sqrt(limits.tiny) / limits.eps
-    ops += _elementwise('lt', finite, maximum, math.inf)
-    ops += _elementwise('where', info, finite, 0, 1)
-    ops.append(_Check(info, 4, 'torch.linalg.eig: input tensor should not contain infs or NaNs.'))
-    scale = _linalg_range_scale(a, small, ops, maximum)
-    ops += _elementwise('mul', matrix, a, scale[..., None, None])
-    _linalg_hessenberg(matrix, schur, ops)
-    _linalg_schur(matrix, schur, ops)
-    if vectors is not None:
-        _linalg_eigenvectors(matrix, schur, vectors, ops)
-    ops += _elementwise('div', values, matrix.diagonal(dim1=-2, dim2=-1), scale.unsqueeze(-1))
-    return ops
 
 
 def _linalg_lengths(matrix, lengths, ops, normalize=True):
@@ -4193,174 +3782,6 @@ def _linalg_lengths(matrix, lengths, ops, normalize=True):
     normalized = _temporary(matrix.shape, matrix.dtype)
     ops += _elementwise('div', normalized, matrix, safe.unsqueeze(-2))
     return normalized
-
-
-def _linalg_complete_columns(columns, lengths, out, ops):
-    m, k = columns.shape[-2:]
-    projector = _temporary((*columns.shape[:-2], m, m), columns.dtype)
-    ops += _linalg_identity(projector)
-    for j in range(out.shape[-1]):
-        diagonal = projector.diagonal(dim1=-2, dim2=-1).real
-        index = _temporary((*columns.shape[:-2], 1), torch.int64)
-        ops += _extreme(A.argmax.default, {'self': diagonal, 'dim': -1, 'keepdim': True}, [index])
-        candidate = _temporary((*columns.shape[:-2], m, 1), columns.dtype)
-        ops += _linalg_columns(projector, index, candidate)
-        if j:
-            previous = out[..., :, :j]
-            row = _linalg_transpose(previous, ops, True, True)
-            coefficient = _temporary((*columns.shape[:-2], j, 1), columns.dtype)
-            projection = _temporary(candidate.shape, columns.dtype)
-            for _ in range(2):
-                ops += _product(A.matmul.default, {'self': row, 'other': candidate}, [coefficient])
-                ops += _product(A.matmul.default, {'self': previous, 'other': coefficient}, [projection])
-                ops += _elementwise('sub', candidate, candidate, projection)
-        norm = _temporary((*columns.shape[:-2], 1), lengths.dtype)
-        unit = _linalg_lengths(candidate, norm, ops)
-        destination = out[..., :, j:j + 1]
-        if j < k:
-            zero = _temporary((*columns.shape[:-2], 1), torch.bool)
-            ops += _elementwise('eq', zero, lengths[..., j:j + 1], 0)
-            ops += _elementwise('where', destination, zero.unsqueeze(-2), unit, columns[..., :, j:j + 1])
-        else:
-            ops += _copy(destination, unit)
-        row = _linalg_transpose(destination, ops, True, True)
-        change = _temporary(projector.shape, projector.dtype)
-        ops += _product(A.matmul.default, {'self': destination, 'other': row}, [change])
-        ops += _elementwise('sub', projector, projector, change)
-
-
-# Z. Drmac and K. Veselic, LAPACK Working Note 196, one-sided Jacobi; Reference-LAPACK SRC/dgesvj.f and zgesvj.f
-def _singular(target, given, outs):
-    a, (u, singular, vh), ops = given['A'], outs, []
-    wide = a.shape[-2] < a.shape[-1]
-    source = _linalg_transpose(a, ops, wide, wide)
-    matrix = _temporary(source.shape, source.dtype)
-    ops += _copy(matrix, source)
-    batch, (m, n), real = source.shape[:-2], source.shape[-2:], source.real.dtype
-    tolerance = math.sqrt(m) * torch.finfo(real).eps
-    if not n:
-        return ops + (_linalg_identity(u) if u.numel() else []) + (_linalg_identity(vh) if vh.numel() else [])
-    vectors = _temporary((*batch, n, n), a.dtype) if given.get('compute_uv', True) else None
-    if vectors is not None:
-        ops += _linalg_identity(vectors)
-    predicate, changed = _temporary((), torch.bool), _temporary(batch, torch.bool)
-    ops += _fill(predicate, n > 1)
-    body = _fill(changed, False)
-    for p in range(n):
-        for q in range(p + 1, n):
-            lp, lq = _temporary((*batch, 1), real), _temporary((*batch, 1), real)
-            up = _linalg_lengths(matrix[..., :, p:p + 1], lp, body)
-            uq = _linalg_lengths(matrix[..., :, q:q + 1], lq, body)
-            correlation = _temporary((*batch, 1, 1), a.dtype)
-            body += _product(A.matmul.default, {'self': _linalg_transpose(up, body, True, True), 'other': uq},
-                              [correlation])
-            app, aqq, apq = _temporary(batch, real), _temporary(batch, real), _temporary(batch, a.dtype)
-            scale, zero = _temporary(batch, real), _temporary(batch, torch.bool)
-            body += _elementwise('maximum', scale, lp[..., 0], lq[..., 0])
-            body += _elementwise('eq', zero, scale, 0)
-            body += _elementwise('where', scale, zero, 1, scale)
-            body += _elementwise('div', app, lp[..., 0], scale)
-            body += _elementwise('div', aqq, lq[..., 0], scale)
-            ratio, magnitude = _temporary(batch, real), _temporary(batch, real)
-            normal, active, tiny, larger = (_temporary(batch, torch.bool) for _ in range(4))
-            body += _elementwise('minimum', ratio, app, aqq)
-            body += _elementwise('ge', normal, ratio, torch.finfo(real).tiny / torch.finfo(real).eps)
-            body += _elementwise('abs', magnitude, correlation[..., 0, 0])
-            body += _elementwise('gt', active, magnitude, tolerance)
-            body += _elementwise('logical_not', tiny, normal)
-            body += _elementwise('logical_and', tiny, tiny, active)
-            body += _elementwise('logical_and', normal, normal, active)
-            body += _elementwise('ge', larger, lp[..., 0], lq[..., 0])
-            body += _elementwise('mul', apq, correlation[..., 0, 0], app)
-            body += _elementwise('mul', apq, apq, aqq)
-            body += _elementwise('mul', app, app, app)
-            body += _elementwise('mul', aqq, aqq, aqq)
-            c, s, _, _, _ = _linalg_rotation(app, aqq, apq, body, active=normal)
-            body += _elementwise('logical_or', changed, changed, active)
-            _linalg_rotate_columns(matrix, p, q, c, s, body)
-            if vectors is not None:
-                _linalg_rotate_columns(vectors, p, q, c, s, body)
-            correction, candidate = _temporary(up.shape, a.dtype), _temporary(up.shape, a.dtype)
-            selected = _temporary(batch, torch.bool)
-            conjugate = _linalg_transpose(correlation, body, False, True)
-            body += _elementwise('mul', correction, uq, conjugate)
-            body += _elementwise('sub', candidate, up, correction)
-            body += _elementwise('mul', candidate, candidate, lp.unsqueeze(-1))
-            body += _elementwise('logical_not', selected, larger)
-            body += _elementwise('logical_and', selected, selected, tiny)
-            body += _elementwise('where', matrix[..., :, p:p + 1], selected[..., None, None],
-                                  candidate, matrix[..., :, p:p + 1])
-            body += _elementwise('mul', correction, up, correlation)
-            body += _elementwise('sub', candidate, uq, correction)
-            body += _elementwise('mul', candidate, candidate, lq.unsqueeze(-1))
-            body += _elementwise('logical_and', selected, larger, tiny)
-            body += _elementwise('where', matrix[..., :, q:q + 1], selected[..., None, None],
-                                  candidate, matrix[..., :, q:q + 1])
-    body += _fold(A.any.default, {'self': changed, 'dim': None, 'keepdim': False}, [predicate])
-    ops += _jacobi_sweeps(body, predicate, n)
-    lengths = _temporary(singular.shape, real)
-    unit = _linalg_lengths(matrix, lengths, ops)
-    if n > 1:
-        gram = _temporary((*batch, n, n), a.dtype)
-        ops += _product(A.matmul.default, {'self': _linalg_transpose(unit, ops, True, True), 'other': unit}, [gram])
-        magnitude, active = _temporary(gram.shape, real), _temporary(gram.shape, torch.bool)
-        ops += _elementwise('abs', magnitude, gram)
-        ops += _fill(magnitude.diagonal(dim1=-2, dim2=-1), 0)
-        ops += _elementwise('gt', active, magnitude, tolerance)
-        _linalg_converged(active, ops, 'linalg.svd Jacobi convergence')
-    indices = _temporary(singular.shape, torch.int64)
-    ops.append(_Sort(lengths, lengths.dim() - 1, n, True, singular, indices))
-    if vectors is not None:
-        columns, right = _temporary(unit.shape, unit.dtype), _temporary(vectors.shape, vectors.dtype)
-        ops += _linalg_columns(unit, indices, columns) + _linalg_columns(vectors, indices, right)
-        left = _temporary((*batch, m, vh.shape[-2] if wide else u.shape[-1]), a.dtype)
-        _linalg_complete_columns(columns, singular, left, ops)
-        ops += _copy(u, right if wide else left)
-        ops += _copy(vh, _linalg_transpose(left if wide else right, ops, True, True))
-    return ops
-
-
-def _pseudoinverse(target, given, outs, default_tolerance_dtype=torch.float64):
-    a, (out,), ops = given['self'], outs, []
-    if not a.numel():
-        return _copy(out, a.transpose(-2, -1))
-    batch, (m, n), k = a.shape[:-2], a.shape[-2:], min(a.shape[-2:])
-    values = _temporary((*batch, k), a.real.dtype)
-    if given['hermitian']:
-        vectors = _temporary(a.shape, a.dtype)
-        ops += _eigen_hermitian(A._linalg_eigh.default, {'A': a, 'UPLO': 'L', 'compute_v': True}, [values, vectors])
-        left, right = vectors, _linalg_transpose(vectors, ops, True, True)
-    else:
-        u, vh = _temporary((*batch, m, k), a.dtype), _temporary((*batch, k, n), a.dtype)
-        ops += _singular(A._linalg_svd.default, {'A': a, 'full_matrices': False, 'compute_uv': True}, [u, values, vh])
-        left, right = _linalg_transpose(vh, ops, True, True), _linalg_transpose(u, ops, True, True)
-    absolute, maximum = _temporary(values.shape, values.dtype), _temporary(batch, values.dtype)
-    ops += _elementwise('abs', absolute, values)
-    ops += _reduced(A.amax.default, {'self': absolute, 'dim': [-1], 'keepdim': False}, [maximum])
-    batch = out.shape[:-2]
-    atol, rtol = given.get('atol'), given.get('rtol', given.get('rcond'))
-    tolerance_dtype = values.dtype
-    for value in (atol, rtol):
-        tolerance_dtype = torch.promote_types(tolerance_dtype, value.dtype if isinstance(value, torch.Tensor)
-                                               else default_tolerance_dtype)
-    atol = 0 if atol is None else atol
-    if rtol is None:
-        default = max(m, n) * torch.finfo(a.real.dtype).eps
-        positive = _temporary(batch, torch.bool)
-        rtol = _temporary(batch, tolerance_dtype)
-        ops += _elementwise('gt', positive, atol, 0)
-        ops += _elementwise('where', rtol, positive, 0, default)
-    tolerance = _temporary(batch, tolerance_dtype)
-    ops += _elementwise('mul', tolerance, maximum, rtol)
-    ops += _elementwise('maximum', tolerance, tolerance, atol)
-    keep, reciprocal = _temporary((*batch, k), torch.bool), _temporary((*batch, k), values.dtype)
-    ops += _elementwise('gt', keep, absolute, tolerance.unsqueeze(-1))
-    ops += _elementwise('where', reciprocal, keep, values, 1)
-    ops += _elementwise('reciprocal', reciprocal, reciprocal)
-    ops += _elementwise('where', reciprocal, keep, reciprocal, 0)
-    scaled = _temporary((*batch, *left.shape[-2:]), left.dtype)
-    ops += _elementwise('mul', scaled, left, reciprocal.unsqueeze(-2))
-    return ops + _product(A.matmul.default, {'self': scaled, 'other': right}, [out])
 
 
 # Reference-LAPACK SRC/dgels.f, zgels.f, dgelsy.f and zgelsy.f
@@ -4528,7 +3949,7 @@ def _least_squares(target, given, outs):
     b, out = (b.unsqueeze(-1), solution.unsqueeze(-1)) if vector else (b, solution)
     m, n = a.shape[-2:]
     driver = _lstsq_driver(a, given.get('driver'))
-    if not min(m, n) or not b.shape[-1] and driver in ('gels', 'gelsy'):
+    if not min(m, n) or not b.shape[-1]:
         ops += _fill(out, 0) + _fill(rank, 0) + _fill(singular, 0)
         if driver == 'gels':
             return ops + _fill(residual, 0)
@@ -4541,42 +3962,13 @@ def _least_squares(target, given, outs):
             rcond = torch.finfo(a.real.dtype).eps * max(m, n)
         if driver == 'gels':
             _linalg_least_qr(scaled, rhs, out, raw, maximum, ops)
-        elif driver == 'gelsy':
+        else:
             packed = _temporary(a.shape, a.dtype)
             tau, pivots = _temporary((*a.shape[:-2], min(m, n)), a.dtype), \
                 _temporary((*a.shape[:-2], min(m, n)), torch.int32)
             ops += _linalg_geqrf(scaled, packed, tau, pivots)
             _linalg_least_rank(packed, rank, rcond, ops)
             _linalg_least_complete(packed, tau, pivots, rank, rhs, out, ops)
-        else:
-            k, batch = min(m, n), a.shape[:-2]
-            vectors = bool(b.shape[-1])
-            u, vh = _temporary((*batch, m, k) if vectors else (0,), a.dtype), \
-                _temporary((*batch, k, n) if vectors else (0,), a.dtype)
-            ops += _singular(A._linalg_svd.default, {'A': scaled, 'full_matrices': False, 'compute_uv': vectors},
-                              [u, singular, vh])
-            threshold = _temporary(batch, a.real.dtype)
-            keep, count = _temporary(singular.shape, torch.bool), _temporary(singular.shape, torch.int64)
-            tolerance = torch.finfo(a.real.dtype).eps if rcond < 0 else rcond
-            if driver == 'gelsd':
-                tolerance = 0 if k == 1 else torch.finfo(a.real.dtype).eps / 2 if rcond <= 0 or rcond >= 1 else rcond
-            ops += _elementwise('mul', threshold, singular[..., 0], tolerance)
-            if driver == 'gelss':
-                ops += _elementwise('maximum', threshold, threshold, torch.finfo(a.real.dtype).tiny)
-            ops += _elementwise('gt', keep, singular, threshold.unsqueeze(-1)) + _copy(count, keep)
-            ops += _reduced(A.sum.dim_IntList, {'self': count, 'dim': [-1], 'keepdim': False}, [rank])
-            if vectors:
-                reciprocal = _temporary(singular.shape, a.real.dtype)
-                ops += _elementwise('where', reciprocal, keep, singular, 1)
-                ops += _elementwise('reciprocal', reciprocal, reciprocal)
-                ops += _elementwise('where', reciprocal, keep, reciprocal, 0)
-                transformed = _temporary((*out.shape[:-2], k, out.shape[-1]), out.dtype)
-                ops += _product(A.matmul.default, {'self': _linalg_transpose(u, ops, True, True), 'other': rhs},
-                                  [transformed])
-                ops += _elementwise('mul', transformed, transformed, reciprocal.unsqueeze(-1))
-                ops += _product(A.matmul.default, {'self': _linalg_transpose(vh, ops, True, True), 'other': transformed},
-                                  [out])
-            ops += _elementwise('div', singular, singular, numerator.unsqueeze(-1))
         _linalg_least_unscale(out, numerator, denominator, ops)
         if raw is not None:
             ops += _elementwise('div', raw, raw, denominator[..., None, None])
@@ -6433,33 +5825,9 @@ def _concatenated(target, given, outs):
     return ops
 
 
-# metal_ir.h metal_ir_control, METAL_IR_WHILE: one range run again while the predicate is nonzero, tested before every
-# trip (`bound` a known trip maximum, 0 none)
-WHILE = 1
-
-
-class _Control:
-    def __init__(self, kind, arms, predicate, bound=0):
-        self.kind, self.arms, self.predicate, self.bound = kind, arms, predicate, bound
-        self.place, self.node = GPU, 0
-
-
-class _Segment:
-    def __init__(self, segment, ops):
-        self.segment, self.ops = segment, ops
-        self.place, self.node = GPU, 0
-
-
 def _placed(ops, place, node):
     for g in ops:
-        g.place = place
-        if not hasattr(g, 'scope'):
-            g.node = node
-        if isinstance(g, _Segment):
-            _placed(g.ops, place, node)
-        if isinstance(g, _Control):
-            for arm in g.arms:
-                _placed(arm, place, node)
+        g.place, g.node = place, node
 
 
 # design/torch-source-lowering-change-request.md item 1; design/compilation-composition-change-request.md, "Complete
@@ -6469,14 +5837,10 @@ SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWI
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
            A._linalg_det: _determinant, A._linalg_slogdet: _determinant,
-           A.linalg_lu: _unpacked_lu, A.linalg_pinv: _pseudoinverse, A.linalg_lstsq: _least_squares,
+           A.linalg_lu: _unpacked_lu, A.linalg_lstsq: _least_squares,
            A._linalg_check_errors: _checked,
            **dict.fromkeys(ASSERTIONS, _asserted),
            **dict.fromkeys(ORTHOGONAL, _orthogonal), A.triu: _triangular_part, A.tril: _triangular_part,
-           A.linalg_matrix_exp: _matrix_exp,
-           A._linalg_eigh: _eigen_hermitian,
-           **dict.fromkeys((A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals), _eigen),
-           A._linalg_svd: _singular,
            **dict.fromkeys((*CONVOLUTION, *TRANSPOSED, A.convolution), _convolving),
            **dict.fromkeys((*MAXIMUM, *AVERAGE, *INDEXED), _pooled), **dict.fromkeys(PAD, _padded),
            **dict.fromkeys((*FILLS, *EMPTY, A.arange), _factory), **dict.fromkeys(REDUCTIONS, _reduced),
@@ -6557,11 +5921,6 @@ def _lowering(local, page):
         transpose = metadata.is_contiguous() and not metadata.is_complex()
         return lambda args, kwargs, outs: _determinant(local.target, _operands(local.target, args, kwargs), outs,
                                                        transpose)
-    if packet is A.linalg_pinv:
-        metadata = _given(local, _names(local))['self'].meta['val']
-        dtype = torch.float32 if metadata.device.type in ('mps', 'metal') else torch.float64
-        return lambda args, kwargs, outs: _pseudoinverse(local.target, _operands(local.target, args, kwargs), outs,
-                                                        dtype)
     if local.target in SYMBOLIC:
         return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)
     if packet in LINEAR:
@@ -6928,100 +6287,34 @@ def _specialized(ir, placed, item, operands, ops, given):
     return value
 
 
-# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
-class _Instantiated:
-    def __init__(self, projection):
-        self.projection, self.root = projection, projection.root
-        self.values, self.storage, self.blocks = {}, {}, {}
-        self.nodes = {(region.id, node): index for index, (region, node) in enumerate(
-            (region, node) for region in self.root.region.regions for node in region.ir.order)}
+def _instantiate(ir, tensors, given, spec, stream=0):
+    RANDOM.update(state=None, sites=0, stream=stream)
+    ops, values = [], {}
+    nodes = {node: index for index, node in enumerate(ir.order)}
 
-    def home(self, scope, key, segment=None):
-        ir = self.root.region.regions[scope].ir
-        if key not in ir.homes:
-            return None
-        value = ir.homes[key][0]
-        selected = segment if (segment, value) in self.projection.wires \
-            else self.storage.get((scope, value))
-        homes = self.projection.homes_by_scope[scope] if selected is None \
-            else self.projection.homes_by_segment[selected]
-        return homes[0][key][0]
+    def placed(key):
+        return tensors[key][0] if key in tensors else None
 
-    def read(self, scope, key):
-        ir = self.root.region.regions[scope].ir
-        if key in ir.homes and (scope, ir.homes[key][0]) in self.storage:
-            return self.home(scope, key)
-        return self.values[scope][key] if key in self.values[scope] else self.home(scope, key)
+    def read(key):
+        return values[key] if key in values else placed(key)
 
-    def remember(self, ir, key, value, segment):
-        self.values[ir.region.id][key] = value
-        if key in ir.homes and isinstance(value, torch.Tensor):
-            v = ir.homes[key][0]
-            home = self.home(ir.region.id, key, segment)
-            if home is not None and _key(home) == _key(value):
-                self.storage[ir.region.id, v] = segment if (segment, v) in self.projection.wires \
-                    else self.storage.get((ir.region.id, v))
+    def remember(key, value):
+        values[key] = value
         form = ir.forms.get(key)
         if isinstance(form, tuple):
             for (_, leaf), made in zip(form[1], pytree.tree_leaves(value)):
                 if leaf != key:
-                    self.remember(ir, leaf, made, segment)
-
-    def locate(self, ops, ir, node, segment):
-        for op in ops:
-            if hasattr(op, 'scope'):
-                continue
-            op.scope, op.segment = ir.region.id, segment
-            op.node = self.nodes.get((ir.region.id, node), len(self.nodes))
-            op.place = CPU if _device(ir, (node, ir.sharding.get(node))) == 'cpu' else GPU
-            if isinstance(op, _Control):
-                for arm in op.arms:
-                    self.locate(arm, ir, node, segment)
-
-    def enter(self, segment, given):
-        ir = self.root.region.regions[segment.scope].ir
-        inputs = {item[2]: given[item[3]] for item in ir.program if item[0] == 'input'}
-        ops = []
-        for key in segment.inputs:
-            if key not in ir.homes or (segment.id, ir.homes[key][0]) not in self.projection.wires:
-                continue
-            source = inputs[key] if key in inputs else self.read(segment.scope, key)
-            target = self.home(segment.scope, key, segment.id)
-            if _key(source) != _key(target):
-                ops += _assign(target, source)
-            self.remember(ir, key, target, segment.id)
-        if ops:
-            self.locate(ops, ir, ir.program[segment.first][2][0], segment.id)
-        return ops
-
-    def region(self, region, given):
-        ir, ops, current = region.ir, [], None
-        self.values[region.id] = {}
-        for position, item in enumerate(ir.program):
-            kind, reads, key, operand = item
-            segment = self.projection.segmented.items[region.id][position]
-            if segment != current:
-                block = _Segment(segment, self.enter(self.projection.segmented.segments[segment], given))
-                block.scope = region.id
-                self.blocks[segment] = block
-                ops.append(block)
-            current = segment
-            emitted = self.blocks[segment].ops
-            if kind == 'output':
-                node, keys = operand
-                return ops, map_arg(node.args[0], lambda n: self.read(region.id, keys[n]))
-            first = len(emitted)
-            placed = lambda k: self.home(region.id, k, segment)
-            value = _specialized(ir, placed, item, [self.read(region.id, read) for read in reads], emitted, given)
-            if kind == 'input' and key in ir.homes and (segment, ir.homes[key][0]) in self.projection.wires:
-                value = placed(key)
-            self.remember(ir, key, value, segment)
-            self.locate(emitted[first:], ir, key[0], segment)
-
-
-def _instantiate(ir, projection, given, spec, stream=0):
-    RANDOM.update(state=None, sites=0, stream=stream)
-    ops, result = _Instantiated(projection).region(ir.region, given)
+                    remember(leaf, made)
+    for item in ir.program:
+        kind, reads, key, operand = item
+        if kind == 'output':
+            node, keys = operand
+            result = map_arg(node.args[0], lambda n: read(keys[n]))
+            break
+        first = len(ops)
+        remember(key, _specialized(ir, placed, item, [read(r) for r in reads], ops, given))
+        _placed(ops[first:], CPU if _device(ir, (key[0], ir.sharding.get(key[0]))) == 'cpu' else GPU,
+                nodes.get(key[0], len(nodes)))
     if RANDOM['state'] is not None:
         ops.append(_stepped(RANDOM['state']))
     return ops, pytree.tree_unflatten(pytree.tree_leaves(result), spec)
@@ -7199,14 +6492,6 @@ class _Builder:
     # metal_ir.h `identity`: the producer's identity of an operation and of the values it first names, (function,
     # call ordinal, FX node position) of the call's graph, kept through every transformation (metal_ir_operation_info)
     def generic(self, g):
-        if isinstance(g, _Segment):
-            first = self.lib.metal_ir_operations(self.p)
-            for inner in g.ops:
-                self.generic(inner)
-            if not hasattr(self, 'segments'):
-                self.segments = {}
-            self.segments[g.segment] = first, self.lib.metal_ir_operations(self.p)
-            return
         if isinstance(g, _Check):
             self.identity = self.base | g.node
             operation = self.lib.metal_ir_check(self.p, self.value(g.info), g.code, self.identity)
@@ -7220,24 +6505,6 @@ class _Builder:
                                                    mesh.Q]
             return sort(self.p, self.value(g.x), g.axis, g.k, int(g.descending), self.value(g.values),
                         self.value(g.indices), g.place, self.identity)
-        if isinstance(g, _Control):
-            bounds = [self.lib.metal_ir_operations(self.p)]
-            children = []
-            for arm in g.arms:
-                for inner in arm:
-                    handle = self.generic(inner)
-                    if isinstance(inner, _Control):
-                        children.append(handle)
-                bounds.append(self.lib.metal_ir_operations(self.p))
-            first, last = bounds
-            control = self.lib.metal_ir_control
-            control.restype, control.argtypes = mesh.U, [C.c_void_p, mesh.U, mesh.U, mesh.U, mesh.U, mesh.U, mesh.Q]
-            handle = control(self.p, g.kind, first, last, last, self.value(g.predicate), g.bound)
-            parent = self.lib.metal_ir_control_parent
-            parent.restype, parent.argtypes = None, [C.c_void_p, mesh.U, mesh.U]
-            for child in children:
-                parent(self.p, child, handle)
-            return handle
         self.identity = self.base | g.node
         lib, p = self.lib, self.p
         inputs, outputs = [self.value(t) for t, _ in g.inputs], [self.value(t) for t, _ in g.outputs]
@@ -7413,24 +6680,11 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
     # its pages of `ir.page` bytes (metal_ir_value_paged)
     def instance(k, j):
         if (k, j) not in standins:
-            ir, projection = irs[k], AllocationProjection(irs[k])
-            copies, allocated = {}, dict(projection.allocations)
-            for root, allocation in allocated.items():
-                scope, v, segment = root
-                own = ir.region.regions[scope].ir
-                dtype, numel, _ = own.layouts[v]
-                if scope == 0 and segment is None:
-                    pages = 0 if own.values[v].run else -(-numel * dtype.itemsize // own.page)
-                    copies[root] = raw[k, 0][v] if j and v in rated[k] else [standin((k, v, j, pages, own.page), dtype, numel)]
-                    allocated[root] = allocation._replace(function=k, index=v)
-                elif segment is not None and len(projection.segmented.segments) == 1:
-                    numerical = projection.numerical[scope, v]
-                    copies[root] = copies[numerical]
-                    allocated[root] = allocated[numerical]._replace(root=root, domain=allocation.domain)
-                else:
-                    copies[root] = [torch.empty(numel, dtype=dtype, device='meta')]
-            raw[k, j] = [copies[projection.numerical[0, v]] for v in range(len(ir.values))]
-            standins[k, j] = projection.realize(copies, allocated)
+            ir, copies = irs[k], []
+            for v, (dtype, numel, _) in enumerate(ir.layouts):
+                pages = 0 if ir.values[v].run else -(-numel * dtype.itemsize // ir.page)
+                copies.append(raw[k, 0][v] if j and v in rated[k] else [standin((k, v, j, pages, ir.page), dtype, numel)])
+            raw[k, j], standins[k, j] = copies, _homes(ir, copies)
         return standins[k, j]
 
     def storage(k, v, j):
@@ -7446,22 +6700,19 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             # the function, its call's result is its delivered leaves (_deliver `ir.landed`), each over its landing
             # value's stand-in, and its passed-through leaves (Compiled `passed`) the call's own inputs here
             output, keys = next(item[3] for item in ir.program if item[0] == 'output')
-            places, passed = instance(k, j).homes_by_scope[0][0] if ir.landed else {}, compiled[k].passed
+            places, passed = instance(k, j)[0] if ir.landed else {}, compiled[k].passed
             leaves = [places[keys[leaf]][0] if o in ir.landed else inputs[passed[o]] if o in passed else None
                       for o, leaf in enumerate(pytree.tree_leaves(output.args))]
             result = pytree.tree_unflatten(leaves, compiled[k].spec) if any(x is not None for x in leaves) else None
             rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': None})
             return result
-        ops, result = _instantiate(ir, instance(k, j), inputs, compiled[k].spec, row)
+        ops, result = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec, row)
         # docs/provider.md#fragment-coded-weights
         if compiled[k].target is not None:
             for g in ops:
                 _placed([g], compiled[k].target, g.node)
-        projection = instance(k, j)
-        fixed = {_key(projection.standins[projection.numerical[region.id, v]][0]): region.ir.initial[v]
-                 for region in ir.region.regions for v in region.ir.constant_values}
+        fixed = {_key(storage(k, v, j)): ir.initial[v] for v in ir.constant_values}
         builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32), fixed)
-        builder.allocation = projection
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[GPU]), C.byref(machines[CPU]))
         owned[id(builder)] = lambda p=builder.p: compiler.metal_ir_program_free(p)
@@ -7497,10 +6748,9 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its preparation: %s'
                           % (node.name, k, error.value.decode()))
         rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': builder, 'prepared': prepared,
-                     'allocation': instance(k, j),
                      'marks': marks, 'receives': receives, 'sends': sends})
         return result
-    _Program(gm, call).run(*[instance(k, 0).homes_by_scope[0][1][i][0] if k is not None else constant
+    _Program(gm, call).run(*[instance(k, 0)[1][i][0] if k is not None else constant
                              for i, (constant, k) in enumerate(zip(constants, holders))])
     return {'lib': lib, 'recorder': recorder, 'owners': owners, 'rated': rated, 'rows': rows, 'compiler': compiler,
             'device': device, 'inputs': [ir.inputs for ir in irs]}
@@ -7567,41 +6817,8 @@ def _lifetimes(programs, irs):
                 row['own'][vi] = len(irs[k].values) + len(own[k])
                 own[k].append(mesh.Value(section=mesh.Section(bytes=value.bytes), kind=value.kind, state=value.state,
                                          begin=value.begin, end=value.end, run=1))
-        projection = row.get('allocation')
-        if projection is not None:
-            for root, copies in projection.standins.items():
-                if root[2] is not None:
-                    continue
-                vi = row['builder'].roots.get(_key(copies[0]))
-                if vi in row['own']:
-                    projection.allocations[root] = projection.allocations[root]._replace(function=k, index=row['own'][vi])
         row['levels'] = levels
     return own
-
-
-# design/compilation-composition-change-request.md#nested-communication-regions-producer-and-consumer-handoff
-Segment = collections.namedtuple('Segment', 'id scope first end inputs outputs transfers')
-Segmented = collections.namedtuple('Segmented', 'segments items')
-
-
-def _segments(root):
-    region, ir = root.region, root
-    exits = {key for kind, reads, _, _ in ir.program if kind == 'output' for key in reads}
-    if set(ir.transfer_sites) != set(range(len(ir.declared))):
-        raise ValueError('region %d has a declaration without its retained producer site' % region.id)
-    sites = collections.defaultdict(list)
-    for i, site in ir.transfer_sites.items():
-        if not 0 <= site.position < len(ir.program):
-            raise ValueError('region %d has a transfer outside its retained program' % region.id)
-        sites[site.position].append(i)
-    end = len(ir.program)
-    made = {item[2] for item in ir.program if item[2] is not None}
-    inputs = tuple(dict.fromkeys(key for item in ir.program
-                                 for key in ((item[2],) if item[0] == 'input' else item[1])
-                                 if item[0] == 'input' or key not in made))
-    outputs = tuple(item[2] for item in ir.program if item[2] is not None and item[2] in exits)
-    transfers = tuple(i for g in range(end) for i in sites[g])
-    return Segmented((Segment(0, region.id, 0, end, inputs, outputs, transfers),), {region.id: (0,) * end})
 
 
 # design/compilation-composition-change-request.md, "Complete replacement workgroup" (6's stage D): each row's received
@@ -8051,7 +7268,7 @@ def _storages(module, names):
 # design/torch-source-lowering-change-request.md item 2; design/aot-compilation-change-request.md A1;
 # design/compilation-composition-change-request.md, "Withdrawn, 2026-11-09"
 CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop, torch.ops.higher_order.map_impl,
-           torch.ops.higher_order.scan)
+           torch.ops.higher_order.scan, torch.ops.higher_order.switch)
 
 
 def _static(exported):
