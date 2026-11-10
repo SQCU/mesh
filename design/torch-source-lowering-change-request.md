@@ -329,7 +329,7 @@ The operator:
 > "- what matrix_exp returns when more than the fixed number of squarings would be needed;"
 > a runtime error and some NaNs; these are not reasons to stop integrations of other code with other requirements which do not need this endless digression into whether we can reduce the number of error-returning compiled runtime function calls further
 
-(2026-11-09, after item 6 was first written)
+(2026-11-09 20:01)
 
 - **Replaces:** item 5's refusal of `svd`, `eigh`, `pinv` and `lstsq`'s gelsd and gelss on a processor other than the
   CPU, and its refusal of `matrix_exp`.
@@ -366,6 +366,23 @@ The operator:
     with computational complexity controlled by the optional `max_squarings` argument. Theoretically, the number of
     required squarings is `max(0, ceil(log2(norm(A))) - c)` where `norm(A)` is the L1 norm and `c=2.42` for
     float64/complex128, or `c=1.97` for float32/complex64."
+  - JAX, `jax/_src/scipy/linalg.py` (https://github.com/jax-ml/jax/blob/main/jax/_src/scipy/linalg.py), read
+    2026-11-09. `_calc_P_Q`, for float64 and complex128: `maxnorm = 5.371920351148152`,
+    `n_squarings = jnp.maximum(0, jnp.floor(jnp.log2(A_L1 / maxnorm)))`, `A = A / 2 ** n_squarings.astype(A.dtype)`,
+    `idx = jnp.digitize(A_L1, conds)`, `U, V = lax.switch(idx, [_pade3, _pade5, _pade7, _pade9, _pade13], A)`; for
+    float32 and complex64, `maxnorm = 3.925724783138660` and `[_pade3, _pade5, _pade7]`. `_squaring`:
+    `return lax.cond(i < n_squarings, _squaring_precise, _identity, c), None` under
+    `lax.scan(_scan_f, R, jnp.arange(max_squarings, dtype=n_squarings.dtype))`. `expm`:
+    `R = lax.cond(n_squarings > max_squarings, _nan, _compute, (A, P, Q))`, where `_nan` is
+    `return jnp.full_like(A, np.nan)`.
+  - JAX, `jax.lax.cond`, https://docs.jax.dev/en/latest/_autosummary/jax.lax.cond.html: "However, when transformed
+    with vmap() to operate over a batch of predicates, cond is converted to select()."
+  - JAX, `jax/_src/tpu/linalg/eigh.py`, `_eigh_work`, read 2026-11-09: "We turn what was originally a recursive
+    algorithm into an iterative algorithm with an explicit stack." "Each step of the algorithm subdivides a block
+    into two subblocks whose sizes sum to the original block size." The split is
+    `split_point = reductions.nanmedian(_mask(jnp.diag(ufuncs.real(H)), (b,), np.nan))`, the sizes of the two
+    subblocks are `rank` and `b - rank`, where `rank` is a value `split_spectrum` returns, and the steps run under
+    `lax.while_loop(loop_cond, loop_body, (agenda, blocks, eigenvectors))` with `return ~agenda.empty()`.
   - PyTorch 2.15, `torch.linalg.pinv` and `torch.linalg.lstsq`, as quoted in item 5: `pinv` "uses
     torch.linalg.svd() if hermitian= False and torch.linalg.eigh() if hermitian= True"; "'gelss' (full SVD)".
   - A. G. M. Lewis et al., "Large Scale Distributed Linear Algebra With Tensor Processing Units", arXiv:2112.09017
@@ -385,9 +402,12 @@ The operator:
     size, an operand. A block has a compiled size, padded, and its true size is a value.
   - `svd` is Algorithm 2: the polar decomposition, the eigendecomposition of its Hermitian factor, and one product.
   - `pinv` and `lstsq` with gelsd and gelss are the compositions PyTorch states, of that `svd` or `eigh`.
-  - `matrix_exp` is scaling and squaring with `max_squarings` squarings, an operand whose default is JAX's 16. Where
-    more squarings would be needed, the result is NaN and the node's status reports an error, through the check the
-    compiler already has (the operator, above: "a runtime error and some NaNs").
+  - `matrix_exp` is scaling and squaring as `_calc_P_Q`, `_squaring` and `expm` state it. The count `n_squarings`
+    is a value computed from the L1 norm. There are `max_squarings` steps, an operand whose default is JAX's 16;
+    step `i` gives the square where `i < n_squarings` and its input otherwise. Each `lax.cond` and `lax.switch` of
+    the source is a selection among computed values, as JAX states of `cond` under `vmap`, and not a branch. Where
+    `n_squarings > max_squarings` the result is NaN, as `_nan` states, and the node's status reports an error,
+    through the check the compiler already has (the operator, above: "a runtime error and some NaNs").
   - Each matrix multiplication, QR factorization, Cholesky factorization and triangular solve in these is an
     ordinary node of the graph. The placement operand names its processor, on the GPU, the CPU or the Neural
     Engine, and its sharding across nodes, as for any other function; they are scheduled with everything else. No
@@ -398,6 +418,10 @@ The operator:
 - **Stops.** No quoted source says what to write for these. They are not written, and they hold up no other item
   (the operator, above: "these are not reasons to stop integrations of other code with other requirements"):
   - the eigendecomposition of a block at the termination size when that size is more than 1;
+  - how many splits `eigh` makes. In `_eigh_work` the sizes of the two subblocks and the number of steps are decided
+    by the matrix's values, under `lax.while_loop`. No quoted source gives QDWH-eig a number of steps or block sizes
+    that tensor data does not decide. `eigh`, and the `svd`, `pinv` and `lstsq` that use it, are written on a
+    processor other than the CPU once one does; on the CPU item 5 stands;
   - `eig` and `eigvals` of a matrix that is not Hermitian on the GPU or the Neural Engine;
   - which of these nodes the Neural Engine's supplier offers, and at what precision.
 
