@@ -331,8 +331,9 @@ The operator:
 
 (2026-11-09 20:01)
 
-- **Replaces:** item 5's refusal of `svd`, `eigh`, `pinv` and `lstsq`'s gelsd and gelss on a processor other than the
-  CPU, and its refusal of `matrix_exp`.
+- **Replaces:** item 5's refusal of `matrix_exp`. Its refusal of `svd`, `eigh`, `pinv` and `lstsq`'s gelsd and gelss
+  on a processor other than the CPU is replaced once the stops below on `eigh` are lifted; until then item 5's
+  Write stands for them there.
 - **Source:**
   - Y. Nakatsukasa and N. J. Higham, "Stable and efficient spectral divide and conquer algorithms for the symmetric
     eigenvalue decomposition and the SVD", SIAM J. Sci. Comput. 35(3), 2013, pp. A1325–A1349
@@ -394,14 +395,17 @@ The operator:
   - JAX, `jax.numpy.linalg.eig`, https://docs.jax.dev/en/latest/_autosummary/jax.numpy.linalg.eig.html: "At present,
     non-symmetric eigendecomposition is only implemented on the CPU and GPU backends."
 - **Write:**
-  - The polar decomposition is QDWH: `max_iterations` iterations, an operand whose default is JAX's 10, each a QR
-    factorization, or a Cholesky factorization and two triangular solves, with matrix multiplications. The number of
-    iterations run is that operand. Whether the iteration converged within it is a value returned with the result.
-  - `eigh` is QDWH-eig: a polar decomposition splits the matrix into two blocks that share its eigenspaces below and
-    above a split point, and the same is done to each block, to the depth at which blocks reach the termination
-    size, an operand. A block has a compiled size, padded, and its true size is a value.
-  - `svd` is Algorithm 2: the polar decomposition, the eigendecomposition of its Hermitian factor, and one product.
-  - `pinv` and `lstsq` with gelsd and gelss are the compositions PyTorch states, of that `svd` or `eigh`.
+  - The polar decomposition is QDWH as `_qdwh` states it (jax/_src/tpu/linalg/qdwh.py, read 2026-11-09). The
+    coefficients of its steps are computed before any step runs, from `l = eps`, by
+    `while l + tol_l < 1 and k < max_iterations:`; `max_iterations` is an operand whose default is JAX's 10. Each of
+    those steps is a QR factorization where `c > CHOLESKY_CUTOFF`, or a Cholesky factorization and two triangular
+    solves otherwise, with matrix multiplications. Their number is known at compilation. Whether the iteration
+    converged is a value returned with the result. What the source runs after those steps is a stop, below.
+  - Held by the stops below on `eigh`, and not written until they are lifted: `eigh` is QDWH-eig, in which a polar
+    decomposition splits the matrix into two blocks that share its eigenspaces below and above a split point, and
+    the same is done to each block; `svd` is Algorithm 2, the polar decomposition, the eigendecomposition of its
+    Hermitian factor, and one product; `pinv` and `lstsq` with gelsd and gelss are the compositions PyTorch states,
+    of that `svd` or `eigh`.
   - `matrix_exp` is scaling and squaring as `_calc_P_Q`, `_squaring` and `expm` state it. The count `n_squarings`
     is a value computed from the L1 norm. There are `max_squarings` steps, an operand whose default is JAX's 16;
     step `i` gives the square where `i < n_squarings` and its input otherwise. Each `lax.cond` and `lax.switch` of
@@ -422,6 +426,11 @@ The operator:
     by the matrix's values, under `lax.while_loop`. No quoted source gives QDWH-eig a number of steps or block sizes
     that tensor data does not decide. `eigh`, and the `svd`, `pinv` and `lstsq` that use it, are written on a
     processor other than the CPU once one does; on the CPU item 5 stands;
+  - the steps `_qdwh` runs after its computed coefficients are used up: "If l has converged but u still has not,
+    continue with Halley's method (coef = None) until convergence", under
+    `lax.while_loop(cond_fun, body_fun, (k, u, is_not_converged))` with
+    `return jnp.logical_and(is_not_converged, k < max_iterations)`. Their number is decided by the matrix's values.
+    No quoted source says how many to compile;
   - `eig` and `eigvals` of a matrix that is not Hermitian on the GPU or the Neural Engine;
   - which of these nodes the Neural Engine's supplier offers, and at what precision.
 
