@@ -224,9 +224,10 @@ This section is Claude's, not the operator's.
 
 ### The assignment of pages to cables and queue pairs
 
-- **The algorithm** is Graham's list scheduling over the cables and queue pairs between two adjacent nodes. Each of the
-  two bridges computes it when the lists are loaded. This document cites no paper of Graham's, and no source for the
-  division by a cable's bandwidth or for the tie-break.
+- **The algorithm** is Graham's list scheduling (R. L. Graham, "Bounds for Certain Multiprocessing Anomalies", The Bell
+  System Technical Journal 45(9), 1966; design/list-scheduling-sources-2026-11-08.md §2) over the cables and queue
+  pairs between two adjacent nodes. Each of the two bridges computes it when the lists are loaded. No source states
+  the division by a cable's bandwidth or the tie-break.
 - **It takes**, for an ordered pair of adjacent nodes (a → b):
   - the ordered list of a's sends to b, which the schedule gives b as the same ordered list of its receives from a;
   - the cables between a and b, from the map, and each cable's bandwidth;
@@ -245,7 +246,7 @@ This section is Claude's, not the operator's.
   - The process lifecycle is the code of tag `pre-return-20261103`, verbatim (`rdma/mesh-heartbeat.c`;
     `rdma/mesh-link.c` per-port children, their stop, reaping, flush and exit; the holder table).
   - A cable's queue-pair count is `max_qp` − `MESH_PROVIDER_RESERVED_QPS`, the smaller of the two ends', as the code of
-    tag `pre-return-20261103` has it (mesh bd85613e).
+    tag `pre-return-20261103` has it (`rdma/mesh-verbs.h` `device_up`, `max_pairs`).
 - **The collective** (`mesh-collective.{c,h}`, `mesh-dataflow.h`, `mesh-call.h`):
   - one function takes a program's declared transfers (operand ranges and destination ranks) and the map, and writes
     the page lists;
