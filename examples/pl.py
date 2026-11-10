@@ -93,17 +93,24 @@ class Inference(torch.nn.Module):
         return 30 * torch.tanh(logits / 30)
 
 
-# M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, Figure 3
-def placement(nodes):
+# M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, Figure 3; design/unequal-shards-change-request.md item 5;
+# Megatron-LM section 3: the feed-forward block's first weights are cut along their columns (a torch.nn.Linear weight's
+# dimension 0) and its second along its rows (dimension 1) by one entry, mesh dimension 0 with `units`, the tuple of
+# item 1, or with none
+def placement(nodes, units=None):
     def choose(gm, examples):
-        splits = {}
+        splits, cut = {}, 0 if units is None else mesh.Shard(0, units)
         for node in gm.graph.nodes:
             if node.op == 'get_attr' and node.target.endswith('.weight'):
                 layer = node.target.rsplit('.', 2)[-2]
-                if layer in ('queryproj', 'keyproj', 'valueproj', 'denseproj_in', 'denseproj_gate'):
+                if layer in ('queryproj', 'keyproj', 'valueproj'):
                     splits[node.target] = (0, -1)
-                elif layer in ('attnoutproj', 'denseproj_out'):
+                elif layer == 'attnoutproj':
                     splits[node.target] = (-1, 0)
+                elif layer in ('denseproj_in', 'denseproj_gate'):
+                    splits[node.target] = (cut, -1)
+                elif layer == 'denseproj_out':
+                    splits[node.target] = (-1, cut)
         return mesh.Placement(list(range(len(nodes))), nodes, splits)
     return choose
 
@@ -116,7 +123,8 @@ def main():
     block = None
     if not args.load:
         model = Inference().to(device=args.device, dtype=torch.float32)
-        block = Calls(mesh.Function(model, placement(args.nodes), mesh.unit, device=args.device))
+        units = tuple(int(u) for u in os.environ['UNITS'].split(',')) if 'UNITS' in os.environ else None
+        block = Calls(mesh.Function(model, placement(args.nodes, units), mesh.unit, device=args.device))
     return execute(block, (input_ids,), args)
 
 

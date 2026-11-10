@@ -855,7 +855,7 @@ def _partition(ir, operators):
             used, partial, contracted = {int(m) for m in target if m >= 0}, [], {}
             for label in rule.contracting:
                 held = {ir.sharding[o][own.index(label)] for o, own in zip(rule.operands, labels) if label in own}
-                (m,) = held if len(held) == 1 and not rule.fused and not partial else (-1,)
+                (m,) = held if len(held) == 1 and (rule.kind == 'dot' or not rule.fused) and not partial else (-1,)
                 if m >= 0:
                     partial.append(int(m))
                 contracted[label] = m
@@ -865,6 +865,13 @@ def _partition(ir, operators):
                 for want, own in zip(wants, labels):
                     if label in own:
                         want[own.index(label)] = m
+            # design/unequal-shards-change-request.md item 5; Megatron-LM section 3, "The output of the second GEMM is
+            # then reduced across the GPUs": a linear with a bias whose contracted dimension is sharded contracts each
+            # rank's shard without the bias, its output is reduced across ranks, and the bias, held as the reduced
+            # output holds its dimension, is added to the reduced output once
+            biased = rule.fused and bool(partial)
+            if biased:
+                wants[-1] = list(_carry(target, out, labels[-1]))
             whole = {w.label for w in rule.windows if local[out.index(w.label)] >= 0
                      and (rule.operands[w.operand].op in ('placeholder', 'get_attr')
                           or local[out.index(w.label)] not in ir.sharding[rule.operands[w.operand]])}
@@ -885,6 +892,9 @@ def _partition(ir, operators):
                         cuts.append((at, local[at], tuple(after), sharded[window.label]))
             for n, configured in rule.configure(sharded):
                 ir.locals[n] = configured
+            if biased:
+                ir.locals[node] = _with(ir.locals[node], _names(ir.locals[node]), {'bias': None})
+                ir.locals[node, 'bias'] = Local('call_function', A.add.Tensor, (node, rule.operands[-1]), {})
             if rule.kind == 'attention':
                 q, m = len(local) - 2, local[-2]
                 def base(m, extent):
@@ -898,7 +908,7 @@ def _partition(ir, operators):
                 offsets = tuple(base(m, extent) for m, extent in zip(wants[0], _value(query).shape))
                 ir.locals[node] = ir.locals[node]._replace(annotation=AttentionOrigin(
                     start, owned, ir.page, keycuts, tuple(_value(query).shape), offsets))
-            reads = tuple(keys)
+            reads = tuple(keys[:-1] if biased else keys)
             if rule.merged is not None:
                 ir.emit(('call', reads, (rule.merged, 'merged', node), rule.merged))
                 reads = ((rule.merged, 'merged', node),)
@@ -915,17 +925,20 @@ def _partition(ir, operators):
             ir.emit(('call', reads, made[0], node))
             for j, (at, m, after, o) in enumerate(cuts):
                 ir.emit(('window', (made[j],), made[j + 1], (at, m, after, o, None, None, None)))
+            reduced = (node, target, 'reduced') if biased else (node, target)
             if any(m in used for m in partial):
                 (m,) = partial
                 d = [int(s) for s in target].index(m)
                 extent = _shape(ir, key)[d]
-                ir.emit(('collective', (key,), (node, target),
+                ir.emit(('collective', (key,), reduced,
                                    Collective('reduce-scatter', node, (m,), d, len(ir.program),
                                               ir.counts(target[d], extent), ir.displs(target[d], extent),
                                               ir.starts(target[d], extent))))
             elif partial:
-                ir.emit(('collective', (key,), (node, target),
+                ir.emit(('collective', (key,), reduced,
                                    Collective('all-reduce', node, tuple(partial), None, len(ir.program))))
+            if biased:
+                ir.emit(('call', (reduced, keys[-1]), (node, target), (node, 'bias')))
             if target != sharding:
                 _reshard(ir, node, target, sharding)
 

@@ -251,34 +251,43 @@ outstanding, and what of it is outstanding. The standard every change request fo
     source changes do not close R4.
 
 - [unequal-shards-change-request.md](unequal-shards-change-request.md): outstanding, items 1–15. Written 2026-11-09
-  from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4. 2026-11-10, `rdma/mesh_compile.py`:
-  items 1, 15 and 3 are `Shard` (an entry of `splits[name]`: the mesh dimension with its tuple), `_sizes` and
-  `IR.counts`, read by a slice, by the narrowing of a contraction's operands and by `IR.local`; an all-gather, an
-  all-to-all and a reduce-scatter carry the counts (`Collective.counts`) and rank j's block is `counts[j]` elements,
-  placed after the blocks of the ranks before it. 2026-11-10, later, items 2, 12, 9 and 10: a rank's buffer is the
-  `max(counts)` elements of the dimension from its base and its shard the subarray at `starts[rank]` (`IR.bases`,
-  `IR.starts`); `Collective` carries `counts`, `displs` and `starts`, and each lowering sends and places the subarray;
-  the slice of a replicated dimension is a view at the rank's base; `_partition_pad`, the `pad` item and the `narrow`
-  item are deleted; `_region` exchanges the halo from the rank j places away by one collective permute at the largest
-  size over the ranks, and a rank copies its own part where a sender's shard is smaller than that size. Not written:
-  item 2's gather and scatter (no function of the program emits either), item 12's other form, whole padded buffers
-  through an equal-size collective, and its choice (item 6, which decides it, is not written), item 4's mask, and
-  items 5 to 8, 11, 13 and 14. 2026-11-10, later, item 9: where a resharding keeps the sharded dimensions and their
-  counts and changes their mesh dimensions, `_reshard` emits one collective permute (XLA's
-  `ReshardWithCollectivePermute`), its record carrying each place's counts, displacements and starts, and
-  `_collective_permute` sends and places the subarray. Still not written: item 2's gather and scatter. No quoted
-  sentence says where the program emits either: every input and constant is held at every node, a resharding
-  replicates on every device (GSPMD §4.5), and the one transfer from a single device is `_deliver`'s, of a whole
-  output. 2026-11-10, later, item 4: before a call that contracts a dimension whose ranks' shards differ, each operand
-  holding the dimension is written through `_shard_select`, a select on the index along the dimension compared with
-  the rank's `starts` and `counts`, 0 outside the shard, at a rank whose shard is smaller than its buffer (`IR.masks`);
-  the narrowing of a contraction's operands (`IR.trims`) is deleted. The select is its own operation writing a
-  temporary; it is not part of the contraction's region. Item 5: `examples/tp.py` `placement` cuts the feed-forward
-  block's first weights along dimension 0 and its second along dimension 1 by one entry, `Shard(0, units)` where the
-  environment gives `UNITS`; `_partition` then contracts each rank's shard and emits one all-reduce, with no collective
-  before the second product. Not written for item 5: `examples/pl.py`'s placement has no tuple; metal-microbench
-  `tools/prepare_e2b.py` `column_cuts` and `partition` are kept as they are, and `column_cuts` floors cumulative
-  shares, which is not item 1's rounding. No run was made of either item.
+  from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4. Written since, 2026-11-10, in
+  `rdma/mesh_compile.py` unless another file is named:
+  - Items 1, 15 and 3: `Shard` (an entry of `splits[name]`: the mesh dimension with its tuple), `_sizes` and
+    `IR.counts`, read by a slice and by `IR.local`; an all-gather, an all-to-all and a reduce-scatter carry the counts
+    (`Collective.counts`) and rank j's block is `counts[j]` elements, placed after the blocks of the ranks before it.
+  - Items 2, 12, 9 and 10: a rank's buffer is the `max(counts)` elements of the dimension from its base and its shard
+    the subarray at `starts[rank]` (`IR.bases`, `IR.starts`); `Collective` carries `counts`, `displs` and `starts`, and
+    each lowering sends and places the subarray; the slice of a replicated dimension is a view at the rank's base;
+    `_partition_pad`, the `pad` item and the `narrow` item are deleted; `_region` exchanges the halo from the rank j
+    places away by one collective permute at the largest size over the ranks, and a rank copies its own part where a
+    sender's shard is smaller than that size. Where a resharding keeps the sharded dimensions and their counts and
+    changes their mesh dimensions, `_reshard` emits one collective permute (XLA's `ReshardWithCollectivePermute`), its
+    record carrying each place's counts, displacements and starts, and `_collective_permute` sends and places the
+    subarray.
+  - Item 4: before a call that contracts a dimension whose ranks' shards differ, each operand holding the dimension is
+    written through `_shard_select`, a select on the index along the dimension compared with the rank's `starts` and
+    `counts`, 0 outside the shard, at a rank whose shard is smaller than its buffer (`IR.masks`). The select is its own
+    operation writing a temporary; it is not part of the contraction's region. The narrowing of a contraction's
+    operands (`IR.trims`) is deleted.
+  - Item 5: `examples/tp.py` and `examples/pl.py` `placement` cut the feed-forward block's first weights along
+    dimension 0 and its second along dimension 1 by one entry, `Shard(0, units)` where the environment gives `UNITS`;
+    `_partition` then contracts each rank's shard and emits one reduction, with no collective before the second
+    product. A linear with a bias is contracted at each rank without the bias, and the bias is added to the reduced
+    output once, by a call the partition adds after the collective. metal-microbench `tools/prepare_e2b.py`
+    `column_cuts` accumulates item 1's sizes into its cuts, with the packed-column alignment after; `partition` is
+    kept as it is.
+
+  Outstanding:
+  - Item 2's gather and scatter. No quoted sentence says where the program emits either: every input and constant is
+    held at every node, a resharding replicates on every device (GSPMD §4.5), and the one transfer from a single
+    device is `_deliver`'s, of a whole output.
+  - Item 12's other form, whole padded buffers through an equal-size collective, and its choice (item 6, which decides
+    it, is not written).
+  - Items 4 and 5: a run. None was made of either; each was partitioned and lowered in process, rank by rank.
+  - Item 5: a convolution with a bias (`_convolution`, `Rule.fused`) still has its input channels gathered before the
+    product.
+  - Items 6 to 8, 11, 13 and 14.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,
