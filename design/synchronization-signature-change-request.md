@@ -97,9 +97,9 @@
   - the synchronization graph's edges, with their delays.
 - **The algorithm** is the graph module's: `mesh_graph_dependences`, `mesh_graph_synchronization`,
   `mesh_graph_redundant` and `mesh_graph_schedule`.
-- **Produced by** the AOT compilation, from the scheduled value (`ir.Scheduled`, which
-  design/torch-source-lowering-change-request.md states the one schedule produces). Nothing else writes it. No cited
-  code or source names the signature's own type.
+- **Produced by** the AOT compilation, from the lowered IR, and nothing else writes it. Lowering takes the scheduled
+  value (`ir.Scheduled`, design/torch-source-lowering-change-request.md). No cited code or source names the
+  signature's own type.
 - **Consumed by:** it is printed in the three formats of item 2, the monitor's D program is generated from it (item
   4), and its SHA-256 is part of the compiled artifact.
 
@@ -139,10 +139,12 @@ Each takes the signature of item 1 and prints it.
     have at that point in the order of that command queue, thread or bridge, a destructive action stops the process at
     that call. Its printed stack names the code that added it.
   - At the end, any count that differs fails the run, and both signatures are printed in the three formats of item 2.
-  - Each measured run's digest is appended to the review record (metal-microbench
-    output_data/change-request-reviews.jsonl).
-  - Every edge of the signature has to be the image of a data dependence between two of the command queue, the thread
-    and the bridge, and must not be redundant under the 1997 paper's §7, which `mesh_graph_redundant` implements.
+  - A change to the compiler's signature shows twice:
+    - the digest changes for the same captured program, and each measured run's digest is appended to the review
+      record (metal-microbench output_data/change-request-reviews.jsonl);
+    - every edge has to be the image of a data dependence between two of the command queue, the thread and the bridge,
+      and must not be redundant under the 1997 paper's §7, which `mesh_graph_redundant` implements. So a wait with no
+      dependence under it shows before anything runs.
 
 ### 5. Detecting false additions by playback
 
