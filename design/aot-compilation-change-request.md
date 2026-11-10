@@ -645,7 +645,8 @@ algorithm its citation gives, and the change.
 - **The data structure is each value's lag L and the unroll factor u.**
 - **The algorithm is modulo variable expansion** (M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
   scheduling, MICRO 1994), as C3.3 states it: "For each value, L is the smallest lag at which every read of it in
-  execution t happens before its write in execution t + L. The unroll factor u is the largest L."
+  execution t happens before its write in execution t + L. The unroll factor u is the largest L. … A value with no such L
+  fails the plan with `ENOMEM`."
 - **Produced by, consumed by.** A5's allocator takes u. Item 2's IPC graph takes it as each transfer's delay.
 - **State of the code:** design/disjoint-pages-revision-coordination.md D5 refuses a value whose write does not reach
   its own next instance at lag 1. A lone AllGather or AllToAll is refused by it.
@@ -989,7 +990,9 @@ algorithm its citation gives, and the change.
 
 ### 7. Torch's existing kernels on the GPU
 
-The requirement these turns were quoted for is stated in design/torch-source-lowering-change-request.md item 1.
+design/torch-source-lowering-change-request.md item 1 replaces this item: no torch Metal kernel is submitted or
+recorded. That item 1 does not restate the second and third turns below. The fourth is quoted in
+design/plan-to-bridge-change-request.md R2.
 
 > no inlining new numerical backends instead of writing collective and transfer and so on code which schedule the use of
 > existing code, basically.
