@@ -51,6 +51,15 @@ The operator, 2026-11-10 UTC, of plan-to-bridge-change-request.md R4:
 
 > "- Coflow ordering is cited but not required. R4 orders the blocking kind by R5's static schedule; Varys's smallest-bottleneck-first is named and explicitly not asked for." then review the change request, rewrite it if necessary s.t. it establishes that this optimizing solver output / scheduling / lowering property is not an evocative metaphor but is in fact a plain behavioral requirement for runtime execution. if there is no source applying this, we can simply accept that it is an outstanding requirement taht needs placement in the implementation ordering of our current data flow and architecture work
 
+The operator, 2026-11-10, of the review hooks' findings on the commits of this order (comments that are not
+citations, graph walks outside the graph module, and the change-request reviews):
+
+> this, alongside all other inlining and review results, must be acted on as part of this review i suppose
+
+The operator, the same day, of no item having closed:
+
+> is there a vast citational gap we cannot close or do we need to revise our change request documents to be totally closed as specifications of implementations instead of leaving a bunch of 'stops' or apparent free choices up in the air?
+
 ## The reference program
 
 `~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
