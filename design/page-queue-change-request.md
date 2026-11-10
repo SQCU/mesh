@@ -133,6 +133,13 @@ On how parity is shown:
 > "So the bridge main runs today has a machine-crash path." so delete a function header s.t. the code fials on compile
 > instead of failing at runtime, then do the reading and background i just told you to do.
 
+### The operator, 2026-11-10
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+
 ## State of the code
 
 - The bridge, mesh `rdma/mesh-flow.c`, is started for each run with `-I <node>` and one `--link
@@ -184,14 +191,13 @@ This section is Claude's, not the operator's.
 
 - **The data structure** is a list of entries held in each node's region: the zero-copy queue of the operator's
   statement under "The page queue". An entry is one transfer of one page between this node and an adjacent node:
-  `{ page, node, direction, word, position, serial }`.
+  `{ page, node, direction, word, position }`. The document's cited code and sources name no type for these fields.
   - `page`: a page of this node's region: the page sent, or the page a receive lands in.
   - `node`: the adjacent node, by its index in the map: the node a send goes to, or the node a receive comes from.
   - `direction`: send or receive.
   - `word`, `position`: a word of the region and a value. A send is posted once its word reads its value. The page's
     producer stores that value, or, at an intermediate node, the completion of the receive of that page stores it. A
     receive's completion stores its value in its word.
-  - `serial`: the serial of the map the lists were written against.
 - Entries refer to pages already in the region. Nothing is copied. The lists are not a ring: they are written once for
   a compiled program and read again by every execution of it.
 - **Produced by** the collective's function that computes a program's static schedule (the next section), in
@@ -201,12 +207,13 @@ This section is Claude's, not the operator's.
 ### The schedule that writes the page lists
 
 - **The algorithm** is the ported concurrent-flow solve (Garg–Könemann, as the statement under "Interleaving every
-  transfer" names it), with the ported packing, for which this document cites no source. It runs ahead of time over
-  every transfer of a program together: every collective call and pipeline hand-off, over the map's
-  Thunderbolt-5-connected nodes, for any node count. It puts the transfers that block a pipeline stage first.
+  transfer" names it), run ahead of time over every transfer of a program together: every collective call and
+  pipeline hand-off, over the map's Thunderbolt-5-connected nodes, for any node count. It puts the transfers that
+  block a pipeline stage first.
 - **It takes** the program's declared transfers (operand ranges and destination ranks) and, from the map, node-level
   adjacency and each node pair's capacity, the sum of that pair's cables. It takes no cable, queue pair or link
-  identity.
+  identity. The map is the one the resident bridge keeps of the fabric; this document does not state its fields, the
+  function that writes it, or the type of a declared transfer.
 - **It writes** page-list entries on every node a page passes through:
   - the source node's sends;
   - each intermediate node's receive into a page of its own region, and its send of that page, whose `word` is the one
