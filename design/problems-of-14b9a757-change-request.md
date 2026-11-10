@@ -51,6 +51,19 @@ Of items 13 and 14:
 > to get canonical reference examples of this solverkind; other implemetnations surely exist in the apache and mit
 > literature-of-programs
 
+The operator, 2026-11-10:
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something
+> about a source but don't say what algorithm is being used, what data structure is being used, and where it composes
+> in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are
+> introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for
+> that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method
+> justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema
+> in the first `3` cases of change request documents used in the repo history.
+
 ## The functions and the types between them
 
 The stages are those of the reference program `~/schedule-emit` (`schedule_emit/driver.py`, `compile_module`). Each is
@@ -67,6 +80,18 @@ a function from a value to a value:
 In the items below, `mesh_plan` (rdma/mesh-collective.c) is the function that writes the parts listed next, at each
 node, before execution 0; `make()` is the runtime's construction at a node; and the bridge's child process for a
 port (rdma/mesh-flow.c, rdma/mesh-child.c) is the part of the runtime that posts sends and receives.
+
+The types the cited code names for the values that pass between these functions:
+- a node of the exported graph is a node of `ExportedProgram`'s torch.fx.Graph (quoted at item 8);
+- `mesh_plan`'s operand is an array of `struct mesh_function` (rdma/mesh-collective.h). Its transfers are `struct
+  mesh_declared`, whose two ends `from` and `to` are each a `struct mesh_strided`. Its values are `struct mesh_value`,
+  with the fields `begin`, `end` and `lag`;
+- a send's record in the port's child process is `struct prepared_send` (rdma/mesh-flow.c), with its count at `count`
+  and its error count at `count+1`;
+- a membership view's record is `struct mesh_group_view` (rdma/mesh-records.c).
+
+No cited code or source names a type for the persistent request's state, for an interval's colors in the memory
+schedule, or for the structure the load reads in item 11.
 
 What `mesh_plan` writes, each part with the name of its source:
 - **Persistent requests:** one for each compiled function at each node, started once per execution. MPI
@@ -102,7 +127,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
      _tensor_docs.py), a node of the program, with no synchronize and no clone.
   3. The local copy is absent only where the operand is the result with the same type map (MPI's in-place condition).
 - **Composition:** the placement stage writes step 1's send and receive nodes and step 2's `copy_` node into the
-  exported graph. The schedule reads them as nodes of that graph.
+  exported graph. The schedule reads them as nodes of that graph. In `mesh_plan`'s operand each transfer of step 1 is
+  one `struct mesh_declared`, its two tensor views the `from` and the `to`.
 - **Code:**
   - rdma/mesh_compile.py:1480–1484 (`_inside`) raises NotImplementedError for every `all-to-all`: "a member's own piece
     lies in its result only by a copy or a share".
@@ -162,7 +188,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
 - **The algorithm:** none is run. A tensor view node's entry in the memory plan is its base's entry, with the view's offset,
   sizes and strides as torch computes them.
 - **Composition:** the placement stage writes a transfer's end that is a tensor view node as its base's value with that
-  offset, those sizes and those strides (item 10's form), in `mesh_plan`'s operand. `mesh_plan` reads it.
+  offset, those sizes and those strides (item 10's form), as the `from` or the `to` (`struct mesh_strided`) of a
+  `struct mesh_declared` in `mesh_plan`'s operand. `mesh_plan` reads it.
 - **Code:** rdma/mesh_compile.py:1430–1432 names "a view an operator makes" among the ends "in no placed value".
 - **Source:** torch 2.14.0 torch/_tensor_docs.py, `view`: "Returns a new tensor with the same data as the self tensor but
   of a different shape. The returned tensor shares the same data and must have the same number of elements".
@@ -294,7 +321,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   4. **Sharing:** two blocks may share pages exactly where ExecuTorch's test finds their lifetimes disjoint.
   5. **Never freed:** a value whose data is kept across executions (a copy of lag k ≥ 1, and an invariant) is never
      freed, as ExecuTorch's mutable buffers are not. Only these have no lifetime.
-- **Composition:** the compile (rdma/mesh_compile.py) writes each value's pair into `mesh_plan`'s operand. `mesh_plan`
+- **Composition:** the compile (rdma/mesh_compile.py) writes each value's pair into `mesh_plan`'s operand, as the
+  `begin` and the `end` of its `struct mesh_value`. `mesh_plan`
   reads the pairs as the intervals of item 14 and writes the memory plan and the memory schedule from them.
 - **Source:**
   - ExecuTorch documentation, "Concepts", sections Out variant and Memory planning:
@@ -360,7 +388,7 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
      together reach the execution's total.
   7. No buffer is reused before the completion of its posted send is retrieved.
 - **Composition:** `mesh_plan` writes the counters into the persistent request's state. The port's child process
-  writes their values. The program's `wait_tensor` reads them.
+  writes their values, through each send's `struct prepared_send`. The program's `wait_tensor` reads them.
 - **Source:**
   - rdma-core, libibverbs/man/ibv_post_send.3
     (https://raw.githubusercontent.com/linux-rdma/rdma-core/master/libibverbs/man/ibv_post_send.3, NOTES): "The buffers
@@ -397,7 +425,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
      torch's `copy_`, as Megatron-LM copies the rank's pieces into the layer's weight at construction (:156–165).
   6. The whole attribute is loaded only where the node reads it whole.
 - **Composition:** the placement stage (the partitioner) writes steps 1 to 3 as DynamicSlice tensor view nodes in the exported
-  graph, and step 4's never-freed values into `mesh_plan`'s operand. `mesh_plan` gives those values their pages.
+  graph, and step 4's never-freed values into `mesh_plan`'s operand, each a `struct mesh_value` of kind
+  MESH_INVARIANT. `mesh_plan` gives those values their pages.
   make() reads the state_dict and those pages and does steps 5 and 6.
 - **Code:**
   - rdma/mesh-collective.h:678 releases a range sent from a MESH_INVARIANT value once, "with `execution` UINT64_MAX −
@@ -426,7 +455,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   start.
 - **The algorithm:** in the sorted list, an interval that begins before its predecessor ends overlaps it. Such a pair
   is what MPI 4.1 §6.1.11 calls overlapping entries, whose use with a buffer the operation updates "is erroneous".
-- **Composition:** `mesh_plan` computes the list from the destination instructions it writes.
+- **Composition:** `mesh_plan` computes the list from the destination instructions it writes. No cited code or source
+  names a type for a destination instruction.
 - **Code:**
   - rdma/mesh-collective.c refuses no pair of destination instructions whose byte intervals at one node intersect within
     one execution.
@@ -441,8 +471,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
 - **The data structure** is MPI's subarray: `ndims`, then arrays of `ndims` elements (MPI 4.1 §6.1.3). Here a tensor
   view is `dims` followed by `dims` (size, stride) pairs, with no fixed bound.
 - **The algorithm:** none is run; it is a representation.
-- **Composition:** the placement stage writes it for each transfer's end, in `mesh_plan`'s operand. `mesh_plan` reads
-  it.
+- **Composition:** the placement stage writes it for each transfer's end, as `struct mesh_strided` in `mesh_plan`'s
+  operand. `mesh_plan` reads it.
 - **Code:** rdma/mesh-collective.h:430–432 (`MESH_STRIDED_DIMS 8u`, `size[8]`, `stride[8]`); rdma/mesh_compile.py:1441–1443
   refuses more.
 - **Source:** MPI 4.1 §6.1.3 (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node99.htm):
@@ -490,7 +520,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
 - **The algorithm** is ViewId's order: "The comparison is done on the IDs, if they are equal, we use the creator."
   1. A membership view's identifier is (Lamport time, creator), where the creator is (sequencer node, boot).
   2. A persistent request's `serial` is that pair, and every comparison compares the pair.
-- **Composition:** rdma/mesh-records.c writes the pair where it makes a membership view. `mesh_plan` writes it as the
+- **Composition:** rdma/mesh-records.c writes the pair where it makes a membership view (`struct mesh_group_view`).
+  `mesh_plan` writes it as the
   persistent request's `serial`. The comparisons of rdma/mesh-flow.c read it.
 - **Code:**
   - rdma/mesh-records.c:741 makes a membership view `.view=greatest+1`, which is 1 again after every bridge restarts.
@@ -516,7 +547,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   1. The queue pair is moved to the error state (`IB_QPS_ERR`).
   2. All its send-queue completions are consumed.
   3. Each SEND completion taken raises the error count of the record at its `wr_id`.
-- **Composition:** in the runtime, the port's child process writes the error count where it drains (`lanes_flush`).
+- **Composition:** in the runtime, the port's child process writes the error count of the send's `struct
+  prepared_send` where it drains (`lanes_flush`).
   The program's `wait_tensor` reads it (7.3, step 6).
 - **Code:**
   - rdma/mesh-child.c:44–75 (`lanes_flush`) moves each lane with work outstanding to the error state and takes the
@@ -566,7 +598,7 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   6. G is colored by Main Fatcover, Establish All Covers Of C_i and Choose A Cover For C_i as printed, with the left
      edge algorithm (A.0.1) for the non-cyclic remainder. A cyclic interval with no fat cover gets new colors, as
      §3.2.3's second phase states.
-- **Composition:** `mesh_plan` reads 7.1's pairs from its operand, runs steps 1 to 6, and writes each interval's
+- **Composition:** `mesh_plan` reads 7.1's pairs (`struct mesh_value` `begin` and `end`) from its operand, runs steps 1 to 6, and writes each interval's
   colors as the memory schedule: the blocks that hold that value in each of the u executions. The memory plan and the
   page table name those blocks' pages.
 - **Code:**
