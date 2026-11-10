@@ -25,6 +25,11 @@ The operator, 2026-11-09, in order:
 
 > document this as a memorandum which cites the change request document literals so it's easier to 'remember' this ordering across whatever subagent mediated work will be involved in its implementation
 
+The operator, 2026-11-09, later, of a report that item 4 stopped because "Nothing else supplies that order to
+e2b_replay, and the plan runs before pages are placed, so it cannot take the job over yet":
+
+> well our task here isn't to rehabilitate code but to categorically replace it, including categorically replacing inverted control flows e.g. situatinos wehre we pretend client prgorams are running 'before' 'pages' are 'placed'
+
 ## The reference program
 
 `~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
