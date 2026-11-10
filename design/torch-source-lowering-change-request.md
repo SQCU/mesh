@@ -110,6 +110,8 @@ The operator, 2026-11-10:
 > 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
 > 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
 
+(2026-11-10 12:39)
+
 ## The stages
 
 Each requirement is a function of one stage of the compilation, as the reference program `~/schedule-emit` composes
@@ -300,11 +302,11 @@ what "them" names)
   - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.
   - `torch.linalg.matrix_exp` has no such function in LAPACK. Item 6 writes it.
   - Every operator whose method, on the processor the placement names, needs an iteration depth that tensor data
-    decides gets, at export, one plain message that names the operator and says that an iteration depth that depends
-    on data is not compiled (the operator, above: "as long as we emit boring ah ah errors which tell the user in
-    boring ah ah terms that data dependent iteration depth isn't compilable with meshlib"). Off the CPU that includes
-    `eigh`, what is composed from it, and the polar decomposition's Halley continuation, while item 6 states no fixed
-    depth for them.
+    decides gets, from the operator lowering, one plain message that names the operator and says that an iteration
+    depth that depends on data is not compiled (the operator, above: "as long as we emit boring ah ah errors which
+    tell the user in boring ah ah terms that data dependent iteration depth isn't compilable with meshlib"). Off the
+    CPU that includes `eigh`, what is composed from it, and the polar decomposition's Halley continuation, while item
+    6 states no fixed depth for them.
   - The functions cited above are the CPU's. Placement is an operand (the operator, quoted in
     design/aot-compilation-change-request.md A2: "we simply need to consume operands which choose these placements,
     letting us define and implement an optimizing chooser function *later*"). Item 6 states what these operators are
