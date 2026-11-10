@@ -1,0 +1,230 @@
+# Memorandum: the order in which the outstanding compilation requirements are implemented
+
+2026-11-09. Written by Claude at the operator's request, from the session
+`.claude-personal/projects/-Users-mdot-metal-microbench/55974018-f56d-4c8b-8973-6fc61b49140c.jsonl`.
+Code was read at mesh 7df87fe4 and metal-microbench 7483572e; the reference program at `~/schedule-emit` 881a347.
+
+This memorandum is an ordering aid. It is not a change request and not a source: the change requests it quotes, and
+the operator's turns, govern. Where it and a change request differ, the change request is right and this is wrong.
+Its form is its own: the turns, quoted verbatim, then each requirement with the clause it comes from, quoted by file
+and heading. Line estimates are Claude's and are rough; nothing here was measured on the mesh code.
+
+## The turns
+
+The operator, 2026-11-09, in order:
+
+> what of the requirements presented in the change request documents et al  entail subsuming and replacing all features and responsibilities of particular modules, what are the modules in mesh and microbench which need to reach total closure in what order to mitigate/prevent these procrastinatory deluges of edits to obsolete dependent code?
+
+> do our external reuqirements for meshlib allow arbitrary control flow inside of programs or do they require exactly the opposite? Review this. we shall not ocnsider arbitrary python to be part of arbitrary torch; programmers who want to run arbitrary data dependent control flow between sections of linear algebra are to learn to write that sort of code on their own time and outside of our mandate and the library features we provide, which are specifically for torch like tensor apis w/ scheduling, transport, and function fusion as needed to support lowest attainable overhead scheduling and transport.
+
+> contiguity is a scheduled operation that must be justified by a solver; in torch making a tensor contiguous is a *call* which necessarily introduces extra overhead in redundant writes, overconstraint on the placement of literal memory in literal addresses, etcetera. [...] arbitrary extra constraitns includes things like guards, syncs, and waits, by the way, if it somehow wasn't discernible.
+
+> correctness is not a malleable property where code can be made 'more correct' by adding more guards, syncs, waits, calls, constraints, overrides, etcetera; all of those are divergent and unspecified behavior; at least three full weeks of rewrites in this repository happened *only* because agents decided to invent new specifications and requirements at every interface between functions. the slightest hint of modesty or restraint would have resulted in formally correct compile time and runtime callgraphs which preserved every program property the repo gave treatment; the interface-level indulgences specifically and uniquely added errors and runtime faults. if there is anything you should be 'adding' to change requests or other templated work schema for subagents, it should be commentary on only the virtue of retraint and modesty in their assigned work, not presumptions of how problems ought to be approached or interpreted beyond templated work orders.
+
+> what are the requirements from the outstanding topics in the change request documents whose path to implementation is now clarified by the counterfactual program-over-IR and lowerer? this should give us a definite list of requirements and an order in which they must be implemented, alongside a rough estiamte of the numebr of lines of code each ultimately requires if tackled in the right order and by centralizing responsibilities into modules rather than unextensible arboreal inlined sprawl
+
+> document this as a memorandum which cites the change request document literals so it's easier to 'remember' this ordering across whatever subagent mediated work will be involved in its implementation
+
+## The reference program
+
+`~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
+functions across processors as an extension of `torch.export`, in 724 lines and 31 functions. Its README states why
+it exists, its data flow, and its limits. Its data flow, one value in and one value out per stage:
+
+| stage | takes | returns |
+|---|---|---|
+| export | a torch module and example arguments | the exported graph and its call signature |
+| placement | that graph and a placement operand | a copy with each node's processor, and `send`/`recv` nodes where a value crosses processors |
+| devices | the placed graph and a device per processor | a copy with devices filled in and a copy node before each cross-device `send` |
+| schedule | that graph and a cost operand | one graph per processor with nodes in scheduled order, and the storage decisions, as one value |
+| lower | the scheduled value | one function per processor, for one compiler |
+| runtime | the scheduled value, optionally the lowered functions | a callable; it waits only for a processor's arguments and for a value a `recv` reads |
+| archive | the scheduled value | files; and the reverse, with no solve on load |
+
+It is a reference for which module owns which decision and in what order. It is not a reference for page-level
+transport, numerical kernels, fusion, Metal or Core ML: it has none of those.
+
+## The requirements, in order
+
+A later item consumes what an earlier item produces. An item is closed when what it replaces is deleted, checked by
+searching the source for the named functions, not by a status paragraph.
+
+### 1. The scope is static capture; control flow that depends on data, and shapes known only at run time, are rejected once, at export
+
+- **Clauses:**
+  - compilation-composition-change-request.md, "The turns": "supporting all pytorch programs which would be
+    cudagraph compileable".
+  - aot-compilation-change-request.md, "A1. The input is each program's captured dataflow graph, with shapes and
+    types": "the use of cudagraphs style 'shapes are compiled but indexes inside of shapes might not need to be'".
+  - torch-source-lowering-change-request.md, "2. The capture is a static dataflow graph".
+  - The operator's second turn above.
+- **Replaces:** the handling of IF and WHILE whose condition is tensor data: the loop stack, predicate reads and
+  drains (`MetalLoopTest`, `MetalDrain`), trip-count observation, and the scoped regions of
+  compilation-composition-change-request.md "Nested communication regions: producer and consumer handoff", struck
+  on 2026-11-09 ("Withdrawn, 2026-11-09" in that request).
+- **Reference:** `schedule_emit/export.py`, 62 lines.
+- **Estimate:** 60–120 lines. It removes scope, so every later item is smaller once it is done.
+
+### 2. The values that pass between stages have their types in one shared header
+
+- **Clauses:** compilation-composition-change-request.md, "3. Put each representation and decision in its existing
+  owner"; "6. Carry compilation results through their consumers": "finish each producer → representation → consumer
+  connection before extracting auxiliary helpers"; the operator's turn quoted there: "are w running into integratino
+  errors where two interfaces 'don't line up well' because they are literally serializing and deserializing
+  equivalent or related types over and over again".
+- **Replaces:** records that restate another module's result. About 157 struct, enum and class types were declared
+  across the files written on 2026-11-09, 45 of them private to `metal_recording.m`.
+- **Reference:** `schedule_emit/ir.py`, 76 lines: two operators and two data types.
+- **Estimate:** 100–200 lines.
+
+### 3. Placement is an operand; a value that crosses processors gets a send and a receive as nodes of the same graph
+
+- **Clauses:**
+  - compilation-composition-change-request.md, "2. Compose the requests on the same program's representations":
+    "a value's sharding, consumer kind, accesses, lifetimes, transfers and dependences describe the same program
+    through lowering."
+  - plan-to-bridge-change-request.md, "R3. An execution is a task graph"; "R8. A program is its function calls".
+  - torch-capture-change-request.md, "9. Every node replays": "every node runs its captured program by replay, its
+    collectives included."
+  - The operator's third turn above, for any copy this stage adds: a copy is a node the scheduler sees.
+- **Replaces:** compilation-composition-change-request.md, "1. Finish lowering the whole assigned domain": "the split
+  in `rdma/mesh_compile.py program()` where `replayed` excludes nodes whose declarations name transferred values";
+  "5. Consolidate repeated implementations at their shared owner": "`mesh_compile.py _outputs` and `_natives`: both
+  traverse the same call graph".
+- **Reference:** `schedule_emit/placement.py` and `devices.py`, 107 lines.
+- **Estimate:** 300–500 lines in `rdma/mesh_compile.py`. Least certain: Claude has not read that file closely.
+
+### 4. One scheduling solve orders functions and transfers together, in the existing owner, with cost as an operand
+
+- **Clauses:**
+  - compilation-composition-change-request.md, "3.": "`metal_recording.m` consumes the compiled order and lowers it to
+    its backend's execution primitives"; "The second scheduling solve, copied graph walks, runtime placement of
+    program values and alternative execution paths are the existing requests' named replacements, not independent
+    facilities to maintain beside their replacements."
+  - "4. Execute the compiled decisions with the specified runtime semantics": "placement and costs arrive as
+    operands; compilation realizes the graph's storage, transfers, ordering and synchronization."
+  - plan-to-bridge-change-request.md, "R5. The order of transfers is a static schedule with costs".
+  - integration-finishing-change-request.md, "2. A node's replayed commands in the completion-time order"; "3. A
+    weight on each task".
+  - torch-capture-change-request.md, "Source for item 2's execution-time estimates (2026-11-09)": "Replaces: the
+    absence of a producer for t(v), and the consequent constant `HOST_LAG`."
+- **Replaces:** compilation-composition-change-request.md, "6.", items 1–3: "`MetalProgramPrepare` calls
+  `mesh_graph_dependences` and then `mesh_graph_synchronization`, which reconstructs the same dependence edges
+  internally"; "`MetalRecorderProgram` receives call handles and reconstructs its ordering inputs from buffer
+  footprints". `MetalProgramPrepare` is 320 lines; `metal_recording.m` and `tools/e2b_replay.m` call none of
+  `mesh_graph_schedule`, `mesh_graph_list_schedule`, `mesh_graph_completion_times` or `mesh_graph_order`.
+- **Reference:** `schedule_emit/schedule.py`, 164 lines; the solve is about 35.
+- **Estimate:** 100–250 lines in `rdma/mesh-collective.c` (`plan_graph`, `plan_schedule`) and `rdma/mesh-graph.{c,h}`.
+
+### 5. Storage decisions are made by the compile side and reach the runtime as data
+
+- **Clauses:** disjoint-pages-change-request.md, "C3. Claude's proposal: the consolidated revision";
+  plan-to-bridge-change-request.md, "R2. Every page is placed at compile time and named by the page table";
+  compilation-composition-change-request.md, "4.": "Readiness determines firing under the compiled order" and
+  "Replay and host/bridge execution use the emitted decisions; they do not independently choose replacements for
+  them."
+- **Replaces:** lifetime and footprint reconstruction when a program is prepared or loaded.
+- **Reference:** `schedule_emit/schedule.py`, `argument_buffers`, about 30 lines, by Bhattacharyya, Sriram and Lee
+  (1997) and Lam (1988), both already cited by these requests.
+- **Estimate:** 50–150 lines, mostly calls of functions `mesh-graph` already has.
+
+### 6. Lowering is a separate function from the scheduled program to each platform's compiler input
+
+- **Clauses:**
+  - compilation-composition-change-request.md, "Correction: generated target source is the final emission":
+    "generated MSL or native target source is the final source emission of the mesh lowering pipeline, passed to the
+    target compiler. Subsequent mesh transformations do not infer semantics by parsing or matching that output."
+  - "7. Preserve the properties while compiling away the abstract machinery": "Emit fixed target/API operations with
+    bound operands, in the scheduled order" (as amended 2026-11-09, "Withdrawn, 2026-11-09").
+- **Replaces:** in the uncommitted work at metal-microbench 7483572e, the recovery of each call site's address by
+  running `dsymutil` and an `lldb` script over the compiled library (`metal_lower.mm`, `NativeBuild`).
+- **Reference:** `schedule_emit/lower_inductor.py`, 103 lines. It imports nothing from scheduling; what one compiler
+  needs is derived inside it.
+- **Estimate:** 300–600 lines in the existing native compile owner (`metal_lower.mm`, `metal_native.mm`): one function
+  per node that calls that node's functions in scheduled order.
+
+### 7. The runtime binds addresses and calls; it waits only for a value a function reads
+
+- **Clauses:** compilation-composition-change-request.md, "7.", Replaces: "the residual position/task/guard/loop-stack
+  interpreter in `MetalProgramExecute`/`MetalNativeStep`, whole-prefix predicate drains without a reaching-writer
+  justification in `MetalLoopTest`, and repeated static command-kind, cut, pass and binding discovery inside
+  `MetalRowEncode`/`MetalReplayRun`. Compiling an outer caller which still invokes those generic decoders does not
+  complete their replacement."; collective-goals-2026-09-14.md: "the *runtime* is necessarily extremely ismple,
+  ebcause any artificially imposed control flow puts more cache reads and loads in between 'work is ready on peer'
+  and 'work has arrived to this meshnode from peer and is being used'."
+- **Replaces:** `metal_recording.m` from `MetalReplayRun` to the end of the file: about 2,480 lines and 91
+  definitions. Its public interface, 30 functions in `metal_recording.h`, falls to load, bind and call.
+- **Reference:** `schedule_emit/runtime.py`, 75 lines. It examines no graph.
+- **Estimate:** 150–300 lines.
+- **Undecided, the operator's to decide:** whether the capture half of `metal_recording.m` (about its first 2,090
+  lines) remains once the provider publishes the program. No clause read for this memorandum names it.
+
+### 8. One archive format, owned by one module in both directions; loading solves nothing
+
+- **Clauses:** aot-compilation-change-request.md, "A8. The IR operand": "The compilation must carry one IR from
+  partitioning to serialization, as an operand of its own."
+- **Replaces:** about 19 save, load and framing functions across `metal_ir.mm`, `metal_lower.mm`, `metal_recording.m`,
+  `metal_native.mm` and `metal_neural.mm`; the artifact format was revised from version 18 to 22 on 2026-11-09.
+- **Reference:** `schedule_emit/archive.py`, 116 lines.
+- **Estimate:** 200–400 lines.
+
+### 9. Callers use the smaller interface
+
+- **Clauses:** compilation-composition-change-request.md, "5.": "`tools/e2b_replay.m` separately orchestrates prepared
+  work. Compile the required ordering once and consume it through the shared native program; delete displaced
+  orchestration."; plan-to-bridge-change-request.md, "R7. Nothing outside the bridge knows the transport".
+- **Replaces:** orchestration in `tools/e2b_replay.m` (1,718 lines), `tools/native_bench.m` (542) and
+  `rdma/mesh-metal.m` (355).
+- **Reference:** `schedule_emit/driver.py`, 21 lines: it only composes the stages.
+- **Estimate:** 300–500 lines remaining across those callers.
+
+### 10. The synchronization signature is printed from the scheduled program
+
+- **Clauses:** synchronization-signature-change-request.md, "1. The signature: the compiler's own statement of every
+  synchronization"; "3. The monitor: outside the program, only observing".
+- **Replaces:** provenance kept by the runtime for the signature's sake, and the monitor's cases for the control flow
+  item 1 removes.
+- **Estimate:** 100–200 lines joining the scheduled program to the existing `mesh_graph_signature_*` functions.
+
+### 11. Evidence
+
+- **Clauses:** compilation-composition-change-request.md, "Complete replacement workgroup": "E2B must complete prefill
+  and decode on all five nodes"; "Measure decode throughput after prefill and transport overhead/bandwidth as
+  `docs/measurement.md` requires"; integration-finishing-change-request.md, "1. Every mesh machine's bridge runs".
+- **Before timing:** a structural comparison, as in the reference program's samples: the scheduled program holds
+  exactly the exported functions plus one send and one receive per value that crosses, and nothing else; what a
+  compiler generates for a one-processor scheduled program equals what it generates for the exported program.
+- **Estimate:** about 100 lines for the structural comparison, in the existing client tools; none for measurement.
+
+## Why this order
+
+- Item 1 removes scope, so it is first.
+- Items 2–5 are the compile side. They close before item 7, because a runtime can stop deriving a fact only when
+  that fact arrives as data.
+- Item 6 precedes item 7, because the runtime calls what lowering returned.
+- Items 8–11 consume the scheduled program. Of 165 commits in the two repositories on 2026-11-09, about 28 went to
+  signature observation and 12 to save and load, built around the runtime that item 7 replaces, and about 10 to
+  scheduling and native execution.
+
+Until item 7 is closed, these are not edited beyond what items 1–6 force: `bin/mesh-sync-monitor.py` and signature
+records, the artifact save and load formats, the sections of metal-microbench `docs/provider.md` that describe
+runtime behaviour, `tools/e2b_replay.m` and `tools/native_bench.m`.
+
+Summed, the estimates are about 1,800 to 3,300 lines written or revised, and at least 4,500 removed by items 4, 7
+and 9.
+
+## Not covered
+
+The reference program says nothing about these outstanding topics, so this memorandum gives them no order:
+
+- page-level transport and a function that reads a received operand a page at a time
+  (plan-to-bridge-change-request.md "R4. Functions that need an operand whole and functions that take pages in any
+  order"; disjoint-pages-change-request.md);
+- the numerical kernels, specialization and fusion inside the typed compiler (compilation-composition-change-request.md
+  "Performance correction: compile the transformations, not their textual symptoms");
+- Core ML and Neural Engine lowering.
+
+## For whoever is assigned an item
+
+Do the item as its clause states it and nothing else. Add no guard, wait, copy, check, setting or interface the
+clause and the program's dependencies do not require. Name things by what they are: a function, a value, a call.
