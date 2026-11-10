@@ -124,7 +124,7 @@ def execute(block, inputs, args):
         torch.save(torch.utils._pytree.tree_map(lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, result), output)
         mesh_disk.write(args.output, output.getvalue(), 'Torch client output')
     leaves = torch.utils._pytree.tree_leaves(result)
-    print(json.dumps({'steps': args.steps, 'ended': run.ended(), 'signature': run.signature()['digest'],
+    print(json.dumps({'steps': args.steps, 'ended': run.ended(),
                       'outputs': [{'shape': list(x.shape), 'dtype': str(x.dtype)}
                                   for x in leaves if isinstance(x, torch.Tensor)]}), flush=True)
     return result

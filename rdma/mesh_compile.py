@@ -1731,9 +1731,6 @@ def _recorder():
         lib.MetalProgramCheckFailure.restype = C.c_int
         lib.MetalProgramCheckFailure.argtypes = [C.c_void_p, C.POINTER(CheckFailure)]
         lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
-        lib.MetalProgramSignature.restype = C.c_int
-        lib.MetalProgramSignature.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, C.POINTER(mesh_graph.Signature),
-                                              C.c_char_p, C.c_size_t]
         metal.MTLCreateSystemDefaultDevice.restype = C.c_void_p
         RECORDER.append((lib, metal.MTLCreateSystemDefaultDevice))
     return RECORDER[0]
@@ -7230,39 +7227,13 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
     # metal_recording.h MetalProgramHorizon: the program's lag (the plan's horizon), the
-    # executions in flight its allocator ring and signature window cover
+    # executions in flight its allocator ring covers
     horizon = lib.MetalProgramHorizon(program)
-    period = _period({k: b[3] for k, b in enumerate(bound)}, horizon)
-    # design/synchronization-signature-change-request.md items 1 and 2: the compiled program's one signature over its
-    # warm-up and one period of its residues, the plan's composed in by its producer (MetalProgramSignature), kept with
-    # the compiled program as the graph module's forms and its record's bytes
-    if 'signature' in programs:
-        signed = programs['signature']
-    else:
-        replayed = mesh_graph.Signature()
-        status = lib.MetalProgramSignature(program, C.addressof(context), horizon + period, C.byref(replayed), error,
-                                           len(error))
-        if status:
-            raise OSError(status, 'the program\'s signature: %s' % error.value.decode())
-        try:
-            signed = dict(mesh_graph.forms(replayed), record=mesh_graph.record(replayed))
-        finally:
-            mesh_graph.free(replayed)
-    # tools/e2b_replay.m signature_write: the record and its three printed forms beside the prefix MESH_SIGNATURE names,
-    # the mesh-sync-monitor.py operand
-    prefix = os.environ.get('MESH_SIGNATURE')
-    if prefix:
-        written = True
-        for suffix, data in (('.record', signed['record']), ('.mtx', signed['matrix_market'].encode()),
-                             ('.dot', signed['dot'].encode()), ('.txt', signed['space_time'].encode())):
-            written = mesh_disk.write(prefix + suffix, data, 'a MESH_SIGNATURE artifact', 'w') and written
-        if written:
-            print('prepared signature %s digest %s' % (prefix, signed['digest']), flush=True)
     gpu = OBJECT(queue, _SEL(b'device'))
     allocators = (C.c_void_p * horizon)(*[_owned(owned, OBJECT(gpu, _SEL(b'newCommandAllocator')))
                                           for _ in range(horizon)])
     return {'lib': lib, 'queue': queue, 'calls': calls, 'program': program, 'allocators': allocators, 'horizon': horizon,
-            'ended': _owned(owned, OBJECT(gpu, _SEL(b'newSharedEvent'))), 'error': error, 'signature': signed}
+            'ended': _owned(owned, OBJECT(gpu, _SEL(b'newSharedEvent'))), 'error': error}
 
 
 # design/aot-compilation-change-request.md, appendix item 6: block execution p's copy of a call's result, the copy of
@@ -8106,7 +8077,7 @@ def _save_program(context, state, path):
                    irs=[(ir.layouts, ir.inputs, ir.device) for ir in retained['irs']],
                    analysed=(analysed.outstanding, bytes(analysed.orders), bytes(analysed.causes), analysed.norders,
                              bytes(analysed.chains)),
-                   native=_saved_bytes(programs['lib'].MetalProgramSave, replay['program']), signature=replay['signature'])
+                   native=_saved_bytes(programs['lib'].MetalProgramSave, replay['program']))
     return mesh_disk.write(path, b'MESH-AOT\0' + pickle.dumps(payload, protocol=5), 'a compiled mesh program', 'w')
 
 
@@ -8163,7 +8134,7 @@ def _restore_programs(saved, owned):
         rows.append(row)
     return {'lib': lib, 'compiler': compiler, 'device': device, 'recorder': recorder, 'rows': rows,
             'rated': {k: {v for v, _ in inputs.values()} for k, (_, inputs, _) in enumerate(saved['irs'])},
-            'native_record': saved['native'], 'signature': saved['signature'], 'state_data': state_data}
+            'native_record': saved['native'], 'state_data': state_data}
 
 
 def load(path):
@@ -8255,6 +8226,5 @@ def _runner(context, state, make):
         return timed(lambda: _save_program(context, state, path))
     run.save = save
     run.synchronize = lambda: timed(lambda: _finish(state['replay']))
-    run.signature = lambda: state['replay']['signature'] if state['replay'] is not None else None
     weakref.finalize(run, _dropped, context, state)
     return run
