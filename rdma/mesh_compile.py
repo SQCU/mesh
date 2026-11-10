@@ -7269,8 +7269,6 @@ def _storages(module, names):
 # design/compilation-composition-change-request.md, "Withdrawn, 2026-11-09"
 CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop, torch.ops.higher_order.map_impl,
            torch.ops.higher_order.scan, torch.ops.higher_order.switch)
-# design/torch-source-lowering-change-request.md item 5: "`torch.linalg.matrix_exp` has no such function in LAPACK"
-ITERATED = (A.linalg_matrix_exp, A.matrix_exp)
 
 
 def _static(exported):
@@ -7278,9 +7276,6 @@ def _static(exported):
         if node.op == 'call_function' and node.target in CONTROL:
             raise ValueError('%s (%s): a program with dynamic control flow is not compiled '
                              '(design/torch-source-lowering-change-request.md item 2)' % (node.name, node.target))
-        if node.op == 'call_function' and getattr(node.target, 'overloadpacket', None) in ITERATED:
-            raise ValueError('%s (%s): an iteration depth that depends on data is not compiled '
-                             '(design/torch-source-lowering-change-request.md item 5)' % (node.name, node.target))
         for value in pytree.tree_leaves(node.meta.get('val')):
             if isinstance(value, torch.Tensor) and not all(isinstance(size, int) for size in value.shape):
                 raise ValueError('%s: sizes %s; shapes are compiled, a dimension known only at run time is not '
