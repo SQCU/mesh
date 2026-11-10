@@ -118,8 +118,9 @@ them (`schedule_emit/driver.py`, `compile_module`). Each stage is a function fro
   archive (`archive.py`) each take it.
 
 Item 2 is the export stage's scope. Items 1, 5 and 6 are operator lowerings: they run where the exported graph is
-decomposed, before placement and scheduling, and produce nodes of that same graph. Item 3's ordering is the schedule
-stage's.
+decomposed, before the placement stage adds its `send` and `recv` nodes and before scheduling. They take the exported
+graph and the placement operand (design/aot-compilation-change-request.md A2) and produce nodes of that same graph.
+Item 3's ordering is the schedule stage's.
 
 ## Requirements
 
@@ -151,7 +152,7 @@ stage's.
 - **Write:** no torch Metal kernel is ever submitted or recorded again.
   - The data structure is the task graph G = (V, E, w, c) of design/plan-to-bridge-change-request.md R3 (O. Sinnen,
     Task Scheduling for Parallel Systems, Wiley, 2007), carried in the IR of design/aot-compilation-change-request.md
-    A8. A vertex is a function, one operation of the exported graph (item 2). An edge is a page passed between
+    A8. A vertex is a function: a node of the graph the operator lowering produces. An edge is a page passed between
     functions.
   - The operator lowering produces these vertices and edges, for each function on whichever Apple silicon backend it
     is placed, the CPU included. Placement and the schedule (item 3) consume them. They are typed and scheduled as
@@ -232,10 +233,13 @@ stage's.
     (design/aot-compilation-change-request.md A3). It produces the scheduled value: for each processor, its functions
     in order. Lowering, the runtime and the archive each take that scheduled value.
   - Each function's processor is the placement operand together with the sharding.
-  - The algorithm for the order is the completion-time linear program (joint-compilation row 8),
-    `mesh_graph_completion_times` then `mesh_graph_heap_order` (rdma/mesh-graph.c), with each function's length from
-    the weighting operand. The order is published with the AOT compiled static link schedule. Each processor's
-    commands are written in that order.
+  - The algorithm for the order is the completion-time linear program, which minimizes C_max and then ΣC_j over the
+    completion times C_j (C.-Y. Chen, arXiv 2205.02474, 2022; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein,
+    Math. Oper. Res. 22(3), 1997; M. Queyranne, Math. Programming 58, 1993; H. Isermann, OR Spektrum 4, 1982),
+    followed by the heap order by those completion times (M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2). These are the
+    sources design/joint-compilation.md lists in its row 8. Each function's length is from the weighting operand. In
+    rdma/mesh-graph.c the two are `mesh_graph_completion_times` and `mesh_graph_heap_order`. The order is published
+    with the AOT compiled static link schedule. Each processor's commands are written in that order.
   - The data structure for the orderings is Sriram's synchronization graph. Only the edges of a synchronization graph
     that preserves the inter-processor communication graph are written: "the synchronization edges alone determine
     the interaction between processors".
@@ -289,7 +293,7 @@ what "them" names)
   - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
   - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.
   - `torch.linalg.matrix_exp` has no such function in LAPACK. Item 6 writes it.
-  - Any other operator whose method needs a number of iterations that depends on tensor data gets, at export, one
+  - An operator whose lowering would repeat a body a number of times that tensor data decides gets, at export, one
     plain message that names the operator and says that an iteration depth that depends on data is not compiled (the
     operator, above: "as long as we emit boring ah ah errors which tell the user in boring ah ah terms that data
     dependent iteration depth isn't compilable with meshlib").
