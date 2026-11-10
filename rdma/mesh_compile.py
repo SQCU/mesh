@@ -3800,6 +3800,186 @@ def _orthogonal(target, given, outs):
     return ops + _triangular_part(A.triu.default, {'self': packed[..., :r.shape[-2], :]}, [r])
 
 
+# design/torch-source-lowering-change-request.md item 6; JAX jax/_src/scipy/linalg.py, expm, _calc_P_Q, _solve_P_Q,
+# _squaring, _pade3, _pade5, _pade7, _pade9 and _pade13
+PADE = {3: (120., 60., 12., 1.), 5: (30240., 15120., 3360., 420., 30., 1.),
+        7: (17297280., 8648640., 1995840., 277200., 25200., 1512., 56., 1.),
+        9: (17643225600., 8821612800., 2075673600., 302702400., 30270240., 2162160., 110880., 3960., 90., 1.),
+        13: (64764752532480000., 32382376266240000., 7771770303897600., 1187353796428800., 129060195264000.,
+             10559470521600., 670442572800., 33522128640., 1323241920., 40840800., 960960., 16380., 182., 1.)}
+SQUARING = {torch.float64: (5.371920351148152, (1.495585217958292e-002, 2.539398330063230e-001,
+                                                9.504178996162932e-001, 2.097847961257068e+000), (3, 5, 7, 9, 13)),
+            torch.float32: (3.925724783138660, (4.258730016922831e-001, 1.880152677804762e+000), (3, 5, 7))}
+
+
+def _matrix_exponential(target, given, outs, max_squarings=16):
+    a, (out,), ops = given['self'], outs, []
+    if not a.numel():
+        return ops
+    batch, real = a.shape[:-2], a.real.dtype
+    if real not in SQUARING:
+        raise TypeError('%s: A.dtype=%s is not supported.' % (target, a.dtype))
+    maxnorm, conds, degrees = SQUARING[real]
+    magnitude, column = _temporary(a.shape, real), _temporary((*batch, a.shape[-1]), real)
+    norm, count, factor = (_temporary(batch, real) for _ in range(3))
+    ops += _elementwise('abs', magnitude, a)
+    ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [column])
+    ops += _reduced(A.amax.default, {'self': column, 'dim': [-1], 'keepdim': False}, [norm])
+    ops += _elementwise('div', count, norm, maxnorm)
+    ops += _elementwise('log2', count, count)
+    ops += _elementwise('floor', count, count)
+    ops += _elementwise('maximum', count, count, 0)
+    ops += _elementwise('exp2', factor, count)
+    scaled = _temporary(a.shape, a.dtype)
+    ops += _elementwise('div', scaled, a, factor[..., None, None])
+
+    def product(left, right):
+        made = _temporary(a.shape, a.dtype)
+        ops.extend(_product(A.matmul.default, {'self': left, 'other': right}, [made]))
+        return made
+
+    def combined(terms, made=None):
+        for coefficient, matrix in terms:
+            if made is None:
+                made = _temporary(a.shape, a.dtype)
+                ops.extend(_elementwise('mul', made, matrix, coefficient))
+            else:
+                ops.extend(_elementwise('add', made, made, matrix, alpha=coefficient))
+        return made
+    powers = {0: _temporary(a.shape, a.dtype)}
+    ops += _linalg_identity(powers[0])
+    powers[2] = product(scaled, scaled)
+    powers[4] = product(powers[2], powers[2])
+    for degree in range(6, min(max(degrees), 9), 2):
+        powers[degree] = product(powers[degree - 2], powers[2])
+    u, v = None, None
+    for j, degree in enumerate(degrees):
+        b, parts = PADE[degree], []
+        for parity in (1, 0):
+            low = [(b[k + parity], powers[k]) for k in range(6 if degree == 13 else degree - 1, -1, -2)]
+            if degree == 13:
+                high = combined([(b[k + 6 + parity], powers[k]) for k in (6, 4, 2)])
+                parts.append(combined(low, product(powers[6], high)))
+            else:
+                parts.append(combined(low))
+        parts[0] = product(scaled, parts[0])
+        if not j:
+            u, v = parts
+            continue
+        below = _temporary(batch, torch.bool)
+        ops += _elementwise('lt', below, norm, conds[j - 1])
+        ops += _elementwise('where', u, below[..., None, None], u, parts[0])
+        ops += _elementwise('where', v, below[..., None, None], v, parts[1])
+    p, q, result = (_temporary(a.shape, a.dtype) for _ in range(3))
+    ops += _elementwise('add', p, u, v)
+    ops += _elementwise('sub', q, v, u)
+    ops += _factorization(A.linalg_solve_ex.default, {'A': q, 'B': p, 'left': True},
+                          [result, _temporary(batch, torch.int32)])
+    for i in range(max_squarings):
+        active = _temporary(batch, torch.bool)
+        square = product(result, result)
+        ops += _elementwise('gt', active, count, i)
+        ops += _elementwise('where', result, active[..., None, None], square, result)
+    over, info = _temporary(batch, torch.bool), _temporary(batch, torch.int32)
+    ops += _elementwise('gt', over, count, max_squarings)
+    ops += _elementwise('where', out, over[..., None, None], math.nan, result)
+    ops += _elementwise('where', info, over, 1, 0)
+    return ops + [_Check(info, 4, 'linalg.matrix_exp')]
+
+
+# design/torch-source-lowering-change-request.md item 6; JAX jax/_src/tpu/linalg/qdwh.py, qdwh, _qdwh, _use_qr and
+# _use_cholesky
+def _polar(x, u, h, converged, max_iterations=10):
+    ops, batch, real = [], x.shape[:-2], x.real.dtype
+    m, n = x.shape[-2:]
+    eps = float(torch.finfo(real).eps)
+    magnitude = _temporary(x.shape, real)
+    column, row = _temporary((*batch, n), real), _temporary((*batch, m), real)
+    one_norm, inf_norm, alpha_inverse = (_temporary(batch, real) for _ in range(3))
+    zero = _temporary(batch, torch.bool)
+    ops += _elementwise('abs', magnitude, x)
+    ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [column])
+    ops += _reduced(A.amax.default, {'self': column, 'dim': [-1], 'keepdim': False}, [one_norm])
+    ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-1], 'keepdim': False}, [row])
+    ops += _reduced(A.amax.default, {'self': row, 'dim': [-1], 'keepdim': False}, [inf_norm])
+    ops += _elementwise('rsqrt', alpha_inverse, one_norm)
+    ops += _elementwise('rsqrt', inf_norm, inf_norm)
+    ops += _elementwise('mul', alpha_inverse, alpha_inverse, inf_norm)
+    ops += _elementwise('eq', zero, one_norm, 0)
+    ops += _elementwise('where', alpha_inverse, zero, 1, alpha_inverse)
+    current = _temporary(x.shape, x.dtype)
+    ops += _elementwise('mul', current, x, alpha_inverse[..., None, None])
+    l, tol_l = eps, 10.0 * eps / 2.0
+    tol_norm = tol_l ** (1 / 3)
+    qr_coefs, chol_coefs = [], []
+    while l + tol_l < 1 and len(qr_coefs) + len(chol_coefs) < max_iterations:
+        l2 = l * l
+        dd = (4 * (1 / l2 - 1) / l2) ** (1 / 3)
+        sqd = (1.0 + dd) ** (1 / 2)
+        a = sqd + (2 - dd + 2 * (2 - l2) / (l2 * sqd)) ** (1 / 2)
+        b = (a - 1) ** 2 / 4
+        c = a + b - 1
+        l = l * (a + b * l2) / (1 + c * l2)
+        e = b / c
+        if c > 100:
+            qr_coefs.append(((a - e) / c ** (1 / 2), c ** (1 / 2), e))
+        else:
+            chol_coefs.append((a - e, c, e))
+
+    def updated(made, weight, e):
+        after = _temporary(x.shape, x.dtype)
+        ops.extend(_elementwise('mul', after, current, e))
+        ops.extend(_elementwise('add', after, after, made, alpha=weight))
+        return after
+    for a_minus_e_by_sqrt_c, sqrt_c, e in qr_coefs:
+        y = _temporary((*batch, m + n, n), x.dtype)
+        ops += _elementwise('mul', y[..., :m, :], current, sqrt_c)
+        ops += _linalg_identity(y[..., m:, :])
+        packed, tau = _temporary(y.shape, y.dtype), _temporary((*batch, n), y.dtype)
+        q, made = _temporary(y.shape, y.dtype), _temporary(x.shape, x.dtype)
+        ops += _linalg_geqrf(y, packed, tau)
+        ops += _linalg_householder(packed, tau, q)
+        q2 = _linalg_transpose(q[..., m:, :], ops, True, True)
+        ops += _product(A.matmul.default, {'self': q[..., :m, :], 'other': q2}, [made])
+        current = updated(made, a_minus_e_by_sqrt_c, e)
+    halley = max_iterations - len(qr_coefs) - len(chol_coefs)
+    previous = None
+    for a_minus_e, c, e in chol_coefs + [(3 - 1 / 3, 3, 1 / 3)] * halley:
+        uh = _linalg_transpose(current, ops, True, True)
+        gram, y = _temporary((*batch, n, n), x.dtype), _temporary((*batch, n, n), x.dtype)
+        ops += _product(A.matmul.default, {'self': uh, 'other': current}, [gram])
+        ops += _elementwise('mul', gram, gram, c)
+        diagonal = gram.diagonal(dim1=-2, dim2=-1)
+        ops += _elementwise('add', diagonal, diagonal, 1)
+        ops += _linalg_cholesky(gram, y, _temporary(batch, torch.int32))
+        z, w = _temporary((*batch, n, m), x.dtype), _temporary((*batch, n, m), x.dtype)
+        ops += _linalg_triangular(y, uh, z, False)
+        ops += _linalg_triangular(_linalg_transpose(y, ops, True, True), z, w, True)
+        previous, current = current, updated(_linalg_transpose(w, ops, True, True), a_minus_e, e)
+    if previous is None:
+        ops += _fill(converged, False)
+    else:
+        difference, squares = _temporary(x.shape, x.dtype), _temporary(x.shape, real)
+        distance = _temporary(batch, real)
+        ops += _elementwise('sub', difference, current, previous)
+        ops += _elementwise('abs', squares, difference)
+        ops += _elementwise('mul', squares, squares, squares)
+        ops += _reduced(A.sum.dim_IntList, {'self': squares, 'dim': [-2, -1], 'keepdim': False}, [distance])
+        ops += _elementwise('sqrt', distance, distance)
+        ops += _elementwise('gt', converged, distance, tol_norm)
+        ops += _elementwise('logical_not', converged, converged)
+    uh = _linalg_transpose(current, ops, True, True)
+    gram, cubic = _temporary((*batch, n, n), x.dtype), _temporary(x.shape, x.dtype)
+    ops += _product(A.matmul.default, {'self': uh, 'other': current}, [gram])
+    ops += _product(A.matmul.default, {'self': current, 'other': gram}, [cubic])
+    ops += _elementwise('mul', u, current, 1.5)
+    ops += _elementwise('sub', u, u, cubic, alpha=0.5)
+    product = _temporary((*batch, n, n), x.dtype)
+    ops += _product(A.matmul.default, {'self': _linalg_transpose(u, ops, True, True), 'other': x}, [product])
+    ops += _elementwise('add', h, product, _linalg_transpose(product, ops, True, True))
+    return ops + _elementwise('div', h, h, 2)
+
+
 # G. H. Golub and C. F. Van Loan, Matrix Computations, 3rd ed., section 8.4, Algorithms 8.4.1 and 8.4.3;
 # Z. Drmac and K. Veselic, LAPACK Working Note 196, sections 2 and 3; Reference-LAPACK SRC/dgesvj.f
 def _linalg_active(app, aqq, magnitude, tolerance, ops):
@@ -5972,6 +6152,7 @@ SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWI
            A._linalg_det: _determinant, A._linalg_slogdet: _determinant,
            A.linalg_lu: _unpacked_lu, A.linalg_pinv: _pseudoinverse, A.linalg_lstsq: _least_squares,
            A._linalg_svd: _singular, A._linalg_eigh: _eigen_hermitian,
+           A.linalg_matrix_exp: _matrix_exponential, A.matrix_exp: _matrix_exponential,
            **dict.fromkeys((A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals), _eigen),
            A._linalg_check_errors: _checked,
            **dict.fromkeys(ASSERTIONS, _asserted),
