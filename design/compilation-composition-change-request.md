@@ -14,8 +14,12 @@ The operator, 2026-11-08, excerpts in order:
 
 ## The data flow
 
-Every requirement below is written against one data flow, the one the reference program `~/schedule-emit` implements
-(design/implementation-order-2026-11-09.md). Each stage is a function from a value to a value:
+The operator, 2026-11-10, verbatim:
+
+> for example we have a literal second repository iwth a priced and measured linecount which demonstrates the exact data flow mesh must have. what is that repo and are we using the exact same data flow yet? if we aren't, what's the cope? what's the excuse? who made up a limit saying we have to underperform our own examples to ourselves?
+
+That repository is `~/schedule-emit`. Every requirement below is written against its data flow. Each stage is a
+function from a value to a value:
 
 | Stage | Function in `schedule_emit/` | Takes | Produces |
 |---|---|---|---|
@@ -83,6 +87,8 @@ LLVM to target code. Bounds that depend on input sizes become generated expressi
 realized in the program; the original functional pipeline need not be reconstructed at each invocation.
 
 ## The nine requests
+
+The third column is read from the stages of `~/schedule-emit` against each clause's title. No request states it.
 
 | Request and applicable clauses | What it writes | Stage that produces it → stage that reads it |
 |---|---|---|
