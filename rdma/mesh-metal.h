@@ -50,7 +50,7 @@ int mesh_metal_status(struct mesh_ctx *,uint64_t plan,int cause,uint64_t *first)
    byte data_off + page x pgsz + offset, a field no hop names 0 (EINVAL where a hop lands in no copy-0 row); `at`
    partition 0's byte in the storage its
    consumers' footprints are measured from (metal_ir.h: the storage root of the received value), `transfer` the
-   declared transfer of planned call `owner`'s plan whose landing it is (metal_recording.h METAL_NATIVE_ARRIVED) */
+   declared transfer of planned call `owner`'s plan whose landing it is (metal_ir.h METAL_IR_ARRIVED) */
 struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_generation generation; uint32_t partitions;
                           uint64_t page; const uint32_t *field; uint64_t at; uint32_t transfer,owner; };
 /* Two stages, before and after mesh_plan (design/compilation-composition-change-request.md, "Complete replacement
@@ -96,7 +96,7 @@ int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh
    threadgroup of every dispatch writing the range adds 1 to one arrival counter after its stores, the one whose
    addition completes `total` (the lowering's count of those threadgroups, a reader's first and later pass counted
    once) resets the counter to 0 and releases. `transfer` the declared transfer of the writer's own call
-   (metal_recording.h METAL_NATIVE_PUBLISH for a CPU writer) */
+   (metal_ir.h METAL_IR_PUBLISH for a CPU writer) */
 struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,padding; };
 /* declared before mesh_plan as {.transfer} (planned call `call`'s transfer, `total` 0 until the lowering counts it);
    prepared after it: the supplied and status words of that call's plan */
