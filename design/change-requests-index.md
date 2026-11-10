@@ -305,8 +305,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
     the weight of its rows over its speed, by `probe` (each rank in order the longest run of rows whose weight does
     not exceed the candidate times its speed, a binary search in the offsets) and Nicol's search over the ranks in
     order, with the smallest candidate that succeeded and the largest that failed. `rows(m, ragged, speeds)` gives
-    the placements (`Shard`) of the rows' lengths, of each inner dimension's rows' lengths, and of the values, each
-    tuple the ranks' counts between the separators; a slice and the collectives read them as items 1, 3 and 12 write.
+    what the ranks hold, each a tensor with its placement (`Shard`): the rows' lengths, `offsets[i+1] - offsets[i]`,
+    each inner dimension's rows' lengths, and the values, each tuple the ranks' counts between the separators; a
+    slice and the collectives read them as items 1, 3 and 12 write. A tuple that sums to its extent is the ranks'
+    sizes as it stands (`_sizes`), so a tensor with no rows, or with every row empty, has a tuple of zeros.
 
   Outstanding:
   - Item 2's gather and scatter. No quoted sentence says where the program emits either: every input and constant is
@@ -331,11 +333,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
   - Items 6, 7 and 14: a run. None was made; `tp.py` and `pl.py` were partitioned in process at two ranks with times
     made up for the purpose, a tuple solved, and a tuple shifted from given shares, for each attention and
     feed-forward block.
-  - Items 11 and 13: no client program holds a tensor whose rows differ in length, so `rows` has no caller. No quoted
-    sentence says which of a program's operators take such a tensor sharded by rows, nor how a program's offsets (as
-    `embedding_bag` takes them) become each rank's row lengths; neither is written. A run: none was made;
-    `separators` was compared in process with an exhaustive search, and a two-tensor program was partitioned in
-    process by `rows`' placements at two and three ranks.
+  - Items 11 and 13: no client program holds a tensor whose rows differ in length, so `rows` has no caller and
+    nothing constructs a `Ragged`. No quoted sentence names the program, nor which of a program's operators take
+    such a tensor sharded by rows; neither is written. A run: none was made; `separators` was compared in process
+    with an exhaustive search, and `rows` was evaluated in process at two and three ranks for one and two ragged
+    dimensions, for no rows and for rows that are all empty.
   - Item 8.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.

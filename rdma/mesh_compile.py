@@ -170,12 +170,15 @@ class IR:
 # `local_units`, and Zhang et al., HAP, EuroSys 2024, section 5.1: each rank's fraction of the extent set to the nearest
 # integer, then, while the sizes do not sum to the extent, the size whose change adds the least rounding error reduced
 # or increased by one. With none, PyTorch 2.15 torch.chunk, which `Shard(dim)` follows: every rank the same size except
-# the last, trailing ranks empty
+# the last, trailing ranks empty. Item 13, "s_0 = 0 ≤ s_1 ≤ ... ≤ s_P = N", and item 11, "nondecreasing offsets": a
+# tuple that sums to the extent is the ranks' sizes as it stands, a tuple of zeros over no elements among them
 def _sizes(units, parts, extent):
     if units is None:
         size = -(-extent // parts)
         return tuple(max(0, min(size, extent - r * size)) for r in range(parts))
     total = sum(units)
+    if total == extent:
+        return tuple(units)
     sizes = [int((2 * extent * u + total) // (2 * total)) for u in units]
     while sum(sizes) != extent:
         step = 1 if sum(sizes) < extent else -1
@@ -249,18 +252,19 @@ Ragged = collections.namedtuple('Ragged', 'values offsets')
 
 # design/unequal-shards-change-request.md item 13; PETSc MatCreateAIJ, "the first m0 rows belong to process 0, the next
 # m1 rows belong to process 1", and MatGetOwnershipRanges; A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008,
-# sections 2 to 4 (allocate.separators): the placements over mesh dimension m of a Ragged whose rows the ranks hold in
-# consecutive ranges, `speeds` each rank's speed in rank order. The ranges are the separator indices of the rows'
-# lengths; each placement's tuple is the ranks' counts between them, the same at every rank (item 3). The first is the
-# placement of the rows' lengths (tf.RaggedTensor `row_lengths`), then one for each inner dimension's rows' lengths,
-# and the last that of the values: rank p holds the lengths of rows s_p to s_p+1 and
+# sections 2 to 4 (allocate.separators): what the ranks hold of a Ragged whose rows they hold in consecutive ranges
+# over mesh dimension m, `speeds` each rank's speed in rank order, each a tensor with its placement. The ranges are the
+# separator indices of the rows' lengths; each placement's tuple is the ranks' counts between them, the same at every
+# rank (item 3). The first tensor is the rows' lengths (tf.RaggedTensor `row_lengths`, "a vector with shape `[nrows]`,
+# which specifies the length of each row"; Arrow, `slot_length = offsets[j + 1] - offsets[j]`), then each inner
+# dimension's rows' lengths, and the last the values: rank p holds the lengths of rows s_p to s_p+1 and
 # `values[offsets[s_p]:offsets[s_p+1]]`
 def rows(m, ragged, speeds):
-    cuts, shards = allocate.separators(ragged.offsets.tolist(), speeds), []
+    cuts, held = allocate.separators(ragged.offsets.tolist(), speeds), []
     while isinstance(ragged, Ragged):
-        shards.append(Shard(m, [b - a for a, b in itertools.pairwise(cuts)]))
+        held.append((ragged.offsets.diff(), Shard(m, [b - a for a, b in itertools.pairwise(cuts)])))
         cuts, ragged = ragged.offsets[cuts].tolist(), ragged.values
-    return (*shards, Shard(m, [b - a for a, b in itertools.pairwise(cuts)]))
+    return (*held, (ragged, Shard(m, [b - a for a, b in itertools.pairwise(cuts)])))
 
 
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1; design/aot-compilation-change-request.md A1 and
