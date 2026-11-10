@@ -28,8 +28,10 @@ The operator, 2026-11-09, in order:
 
 > are any of these requirements optional for the complete implementation of the requirements as code? if any of them are optional, drop them. if any of them are not optional, then ground them in citation
 
-The operator, 2026-11-10, of mesh aeecb9f9's "two whole-sequence all-gathers per attention":
+The operator, 2026-11-10:
 
+> " no order in the chain closed." is there a vast citational gap we cannot close or do we need to revise our change request documents to be totally closed as specifications of implementations instead of leaving a bunch of 'stops' or apparent free choices up in the air?
+> "which adds two whole-sequence all-gathers per attention'
 > hm, stinky, and neither grounded in citation nor a requirement
 
 ## Requirements
@@ -246,7 +248,7 @@ The operator, 2026-11-10, of mesh aeecb9f9's "two whole-sequence all-gathers per
   that the mask inhibits entirely is not computed. No communication is added at an attention to bring the sequence
   into or out of this layout.
 - **Replaces:** `rdma/mesh_compile.py` `_stripe`'s `index_select` before and `index_copy` after each attention
-  (mesh aeecb9f9), which gather the whole query and the whole output at every attention.
+  , which gather the whole query and the whole output at every attention.
 - **Not stated by the source read** (the HTML text through section 5.3): a step that puts a returned per-token
   result back in the original order; the stripes where the ranks' counts differ (item 1); the layout where the
   sequence is not the program's input. These are in Stops.
@@ -416,8 +418,7 @@ The operator, 2026-11-10, of mesh aeecb9f9's "two whole-sequence all-gathers per
 
 Item 8, three, each with no quoted sentence: where a program returns one result per token, the step that returns
 them in the original order; which tokens a rank holds where the ranks' counts differ, since the source's stripes are
-residues modulo the device count; and a causal attention whose sequence is not an input of the program. Until a
-source is quoted for one of these, a program that meets it is refused at partition with a message that names item 8.
+residues modulo the device count; and a causal attention whose sequence is not an input of the program.
 
 Every other requirement above states what its quoted source says to write.
 

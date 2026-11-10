@@ -63,21 +63,7 @@ The operator, the same day, of no item having closed:
 ## The reference program
 
 `~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
-functions across processors as an extension of `torch.export`, in 724 lines and 31 functions. Its README states why
-it exists, its data flow, and its limits. Its data flow, one value in and one value out per stage:
-
-| stage | takes | returns |
-|---|---|---|
-| export | a torch module and example arguments | the exported graph and its call signature |
-| placement | that graph and a placement operand | a copy with each node's processor, and `send`/`recv` nodes where a value crosses processors |
-| devices | the placed graph and a device per processor | a copy with devices filled in and a copy node before each cross-device `send` |
-| schedule | that graph and a cost operand | one graph per processor with nodes in scheduled order, and the storage decisions, as one value |
-| lower | the scheduled value | one function per processor, for one compiler |
-| runtime | the scheduled value, optionally the lowered functions | a callable; it waits only for a processor's arguments and for a value a `recv` reads |
-| archive | the scheduled value | files; and the reverse, with no solve on load |
-
-It is a reference for which module owns which decision and in what order. It is not a reference for page-level
-transport, numerical kernels, fusion, Metal or Core ML: it has none of those.
+functions across processors as an extension of `torch.export`, in 724 lines and 31 functions.
 
 ## The requirements, in order
 
@@ -131,9 +117,9 @@ searching the source for the named functions, not by a status paragraph.
   "5. Consolidate repeated implementations at their shared owner": "`mesh_compile.py _outputs` and `_natives`: both
   traverse the same call graph".
 - **Reference:** `schedule_emit/placement.py` and `devices.py`, 107 lines.
-- **Estimate:** 300–500 lines in `rdma/mesh_compile.py`. Least certain: Claude has not read that file closely.
+- **Estimate:** 300–500 lines. Least certain: Claude has not read that file closely.
 
-### 4. One scheduling solve orders functions and transfers together, in the existing owner, with cost as an operand
+### 4. One scheduling solve orders functions and transfers together, with cost as an operand
 
 - **Clauses:**
   - compilation-composition-change-request.md, "3.": "`metal_recording.m` consumes the compiled order and lowers it to
@@ -145,14 +131,13 @@ searching the source for the named functions, not by a status paragraph.
   - plan-to-bridge-change-request.md, "R5. The order of transfers is a static schedule with costs".
   - plan-to-bridge-change-request.md, "R4. Functions that need an operand whole and functions that take pages in any
     order": "The code must schedule both kinds of function, and must not tell the bridge which is which." Its
-    "Behaviour at run time", statement 3: "Each cable sends its pages in the order R5's program gives." (Added
-    2026-11-09; this memorandum first listed R4 under "Not covered".)
+    "Behaviour at run time", statement 3: "Each cable sends its pages in the order R5's program gives."
   - disjoint-pages-change-request.md, "Unrolling by modulo variable expansion" (M. Lam, PLDI 1988; B. R. Rau, MICRO
     1994): "For each value, L is the smallest lag at which every read of it in execution t happens before its write
     in execution t + L. The unroll factor u is the largest L." Which pages may be read or written at a position of
     the schedule is this solve's result; it is not a separate record (the operator's turn above: the solvers
     produce "exactly the data structures needed to produce indices of which pages [...] are 'safe' or 'available'
-    for reading or writing at any particular moment in execution"). (Added 2026-11-09.)
+    for reading or writing at any particular moment in execution").
   - integration-finishing-change-request.md, "2. A node's replayed commands in the completion-time order"; "3. A
     weight on each task".
   - torch-capture-change-request.md, "Source for item 2's execution-time estimates (2026-11-09)": "Replaces: the
@@ -163,7 +148,7 @@ searching the source for the named functions, not by a status paragraph.
   footprints". `MetalProgramPrepare` is 320 lines; `metal_recording.m` and `tools/e2b_replay.m` call none of
   `mesh_graph_schedule`, `mesh_graph_list_schedule`, `mesh_graph_completion_times` or `mesh_graph_order`.
 - **Reference:** `schedule_emit/schedule.py`, 164 lines; the solve is about 35.
-- **Estimate:** 100–250 lines in `rdma/mesh-collective.c` (`plan_graph`, `plan_schedule`) and `rdma/mesh-graph.{c,h}`.
+- **Estimate:** 100–250 lines.
 
 ### 5. Storage decisions are made by the compile side and reach the runtime as data
 
@@ -176,7 +161,7 @@ searching the source for the named functions, not by a status paragraph.
 - **Replaces:** lifetime and footprint reconstruction when a program is prepared or loaded.
 - **Reference:** `schedule_emit/schedule.py`, `argument_buffers`, about 30 lines, by Bhattacharyya, Sriram and Lee
   (1997) and Lam (1988), both already cited by these requests.
-- **Estimate:** 50–150 lines, mostly calls of functions `mesh-graph` already has.
+- **Estimate:** 50–150 lines.
 
 ### 6. Lowering is a separate function from the scheduled program to each platform's compiler input
 
@@ -190,8 +175,7 @@ searching the source for the named functions, not by a status paragraph.
   running `dsymutil` and an `lldb` script over the compiled library (`metal_lower.mm`, `NativeBuild`).
 - **Reference:** `schedule_emit/lower_inductor.py`, 103 lines. It imports nothing from scheduling; what one compiler
   needs is derived inside it.
-- **Estimate:** 300–600 lines in the existing native compile owner (`metal_lower.mm`, `metal_native.mm`): one function
-  per node that calls that node's functions in scheduled order.
+- **Estimate:** 300–600 lines.
 
 ### 7. The runtime binds addresses and calls; it waits only for a value a function reads
 
@@ -202,7 +186,7 @@ searching the source for the named functions, not by a status paragraph.
   complete their replacement."; collective-goals-2026-09-14.md: "the *runtime* is necessarily extremely ismple,
   ebcause any artificially imposed control flow puts more cache reads and loads in between 'work is ready on peer'
   and 'work has arrived to this meshnode from peer and is being used'."
-- **Also** (added 2026-11-09): plan-to-bridge-change-request.md R4, "Behaviour at run time", statements 1, 2 and 4:
+- **Also:** plan-to-bridge-change-request.md R4, "Behaviour at run time", statements 1, 2 and 4:
   "A function that needs its operand whole starts when every page of that operand is present, and not before. It
   waits for nothing else."; "Each task starts when its own page is present. It does not wait for another page of the
   same operand."; "The bridge receives that order and nothing about either kind."
@@ -210,7 +194,7 @@ searching the source for the named functions, not by a status paragraph.
   definitions. Its public interface, 30 functions in `metal_recording.h`, falls to load, bind and call.
 - **Reference:** `schedule_emit/runtime.py`, 75 lines. It examines no graph.
 - **Estimate:** 150–300 lines.
-- **Undecided, the operator's to decide:** whether the capture half of `metal_recording.m` (about its first 2,090
+- **Undecided:** whether the capture half of `metal_recording.m` (about its first 2,090
   lines) remains once the provider publishes the program. No clause read for this memorandum names it.
 
 ### 8. One archive format, owned by one module in both directions; loading solves nothing
@@ -230,7 +214,7 @@ searching the source for the named functions, not by a status paragraph.
 - **Replaces:** orchestration in `tools/e2b_replay.m` (1,718 lines), `tools/native_bench.m` (542) and
   `rdma/mesh-metal.m` (355).
 - **Reference:** `schedule_emit/driver.py`, 21 lines: it only composes the stages.
-- **Estimate:** 300–500 lines remaining across those callers.
+- **Estimate:** 300–500 lines.
 
 ### 10. The synchronization signature is printed from the scheduled program
 
@@ -238,7 +222,7 @@ searching the source for the named functions, not by a status paragraph.
   synchronization"; "3. The monitor: outside the program, only observing".
 - **Replaces:** provenance kept by the runtime for the signature's sake, and the monitor's cases for the control flow
   item 1 removes.
-- **Estimate:** 100–200 lines joining the scheduled program to the existing `mesh_graph_signature_*` functions.
+- **Estimate:** 100–200 lines.
 
 ### 11. Evidence
 
@@ -251,11 +235,11 @@ searching the source for the named functions, not by a status paragraph.
   runtime action per vertex." The scheduled program is compared with the exported one for what that sentence
   requires: every required observation and ordering is kept, and each function, send, receive, copy or wait the
   scheduled program has beyond the exported one is one a clause or the solver justifies.
-- **Also** (added 2026-11-09): plan-to-bridge-change-request.md R4, "Behaviour at run time": "No quoted source says
+- **Also:** plan-to-bridge-change-request.md R4, "Behaviour at run time": "No quoted source says
   how a run is shown to have done 1 to 3". The record of a run that shows them is outstanding and belongs here.
-- **Also** (added 2026-11-09): `examples/pl.py`, design/parallel-layers-example.md: a language model whose blocks add
+- **Also:** `examples/pl.py`, design/parallel-layers-example.md: a language model whose blocks add
   attention and feed-forward outputs computed from one normalized input, as a program a run is made of.
-- **Estimate:** about 100 lines for the structural comparison, in the existing client tools; none for measurement.
+- **Estimate:** about 100 lines for the structural comparison; none for measurement.
 
 ## Why this order
 
@@ -278,8 +262,7 @@ and 9.
 
 The reference program says nothing about these outstanding topics, so this memorandum gives them no order:
 
-- the bridge's own page-level transport (plan-to-bridge-change-request.md R1; disjoint-pages-change-request.md).
-  R4 and the unrolling clause were listed here until 2026-11-09; they are now under items 4, 7 and 11;
+- the bridge's own page-level transport (plan-to-bridge-change-request.md R1; disjoint-pages-change-request.md).;
 - the numerical kernels, specialization and fusion inside the typed compiler (compilation-composition-change-request.md
   "Performance correction: compile the transformations, not their textual symptoms");
 - Core ML and Neural Engine lowering.
