@@ -1,0 +1,40 @@
+class GraphModule(torch.nn.Module):
+    def forward(self, p_features_1_weight: "f32[8]", p_features_1_bias: "f32[8]", p_features_5_weight: "f32[16]", p_features_5_bias: "f32[16]", p_head_weight: "f32[5, 16]", p_head_bias: "f32[5]", b_features_1_running_mean: "f32[8]", b_features_1_running_var: "f32[8]", b_features_5_running_mean: "f32[16]", b_features_5_running_var: "f32[16]"):
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        permute: "f32[16, 5]" = torch.ops.aten.permute.default(p_head_weight, [1, 0]);  p_head_weight = None
+
+        # No stacktrace found for following nodes
+        recv_default: "f32[2, 8, 12, 12]" = torch.ops.mesh.recv.default(0)
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/batchnorm.py:210 in forward, code: return F.batch_norm(
+        _native_batch_norm_legit_no_training = torch.ops.aten._native_batch_norm_legit_no_training.default(recv_default, p_features_1_weight, p_features_1_bias, b_features_1_running_mean, b_features_1_running_var, 0.1, 1e-05);  recv_default = p_features_1_weight = p_features_1_bias = b_features_1_running_mean = b_features_1_running_var = None
+        getitem: "f32[2, 8, 12, 12]" = _native_batch_norm_legit_no_training[0];  _native_batch_norm_legit_no_training = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/activation.py:143 in forward, code: return F.relu(input, inplace=self.inplace)
+        relu: "f32[2, 8, 12, 12]" = torch.ops.aten.relu.default(getitem);  getitem = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/pooling.py:224 in forward, code: return F.max_pool2d(
+        max_pool2d_with_indices = torch.ops.aten.max_pool2d_with_indices.default(relu, [2, 2], [2, 2]);  relu = None
+        getitem_3: "f32[2, 8, 6, 6]" = max_pool2d_with_indices[0];  max_pool2d_with_indices = None
+
+        # No stacktrace found for following nodes
+        _to_copy_default_1: "f32[2, 8, 6, 6]" = torch.ops.aten._to_copy.default(getitem_3, device = device(type='mps'));  getitem_3 = None
+        send_default_1 = torch.ops.mesh.send.default(_to_copy_default_1, 1);  _to_copy_default_1 = send_default_1 = None
+        recv_default_2: "f32[2, 16, 4, 4]" = torch.ops.mesh.recv.default(2)
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/batchnorm.py:210 in forward, code: return F.batch_norm(
+        _native_batch_norm_legit_no_training_1 = torch.ops.aten._native_batch_norm_legit_no_training.default(recv_default_2, p_features_5_weight, p_features_5_bias, b_features_5_running_mean, b_features_5_running_var, 0.1, 1e-05);  recv_default_2 = p_features_5_weight = p_features_5_bias = b_features_5_running_mean = b_features_5_running_var = None
+        getitem_5: "f32[2, 16, 4, 4]" = _native_batch_norm_legit_no_training_1[0];  _native_batch_norm_legit_no_training_1 = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/activation.py:143 in forward, code: return F.relu(input, inplace=self.inplace)
+        relu_1: "f32[2, 16, 4, 4]" = torch.ops.aten.relu.default(getitem_5);  getitem_5 = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/pooling.py:1514 in forward, code: return F.adaptive_avg_pool2d(input, self.output_size)
+        mean: "f32[2, 16, 1, 1]" = torch.ops.aten.mean.dim(relu_1, [-1, -2], True);  relu_1 = None
+
+        # File: /Users/mdot/dox/mesh/compiler/samples.py:76 in forward, code: return self.head(self.features(x).flatten(1))
+        view: "f32[2, 16]" = torch.ops.aten.view.default(mean, [2, 16]);  mean = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        addmm: "f32[2, 5]" = torch.ops.aten.addmm.default(p_head_bias, view, permute);  p_head_bias = view = permute = None
+        return (addmm,)

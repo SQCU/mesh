@@ -1,0 +1,20 @@
+class GraphModule(torch.nn.Module):
+    def forward(self, p_net_0_weight: "f32[32, 16]", p_net_0_bias: "f32[32]", p_net_2_weight: "f32[32, 32]", p_net_2_bias: "f32[32]", p_net_4_weight: "f32[4, 32]", p_net_4_bias: "f32[4]", x: "f32[5, 16]"):
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        permute: "f32[16, 32]" = torch.ops.aten.permute.default(p_net_0_weight, [1, 0]);  p_net_0_weight = None
+        addmm: "f32[5, 32]" = torch.ops.aten.addmm.default(p_net_0_bias, x, permute);  p_net_0_bias = x = permute = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/activation.py:817 in forward, code: return F.gelu(input, approximate=self.approximate)
+        gelu: "f32[5, 32]" = torch.ops.aten.gelu.default(addmm);  addmm = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        permute_1: "f32[32, 32]" = torch.ops.aten.permute.default(p_net_2_weight, [1, 0]);  p_net_2_weight = None
+        addmm_1: "f32[5, 32]" = torch.ops.aten.addmm.default(p_net_2_bias, gelu, permute_1);  p_net_2_bias = gelu = permute_1 = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/activation.py:433 in forward, code: return torch.tanh(input)
+        tanh: "f32[5, 32]" = torch.ops.aten.tanh.default(addmm_1);  addmm_1 = None
+
+        # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)
+        permute_2: "f32[32, 4]" = torch.ops.aten.permute.default(p_net_4_weight, [1, 0]);  p_net_4_weight = None
+        addmm_2: "f32[5, 4]" = torch.ops.aten.addmm.default(p_net_4_bias, tanh, permute_2);  p_net_4_bias = tanh = permute_2 = None
+        return (addmm_2,)

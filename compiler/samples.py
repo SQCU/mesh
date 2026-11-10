@@ -1,0 +1,776 @@
+# design/the-compiler.md
+import ast
+import collections
+import copy
+import dataclasses
+import hashlib
+import itertools
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+import torch
+from torch import nn
+from torch._dynamo.utils import counters
+from torch._higher_order_ops.map import map as hop_map
+from torch._higher_order_ops.while_loop import while_loop
+from torch._ops import HigherOrderOperator
+from torch.fx.passes.dialect.common.cse_pass import CSEPass
+from torch.utils import _pytree as pytree
+
+from torch._inductor import metrics
+from torch._inductor.graph import GraphLowering
+from torch._ops import OpOverload
+
+from mesh_compiler import archive, ir, lower_inductor
+from mesh_compiler.devices import TO_COPY
+from mesh_compiler.driver import compile_module
+from mesh_compiler.runtime import Program
+
+TOLERANCE = 1e-4
+MPS = torch.backends.mps.is_available()
+HERE = pathlib.Path(__file__).parent
+EMITTED = HERE / "emitted"
+WITH_EFFECTS = torch.ops.higher_order.with_effects
+
+
+class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(16, 32), nn.GELU(), nn.Linear(32, 32), nn.Tanh(),
+                                 nn.Linear(32, 4))
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class EncoderBlock(nn.Module):
+    def __init__(self, width=32, heads=4):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(width, heads, batch_first=True)
+        self.norm1, self.norm2 = nn.LayerNorm(width), nn.LayerNorm(width)
+        self.mlp = nn.Sequential(nn.Linear(width, 64), nn.GELU(), nn.Linear(64, width))
+
+    def forward(self, x):
+        attended, _ = self.attention(x, x, x, need_weights=False)
+        x = self.norm1(x + attended)
+        return self.norm2(x + self.mlp(x))
+
+
+class ConvNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(nn.Conv2d(3, 8, 3, padding=1), nn.BatchNorm2d(8), nn.ReLU(),
+                                      nn.MaxPool2d(2), nn.Conv2d(8, 16, 3), nn.BatchNorm2d(16),
+                                      nn.ReLU(), nn.AdaptiveAvgPool2d(1))
+        self.head = nn.Linear(16, 5)
+        for norm in (self.features[1], self.features[5]):
+            norm.running_mean.normal_()
+            norm.running_var.uniform_(0.5, 2.0)
+
+    def forward(self, x):
+        return self.head(self.features(x).flatten(1))
+
+
+class RunningMean(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("count", torch.zeros(()))
+        self.register_buffer("mean", torch.zeros(8))
+
+    def forward(self, x):
+        self.count.add_(1)
+        self.mean.add_((x.mean(0) - self.mean) / self.count)
+        return x - self.mean
+
+
+class Solve(nn.Module):
+    def forward(self, a, b):
+        return torch.linalg.solve(a @ a.mT + torch.eye(a.shape[-1]), b)
+
+
+class QR(nn.Module):
+    def forward(self, a):
+        q, r = torch.linalg.qr(a)
+        return {"q": q, "r": r, "back": q @ r}
+
+
+class Recurrent(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(8, 16, batch_first=True)
+
+    def forward(self, x):
+        out, (h, c) = self.lstm(x)
+        return out, h
+
+
+class ShapeDependent(nn.Module):
+    def forward(self, x):
+        rows = x.reshape(x.shape[0], -1)
+        return rows.sum(1, keepdim=True) / x.shape[0] + torch.arange(x.shape[0]).unsqueeze(1)
+
+
+class Branch(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(8, 8)
+
+    def forward(self, x):
+        y = torch.cond(x.sum() > 0, lambda v: self.linear(v).relu(), lambda v: v.cos() - 1, (x,))
+        return y * 2
+
+
+class Loop(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(8, 8)
+
+    def forward(self, trips, x):
+        def test(i, v):
+            return i < trips
+
+        def body(i, v):
+            return i + 1, torch.tanh(self.linear(v))
+
+        _, y = while_loop(test, body, (torch.zeros((), dtype=torch.int64), x))
+        return y + x
+
+
+class LoopWithBranch(nn.Module):
+    def forward(self, x):
+        def body(i, v):
+            v = torch.cond(v.sum() > 0, lambda u: u - 1.0, lambda u: u * -0.5 + 0.25, (v,))
+            return i + 1, v
+
+        return while_loop(lambda i, v: i < 4, body, (torch.zeros((), dtype=torch.int64), x))[1]
+
+
+class StaticLoop(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(8, 8)
+
+    def forward(self, x):
+        for trip in range(4):
+            x = torch.tanh(self.linear(x)) + trip
+        return x
+
+
+class Indexing(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.table = nn.Parameter(torch.randn(10, 8))
+
+    def forward(self, x, index):
+        picked = x.gather(1, index)
+        rows = self.table.index_select(0, index[:, 0])
+        spread = torch.zeros_like(x).scatter_add(1, index, picked)
+        return torch.where(x > 0, rows, spread) + x[index[:, 1] % 4]
+
+
+class MixtureOfExperts(nn.Module):
+    def __init__(self, width=16, experts=4, k=2):
+        super().__init__()
+        self.k = k
+        self.gate = nn.Linear(width, experts)
+        self.experts = nn.ModuleList(
+            nn.Sequential(nn.Linear(width, 32), nn.GELU(), nn.Linear(32, width))
+            for _ in range(experts))
+
+    def forward(self, x):
+        scores = self.gate(x)
+        top, chosen = scores.topk(self.k, dim=-1)
+        weights = torch.zeros_like(scores).scatter(-1, chosen, top.softmax(-1))
+        outputs = torch.stack([expert(x) for expert in self.experts], dim=-1)
+        return (outputs * weights.unsqueeze(-2)).sum(-1)
+
+
+class Mapped(nn.Module):
+    def forward(self, xs):
+        return hop_map(lambda x: x.sin() + 1, xs)
+
+
+class PythonBranch(nn.Module):
+    def forward(self, x):
+        return x.relu() if x.sum() > 0 else x.neg()
+
+
+class MutatesInput(nn.Module):
+    def forward(self, x):
+        x.add_(1)
+        return x * 2
+
+
+def round_robin(*processors):
+    turn = itertools.cycle(processors)
+    return lambda node: next(turn)
+
+
+def halves(first, second, boundary):
+    seen = itertools.count()
+    return lambda node: first if next(seen) < boundary else second
+
+
+def by_target(table, default):
+    def placement(node):
+        return next((p for key, p in table.items() if key in str(node.target)), default)
+    return placement
+
+
+def by_module(table, default):
+    def placement(node):
+        stack = [str(path) for path, _ in node.meta.get("nn_module_stack", {}).values()]
+        where = " ".join(stack + [node.name])
+        return next((p for key, p in table.items()
+                     if key in where or key.replace(".", "_") in where), default)
+    return placement
+
+
+def r(*shape):
+    return torch.randn(*shape)
+
+
+def index(rows, columns, high):
+    return torch.randint(0, high, (rows, columns))
+
+
+ONE = {"cpu": "cpu"}
+TWO, THREE = {"p0": "cpu", "p1": "cpu"}, {"p0": "cpu", "p1": "cpu", "p2": "cpu"}
+MIXED = {"cpu": "cpu", "gpu": "mps"}
+BATCH = {"x": {0: torch.export.Dim("batch", min=2, max=64)}}
+EXPERTS = {"experts.0": "p1", "experts.1": "p1", "experts.2": "p2", "experts.3": "p2"}
+EXPERTS_MIXED = {"experts.0": "gpu", "experts.1": "gpu"}
+POSITIVE = torch.full((2, 8), 0.5)
+GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
+
+CASES = [
+    ("mlp", MLP, [(r(5, 16),)], {}),
+    ("sequential (input named `input`)", lambda: nn.Sequential(nn.Linear(16, 8), nn.GELU()),
+     [(r(5, 16),)], {"processors": TWO, "placement": lambda: round_robin("p0", "p1")}),
+    ("encoder block", EncoderBlock, [(r(2, 6, 32),)], {}),
+    ("conv + batchnorm eval", ConvNet, [(r(2, 3, 12, 12),)], {}),
+    ("buffer mutation x3", RunningMean, [(r(4, 8),), (r(4, 8),), (r(4, 8),)], {}),
+    ("linalg.solve", Solve, [(r(6, 6), r(6, 2))], {}),
+    ("linalg.qr", QR, [(r(7, 4),)], {}),
+    ("lstm (5 steps, traced through)", Recurrent, [(r(2, 5, 8),)], {}),
+    ("python for, 4 static trips", StaticLoop, [(r(2, 8),)], {}),
+    ("gather/scatter/index/where", Indexing, GATHER, {}),
+    ("mixture of experts, top-2 of 4", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)], {}),
+    ("mlp | 2 processors pipeline", MLP, [(r(5, 16),)],
+     {"processors": TWO, "placement": lambda: halves("p0", "p1", 4)}),
+    ("encoder | 3 processors round-robin", EncoderBlock, [(r(2, 6, 32),)],
+     {"processors": THREE, "placement": lambda: round_robin("p0", "p1", "p2")}),
+    ("buffer mutation x3 | 2 processors", RunningMean, [(r(4, 8),), (r(4, 8),), (r(4, 8),)],
+     {"processors": TWO, "placement": lambda: round_robin("p0", "p1")}),
+    ("solve | 3 processors round-robin", Solve, [(r(6, 6), r(6, 2))],
+     {"processors": THREE, "placement": lambda: round_robin("p0", "p1", "p2")}),
+    ("python for | 2 processors", StaticLoop, [(r(2, 8),)],
+     {"processors": TWO, "placement": lambda: round_robin("p0", "p1")}),
+    ("gather/scatter/... | 2 processors", Indexing, GATHER,
+     {"processors": TWO, "placement": lambda: round_robin("p0", "p1")}),
+    ("mixture of experts | 3 processors", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
+     {"processors": THREE, "placement": lambda: by_module(EXPERTS, "p0"), "expect_on": EXPERTS}),
+    ("mlp | all on mps", MLP, [(r(5, 16),)], {"processors": {"gpu": "mps"}, "needs_mps": True}),
+    ("conv | conv on mps, rest cpu", ConvNet, [(r(2, 3, 12, 12),)],
+     {"processors": MIXED, "needs_mps": True,
+      "placement": lambda: by_target({"convolution": "gpu", "p_features": "gpu"}, "cpu")}),
+    ("encoder | cpu/mps round-robin", EncoderBlock, [(r(2, 6, 32),)],
+     {"processors": MIXED, "needs_mps": True, "placement": lambda: round_robin("cpu", "gpu")}),
+    ("mixture of experts | cpu/mps", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
+     {"processors": MIXED, "needs_mps": True, "expect_on": EXPERTS_MIXED,
+      "placement": lambda: by_module(EXPERTS_MIXED, "cpu")}),
+    ("mlp dynamic batch", MLP, [(r(5, 16),), (r(11, 16),)],
+     {"dynamic_shapes": BATCH, "rejected": True}),
+    ("shape arithmetic dynamic batch", ShapeDependent, [(r(5, 3, 4),), (r(9, 3, 4),)],
+     {"dynamic_shapes": BATCH, "rejected": True}),
+    ("mlp dynamic batch | 2 processors", MLP, [(r(5, 16),), (r(11, 16),)],
+     {"dynamic_shapes": BATCH, "rejected": True, "processors": TWO,
+      "placement": lambda: halves("p0", "p1", 4)}),
+    ("torch.cond", Branch, [(POSITIVE,)], {"rejected": True}),
+    ("while_loop", Loop, [(torch.tensor(3), r(2, 8))], {"rejected": True}),
+    ("cond inside while_loop", LoopWithBranch, [(POSITIVE,)], {"rejected": True}),
+    ("map higher-order operator", Mapped, [(r(3, 4),)], {"rejected": True}),
+    ("python branch on tensor data", PythonBranch, [(r(3, 4),)], {"rejected": True}),
+    ("input mutation", MutatesInput, [(r(3, 4),)], {"rejected": True}),
+]
+SAVE = {"mlp": "mlp", "python for, 4 static trips": "static_for",
+        "mixture of experts | 3 processors": "moe_three_processors",
+        "conv | conv on mps, rest cpu": "conv_cpu_mps"}
+PATHS = ("fx direct", "inductor", "archive", "fx pass")
+FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 processors",
+               "buffer mutation x3 | 2 processors",
+               "solve | 3 processors round-robin", "mixture of experts | 3 processors",
+               "conv | conv on mps, rest cpu")
+KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on")
+
+
+def errors(reference, got):
+    worst_abs = worst_rel = 0.0
+    for a, b in zip(pytree.tree_leaves(reference), pytree.tree_leaves(got), strict=True):
+        a, b = torch.as_tensor(a).cpu().double(), torch.as_tensor(b).cpu().double()
+        if a.shape != b.shape:
+            return float("inf"), float("inf")
+        difference = (a - b).abs().max().item() if a.numel() else 0.0
+        scale = a.abs().max().item() if a.numel() else 0.0
+        worst_abs = max(worst_abs, difference)
+        worst_rel = max(worst_rel, difference / max(scale, 1e-12))
+    return worst_abs, worst_rel
+
+
+def call_nodes(graph):
+    return [n for n in graph.nodes if n.op == "call_function"]
+
+
+def check_ir(scheduled, expect_on=None):
+    exported = scheduled.exported.graph_module.graph
+    assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
+    original = {n.name: n.target for n in call_nodes(exported)}
+    where, added, sender, reader = {}, [], {}, {}
+    for processor, module in scheduled.modules.items():
+        module.graph.lint()
+        for node in module.graph.nodes:
+            assert node.op in ("placeholder", "call_function", "output"), node.op
+            control = isinstance(node.target, HigherOrderOperator) and node.target is not WITH_EFFECTS
+            assert not control, f"control operator {node.target} in a scheduled graph"
+            if node.op == "placeholder":
+                assert isinstance(node.meta["val"], torch.Tensor), "a graph input that is not a tensor"
+                continue
+            assert node.meta["processor"] == processor, (node, processor)
+            if node.op != "call_function":
+                continue
+            if node.name in original and node.target is original[node.name]:
+                assert node.name not in where, f"{node.name} scheduled twice"
+                where[node.name] = processor
+            else:
+                added.append(node)
+            channel = ir.channel_of(node)
+            assert channel is None or type(channel) is int, "a channel must be an integer literal"
+            if channel is not None:
+                side = sender if node.target is ir.SEND else reader
+                assert channel not in side, "a channel with two sends or two recvs"
+                side[channel] = processor
+            for key_, wanted in (expect_on or {}).items():
+                stack = [str(path) for path, _ in node.meta.get("nn_module_stack", {}).values()]
+                if any(path == key_ or path.startswith(key_ + ".") for path in stack):
+                    assert processor == wanted, f"{node.name} of {key_} is on {processor}, not {wanted}"
+
+    assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
+    where["output"] = scheduled.output_processor
+    pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
+             if where[u.name] != where[n.name]}
+    crossing = [c for c in sender if scheduled.devices[sender[c]] != scheduled.devices[reader[c]]]
+    copies = [n for n in added if n.target is TO_COPY]
+    assert sender.keys() == reader.keys() == set(range(scheduled.channels)), "channel numbering"
+    assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
+    assert all(sender[c] != reader[c] for c in sender), "a send and its recv on one processor"
+    assert len(copies) == len(crossing), "device copies differ from cross-device channels"
+    assert len(added) == 2 * scheduled.channels + len(copies), "a node that export did not produce"
+    if len(scheduled.modules) == 1:
+        assert not added and not Program(scheduled).argument_queues, "1-processor program differs"
+
+    queues = {p: collections.deque(call_nodes(m.graph)) for p, m in scheduled.modules.items()}
+    sent, moved = set(), True
+    while moved:
+        moved = False
+        for queue in queues.values():
+            while queue and (queue[0].target is not ir.RECV or ir.channel_of(queue[0]) in sent):
+                node = queue.popleft()
+                moved = True
+                if node.target is ir.SEND:
+                    sent.add(ir.channel_of(node))
+    assert not any(queues.values()), "the per-processor orders deadlock"
+    return len(original), len(copies)
+
+
+def fx_pass(module):
+    module = CSEPass()(module).graph_module
+    module.graph.eliminate_dead_code()
+    module.graph.lint()
+    module.recompile()
+    return module
+
+
+def canonical(module):
+    position = {node: index for index, node in enumerate(module.graph.nodes)}
+
+    def literal(value):
+        if isinstance(value, torch.fx.Node):
+            return {"node": position[value]}
+        if isinstance(value, (tuple, list)):
+            return [literal(v) for v in value]
+        if isinstance(value, dict):
+            return {key_: literal(v) for key_, v in value.items()}
+        if isinstance(value, (OpOverload, HigherOrderOperator)):
+            return {"operator": str(value)}
+        return value if value is None or isinstance(value, (bool, int, float)) else str(value)
+
+    def described(value):
+        if isinstance(value, torch.Tensor):
+            return [str(value.dtype), list(value.shape)]
+        return [described(v) for v in value] if isinstance(value, (tuple, list)) else None
+
+    return [[node.op, literal(node.target) if node.op == "call_function" else None,
+             literal(list(node.args)), literal(dict(node.kwargs)),
+             None if node.op == "output" else described(node.meta.get("val")),
+             node.meta.get("processor")] for node in module.graph.nodes]
+
+
+def digests(modules):
+    return {processor: hashlib.sha256(json.dumps(canonical(m)).encode()).hexdigest()
+            for processor, m in modules.items()}
+
+
+def state_of(program):
+    current = {}
+    for name, (key_, tensor) in program.exported.state.items():
+        processor, position = program.positions.get(name, [(None, None)])[0]
+        current[key_] = tensor if processor is None else program.arguments[processor][position]
+    return current
+
+
+def compiled_program(scheduled):
+    functions = lower_inductor.lower(scheduled)
+    unwrapped = torch._dynamo.eval_frame.OptimizedModule
+    assert all(isinstance(f, unwrapped) for f in functions.values()), "a wrapped function"
+    return Program(scheduled, functions)
+
+
+def archived_program(scheduled):
+    with tempfile.TemporaryDirectory() as directory:
+        archive.save(directory, scheduled)
+        loaded = archive.load(directory)
+    assert digests(loaded.modules) == digests(scheduled.modules), "digest changed by the archive"
+    return Program(loaded)
+
+
+def variants(scheduled, with_inductor):
+    passed = lambda: {p: fx_pass(copy.deepcopy(m)) for p, m in scheduled.modules.items()}
+    return {
+        "fx direct": lambda: Program(scheduled),
+        "inductor": (lambda: compiled_program(scheduled)) if with_inductor else None,
+        "archive": lambda: archived_program(scheduled),
+        "fx pass": lambda: Program(dataclasses.replace(scheduled, modules=passed())),
+    }
+
+
+RAISED = []
+threading.excepthook = lambda args: RAISED.append(f"{args.exc_type.__name__}: {args.exc_value}")
+
+
+def within(seconds, thunk):
+    box = []
+
+    def attempt():
+        try:
+            box.append(thunk())
+        except Exception as error:
+            box.append(error)
+
+    caller = threading.Thread(target=attempt, daemon=True)
+    caller.start()
+    caller.join(seconds)
+    return box[0] if box else TimeoutError(f"no result; a thread raised {RAISED[-1:] or 'nothing'}")
+
+
+def measure(make, module, calls):
+    reference, runner, worst = copy.deepcopy(module), make(), (0.0, 0.0)
+    for args in calls:
+        with torch.no_grad():
+            expected = reference(*copy.deepcopy(args))
+        got = runner(*copy.deepcopy(args))
+        state = state_of(runner)
+        buffers = {key: value for key, value in reference.named_buffers() if key in state}
+        worst = max(worst, errors((expected, buffers), (got, {key: state[key] for key in buffers})))
+    return worst
+
+
+def save_for_review(stem, program):
+    for processor, module in program.modules.items():
+        (EMITTED / f"{stem}.{processor}.ir.txt").write_text(module.print_readable(print_output=False))
+    archive.save(EMITTED / f"{stem}.archive", program)
+
+
+def build(name):
+    _, factory, calls, options = next(case for case in CASES if case[0] == name)
+    options = {k: v for k, v in options.items() if k not in OPTION_FLAGS}
+    processors = options.pop("processors", ONE)
+    placement = options.pop("placement", lambda: lambda node: next(iter(processors)))()
+    torch.manual_seed(0)
+    module = factory().eval()
+    return module, calls, compile_module(module, copy.deepcopy(calls[0]), processors, placement,
+                                         **options)
+
+
+def run_case(name, with_inductor):
+    module, calls, program = build(name)
+    expect_on = next(case for case in CASES if case[0] == name)[3].get("expect_on")
+    (operators, copies), channels = check_ir(program, expect_on), program.channels
+    if name in SAVE:
+        save_for_review(SAVE[name], program)
+    results, dynamo, breaks = {}, "", 0
+    for path, make in variants(program, with_inductor).items():
+        if make is None:
+            results[path] = None
+            continue
+        counters.clear()
+        results[path] = within(120, lambda: measure(make, module, calls))
+        if path == "inductor":
+            breaks = sum(counters["graph_break"].values())
+            dynamo = (f"{counters['stats']['unique_graphs']} graphs / {len(program.modules)} processors, "
+                      f"{breaks} breaks")
+            BREAK_REASONS.update({k.split(chr(10))[1].strip(): v
+                                  for k, v in counters["graph_break"].items()})
+            torch._dynamo.reset()
+    return operators, channels, copies, results, dynamo, breaks
+
+
+def inductor_structure(scheduled, call):
+    codes = []
+    GraphLowering.save_output_code = codes.append
+    metrics.reset()
+    with torch._inductor.config.patch(force_disable_caches=True):
+        Program(scheduled, lower_inductor.lower(scheduled))(*copy.deepcopy(call))
+    GraphLowering.save_output_code = None
+    torch._dynamo.reset()
+    code = "\n".join(codes)
+    return (metrics.generated_kernel_count, code.count("empty_strided"),
+            code.count("extern_kernels."), code.count("copy_(") + code.count("aten.clone"))
+
+
+def check_inductor_structure():
+    differences = []
+    for name, _, calls, options in CASES:
+        if options.get("rejected") or "processors" in options:
+            continue
+        scheduled = build(name)[2]
+        exported = scheduled.exported.graph_module
+        every = [n.target for n in exported.graph.nodes if n.op == "placeholder"]
+        unscheduled = dataclasses.replace(scheduled, modules={"cpu": exported}, inputs={"cpu": every})
+        ours, theirs = inductor_structure(scheduled, calls[0]), inductor_structure(unscheduled, calls[0])
+        differences += [name] if ours != theirs else []
+        print(f"  {name:34} scheduled {ours}  exported {theirs}  {'same' if ours == theirs else 'DIFFERENT'}")
+    print(f"  (kernels, buffers, extern kernel calls, copies); cases that differ: {differences or 'none'}")
+
+
+BREAK_REASONS = collections.Counter()
+
+
+def cell(result):
+    if result is None:
+        return "-", True
+    if isinstance(result, Exception):
+        return "FAIL", False
+    ok = result[1] <= TOLERANCE or result[0] <= TOLERANCE
+    return f"{result[1]:.1e}" if ok else f"BAD {result[1]:.1e}", ok
+
+
+def imports_of(path):
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and (node.level or (node.module or "").startswith("mesh_compiler")):
+            base = (node.module or "").replace("mesh_compiler", "").strip(".")
+            found |= {base} if base else {alias.name for alias in node.names}
+        elif isinstance(node, ast.Import):
+            found |= {a.name.split(".", 1)[1] for a in node.names if a.name.startswith("mesh_compiler.")}
+    return found
+
+
+def check_imports():
+    direct = {p.stem: imports_of(p) for p in (HERE / "mesh_compiler").glob("*.py")}
+    assert not direct["__init__"], "the package __init__ must import nothing"
+
+    def reach(name):
+        seen, todo = set(), [name]
+        while todo:
+            for dep in direct[todo.pop()] - seen:
+                seen.add(dep)
+                todo.append(dep)
+        return seen
+
+    lowerers = {m for m in direct if m.startswith("lower_")}
+    compile_side = {"export", "placement", "devices", "schedule", "driver"}
+    for module in sorted(direct):
+        print(f"  {module:15} imports {sorted(direct[module]) or '-'}")
+    for module in compile_side | {"ir", "runtime"}:
+        assert not reach(module) & (lowerers | {"archive"}), f"{module} reaches a lowerer or the archive"
+    for module in lowerers | {"archive"} | compile_side:
+        assert "runtime" not in reach(module), f"{module} reaches the runtime"
+    for module in lowerers | {"archive", "schedule", "runtime", "placement", "devices", "export"}:
+        assert reach(module) == {"ir"}, f"{module} imports {reach(module)}"
+    tree = ast.parse((HERE / "mesh_compiler" / "runtime.py").read_text())
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    imported |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+    touched = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert not imported & {"networkx", "torch.fx"} and not touched & {"graph", "nodes"}, \
+        "the runtime must not examine graphs"
+    stages = compile_side | lowerers | {"runtime", "archive"}
+    between = {(a, b) for a in stages for b in direct[a] & stages}
+    assert between == {("driver", stage) for stage in compile_side - {"driver"}}, between
+    for path in (HERE / "mesh_compiler").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            relative = isinstance(node, ast.ImportFrom) and node.level > 0
+            source = (node.module or "") if relative else ""
+            if path.stem in stages and source in stages:
+                owner = sys.modules[f"mesh_compiler.{source}"]
+                types = [a.name for a in node.names if isinstance(getattr(owner, a.name), type)]
+                assert not types, f"{path.stem} imports the type {types} from stage {source}"
+    print("  ok: every stage module imports only ir, except driver, which imports the four")
+    print("      compile stages for their functions; the runtime examines no graph")
+
+
+class Checked(nn.Module):
+    def forward(self, x):
+        torch.ops.aten._assert_async.msg((x == x).all(), "not a number")
+        return x.sin()
+
+
+class SharedValue(nn.Module):
+    def forward(self, x):
+        y = x.sin()
+        w = (y.cos() + y).exp()
+        z = (y + 1.0) @ x
+        return z, w
+
+
+def check_overlapping_calls():
+    assert not build("encoder | 3 processors round-robin")[2].feedforward, "every processor is read by the output processor"
+    torch.manual_seed(0)
+    scheduled = compile_module(Checked(), (r(4),), TWO,
+                               lambda node: "p0" if node.name in ("sin", "output") else "p1")
+    assert scheduled.feedforward == ["p1"], "the assertion's processor has no path to the output processor"
+    gate, seen, checker = threading.Event(), [], scheduled.modules["p1"]
+
+    def late(*arguments):
+        gate.wait()
+        seen.append(arguments[0][0].item())
+        return checker(*arguments)
+
+    program = Program(scheduled, {**scheduled.modules, "p1": late})
+    for value in (1.0, 2.0, 3.0):
+        program(torch.full((4,), value))
+    gate.set()
+    deadline = time.time() + 20
+    while len(seen) < 3 and time.time() < deadline:
+        time.sleep(0.01)
+    assert seen == [1.0, 2.0, 3.0], f"the late thread read {seen}"
+    print(f"  feedforward processor p1, its thread held back over three calls, read inputs {seen}")
+    print("  ok: each call's inputs reached the thread; other processors keep one list of arguments")
+
+
+def check_shared_storage():
+    torch.manual_seed(0)
+    module = SharedValue()
+    scheduled = compile_module(module, (r(64, 64),), TWO,
+                               lambda node: "p0" if node.name in ("add_1", "mm", "output") else "p1")
+    received = [n for n in scheduled.modules["p0"].graph.nodes if n.target is ir.RECV]
+    assert received, "the output processor must receive"
+    compiled = Program(scheduled, lower_inductor.lower(scheduled))
+    worst = max(errors(module(x), compiled(x))[1] for x in (r(64, 64) for _ in range(100)))
+    assert worst <= TOLERANCE, worst
+    print(f"  {len(received)} same-device receives on p0; 100 runs through Inductor, worst rel err {worst:.1e}")
+    print("  ok: the receiver's compiled code left the sender's storage intact")
+
+
+def check_digests_across_processes():
+    command = [sys.executable, str(HERE / "samples.py"), "--digests"]
+    runs = [json.loads(subprocess.run(command, capture_output=True, text=True, check=True).stdout)
+            for _ in range(2)]
+    here = {name: digests(build(name)[2].modules) for name in KEY_CASES}
+    assert runs[0] == runs[1] == here, "digests differ between processes"
+    for name, found in here.items():
+        print(f"  {name:34} " + " ".join(f"{p}:{d[:12]}" for p, d in found.items()))
+    print("  ok: identical in two fresh interpreter processes and in this one")
+
+
+def reload_case(directory, name):
+    _, factory, calls, _ = next(case for case in CASES if case[0] == name)
+    torch.manual_seed(0)
+    module = factory().eval()
+    scheduled = archive.load(directory)
+    worst = measure(lambda: Program(scheduled), module, calls)
+    print(json.dumps({"abs": worst[0], "rel": worst[1], "digests": digests(scheduled.modules)}))
+
+
+def check_reload_in_fresh_process():
+    for name in FRESH_CASES:
+        if "mps" in name and not MPS:
+            continue
+        program = build(name)[2]
+        with tempfile.TemporaryDirectory() as directory:
+            archive.save(directory, program)
+            size = sum(f.stat().st_size for f in pathlib.Path(directory).iterdir())
+            command = [sys.executable, str(HERE / "samples.py"), "--reload", directory, name]
+            done = subprocess.run(command, capture_output=True, text=True, check=True)
+        report = json.loads(done.stdout.strip().splitlines()[-1])
+        assert report["rel"] <= TOLERANCE or report["abs"] <= TOLERANCE, report
+        assert report["digests"] == digests(program.modules), "digest changed by reload"
+        print(f"  {name:34} {len(program.modules)} archives {size:7d} bytes  rel err "
+              f"{report['rel']:.1e}  digests equal")
+    print("  ok: loaded and run in a fresh process, matches eager, digests equal the originals")
+
+
+def main():
+    if "--digests" in sys.argv:
+        print(json.dumps({name: digests(build(name)[2].modules) for name in KEY_CASES}))
+        return
+    if "--reload" in sys.argv:
+        reload_case(*sys.argv[sys.argv.index("--reload") + 1:][:2])
+        return
+    with_inductor = "--fast" not in sys.argv
+    failed, total_breaks = False, 0
+    print(f"torch {torch.__version__}  mps={MPS}  tolerance={TOLERANCE}")
+    print("max relative error against eager, per execution path of the same scheduled IR;")
+    print("nodes = call_function nodes of the exported graph; chan = channels, each one send and")
+    print("one recv; copy = device copies; the scheduled graphs hold exactly nodes + 2 chan + copy:")
+    print(f"{'case':34} {'nodes':>5} {'chan':>4} {'copy':>4} " + " ".join(f"{p:>11}" for p in PATHS)
+          + "  torch.compile")
+    for name, _, _, options in CASES:
+        rejected = options.get("rejected", False)
+        if options.get("needs_mps") and not MPS:
+            print(f"{name:34} SKIP (no mps)")
+            continue
+        started = time.time()
+        try:
+            operators, channels, copies, results, dynamo, breaks = run_case(name, with_inductor)
+        except Exception as error:
+            failed |= not rejected
+            detail = str(error).strip().splitlines()[0][:150]
+            print(f"{name:34} {'REJECTED' if rejected else 'ERROR'}: {type(error).__name__}: {detail}")
+            continue
+        cells = [cell(results[path]) for path in PATHS]
+        total_breaks += breaks
+        failed |= rejected or breaks > 0 or not all(ok for _, ok in cells)
+        print(f"{name:34} {operators:5d} {channels:4d} {copies:4d} " + " ".join(f"{text:>11}" for text, _ in cells)
+              + f"  {dynamo} ({time.time() - started:.0f}s)", flush=True)
+        for path in PATHS:
+            if isinstance(results[path], Exception):
+                detail = " ".join(str(results[path]).split())[:300]
+                print(f"    {path}: {type(results[path]).__name__}: {detail}")
+    print(f"torch.compile graph breaks over all cases: {total_breaks}")
+    for reason, count in BREAK_REASONS.most_common():
+        print(f"  {count:5d}  {reason}")
+    print("import separation (from the modules' syntax trees):")
+    check_imports()
+    print("digests of the scheduled GraphModules across processes:")
+    check_digests_across_processes()
+    if with_inductor:
+        print("Inductor's generated code, scheduled against exported, single-processor cases:")
+        check_inductor_structure()
+    print("overlapping calls (a processor with no path to the output processor):")
+    check_overlapping_calls()
+    if with_inductor:
+        print("shared storage (a value read on another processor and again by its sender):")
+        check_shared_storage()
+    print("torch.export.save of the scheduled programs, reloaded in a fresh process:")
+    check_reload_in_fresh_process()
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
