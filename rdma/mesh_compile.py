@@ -1611,10 +1611,7 @@ OBJC.objc_getClass.restype, OBJC.objc_getClass.argtypes = C.c_void_p, [C.c_char_
 SET = _message(None, C.c_void_p)
 OBJECT = _message(C.c_void_p)
 VALUE = _message(C.c_uint64)
-# metal_recording.h place:value:in:offsets:copies:ahead:shares:, place:step:offsets:copies:shares: and
-# state:buffer:status:
-PLACE_VALUE = _message(None, C.c_void_p, C.c_ulong, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_bool)
-PLACE_STEP = _message(None, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_bool)
+# metal_recording.h state:buffer:status:
 STATE_BUFFER = _message(None, C.c_void_p, C.c_void_p, C.c_ulong)
 
 
@@ -6873,6 +6870,9 @@ def _compiler():
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
                 ('metal_ir_storages', C.c_size_t, [P, C.POINTER(C.POINTER(Storage))]),
+                ('metal_ir_value_placed', None, [P, U, P, C.POINTER(Q), Q, Q, U]),
+                ('metal_ir_step_placed', None, [P, P, C.POINTER(Q), Q, U]),
+                ('metal_ir_place', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value', U, [P, U, U, U, C.POINTER(Q), U, C.POINTER(Term), C.c_int64, Q]),
                 ('metal_ir_value_view', None, [P, U, U]),
                 ('metal_ir_value_data', None, [P, U, P, C.c_size_t, P, Q, P, RELEASE]),
@@ -7178,14 +7178,15 @@ def _expanded(selection, owned, reader, addresses, base):
 
 
 # ExecuTorch, "Concepts", Memory planning; torch 2.14.0 torch/_inductor/cudagraph_trees.py; M. Lam, PLDI 1988, §2.3;
-# metal_recording.h place:value:in:offsets:copies:ahead:shares:, place:step:, state:buffer:status:, replay: and
-# MetalReplayNative; MTL4CommandQueue.h addResidencySet:; design/compilation-composition-change-request.md, "Complete
+# metal_ir.h metal_ir_value_placed, metal_ir_step_placed, metal_ir_place; metal_recording.h state:buffer:status:,
+# replay: and MetalReplayNative; MTL4CommandQueue.h addResidencySet:; design/compilation-composition-change-request.md, "Complete
 # replacement workgroup" (6's stage E): each row's values bound to their placed copies (a plan value's copies as its
 # reader's executions select them, _expanded; a realized value's own copies), its step word and transport view, its
 # replay and compiled CPU entries the row (MetalCall `call` = j + 1) of the one native program, prepared with the
 # plan's results (mesh-collective.h struct mesh_planned) and retained by it until retirement
 def _replays(programs, context, irs, planned, values, addresses, base, buffer, bound, owned, made, steps, every):
     lib, recorder, error = programs['lib'], programs['recorder'], C.create_string_buffer(4096)
+    compiler = programs['compiler']
     queue, rows, selection = OBJECT(recorder, _SEL(b'queue')), [], {'every': every, 'rated': programs['rated']}
 
     def offsets(at):
@@ -7194,20 +7195,21 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
         if entry['builder'] is None:
             rows.append(None)
             continue
-        k, prepared = entry['k'], entry['prepared']
+        k, prepared, p = entry['k'], entry['prepared'], entry['builder'].p
         for vi, owner in entry['builder'].planned.items():
             at, width = _expanded(selection, owner, k, addresses, base)
-            PLACE_VALUE(recorder, _SEL(b'place:value:in:offsets:copies:ahead:shares:'), prepared, vi, buffer, at, width,
-                        0, bool(values[owner[0]][owner[1]].shares))
+            compiler.metal_ir_value_placed(p, vi, buffer, at, width, 0, values[owner[0]][owner[1]].shares)
         for vi, index in entry['own'].items():
             value = values[k][index]
-            PLACE_VALUE(recorder, _SEL(b'place:value:in:offsets:copies:ahead:shares:'), prepared, vi, buffer,
-                        offsets(addresses[k][index]), value.section.count, 0, bool(value.shares))
+            compiler.metal_ir_value_placed(p, vi, buffer, offsets(addresses[k][index]), value.section.count, 0,
+                                           value.shares)
         if k in steps:
             step = values[k][steps[k]]
-            PLACE_STEP(recorder, _SEL(b'place:step:offsets:copies:shares:'), prepared, buffer,
-                       offsets(addresses[k][steps[k]]), step.section.count, bool(step.shares))
+            compiler.metal_ir_step_placed(p, buffer, offsets(addresses[k][steps[k]]), step.section.count, step.shares)
         STATE_BUFFER(recorder, _SEL(b'state:buffer:status:'), prepared, made.state, entry['status'])
+        if compiler.metal_ir_place(p, error, len(error)):
+            raise OSError(errno.EINVAL, 'call %s of compiled function %d: its placed accesses: %s'
+                          % (entry['node'].name, k, error.value.decode()))
         replay = Replay()
         status = lib.MetalRecorderReplay(recorder, prepared, C.byref(replay), error, len(error))
         if status:
@@ -7938,7 +7940,7 @@ def program(block, *example_inputs):
         # each call's program declared and lowered, its compiled order's lifetimes the plan's operands
         programs = _programs(context, irs, compiled, gm, of, constants, holders, state['owned'], calls)
         own = _lifetimes(programs, irs)
-        # metal_recording.h place:step:; the later passes: each function's step word, its rows' plan execution
+        # metal_ir.h metal_ir_step_placed; the later passes: each function's step word, its rows' plan execution
         # e = b every + ordinal, which the native program writes before row execution e; lag copies
         # (mesh-collective.c plan copies of a lagged value), horizon every of them, so each of the horizon block
         # executions in flight owns copy e mod copies; 8 bytes, e's 64 bits as the host's executions,
