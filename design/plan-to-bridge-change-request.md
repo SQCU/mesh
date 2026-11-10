@@ -2154,7 +2154,40 @@ code, and each method is used as its source states it.
 > the fact that one pagelist transmitted thrtough the dma driver came from a coflow vs an independent flow is *not
 > something the bridge cares about*; both are page -> page sends with no logic related to this typing.
 
+> "- Coflow ordering is cited but not required. R4 orders the blocking kind by R5's static schedule; Varys's smallest-bottleneck-first is named and explicitly not asked for." then review the change request, rewrite it if necessary s.t. it establishes that this optimizing solver output / scheduling / lowering property is not an evocative metaphor but is in fact a plain behavioral requirement for runtime execution. if there is no source applying this, we can simply accept that it is an outstanding requirement taht needs placement in the implementation ordering of our current data flow and architecture work
+
+(2026-11-10 UTC, session 55974018; the quoted sentence opening the turn is Claude's summary of this requirement, and
+it was wrong: see "Behaviour at run time" below.)
+
 - The code must schedule both kinds of function, and must not tell the bridge which is which.
+- **Behaviour at run time** (added 2026-11-09, from the turn above). "Coflow" and "independent flow" here are not
+  figures of speech. They name what a run does, and each statement below is something a run either does or does not
+  do.
+  1. A function that needs its operand whole starts when every page of that operand is present, and not before. It
+     waits for nothing else. Bhattacharyya, Sriram and Lee, §2, as design/aot-compilation-change-request.md quotes
+     it: "Each processor executes the actors assigned to it in the order specified at compile time. Before firing an
+     actor, a processor waits for the data needed by that actor to become available". Its data is every page of its
+     operand (below: "one task with an edge from every page of its operand").
+  2. A function that takes pages in any order has one task for each page. Each task starts when its own page is
+     present. It does not wait for another page of the same operand. Each output page is released when it is
+     written (below: I-structures, "a reader waits only for the element it reads, with no barrier over the
+     structure").
+  3. Each cable sends its pages in the order R5's program gives. In that program the two kinds are rows, not labels:
+     the first kind's task "has an edge from every page of its operand, which with (1c) is Chen's (1a): 'the
+     completion time of coflow k is bounded by all its flows'", and each of the second kind's tasks "has one edge,
+     from its own page, so its pages are independent flows" (R5). So the order a cable sends in is computed from
+     which pages a function needs together and which it needs singly.
+  4. The bridge receives that order and nothing about either kind.
+  - What is and is not sourced. R5 cites Chen for the program and says of its theorem: "No theorem cited here covers
+    that case", the case of cables and devices in place of Chen's switches. No quoted source applies coflow
+    scheduling with precedence to this network. The four statements are required all the same; that no source applies
+    them here is recorded, and it changes nothing they require.
+  - No quoted source says how a run is shown to have done 1 to 3: which record of a run gives, for each function, when
+    each page of its operand became present and when the function started, and each cable's sequence of sends. That is
+    outstanding with them.
+  - Status, 2026-11-09: outstanding. No run with a received operand has been made at the current tree. In
+    design/implementation-order-2026-11-09.md, statement 3 is written with item 4, statements 1, 2 and 4 with item 7,
+    and the record of a run with item 11.
 - **Method,** as Claude's turn that introduced the two kinds gave it:
   - The synchronous, complete, contiguous consumer (the turns' "function A") is a blocking operator over a dense operand: databases' blocking operator, as against a pipelined one (G.
     Graefe, Query evaluation techniques for large databases, ACM Comput. Surv., 1993). Its operand is a coflow, which
@@ -2163,7 +2196,8 @@ code, and each method is used as its source states it.
     consumer's bottom level. Ordering coflows to minimize their completion time is Varys's smallest-effective-bottleneck
     first (M. Chowdhury, Y. Zhong and I. Stoica, Efficient coflow scheduling with Varys, SIGCOMM 2014). R5 does not
     require it. (Corrected 2026-11-05: the first text said that consumer's operand is scheduled by Varys, which no requirement asked
-    the code to do.)
+    the code to do.) (2026-11-09: "it" is Varys's heuristic. The coflow itself is required: it is a row of R5's
+    program, Chen's (1a), as "Behaviour at run time" states.)
   - The asynchronous, incomplete, noncontiguous consumer (the turns' "function B") is a streaming homomorphism over pages: f(x ∪ y) = f(x) ⊕ f(y). Gibbons states homomorphisms over
     lists, with ⊕ associative (J. Gibbons, The third homomorphism theorem, J. Functional Programming, 1996). Taking
     pages in any order also needs ⊕ commutative: the bag homomorphisms of the Bird–Meertens formalism's Boom hierarchy

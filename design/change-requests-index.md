@@ -235,6 +235,10 @@ outstanding, and what of it is outstanding. The standard every change request fo
     read of `removed` in `plans_load`; that implementation remains in the current source. The former no-commit
     statement was stale. This structural review did not perform a link-loss workload.
 - [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md): outstanding in part.
+  - R4, "Behaviour at run time" (added 2026-11-09): outstanding. Four statements of what a run does for a function
+    that needs its operand whole and for one that takes pages in any order. Ordered in
+    implementation-order-2026-11-09.md under items 4, 7 and 11. No run with a received operand exists at the current
+    tree, and no quoted source says which record of a run shows them.
   - R4's consumption of a received operand one partition at a time has historical implementations in the torch
     scope through the lowering request's item 1 and in LiteRT through torch-capture item 3. In the replacement,
     build19 carries per-group footprints/page masks into native first-pass, compaction and deferred work, and

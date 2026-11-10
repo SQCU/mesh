@@ -42,6 +42,15 @@ parts of a call":
 
 > we're talking about apple silicon which doesn't have a host-device model, it has shm, command buffers, and cooperative tensors? what is the question here asking in non-idiomatic language?
 
+The operator, 2026-11-10 UTC, of Claude's sentence that the solve "needs to know which values each one reads and
+which it writes" and that "the replacement states it early":
+
+> so this early topic is relating to one of the unimplemented change request documents, which ultimately describes blah blah blah loop unrolling and dependency ordering optimization solvers as producing exactly the data structures needed to produce indices of which pages (literally, an abstraction over pointers) are 'safe' or 'available' for reading or writing at any particular moment in execution, as the optimizing solver produces memory safe scheduling-allocation solutions by coincidence of producing optimal solutions.
+
+The operator, 2026-11-10 UTC, of plan-to-bridge-change-request.md R4:
+
+> "- Coflow ordering is cited but not required. R4 orders the blocking kind by R5's static schedule; Varys's smallest-bottleneck-first is named and explicitly not asked for." then review the change request, rewrite it if necessary s.t. it establishes that this optimizing solver output / scheduling / lowering property is not an evocative metaphor but is in fact a plain behavioral requirement for runtime execution. if there is no source applying this, we can simply accept that it is an outstanding requirement taht needs placement in the implementation ordering of our current data flow and architecture work
+
 ## The reference program
 
 `~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
@@ -126,12 +135,15 @@ searching the source for the named functions, not by a status paragraph.
     operands; compilation realizes the graph's storage, transfers, ordering and synchronization."
   - plan-to-bridge-change-request.md, "R5. The order of transfers is a static schedule with costs".
   - plan-to-bridge-change-request.md, "R4. Functions that need an operand whole and functions that take pages in any
-    order": "The code must schedule both kinds of function, and must not tell the bridge which is which." (Added
+    order": "The code must schedule both kinds of function, and must not tell the bridge which is which." Its
+    "Behaviour at run time", statement 3: "Each cable sends its pages in the order R5's program gives." (Added
     2026-11-09; this memorandum first listed R4 under "Not covered".)
   - disjoint-pages-change-request.md, "Unrolling by modulo variable expansion" (M. Lam, PLDI 1988; B. R. Rau, MICRO
     1994): "For each value, L is the smallest lag at which every read of it in execution t happens before its write
     in execution t + L. The unroll factor u is the largest L." Which pages may be read or written at a position of
-    the schedule is this solve's result; it is not a separate record. (Added 2026-11-09.)
+    the schedule is this solve's result; it is not a separate record (the operator's turn above: the solvers
+    produce "exactly the data structures needed to produce indices of which pages [...] are 'safe' or 'available'
+    for reading or writing at any particular moment in execution"). (Added 2026-11-09.)
   - integration-finishing-change-request.md, "2. A node's replayed commands in the completion-time order"; "3. A
     weight on each task".
   - torch-capture-change-request.md, "Source for item 2's execution-time estimates (2026-11-09)": "Replaces: the
@@ -181,6 +193,10 @@ searching the source for the named functions, not by a status paragraph.
   complete their replacement."; collective-goals-2026-09-14.md: "the *runtime* is necessarily extremely ismple,
   ebcause any artificially imposed control flow puts more cache reads and loads in between 'work is ready on peer'
   and 'work has arrived to this meshnode from peer and is being used'."
+- **Also** (added 2026-11-09): plan-to-bridge-change-request.md R4, "Behaviour at run time", statements 1, 2 and 4:
+  "A function that needs its operand whole starts when every page of that operand is present, and not before. It
+  waits for nothing else."; "Each task starts when its own page is present. It does not wait for another page of the
+  same operand."; "The bridge receives that order and nothing about either kind."
 - **Replaces:** `metal_recording.m` from `MetalReplayRun` to the end of the file: about 2,480 lines and 91
   definitions. Its public interface, 30 functions in `metal_recording.h`, falls to load, bind and call.
 - **Reference:** `schedule_emit/runtime.py`, 75 lines. It examines no graph.
@@ -226,6 +242,8 @@ searching the source for the named functions, not by a status paragraph.
   runtime action per vertex." The scheduled program is compared with the exported one for what that sentence
   requires: every required observation and ordering is kept, and each function, send, receive, copy or wait the
   scheduled program has beyond the exported one is one a clause or the solver justifies.
+- **Also** (added 2026-11-09): plan-to-bridge-change-request.md R4, "Behaviour at run time": "No quoted source says
+  how a run is shown to have done 1 to 3". The record of a run that shows them is outstanding and belongs here.
 - **Estimate:** about 100 lines for the structural comparison, in the existing client tools; none for measurement.
 
 ## Why this order
@@ -249,9 +267,8 @@ and 9.
 
 The reference program says nothing about these outstanding topics, so this memorandum gives them no order:
 
-- page-level transport and a function that reads a received operand a page at a time
-  (plan-to-bridge-change-request.md "R4. Functions that need an operand whole and functions that take pages in any
-  order"; disjoint-pages-change-request.md);
+- the bridge's own page-level transport (plan-to-bridge-change-request.md R1; disjoint-pages-change-request.md).
+  R4 and the unrolling clause were listed here until 2026-11-09; they are now under items 4, 7 and 11;
 - the numerical kernels, specialization and fusion inside the typed compiler (compilation-composition-change-request.md
   "Performance correction: compile the transformations, not their textual symptoms");
 - Core ML and Neural Engine lowering.
