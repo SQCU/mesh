@@ -47,9 +47,9 @@
 
 ### 3. A weight on each task
 
-- **The data structure** is the weighting operand, of the type design/aot-compilation-change-request.md A3 gives: "a
-  weight on each task; a weight on each edge; the cables' capacities, from the map". The task weights are the lengths
-  of `mesh_plan`'s tasks; no cited source states that.
+- **The data structure** is the weighting operand, as design/aot-compilation-change-request.md A3 gives it: "a weight
+  w on each task and a weight c on each edge", and the cables' capacities, from the map. The task weights are the
+  lengths of `mesh_plan`'s tasks; no cited source states that.
 - **Produced by** the caller of the compilation. **Consumed by** the compilation's router and its scheduler, which
   compute no weight (A3).
 - **Replaces:** the weighting operand of one `mesh.Weight` per transfer.
