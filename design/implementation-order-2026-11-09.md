@@ -125,6 +125,13 @@ searching the source for the named functions, not by a status paragraph.
   - "4. Execute the compiled decisions with the specified runtime semantics": "placement and costs arrive as
     operands; compilation realizes the graph's storage, transfers, ordering and synchronization."
   - plan-to-bridge-change-request.md, "R5. The order of transfers is a static schedule with costs".
+  - plan-to-bridge-change-request.md, "R4. Functions that need an operand whole and functions that take pages in any
+    order": "The code must schedule both kinds of function, and must not tell the bridge which is which." (Added
+    2026-11-09; this memorandum first listed R4 under "Not covered".)
+  - disjoint-pages-change-request.md, "Unrolling by modulo variable expansion" (M. Lam, PLDI 1988; B. R. Rau, MICRO
+    1994): "For each value, L is the smallest lag at which every read of it in execution t happens before its write
+    in execution t + L. The unroll factor u is the largest L." Which pages may be read or written at a position of
+    the schedule is this solve's result; it is not a separate record. (Added 2026-11-09.)
   - integration-finishing-change-request.md, "2. A node's replayed commands in the completion-time order"; "3. A
     weight on each task".
   - torch-capture-change-request.md, "Source for item 2's execution-time estimates (2026-11-09)": "Replaces: the
