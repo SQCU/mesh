@@ -49,9 +49,9 @@ The operator, in order (UTC):
 
 ## The program
 
-### The types that pass between stages
+### `schedule_emit/ir.py`
 
-`schedule_emit/ir.py`, lines 29–43:
+`schedule_emit/ir.py`, lines 29–54:
 
 ```python
 @torch.library.custom_op("schedule_emit::send", mutates_args=())
@@ -69,6 +69,17 @@ def recv(channel: int) -> Tensor:
     return LOCAL.channels[channel].get()
 
 
+_register_effectful_op(send, _EffectType.ORDERED)
+_register_effectful_op(recv, _EffectType.ORDERED)
+SEND = torch.ops.schedule_emit.send.default
+RECV = torch.ops.schedule_emit.recv.default
+
+
+def channel_of(node):
+    """The integer channel of a send or recv node, else None."""
+    if node.target is SEND:
+        return node.args[1]
+    return node.args[0] if node.target is RECV else None
 ```
 
 `schedule_emit/ir.py`, lines 57–76:
@@ -96,7 +107,7 @@ class Scheduled:
     feedforward: list      # processors whose arguments edge is feedforward (no buffer bound)
 ```
 
-### The order of the stages
+### `schedule_emit/driver.py`
 
 `schedule_emit/driver.py`, lines 14–21:
 
@@ -111,7 +122,7 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
     return Scheduled(exported, modules, devices, output_processor, channels, inputs, feedforward)
 ```
 
-### Each stage's function
+### `export.py`, `placement.py`, `devices.py`, `schedule.py`
 
 - `schedule_emit/export.py`:17: `def export(module, args, **export_options):`
 - `schedule_emit/placement.py`:26: `def place(graph_module, placement):`
@@ -119,15 +130,16 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
 - `schedule_emit/schedule.py`:99: `def schedule(module, cost=unit_cost):`
 - `schedule_emit/schedule.py`:136: `def argument_buffers(modules, output_processor):`
 
-### What takes the scheduled value
+### `lower_inductor.py`, `runtime.py`, `archive.py`
 
 - `schedule_emit/lower_inductor.py`:96: `def lower(scheduled):`
 - `schedule_emit/runtime.py`:28: `def __init__(self, scheduled, functions=None):`
 - `schedule_emit/runtime.py`:59: `def __call__(self, *args, **kwargs):`
 - `schedule_emit/archive.py`:57: `def save(directory, scheduled):`
 - `schedule_emit/archive.py`:98: `def load(directory):`
+- `schedule_emit/archive.py`:115: `return Scheduled(exported, modules, devices, about["output_processor"], about["channels"],`
 
-### What each module imports from the others
+### Imports within `schedule_emit/`
 
 - `schedule_emit/export.py`: `from .ir import Exported`
 - `schedule_emit/placement.py`: `from .ir import RECV, SEND`
