@@ -1611,8 +1611,6 @@ OBJC.objc_getClass.restype, OBJC.objc_getClass.argtypes = C.c_void_p, [C.c_char_
 SET = _message(None, C.c_void_p)
 OBJECT = _message(C.c_void_p)
 VALUE = _message(C.c_uint64)
-LEVELS = _message(C.c_uint32, C.c_void_p)
-VALUES = _message(C.c_ulong, C.c_void_p, C.c_uint32, C.c_void_p)
 # metal_recording.h place:value:in:offsets:copies:ahead:shares:, place:step:offsets:copies:shares: and
 # state:buffer:status:
 PLACE_VALUE = _message(None, C.c_void_p, C.c_ulong, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_bool)
@@ -6840,6 +6838,11 @@ class ValueInfo(C.Structure):
         ('pages', mesh.U), ('source', mesh.U)]
 
 
+# metal-microbench metal_ir.h struct metal_ir_storage
+class Storage(C.Structure):
+    _fields_ = [('bytes', mesh.Q), ('begin', mesh.U), ('end', mesh.U)]
+
+
 MACHINES = []
 
 
@@ -6869,6 +6872,7 @@ def _compiler():
                 ('metal_ir_load', P, [P, C.c_size_t, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
+                ('metal_ir_storages', C.c_size_t, [P, C.POINTER(C.POINTER(Storage))]),
                 ('metal_ir_value', U, [P, U, U, U, C.POINTER(Q), U, C.POINTER(Term), C.c_int64, Q]),
                 ('metal_ir_value_view', None, [P, U, U]),
                 ('metal_ir_value_data', None, [P, U, P, C.c_size_t, P, Q, P, RELEASE]),
@@ -7018,11 +7022,7 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
         if compiler.metal_ir_lower(builder.p, device, error, len(error)):
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its lowering: %s'
                           % (node.name, k, error.value.decode()))
-        prepared = _owned(owned, lib.MetalRecorderPrepare(recorder, builder.p, error, len(error)))
-        if not prepared:
-            raise OSError(errno.EINVAL, 'call %s of compiled function %d: its preparation: %s'
-                          % (node.name, k, error.value.decode()))
-        rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': builder, 'prepared': prepared,
+        rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': builder,
                      'marks': marks, 'receives': receives, 'sends': sends})
         return result
     _Program(gm, call).run(*[instance(k, 0)[1][i][0] if k is not None else constant
@@ -7047,12 +7047,12 @@ def _actors(programs, irs):
         lib.MetalRecorderActors.argtypes = [C.c_void_p, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine),
                                             C.POINTER(C.c_double), C.POINTER(C.c_double), mesh.U, C.POINTER(mesh.U),
                                             C.POINTER(mesh_graph.Dependence), C.c_size_t, C.POINTER(C.c_size_t)]
-        status = lib.MetalRecorderActors(row['prepared'], gpu, cpu, None, None, 0, C.byref(parts), None, 0, C.byref(count))
+        status = lib.MetalRecorderActors(row['builder'].p, gpu, cpu, None, None, 0, C.byref(parts), None, 0, C.byref(count))
         if status not in (0, errno.ERANGE, errno.ENODATA):
             mesh.check(status)
         host, work = (C.c_double * max(parts.value, 1))(), (C.c_double * max(parts.value, 1))()
         edges = (mesh_graph.Dependence * max(count.value, 1))()
-        status = lib.MetalRecorderActors(row['prepared'], gpu, cpu, host, work, parts.value, C.byref(parts), edges,
+        status = lib.MetalRecorderActors(row['builder'].p, gpu, cpu, host, work, parts.value, C.byref(parts), edges,
                                         count.value, C.byref(count))
         if status not in (0, errno.ENODATA):
             mesh.check(status)
@@ -7064,20 +7064,21 @@ def _actors(programs, irs):
         made[k] = host, work, edges, parts.value, count.value, complete
     return made
 
-# M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; metal_recording.h levels: and
-# values:level:into:: each row's schedule's lifetimes, a plan value's interval the union of its calls' (every call an
+# M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; design/plan-to-bridge-change-request.md R2;
+# metal-microbench metal_ir.h metal_ir_storages: each row's compiled program's storage records (a value's bytes and its
+# first and last positions of the compiled order), a plan value's interval the union of its calls' (every call an
 # execution of the one plan), and the program values the lowering realized beyond the plan's (bytes > 0, no plan
-# identity) new values of the row's function, `firsts[row]` the first of them
+# identity) new values of the row's function (CONSTANT and STATE invariant, its zeroed mark its state)
 def _lifetimes(programs, irs):
     own = [[] for _ in irs]
     spanned = {}
+    compiler = programs['compiler']
     for at, row in enumerate(programs['rows']):
         if row['builder'] is None:
             continue
-        k, recorder, prepared = row['k'], programs['recorder'], row['prepared']
-        levels = LEVELS(recorder, _SEL(b'levels:'), prepared)
-        made = (mesh.Value * max(VALUES(recorder, _SEL(b'values:level:into:'), prepared, 0, None), 1))()
-        count = VALUES(recorder, _SEL(b'values:level:into:'), prepared, 0, C.cast(made, C.c_void_p))
+        k, p = row['k'], row['builder'].p
+        made = C.POINTER(Storage)()
+        count = compiler.metal_ir_storages(p, C.byref(made))
         row['own'] = {}
         for vi in range(count):
             value = made[vi]
@@ -7088,11 +7089,13 @@ def _lifetimes(programs, irs):
                     spans = [(value.begin, value.end)] + ([spanned[f, v]] if (f, v) in spanned else [])
                     spanned[f, v] = irs[f].values[v].begin, irs[f].values[v].end = \
                         min(s for s, _ in spans), max(e for _, e in spans)
-            elif value.section.bytes:
+            elif value.bytes:
+                info = ValueInfo()
+                compiler.metal_ir_value_info(p, vi, C.byref(info))
                 row['own'][vi] = len(irs[k].values) + len(own[k])
-                own[k].append(mesh.Value.from_buffer_copy(value))
-                own[k][-1].run = 1
-        row['levels'] = levels
+                own[k].append(mesh.Value(section=mesh.Section(bytes=value.bytes),
+                                         kind=mesh.INVARIANT if info.role in (CONSTANT, STATE) else mesh.EXECUTION,
+                                         state=info.zeroed, begin=value.begin, end=value.end, run=1))
     return own
 
 
@@ -7150,6 +7153,14 @@ def _finalized(programs, context, irs, planned, values, owned):
             if not row['prepared']:
                 raise OSError(errno.EINVAL, 'call %s: its saved preparation: %s'
                               % (row['node'].name, error.value.decode()))
+        else:
+            # metal-microbench metal_recording.h MetalRecorderPrepare: the executor of the finalized program, after
+            # the plan
+            row['prepared'] = _owned(owned, programs['lib'].MetalRecorderPrepare(programs['recorder'], p, error,
+                                                                                  len(error)))
+            if not row['prepared']:
+                raise OSError(errno.EINVAL, 'call %s of compiled function %d: its preparation: %s'
+                              % (row['node'].name, k, error.value.decode()))
     return made
 
 
@@ -7924,7 +7935,7 @@ def program(block, *example_inputs):
         # collectives included"; design/aot-compilation-change-request.md, appendix item 6
         # design/compilation-composition-change-request.md item 5
         # design/compilation-composition-change-request.md, "Complete replacement workgroup", 6's stages A to C:
-        # each call's program declared, lowered and prepared, its schedule's lifetimes the plan's operands
+        # each call's program declared and lowered, its compiled order's lifetimes the plan's operands
         programs = _programs(context, irs, compiled, gm, of, constants, holders, state['owned'], calls)
         own = _lifetimes(programs, irs)
         # metal_recording.h place:step:; the later passes: each function's step word, its rows' plan execution
