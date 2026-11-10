@@ -4,7 +4,7 @@
 
 ## The turns
 
-The operator, 2026-11-10 (UTC), of the example, once its review was finished:
+The operator, 2026-11-10 (UTC):
 
 > "It made the cross-device copy an explicit node on the sending processor, before the send, so the scheduler sees it as a function like any other." behaviorally appropriate. okay. we now have a reference program which counterexamples whatever wide-spanning and comprehensive pathologies are in the 'existing code' in the mesh lib and mesh repo.
 
@@ -12,9 +12,11 @@ The operator, 2026-11-10 (UTC), of the example, once its review was finished:
 
 > for any change requests outstanding before that separate repo was made, what structural chagnes require the total reappraisal and total rewriting of the change request documents with respect to the strictly available xample?
 
+> catch this as a compact memorandum before continuing on the other tasks in this message i suppose.
+
 ## Which requests
 
-The example was first committed on 2026-11-09 at 12:53 (schedule-emit e6508cc). First committed before it:
+The example was first committed on 2026-11-09 at 12:53 -0800 (schedule-emit e6508cc); the times below are -0800. First committed before it:
 
 | request | first committed |
 |---|---|
@@ -35,8 +37,8 @@ Written after it: unequal-shards (11-09 18:56) and torch-source-lowering items 5
 
 | The example (data-flow.md) | The earlier requests |
 |---|---|
-| `compile_module` runs `export`, `place`, `on_devices`, `schedule`, in that order, once. | torch-capture, item 9: "every node runs its captured program by replay". integration-finishing, item 2: "A node's replayed commands in the completion-time order". compilation-composition, requirement 6, names a second solve in `MetalProgramPrepare` as what it replaces. |
-| `send(value: Tensor, channel: int)` and `recv(channel: int) -> Tensor` are nodes `place` adds to the one graph. | plan-to-bridge R3 and R6: transfers are `struct mesh_declared` records, and `mesh_plan` "builds the task graph from the IR". |
+| `compile_module` runs `export`, `place`, `on_devices`, `schedule`, in that order, once. | torch-capture, item 9: "every node runs its captured program by replay". integration-finishing, item 2: "A node's replayed commands in the completion-time order". |
+| `send(value: Tensor, channel: int)` and `recv(channel: int) -> Tensor` are added to the graph by `insert_send_recv` (`graph.call_function(SEND, (node, channel))`, `graph.call_function(RECV, (channel,))`). | plan-to-bridge R3: `mesh_plan` "builds the task graph from the IR". |
 | One value, `Scheduled`, is returned by `compile_module`; `lower(scheduled)`, `Program(scheduled, functions)` and `save(directory, scheduled)` each take it. | plan-to-bridge's title: "what the plan gives the bridge". The schedule is made by one function and handed to another program as its own artifact. |
 | `runtime.py` imports `ir` and nothing else of the program. | torch-capture items 2 to 6 and disjoint-pages C3: waits, phases and counts that are worked out when a recorded program is prepared. |
 

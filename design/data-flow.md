@@ -130,9 +130,36 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
 - `schedule_emit/schedule.py`:99: `def schedule(module, cost=unit_cost):`
 - `schedule_emit/schedule.py`:136: `def argument_buffers(modules, output_processor):`
 
+`schedule_emit/placement.py`, lines 41–61:
+
+```python
+def insert_send_recv(graph, node, first):
+    """One channel, send and recv per processor that reads `node` from elsewhere. Returns how many."""
+    here = node.meta["processor"]
+    away = {}
+    for user in node.users:
+        if user.meta["processor"] != here:
+            away.setdefault(user.meta["processor"], []).append(user)
+    if not away:
+        return 0
+    value = node.meta.get("val")
+    if not isinstance(value, torch.Tensor):
+        raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
+    for channel, (processor, users) in enumerate(away.items(), first):
+        with graph.inserting_after(node):
+            graph.call_function(SEND, (node, channel)).meta["processor"] = here
+        with graph.inserting_before(users[0]):
+            arrived = graph.call_function(RECV, (channel,))
+            arrived.meta.update(processor=processor, val=value)
+        for user in users:
+            user.replace_input_with(node, arrived)
+    return len(away)
+```
+
 ### `lower_inductor.py`, `runtime.py`, `archive.py`
 
 - `schedule_emit/lower_inductor.py`:96: `def lower(scheduled):`
+- `schedule_emit/runtime.py`:27: `class Program:`
 - `schedule_emit/runtime.py`:28: `def __init__(self, scheduled, functions=None):`
 - `schedule_emit/runtime.py`:59: `def __call__(self, *args, **kwargs):`
 - `schedule_emit/archive.py`:57: `def save(directory, scheduled):`
