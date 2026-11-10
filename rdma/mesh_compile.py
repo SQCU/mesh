@@ -807,11 +807,11 @@ def _partition(ir, operators):
 
 
 # design/aot-compilation-change-request.md A2 and A4; GSPMD sections 3, 3.1 and 4.6
-def partition(gm, placement, nodes, page):
+def partition(gm, placement, nodes, page, max_squarings):
     if not isinstance(placement, Placement):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
     ir, operators, annotated = IR(gm, placement, nodes), {}, set()
-    ir.page = page
+    ir.page, ir.max_squarings = page, max_squarings
     for node in ir.order:
         if node.op == 'call_function':
             ir.locals[node] = Local(node.op, node.target, node.args, {k: v for k, v in node.kwargs.items() if k != 'device'}
@@ -3812,7 +3812,7 @@ SQUARING = {torch.float64: (5.371920351148152, (1.495585217958292e-002, 2.539398
             torch.float32: (3.925724783138660, (4.258730016922831e-001, 1.880152677804762e+000), (3, 5, 7))}
 
 
-def _matrix_exponential(target, given, outs, max_squarings=16):
+def _matrix_exponential(target, given, outs, max_squarings):
     a, (out,), ops = given['self'], outs, []
     if not a.numel():
         return ops
@@ -6227,7 +6227,7 @@ SYMBOLIC = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', opera
             torch.sym_not: 'logical_not'}
 
 
-def _lowering(local, page):
+def _lowering(local, page, max_squarings):
     packet = getattr(local.target, 'overloadpacket', local.target)
     if packet is A.scaled_dot_product_attention:
         origin = local.annotation if isinstance(local.annotation, AttentionOrigin) else AttentionOrigin(0, 0, page)
@@ -6242,6 +6242,9 @@ def _lowering(local, page):
         dtype = torch.float32 if metadata.device.type in ('mps', 'metal') else torch.float64
         return lambda args, kwargs, outs: _pseudoinverse(local.target, _operands(local.target, args, kwargs), outs,
                                                         dtype)
+    if packet in (A.linalg_matrix_exp, A.matrix_exp):
+        return lambda args, kwargs, outs: _matrix_exponential(local.target, _operands(local.target, args, kwargs),
+                                                              outs, max_squarings)
     if local.target in SYMBOLIC:
         return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)
     if packet in LINEAR:
@@ -6414,7 +6417,7 @@ def _key(value):
 # structured operations over its operands' placed views, its result its own place, a placed view of an operand it
 # writes in place, an alias, or a temporary the compilation realizes
 def _called(ir, key, operands, local, form, placed):
-    lower = _lowering(local, ir.page)
+    lower = _lowering(local, ir.page, ir.max_squarings)
     given = iter(operands)
     args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
@@ -7422,10 +7425,10 @@ def _ended(replay):
 # 3; J. Reed, Z. DeVito, H. He, A. Ussery and J. Ansel, MLSys 2022; torch v2.14.0 torch/fx/_symbolic_trace.py,
 # Tracer.is_leaf_module; torch/nn/modules/module.py, _forward_unimplemented
 class Function(torch.nn.Module):
-    def __init__(self, module, placement, weights, device=None, loss=None, source_device=None):
+    def __init__(self, module, placement, weights, device=None, loss=None, source_device=None, max_squarings=16):
         super().__init__()
         self.module, self.placement, self.weights, self.device = module, placement, weights, device
-        self.loss, self.source_device = loss, source_device
+        self.loss, self.source_device, self.max_squarings = loss, source_device, max_squarings
 
 
 # torch 2.14.0 torch/export/experimental/__init__.py _export_forward_backward;
@@ -7961,7 +7964,8 @@ def program(block, *example_inputs):
         nodes, header = mesh.Nodes(), mesh.Header.from_address(context.M)
         mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
         page = header.pgsz * header.block
-        irs = [partition(record.gm, operand, nodes, page) for record, operand in zip(compiled, operands)]
+        irs = [partition(record.gm, operand, nodes, page, record.function.max_squarings)
+               for record, operand in zip(compiled, operands)]
         # design/compilation-composition-change-request.md items 1 and 6 (unit 6E); design/aot-compilation-change-
         # request.md A4: a function's results are whole at every node of its map (_partition), so a consumer at a node
         # outside its producer's map reads the producer's delivery there (_deliver). wanted[f, o]: the functions of the
