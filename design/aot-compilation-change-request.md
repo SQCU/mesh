@@ -200,8 +200,8 @@ its function and type names are given beside each stage.
   router's capacities and demands are the given inputs of concurrent multicommodity flow (N. Garg and J. Könemann,
   Faster and simpler algorithms for multicommodity flow and other fractional packing problems, FOCS 1998).
 - **Produced by, consumed by.** The caller passes the operand. A4's routing takes the capacities, and A6's schedule
-  takes w and c. In the reference program the operand is `cost`, a function from an fx node to a float. No cited mesh
-  code names a type for the weights.
+  takes w and c. In the reference program the operand is `cost`, a function from an fx node to a float. In mesh the
+  weights are `struct mesh_weight`, a field of `struct mesh_function` (rdma/mesh-collective.h).
 - **The chooser of the weights is defined later, apart, as the chooser of A2 is.**
 
 ### A4. Collectives lower to page transfers over packed trees
@@ -509,8 +509,8 @@ its function and type names are given beside each stage.
   al., 2023, §4 and §5).
 - **Produced by, consumed by.** A2 partitions it. `mesh_plan` takes it for A4's routing and lowering, A5's allocator
   and A6's ordering, as `struct mesh_function` with its `struct mesh_declared`, `struct mesh_weight` and
-  `struct mesh_dependence` (rdma/mesh-collective.h). `struct mesh_function` has no field named for A2's placement operand; each
-  `struct mesh_declared` carries its `source` and `destination`.
+  `struct mesh_dependence` (rdma/mesh-collective.h). `struct mesh_function` has no field named for A2's placement
+  operand; each `struct mesh_declared` carries its `source` and `destination`.
 
 ### A9. The serialized operand, in MSCCL-IR's shape
 
