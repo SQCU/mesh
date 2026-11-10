@@ -326,6 +326,11 @@ The operator:
 
 (2026-11-09 19:55)
 
+> "- what matrix_exp returns when more than the fixed number of squarings would be needed;"
+> a runtime error and some NaNs; these are not reasons to stop integrations of other code with other requirements which do not need this endless digression into whether we can reduce the number of error-returning compiled runtime function calls further
+
+(2026-11-09, after item 6 was first written)
+
 - **Replaces:** item 5's refusal of `svd`, `eigh`, `pinv` and `lstsq`'s gelsd and gelss on a processor other than the
   CPU, and its refusal of `matrix_exp`.
 - **Source:**
@@ -380,7 +385,9 @@ The operator:
     size, an operand. A block has a compiled size, padded, and its true size is a value.
   - `svd` is Algorithm 2: the polar decomposition, the eigendecomposition of its Hermitian factor, and one product.
   - `pinv` and `lstsq` with gelsd and gelss are the compositions PyTorch states, of that `svd` or `eigh`.
-  - `matrix_exp` is scaling and squaring with `max_squarings` squarings, an operand whose default is JAX's 16.
+  - `matrix_exp` is scaling and squaring with `max_squarings` squarings, an operand whose default is JAX's 16. Where
+    more squarings would be needed, the result is NaN and the node's status reports an error, through the check the
+    compiler already has (the operator, above: "a runtime error and some NaNs").
   - Each matrix multiplication, QR factorization, Cholesky factorization and triangular solve in these is an
     ordinary node of the graph. The placement operand names its processor, on the GPU, the CPU or the Neural
     Engine, and its sharding across nodes, as for any other function; they are scheduled with everything else. No
@@ -388,8 +395,8 @@ The operator:
   - Where the placement names the CPU for the whole operator, item 5's one call of a LAPACK driver stands.
   - `eig` and `eigvals` of a matrix that is not Hermitian stay as item 5 states them.
   - No lowering here repeats a body a number of times that tensor data decides.
-- **Stops.** No quoted source says what to write for these:
-  - what `matrix_exp` returns when more than `max_squarings` squarings would be needed;
+- **Stops.** No quoted source says what to write for these. They are not written, and they hold up no other item
+  (the operator, above: "these are not reasons to stop integrations of other code with other requirements"):
   - the eigendecomposition of a block at the termination size when that size is more than 1;
   - `eig` and `eigvals` of a matrix that is not Hermitian on the GPU or the Neural Engine;
   - which of these nodes the Neural Engine's supplier offers, and at what precision.
