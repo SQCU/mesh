@@ -7160,9 +7160,9 @@ def _finalized(programs, context, irs, planned, values, owned):
 # so its offsets repeat with period m x copies; a block input's copy is the block's execution t
 def _expanded(selection, owned, reader, addresses, base):
     k, v, j = owned[:3]
-    at, m, n = addresses[k][v], selection['every'][reader], selection['every'][k]
-    block = v in selection['rated'][k]
-    picked = [at[(x // m) % len(at) if block else ((x // m) * n + j) % len(at)] for x in range(m * len(at))]
+    at, m = addresses[k][v], selection['every'][reader]
+    picked = [at[_execution_copy(selection['every'], selection['rated'], k, v, j, x // m, len(at))]
+              for x in range(m * len(at))]
     flat = [a for copy in picked for a in (copy if isinstance(copy, list) else [copy])]
     return (C.c_uint64 * len(flat))(*[a - base for a in flat]), len(picked)
 
@@ -7258,6 +7258,10 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
 
 # design/aot-compilation-change-request.md, appendix item 6: block execution p's copy of a call's result, the copy of
 # its plan's execution p every + ordinal (a block input's: p)
+def _execution_copy(every, rated, k, v, j, p, copies):
+    return (p if v in rated[k] else p * every[k] + j) % copies
+
+
 def _period(copies, horizon):
     return math.lcm(horizon, *(len(c) for function in copies.values() for c in function))
 
@@ -7296,15 +7300,14 @@ def _specialize(programs, horizon, bound, gm, constants, holders, every):
         if _key(x) not in owners:
             return x
         k, v, j = owners[_key(x)][:3]
-        at = copies[k][v]
-        return _TensorLocation(k, v, (p if v in rated[k] else p * every[k] + j) % len(at),
+        return _TensorLocation(k, v, _execution_copy(every, rated, k, v, j, p, len(copies[k][v])),
                                x.shape, x.stride(), x.storage_offset(), x.dtype)
     def input(i, p):
         k = holders[i]
         if k is None:
             return constants[i]
         value, shape = programs['inputs'][k][i]
-        return _TensorLocation(k, value, p % len(copies[k][value]), shape,
+        return _TensorLocation(k, value, _execution_copy(every, rated, k, value, 0, p, len(copies[k][value])), shape,
                                [math.prod(shape[d + 1:]) for d in range(len(shape))], 0, copies[k][value][0].dtype)
     return [_Program(gm, lambda node, args, kwargs, p=p: pytree.tree_map(lambda x: leaf(x, p), results[node])).run(
         *[input(i, p) for i in range(len(constants))])
