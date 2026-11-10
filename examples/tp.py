@@ -63,31 +63,54 @@ class Training(torch.nn.Module):
         return out.sum(), out.detach()
 
 
-# M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, Figure 3; V. Korthikanti et al., arXiv:2205.05198;
-# design/unequal-shards-change-request.md item 5; Megatron-LM section 3: the feed-forward block's first weights are cut
-# along their columns (a torch.nn.Linear weight's dimension 0) and its second along its rows (dimension 1) by one
-# entry, mesh dimension 0 with the tuple of item 1, or with none; item 6; Zhang et al., HAP, EuroSys 2024, sections 2.4
-# and 5.2: a tuple for each part of the model, `parts[block]` the stages of the feed-forward block of that name
-# (mesh.shard's `comm`, `comp` and `upper`)
-def placement(nodes, sequence_parallel, parts=None):
+# M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, Figure 3; design/unequal-shards-change-request.md item 5;
+# Megatron-LM section 3: a block's first weights (`columns`) are cut along their columns (a torch.nn.Linear weight's
+# dimension 0) and its second (`rows`) along its rows (dimension 1) by one entry, mesh dimension 0 with the tuple of
+# item 1, or with none. Items 6, 7 and 14; Zhang et al., HAP, EuroSys 2024, sections 2.4, 3.2, 5 and 5.2: a tuple for
+# each part of the model, a part a block named in `measured['parts']`, "specified by the user (such as using the layers
+# of the model)". The program is partitioned with every part's shards even, the tuple of part k k + 1 at every rank,
+# and each part's times of (3) are taken from that program's stages (mesh.stage_times: `measured['times']`, each
+# rank's measured times of each kind of function, and `measured['collectives']`); a part's entry holds each rank's
+# upper bound `upper` and, where its shares are given and not solved for, `shares` (mesh.shard)
+def megatron(gm, nodes, columns, rows, splits, measured):
+    cut = {}
+    for node in gm.graph.nodes:
+        if node.op == 'get_attr' and node.target.endswith('.weight'):
+            block, layer = node.target.rsplit('.', 2)[:2]
+            if layer in columns + rows:
+                cut.setdefault(block, []).append((node, int(layer in rows)))
+
+    def placed(cuts):
+        return mesh.Placement(list(range(len(nodes))), nodes, {**splits, **{
+            node.target: (cuts.get(block, 0), -1) if along == 0 else (-1, cuts.get(block, 0))
+            for block, held in cut.items() for node, along in held}})
+    if measured is None:
+        return placed({})
+    marks = {block: mesh.Shard(0, (k + 1,) * len(nodes)) for k, block in enumerate(measured['parts'])}
+    ir = mesh.partitioned(gm, placed(marks))
+    return placed({block: mesh.shard(0, cut[block][0][0].meta['val'].shape[cut[block][0][1]],
+                                     *mesh.stage_times(ir, marks[block], measured['times'], measured['collectives']),
+                                     **part)
+                   for block, part in measured['parts'].items()})
+
+
+# V. Korthikanti et al., arXiv:2205.05198
+def placement(nodes, sequence_parallel, measured=None):
     def choose(gm, examples):
-        splits, cuts = {}, {}
-        for node in gm.graph.nodes:
-            if node.op == 'get_attr' and node.target.endswith('.weight'):
-                block, layer = node.target.rsplit('.', 2)[:2]
-                if layer in ('wq', 'wk', 'wv'):
-                    splits[node.target] = (0, -1)
-                elif layer == 'wo':
-                    splits[node.target] = (-1, 0)
-                elif layer in ('w1', 'w3', 'w2'):
-                    along = int(layer == 'w2')
-                    if block in (parts or {}) and block not in cuts:
-                        cuts[block] = mesh.shard(0, node.meta['val'].shape[along], **parts[block])
-                    splits[node.target] = (cuts.get(block, 0), -1) if along == 0 else (-1, cuts.get(block, 0))
-            elif node.op == 'placeholder' and sequence_parallel:
-                splits[node.name] = (-1, 0, -1)
-        return mesh.Placement(list(range(len(nodes))), nodes, splits)
+        return megatron(gm, nodes, ('wq', 'wk', 'wv', 'w1', 'w3'), ('wo', 'w2'),
+                        {node.name: (-1, 0, -1) for node in gm.graph.nodes
+                         if node.op == 'placeholder' and sequence_parallel}, measured)
     return choose
+
+
+# design/unequal-shards-change-request.md item 7: PARTS, JSON of `parts`, `times` (one entry a rank of mesh dimension
+# 0: a kind of function's measured times by its units) and `collectives`
+def measured():
+    if 'PARTS' not in os.environ:
+        return None
+    given = json.loads(os.environ['PARTS'])
+    return {**given, 'times': [{kind: {int(x): t for x, t in at.items()} for kind, at in rank.items()}
+                               for rank in given['times']]}
 
 
 class Calls(torch.nn.Module):
@@ -148,9 +171,8 @@ def main():
     block = None
     if not args.load:
         model = Training().to(device=args.device, dtype=torch.float32)
-        parts = json.loads(os.environ['PARTS']) if 'PARTS' in os.environ else None
-        block = Calls(mesh.Function(model, placement(args.nodes, os.environ.get('SP', '1') == '1', parts), mesh.unit,
-                                    device=args.device, loss=0))
+        block = Calls(mesh.Function(model, placement(args.nodes, os.environ.get('SP', '1') == '1', measured()),
+                                    mesh.unit, device=args.device, loss=0))
     return execute(block, (x,), args)
 
 

@@ -22,6 +22,7 @@ from torch._subclasses.meta_utils import MetaConverter
 from torch.fx.node import Node, map_arg
 from torch.utils._mode_utils import no_dispatch
 
+import allocate
 import mesh
 import mesh_code
 import mesh_disk
@@ -183,12 +184,58 @@ def _sizes(units, parts, extent):
     return tuple(sizes)
 
 
+# design/unequal-shards-change-request.md item 6; Zhang et al., HAP, EuroSys 2024, section 3.2, "divide the execution of
+# a distributed program into stages, with each stage starting with a communication operation followed by a series of
+# computation operations (except for the first stage which only contains computation)": each stage of a partitioned
+# program as (its collective's item, its calls' items), the first stage's collective None
+def stages(ir):
+    made = [(None, [])]
+    for item in ir.program:
+        if item[0] == 'collective':
+            made.append((item, []))
+        elif item[0] == 'call':
+            made[-1][1].append(item)
+    return made
+
+
+# design/unequal-shards-change-request.md items 6 and 7; HAP section 3.2: the times of (3) for the dimensions `part`
+# shards, from the stages of the partitioned program. `comp[i][j]`, "calculated for each operator in the i-th stage",
+# "a linear function of the sharding ratio": for each call of stage i holding a dimension of n elements that `part`
+# shards, n over rank j's speed for that kind of function; A. Lastovetsky et al., arXiv:1109.3074, step 2, "the first
+# approximation of their functional performance models in the form of constant models, si(x) = si(n / p)":
+# `times[j][kind]` rank j's measured times of the function `kind` by its units, the speed taken at n / p (allocate.speed).
+# `comm[i]`, "estimated using the fitted model, with the input of the tensor size of the largest shard": for a
+# collective whose blocks are shards of `part`, `collectives[kind]`, the fitted time a byte of that kind of collective,
+# times the bytes of its whole tensor. A call that returns a view of its operand computes nothing and has no time
+def stage_times(ir, part, times, collectives):
+    ranks, producer = len(part.units), {item[2]: item for item in ir.program}
+
+    def extent(keys):
+        return next((_value(key[0]).shape[d] for key in keys if isinstance(key[1], tuple)
+                     for d, s in enumerate(key[1]) if s == part), None)
+    comm, comp = [], []
+    for collective, calls in stages(ir):
+        sent = collective is not None and extent([*collective[1], collective[2], *(
+            key for read in collective[1] if producer[read][0] == 'copy' for key in producer[read][1])]) is not None
+        value = _value(collective[3].node) if sent else None
+        comm.append(collectives[collective[3].kind] * value.numel() * value.dtype.itemsize if sent else 0.0)
+        held = [(str(ir.locals[item[3]].target), extent([*item[1], item[2]])) for item in calls
+                if not _aliases(ir.locals[item[3]])]
+        comp.append([(0.0, sum(n / allocate.speed(times[j][kind], n // ranks) for kind, n in held if n is not None))
+                     for j in range(ranks)])
+    return comm, comp
+
+
 # design/unequal-shards-change-request.md items 6 and 14; Zhang et al., HAP, EuroSys 2024, sections 2.4, 5.1 and 5.2,
 # "to determine the optimal ratios for each part of the model": the placement of one part's dimension of `extent`
 # elements over mesh dimension m, its tuple the whole sizes, by item 1's rounding, of the shares that solve (3) for the
-# part's stages (mesh_graph.shares: `comm`, `comp` and each rank's upper bound `upper`)
-def shard(m, extent, comm, comp, upper):
-    shares = mesh_graph.shares(comm, comp, upper)
+# part's stages (mesh_graph.shares: `comm`, `comp` and each rank's upper bound `upper`). Where `shares` are given they
+# are not solved for: X. Jia et al., Whale, USENIX ATC 2022, Algorithm 1 (allocate.shift), a rank's computation load its
+# computation time at its share, summed over the stages
+def shard(m, extent, comm, comp, upper, shares=None):
+    shares = mesh_graph.shares(comm, comp, upper) if shares is None else allocate.shift(
+        shares, upper, [lambda share, j=j: sum(stage[j][0] + stage[j][1] * share for stage in comp)
+                        for j in range(len(upper))])
     return Shard(m, _sizes(shares, len(shares), extent))
 
 
@@ -1009,6 +1056,21 @@ def partition(gm, placement, nodes, page):
     _over(ir)
     _kinds(ir)
     return ir
+
+
+# mesh-dataflow.h mesh_nodes_read: this node's map of the mesh and the bytes of a page
+def _nodes():
+    context, nodes = _context(), mesh.Nodes()
+    header = mesh.Header.from_address(context.M)
+    mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
+    return nodes, header.pgsz * header.block
+
+
+# design/unequal-shards-change-request.md item 6; HAP section 5, "the optimal sharding ratios B for a fixed distributed
+# program Q": a function's graph partitioned under a placement at this node's map, for a placement function that takes
+# its shares from the partitioned program's stages
+def partitioned(gm, placement):
+    return partition(gm, placement, *_nodes())
 
 
 # torch 2.14.0 torch/_export/verifier.py
@@ -8104,9 +8166,7 @@ def program(block, *example_inputs):
     # re-compile anything"): the compilation's results at this node (_built), what an artifact retains, and what plan,
     # placement and binding derive from them each time (_bound)
     def _built():
-        nodes, header = mesh.Nodes(), mesh.Header.from_address(context.M)
-        mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
-        page = header.pgsz * header.block
+        nodes, page = _nodes()
         irs = [partition(record.gm, operand, nodes, page) for record, operand in zip(compiled, operands)]
         # design/compilation-composition-change-request.md items 1 and 6 (unit 6E); design/aot-compilation-change-
         # request.md A4: a function's results are whole at every node of its map (_partition), so a consumer at a node

@@ -281,29 +281,48 @@ outstanding, and what of it is outstanding. The standard every change request fo
     with HiGHS: the shares minimise, summed over the stages, the stage's collective time a unit of the largest share
     times the largest share, plus the largest over ranks of the rank's computation time, a fixed part and a part a unit
     of its share; the shares sum to 1 and each lies between 0 and the rank's upper bound, the variable's bound.
-    `shard(m, extent, comm, comp, upper)` gives one part's placement, its tuple the whole sizes of those shares by
-    `_sizes`. `examples/tp.py` and `examples/pl.py` `placement` take `parts`, the stages of each feed-forward block by
-    its name, and call `shard` for each; the one tuple for every block (`UNITS`) is deleted, and `PARTS` gives the
-    stages as JSON. `rdma/allocate.py` `min_max`'s `shared` argument is deleted. Where shares are given,
-    `rdma/allocate.py` `shift` is Whale's Algorithm 1.
-  - Item 7: `rdma/allocate.py` `speed(times, x)` is x / t(x) from one node's measured times of one kind of function.
+    `stages(ir)` divides a partitioned program as HAP §3.2 does, a stage a collective and the calls after it, the first
+    stage calls alone. `stage_times(ir, part, times, collectives)` gives (3)'s times for the dimensions one part
+    shards: a stage's collective time, where its blocks are that part's shards, the fitted time a byte of that kind of
+    collective times the bytes of its whole tensor; a rank's computation time a unit of its share, the sum over the
+    stage's calls that hold a dimension the part shards (calls that return a view of an operand left out) of the
+    dimension's n elements over the rank's speed for that kind of function. `shard(m, extent, comm, comp, upper,
+    shares)` gives one part's placement, its tuple the whole sizes of the solved shares by `_sizes`; where `shares` are
+    given it does not solve, and the tuple is the whole sizes of `rdma/allocate.py` `shift` of them (Whale's Algorithm
+    1: while a rank exceeds its bound, the rank furthest over gives up load to the rank with room whose computation
+    time at its share is lowest; with no rank with room it raises). `examples/tp.py` `megatron`, which `tp.py` and
+    `pl.py` `placement` call, partitions the function's graph with every part's shards even (`partitioned`), takes each
+    part's times from that program's stages and calls `shard` for each attention block and each feed-forward block
+    named in the operand's `parts`. `PARTS` gives the operand as JSON: `parts` (each part's `upper`, and `shares` where
+    they are given), `times` (each rank's measured times of each kind of function, by units) and `collectives` (the
+    time a byte of each kind of collective). The one tuple for every block (`UNITS`), the stages given as JSON, and
+    `rdma/allocate.py` `min_max`'s `shared` argument are deleted.
+  - Item 7: `rdma/allocate.py` `speed(times, x)` is x / t(x) from one node's measured times of one kind of function;
+    `stage_times` takes it at x = n / p, the constant model of Lastovetsky et al.'s step 2.
 
   Outstanding:
   - Item 2's gather and scatter. No quoted sentence says where the program emits either: every input and constant is
     held at every node, a resharding replicates on every device (GSPMD §4.5), and the one transfer from a single
     device is `_deliver`'s, of a whole output.
-  - Item 12's other form, whole padded buffers through an equal-size collective, and its choice (item 6, which decides
-    it, is not written).
+  - Item 12's other form, whole padded buffers through an equal-size collective, and the choice between the two forms
+    from item 6's shares.
   - Items 4 and 5: a run. None was made of either; each was partitioned and lowered in process, rank by rank.
   - Item 5: a convolution with a bias (`_convolution`, `Rule.fused`) still has its input channels gathered before the
     product.
-  - Items 6 and 7: no measured time of any function on any node is in either repository, and no quoted sentence says
-    at which x a rank's speed s(x) is taken to give (3) its linear computation time, or which of a program's
-    collectives make a stage and what its time is a unit of the largest share. `speed` has no caller, and a client's
-    `parts` come from its caller.
-  - Item 14: `shift` has no caller; no client is given shares with what each rank can hold.
-  - Items 6, 7 and 14: a run. None was made; `tp.py`'s feed-forward blocks were partitioned in process with a tuple
-    solved for each.
+  - Item 6: the fixed part of a rank's computation time, the calls of a stage that hold no dimension the part shards
+    ("otherwise, the number of flops does not change"): `stage_times` gives 0 for it, since no quoted sentence says
+    at which units such a call's measured time is taken. The latency of a collective's fitted model is left out; it
+    does not depend on the shares.
+  - Item 7: no measured time of any function on any node, and no fitted time of any collective, is in either
+    repository; `PARTS` has no value in any configuration. The speeds are the first approximation only: the later
+    steps of the cited algorithm, which measure again at each new distribution and fit a piecewise linear speed, are
+    not written, and item 6's program takes a constant speed.
+  - Item 14: metal-microbench `tools/prepare_e2b.py` is given shares (`--placement`, `--layer-placement`,
+    `--vocabulary-placement`) with no bound for any rank and no measured time from which a rank's computation load
+    follows; `shift` is not called there.
+  - Items 6, 7 and 14: a run. None was made; `tp.py` and `pl.py` were partitioned in process at two ranks with times
+    made up for the purpose, a tuple solved, and a tuple shifted from given shares, for each attention and
+    feed-forward block.
   - Items 8, 11 and 13.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.

@@ -163,6 +163,28 @@ The operator, 2026-11-09, in order:
   - §5.2 "Different Sharding Ratios across the Model": "If the DNN model contains many layers and the
     computation-communication ratio differs across layers, using the same sharding ratios throughout the model may
     not be ideal."
+- **Source for the stages and their times** (added 2026-11-10; the passages the quotations above cite as "Sec. 3.2",
+  copied from the text of the arXiv PDF, line-break hyphens joined and the times' sub- and superscripts written
+  inline):
+  - HAP, §3.2 "Cost Modeling": "This allows us to divide the execution of a distributed program into stages, with
+    each stage starting with a communication operation followed by a series of computation operations (except for
+    the first stage which only contains computation), as illustrated in Fig. 6."
+  - "comp(i)_j(B_j) can be calculated based on the profiled flops-per-second of the j-th device and the estimated
+    number of flops of the computation operations in stage i. Specifically, common operations in DNNs have numbers
+    of flops that are linear to some of the dimensions of the input tensors. If one of these dimensions are sharded,
+    the number of flops of this operation on a device is proportional to the sharding ratio of this device;
+    otherwise, the number of flops does not change. The computation time comp(i)_j(B_j), which is calculated for
+    each operator in the i-th stage by dividing the flops with the flops-per-second of the j-th device, is therefore
+    a linear function of the sharding ratio B_j."
+  - "comm(i)(B) is determined based on the collective operation type, the sharding ratio B, and NCCL's profiling data
+    on the cluster's network. We run each collective operation on the cluster with tensors of different sizes and
+    fit the latency and bandwidth in a linear model. comm(i)(B) is then estimated using the fitted model, with the
+    input of the tensor size of the largest shard."
+  - HAP, §5: "the optimal sharding ratios B for a fixed distributed program Q".
+  - HAP, §5.2: "The segment division can be either specified by the user (such as using the layers of the model) or
+    determined using a partition algorithm such as METIS"; "each stage is entirely within a model segment. In this
+    way, for each segment, we can solve the optimization problem in (3) independently to determine the optimal
+    sharding ratios for tensors in that segment."
 - **Replaces:** `rdma/allocate.py` `min_max`'s `shared` argument (:67), which no caller supplies; and one tuple per
   mesh dimension.
 - **Write:** the shares B_j of the m ranks minimise, summed over the program's stages, the stage's collective time,
@@ -182,6 +204,10 @@ The operator, 2026-11-09, in order:
     a function of problem size, has been recently proposed."
   - "A set of p (p < n) processors P1,…,Pp, whose speeds of processing x units, si = si(x), can be obtained by
     measuring the execution time, ti(x), of a computational kernel, si(x) = x/ti(x)"
+- **Source for the x at which a speed is first taken** (added 2026-11-10, from the text of the same arXiv PDF, its
+  algorithm's steps 1 and 2): "All the p processors execute n / p computation units in parallel." "processor P1
+  calculates the absolute speeds of the processors, si(n / p) = (n / p) / ti(n / p) for 1 ≤ i ≤ p and builds the
+  first approximation of their functional performance models in the form of constant models, si(x) = si(n / p)".
 - **Write:** for each node and each kind of function, the speed used to choose shares is s(x) = x / t(x), t(x) the
   measured time of that function at x units. It is not one number per node. In history: the node lines of
   metal-microbench `configs/links/pair-ring.txt` (parent of 8375cb22).

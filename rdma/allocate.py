@@ -91,7 +91,7 @@ def shift(shares, upper, load):
     shares, n = list(shares), len(shares)
     over = [j for j in range(n) if shares[j] > upper[j]]
     free = [j for j in range(n) if shares[j] < upper[j]]
-    while over and free:
+    while over:
         peak = max(over, key=lambda j: shares[j] / upper[j])
         valley = min(free, key=lambda j: load[j](shares[j]))
         if shares[peak] - upper[peak] <= upper[valley] - shares[valley]:

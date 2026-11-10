@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # design/parallel-layers-example.md; design/aot-compilation-change-request.md A1 to A4 and A10;
 # design/plan-to-bridge-change-request.md R4; metal-microbench/docs/measurement.md
-import json
 import os
 
 import torch
 import torch.nn.functional as F
 
 import mesh_compile as mesh
-from tp import Calls, arguments, execute
+from tp import Calls, arguments, execute, measured, megatron
 
 
 DIM, HEADS, FF_MULT, LAYERS, BATCH, SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in
@@ -94,27 +93,11 @@ class Inference(torch.nn.Module):
         return 30 * torch.tanh(logits / 30)
 
 
-# M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, Figure 3; design/unequal-shards-change-request.md item 5;
-# Megatron-LM section 3: the feed-forward block's first weights are cut along their columns (a torch.nn.Linear weight's
-# dimension 0) and its second along its rows (dimension 1) by one entry, mesh dimension 0 with the tuple of item 1, or
-# with none; item 6; Zhang et al., HAP, EuroSys 2024, sections 2.4 and 5.2: a tuple for each part of the model,
-# `parts[block]` the stages of the feed-forward block of that name (mesh.shard's `comm`, `comp` and `upper`)
-def placement(nodes, parts=None):
+# tp.py megatron
+def placement(nodes, measured=None):
     def choose(gm, examples):
-        splits, cuts = {}, {}
-        for node in gm.graph.nodes:
-            if node.op == 'get_attr' and node.target.endswith('.weight'):
-                block, layer = node.target.rsplit('.', 2)[:2]
-                if layer in ('queryproj', 'keyproj', 'valueproj'):
-                    splits[node.target] = (0, -1)
-                elif layer == 'attnoutproj':
-                    splits[node.target] = (-1, 0)
-                elif layer in ('denseproj_in', 'denseproj_gate', 'denseproj_out'):
-                    along = int(layer == 'denseproj_out')
-                    if block in (parts or {}) and block not in cuts:
-                        cuts[block] = mesh.shard(0, node.meta['val'].shape[along], **parts[block])
-                    splits[node.target] = (cuts.get(block, 0), -1) if along == 0 else (-1, cuts.get(block, 0))
-        return mesh.Placement(list(range(len(nodes))), nodes, splits)
+        return megatron(gm, nodes, ('queryproj', 'keyproj', 'valueproj', 'denseproj_in', 'denseproj_gate'),
+                        ('attnoutproj', 'denseproj_out'), {}, measured)
     return choose
 
 
@@ -126,8 +109,7 @@ def main():
     block = None
     if not args.load:
         model = Inference().to(device=args.device, dtype=torch.float32)
-        parts = json.loads(os.environ['PARTS']) if 'PARTS' in os.environ else None
-        block = Calls(mesh.Function(model, placement(args.nodes, parts), mesh.unit, device=args.device))
+        block = Calls(mesh.Function(model, placement(args.nodes, measured()), mesh.unit, device=args.device))
     return execute(block, (input_ids,), args)
 
 
