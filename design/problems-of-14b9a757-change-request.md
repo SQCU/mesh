@@ -459,6 +459,8 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   intervals at one node intersect within one execution.
 - **The algorithm:** none is determined. MPI says only that the use of such entries with a buffer the operation updates
   "is erroneous".
+- **Composition:** `mesh_plan` writes the destination instructions. No function reads their overlap, since no
+  algorithm is determined. No cited code or source names a type for a destination instruction.
 - **Code:**
   - rdma/mesh-collective.c refuses no pair of destination instructions whose byte intervals at one node intersect within
     one execution.
