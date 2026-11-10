@@ -87,6 +87,11 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
 /* design/joint-compilation.md §3, row 8 */
 int mesh_graph_completion_times(uint32_t vertices, const double *length, const uint32_t *resource, uint32_t resources,
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion);
+/* design/unequal-shards-change-request.md items 6 and 14; S. Zhang et al., HAP, EuroSys 2024, section 5.1, (3): the
+   shares B_j of `ranks` ranks that minimise, summed over `stages` stages, comm[i] times the largest B_j plus the largest
+   over j of fixed[i * ranks + j] + slope[i * ranks + j] * B_j, subject to the B_j summing to 1 and 0 <= B_j <= upper[j] */
+int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const double *fixed, const double *slope,
+                      const double *upper, double *share);
 /* design/joint-compilation.md §3, row 8 */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place);

@@ -1206,6 +1206,73 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
   return result;
 }
 
+/* design/unequal-shards-change-request.md items 6 and 14; S. Zhang et al., HAP, EuroSys 2024, section 5.1, (3), "The
+   objective function is the sum of the communication time and computation time of all stages"; X. Jia et al., Whale,
+   USENIX ATC 2022, with HiGHS 1.15.1 README.md, "l <= x <= u": columns B_j in [0, upper[j]], the largest share and each
+   stage's largest computation time; rows the shares' sum, the largest share over each B_j and each stage's time over
+   each rank's; HiGHS 1.15.1, highs_c_api.h */
+int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const double *fixed, const double *slope,
+                      const double *upper, double *share) {
+  const uint64_t rows = 1 + (uint64_t)ranks * ((uint64_t)stages + 1), columns = (uint64_t)ranks + stages + 1;
+  if (rows >= INT32_MAX / 2 || columns >= INT32_MAX / 2) return ENOMEM;
+  const size_t room = rows > columns ? rows : columns;
+  double *lower = malloc(room * sizeof *lower), *high = malloc(room * sizeof *high);
+  double *value = malloc(2 * room * sizeof *value), *column = malloc(columns * sizeof *column);
+  HighsInt *start = malloc(room * sizeof *start), *index = malloc(2 * room * sizeof *index);
+  void *highs = lower && high && value && column && start && index ? Highs_create() : NULL;
+  int result = highs ? 0 : ENOMEM;
+  const double infinity = highs ? Highs_getInfinity(highs) : 0;
+  if (!result) {
+    double largest = 0;
+    for (uint32_t i = 0; i < stages; i++) largest += comm[i];
+    for (uint32_t j = 0; j < ranks; j++) { lower[j] = 0; high[j] = upper[j]; }
+    lower[ranks] = 0; high[ranks] = infinity;
+    for (uint32_t i = 0; i < stages; i++) { lower[ranks + 1 + i] = -infinity; high[ranks + 1 + i] = infinity; }
+    if (Highs_setBoolOptionValue(highs, "output_flag", 0) == kHighsStatusError ||
+        Highs_setStringOptionValue(highs, "solver", "simplex") == kHighsStatusError ||
+        Highs_setIntOptionValue(highs, "simplex_strategy", 1) == kHighsStatusError ||
+        Highs_setStringOptionValue(highs, "parallel", "off") == kHighsStatusError ||
+        Highs_setIntOptionValue(highs, "threads", 1) == kHighsStatusError ||
+        Highs_changeObjectiveSense(highs, kHighsObjSenseMinimize) == kHighsStatusError ||
+        Highs_addVars(highs, (HighsInt)columns, lower, high) == kHighsStatusError ||
+        Highs_changeColCost(highs, (HighsInt)ranks, largest) == kHighsStatusError)
+      result = EDOM;
+    for (uint32_t i = 0; i < stages && !result; i++)
+      if (Highs_changeColCost(highs, (HighsInt)(ranks + 1 + i), 1) == kHighsStatusError) result = EDOM;
+  }
+  if (!result) {
+    HighsInt total = 0, nonzeros = 0;
+    start[total] = nonzeros; lower[total] = 1; high[total] = 1; total++;
+    for (uint32_t j = 0; j < ranks; j++) { index[nonzeros] = (HighsInt)j; value[nonzeros++] = 1; }
+    if (Highs_addRows(highs, total, lower, high, nonzeros, start, index, value) == kHighsStatusError) result = EDOM;
+    total = 0; nonzeros = 0;
+    for (uint32_t j = 0; j < ranks; j++) {
+      start[total] = nonzeros; lower[total] = 0; high[total] = infinity; total++;
+      index[nonzeros] = (HighsInt)j; value[nonzeros++] = -1;
+      index[nonzeros] = (HighsInt)ranks; value[nonzeros++] = 1;
+    }
+    for (uint32_t i = 0; i < stages; i++)
+      for (uint32_t j = 0; j < ranks; j++) {
+        const size_t k = (size_t)i * ranks + j;
+        start[total] = nonzeros; lower[total] = fixed[k]; high[total] = infinity; total++;
+        index[nonzeros] = (HighsInt)j; value[nonzeros++] = -slope[k];
+        index[nonzeros] = (HighsInt)(ranks + 1 + i); value[nonzeros++] = 1;
+      }
+    if (!result && Highs_addRows(highs, total, lower, high, nonzeros, start, index, value) == kHighsStatusError)
+      result = EDOM;
+  }
+  if (!result) {
+    if (Highs_run(highs) == kHighsStatusError) result = EDOM;
+    else if (Highs_getModelStatus(highs) == kHighsModelStatusInfeasible) result = EINVAL;
+    else if (Highs_getModelStatus(highs) != kHighsModelStatusOptimal ||
+             Highs_getSolution(highs, column, NULL, NULL, NULL) == kHighsStatusError) result = EDOM;
+  }
+  if (!result) for (uint32_t j = 0; j < ranks; j++) share[j] = column[j];
+  if (highs) Highs_destroy(highs);
+  free(lower); free(high); free(value); free(column); free(start); free(index);
+  return result;
+}
+
 /* design/plan-to-bridge-change-request.md R5, "The order of each cable's list, by the reference algorithm" */
 static int order_before(const void *context, uint32_t a, uint32_t b) {
   const double *priority = context;

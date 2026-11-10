@@ -335,6 +335,22 @@ def buffer_bound(host, work, edges=()):
     return list(bound[:count])
 
 
+# design/unequal-shards-change-request.md items 6 and 14; S. Zhang et al., HAP, EuroSys 2024, section 5.1, (3);
+# mesh-graph.h mesh_graph_shares: `comm[i]` stage i's collective time a unit of the largest share, `comp[i][j]` rank j's
+# computation time in stage i as (fixed, a unit of its share), `upper[j]` the most rank j holds
+LIB.mesh_graph_shares.restype = C.c_int
+LIB.mesh_graph_shares.argtypes = [C.c_uint32, C.c_uint32] + [C.POINTER(C.c_double)] * 5
+
+
+def shares(comm, comp, upper):
+    ranks, stages = len(upper), len(comm)
+    fixed, slope = ([time[k] for stage in comp for time in stage] for k in range(2))
+    share = (C.c_double * max(ranks, 1))()
+    _check(LIB.mesh_graph_shares(ranks, stages, *(_array(C.c_double, v)[0] for v in (comm, fixed, slope, upper)),
+                                 share))
+    return list(share[:ranks])
+
+
 # BSL §3; R. E. Tarjan, SIAM J. Comput. 1(2), 1972; mesh-graph.h mesh_graph_components: each vertex's strongly
 # connected component
 LIB.mesh_graph_components.restype = C.c_int

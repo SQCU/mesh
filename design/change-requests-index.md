@@ -277,6 +277,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
     output once, by a call the partition adds after the collective. metal-microbench `tools/prepare_e2b.py`
     `column_cuts` accumulates item 1's sizes into its cuts, with the packed-column alignment after; `partition` is
     kept as it is.
+  - Items 6 and 14: `rdma/mesh-graph.h` `mesh_graph_shares` (`rdma/mesh_graph.py` `shares`) solves HAP's program (3)
+    with HiGHS: the shares minimise, summed over the stages, the stage's collective time a unit of the largest share
+    times the largest share, plus the largest over ranks of the rank's computation time, a fixed part and a part a unit
+    of its share; the shares sum to 1 and each lies between 0 and the rank's upper bound, the variable's bound.
+    `shard(m, extent, comm, comp, upper)` gives one part's placement, its tuple the whole sizes of those shares by
+    `_sizes`. `examples/tp.py` and `examples/pl.py` `placement` take `parts`, the stages of each feed-forward block by
+    its name, and call `shard` for each; the one tuple for every block (`UNITS`) is deleted, and `PARTS` gives the
+    stages as JSON. `rdma/allocate.py` `min_max`'s `shared` argument is deleted. Where shares are given,
+    `rdma/allocate.py` `shift` is Whale's Algorithm 1.
+  - Item 7: `rdma/allocate.py` `speed(times, x)` is x / t(x) from one node's measured times of one kind of function.
 
   Outstanding:
   - Item 2's gather and scatter. No quoted sentence says where the program emits either: every input and constant is
@@ -287,7 +297,14 @@ outstanding, and what of it is outstanding. The standard every change request fo
   - Items 4 and 5: a run. None was made of either; each was partitioned and lowered in process, rank by rank.
   - Item 5: a convolution with a bias (`_convolution`, `Rule.fused`) still has its input channels gathered before the
     product.
-  - Items 6 to 8, 11, 13 and 14.
+  - Items 6 and 7: no measured time of any function on any node is in either repository, and no quoted sentence says
+    at which x a rank's speed s(x) is taken to give (3) its linear computation time, or which of a program's
+    collectives make a stage and what its time is a unit of the largest share. `speed` has no caller, and a client's
+    `parts` come from its caller.
+  - Item 14: `shift` has no caller; no client is given shares with what each rank can hold.
+  - Items 6, 7 and 14: a run. None was made; `tp.py`'s feed-forward blocks were partitioned in process with a tuple
+    solved for each.
+  - Items 8, 11 and 13.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,

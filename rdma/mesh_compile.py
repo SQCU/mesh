@@ -175,12 +175,21 @@ def _sizes(units, parts, extent):
         size = -(-extent // parts)
         return tuple(max(0, min(size, extent - r * size)) for r in range(parts))
     total = sum(units)
-    sizes = [(2 * extent * u + total) // (2 * total) for u in units]
+    sizes = [int((2 * extent * u + total) // (2 * total)) for u in units]
     while sum(sizes) != extent:
         step = 1 if sum(sizes) < extent else -1
         r = min(range(parts), key=lambda r: abs((sizes[r] + step) * total - extent * units[r]))
         sizes[r] += step
     return tuple(sizes)
+
+
+# design/unequal-shards-change-request.md items 6 and 14; Zhang et al., HAP, EuroSys 2024, sections 2.4, 5.1 and 5.2,
+# "to determine the optimal ratios for each part of the model": the placement of one part's dimension of `extent`
+# elements over mesh dimension m, its tuple the whole sizes, by item 1's rounding, of the shares that solve (3) for the
+# part's stages (mesh_graph.shares: `comm`, `comp` and each rank's upper bound `upper`)
+def shard(m, extent, comm, comp, upper):
+    shares = mesh_graph.shares(comm, comp, upper)
+    return Shard(m, _sizes(shares, len(shares), extent))
 
 
 # J. Ansel et al., PyTorch 2, ASPLOS 2024, sections 3.5 and 5.1; design/aot-compilation-change-request.md A1 and

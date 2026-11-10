@@ -64,25 +64,42 @@ def equal_finish(total, grain, low, high, a, b):
     return c, s, T
 
 
-def min_max(total, grain, low, high, cost, shared=None):
-    n = len(low)
-
-    def fill(cap):
-        c = list(low)
-        for _ in range((total - sum(low)) // grain):
-            fits = [i for i in range(n) if c[i] + grain <= min(high[i], cap)]
-            if not fits:
-                break
-            i = min(fits, key=lambda i: (cost[i](c[i] + grain), i))
-            c[i] += grain
-        return c, max(cost[i](c[i]) for i in range(n))
-
-    if shared is None:
-        return fill(math.inf)
-    fills = [fill(cap) for cap in range(max(low), total + 1, grain)]
-    c, t = min((f for f in fills if sum(f[0]) == sum(fills[-1][0])), key=lambda f: f[1] + shared(f[0]))
-    return c, t + shared(c)
+def min_max(total, grain, low, high, cost):
+    n, c = len(low), list(low)
+    for _ in range((total - sum(low)) // grain):
+        fits = [i for i in range(n) if c[i] + grain <= high[i]]
+        if not fits:
+            break
+        i = min(fits, key=lambda i: (cost[i](c[i] + grain), i))
+        c[i] += grain
+    return c, max(cost[i](c[i]) for i in range(n))
 
 
 def capacity(total, grain, low, high):
     return [min(high[i], total - sum(low) + low[i]) // grain * grain for i in range(len(low))]
+
+
+# design/unequal-shards-change-request.md item 7; A. Lastovetsky, R. Reddy, V. Rychkov and D. Clarke, arXiv:1109.3074,
+# "si(x) = x/ti(x)": a node's speed for one kind of function at x units, `times[x]` that function's measured time at x
+def speed(times, x):
+    return x / times[x]
+
+
+# design/unequal-shards-change-request.md item 14; X. Jia et al., Whale, USENIX ATC 2022, Algorithm 1: `shares` given
+# as fractions of the dimension, `upper[j]` what rank j can hold as one, `load[j](share)` rank j's computation load
+def shift(shares, upper, load):
+    shares, n = list(shares), len(shares)
+    over = [j for j in range(n) if shares[j] > upper[j]]
+    free = [j for j in range(n) if shares[j] < upper[j]]
+    while over and free:
+        peak = max(over, key=lambda j: shares[j] / upper[j])
+        valley = min(free, key=lambda j: load[j](shares[j]))
+        if shares[peak] - upper[peak] <= upper[valley] - shares[valley]:
+            shares[valley] += shares[peak] - upper[peak]
+            shares[peak] = upper[peak]
+            over.remove(peak)
+        else:
+            shares[peak] -= upper[valley] - shares[valley]
+            shares[valley] = upper[valley]
+            free.remove(valley)
+    return shares
