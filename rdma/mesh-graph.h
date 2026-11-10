@@ -70,8 +70,8 @@ struct mesh_graph_read { uint64_t net, total; double utilization; };
 struct mesh_graph_actor { struct mesh_graph_work work; uint64_t blocks, threads, written, launches; size_t reads;
                           const struct mesh_graph_read *read; uint64_t direct, blits; };
 int mesh_graph_actor_time(const struct mesh_graph_machine *machine, const struct mesh_graph_actor *actor, double *time);
-enum { MESH_GRAPH_COST_ACTOR, MESH_GRAPH_COST_SUM, MESH_GRAPH_COST_MAX, MESH_GRAPH_COST_REPEAT };
-struct mesh_graph_cost { uint32_t kind, first, second, padding; uint64_t count; };
+enum { MESH_GRAPH_COST_ACTOR, MESH_GRAPH_COST_SUM };
+struct mesh_graph_cost { uint32_t kind, first, second, padding; };
 int mesh_graph_cost_times(const struct mesh_graph_machine *, size_t actors, const struct mesh_graph_actor *,
                           size_t nodes, const struct mesh_graph_cost *, double *times, int *status);
 /* design/joint-compilation.md §3, row 5 */
@@ -191,11 +191,6 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
    edge another path covers (mesh_graph_redundant at zero delays, every edge a candidate); kept counts the others */
 int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
                                unsigned char *redundant, size_t *kept);
-/* design/compilation-composition-change-request.md item 6.1; scope[v] == UINT32_MAX or scope[v] < scopes;
-   parent[c] == UINT32_MAX or parent[c] < c;
-   alternate(u,v) => every internal w has scope[w] in ancestors(scope[u]) union ancestors(scope[v]) */
-int mesh_graph_synchronization_scoped(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
-    const uint32_t *scope, const uint32_t *parent, uint32_t scopes, unsigned char *redundant, size_t *kept);
 /* design/torch-source-lowering-change-request.md item 3; design/compilation-composition-change-request.md item 6.3:
    levels and places over the caller's dependence relation (from[e] < to[e]); level the longest path to v, place the
    heap order by -level (mesh_graph_heap_order) */
@@ -211,19 +206,16 @@ enum { MESH_GRAPH_SUBMIT, MESH_GRAPH_QUEUE_SIGNAL, MESH_GRAPH_QUEUE_WAIT, MESH_G
        MESH_GRAPH_PASS_BARRIER, MESH_GRAPH_QUEUE_BARRIER, MESH_GRAPH_HOST_WAIT, MESH_GRAPH_HOST_NOTIFY,
        MESH_GRAPH_BRIDGE_START, MESH_GRAPH_THREADGROUP_BARRIER, MESH_GRAPH_SIMDGROUP_BARRIER, MESH_GRAPH_ATOMIC,
        MESH_GRAPH_PRODUCER_BARRIER, MESH_GRAPH_BRIDGE_RAISE, MESH_GRAPH_INITIAL, MESH_GRAPH_HOST_PUBLISH,
-       MESH_GRAPH_KERNEL_FENCE, MESH_GRAPH_HOST_SIGNAL, MESH_GRAPH_TRIP_TEST, MESH_GRAPH_PRIMITIVES };
+       MESH_GRAPH_KERNEL_FENCE, MESH_GRAPH_HOST_SIGNAL, MESH_GRAPH_PRIMITIVES };
 enum { MESH_GRAPH_IMAGE, MESH_GRAPH_STRONGER, MESH_GRAPH_FALSE, MESH_GRAPH_UNMATCHED, MESH_GRAPH_SATISFIED,
        MESH_GRAPH_TRANSFORMED, MESH_GRAPH_STATES };
 struct mesh_graph_processor { uint32_t kind, index; };
 /* one program's identities across its producers: a processor's `index` is thread * MESH_GRAPH_NODES + node (the host's
    program thread 0 and its event listener 1; a queue's ordinal; the bridge 0), node its map index; a plan count word
    is object MESH_GRAPH_PLAN_COUNT + its added edge, a compiled function's submissions MESH_GRAPH_PLAN_SUBMISSION + its
-   index in mesh_plan's `functions`, each submission's value the plan's executions after it (mesh_transfers_start); a
-   WHILE of no bound's trip test (MESH_GRAPH_TRIP_TEST, a host wait on the queue signal of the same object) object
-   MESH_GRAPH_LOOP + its control (metal_ir.h metal_ir_controls), value the test's count */
+   index in mesh_plan's `functions`, each submission's value the plan's executions after it (mesh_transfers_start) */
 #define MESH_GRAPH_NODES 64u
 #define MESH_GRAPH_PLAN_COUNT UINT32_C(0x80000000)
-#define MESH_GRAPH_LOOP UINT32_C(0xA0000000)
 #define MESH_GRAPH_PLAN_SUBMISSION UINT32_C(0xC0000000)
 struct mesh_graph_task { uint32_t processor, place, label, copy; };
 struct mesh_graph_dependence { uint32_t from, to; uint64_t delay; };
@@ -242,59 +234,41 @@ _Static_assert(sizeof(struct mesh_graph_processor) == 8 && sizeof(struct mesh_gr
    MetalPlannedOrder), so every copy pair is its own output */
 int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
                         const unsigned char *kept, size_t room, struct mesh_graph_dependence *contracted, size_t *made);
-enum { MESH_GRAPH_WHILE = 1, MESH_GRAPH_OPTIONAL = 2 };
 enum { MESH_GRAPH_COMPLETION_EVENT = 1, MESH_GRAPH_COUNTER_EVENT = 2 };
-struct mesh_graph_control { uint32_t kind, parent; uint64_t entry, body, retest, end, execution, bound; };
 struct mesh_graph_event { uint32_t object, role, counter, argument; uint64_t lookback; };
 struct mesh_graph_scope { uint32_t once, counter; int64_t delta; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };
-struct mesh_graph_selection { uint32_t argument, bytes; uint64_t table, index; };
-struct mesh_graph_guard { uint64_t operation; uint32_t selection, taken; };
-struct mesh_graph_choice { uint32_t parent, control; uint64_t execution, call; uint32_t entry, trip; };
-enum mesh_graph_instruction_kind { MESH_GRAPH_OPERATION, MESH_GRAPH_ACTION, MESH_GRAPH_LOOP_ENTRY, MESH_GRAPH_LOOP_BODY,
-  MESH_GRAPH_LOOP_RETEST, MESH_GRAPH_LOOP_END, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END, MESH_GRAPH_TASK };
+enum mesh_graph_instruction_kind { MESH_GRAPH_OPERATION, MESH_GRAPH_ACTION, MESH_GRAPH_SPAN_ENTRY, MESH_GRAPH_SPAN_END,
+  MESH_GRAPH_TASK };
 struct mesh_graph_submission { uint32_t lag, positions, window, flags, queue, host, drained, ended, progress, padding; unsigned char policy[16]; };
 enum { MESH_GRAPH_ACTION_ISSUE = 1, MESH_GRAPH_ACTION_QUEUE = 2, MESH_GRAPH_ACTION_CURRENT = 4, MESH_GRAPH_ACTION_COMPLETE = 8 };
 struct mesh_graph_action { uint32_t kind, submission, object, primitive, vertex, provenance; uint64_t execution, value, begin, end; };
 struct mesh_graph_ownership { uint32_t current, issued, completed, padding; uint64_t execution, issued_execution, completed_execution; };
 void mesh_graph_action_owner(struct mesh_graph_action *, struct mesh_graph_ownership *,
                              struct mesh_graph_action *prefix, struct mesh_graph_action *completed);
-struct mesh_graph_instruction { uint32_t kind, index, once, condition, conditions, submission; uint64_t execution, position; };
-/* design/compilation-composition-change-request.md 6.2; named control entry, logical trip-boundary carry. */
-struct mesh_graph_feedback { uint32_t control, from, to, distance; };
-struct mesh_graph_condition { uint32_t choice, taken; };
+struct mesh_graph_instruction { uint32_t kind, index, once, submission; uint64_t execution, position; };
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
                               struct mesh_graph_operation *operation; struct mesh_graph_dependence *dependence;
                               struct mesh_graph_synchronized *edge; uint64_t *position, *count, *least;
                               size_t *previous, *waited, *first, *order; uint64_t *unknown; uint32_t *alias;
-                              unsigned char digest[32]; size_t controls, events;
-                              struct mesh_graph_control *control; struct mesh_graph_event *event;
+                              unsigned char digest[32]; size_t events; struct mesh_graph_event *event;
                               struct mesh_graph_scope *scope; size_t spans; struct mesh_graph_span *span;
-                              size_t selections, guards; struct mesh_graph_selection *selection;
-                              struct mesh_graph_guard *guard; size_t choices; struct mesh_graph_choice *choice;
-                              size_t submissions, actions, instructions, conditions;
+                              size_t submissions, actions, instructions;
                               struct mesh_graph_submission *submission; struct mesh_graph_action *action;
-                              struct mesh_graph_instruction *instruction; struct mesh_graph_condition *condition;
-                              size_t feedbacks; struct mesh_graph_feedback *feedback; };
+                              struct mesh_graph_instruction *instruction; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
                          const struct mesh_graph_operation *operation, struct mesh_graph_signature *signature);
 void mesh_graph_signature_free(struct mesh_graph_signature *signature);
-int mesh_graph_signature_program(struct mesh_graph_signature *, size_t controls, const struct mesh_graph_control *,
-                                 size_t events, const struct mesh_graph_event *, const struct mesh_graph_scope *);
+int mesh_graph_signature_program(struct mesh_graph_signature *, size_t events, const struct mesh_graph_event *,
+                                 const struct mesh_graph_scope *);
 int mesh_graph_signature_spans(struct mesh_graph_signature *, size_t spans, const struct mesh_graph_span *);
-int mesh_graph_signature_conditions(struct mesh_graph_signature *, size_t selections, const struct mesh_graph_selection *,
-                                    size_t guards, const struct mesh_graph_guard *);
-int mesh_graph_signature_choices(struct mesh_graph_signature *, size_t choices, const struct mesh_graph_choice *,
-                                 size_t guards, const struct mesh_graph_guard *);
-
-int mesh_graph_signature_feedback(struct mesh_graph_signature *, size_t, const struct mesh_graph_feedback *);
 int mesh_graph_signature_execution(struct mesh_graph_signature *, size_t submissions, const struct mesh_graph_submission *,
                                    size_t actions, const struct mesh_graph_action *, size_t instructions,
-                                   const struct mesh_graph_instruction *, size_t conditions, const struct mesh_graph_condition *);
+                                   const struct mesh_graph_instruction *);
 
 /* design/synchronization-signature-change-request.md item 1, "its SHA-256 is part of the compiled artifact": the
    signature's one serialized form, its header then processor, task, dependence, operation, edge, least and alias in

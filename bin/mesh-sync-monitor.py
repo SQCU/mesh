@@ -107,17 +107,11 @@ def load(path):
         dependences = [mesh_graph.Dependence.from_buffer_copy(d) for d in made.dependence[:made.dependences]]
         operations = [mesh_graph.Operation.from_buffer_copy(o) for o in made.operation[:made.operations]]
         lane = {p: [made.order[k] for k in range(made.first[p], made.first[p + 1])] for p in range(made.processors)}
-        metadata = {'controls': [mesh_graph.Control.from_buffer_copy(c) for c in made.control[:made.controls]],
-                    'events': [mesh_graph.Event.from_buffer_copy(e) for e in made.event[:made.events]],
+        metadata = {'events': [mesh_graph.Event.from_buffer_copy(e) for e in made.event[:made.events]],
                     'spans': [mesh_graph.Span.from_buffer_copy(x) for x in made.span[:made.spans]],
-                    'choices': [mesh_graph.Choice.from_buffer_copy(x) for x in made.choice[:made.choices]],
                     'submissions': [mesh_graph.Submission.from_buffer_copy(x) for x in made.submission[:made.submissions]],
                     'actions': [mesh_graph.Action.from_buffer_copy(x) for x in made.action[:made.actions]],
                     'instructions': [mesh_graph.Instruction.from_buffer_copy(x) for x in made.instruction[:made.instructions]],
-                    'conditions': [mesh_graph.Condition.from_buffer_copy(x) for x in made.condition[:made.conditions]],
-                    'feedbacks': [mesh_graph.Feedback.from_buffer_copy(x) for x in made.feedback[:made.feedbacks]],
-                    'selections': [mesh_graph.Selection.from_buffer_copy(x) for x in made.selection[:made.selections]],
-                    'guards': [mesh_graph.Guard.from_buffer_copy(x) for x in made.guard[:made.guards]],
                     'scopes': [mesh_graph.Scope.from_buffer_copy(x) for x in made.scope[:made.operations]] if made.scope else []}
     finally:
         mesh_graph.free(made)
@@ -261,7 +255,7 @@ def generate(operations, program, observe, point=None, metadata=None):
     slots = max(1, completion.lookback) if completion else 1
     object_primitives = {PRIMITIVES.index(name) for name, _, obj, _, _ in PROBES if obj is not None}
     lane_primitives = {PRIMITIVES.index(name) for name, _, _, _, lane in PROBES if lane is not None}
-    object_primitives.update((PRIMITIVES.index('trip_test'), PRIMITIVES.index('bridge_start')))
+    object_primitives.add(PRIMITIVES.index('bridge_start'))
     objects = {k: operations[i].object for k, i in enumerate(program)
                if operations[i].primitive in object_primitives and (not completion or operations[i].object != completion.object)}
     lanes = {k: operations[i].processor for k, i in enumerate(program) if operations[i].primitive in lane_primitives}
@@ -279,7 +273,7 @@ def generate(operations, program, observe, point=None, metadata=None):
     for source, _, kind, index, _, _ in machine['transitions']:
         if kind == 'op':
             operation, (family, delta) = operations[program[index]], rules[index]
-            bindings = tuple(ordinal for logical, ordinal in zip(machine['objects'], machine['states'][source][4])
+            bindings = tuple(ordinal for logical, ordinal in zip(machine['objects'], machine['states'][source][2])
                              if logical in family_objects[family] and ordinal)
             labels[(source, kind, index)] = (operation.primitive, operation.object, operation.value, operation.execution,
                                              operation.processor, family, delta, bindings)
@@ -296,7 +290,7 @@ def generate(operations, program, observe, point=None, metadata=None):
               'uint64_t active[uint64_t, uint64_t], stamp[uint64_t, uint64_t], om[uint64_t], lm[uint64_t], signals[uint64_t];',
               'uint64_t spanEvent[uint64_t], spanFirst[uint64_t], spanEnd[uint64_t];',
               'BEGIN { epoch = 1, active[1, 0] = 1, stamp[1, 0] = 1; }']
-    trip, wait, signal = (PRIMITIVES.index(name) for name in ('trip_test', 'host_wait', 'queue_signal'))
+    signal = PRIMITIVES.index('queue_signal')
 
     def check(probe, point, predicate, kind, name=None, obj=None, val=None, lane=None):
         at = probe + point
@@ -320,7 +314,7 @@ def generate(operations, program, observe, point=None, metadata=None):
             clause = []
             if kind == 'op':
                 operation = operations[program[index]]
-                if operation.primitive != primitive and not (operation.primitive == trip and primitive == wait):
+                if operation.primitive != primitive:
                     continue
                 if name == 'bridge_start':
                     clause.append('arg1 == 0')
@@ -353,7 +347,7 @@ def generate(operations, program, observe, point=None, metadata=None):
             lines.append('%s /this->checked/ { this->matching = %s, this->tally = 0; }' %
                          (at, ' && '.join(clause) or '1'))
             if family:
-                bindings = machine['states'][source][4]
+                bindings = machine['states'][source][2]
                 for logical, ordinal in zip(machine['objects'], bindings):
                     if logical in family_objects[family] and ordinal:
                         lines.append('%s /this->checked && this->matching && signals[%d] > this->tally/ '

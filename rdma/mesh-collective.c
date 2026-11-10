@@ -1088,7 +1088,7 @@ static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *call
       for(size_t k=0;k<o.count;k++)if(o.operation[k].vertex<V &&
         (o.operation[k].primitive==MESH_GRAPH_HOST_WAIT || o.operation[k].primitive==MESH_GRAPH_BRIDGE_START))
         scope[k].once=task[o.operation[k].vertex].label+1;
-      status=mesh_graph_signature_program(&signature,0,NULL,0,NULL,scope);free(scope);
+      status=mesh_graph_signature_program(&signature,0,NULL,scope);free(scope);
     }
     if(status)mesh_graph_signature_free(&signature);
   }
