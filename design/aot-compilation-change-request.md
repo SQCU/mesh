@@ -63,6 +63,19 @@ justified by a cited algorithm or data structure, never by one program.
 The turns are held once, in design/plan-to-bridge-change-request.md, "The turns", after
 design/disjoint-pages-change-request.md D.1. They are this document's body.
 
+### The operator, 2026-11-10
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something
+> about a source but don't say what algorithm is being used, what data structure is being used, and where it composes
+> in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are
+> introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for
+> that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method
+> justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema
+> in the first `3` cases of change request documents used in the repo history.
+
 ## Claude's proposal
 
 This section and the appendices are Claude's (T178). Of an earlier text of the appendix "the citations the
@@ -132,6 +145,8 @@ its function and type names are given beside each stage.
     languages" (PyTorch v2.11.0, docs/source/user_guide/torch_compiler/export.md, "JIT vs. AOT" and "Partial vs. Full
     Graph Capture").
 - **Produced by, consumed by.** Export takes the torch program and returns its graph. A2's placement takes that graph.
+  The reference program's type for it is `ir.Exported`, which holds a `torch.fx.GraphModule`. No cited mesh code names
+  a type for it.
   Every function of a torch program is captured and compiled before the program runs, the same at every rank, and
   nothing runs eagerly between its compiled calls. The program's calls between functions are A10's graph.
 - **A program run through another framework's delegate.** Its graph is the recorder's capture of the delegate's
@@ -161,7 +176,9 @@ its function and type names are given beside each stage.
   all partitions" (GSPMD §1).
 - **Produced by, consumed by.** The caller passes the operand. Placement takes A1's graph and the sharding specs and
   returns the partitioned graph with its collectives, which A4 turns into sends and receives of pages. Devices takes
-  that graph and the mapping onto the map's nodes. A6's schedule takes the result, in A8's IR.
+  that graph and the mapping onto the map's nodes. A6's schedule takes the result, in A8's IR. In the reference
+  program the operand is `placement`, a function from an fx node to a processor name, and `processors`, a dict from
+  processor name to torch device. No cited mesh code names a type for either part.
 - **The chooser is a separate pass that emits the same operand, and this compilation contains none:**
   - Alpa's own chooser works this way. "Alpa compiles each stage against its assigned device mesh, respecting the
     intra-op parallelism plan output by the ILP solver. The compilation depends on XLA and GSPMD" (Alpa, §6).
@@ -183,7 +200,8 @@ its function and type names are given beside each stage.
   router's capacities and demands are the given inputs of concurrent multicommodity flow (N. Garg and J. Könemann,
   Faster and simpler algorithms for multicommodity flow and other fractional packing problems, FOCS 1998).
 - **Produced by, consumed by.** The caller passes the operand. A4's routing takes the capacities, and A6's schedule
-  takes w and c.
+  takes w and c. In the reference program the operand is `cost`, a function from an fx node to a float. No cited mesh
+  code names a type for the weights.
 - **The chooser of the weights is defined later, apart, as the chooser of A2 is.**
 
 ### A4. Collectives lower to page transfers over packed trees
@@ -228,6 +246,7 @@ its function and type names are given beside each stage.
     flow.
 - **Produced by, consumed by.** A2's partitioning produces the collectives. This requirement takes them, the map and
   A3's capacities, and writes the instruction DAG with each instruction's route into A8's IR. A6's schedule takes it.
+  No cited code names a type for the instruction DAG or for a route.
 - **Where the partitioning inserts ReduceScatter and CollectivePermute:** where GSPMD's does.
   - ReduceScatter goes where a reduction's result is sharded: "gradients will be communicated with ReduceScatter
     instead of AllReduce" (GSPMD §3.2).
@@ -263,7 +282,7 @@ its function and type names are given beside each stage.
   with the unroll factor u of appendix item 1, and "The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv
   2001.03288, 2020)."
 - **Produced by, consumed by.** The allocator takes the values of A8's IR. The bridge and the GPU's program take the
-  bindings from the scheduled value (A9).
+  bindings from the scheduled value (A9). No cited code names a type for a binding.
 
 ### A6. One schedule per function
 
@@ -276,7 +295,7 @@ its function and type names are given beside each stage.
   Wein, Scheduling to minimize average completion time: off-line and on-line approximation algorithms, Math. Oper.
   Res. 22(3), 1997), solved by HiGHS.
 - **Produced by, consumed by.** The schedule takes A8's IR. It writes, for each adjacent node and direction, the
-  ordered list of page instructions of A9. The bridge takes those lists.
+  ordered list of page instructions of A9. The bridge takes those lists. Each entry is a `struct mesh_hop`.
 
 ### A7. Function executions of programs that run at once are ordered by one scheduler for the island
 
@@ -360,7 +379,7 @@ its function and type names are given beside each stage.
     releases its executions at the node. The pages of delivered executions interleave on each cable (T99).
 - **Produced by, consumed by.** The program's sender TO-broadcasts m. The sequencer numbers it and sends (m, sn(m)) to
   all. Each node of Dest(m) delivers it into the queue of appendix item 2, and the bridge at that node takes it from
-  the queue.
+  the queue. The type at every step is `struct mesh_order`.
 - **Failures.** "This algorithm does not tolerate the failure of the sequencer" (§7.1). A static schedule is used only
   while its map is unchanged (design/disjoint-pages-change-request.md D.3.6), so the loss of a cable or node ends
   every static schedule that uses it, and the sequencer of a static schedule in use does not change. A static schedule
@@ -479,7 +498,7 @@ its function and type names are given beside each stage.
 - **No algorithm of its own.** MSCCLang carries its instruction DAG the same way, from lowering to scheduling (Cowan et
   al., 2023, §4 and §5).
 - **Produced by, consumed by.** A2 partitions it and A4 lowers its collectives into it. A5's allocator and A6's
-  schedule take it.
+  schedule take it. No cited code names a type for the IR.
 
 ### A9. The serialized operand, in MSCCL-IR's shape
 
@@ -487,7 +506,8 @@ its function and type names are given beside each stage.
 > existing code, basically.
 
 - **Stage:** the scheduled value and its archive. The schedule (A5, A6) produces it. The bridge and the GPU's program
-  take it.
+  take it. The reference program's type for the scheduled value is `ir.Scheduled`. Here its lists' entries are
+  `struct mesh_hop`; no cited code names a type for the whole value.
 - **The data structure is MSCCL-IR** (Cowan et al., 2023, §5): "a tree data structure that divides a collective into
   individual GPU programs that are subdivided into thread blocks containing a list of instructions that are
   sequentially executed". An instruction that depends on another list carries the dependency explicitly ("a dep
@@ -601,7 +621,7 @@ its function and type names are given beside each stage.
   - both carried in A8's IR.
 - **Produced by, consumed by.** The schedule takes the bound as a delay of its IPC graph (appendix item 2). At run
   time the program issues calls ahead, as futures, in the order the analysis allows, as Pathways dispatches
-  asynchronously (Barham et al., 2022, §4.5).
+  asynchronously (Barham et al., 2022, §4.5). No cited code names a type for the bound or the order constraints.
 
 ## Appendix: a chooser for edge weights
 
@@ -645,9 +665,10 @@ algorithm its citation gives, and the change.
 - **The data structure is each value's lag L and the unroll factor u.**
 - **The algorithm is modulo variable expansion** (M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
   scheduling, MICRO 1994), as C3.3 states it: "For each value, L is the smallest lag at which every read of it in
-  execution t happens before its write in execution t + L. The unroll factor u is the largest L. … A value with no such L
-  fails the plan with `ENOMEM`."
-- **Produced by, consumed by.** A5's allocator takes u. Item 2's IPC graph takes it as each transfer's delay.
+  execution t happens before its write in execution t + L. The unroll factor u is the largest L. … A value with no
+  such L fails the plan with `ENOMEM`."
+- **Produced by, consumed by.** A5's allocator takes u. Item 2's IPC graph takes it as each transfer's delay. No cited
+  code names a type for L or u.
 - **State of the code:** design/disjoint-pages-revision-coordination.md D5 refuses a value whose write does not reach
   its own next instance at lag 1. A lone AllGather or AllToAll is refused by it.
 - **The change:** compute u as C3.3 states. D5's lag-1 condition is deleted.
@@ -680,7 +701,7 @@ algorithm its citation gives, and the change.
   - the bridge's taking by a multiway merge on the sequence number (Knuth, vol. 3, §5.4.1).
 - **Produced by, consumed by.** A node's delivery of m (A7) appends an entry to the queue of m's static schedule at
   that node. The bridge at that node takes the entries by the merge and sends and receives the pages of their
-  executions.
+  executions. The message is a `struct mesh_order`; no cited code names a type for the queue.
 - **What is ordered, and what is not:**
   - The fixed sequencer orders function executions, Pathways' unit (P. Barham et al., MLSys 2022, §4.4: "a consistent
     order of function executions across all programs"). It does not order transactions.
@@ -888,8 +909,8 @@ algorithm its citation gives, and the change.
     (rdma/mesh-flow.c `set_draw`), which is Lemire's multiply-and-shift. With Lemire's rejection step, which the code
     must add, the integer is exactly uniform (D. Lemire, Fast random integer generation in an interval, ACM Trans.
     Model. Comput. Simul. 29(1), 2019).
-- **Produced by, consumed by.** rdma/mesh-collective.c writes each entry's `set`. The bridge at each end of a cable
-  takes the sets and draws the same permutation.
+- **Produced by, consumed by.** rdma/mesh-collective.c writes each entry's `set`, a field of the entry's
+  `struct mesh_hop` (A9). The bridge at each end of a cable takes the sets and draws the same permutation.
 - **Repeated runs:** across runs, the same function is sent in different, uniformly distributed orders. The pages and
   their bytes are the same each time, so the requirement's mean and variance hold over the set.
 - **One permutation of the whole set per execution, as one renaming on every channel the set crosses.**
