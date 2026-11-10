@@ -244,6 +244,8 @@ searching the source for the named functions, not by a status paragraph.
   scheduled program has beyond the exported one is one a clause or the solver justifies.
 - **Also** (added 2026-11-09): plan-to-bridge-change-request.md R4, "Behaviour at run time": "No quoted source says
   how a run is shown to have done 1 to 3". The record of a run that shows them is outstanding and belongs here.
+- **Also** (added 2026-11-09): `examples/pl.py`, design/parallel-layers-example.md: a language model whose blocks add
+  attention and feed-forward outputs computed from one normalized input, as a program a run is made of.
 - **Estimate:** about 100 lines for the structural comparison, in the existing client tools; none for measurement.
 
 ## Why this order
