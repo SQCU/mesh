@@ -249,7 +249,9 @@ its function and type names are given beside each stage.
 - **Produced by, consumed by.** A2's partitioning produces the collectives, in A8's IR. `mesh_plan` takes them, the
   map and A3's capacities, and produces the instruction DAG with each instruction's route. A6's ordering, in the same
   function, takes it.
-  No cited code names a type for the instruction DAG or for a route.
+  `mesh_plan` takes `struct mesh_function`, whose `declared` are the collectives' `struct mesh_declared`
+  (rdma/mesh-collective.h). It writes the instructions as `struct plan_entry` (rdma/mesh-collective.c) and from them
+  the `struct mesh_hop` lists (rdma/mesh.h).
 - **Where the partitioning inserts ReduceScatter and CollectivePermute:** where GSPMD's does.
   - ReduceScatter goes where a reduction's result is sharded: "gradients will be communicated with ReduceScatter
     instead of AllReduce" (GSPMD §3.2).
@@ -288,7 +290,8 @@ its function and type names are given beside each stage.
   Annals of Mathematics 51(1), 1950; D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered
   sets, Proc. AMS 7(4), 1956).
 - **Produced by, consumed by.** The allocator takes the values of A8's IR. The bridge and the GPU's program take the
-  bindings from the scheduled value (A9). No cited code names a type for a binding.
+  bindings from the scheduled value (A9). rdma/mesh.h has `struct mesh_page_entry`;
+  it was not checked that this is the binding's type.
 
 ### A6. One schedule per function
 
@@ -385,7 +388,8 @@ its function and type names are given beside each stage.
     releases its executions at the node. The pages of delivered executions interleave on each cable (T99).
 - **Produced by, consumed by.** The program's sender TO-broadcasts m. The sequencer numbers it and sends (m, sn(m)) to
   all. Each node of Dest(m) delivers it into the queue of appendix item 2, and the bridge at that node takes it from
-  the queue. The type at every step is `struct mesh_order`.
+  the queue. The message is `struct mesh_order` up to its delivery. The queue's entry, which the bridge takes, is
+  `struct mesh_delivery` (rdma/mesh.h).
 - **Failures.** "This algorithm does not tolerate the failure of the sequencer" (§7.1). A static schedule is used only
   while its map is unchanged (design/disjoint-pages-change-request.md D.3.6), so the loss of a cable or node ends
   every static schedule that uses it, and the sequencer of a static schedule in use does not change. A static schedule
@@ -504,7 +508,9 @@ its function and type names are given beside each stage.
 - **No algorithm of its own.** MSCCLang carries its instruction DAG the same way, from lowering to scheduling (Cowan et
   al., 2023, §4 and §5).
 - **Produced by, consumed by.** A2 partitions it. `mesh_plan` takes it for A4's routing and lowering, A5's allocator
-  and A6's ordering. No cited code names a type for the IR.
+  and A6's ordering, as `struct mesh_function` with its `struct mesh_declared`, `struct mesh_weight` and
+  `struct mesh_dependence` (rdma/mesh-collective.h). `struct mesh_function` has no field named for A2's placement operand; each
+  `struct mesh_declared` carries its `source` and `destination`.
 
 ### A9. The serialized operand, in MSCCL-IR's shape
 
@@ -512,8 +518,9 @@ its function and type names are given beside each stage.
 > existing code, basically.
 
 - **Stage:** the scheduled value and its archive. The schedule (A5, A6) produces it. The bridge and the GPU's program
-  take it. The reference program's type for the scheduled value is `ir.Scheduled`. Here its lists' entries are
-  `struct mesh_hop`; no cited code names a type for the whole value.
+  take it. The reference program's type for the scheduled value is `ir.Scheduled`. Here it is `struct mesh_algo`, the
+  published table, with one `struct mesh_state` for each static schedule, which holds the `struct mesh_hop` lists
+  (rdma/mesh.h). `mesh_plan_save` and `mesh_plan_load` write and read it (rdma/mesh-collective.h).
 - **The data structure is MSCCL-IR** (Cowan et al., 2023, §5): "a tree data structure that divides a collective into
   individual GPU programs that are subdivided into thread blocks containing a list of instructions that are
   sequentially executed". An instruction that depends on another list carries the dependency explicitly ("a dep
@@ -627,7 +634,9 @@ its function and type names are given beside each stage.
   - both carried in A8's IR.
 - **Produced by, consumed by.** The schedule takes the bound as a delay of its IPC graph (appendix item 2). At run
   time the program issues calls ahead, as futures, in the order the analysis allows, as Pathways dispatches
-  asynchronously (Barham et al., 2022, §4.5). No cited code names a type for the bound or the order constraints.
+  asynchronously (Barham et al., 2022, §4.5). The schedule writes the IPC graph's
+  delay edges as `struct mesh_sync` (rdma/mesh.h), which the program's submission reads. `mesh_plan` takes the order
+  constraints as its `orders` argument, an array of `uint32_t`.
 
 ## Appendix: a chooser for edge weights
 
@@ -707,7 +716,7 @@ algorithm its citation gives, and the change.
   - the bridge's taking by a multiway merge on the sequence number (Knuth, vol. 3, §5.4.1).
 - **Produced by, consumed by.** A node's delivery of m (A7) appends an entry to the queue of m's static schedule at
   that node. The bridge at that node takes the entries by the merge and sends and receives the pages of their
-  executions. The message is a `struct mesh_order`; no cited code names a type for the queue.
+  executions. The message is a `struct mesh_order`, and the queue's entry is a `struct mesh_delivery` (rdma/mesh.h).
 - **What is ordered, and what is not:**
   - The fixed sequencer orders function executions, Pathways' unit (P. Barham et al., MLSys 2022, §4.4: "a consistent
     order of function executions across all programs"). It does not order transactions.
