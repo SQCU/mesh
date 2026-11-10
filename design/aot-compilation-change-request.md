@@ -102,7 +102,7 @@ its function and type names are given beside each stage.
 | A1 | export |
 | A2 | placement and devices: their operands, and the partitioning |
 | A3 | the cost operand of the schedule, and the capacities of A4's routing |
-| A4 | placement: the sends and receives it adds, and their routes |
+| A4 | schedule: `mesh_plan` routes the collectives placement inserted and lowers them to sends and receives of pages |
 | A5 | schedule: the page table's bindings it writes into the scheduled value |
 | A6 | schedule |
 | A7 | the runtime |
@@ -216,7 +216,9 @@ its function and type names are given beside each stage.
 > routing within tb5 linked collectives is supported; attempting to involve nodes with no tb5 dma connection to any node
 > within the collective is not allowed.
 
-- **Stage:** placement. This is where the sends and receives of pages enter the graph.
+- **Stage:** schedule. Placement inserts the collectives (A2). `mesh_plan`, the schedule stage's function, routes them
+  and lowers them to sends and receives of pages (rdma/mesh-collective.c). The reference program's `place` adds its
+  send and recv nodes at placement and routes nothing.
 - **The data structures are two:**
   - **The instruction DAG.** MSCCLang (M. Cowan et al., MSCCLang: Microsoft Collective Communication Language, ASPLOS
     2023, §4 and §5) lowers operations on chunks into an instruction DAG of sends, receives and
@@ -244,8 +246,9 @@ its function and type names are given beside each stage.
     demand a pair, routed as AllToAll's are.
   - **AllToAll** is point-to-point demands, one per ordered pair of ranks, routed jointly as concurrent multicommodity
     flow.
-- **Produced by, consumed by.** A2's partitioning produces the collectives. This requirement takes them, the map and
-  A3's capacities, and writes the instruction DAG with each instruction's route into A8's IR. A6's schedule takes it.
+- **Produced by, consumed by.** A2's partitioning produces the collectives, in A8's IR. `mesh_plan` takes them, the
+  map and A3's capacities, and produces the instruction DAG with each instruction's route. A6's ordering, in the same
+  function, takes it.
   No cited code names a type for the instruction DAG or for a route.
 - **Where the partitioning inserts ReduceScatter and CollectivePermute:** where GSPMD's does.
   - ReduceScatter goes where a reduction's result is sharded: "gradients will be communicated with ReduceScatter
@@ -269,8 +272,8 @@ its function and type names are given beside each stage.
   routes give it, and computes nothing; it has no value for any program code to read.
 - **State of the code.**
   - `mesh_plan` routes every demand of one static schedule at once (rdma/mesh-collective.c, `mesh_graph_flow`).
-  - rdma/mesh_compile.py `_operator` refuses an operator with "GSPMD gives no rule here for it". GSPMD gives the rule
-    for the window-based operators (above).
+  - rdma/mesh_compile.py at mesh 26701d8e has `_operator`, `_convolution`, `_reduce_scatter` and
+    `_collective_permute`.
 
 ### A5. Every page is placed ahead of time
 
@@ -497,8 +500,8 @@ its function and type names are given beside each stage.
   - A10's output.
 - **No algorithm of its own.** MSCCLang carries its instruction DAG the same way, from lowering to scheduling (Cowan et
   al., 2023, §4 and §5).
-- **Produced by, consumed by.** A2 partitions it and A4 lowers its collectives into it. A5's allocator and A6's
-  schedule take it. No cited code names a type for the IR.
+- **Produced by, consumed by.** A2 partitions it. `mesh_plan` takes it for A4's routing and lowering, A5's allocator
+  and A6's ordering. No cited code names a type for the IR.
 
 ### A9. The serialized operand, in MSCCL-IR's shape
 
@@ -906,8 +909,8 @@ algorithm its citation gives, and the change.
     tools/mesh/run_pair.py: `1 + secrets.randbelow(2**64 - 1)`, passed as `MESH_GROUP`). Its counter is (execution,
     set). So both ends of a cable draw the same permutation without exchanging anything.
   - Algorithm P needs a uniform integer in [1, j] at each step. The code takes the high word of j times a random word
-    (rdma/mesh-flow.c `set_draw`), which is Lemire's multiply-and-shift. With Lemire's rejection step, which the code
-    must add, the integer is exactly uniform (D. Lemire, Fast random integer generation in an interval, ACM Trans.
+    (rdma/mesh-flow.c `set_draw`), which is Lemire's multiply-and-shift. With Lemire's rejection step, which
+    `set_draw` has at mesh 26701d8e, the integer is exactly uniform (D. Lemire, Fast random integer generation in an interval, ACM Trans.
     Model. Comput. Simul. 29(1), 2019).
 - **Produced by, consumed by.** rdma/mesh-collective.c writes each entry's `set` into its `struct plan_entry`
   and copies it from there into the entry's `struct mesh_hop` (A9). The bridge at each end of a cable takes the sets
@@ -1038,14 +1041,17 @@ design/plan-to-bridge-change-request.md R2.
 
 - The operator: "settled."
 
-## The changes, by file
+## The files and functions the requirements name
 
-Only the files the requirements above name.
+The appendix items' changes are stated against mesh ce3d5d5e. It was not checked for every entry below whether the
+code at mesh 26701d8e already has it. These it has: `_operator`, `_convolution`, `_collective_permute`, `_all_gather`
+and `_program` in rdma/mesh_compile.py; `closure` and `width` in rdma/mesh_graph.py; `mesh_graph_cycle_mean`,
+`mesh_graph_min_delay` and `mesh_graph_determine_delays` in rdma/mesh-graph.h; the rejection step in `set_draw`.
 
 **mesh**
 - **rdma/mesh_compile.py:**
   - capture by `torch.export` (A1);
-  - `_operator` partitions every operator, the window-based ones by CollectivePermute (A4);
+  - `_operator`: the partitioning of every operator, the window-based ones by CollectivePermute (A4);
   - `_all_gather` declares one broadcast from each source (A4);
   - `_program`: the program's nodes, passed as MESH_PROGRAM (A7);
   - A10's analysis calls rdma/mesh_graph.py's functions and holds no copy of them.
@@ -1060,8 +1066,7 @@ Only the files the requirements above name.
   - tree j's entries have `set` j + 1 (item 5).
 - **rdma/mesh-bridge.h:** `struct mesh_order` (A7).
 - **rdma/mesh-records.c:** `island_set`, the sequencer (A7).
-- **rdma/mesh-flow.c:** `set_draw` gains Lemire's rejection step; `threefry4x64_20` (item 5); `struct mesh_trace`
-  (item 2).
+- **rdma/mesh-flow.c:** `set_draw` and `threefry4x64_20` (item 5); `struct mesh_trace` (item 2).
 
 **metal-microbench**
 - **tools/mesh/run_pair.py:** draws the group and passes it as `MESH_GROUP`; starts rank r at map index r on every
