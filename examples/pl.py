@@ -78,7 +78,7 @@ class Block(torch.nn.Module):
         return h_states * self.learnedlambda + dense_out + attn_out
 
 
-# dff_sparsify legacy/pgpt/pgptlformer.py PGPT_Lformer.forward, the branch without targets
+# dff_sparsify legacy/pgpt/pgptlformer.py PGPT_Lformer.forward
 class Inference(torch.nn.Module):
     def __init__(self):
         super().__init__()

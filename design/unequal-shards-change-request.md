@@ -28,6 +28,10 @@ The operator, 2026-11-09, in order:
 
 > are any of these requirements optional for the complete implementation of the requirements as code? if any of them are optional, drop them. if any of them are not optional, then ground them in citation
 
+The operator, 2026-11-10, of mesh aeecb9f9's "two whole-sequence all-gathers per attention":
+
+> hm, stinky, and neither grounded in citation nor a requirement
+
 ## Requirements
 
 ### 1. A sharded dimension carries one integer per rank
@@ -223,8 +227,29 @@ The operator, 2026-11-09, in order:
     interactions on each device will be inhibited by the causal mask."
   - "we exploit the permutation equivariance of the core attention computation to ensure that our decision to
     internally permute the input sequence does not affect the final output of the model."
-- **Write:** where attention under a causal mask is sharded along the sequence, the sequence is permuted so that
-  each rank's tokens are spread uniformly through it, and the permutation is undone on the output.
+  - Section 2.2.1: "permuting the input tokens before the model's first embedding layer".
+  - Figure 1, caption: "the tokens in the input sequence are partitioned among devices before running the first layer
+    of the model", and they "remain partitioned in the same layout throughout the forward and backward passes", "with
+    no extra per-layer communication required to prepare them in this state".
+  - Section 2.2.1: "we partition them into sets of evenly-spaced stripes based on their residues modulo the device
+    count"; "device 0 would own tokens 0,4,8,…, device 1 would own tokens 1,5,9,…, and so on".
+  - Section 2.2.1: "the position ids must be permuted as well"; "we must also permute the sequence of target token
+    ids used to compute the loss".
+  - Section 2.2.1: the mask "is causal with respect to the order in which tokens appear in the original input
+    sequence".
+  - Section 3.1: "the algorithm computes the attention interactions for the tile if and only if it contains at least
+    one unmasked element".
+- **Write:** where attention under a causal mask is sharded along the sequence, the input tokens are permuted before
+  the first embedding so that rank r of N holds the tokens whose index is r modulo N. The sequence keeps that layout
+  through every function of the program, forward and backward. Position ids, and the target ids of a loss, are
+  permuted the same way. Each attention's mask is causal in the tokens' original order. A block of queries and keys
+  that the mask inhibits entirely is not computed. No communication is added at an attention to bring the sequence
+  into or out of this layout.
+- **Replaces:** `rdma/mesh_compile.py` `_stripe`'s `index_select` before and `index_copy` after each attention
+  (mesh aeecb9f9), which gather the whole query and the whole output at every attention.
+- **Not stated by the source read** (the HTML text through section 5.3): a step that puts a returned per-token
+  result back in the original order; the stripes where the ranks' counts differ (item 1); the layout where the
+  sequence is not the program's input. These are in Stops.
 
 ### 9. Changing a tensor from one sharding to another
 
@@ -389,7 +414,12 @@ The operator, 2026-11-09, in order:
 
 ## Stops
 
-None. Every requirement above states what its quoted source says to write.
+Item 8, three, each with no quoted sentence: where a program returns one result per token, the step that returns
+them in the original order; which tokens a rank holds where the ranks' counts differ, since the source's stripes are
+residues modulo the device count; and a causal attention whose sequence is not an input of the program. Until a
+source is quoted for one of these, a program that meets it is refused at partition with a message that names item 8.
+
+Every other requirement above states what its quoted source says to write.
 
 Settled on 2026-11-09, each by the sources named in its item: item 1's whole sizes (HAP §5.1's rounding); item 6's
 program (HAP §5.1, eq. 3); items 2 and 4 together (item 12: ScaLAPACK's local leading dimension, MPI's subarray

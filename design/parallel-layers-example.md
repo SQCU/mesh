@@ -50,10 +50,12 @@ predecessor and the order of a layer is fixed by the program. Here it is not:
    `blocks.0.attention` among its ancestors, nor the reverse. So the calls' graph has no order between them
    (design/aot-compilation-change-request.md A10: "the order constraints between calls"; A. J. Bernstein, 1966), and
    the one solve of design/implementation-order-2026-11-09.md item 4 is free to run them at once.
-2. **The block's sum takes its operands in any order.** `h_states * lambda + dense_out + attn_out` is a sum, whose ⊕
-   is commutative and associative. It is a function of plan-to-bridge-change-request.md R4's second kind, and R4's
-   "Behaviour at run time", statement 2, is what a run must do with it: "Each task starts when its own page is
-   present. It does not wait for another page of the same operand."
+2. **The block's sum is computed page by page.** `h_states * lambda + dense_out + attn_out` is elementwise: each
+   page of the result is computed from the pages of its operands at the same index and from no other. For pages x and
+   y, f(x ∪ y) = f(x) ∪ f(y), and the union of disjoint pages is commutative and associative. So it is a function of
+   plan-to-bridge-change-request.md R4's second kind ("a streaming homomorphism over pages: f(x ∪ y) = f(x) ⊕ f(y)"),
+   and R4's "Behaviour at run time", statement 2, is what a run must do with it: "Each task starts when its own page
+   is present. It does not wait for another page of the same operand."
 3. **One all-reduce a layer, or two that do not wait on each other.** Under Megatron's splits, each branch's output
    projection leaves partial sums on every node. mesh-transformer-jax adds the two branches' partial sums and reduces
    once, "to minimize all reduces". The torch source here does not say that; it says
