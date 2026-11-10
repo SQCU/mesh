@@ -159,15 +159,15 @@ class SubmissionOwner:
     def __init__(self, metadata, operations, program, objects, lanes, object_primitives, lane_primitives, completion):
         C = mesh_graph.C
         class Config(C.Structure):
-            _fields_ = [(name, C.c_uint32) for name in ('lag', 'positions', 'window', 'flags')]
+            _fields_ = [(name, C.c_uint32) for name in ('lag', 'positions', 'window')]
         class State(C.Structure):
             _fields_ = [(name, C.c_uint64) for name in
-                        ('commits', 'encoded', 'signalled', 'tests', 'completed', 'completedCommits', 'pending', 'issued')] + \
-                       [('commitEnds', C.POINTER(C.c_uint64)), ('progressCommits', C.POINTER(C.c_uint64))]
+                        ('commits', 'encoded', 'signalled', 'completedCommits', 'pending', 'issued')] + \
+                       [('progressCommits', C.POINTER(C.c_uint64))]
         class Effect(C.Structure):
             _fields_ = [(name, C.c_uint64) for name in
-                        ('wait', 'signal', 'ended', 'slot', 'stored', 'completed', 'completedCommits', 'encoded')] + \
-                       [(name, C.c_uint32) for name in ('action', 'active', 'submitted', 'array')]
+                        ('wait', 'signal', 'slot', 'stored', 'completedCommits', 'encoded')] + \
+                       [(name, C.c_uint32) for name in ('action', 'submitted', 'array')]
         library = os.path.abspath(os.path.join(HERE, '..', '..', '..', 'metal-microbench', '.build', 'libmetal_recording.dylib'))
         self.library = C.CDLL(library)
         self.library.MetalSubmissionIdentity.argtypes = [C.POINTER(C.c_ubyte)]
@@ -187,18 +187,18 @@ class SubmissionOwner:
         self.library.MetalSubmissionNormalize.argtypes = [C.POINTER(Config), C.POINTER(State)]
         self.library.MetalSubmissionNormalize.restype = None
         self.library.MetalSubmissionEvents.argtypes = [C.POINTER(mesh_graph.Submission), C.POINTER(mesh_graph.Action),
-            C.POINTER(mesh_graph.Action), C.POINTER(mesh_graph.Action), C.POINTER(State), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
+            C.POINTER(mesh_graph.Action), C.POINTER(Effect), C.POINTER(mesh_graph.Operation), C.POINTER(mesh_graph.Scope)]
         self.library.MetalSubmissionEvents.restype = C.c_size_t
         self.Config, self.State, self.Effect = Config, State, Effect
         self.metadata, self.operations, self.program = metadata, operations, program
-        self.objects = {obj for x in metadata['submissions'] for obj in (x.drained, x.progress)} | \
+        self.objects = {x.progress for x in metadata['submissions']} | \
                        {x.object for x in metadata['actions'] if x.object != NONE}
         if completion:
             self.objects.discard(completion.object)
         self.lanes = {x.queue for x in metadata['submissions']}
         self.object_map, self.lane_map = objects, lanes
         self.object_primitives, self.lane_primitives, self.completion = object_primitives, lane_primitives, completion
-        self.initial = tuple((0,) * (8 + x.lag + x.positions * x.window) + (NONE, 0, NONE, 0, NONE, 0) for x in metadata['submissions'])
+        self.initial = tuple((0,) * (6 + x.positions * x.window) + (NONE, 0, NONE, 0, NONE, 0) for x in metadata['submissions'])
         self.cache, self.catalog = {}, {}
 
     def task(self, vertex, execution, values):
@@ -214,15 +214,14 @@ class SubmissionOwner:
         prefix, completed = mesh_graph.Action(), mesh_graph.Action()
         mesh_graph.LIB.mesh_graph_action_owner(C.byref(action), C.byref(owner), C.byref(prefix), C.byref(completed))
         source = self.metadata['submissions'][action.submission]
-        config = self.Config(source.lag, source.positions, source.window, source.flags)
-        commits = (C.c_uint64 * source.lag)(*values[8:8 + source.lag])
-        progress = (C.c_uint64 * (source.positions * source.window))(*values[8 + source.lag:-6])
-        state, effect = self.State(*values[:8], commits, progress), self.Effect()
+        config = self.Config(source.lag, source.positions, source.window)
+        progress = (C.c_uint64 * (source.positions * source.window))(*values[6:-6])
+        state, effect = self.State(*values[:6], progress), self.Effect()
         status = self.library.MetalSubmissionAdvance(C.byref(config), C.byref(state), action.kind, action.value, C.byref(effect))
         if status:
             raise ValueError('compiled submission action %d: %s' % (index, os.strerror(status)))
         emitted, scopes = (mesh_graph.Operation * 3)(), (mesh_graph.Scope * 3)()
-        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(prefix), C.byref(completed), C.byref(state), C.byref(effect), emitted, scopes)
+        count = self.library.MetalSubmissionEvents(C.byref(source), C.byref(action), C.byref(prefix), C.byref(effect), emitted, scopes)
         if count > 3:
             raise ValueError('submission owner exceeded its event record')
         outputs = []
@@ -244,7 +243,7 @@ class SubmissionOwner:
             outputs.append(self.catalog[signature])
         self.library.MetalSubmissionApply(C.byref(state), C.byref(effect))
         self.library.MetalSubmissionNormalize(C.byref(config), C.byref(state))
-        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:8]) + tuple(commits) + tuple(progress) + (owner.current, owner.execution, owner.issued, owner.issued_execution, owner.completed, owner.completed_execution)
+        changed = tuple(getattr(state, name) for name, _ in self.State._fields_[:6]) + tuple(progress) + (owner.current, owner.execution, owner.issued, owner.issued_execution, owner.completed, owner.completed_execution)
         self.cache[key] = changed, tuple(outputs)
         return self.cache[key]
 
