@@ -74,6 +74,13 @@
 
 (2026-11-08)
 
+**The operator, 2026-11-10:**
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+
 ## Requirements
 
 ### 1. The signature: the compiler's own statement of every synchronization
@@ -90,10 +97,11 @@
   - the synchronization graph's edges, with their delays.
 - **The algorithm** is the graph module's: `mesh_graph_dependences`, `mesh_graph_synchronization`,
   `mesh_graph_redundant` and `mesh_graph_schedule`.
-- **Produced by** the AOT compilation, from the scheduled value that the one schedule produces. Nothing else writes
-  it.
-- **Consumed by** item 2's prints, by item 4's generator of the monitor's D program, and by the compiled artifact,
-  which has the signature's SHA-256 as a part.
+- **Produced by** the AOT compilation, from the scheduled value (`ir.Scheduled`, which
+  design/torch-source-lowering-change-request.md states the one schedule produces). Nothing else writes it. No cited
+  code or source names the signature's own type.
+- **Consumed by:** it is printed in the three formats of item 2, the monitor's D program is generated from it (item
+  4), and its SHA-256 is part of the compiled artifact.
 
 ### 2. Matrix Market, DOT and the text space-time diagram
 
@@ -121,8 +129,7 @@ Each takes the signature of item 1 and prints it.
 - **Write:**
   - The monitor is DTrace, in a process of its own. Its Objective-C provider catches every Metal 4 call by selector,
     whatever class implements it. Its pid provider catches the thread's semaphore waits and shared-event waits.
-  - It takes the running program and the D program of item 4. The program isn't rebuilt, linked against anything or
-    changed to be observed.
+  - The program isn't rebuilt, linked against anything or changed to be observed.
 
 ### 4. Failing loudly
 
