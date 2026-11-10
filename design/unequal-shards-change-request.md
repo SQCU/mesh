@@ -53,8 +53,14 @@ Each requirement composes into the stages of the reference program `~/schedule-e
 
 A sharding is part of the placement operand. Items 1, 5, 8, 13 and 15 state what the operand carries for a sharded
 dimension. Items 6, 7 and 14 produce it before `place` runs. Items 2, 3, 4, 9, 10 and 12 state nodes that `place` adds
-to the graph. Item 11 states the form of a value. The Stage line of each item rests on these functions; no quoted
-source of an item names a stage.
+to the graph. Item 11 states the form of a value.
+
+A Stage line below says which of these functions produces a value and which consumes it. HAP §3.2's stages, in items
+6 and 12, are another thing: the parts a program's execution is divided into. No quoted source of an item names one
+of these functions. Where an item's quotations state where its step sits in the program, its Stage line follows
+them: item 8's Striped Attention passages ("before the model's first embedding layer", "no extra per-layer
+communication required") and item 12's HAP §2.5.1 passage ("when we optimize the sharding ratios, the communication
+methods should be updated accordingly").
 
 The reference program's placement operand is a function from an fx node to a processor name, and has no field for a
 sharding. Its operators are `send(value: Tensor, channel: int)` and `recv(channel: int) -> Tensor`, and have no
@@ -238,8 +244,9 @@ and `displs`, each an integer array of length the group size; MPI's `array_of_si
   time at B_j; subject to the B_j being nonnegative and summing to 1. It is solved as a linear program. The whole
   sizes follow by item 1's rounding. A tuple is chosen for each segment of the model, not one for the whole mesh
   dimension.
-- **Stage:** the solve runs before `place`. It takes the program's stages and their times and writes, for each
-  segment, the tuple of item 1 in the placement operand, which `place` consumes.
+- **Stage:** the solve runs before `place`. It takes the program's HAP stages and their times and writes, for each
+  segment, the tuple of item 1 in the placement operand, and for each collective which of item 12's two ways it
+  uses; `place` consumes both.
 
 ### 7. A node's speed is a function of the size of the problem
 
