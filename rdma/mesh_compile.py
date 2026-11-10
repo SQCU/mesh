@@ -1713,15 +1713,11 @@ def _recorder():
         lib.MetalRecorderProgram.restype = C.c_void_p
         lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, C.POINTER(mesh.Planned), C.c_char_p,
                                              C.c_size_t]
-        for name in ('MetalRecorderSave', 'MetalProgramSave'):
-            function = getattr(lib, name)
-            function.restype = C.c_int
-            function.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), C.POINTER(C.c_size_t), C.c_char_p, C.c_size_t]
-        lib.MetalRecorderLoad.restype = C.c_void_p
-        lib.MetalRecorderLoad.argtypes = [C.c_void_p, C.c_void_p, C.c_void_p, C.c_size_t, C.c_char_p, C.c_size_t]
+        lib.MetalProgramSave.restype = C.c_int
+        lib.MetalProgramSave.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), C.POINTER(C.c_size_t), C.c_char_p,
+                                         C.c_size_t]
         lib.MetalProgramLoad.restype = C.c_void_p
-        lib.MetalProgramLoad.argtypes = lib.MetalRecorderProgram.argtypes[:-2] + [C.c_void_p, C.c_size_t,
-                                                                               C.c_char_p, C.c_size_t]
+        lib.MetalProgramLoad.argtypes = lib.MetalRecorderProgram.argtypes[:-2] + [C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalProgramRun.restype = C.c_int
         lib.MetalProgramRun.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), mesh.Q, mesh.Q, C.c_void_p, C.c_void_p,
                                         C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
@@ -6865,8 +6861,9 @@ def _compiler():
         P, U, Q = C.c_void_p, mesh.U, mesh.Q
         for name, result, arguments in (
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
-                ('metal_ir_save', C.c_int, [P, C.POINTER(P), C.POINTER(C.c_size_t), C.c_char_p, C.c_size_t]),
-                ('metal_ir_load', P, [P, C.c_size_t, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_archive_load', P, [P, C.c_size_t, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_solved', P, [P]),
+                ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
                 ('metal_ir_storages', C.c_size_t, [P, C.POINTER(C.POINTER(Storage))]),
@@ -7141,26 +7138,17 @@ def _finalized(programs, context, irs, planned, values, owned):
                                                        C.byref(word)))
         compiler.metal_ir_transport(p, word.value)
         row['status'] = word.value
-        status = compiler.metal_ir_loaded(p, error, len(error)) if 'prepared_record' in row else \
+        status = compiler.metal_ir_loaded(p, error, len(error)) if 'solved' in programs else \
             compiler.metal_ir_finalize(p, error, len(error))
         if status:
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its emission: %s'
                           % (row['node'].name, k, error.value.decode()))
-        if 'prepared_record' in row:
-            record = row['prepared_record']
-            row['prepared'] = _owned(owned, programs['lib'].MetalRecorderLoad(
-                programs['recorder'], p, record, len(record), error, len(error)))
-            if not row['prepared']:
-                raise OSError(errno.EINVAL, 'call %s: its saved preparation: %s'
-                              % (row['node'].name, error.value.decode()))
-        else:
-            # metal-microbench metal_recording.h MetalRecorderPrepare: the executor of the finalized program, after
-            # the plan
-            row['prepared'] = _owned(owned, programs['lib'].MetalRecorderPrepare(programs['recorder'], p, error,
-                                                                                  len(error)))
-            if not row['prepared']:
-                raise OSError(errno.EINVAL, 'call %s of compiled function %d: its preparation: %s'
-                              % (row['node'].name, k, error.value.decode()))
+        # metal-microbench metal_recording.h MetalRecorderPrepare
+        row['prepared'] = _owned(owned, programs['lib'].MetalRecorderPrepare(programs['recorder'], p, error,
+                                                                              len(error)))
+        if not row['prepared']:
+            raise OSError(errno.EINVAL, 'call %s of compiled function %d: its preparation: %s'
+                          % (row['node'].name, k, error.value.decode()))
     return made
 
 
@@ -7224,9 +7212,8 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
                                  for row, r in enumerate(rows)])
     # metal_recording.h MetalRecorderProgram
     arguments = (recorder, calls, len(calls), C.byref(planned))
-    program = _owned(owned, lib.MetalProgramLoad(*arguments, programs['native_record'],
-        len(programs['native_record']), error, len(error)) if 'native_record' in programs else
-        lib.MetalRecorderProgram(*arguments, error, len(error)))
+    program = _owned(owned, lib.MetalProgramLoad(*arguments, programs['solved'], error, len(error))
+                     if 'solved' in programs else lib.MetalRecorderProgram(*arguments, error, len(error)))
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
     # metal_recording.h MetalProgramHorizon: the program's lag (the plan's horizon), the
@@ -7978,8 +7965,8 @@ def program(block, *example_inputs):
     return _runner(context, state, make)
 
 
-# design/aot-compilation-change-request.md A1; metal_ir.h metal_ir_save/load; metal_recording.h
-# MetalRecorderSave/Load and MetalProgramSave/Load; mesh-collective.h mesh_plan_save/load
+# design/aot-compilation-change-request.md A1 and A8; metal_ir.h metal_ir_archive_load; metal_recording.h
+# MetalProgramSave and MetalProgramLoad; mesh-collective.h mesh_plan_save and mesh_plan_load
 _FREE = C.CDLL(None).free
 _FREE.restype, _FREE.argtypes = None, [C.c_void_p]
 _NEW_BUFFER = _message(C.c_void_p, C.c_ulong, C.c_ulong)
@@ -8037,7 +8024,7 @@ def _initial(retained):
 
 def _artifact_header():
     machines = _machines()
-    return (1, sys.byteorder, C.sizeof(C.c_void_p), torch.__version__,
+    return (2, sys.byteorder, C.sizeof(C.c_void_p), torch.__version__,
             tuple(C.sizeof(t) for t in (mesh.Declared, mesh.Weight, mesh.Value, mesh.Dependence, Range, Release,
                                        ValueInfo, mesh_graph.Dependence)),
             tuple((k, bytes(v)) for k, v in sorted(machines.items())))
@@ -8094,9 +8081,7 @@ def _save_program(context, state, path):
                 declaration = Release.from_buffer_copy(bytes(release))
                 declaration.supplied = declaration.status = 0
                 sent.append((v, bytes(declaration)))
-            record.update(program=_saved_bytes(programs['compiler'].metal_ir_save, p),
-                          prepared=_saved_bytes(programs['lib'].MetalRecorderSave, row['prepared']), constants=constants,
-                          source_values=row['builder'].source_values,
+            record.update(constants=constants, source_values=row['builder'].source_values,
                           planned=row['builder'].planned, own=row['own'], receives=row['receives'], sends=row['sends'],
                           marks={'received': received, 'sent': sent, 'sending': row['marks']['sending']})
         rows.append(record)
@@ -8106,7 +8091,8 @@ def _save_program(context, state, path):
                    irs=[(ir.layouts, ir.inputs, ir.device) for ir in retained['irs']],
                    analysed=(analysed.outstanding, bytes(analysed.orders), bytes(analysed.causes), analysed.norders,
                              bytes(analysed.chains)),
-                   native=_saved_bytes(programs['lib'].MetalProgramSave, replay['program']), signature=replay['signature'])
+                   compiled=_saved_bytes(programs['lib'].MetalProgramSave, replay['program']),
+                   signature=replay['signature'])
     return mesh_disk.write(path, b'MESH-AOT\0' + pickle.dumps(payload, protocol=5), 'a compiled mesh program', 'w')
 
 
@@ -8130,15 +8116,16 @@ def _restore_programs(saved, owned):
             owned[id(blob)] = lambda blob=blob: None
             address, buffer = C.addressof(blob), None
         storage.append((address, buffer))
+    archive = compiler.metal_ir_archive_load(saved['compiled'], len(saved['compiled']), device, error, len(error))
+    if not archive:
+        raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
+    owned[archive] = lambda: compiler.metal_ir_archive_free(archive)
     rows, state_data = [], {}
-    for source in saved['rows']:
+    for at, source in enumerate(saved['rows']):
         row = {key: source[key] for key in ('k', 'j')}
         row.update(node=types.SimpleNamespace(name=source['node']), builder=None)
-        if 'program' in source:
-            data = source['program']
-            p = compiler.metal_ir_load(data, len(data), device, error, len(error))
-            if not p:
-                raise OSError(errno.EINVAL, 'saved call %s: %s' % (source['node'], error.value.decode()))
+        if 'constants' in source:
+            p = compiler.metal_ir_archive_program(archive, at)
             builder = types.SimpleNamespace(p=p, planned=source['planned'], source_values=source['source_values'])
             owned[id(builder)] = lambda p=p: compiler.metal_ir_program_free(p)
             for v, index, at, count, offset in source['constants']:
@@ -8154,7 +8141,7 @@ def _restore_programs(saved, owned):
                 if info.role == STATE:
                     key = ('buffer', buffer) if buffer else ('data', address + (offset or 0), count)
                     state_data[key] = saved['storage'][index][1]
-            row.update(builder=builder, prepared_record=source['prepared'], own=source['own'],
+            row.update(builder=builder, own=source['own'],
                        receives=source['receives'], sends=source['sends'],
                        marks={'received': [(v, f, value, Range.from_buffer_copy(data))
                                            for v, f, value, data in source['marks']['received']],
@@ -8163,7 +8150,8 @@ def _restore_programs(saved, owned):
         rows.append(row)
     return {'lib': lib, 'compiler': compiler, 'device': device, 'recorder': recorder, 'rows': rows,
             'rated': {k: {v for v, _ in inputs.values()} for k, (_, inputs, _) in enumerate(saved['irs'])},
-            'native_record': saved['native'], 'signature': saved['signature'], 'state_data': state_data}
+            'solved': compiler.metal_ir_archive_solved(archive), 'signature': saved['signature'],
+            'state_data': state_data}
 
 
 def load(path):
