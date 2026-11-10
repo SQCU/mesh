@@ -384,15 +384,21 @@ the scheduled value, and lowering, the runtime and the archive each take it.
   writes the static schedule, which is the scheduled value. The types, as mesh db17c3ad defines them:
   - what it takes (`rdma/mesh-collective.h`): an array of `struct mesh_function`, with each value as a `struct
     mesh_value` (its `section` with its pages; its `kind`, `MESH_INVARIANT` or `MESH_EXECUTION`; its `lag`), and each
-    edge of the dependence graph as a `struct mesh_dependence` `{from, to, lag, kinds}`;
+    edge of the dependence graph as a `struct mesh_dependence` `{from, to, lag, kinds}`; each declared transfer as a
+    `struct mesh_declared` (`source`, `destination`, `identity`, `kind`, `value`, and the strided ranges `from` and
+    `to`), with a `struct mesh_weight` `{produced, consumed, read, page}`; and the `uint32_t` arrays `calls`, `orders`,
+    `causes` and `chains`;
   - what it writes (`rdma/mesh.h`): the page table, rows of `struct mesh_page_entry` `{mapping, address, device}`; each
     adjacent node's lists of transfer entries, `struct mesh_hop` (`page`, `node`, `direction`, `pages`, `bytes`, and for
     the state section `field`, `word` and `count`); and the state section, a contiguous section of the region apart from
     the data pages, headed by `struct mesh_state` (`copies`; the offsets `phases`, `counts`, `supplied` and `status`;
-    `executions`), with the status a `struct mesh_status` `{behind, ahead, first}`.
+    `executions`), with the status a `struct mesh_status` `{behind, ahead, first}`; and, to its caller, a `struct
+    mesh_planned` (`rdma/mesh-collective.h`). No source this document cites states what `struct mesh_weight`, `calls`,
+    `orders`, `causes`, `chains` or `struct mesh_planned` are for.
 - **Runtime.** The bridge (mesh `rdma/mesh-flow.c`) reads the `struct mesh_hop` entries and, for sends, the words at
   `word`, and writes the phases at `field` and the counts at `count`. `tools/e2b_replay.m` passes the `struct
-  mesh_function` array to `mesh_plan`, commits the command buffers and reads the `struct mesh_status`.
+  mesh_function` array to `mesh_plan`, commits the command buffers and reads the `struct mesh_planned` and the `struct
+  mesh_status`.
 - **Lowering.** The kernels `metal_recording.m` records (`mesh_read_N`) read the pages the `struct mesh_page_entry` rows
   name and the state section's phases. No source this document cites names the type of the recorded kernels' bindings.
 
