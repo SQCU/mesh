@@ -334,6 +334,19 @@ Trans. Signal Processing 45(6), 1997).
 > - M. Herlihy. Wait-free synchronization. ACM TOPLAS 13(1), 1991.
 > - P. E. McKenney and J. D. Slingwine. Read-copy update. 1998.
 
+**The operator, 2026-11-10:**
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something
+> about a source but don't say what algorithm is being used, what data structure is being used, and where it composes
+> in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are
+> introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for
+> that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method
+> justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema
+> in the first `3` cases of change request documents used in the repo history.
+
 ## State of the code
 
 - mesh `rdma/mesh.h`:
@@ -369,9 +382,9 @@ the scheduled value, and lowering, the runtime and the archive each take it.
 
 - **Schedule.** `mesh_plan` (mesh `rdma/mesh-collective.c`) takes the program's values and its dependence graph and
   writes the static schedule, which is the scheduled value. The types, as mesh db17c3ad defines them:
-  - what it takes (`rdma/mesh-collective.h`): an array of `struct mesh_function`, with each value as a `struct mesh_value` (its `section` with its pages; its
-    `kind`, `MESH_INVARIANT` or `MESH_EXECUTION`; its `lag`), and each edge of the dependence graph as a `struct
-    mesh_dependence` `{from, to, lag, kinds}`;
+  - what it takes (`rdma/mesh-collective.h`): an array of `struct mesh_function`, with each value as a `struct
+    mesh_value` (its `section` with its pages; its `kind`, `MESH_INVARIANT` or `MESH_EXECUTION`; its `lag`), and each
+    edge of the dependence graph as a `struct mesh_dependence` `{from, to, lag, kinds}`;
   - what it writes (`rdma/mesh.h`): the page table, rows of `struct mesh_page_entry` `{mapping, address, device}`; each
     adjacent node's lists of transfer entries, `struct mesh_hop` (`page`, `node`, `direction`, `pages`, `bytes`, and for
     the state section `field`, `word` and `count`); and the state section, a contiguous section of the region apart from
@@ -451,7 +464,9 @@ and the Cydra 5 and IA-64 rotating register files).
 **Which function computes it, and which read it.** `mesh_plan` calls it once per static schedule, before the first
 execution. It is the only allocator of a program's pages: nothing allocates a program page while the program runs, not
 the bridge, not a call site, not a GPU kernel. The bridge (`rdma/mesh-flow.c`) reads the page lists, and the recorded
-kernels (`metal_recording.m`) read the pages the page table names.
+kernels (`metal_recording.m`) read the pages the page table names. The types are those of "The functions, and the values
+between them": it takes `struct mesh_value` and `struct mesh_dependence`, and writes `struct mesh_page_entry` rows and
+the `page` of each `struct mesh_hop`.
 
 The bridge's record pages are laid out once, with the region.
 
@@ -805,13 +820,15 @@ functions that read it.
 - **Written by, read by.** The bridge (`rdma/mesh-flow.c`) writes the phases and the counts. The recorded kernels' first
   pass (`mesh_read_N`, `metal_recording.m`) reads the phases and writes the threadgroup count, and Metal's indirect
   dispatch reads that count. The later pass writes the status word, which only the GPU writes, and `e2b_replay` reads it
-  after the run.
+  after the run. The phases are at each `struct mesh_hop`'s `field`, the counts at its `count`, and the status is a
+  `struct mesh_status` (`rdma/mesh.h`). No cited code names a type for the threadgroup count.
 - Both waits in `mesh_read_N` are deleted: the wait on the execution's mask, and the local countdown. A producer on the
   same command queue comes before its consumer by the command buffer's order or a memory barrier.
 
 **C3.2 The allocator places every value.**
 - **The data structure** is the page table, and **the algorithm** is A3's allocator. `mesh_plan` computes the placement,
-  and the bridge and the recorded kernels read it (A3).
+  and the bridge and the recorded kernels read it (A3). Each value is a `struct mesh_value`, and a value placed once has
+  `kind` `MESH_INVARIANT` (`rdma/mesh-collective.h`).
 - It places the weights, the KV cache, pooled intermediates, the values sent between nodes, the GPU's publication
   records, the array of phases and the sent ranges' words (C3.7).
 - A value written before the first execution and read by every execution (the weights; the KV cache as one array) is
@@ -829,7 +846,7 @@ functions that read it.
   3. One execution's graph is unrolled into u copies, and execution t runs copy t mod u.
 - **Written by, read by.** `mesh_plan` computes u and the copies, and A3's allocator places the copies' pages.
   `executions` is not an input of `mesh_plan`: a static schedule runs any number of executions. For execution t, the
-  bridge and the recorded kernels read copy t mod u's pages.
+  bridge and the recorded kernels read copy t mod u's pages. u is `struct mesh_state`'s `copies` (`rdma/mesh.h`).
 - It is computed at compile time, once per static schedule, over one execution's values × u, never over the run's
   length. At run time nothing is allocated, and every address is a constant of the static schedule.
 
@@ -843,14 +860,15 @@ functions that read it.
   update, 1998; K. Fraser, Practical lock-freedom, 2004): the bridge releases a retired static schedule's pages once
   none of its ports still has that static schedule loaded, and nothing waits for the release.
 - **Written by, read by.** `mesh_plan` writes the placement. The bridge reads it, and releases its pages after its
-  retirement.
+  retirement. The placement is the `struct mesh_page_entry` rows.
 
 **C3.5 The normal program passes its dependences.**
 - **The data structure** is the dependence graph A3's allocator takes: each stage's reads and writes, in the order its
   command buffer runs them, from the captured graph's stages. It has no algorithm of its own.
 - **Written by, read by.** `tools/prepare_e2b.py` writes the dependences into the manifest. `e2b_replay` passes them to
   `mesh_plan` in place of `NULL, 0` (e2b_replay.m:578–579). A3's allocator reads them as its order. The run's pages then
-  don't grow with its executions.
+  don't grow with its executions. Each dependence is a `struct mesh_dependence` `{from, to, lag, kinds}`
+  (`rdma/mesh-collective.h`). No source this document cites names the manifest's type.
 
 **C3.6 The races and the unbounded waits.** Each is removed by the item named. None has a data structure or an algorithm
 of its own.
@@ -882,7 +900,9 @@ of its own.
   5. The counts and the event only rise.
 - **Written by, read by.** `mesh_plan`'s allocator places the array and the words and writes their starting values. The
   bridge (`rdma/mesh-flow.c`) writes the phases and the counts and reads the words. Each range's producer writes its
-  word. The recorded kernels' first pass reads the phases (C3.1).
+  word. The recorded kernels' first pass reads the phases (C3.1). The array, the counts and the words are at `struct
+  mesh_state`'s offsets `phases`, `counts` and `supplied`; a receive's field is its `struct mesh_hop`'s `field`, and a
+  send's word its `word` (`rdma/mesh.h`).
 - No data page is written but by its producer or by the receive that fills it.
 - The only zeroing is mesh-link.c's zeroing of the region's header, once, when the bridge creates the region.
 - The projection kernels' partial sums are not zeroed: every threadgroup writes its own before any are read. Their
@@ -1366,7 +1386,8 @@ functions that read it.
 - **Written by, read by.** `mesh_plan` places the pages. An invariant's producer writes it into its placed pages once,
   after `mesh_plan` and before the first execution. For the weights, that write is one copy from the buffer the delegate
   loaded, at the bind: the producer writing its own value (C3.7). The recorded kernels read the placed pages, and after
-  the bind no command reads a delegate buffer.
+  the bind no command reads a delegate buffer. A value is a `struct mesh_value`, and an invariant has `kind`
+  `MESH_INVARIANT` (`rdma/mesh-collective.h`).
 
 **D.3.3 The per-execution inputs the CPU writes, in copies.**
 - **The data structure** is the copies of each such input, and **the algorithm** is modulo variable expansion (C3.3) by
@@ -1374,7 +1395,8 @@ functions that read it.
   stream.
 - **Written by, read by.** The program declares the lag of the CPU code that writes them: with that code writing
   execution t + 1 while the GPU runs execution t, the lag is 2. `mesh_plan`'s allocator gives the inputs copies by that
-  lag. The CPU code writes each copy, and the recorded kernels read it.
+  lag. The CPU code writes each copy, and the recorded kernels read it. The lag is `struct mesh_value`'s `lag`
+  (`rdma/mesh-collective.h`).
 - Nothing the run binds grows with its executions.
 
 **D.3.4 Metal 4 submission.**
@@ -1401,7 +1423,7 @@ functions that read it.
   The allocator already orders the adjacent node's next send into that page after this node's reads of the last one
   (C3.3).
 - **Written by, read by.** `mesh_plan` writes the receive lists. The bridge (`rdma/mesh-flow.c`) reads them and posts
-  the receives.
+  the receives. A receive list's entry is a `struct mesh_hop` with `direction` `MESH_RECEIVE` (`rdma/mesh.h`).
 
 **D.3.6 A static schedule is used only while the map it was made from is current.**
 - **The data structure** is the map and its serial, a link-state database (RFC 2328). A static schedule is made against
@@ -1413,7 +1435,8 @@ functions that read it.
   node of the static schedule then reads ENOLINK, with no case for relays.
 - **Written by, read by.** mesh-records.c `map_put` writes the map and its serial. The bridge (`rdma/mesh-flow.c`)
   compares the serial with the static schedule's and cancels. The recorded kernels' later pass reads the counts and the
-  phases (C3.1).
+  phases (C3.1). The static schedule's serial is `struct mesh_state`'s `serial` (`rdma/mesh.h`). No source this document
+  cites names the map's type.
 
 ### D.4 The changes, by file
 
