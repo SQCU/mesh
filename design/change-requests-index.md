@@ -20,7 +20,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
   [Item 7](compilation-composition-change-request.md#7-preserve-the-properties-while-compiling-away-the-abstract-machinery)
   cites MLIR analysis/control lowering, Halide scheduled program synthesis and CompCert behavioral preservation.
   Lowerable IR carries solved properties into optimizing compilation; the runtime need not retain their original
-  types/graphs/metadata. Direct compiled control and fixed target operations must displace the remaining task/loop
+  types/graphs/metadata. Fixed target operations in the scheduled order must displace the remaining task/loop
   and command interpreters. This documentation records the obligation, not completion or a performance result.
 
   Current connected path: source-built LiteRT/ML Drift and Torch numerical producers → owned typed numerical
@@ -94,13 +94,8 @@ outstanding, and what of it is outstanding. The standard every change request fo
   operations become five GPU dispatches or one native CPU task. Forward relative errors are 8.270e-8 and 7.236e-8;
   all gradient errors are below 2.020e-7 and the loss error is 2.362e-7. The artifacts are 521,972 and 378,827 bytes.
   This establishes those joint numerical paths and restoration, not distributed public-program execution.
-  Mesh4269c977 completes nested decomposition discovery and source-metadata handoffs through the same owners.
-  With build25 libraries, branch-only bucketize inside a loop executes exactly on GPU; conditional det/pinv/GELS
-  executes on native CPU with exact determinant and relative errors 1.999e-7 / 1.088e-7 for the latter two outputs.
-  Two dynamic WHILEs also execute exactly, including alternating inner trip counts 2/0/2 and an outer-zero case.
 
-  Remaining work: complete frontend/target coverage including binary64 functions; target-owned structured control
-  and justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
+  Remaining work: complete frontend/target coverage including binary64 functions; justified mixed-target handoffs; paged CPU/write-ahead and compiled execution-index behavior; complete sourced
   actor costs and whole-group decisions; typed dynamic synchronization observation; actual Torch/collective and
   five-node E2B execution with the required transport overhead/bandwidth and decode throughput after prefill.
   Source review also identifies specific performance mechanisms still to preserve: typed native CPU SGEMM/BNNS
@@ -176,73 +171,31 @@ outstanding, and what of it is outstanding. The standard every change request fo
   in the composition implementation. The review records distinguish remaining representation and observation gaps
   from implemented source. The existing external monitor observes the restored CPU projection's one expected
   host signal at mesh 53bc3b17, with numerical agreement. The restored GPU projection also passes external
-  observation of five program operations; its three kernel records are static compiler data. Bridge and
-  structured-control observation and fail-stop interception remain open. Typed invocation spans are emitted and
-  consumed. At metalcc3618ff / mesh69a971ce, three-span argmax passes observation of17 program operations, with9
-  static kernel records,2 image edges and no redundant edges. Retained allocator-completion facts remove the
-  GPU fences that duplicated its required completion waits; argmax numerical mismatch counts remain0.
+  observation of five program operations; its three kernel records are static compiler data. Bridge observation
+  and fail-stop interception remain open. Typed invocation spans are emitted and consumed. At metalcc3618ff /
+  mesh69a971ce, three-span argmax passes observation of17 program operations, with9 static kernel records,2 image
+  edges and no redundant edges. Retained allocator-completion facts remove the GPU fences that duplicated its
+  required completion waits; argmax numerical mismatch counts remain0.
   At metal012f52bd, the GPU eig's CHECK wait consumes the same commit-completion fact as allocator reuse, removing
   its two redundant synchronization edges. External observation initially exceeded macOS's total DOF load limit;
   smaller initializer chunks and short clauses alone did not fix it. At mesh ba80ddcc, grouping equivalent
   compatible-state transitions into bit sets enables and observes all161 program operations successfully;
-  its215 kernel records remain static IR facts. Conditional submission-state emission is still being completed.
-  Build18's fused eig also passes external observation:13 program operations,7 static kernel records,1 image edge
-  and no redundant edges. Compiler controls retain explicit lexical parents and actual entry writer/trip identities
-  through both frontends, artifacts and signature choices; equal dispatch ranges no longer stand in for ancestry.
+  its215 kernel records remain static IR facts. Build18's fused eig also passes external observation:13 program
+  operations,7 static kernel records,1 image edge and no redundant edges.
   A deliberate mismatched existing CPU client/signature could not exercise fail-stop: macOS denied destructive
   DTrace before client execution. No stopped client remained and no machine security configuration was changed.
   Build19 retains submission actions and binds their meaning to the actual recorder image UUID. Fused eig passes
   external observation of 12 program operations and seven static kernel records, with one image edge and no
-  redundant edges. Conditional thresholds, nested guards, composed instruction order and realized-alternative
-  validation still require their corresponding operational evidence.
-  Build20 executes a nested Torch conditional and nonunrolled GPU WHILE over 4,096 elements: the taken three-trip
-  result has relative error 3.585e-8 and the untaken branch is exact. The first diagnostic input omitted padding
-  for the compiled Boolean storage word; its producer now consumes finalized physical byte sizes. External
-  observation then refuses both signatures before client execution because two trip-test waits have no dependency
-  image. Review finds that the host predicate read was attributed to the preceding GPU task instead of represented
-  as its own computation. That handoff and the fences made redundant by a completed drain remain under repair.
-  Build21 retains the host predicate-read task and potential initial/retest writers. The fresh nested program
-  restores with correct three-trip, untaken and zero-trip results. Static signature validation has no false edges;
-  external observation passes the untaken and zero-trip executions. The three-trip execution still fails because
-  its realized graph reports three redundant synchronization edges. This failure remains assigned; numerical
-  correctness and the successful alternatives do not close repeated-trip observation.
-  Build22 retains task-activation markers in the compiled instruction stream and materializes distinct task
-  occurrences from observable transitions. Shared dominator/SCC analysis retains silent optional/repeated
-  activations symbolically; affected synchronization classifications remain unproved rather than selecting an
-  arbitrary hidden path. The fresh three-trip, untaken and zero-trip cases now pass numerical execution and external
-  observation; the three-trip trace observes 37 program operations. General nested activation frames and named-control
-  trip-distance feedback are still missing handoffs. The currently unconsumed anonymous compiler control-edge
-  relation is being replaced by that consumed relation; the concrete three-trip success does not close it.
-  Build25 connects named-control feedback through signature v7 and entry/trip frames. The three concrete cases
-  still pass external observation; the three-trip realized graph has four image edges and no false/redundant edge.
-  Review then finds that materialization selects one accepting state path from the surviving family. Preserving
-  that family, and actual nested-WHILE/inner-zero-trip evidence, remain assigned. Compiler feedback also repeats
-  exact conflict analysis already performed for ordinary edges; the owners are completing one retained conflict
-  result consumed by ordinary ordering, feedback and predicate reads.
-  Mesh67792fda preserves the finite family of complete accepting state paths. The actual two-WHILE artifacts
-  (31 operations, 282,897 bytes) have exact numerical results and four static image edges with no false edge.
-  The initial external observation fails before execution with DTrace's program-size diagnostic. Individual
-  actions were small; the evidence points to aggregate observer load size. Mesh201f2a89 shares20 typed matching
-  rules across128 masked transition rows and retains all transition identities as data. The generated observer
-  falls from181,732bytes to69,699bytes in the actual enabled runs; the private disassembly comparison records
-  43,109 to14,429 DIF instructions. This completes a representation handoff,
-  rather than merely packaging the same repeated checks into smaller clauses. Actual build26 observation now
-  enables: outer3/inner2,0,2 passes with85 observed program operations,11 image edges and no false/redundant edge.
-  The first outer-zero observation fails because completion names a lexical task that did not activate.
-  Build27 (metal63c465ab / mesh22f409d0) completes that handoff: instruction-local task ownership and the existing
-  issued/encoded actions retain active work, issued GPU work and completed work separately. Both nested cases now
-  pass; outer-zero observes8 operations and one image edge. Mixed GPU/CPU/GPU observes10 operations and one image
-  edge; three-span argmax observes17 operations and two image edges, with zero numerical mismatches. All four have
-  no false/redundant synchronization edge. Event-role selection uses the configured identity after composition,
+  redundant edges. At build27 (metal63c465ab / mesh22f409d0), mixed GPU/CPU/GPU observes10 operations and one image
+  edge; three-span argmax observes17 operations and two image edges, with zero numerical mismatches; neither has a
+  false or redundant synchronization edge. Event-role selection uses the configured identity after composition,
   and the optimized runtime gains no provenance bookkeeping. These runs use --observe and do not exercise
-  destructive fail-stop interception. Trip-carried numerical dependencies do not by themselves establish new
-  communication generations inside distributed loops; that producer/consumer handoff remains under review.
-  Metalcc580af4 / mesh8ce87a05 also retain one exact conflict result, including self conflicts and predicate reads,
-  consumed by ordinary dependencies, control feedback and predicate phases. Artifact v18 retains it on save/load.
-  Arbitrary structured-control observation must retain all compatible observable traces and their counter/object
-  bindings. Reading an earlier branch's snapshot at a later probe can read reused storage and is not evidence of
-  the earlier decision; that incomplete observer path is being replaced without new runtime hooks.
+  destructive fail-stop interception. Metalcc580af4 / mesh8ce87a05 also retain one exact conflict result, including
+  self conflicts, consumed by ordinary dependencies. Artifact v18 retains it on save/load.
   These limited observations do not close items1–6.
+  Struck 2026-11-09 (compilation-composition-change-request.md, "Withdrawn, 2026-11-09"): this entry's record of
+  builds 20 to 27 observing conditionals, nested regions and WHILE loops, and the work it listed as remaining for
+  them. None of it is outstanding.
 - [torch-capture-change-request.md](torch-capture-change-request.md): outstanding in part.
   - Item 3 in the LiteRT scope: implemented in metal-microbench 5600d84b, 66a18fab, c0a067fc and 6b8f7c3c, and mesh
     56e33484, e34e7a5e and b482a825. A received operand's reader is masked, the threadgroups whose pages have not
@@ -285,14 +238,16 @@ outstanding, and what of it is outstanding. The standard every change request fo
   - R4's consumption of a received operand one partition at a time has historical implementations in the torch
     scope through the lowering request's item 1 and in LiteRT through torch-capture item 3. In the replacement,
     build19 carries per-group footprints/page masks into native first-pass, compaction and deferred work, and
-    retains a shared CPU/GPU dispatch order. Received IF/unrolled-trip selections use that same construction.
-    Metaleb9826a3 adds scoped acquisition for direct received predicates at nonunrolled WHILE entry; it is linked in
-    build21, but received-operand runtime evidence remains pending. Build20 restores the receive-completion priority through
+    retains a shared CPU/GPU dispatch order. Received-operand runtime evidence
+    remains pending. Build20 restores the receive-completion priority through
     compiler-owned legal insertion bounds and a final permutation over the retained relation. Recorder lifetimes
     use stable preparation anchors, extending every movable pass operand over its permitted interval; normal load
     restores the permutation without another solve. Metale1791a34 also persists last-use handover records and orders
     a shared-cut handover after all deferred passes at that cut. Transport/overlap evidence remains pending, so these
     source changes do not close R4.
+
+- [unequal-shards-change-request.md](unequal-shards-change-request.md): outstanding, items 1–15. Written 2026-11-09
+  from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4.
 
 ## Implemented
 

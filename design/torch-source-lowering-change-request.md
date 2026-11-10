@@ -163,8 +163,13 @@ Each requirement names the code it replaces or keeps, the quoted source, and wha
   - E. A. Lee, D. G. Messerschmitt, "Static Scheduling of Synchronous Data Flow Programs for Digital Signal Processing",
     IEEE Trans. Computers C-36(1), 1987, §IV, p. 26 (CP §8): "The desired schedule is *admissible*, meaning that blocks
     will be scheduled to run only when data are available, and that a finite amount of memory is required."
-- **Write:** a program whose dynamic control flow is based on CPU data, or on GPU data without a higher order operator,
-  is not compiled.
+- **Source, 2026-11-09:** the operator: "we shall not ocnsider arbitrary python to be part of arbitrary torch;
+  programmers who want to run arbitrary data dependent control flow between sections of linear algebra are to learn
+  to write that sort of code on their own time and outside of our mandate and the library features we provide".
+- **Write:** a program with dynamic control flow is not compiled, whether the control flow is based on CPU data or on
+  GPU data, and whether or not it is written with a higher order operator (`torch.cond`, `while_loop`, `map`,
+  `scan`). The exception in the PyTorch sentence quoted above is not taken. A dimension known only at run time is
+  refused the same way (design/aot-compilation-change-request.md A1: "shapes are compiled").
 
 ### 3. Self-timed lowering of dependences into Metal orderings
 

@@ -96,13 +96,8 @@ tensor operations to buffer operations. Rewriting consumes those decisions. The 
 analysis-to-lowering handoff; recovering aliases from already allocated memory would discard the analysis.
 
 MLIR's [affine lowering](https://mlir.llvm.org/docs/Passes/#-lower-affine) replaces affine operations with
-structured control and arithmetic and removes unused maps/sets. Its
-[SCF-to-CF conversion](https://mlir.llvm.org/docs/Passes/#-convert-scf-to-cf) and
-[CF-to-LLVM conversion](https://mlir.llvm.org/docs/Passes/#-convert-cf-to-llvm) continue to ordinary control flow.
-The concrete [`WhileLowering::matchAndRewrite` implementation](https://mlir.llvm.org/doxygen/SCFToControlFlow_8cpp_source.html)
-inlines test/body regions and replaces their terminators with conditional branches and backedges. Loop-carried
-values become block arguments. These methods preserve control and data flow while eliminating the structured
-loop operation; they do not require an executor to interpret a loop object.
+loops over index ranges and arithmetic and removes unused maps/sets. (The citation here of MLIR's lowering of
+`scf.while` is struck; see "Withdrawn, 2026-11-09".)
 
 ### S9. Algorithm and schedule compile into loops, storage and target code
 
@@ -575,120 +570,8 @@ replace the assigned domain with the operations exercised by a diagnostic.
 
 ### Nested communication regions: producer and consumer handoff
 
-This is the next open implementation connection of items 1, 5 and 6, units 6D–6F, and workgroup
-responsibilities 2, 5–7. It applies AOT A7/A10 and appendix item 6, disjoint-pages C3.3, and the complete
-replacement's typed transfer/generation requirement. It does not change the bridge protocol or introduce a
-second executor. The build27 numerical/control observations recorded in the workgroup's `output_data` do not
-establish distributed communication inside a dynamic body.
-
-**Code fact and displaced boundary.** `mesh_compile.partition` currently partitions the outer FX graph. A generic
-control call gathers operands before `_interpreted` recursively lowers its body numerically. The body does not
-pass through the existing partition, collective construction and plan consumers. `_Export` and `mesh_plan` carry
-a flat repeated call block. Its range generation `{every, producer, ordinal}` maps a consumer invocation to a
-producer invocation; native step words and `MetalCallExecution` carry that invocation through all its trips.
-`Joins` publishes the call's sent result after its outermost control. These facts correctly describe a fixed
-received operand reused by the body. They do not describe a fresh collective created in that body. Each bridge
-plan execution visits its compiled hops once: putting optional or repeated transfers into that unchanged parent
-plan can leave an untaken hop waiting or reuse an earlier phase.
-A source region is not necessarily one communication plan: `mesh-flow.c`'s `lane_take` selects the earliest
-delivered execution, and `link_send_drain` retains that execution's cursor when its next supplied/phase word is
-not ready. If a parent's later hop requires a nested child's result, retaining the parent execution on that lane
-can prevent the child's later delivery from running. The compiler therefore projects a region into maximal
-straight-line communication segments at the required nested call/control boundaries, retaining each segment's
-original region and ports. Existing graph ordering/scheduling owners determine those cuts and dependencies;
-there is no default plan per numerical operation. The segment port relations carry pre-call values into the
-child and its actual yielded values into the continuation, with the corresponding producing activation intact.
-
-**Source roles.** MLIR's [SCF while, condition and yield](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfwhile-scfwhileop)
-provide explicit region arguments, carried values and result correspondence, including zero trips. Their role
-here is preserving structured value/control links, not selecting a communication schedule. MPI 4.1
-[Persistent Communication Requests](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node83.htm), §4.9,
-separates binding persistent operands from starting and completing repeated operations. Its role here is the
-already compiled plan's activation and buffer lifetime, not an MPI wire protocol. The existing Lam/BSL and exact
-dependence owners remain responsible for storage reuse, scheduling and synchronization; a dynamic trip count
-must not be silently supplied as a static repetition count to their existing flat-call inputs.
-
-OpenXLA's [`SpmdPartitioner::PreprocessCallSites`, `HandleWhile` and `HandleConditional`](https://github.com/openxla/xla/blob/main/xla/service/spmd/spmd_partitioner.cc)
-align caller/callee shardings and retain partitioned control operands and results; the conditional predicate is
-replicated across participating partitions. Their role is recursive partitioning with explicit boundary layouts,
-using the same sharding and collective owners inside and outside control regions. This does not adopt another
-transport scheduler.
-
-**Retained operands and responsibility.**
-
-| Producer and representation | Consumer and required preservation |
-|---|---|
-| Frontend: nested region identity from the owning function, original control node and arm/test/body role; its parent and actual control activation. | Shared compiler keeps the same region/call identity through partitioning and lowering. An untaken arm has no activation; a zero-trip loop has its initial test and selected exit values, but no body activation. |
-| Frontend: each flattened argument/result's source value, formal/result ordinal, storage/alias identity and sharding/layout; initial, carried, additional/captured and yielded correspondence. | Partitioning uses the existing propagation, resharding and collective owners in every region. Lowering retains borrowed parent values in their producer's domain and preserves the actual child producer of a yielded or aliased result. |
-| Compiler/plan: the persistent communicating region's actual activation and each range's producing activation, alongside its transfer, view and effects. | Native call entry supplies the monotonically increasing plan execution only when that region executes. Acquisition, publication and copy selection consume that exact identity. A loop trip number or observer feedback distance is not a substitute. Fixed invocation correspondence remains the existing static case. |
-| Shared effect/lifetime owner: the complete uses of borrowed inputs, child outputs and aliases, including enclosing consumers and transport completion. | Preparation binds the resulting finite copies and last-use/completion relations. A child return alone does not free an escaping output. Later reentry reuses storage only after the retained last use, without a guessed trip bound or an unconditional added wait. |
-| Plan owner: scoped call/control relations and solved allocations/schedules. | Native caller and signature consume the same results. The old global cyclic call order, affine cross-call thresholds and `horizon × calls-per-block` coordinate apply only where their premises hold; optional children must not be appended to that flat cycle. Save/load retains the resolved results and relocates live bindings without solving them again. |
-
-A dynamic child's activation count need not be affine in its parent's invocation count. The existing wire
-program fixes a child's buffer addresses by its own execution copy. A borrowed parent's numerical view still
-selects its parent's copy. Direct transport aliasing therefore requires the retained address correspondence;
-where it does not hold, the existing typed copy/reshard lowering supplies the required child-domain transfer
-value and may fuse its producer's store when legal. This preserves source alias semantics while meeting the
-compiled transport's actual storage constraint. A generation word alone cannot repair an incorrectly bound
-buffer, and no runtime bridge descriptor remapping is introduced.
-
-The frontend's concrete source records are `Region {id, parent, control, role, path, gm, ports, inputs, outputs,
-links, children, ir}`, `Port {scope, node, index, value, storage}`, and `Link {source, target, kind}`. A region ID
-names a lexical control site; reusing a GraphModule does not reuse that activation identity. `control` is the
-original owning FX node; ordered children retain then/else or test/body roles. `index` is a flattened result
-ordinal; `value` retains the original typed metadata, and `storage` its scoped alias identity. Links distinguish
-borrowed, initial, carried, yielded and zero-trip exit values. The region's existing partition IR owns sharding
-and layout; no second layout schema is inferred from names. Paths serve source provenance and annotations only.
-One compiler Program retains the regions of an outer call. The plan owner projects its communication segments
-from that ordered IR and these ports; it does not reparse FX or create separate recorder captures for each body.
-
-The partition IR resolves those ports to its existing values through `ports`, `entry_ports`, `exit_ports` and
-`call_ports`. `_link_values` is the single resolver for initial, borrowed, carried, yielded and zero-trip links;
-its results are `(scope, value-key)` pairs consumed by the existing layout, place and home owners. A control result
-leaf is retained in the same `forms`/`added`/`results` representation as other multi-result operations before
-instantiation. The produced leaf and each consumer's sliced or resharded view remain distinct keys. Logical value
-links do not authorize physical aliasing; actual source alias identity, copies and completion remain operands.
-
-`AllocationProjection` connects those scoped values to storage through `numerical[(scope,value)]` and
-`wires[(segment,value)]`. Both name an `Allocation {root, domain, function, index, activation, context}`;
-`root` is `(scope,value,segment-or-none)`. The numerical domain is its owning scope, while an independently
-activated wire domain is its communication segment. `function,index` retain the actual solved allocation,
-`activation` its typed producing-generation operand, and `context` the prepared parent-frame selector. A
-compiler-owned numerical temporary may acquire its allocation from the existing lifetime owner. An unassigned
-wire plan is unfinished construction, not permission to substitute its parent's invocation generation.
-
-The projection's `standins` bind these roots; `realize` derives both `homes_by_scope` and `homes_by_segment`
-through the existing `_homes` view owner. Only a segment's actual wire roots override its numerical views.
-Borrowed formals retain the linked source when they have no local home. A wire live-in is materialized through
-the existing typed copy owner when its fixed transport address differs; newly produced outputs write their
-wire view directly. A yielded wire result is copied directly into its parent result, without an intermediate
-child numerical copy. Source correspondence, physical alias proof and producing generation remain distinct.
-
-Recursive instantiation consumes each retained `Region.ir`, replacing the old numerical-only FX branch walk.
-Its `_Segment` records are compilation boundaries over maximal operation blocks, including empty blocks;
-the builder retains their exact operation ranges for the scoped activation/effect consumer. Keeping these
-ranges alone does not implement that consumer. The same projection is used by the public program builder and
-the existing single-node artifact diagnostic. Neither source lowering nor the diagnostic has a second child
-layout allocator or a second execution regime.
-
-A WHILE retains its test once in `[first,middle)` and its body once in `[middle,last)`. After each body, execution
-returns to that same test; N body executions therefore entail N+1 tests, including the final false test's effects.
-The loop's initial and repeated tests share its lexical test region and communication activation stream. The
-compiler and native/signature consumers use these retained boundaries and their derived entry/predicate actions,
-without a second traversal of source FX or duplicated test lowering. This is a structured-control contract, not a
-requirement for a runtime control stack or general CALL/RET interpreter: final lowering may emit direct branches
-and backedges and fuse compatible work, retaining only waits demanded by actual dependencies and semantics.
-Requirement 7 below makes completing that final lowering explicit.
-
-**Connected edit boundary.** Frontend owns recursive region partition/instantiation and the original port links;
-compiler owns shared typed region/generation operands and their transformed effects; executor owns scoped
-`mesh_plan` consumption, native activation/copy/completion and the saved signature connection. A communicating
-region uses persistent child plans through the existing protocol. Their preparation, activation and lifetime
-consumers must land together; no unused region metadata, parent-generation replay of a child collective, or
-numerical-only branch fallback constitutes this handoff. The concrete C interface follows agreement on these
-producer facts and their existing consumers. Existing operational callers will exercise taken/untaken and
-zero/repeated nested activations, borrowed inputs, carried outputs and communication as the connected code becomes
-runnable; no separate evaluator is introduced.
+Struck in whole; see "Withdrawn, 2026-11-09". This section specified regions for IF and WHILE whose condition is
+tensor data, and quoted no operator turn.
 
 ### 7. Preserve the properties while compiling away the abstract machinery
 
@@ -698,30 +581,29 @@ The operator, 2026-11-09:
 
 > lets make sure that our documentation of change requests and so on correctly cites reference systems where abstract problems are solved, producing lowerable-IRs, which are themselves then optimizing-compiled into abstraction-agnostic-forms which have the same properties (by compilation) with or without an explicit representation of the types, metadata, graphs, etc that we know will still be true about the runtimes.
 
-- **Source:** S8 supplies analysis-to-storage and structured-control-to-CFG lowerings; S9 supplies scheduled
+- **Source:** S8 supplies analysis-to-storage lowering; S9 supplies scheduled
   imperative program synthesis and target compilation; S6 specializes static operands into executable code;
   S10 supplies the cross-representation preservation criterion. S3/S4 permit joint compute/communication
   transformations and S7 supplies the remaining data-availability semantics.
-- **Applies to:** requirements 1–6, all nine composed requests, the complete replacement workgroup and nested
-  region handoff above. This clarifies their final lowering; it adds no separate execution regime.
+- **Applies to:** requirements 1–6, all nine composed requests, and the complete replacement workgroup above. This clarifies their final lowering; it adds no separate execution regime.
 - **Roles and representations:** analysis solves the abstract problem once and supplies a lowerable program to
-  its optimizing consumers. Typed numerical IR, dependencies, placement, storage, control and communication
+  its optimizing consumers. Typed numerical IR, dependencies, placement, storage and communication
   annotations stay available until their last compiler consumer. Each may then be realized in instructions,
-  addresses, branches, target commands and synchronization without preserving its original runtime encoding.
+  addresses, target commands and synchronization without preserving its original runtime encoding.
   A property is preserved through the meaning of the generated program, whether its descriptive metadata is
   erased or retained separately for loading, inspection or the required signature.
 - **Replaces:** the residual position/task/guard/loop-stack interpreter in `MetalProgramExecute`/`MetalNativeStep`,
-  whole-prefix predicate drains without a reaching-writer justification in `MetalLoopTest`, and repeated static
+  `MetalLoopTest` and its drains, which are deleted and not replaced (Withdrawn, 2026-11-09), and repeated static
   command-kind, cut, pass and binding discovery inside `MetalRowEncode`/`MetalReplayRun`. Compiling an outer caller
   which still invokes those generic decoders does not complete their replacement. These are implementation sites
   to revise; the external references above define the methods.
-- **Write:** pass the solved schedule and structured control/effects into the existing compiler's native target
-  lowering and persistence owner. Emit direct control flow and fixed target/API operations with bound operands;
-  compose and optimize CPU bodies with that control, and fuse target-local work where legal. Preserve lowerable
+- **Write:** pass the solved schedule and effects into the existing compiler's native target
+  lowering and persistence owner. Emit fixed target/API operations with bound operands, in the scheduled order;
+  compose and optimize CPU bodies with them, and fuse target-local work where legal. Preserve lowerable
   CPU bodies until composition rather than reducing them prematurely to opaque function pointers. Reuse the
   existing native compilation/load owner; remove the displaced executor bodies when the complete consumer lands.
 
-The preservation and elimination obligations apply at every scope: numerical functions, their call/control graph,
+The preservation and elimination obligations apply at every scope: numerical functions, their call graph,
 and the placed collective/transport program. These are applications of the cited methods to Mesh's existing
 contracts, not claims that the reference systems implement Mesh's interfaces.
 
@@ -729,28 +611,56 @@ contracts, not claims that the reference systems implement Mesh's interfaces.
 |---|---|---|
 | Typed numerical operations, shapes, views and alias/effect relations | Specified numerical semantics, permitted floating-point transformations, mutations, addressing and required lifetimes | Type objects, shape inference, operation names, alias-analysis graphs |
 | Partitioned computation, transfer dependencies and compiled order | Required producer/consumer ordering, publication and readiness; legal overlap and fused work | Original vertices, edges, partitions and an independent scheduling solve |
-| Structured test/body regions, carried values and exit links | Taken-arm effects, N+1 tests for N WHILE bodies, final false-test effects and correct exit values | Source region objects, position dispatch, a general loop-stack interpreter |
 | Realized storage, copies and completion dependencies | Correct value instance, non-overlapping live storage where required, reuse only after completion | Repeated lifetime analysis or parsing allocation metadata on each task |
 | Selected ICB runs, bindings, copies/fills, barriers and API boundaries | The selected target commands with their required ordering and operands | Static command-kind switches, pass scans, cut discovery and generic callback tables |
 | Lowered synchronization and its retained provenance | The required externally observable synchronization property of this executable | Runtime reconstruction of the compiler graph; the signature remains an associated observation artifact |
 
-Graph transformations may fuse vertices, remove edges made internal to fused work, and replace storage or control
+Graph transformations may fuse vertices, remove edges made internal to fused work, and replace storage
 representations. The contract preserves the required observations and ordering, not a literal source graph or
 one runtime action per vertex. Dropping an annotation before its consumer, reparsing emitted source to recover it,
 or silently forgetting its property is an incomplete lowering.
 
-Residual runtime operands are actual changing data: inputs, predicates, supported dynamic indexes, addresses bound
-at preparation/load, arrival/completion and resource state. Their arithmetic, branches and necessary API work
+Residual runtime operands are actual changing data: inputs, supported dynamic indexes, addresses bound
+at preparation/load, arrival/completion and resource state. Their arithmetic and necessary API work
 remain compiled operations. A remaining wait must follow from actual producer/consumer effects and the selected
-target mechanism. A host predicate's reaching writers determine its synchronization; unrelated queued work alone
-does not justify a whole-queue drain. Readiness is not permission to repeat placement or dependency analysis.
+target mechanism. Unrelated queued work does not justify a whole-queue drain. Readiness is not permission to repeat placement or dependency analysis.
 
 Performance is an independent requirement of this replacement. Semantic equivalence does not excuse an extra
 interpreter, launch, transfer, guard or wait introduced only to maintain an erased abstraction. Review the generated
-control flow and target operations as well as the retained IR; removing a top-level interpreter while hiding the
+target operations as well as the retained IR; removing a top-level interpreter while hiding the
 same dispatch underneath it does not satisfy the requirement. Existing numerical clients, emitted-signature
 observation and the measurements required by `docs/measurement.md` establish the corresponding implementation
 evidence. Citations and successful compilation alone establish neither full coverage nor the required performance.
+
+## Withdrawn, 2026-11-09
+
+The operator, 2026-11-09, in order:
+
+> do our external reuqirements for meshlib allow arbitrary control flow inside of programs or do they require exactly the opposite? Review this. we shall not ocnsider arbitrary python to be part of arbitrary torch; programmers who want to run arbitrary data dependent control flow between sections of linear algebra are to learn to write that sort of code on their own time and outside of our mandate and the library features we provide, which are specifically for torch like tensor apis w/ scheduling, transport, and function fusion as needed to support lowest attainable overhead scheduling and transport.
+
+> let me preempt a list of common concerns:
+> "what about mixture of experts"
+> that is a *scatter* or a *sparse tensor operation*. it is not data dependent control flow; it is data dependent data flow aka data dependent sparsity aka literally more linear algebra of a trivially optimizable form.
+> "what if i really want a graph break"
+> we do not need graph breaks in our example lowerer.
+
+> strike out anything and everything which contradicts the remarks reaffirmed (yet again) that we still aren't creating fake problems for ourselves wrt 'what if there's an arbitrary python program pretended to be part of a torch program and we need to play geometry dash for 12 hours inside of a graph for a larped reason gosh what are we gonna do now'.
+
+A program's graph has no node that branches or repeats on tensor data, and its shapes are fixed when it is compiled.
+A program with such a node is not compiled (`torch-source-lowering-change-request.md` item 2). Mixture of experts is
+written as scatters and gathers over fixed shapes. Struck from this request, as contradicting that:
+
+- "Nested communication regions: producer and consumer handoff", in whole.
+- S8's citation of MLIR's `scf.while` lowering and of SCF-to-CF conversion.
+- In requirement 7: structured test and body regions, taken and untaken arms, N+1 tests for N bodies, carried and
+  exit values, predicates as runtime operands, a host predicate's writers, and "direct control flow" as something to
+  emit. What requirement 7 replaces is unchanged; `MetalLoopTest` and its drains are deleted and nothing replaces
+  them.
+- The operator's turn in requirement 7 ("does this mean that a runtime has a loop stack?") stands as written.
+
+Not to be written, extended, observed or measured under any request: IF or WHILE on tensor data, loop stacks,
+predicate reads and drains, trip counts and trip observers, regions scoped to a branch or a loop body, and their
+entries in signatures, archives and monitors.
 
 ## Reusable form
 
