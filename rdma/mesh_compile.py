@@ -3649,7 +3649,8 @@ def _lstsq_metadata(self, b, rcond=None, *, driver=None):
     torch._check(self.dtype == b.dtype and self.device == b.device,
                  lambda: 'torch.linalg.lstsq: input and other must have the same dtype and device')
     selected = _lstsq_driver(self, driver)
-    torch._check(selected in ('gels', 'gelsy'), lambda: 'torch.linalg.lstsq: driver must be gels or gelsy')
+    torch._check(selected in ('gels', 'gelsy', 'gelsd', 'gelss'),
+                 lambda: 'torch.linalg.lstsq: driver must be gels, gelsy, gelsd or gelss')
     torch._check(self.device.type != 'cuda' or selected == 'gels',
                  lambda: 'torch.linalg.lstsq: driver other than gels is not supported on CUDA')
     vector = _linalg_vector_rhs(self, b)
@@ -3661,10 +3662,127 @@ def _lstsq_metadata(self, b, rcond=None, *, driver=None):
     solution = self.new_empty((*batch, nrhs, max(m, n))).transpose(-2, -1)[..., :n, :]
     if vector:
         solution = solution.squeeze(-1)
-    residual = self.real.new_empty((*batch, nrhs) if m > n and selected == 'gels' else (0,))
+    residual = self.real.new_empty((*batch, nrhs) if m > n and (selected == 'gels' or n == 0 and selected != 'gelsy')
+                                   else (0,))
+    if m > n > 0 and selected in ('gelsd', 'gelss'):
+        from torch._subclasses.fake_tensor import DynamicOutputShapeException
+        raise DynamicOutputShapeException(A.linalg_lstsq.default)
     rank = self.new_empty(self.shape[:-2] if selected != 'gels' else (0,), dtype=torch.int64)
-    singular = self.real.new_empty((0,))
+    singular = self.real.new_empty((*self.shape[:-2], min(m, n)) if selected in ('gelsd', 'gelss') else (0,))
     return solution, residual, rank, singular
+
+
+# design/torch-source-lowering-change-request.md item 5; metal-microbench metal_ir.h metal_ir_lapack
+GESDD, HEEVD, GEEV, GELSD, GELSS = range(5)
+
+
+class _Lapack:
+    def __init__(self, routine, job, batch, inputs, outputs, rcond=0.0):
+        self.routine, self.job, self.batch, self.rcond = routine, job, tuple(batch), rcond
+        self.inputs, self.outputs = list(inputs), list(outputs)
+        self.place, self.node = CPU, 0
+
+
+def _singular(target, given, outs):
+    a, (u, singular, vh) = given['A'], outs
+    batch = a.shape[:-2]
+    if not a.numel():
+        return (_linalg_identity(u) if u.numel() else []) + (_linalg_identity(vh) if vh.numel() else [])
+    info = _temporary(batch, torch.int64)
+    vectors = [(u, 2), (vh, 2)] if given['compute_uv'] else []
+    job = b'N' if not vectors else b'A' if given['full_matrices'] else b'S'
+    return [_Lapack(GESDD, job, batch, [(a, 2)], [(singular, 1), *vectors, (info, 0)]), _Check(info, 3, 'linalg.svd')]
+
+
+def _eigen_hermitian(target, given, outs):
+    a, (values, vectors) = given['A'], outs
+    batch = a.shape[:-2]
+    if not a.numel():
+        return []
+    info = _temporary(batch, torch.int64)
+    job = (b'V' if given['compute_v'] else b'N') + given['UPLO'].upper().encode()
+    return [_Lapack(HEEVD, job, batch, [(a, 2)],
+                    [(values, 1), *([(vectors, 2)] if given['compute_v'] else []), (info, 0)]),
+            _Check(info, 3, 'linalg.eigh')]
+
+
+# Reference-LAPACK SRC/dgeev.f, WR, WI and VR: "If the j-th and (j+1)-st eigenvalues form a complex conjugate pair, then
+# v(j) = VR(:,j) + i*VR(:,j+1) and v(j+1) = VR(:,j) - i*VR(:,j+1)", "with the eigenvalue having the positive imaginary
+# part first"
+def _eigen(target, given, outs):
+    a, values = given['self'], outs[0]
+    batch, n = a.shape[:-2], a.shape[-1]
+    if not a.numel():
+        return []
+    info = _temporary(batch, torch.int64)
+    vectors = outs[1] if len(outs) > 1 else None
+    job = b'N' if vectors is None else b'V'
+    if a.is_complex():
+        return [_Lapack(GEEV, job, batch, [(a, 2)],
+                        [(values, 1), *([] if vectors is None else [(vectors, 2)]), (info, 0)]),
+                _Check(info, 3, 'linalg.eig')]
+    wr, wi = _temporary((*batch, n), a.dtype), _temporary((*batch, n), a.dtype)
+    packed = None if vectors is None else _temporary(a.shape, a.dtype)
+    ops = [_Lapack(GEEV, job, batch, [(a, 2)], [(wr, 1), (wi, 1), *([] if packed is None else [(packed, 2)]), (info, 0)]),
+           _Check(info, 3, 'linalg.eig')]
+    ops += _complex('complex', values, wr, wi)
+    if packed is not None:
+        before, after = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
+        ops += _fill(before, 0) + _fill(after, 0)
+        if n > 1:
+            ops += _copy(before[..., :, 1:], packed[..., :, :-1]) + _copy(after[..., :, :-1], packed[..., :, 1:])
+        first, second = _temporary((*batch, 1, n), torch.bool), _temporary((*batch, 1, n), torch.bool)
+        ops += _elementwise('gt', first, wi.unsqueeze(-2), 0) + _elementwise('lt', second, wi.unsqueeze(-2), 0)
+        real, imaginary = _temporary(a.shape, a.dtype), _temporary(a.shape, a.dtype)
+        ops += _elementwise('where', real, second, before, packed)
+        ops += _elementwise('neg', imaginary, packed) + _elementwise('where', imaginary, second, imaginary, 0)
+        ops += _elementwise('where', imaginary, first, after, imaginary)
+        ops += _complex('complex', vectors, real, imaginary)
+    return ops
+
+
+# PyTorch 2.15 documentation, torch.linalg.pinv
+def _pseudoinverse(target, given, outs, default_tolerance_dtype=torch.float64):
+    a, (out,), ops = given['self'], outs, []
+    if not a.numel():
+        return _copy(out, a.transpose(-2, -1))
+    batch, (m, n), k = a.shape[:-2], a.shape[-2:], min(a.shape[-2:])
+    values = _temporary((*batch, k), a.real.dtype)
+    if given['hermitian']:
+        vectors = _temporary(a.shape, a.dtype)
+        ops += _eigen_hermitian(A._linalg_eigh.default, {'A': a, 'UPLO': 'L', 'compute_v': True}, [values, vectors])
+        left, right = vectors, _linalg_transpose(vectors, ops, True, True)
+    else:
+        u, vh = _temporary((*batch, m, k), a.dtype), _temporary((*batch, k, n), a.dtype)
+        ops += _singular(A._linalg_svd.default, {'A': a, 'full_matrices': False, 'compute_uv': True}, [u, values, vh])
+        left, right = _linalg_transpose(vh, ops, True, True), _linalg_transpose(u, ops, True, True)
+    absolute, maximum = _temporary(values.shape, values.dtype), _temporary(batch, values.dtype)
+    ops += _elementwise('abs', absolute, values)
+    ops += _reduced(A.amax.default, {'self': absolute, 'dim': [-1], 'keepdim': False}, [maximum])
+    batch = out.shape[:-2]
+    atol, rtol = given.get('atol'), given.get('rtol', given.get('rcond'))
+    tolerance_dtype = values.dtype
+    for value in (atol, rtol):
+        tolerance_dtype = torch.promote_types(tolerance_dtype, value.dtype if isinstance(value, torch.Tensor)
+                                               else default_tolerance_dtype)
+    atol = 0 if atol is None else atol
+    if rtol is None:
+        default = max(m, n) * torch.finfo(a.real.dtype).eps
+        positive = _temporary(batch, torch.bool)
+        rtol = _temporary(batch, tolerance_dtype)
+        ops += _elementwise('gt', positive, atol, 0)
+        ops += _elementwise('where', rtol, positive, 0, default)
+    tolerance = _temporary(batch, tolerance_dtype)
+    ops += _elementwise('mul', tolerance, maximum, rtol)
+    ops += _elementwise('maximum', tolerance, tolerance, atol)
+    keep, reciprocal = _temporary((*batch, k), torch.bool), _temporary((*batch, k), values.dtype)
+    ops += _elementwise('gt', keep, absolute, tolerance.unsqueeze(-1))
+    ops += _elementwise('where', reciprocal, keep, values, 1)
+    ops += _elementwise('reciprocal', reciprocal, reciprocal)
+    ops += _elementwise('where', reciprocal, keep, reciprocal, 0)
+    scaled = _temporary((*batch, *left.shape[-2:]), left.dtype)
+    ops += _elementwise('mul', scaled, left, reciprocal.unsqueeze(-2))
+    return ops + _product(A.matmul.default, {'self': scaled, 'other': right}, [out])
 
 
 def _orthogonal(target, given, outs):
@@ -3949,11 +4067,28 @@ def _least_squares(target, given, outs):
     b, out = (b.unsqueeze(-1), solution.unsqueeze(-1)) if vector else (b, solution)
     m, n = a.shape[-2:]
     driver = _lstsq_driver(a, given.get('driver'))
-    if not min(m, n) or not b.shape[-1]:
+    if not min(m, n) or not b.shape[-1] and driver in ('gels', 'gelsy'):
         ops += _fill(out, 0) + _fill(rank, 0) + _fill(singular, 0)
         if driver == 'gels':
             return ops + _fill(residual, 0)
         raw = b if n == 0 else None
+    elif driver in ('gelsd', 'gelss'):
+        batch, own = out.shape[:-2], a.shape[:-2]
+        if not math.prod(batch):
+            return ops
+        rcond = given.get('rcond')
+        if rcond is None:
+            rcond = torch.finfo(a.real.dtype).eps * max(m, n)
+        info = _temporary(batch, torch.int64)
+        ranks, values = (rank, singular) if own == batch else \
+            (_temporary(batch, rank.dtype), _temporary((*batch, min(m, n)), singular.dtype))
+        ops.append(_Lapack(GELSD if driver == 'gelsd' else GELSS, b'', batch, [(a, 2), (b, 2)],
+                           [(out, 2), (values, 1), (ranks, 0), (info, 0)], rcond))
+        ops.append(_Check(info, 3, 'linalg.lstsq'))
+        if own != batch:
+            first = (0,) * (len(batch) - len(own)) + tuple(slice(0, 1) if size == 1 else slice(None) for size in own)
+            ops += _copy(rank, ranks[first]) + _copy(singular, values[first])
+        return ops
     else:
         scaled, rhs, numerator, denominator, maximum = _linalg_least_scaled(a, b, ops)
         raw = _temporary((*out.shape[:-2], m - n, out.shape[-1]), out.dtype) if residual.numel() else None
@@ -5837,7 +5972,9 @@ SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWI
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
            A._linalg_det: _determinant, A._linalg_slogdet: _determinant,
-           A.linalg_lu: _unpacked_lu, A.linalg_lstsq: _least_squares,
+           A.linalg_lu: _unpacked_lu, A.linalg_pinv: _pseudoinverse, A.linalg_lstsq: _least_squares,
+           A._linalg_svd: _singular, A._linalg_eigh: _eigen_hermitian,
+           **dict.fromkeys((A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals), _eigen),
            A._linalg_check_errors: _checked,
            **dict.fromkeys(ASSERTIONS, _asserted),
            **dict.fromkeys(ORTHOGONAL, _orthogonal), A.triu: _triangular_part, A.tril: _triangular_part,
@@ -5921,6 +6058,11 @@ def _lowering(local, page):
         transpose = metadata.is_contiguous() and not metadata.is_complex()
         return lambda args, kwargs, outs: _determinant(local.target, _operands(local.target, args, kwargs), outs,
                                                        transpose)
+    if packet is A.linalg_pinv:
+        metadata = _given(local, _names(local))['self'].meta['val']
+        dtype = torch.float32 if metadata.device.type in ('mps', 'metal') else torch.float64
+        return lambda args, kwargs, outs: _pseudoinverse(local.target, _operands(local.target, args, kwargs), outs,
+                                                        dtype)
     if local.target in SYMBOLIC:
         return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)
     if packet in LINEAR:
@@ -6498,6 +6640,33 @@ class _Builder:
             if g.message:
                 self.lib.metal_ir_check_message(self.p, operation, g.message.encode())
             return operation
+        if isinstance(g, _Lapack):
+            if g.place != CPU:
+                raise NotImplementedError('a LAPACK driver\'s node on a processor other than the CPU: its lowering is '
+                                          'unfinished (design/torch-source-lowering-change-request.md item 6)')
+            self.identity = self.base | g.node
+            sizes, picks, matrices, operands = list(g.batch), [], [], []
+            for t, rank in g.inputs + g.outputs:
+                real = torch.view_as_real(t) if t.is_complex() else t
+                own = rank + t.is_complex()
+                lead, first = real.dim() - own, len(g.batch) - (real.dim() - own)
+                picks.append([None if n == 1 and g.batch[first + d] != 1 else first + d
+                              for d, n in enumerate(real.shape[:lead])] + list(range(len(sizes), len(sizes) + own)))
+                loops = list(range(len(sizes), len(sizes) + rank)) + [NONE] * (2 - rank)
+                matrices.append(Matrix(loops[0], loops[1], len(sizes) + rank if t.is_complex() else NONE))
+                sizes += real.shape[lead:]
+                operands.append(self.value(real))
+            exprs, terms = [], []
+            for pick in picks:
+                for row in _rows(len(sizes), pick):
+                    first = len(terms)
+                    terms += [Term(l, 0, c, 1, 0) for l, c in enumerate(row[:len(sizes)]) if c]
+                    exprs.append(Expr(first, len(terms) - first, row[len(sizes)]))
+            call = Lapack(g.routine, len(g.batch), g.job, g.rcond)
+            return self.lib.metal_ir_lapack(self.p, C.byref(call), len(sizes), _array(mesh.Q, sizes), len(g.inputs),
+                                            _array(mesh.U, operands[:len(g.inputs)]), len(g.outputs),
+                                            _array(mesh.U, operands[len(g.inputs):]), _array(Matrix, matrices),
+                                            _array(Expr, exprs), len(terms), _array(Term, terms), self.identity)
         if isinstance(g, _Sort):
             self.identity = self.base | g.node
             sort = self.lib.metal_ir_sort
@@ -6539,6 +6708,14 @@ class Term(C.Structure):
 
 class Expr(C.Structure):
     _fields_ = [('first', mesh.U), ('terms', mesh.U), ('constant', C.c_int64)]
+
+
+class Lapack(C.Structure):
+    _fields_ = [('routine', mesh.U), ('batch', mesh.U), ('job', C.c_char * 8), ('rcond', C.c_double)]
+
+
+class Matrix(C.Structure):
+    _fields_ = [('row', mesh.U), ('column', mesh.U), ('part', mesh.U)]
 
 
 class Generated(C.Structure):
@@ -6614,6 +6791,8 @@ def _compiler():
                 ('metal_ir_states', None, [P, U, U, C.POINTER(U), C.POINTER(Q)]),
                 ('metal_ir_check', U, [P, U, U, Q]),
                 ('metal_ir_check_message', None, [P, U, C.c_char_p]),
+                ('metal_ir_lapack', U, [P, C.POINTER(Lapack), U, C.POINTER(Q), U, C.POINTER(U), U, C.POINTER(U),
+                                        C.POINTER(Matrix), C.POINTER(Expr), U, C.POINTER(Term), Q]),
                 ('metal_ir_region', U, [P, U, U]), ('metal_ir_parameter', U, [P, U, U]),
                 ('metal_ir_literal', U, [P, U, U, Q]), ('metal_ir_binary', U, [P, U, U, U, U]),
                 ('metal_ir_unary', U, [P, U, U, U]), ('metal_ir_convert', U, [P, U, U, U]),
@@ -7269,13 +7448,22 @@ def _storages(module, names):
 # design/compilation-composition-change-request.md, "Withdrawn, 2026-11-09"
 CONTROL = (torch.ops.higher_order.cond, torch.ops.higher_order.while_loop, torch.ops.higher_order.map_impl,
            torch.ops.higher_order.scan, torch.ops.higher_order.switch)
+# design/torch-source-lowering-change-request.md item 5, as item 6 leaves it: "`eig` and `eigvals` of a matrix that is
+# not Hermitian stay as item 5 states them"
+ITERATED = (A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals)
 
 
-def _static(exported):
+def _static(exported, target):
     for node in exported.graph_module.graph.nodes:
         if node.op == 'call_function' and node.target in CONTROL:
             raise ValueError('%s (%s): a program with dynamic control flow is not compiled '
                              '(design/torch-source-lowering-change-request.md item 2)' % (node.name, node.target))
+        if node.op == 'call_function' and getattr(node.target, 'overloadpacket', None) in ITERATED:
+            device = next((value.device.type for value in pytree.tree_leaves(node.meta.get('val'))
+                           if isinstance(value, torch.Tensor)), 'cpu')
+            if (target if target is not None else CPU if device == 'cpu' else GPU) != CPU:
+                raise ValueError('%s (%s): an iteration depth that depends on data is not compiled '
+                                 '(design/torch-source-lowering-change-request.md item 5)' % (node.name, node.target))
         for value in pytree.tree_leaves(node.meta.get('val')):
             if isinstance(value, torch.Tensor) and not all(isinstance(size, int) for size in value.shape):
                 raise ValueError('%s: sizes %s; shapes are compiled, a dimension known only at run time is not '
@@ -7344,9 +7532,9 @@ def _metadata(value):
 # torch 2.14.0 torch/export/experimental/__init__.py _export_forward_backward;
 # torch/export/exported_program.py _decompose_and_get_gm_with_new_signature_constants, ModuleCallSignature;
 # torch/nn/attention/__init__.py sdpa_kernel, SDPBackend.MATH
-def _exported(function, args, kwargs):
+def _exported(function, args, kwargs, target):
     exported = torch.export.export(function.module, tuple(args), dict(kwargs), strict=False)
-    _static(exported)
+    _static(exported, target)
     forward = exported.call_spec.out_spec
     if function.loss is not None:
         from torch.export.experimental import _export_forward_backward
@@ -7428,7 +7616,7 @@ class _Export(torch.fx.Interpreter):
         if not found:
             if source is not None:
                 args, kwargs = pytree.tree_map(lambda v: self.fake(v, source), (args, kwargs))
-            exported = _exported(function, args, kwargs)
+            exported = _exported(function, args, kwargs, target)
             gm = exported.module(check_guards=False)
             _metadata_asserted(gm)
             out = [a.meta['val'] if isinstance(a, Node) else a for a in gm.graph.output_node().args[0]]
