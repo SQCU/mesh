@@ -393,8 +393,7 @@ the scheduled value, and lowering, the runtime and the archive each take it.
     the state section `field`, `word` and `count`); and the state section, a contiguous section of the region apart from
     the data pages, headed by `struct mesh_state` (`copies`; the offsets `phases`, `counts`, `supplied` and `status`;
     `executions`), with the status a `struct mesh_status` `{behind, ahead, first}`; and, to its caller, a `struct
-    mesh_planned` (`rdma/mesh-collective.h`). No source this document cites states what `calls`, `orders`, `causes` or
-    `struct mesh_planned` are for.
+    mesh_planned` (`rdma/mesh-collective.h`).
 - **Runtime.** The bridge (mesh `rdma/mesh-flow.c`) reads the `struct mesh_hop` entries and, for sends, the words at
   `word`, and writes the phases at `field` and the counts at `count`. `tools/e2b_replay.m` passes the `struct
   mesh_function` array to `mesh_plan`, commits the command buffers and reads the `struct mesh_planned` and the `struct
