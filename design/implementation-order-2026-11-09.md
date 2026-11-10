@@ -34,6 +34,14 @@ The operator, 2026-11-09, later, of a report that item 4 stopped on "Programs th
 
 > return an error and halt? we don't need a fallback path and hte good faith reading of our requirements is to cull code paths that interact with 'fallbacks'.
 
+The operator, same turn, of "The per-value access record. No form is stated for five cases: which copy an access
+uses, frame tables, transport words, fixed buffers outside the mapping, and the shares mark" and of "Host and device
+parts of a call":
+
+> what does this actually mean...?
+
+> we're talking about apple silicon which doesn't have a host-device model, it has shm, command buffers, and cooperative tensors? what is the question here asking in non-idiomatic language?
+
 ## The reference program
 
 `~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
