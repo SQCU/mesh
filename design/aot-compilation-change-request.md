@@ -281,9 +281,12 @@ its function and type names are given beside each stage.
 - **The data structure is the page table:** names bound to frames (T. Kilburn, D. B. G. Edwards, M. J. Lanigan and F.
   H. Sumner, One-level storage system, IRE Trans. Electronic Computers, 1962; P. J. Denning, Virtual memory, ACM
   Comput. Surv., 1970), as design/plan-to-bridge-change-request.md R2 states it.
-- **The algorithm is C3's allocator** (design/disjoint-pages-change-request.md C3.3, as R2 quotes it): static binding,
-  with the unroll factor u of appendix item 1, and "The colouring is greedy by size (Y. Pisarchyk and J. Lee, arXiv
-  2001.03288, 2020)."
+- **The algorithm is the allocator's, as R2 states it:** the u copies of appendix item 1 (Lam, 1988); the order in
+  which two items may share a page, Lamport's happens-before (L. Lamport, Time, clocks, and the ordering of events in a
+  distributed system, CACM 21(7), 1978); and the fewest pages as the fewest chains of that order, by Dilworth's
+  theorem, found by maximum bipartite matching (R. P. Dilworth, A decomposition theorem for partially ordered sets,
+  Annals of Mathematics 51(1), 1950; D. R. Fulkerson, Note on Dilworth's decomposition theorem for partially ordered
+  sets, Proc. AMS 7(4), 1956).
 - **Produced by, consumed by.** The allocator takes the values of A8's IR. The bridge and the GPU's program take the
   bindings from the scheduled value (A9). No cited code names a type for a binding.
 
@@ -667,11 +670,11 @@ algorithm its citation gives, and the change.
 - **Stage:** schedule. `mesh_plan` computes u (item 2).
 - **The data structure is each value's lag L and the unroll factor u.**
 - **The algorithm is modulo variable expansion** (M. Lam, Software pipelining, PLDI 1988; B. R. Rau, Iterative modulo
-  scheduling, MICRO 1994), as C3.3 states it: "For each value, L is the smallest lag at which every read of it in
-  execution t happens before its write in execution t + L. The unroll factor u is the largest L. … A value with no
-  such L fails the plan with `ENOMEM`."
-- **Produced by, consumed by.** A5's allocator takes u. Item 2's IPC graph takes it as each transfer's delay. No cited
-  code names a type for L or u.
+  scheduling, MICRO 1994), as design/disjoint-pages-change-request.md C3.3 states it: "For each value, L is the
+  smallest lag at which every read of it in execution t happens before its write in execution t + L." "u is the
+  largest L."
+- **Produced by, consumed by.** A5's allocator takes u. Item 2's IPC graph takes it as each transfer's delay. C3.3 names
+  u as `struct mesh_state`'s `copies` (rdma/mesh.h); no cited code names a type for L.
 - **State of the code:** design/disjoint-pages-revision-coordination.md D5 refuses a value whose write does not reach
   its own next instance at lag 1. A lone AllGather or AllToAll is refused by it.
 - **The change:** compute u as C3.3 states. D5's lag-1 condition is deleted.
@@ -910,8 +913,8 @@ algorithm its citation gives, and the change.
     set). So both ends of a cable draw the same permutation without exchanging anything.
   - Algorithm P needs a uniform integer in [1, j] at each step. The code takes the high word of j times a random word
     (rdma/mesh-flow.c `set_draw`), which is Lemire's multiply-and-shift. With Lemire's rejection step, which
-    `set_draw` has at mesh 26701d8e, the integer is exactly uniform (D. Lemire, Fast random integer generation in an interval, ACM Trans.
-    Model. Comput. Simul. 29(1), 2019).
+    `set_draw` has at mesh 26701d8e, the integer is exactly uniform (D. Lemire, Fast random integer generation in an
+    interval, ACM Trans. Model. Comput. Simul. 29(1), 2019).
 - **Produced by, consumed by.** rdma/mesh-collective.c writes each entry's `set` into its `struct plan_entry`
   and copies it from there into the entry's `struct mesh_hop` (A9). The bridge at each end of a cable takes the sets
   from the `struct mesh_hop` lists and draws the same permutation.
@@ -1016,8 +1019,8 @@ algorithm its citation gives, and the change.
 ### 7. Torch's existing kernels on the GPU
 
 design/torch-source-lowering-change-request.md item 1 replaces this item: no torch Metal kernel is submitted or
-recorded. That item 1 does not restate the second and third turns below. The fourth is quoted in
-design/plan-to-bridge-change-request.md R2.
+recorded. That item 1 does not restate the first, second and third turns below. The first is also quoted in A9. The
+fourth is quoted in design/plan-to-bridge-change-request.md R2.
 
 > no inlining new numerical backends instead of writing collective and transfer and so on code which schedule the use of
 > existing code, basically.
