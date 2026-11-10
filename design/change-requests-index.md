@@ -252,9 +252,11 @@ outstanding, and what of it is outstanding. The standard every change request fo
 
 - [unequal-shards-change-request.md](unequal-shards-change-request.md): outstanding, items 1–15. Written 2026-11-09
   from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4. 2026-11-10, `rdma/mesh_compile.py`:
-  items 1, 15 and 3 are `Placement.units`, `_sizes` and `IR.counts`, read by a slice, by the narrowing of a
-  contraction's operands and by `IR.local`. A collective other than an all-reduce, or a window, over a mesh dimension
-  that has a tuple is refused at `partition`: items 2, 9 and 10 are not written.
+  items 1, 15 and 3 are `Shard` (an entry of `splits[name]`: the mesh dimension with its tuple), `_sizes` and
+  `IR.counts`, read by a slice, by the narrowing of a contraction's operands and by `IR.local`; an all-gather, an
+  all-to-all and a reduce-scatter carry the counts (`Collective.counts`) and rank j's block is `counts[j]` elements,
+  placed after the blocks of the ranks before it. Not written: item 2's gather and scatter, item 4's mask, item 10 (a
+  window's halos over a dimension that has a tuple are still equal blocks), and items 5 to 9 and 11 to 14.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,

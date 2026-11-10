@@ -38,16 +38,37 @@ MAXIMUM = {A.max_pool1d: 1, A.max_pool2d: 2, A.max_pool3d: 3}
 AVERAGE = {A.avg_pool1d: 1, A.avg_pool2d: 2, A.avg_pool3d: 3}
 PAD = {A.pad, A.constant_pad_nd}
 # design/aot-compilation-change-request.md A2; GSPMD section 3.1; L. Zheng et al., Alpa, OSDI 2022, section 4.1;
-# mesh-dataflow.h mesh_nodes_read; design/unequal-shards-change-request.md item 1; pytorch/pytorch#169320, RaggedShard
-# `local_units`: `units[m]` the tuple of integers of mesh dimension m, one per rank
-Placement = collections.namedtuple('Placement', 'mesh nodes splits units', defaults=({},))
-# GSPMD sections 2.1, 3.2, 4.2 and 4.5
-Collective = collections.namedtuple('Collective', 'kind node dims dim position')
+# mesh-dataflow.h mesh_nodes_read
+Placement = collections.namedtuple('Placement', 'mesh nodes splits')
+# GSPMD sections 2.1, 3.2, 4.2 and 4.5; design/unequal-shards-change-request.md item 3; MPI 4.1 sections 7.5, 7.7 and
+# 7.10.2: `counts` the elements of each rank's block along `dim`, for an all-to-all the pair of them along `dim`'s two
+# dimensions
+Collective = collections.namedtuple('Collective', 'kind node dims dim position counts', defaults=(None,))
 # design/aot-compilation-change-request.md A10, "Its output": "the order constraints between calls, which the program
 # keeps when it submits"; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997, section 2; mesh-collective.h mesh_plan:
 # each function's outstanding calls, `norders` pairs (a, b) of call indexes in `orders`, and `chains[j]` the first call
 # of call j's commuting chain
 Calls = collections.namedtuple('Calls', 'outstanding orders causes norders chains')
+
+
+# design/unequal-shards-change-request.md item 1; pytorch/pytorch#169320, RaggedShard `local_units`: a sharded
+# dimension's placement, the mesh dimension with its tuple of integers, one per rank; an entry of `splits[name]`
+class Shard(int):
+    def __new__(cls, m, units):
+        self = super().__new__(cls, m)
+        self.units = tuple(units)
+        return self
+
+    def __eq__(self, other):
+        return isinstance(other, Shard) and int(self) == int(other) and self.units == other.units
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __hash__(self):
+        return hash((int(self), self.units))
+
+
 # GSPMD section 4.1, "Static operator configurations"
 Local = collections.namedtuple('Local', 'op target args kwargs annotation', defaults=(None,))
 AttentionOrigin = collections.namedtuple('AttentionOrigin', 'query key page cuts shape offsets',
@@ -94,9 +115,9 @@ class IR:
         return result
 
     # design/unequal-shards-change-request.md item 3; MPI 4.1 sections 7.5, 7.7 and 7.10.2: the counts of an extent
-    # sharded on mesh dimension m, the same arrays at every rank
+    # under a sharded dimension's placement m, the same arrays at every rank
     def counts(self, m, extent):
-        return _sizes(self.placement.units.get(m), self.shape[m], extent)
+        return _sizes(getattr(m, 'units', None), self.shape[m], extent)
 
     def start(self, m, extent, device):
         return sum(self.counts(m, extent)[:self.coords[device][m]])
@@ -214,7 +235,7 @@ def _mesh(placement, count):
 # GSPMD section 3.5, "Merging compatible shardings"
 def _merge(a, b):
     merged = tuple(x if y < 0 else y for x, y in zip(a, b))
-    used = [m for m in merged if m >= 0]
+    used = [int(m) for m in merged if m >= 0]
     if any(0 <= x != y >= 0 for x, y in zip(a, b)) or len(used) != len(set(used)):
         return None
     return merged
@@ -609,66 +630,59 @@ def _reshard(ir, node, have, want):
         if item[2] not in ir.made:
             ir.emit(item)
 
+    # design/unequal-shards-change-request.md item 3; MPI 4.1 section 7.7: rank r's block is `counts[r]` elements of
+    # its own buffer, in the gathered value after the blocks of the ranks before it
     def gather(have, m):
-        after, d, shape = tuple(-1 if s == m else s for s in have), have.index(m), ir.local(node, have)
-        target = (node, after)
+        after, d = tuple(-1 if s == m else s for s in have), have.index(m)
+        target, own = (node, after), (node, after, 'own')
         if target in ir.made:
             return after
-        size = ir.local(node, after)[d]
-        padded = shape[d] * ir.shape[m]
-        made = target if padded == size else target + ('gather', m)
-        if made != target:
-            ir.shapes[made] = shape[:d] + (padded,) + shape[d + 1:]
-        own = (node, after, 'own')
-        ir.shapes[own] = shape
-        ir.inside[own] = (made, d, {e: ir.coords[e][m] * shape[d] for e in ir.coords})
-        step(('copy', ((node, have),), own, None))
-        step(('collective', (own,), made, Collective('all-gather', node, (m,), d, len(ir.program))))
-        if made != target:
-            step(('narrow', (made,), target, (d, 0, size)))
+        extent = _value(node).shape[d]
+        counts = ir.counts(m, extent)
+        ir.shapes[own] = ir.local(node, have)
+        ir.inside[own] = (target, {e: ((d, ir.start(m, extent, e), counts[ir.coords[e][m]]),) for e in ir.coords})
+        step(('copy', ((node, have),), own,
+              None if min(counts) == max(counts) else (m, tuple(((d, 0, n),) for n in counts))))
+        step(('collective', (own,), target, Collective('all-gather', node, (int(m),), d, len(ir.program), counts)))
         return after
 
+    # design/unequal-shards-change-request.md item 3; MPI 4.1 section 7.8: rank p's block for rank q is `rows[p]`
+    # elements along i by `columns[q]` along j
     def exchange(have, m):
         i, j = have.index(m), want.index(m)
-        after, shape = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have)), ir.local(node, have)
-        padded = shape[i] * ir.shape[m]
-        target, size = (node, after), ir.local(node, after)[i]
+        after = tuple(-1 if k == i else m if k == j else s for k, s in enumerate(have))
+        target, own = (node, after), (node, after, 'own')
         if target in ir.made:
             return after
-        counts = ir.counts(m, shape[j])
-        source = _partition_pad(ir, (node, have), j, max(counts) * ir.shape[m])
-        made = target if padded == size else target + ('exchange', m)
-        ir.shapes[made] = tuple(padded if k == i else max(counts) if k == j else n for k, n in enumerate(shape))
-        own = (node, after, 'own')
-        ir.shapes[own] = tuple(max(counts) if k == j else n for k, n in enumerate(shape))
-        ir.inside[own] = (made, i, {e: ir.coords[e][m] * shape[i] for e in ir.coords})
-        step(('copy', (source,), own, (j, m, counts)))
-        step(('collective', (source,), made,
-              Collective('all-to-all', node, (m,), (i, j), len(ir.program))))
-        if made != target:
-            step(('narrow', (made,), target, (i, 0, size)))
+        shape = _value(node).shape
+        rows, columns = ir.counts(m, shape[i]), ir.counts(m, shape[j])
+        ir.shapes[own] = tuple(max(rows) if k == i else n for k, n in enumerate(ir.local(node, after)))
+        ir.inside[own] = (target, {e: ((i, ir.start(m, shape[i], e), rows[ir.coords[e][m]]),
+                                       (j, 0, columns[ir.coords[e][m]])) for e in ir.coords})
+        step(('copy', ((node, have),), own,
+              (m, tuple(((j, sum(columns[:q]), columns[q]), (i, 0, rows[q])) for q in range(ir.shape[m])))))
+        step(('collective', ((node, have),), target,
+              Collective('all-to-all', node, (int(m),), (i, j), len(ir.program), (rows, columns))))
         return after
     if (node, want) in ir.made:
         return node, want
     if node.op in ('placeholder', 'get_attr'):
         have = (-1,) * len(have)
-    for m in range(len(ir.shape)):
-        if m in have and m not in want:
-            have = gather(have, m)
+    for m in sorted(m for m in have if m >= 0 and m not in want):
+        have = gather(have, m)
     while True:
-        moving = [m for m in range(len(ir.shape)) if m in have and m in want and have.index(m) != want.index(m)]
+        moving = sorted(m for m in have if m >= 0 and m in want and have.index(m) != want.index(m))
         if not moving:
             break
         free = [m for m in moving if have[want.index(m)] < 0]
         have = exchange(have, free[0]) if free else gather(have, have[want.index(moving[0])])
-    for m in range(len(ir.shape)):
-        if m in want and m not in have:
-            after = tuple(m if k == want.index(m) else s for k, s in enumerate(have))
-            d = want.index(m)
-            counts = ir.counts(m, _value(node).shape[d])
-            source = _partition_pad(ir, (node, have), d, sum(counts[:-1]) + max(counts))
-            step(('slice', (source,), (node, after), (d, m, counts)))
-            have = after
+    for m in sorted(m for m in want if m >= 0 and m not in have):
+        after = tuple(m if k == want.index(m) else s for k, s in enumerate(have))
+        d = want.index(m)
+        counts = ir.counts(m, _value(node).shape[d])
+        source = _partition_pad(ir, (node, have), d, sum(counts[:-1]) + max(counts))
+        step(('slice', (source,), (node, after), (d, m, counts)))
+        have = after
     return node, have
 
 
@@ -715,7 +729,7 @@ def _region(ir, consumer, key, window, m, o, whole):
             ir.emit(('narrow', (middle,), piece, (dim, n - part if side == 'left' else 0, part)))
             pairs = tuple((p, p + j) if side == 'left' else (p + j, p) for p in range(parts - j))
             ir.emit(('collective', (piece,), arrival,
-                               Collective('collective-permute', node, (m,), pairs, len(ir.program))))
+                               Collective('collective-permute', node, (int(m),), pairs, len(ir.program))))
             pieces.append(arrival)
         reads = pieces[::-1] + reads if side == 'left' else reads + pieces
     if left or right:
@@ -723,9 +737,9 @@ def _region(ir, consumer, key, window, m, o, whole):
         ir.shapes[landed] = tuple(left + n + right if i == dim else s for i, s in enumerate(shape))
         ir.added[landed] = (first, len(ir.program))
         for k in reads:
-            ir.inside[k] = (landed, dim, dict.fromkeys(ir.coords, at))
+            ir.inside[k] = (landed, dict.fromkeys(ir.coords, ((dim, at, ir.shapes[k][dim]),)))
             at += ir.shapes[k][dim]
-        ir.inside[region] = (landed, dim, {e: offsets[ir.coords[e][m]] for e in ir.coords})
+        ir.inside[region] = (landed, {e: ((dim, offsets[ir.coords[e][m]], length),) for e in ir.coords})
     ir.emit(('window', tuple(reads), region, (dim, m, offsets, length, tuple(starts), size, fill)))
     return region, after
 
@@ -761,14 +775,14 @@ def _partition(ir, operators):
             out, labels = rule.out, rule.labels
             free = set() if rule.kind == 'factory' else {label for label in out if not any(label in own for own in labels)}
             target = tuple(-1 if label in free else s for s, label in zip(sharding, out))
-            used, partial, contracted = {m for m in target if m >= 0}, [], {}
+            used, partial, contracted = {int(m) for m in target if m >= 0}, [], {}
             for label in rule.contracting:
                 held = {ir.sharding[o][own.index(label)] for o, own in zip(rule.operands, labels) if label in own}
                 (m,) = held if len(held) == 1 and not rule.fused and not partial else (-1,)
                 if m >= 0:
-                    partial.append(m)
+                    partial.append(int(m))
                 contracted[label] = m
-            local = tuple(-1 if s in partial else s for s in target)
+            local = tuple(-1 if int(s) in partial else s for s in target)
             wants = [list(_carry(local, out, own)) for own in labels]
             for label, m in contracted.items():
                 for want, own in zip(wants, labels):
@@ -822,10 +836,10 @@ def _partition(ir, operators):
                 ir.emit(('window', (made[j],), made[j + 1], (at, m, after, o, None, None, None)))
             if any(m in used for m in partial):
                 (m,) = partial
-                d = target.index(m)
-                source = _partition_pad(ir, key, d, -(-_shape(ir, key)[d] // ir.shape[m]) * ir.shape[m])
-                ir.emit(('collective', (source,), (node, target),
-                                   Collective('reduce-scatter', node, (m,), target.index(m), len(ir.program))))
+                d = [int(s) for s in target].index(m)
+                ir.emit(('collective', (key,), (node, target),
+                                   Collective('reduce-scatter', node, (m,), d, len(ir.program),
+                                              ir.counts(target[d], _shape(ir, key)[d]))))
             elif partial:
                 ir.emit(('collective', (key,), (node, target),
                                    Collective('all-reduce', node, tuple(partial), None, len(ir.program))))
@@ -839,11 +853,6 @@ def partition(gm, placement, nodes, page):
         raise TypeError('the placement function returned %r, not a Placement (A2)' % (placement,))
     ir, operators, annotated = IR(gm, placement, nodes), {}, set()
     ir.page = page
-    for m, units in placement.units.items():
-        if not isinstance(m, int) or not 0 <= m < len(ir.shape) or len(units) != ir.shape[m] \
-                or not all(isinstance(u, int) for u in units):
-            raise ValueError('units[%r] = %r: no tuple of integers, one per rank of a mesh dimension, over a mesh of '
-                             'shape %s (pytorch/pytorch#169320, RaggedShard local_units)' % (m, units, ir.shape))
     for node in ir.order:
         if node.op == 'call_function':
             ir.locals[node] = Local(node.op, node.target, node.args, {k: v for k, v in node.kwargs.items() if k != 'device'}
@@ -861,9 +870,12 @@ def partition(gm, placement, nodes, page):
         node, mapping = names.get(name), tuple(mapping)
         if node is None or ir.sharding[node] is None or len(mapping) != len(ir.sharding[node]) \
                 or not all(isinstance(m, int) and -1 <= m < len(ir.shape) for m in mapping) \
-                or len([m for m in mapping if m >= 0]) != len({m for m in mapping if m >= 0}):
+                or len([m for m in mapping if m >= 0]) != len({int(m) for m in mapping if m >= 0}) \
+                or any(len(m.units) != ir.shape[m] for m in mapping if isinstance(m, Shard)):
             raise ValueError('splits[%r] = %s: no tensor result\'s dims_mapping over a mesh of %d dimensions, each at '
-                             'most once (GSPMD section 3.1)' % (name, mapping, len(ir.shape)))
+                             'most once (GSPMD section 3.1), a Shard\'s tuple one integer a rank of its mesh '
+                             'dimension (pytorch/pytorch#169320, RaggedShard local_units)'
+                             % (name, mapping, len(ir.shape)))
         ir.sharding[node] = tuple(m if m >= 0 and ir.shape[m] > 1 else -1 for m in mapping)
         annotated.add(node)
     # GSPMD sections 3.1, 3.5 and 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram;
@@ -875,13 +887,6 @@ def partition(gm, placement, nodes, page):
     annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
     _partition(ir, operators)
-    for kind, _, _, operand in ir.program:
-        over = operand.dims if kind == 'collective' and operand.kind != 'all-reduce' else \
-            operand[1:2] if kind == 'window' else ()
-        if any(m in placement.units for m in over):
-            raise NotImplementedError('%s over mesh dimension %s, which has a tuple of units: no lowering at each '
-                                      'rank\'s own counts (design/unequal-shards-change-request.md items 2, 9 and 10)'
-                                      % (operand.kind if kind == 'collective' else 'a window', over))
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
     ir.sent = mesh_graph.reach([item[1][0] for item in ir.program if item[0] == 'collective'],
@@ -1124,9 +1129,11 @@ def _cut(ir, kind, operand, device):
 
 
 def _inside_of(ir, key, device):
-    owner, dim, starts = ir.inside[key]
-    return _narrowed(_own(ir, owner), dim, starts[device], _layout(ir, key)[1][dim])._replace(
-        writer=ir.results.get(key, key))
+    owner, cuts = ir.inside[key]
+    place = _own(ir, owner)
+    for cut in cuts[device]:
+        place = _narrowed(place, *cut)
+    return place._replace(writer=ir.results.get(key, key))
 
 
 # MPI 4.1 section 7.8; torch 2.14.0 torch/_tensor_docs.py, view
@@ -1138,7 +1145,9 @@ def _placement(ir, item, reads, device, added):
         place = _inside_of(ir, key, device)
         if kind != 'copy' or reads[0] is None:
             return place
-        source = reads[0] if operand is None else _narrowed(reads[0], *_cut(ir, 'slice', operand, device))
+        source = reads[0]
+        for cut in () if operand is None else operand[1][ir.coords[device][operand[0]]]:
+            source = _narrowed(source, *cut)
         return source if source[:4] == place[:4] else place
     if key in ir.taken:
         return added[ir.taken[key]]
@@ -1272,11 +1281,11 @@ def _all_reduce(ir, c, groups, key, made):
 # MESH_FROM_SOURCE_READ; NCCL, ncclAllGather
 def _all_gather(ir, c, groups, key, made):
     d, received = c.dim, 3 * c.position + 1
-    n = _shape(ir, key)[d]
     last = max(received, _readers(ir, {made}, received)[1])
     for group in groups:
         ranges = [ir.transfer(e, [f for f in group if f != e], _consumer(ir, {made}), _strided(ir, ir.places[e][key]),
-                              {f: _strided(ir, _narrowed(ir.places[f][made], d, p * n, n)) for f in group if f != e})
+                              {f: _strided(ir, _narrowed(ir.places[f][made], d, sum(c.counts[:p]), c.counts[p]))
+                               for f in group if f != e})
                   for p, e in enumerate(group)]
         for e, transfers in zip(group, ranges):
             ir.events += _produced(ir, e, min(transfers.values()), key, received)
@@ -1292,7 +1301,7 @@ def _all_gather(ir, c, groups, key, made):
 def _exchange(ir, c, groups, pairs, key, sent, landed, kind, last):
     received = 3 * c.position + 1
     for group in groups:
-        moved = {(p, q): ir.transfer(group[p], [group[q]], kind, _strided(ir, sent(group[p], q)),
+        moved = {(p, q): ir.transfer(group[p], [group[q]], kind, _strided(ir, sent(group[p], p, q)),
                                      {group[q]: _strided(ir, landed(group[q], p, q)[0])})[group[q]]
                  for p, q in pairs if p != q}
         for (p, q), x in moved.items():
@@ -1308,13 +1317,14 @@ def _exchange(ir, c, groups, pairs, key, sent, landed, kind, last):
                     ir.at[x] = landed(ir.device, p, me)[1]
 
 
-# MPI 4.1 section 7.8, MPI_ALLTOALL
+# MPI 4.1 section 7.8, MPI_ALLTOALLV
 def _all_to_all(ir, c, groups, key, made):
-    (i, j), k = c.dim, len(groups[0])
-    ni, nj, received = _shape(ir, key)[i], _shape(ir, key)[j] // k, 3 * c.position + 1
+    (i, j), (rows, columns), k = c.dim, c.counts, len(groups[0])
+    received = 3 * c.position + 1
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key,
-              lambda e, q: _narrowed(ir.places[e][key], j, q * nj, nj),
-              lambda f, p, q: (_narrowed(ir.places[f][made], i, p * ni, ni), made, None), _consumer(ir, {made}),
+              lambda e, p, q: _narrowed(_narrowed(ir.places[e][key], j, sum(columns[:q]), columns[q]), i, 0, rows[p]),
+              lambda f, p, q: (_narrowed(_narrowed(ir.places[f][made], i, sum(rows[:p]), rows[p]), j, 0, columns[q]),
+                               made, None), _consumer(ir, {made}),
               max(received, _readers(ir, {made}, received)[1]))
 
 
@@ -1322,12 +1332,13 @@ def _all_to_all(ir, c, groups, key, made):
 # and 5.1; G. Wang et al., Blink, MLSys 2020, section 3.3; M. Cowan et al., MSCCLang, ASPLOS 2023, section 4.2
 def _reduce_scatter(ir, c, groups, key, made):
     dim, k = c.dim, len(groups[0])
-    n, received = _shape(ir, key)[dim] // k, (c.node, 'received', c.position)
+    received = (c.node, 'received', c.position)
     shape = _layout(ir, key)[1]
-    ir.shapes[received], ir.added[received] = (k - 1,) + shape[:dim] + (n,) + shape[dim + 1:], None
+    ir.shapes[received], ir.added[received] = (k - 1,) + shape[:dim] + (max(c.counts),) + shape[dim + 1:], None
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key,
-              lambda e, q: _narrowed(ir.places[e][key], dim, q * n, n),
-              lambda f, p, q: (_part(ir, received, p - (p > q)), received, (received, p - (p > q))), mesh.PAGES,
+              lambda e, p, q: _narrowed(ir.places[e][key], dim, sum(c.counts[:q]), c.counts[q]),
+              lambda f, p, q: (_narrowed(_part(ir, received, p - (p > q)), dim, 0, c.counts[q]), received,
+                               (received, p - (p > q))), mesh.PAGES,
               3 * c.position + 1)
 
 
@@ -1341,7 +1352,7 @@ def _collective_permute(ir, c, groups, key, made):
         raise ValueError('%s: a CollectivePermute\'s pairs %s over a group of %d: each a (source, target) place, no two '
                          'with one source or one target (XLA\'s source_target_pairs)' % (c.node.name, pairs, k))
     landed = ir.inside[made][0]
-    _exchange(ir, c, groups, pairs, key, lambda e, q: ir.places[e][key],
+    _exchange(ir, c, groups, pairs, key, lambda e, p, q: ir.places[e][key],
               lambda f, p, q: (ir.places[f][made], landed, None), _consumer(ir, {landed}),
               max(3 * c.position + 1, _readers(ir, {landed}, 3 * c.position + 1)[1]))
 
@@ -6426,16 +6437,20 @@ def _collected(ir, placed, item, operands):
     local = _local(ir, collective)
     if local == 'reduce':
         total, first = placed(key), operands[0]
-        if collective.kind == 'reduce-scatter':
-            n = first.shape[collective.dim] // (len(receives) + 1)
-            first = first.narrow(collective.dim, me * n, n)
         def real(v):
             return torch.view_as_real(v) if v.is_complex() else v
-        total, first = real(total), real(first)
-        _typed(collective.kind, [first], [total])
-        flat = total.view(-1)
-        whole = [first.reshape(-1)] + [real(placed(received)).view(-1).narrow(0, j * flat.numel(), flat.numel())
-                                       for _, (received, j) in receives]
+        # design/unequal-shards-change-request.md item 3; MPI 4.1 section 7.10.2: block `me` of the summed vector,
+        # `counts[me]` elements after the blocks of the ranks before it
+        if collective.kind == 'reduce-scatter':
+            dim, n = collective.dim, collective.counts[me]
+            total = real(total.narrow(dim, 0, n))
+            whole = [real(first.narrow(dim, sum(collective.counts[:me]), n))] \
+                + [real(placed(received).select(0, j).narrow(dim, 0, n)) for _, (received, j) in receives]
+        else:
+            total, first = real(total).view(-1), real(first)
+            whole = [first.reshape(-1)] + [real(placed(received)).view(-1).narrow(0, j * total.numel(), total.numel())
+                                           for _, (received, j) in receives]
+        _typed(collective.kind, whole[:1], [total])
         t = _compute(total.dtype, *[x.dtype for x in whole])
         r = _Region()
         made = None
@@ -6443,7 +6458,8 @@ def _collected(ir, placed, item, operands):
             x = _load(r, k, piece, t)
             made = x if made is None else r('add', t, made, x)
         r.done(_store(r, made, t, total))
-        return [_Generic(flat.shape, [(piece, _same(1)) for piece in whole], [(flat, _same(1))], r)]
+        rows = _same(total.dim())
+        return [_Generic(total.shape, [(piece, rows) for piece in whole], [(total, rows)], r)]
     places = ir.places[ir.device]
     if local == 'copy' and places[reads[0]][:4] != places[key][:4]:
         return _assign(placed(key), operands[0])
@@ -6505,10 +6521,12 @@ def _initial_values(ir, immutable):
 
 
 # MPICH allgather_intra_ring.c, MPIR_Localcopy; torch 2.14.0 torch/_tensor_docs.py, copy_
-def _copied(ir, key, cut, source, target):
+def _copied(ir, key, operand, source, target):
     if ir.places[ir.device][key].writer != key:
         return []
-    return _assign(target, source if cut is None else source.narrow(*_cut(ir, 'slice', cut, ir.device)))
+    for cut in () if operand is None else operand[1][ir.coords[ir.device][operand[0]]]:
+        source = source.narrow(*cut)
+    return _assign(target, source)
 
 
 # N. D. Jones, C. K. Gomard and P. Sestoft, 1993, Definition 4.1: one item of the function's program over its placed
