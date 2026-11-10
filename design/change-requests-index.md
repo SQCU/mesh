@@ -15,7 +15,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
   assigns replacement of duplicated specialization, command orchestration and representation bodies.
   Item 6 requires completing IR handoffs before helper extraction. The
   [complete replacement workgroup](compilation-composition-change-request.md#complete-replacement-workgroup)
-  assigns eight connected responsibilities and one coordinated replacement landing across both repositories.
+  assigns one coordinated replacement landing across both repositories.
   Working commits record development; they do not constitute that landing or narrow the assigned program domain.
   [Item 7](compilation-composition-change-request.md#7-preserve-the-properties-while-compiling-away-the-abstract-machinery)
   cites MLIR analysis/control lowering, Halide scheduled program synthesis and CompCert behavioral preservation.

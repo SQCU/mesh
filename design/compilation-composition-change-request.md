@@ -270,7 +270,7 @@ The operator, during the structural review, verbatim:
 
 > we don't want or need incremental pity-ports which pretend the current behavior of the data flow is adherent with a spec or system of requirements merely beacuse it runs; the 'lets turn things into text hten blindly parse them' is *simply wrong* as a lowering. it is *simply not correct*. why would compiled proglang output source be anything but the *final* lowering stage in any representation we are using if we were following the requirements in the change request documents? where does this come from?
 
-- **Applies to:** items 1–6, especially 2, 3, 5 and 6F; source-lowering 1–3; capture 3/8/9;
+- **Applies to:** items 1–6, especially 2, 3 and 5; source-lowering 1–3; capture 3/8/9;
   synchronization-signature 1/6. S1 and S2 already assign structured operations and typed operands/results to lowering.
 - **Reference implementation:** MLIR's
   [Toy-to-Affine lowering](https://github.com/llvm/llvm-project/blob/main/mlir/examples/toy/Ch5/mlir/LowerToAffineLoops.cpp)
@@ -431,7 +431,7 @@ Numerical transformations belong to the compiler; recording and execution consum
 | `MetalNativeProjection`/`MetalNativeArgmax` source recognition and extraction, `MetalPackedWeights`, `MetalProjectionReduction`, `MetalNormalizationReduction` | Select/construct the retained tuned algorithms from typed operations, layouts and reduction domains. Preserve packed arithmetic, parallel reductions and split work; propagate `MetalNativePlan` facts directly instead of rereading `MN_*` defines. |
 | `MetalCoherentStores`, source-spliced publication/acquisition and `MetalMaskedPass` | Lower typed memory effects and page readiness to coherent access, publication, worklists and later-pass kernels. Preserve computation/transport overlap and fused publication. Carry any required target extension through the IR and emitter. |
 | `MetalParsedSpace` and `MetalCommandAccesses` as semantic reconstruction from emitted source | Use the compiler's instruction call/use-def and access relations. Remove the parser and its dead helpers once both scheduling and signature consumers use those relations. |
-| Replay-footprint reconstruction and the default/non-self-timed preparation bypass | Emit its required synchronization regardless of the caller; remove the bypass and displaced orchestration. |
+| Replay-footprint reconstruction and the default/non-self-timed preparation bypass | Emit the shared native program's required synchronization regardless of the caller; remove the bypass and displaced orchestration. |
 
 **One replacement landing.** The finished change includes producer, representations, transformations, all callers,
 the production build and the deletions together. Metal-microbench and mesh are separate Git repositories, so the
