@@ -107,6 +107,7 @@ def execute(block, inputs, args):
     run = mesh.load(args.load) if args.load else mesh.program(block, *inputs)
     if args.save:
         run.save(args.save)
+    print(json.dumps({'structure': run.structure()}), flush=True)
     result = None
     for _ in range(args.steps):
         pending = False

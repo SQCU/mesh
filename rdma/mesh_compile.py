@@ -7836,6 +7836,66 @@ def _bound(context, state, retained, deadline):
                 programs['state_data'][key] = C.string_at(address, length)
 
 
+# design/compilation-composition-change-request.md requirement 7: "Graph transformations may fuse vertices, remove edges
+# made internal to fused work, and replace storage representations. The contract preserves the required observations
+# and ordering, not a literal source graph or one runtime action per vertex."; design/implementation-order-2026-11-09.md
+# item 11, "Before timing"; mesh-collective.h struct mesh_planned `order` and `cause`; mesh-graph.h struct
+# mesh_graph_signature `states`, `redundant`, `uncovered` and `unwaited`
+CAUSES = ('flow', 'conflict', 'program', 'submit', 'outstanding', 'chain', 'transfer', 'part')
+
+
+def _compared(retained, returned, signed):
+    irs, calls, analysed, planned = (retained[name] for name in ('irs', 'calls', 'analysed', 'planned'))
+    functions = []
+    for ir, (_, _, _, copies) in zip(irs, retained['bound']):
+        exported = [node for node in ir.order if node.op == 'call_function']
+        called = {item[3] for item in ir.program if item[0] == 'call'}
+        places = ir.places.get(ir.device, {})
+        collective = {i: c.kind for c, declared in ir.declares.items() for i in declared}
+        functions.append({
+            'exported': len(exported),
+            'absent': [node.name for node in exported if node not in called],
+            'added': collections.Counter(item[3].kind if item[0] == 'collective' else item[0] for item in ir.program
+                                         if item[0] not in ('input', 'constant', 'call', 'output')),
+            'copies': sum(1 for kind, _, key, _ in ir.program if kind == 'copy' and key not in ir.attributes
+                          and places.get(key) is not None and places[key].writer == key),
+            'sends': collections.Counter(collective.get(i, 'delivery') for i, d in enumerate(ir.declared)
+                                         if d.source == ir.index),
+            'receives': collections.Counter(collective.get(i, 'delivery') for i, d in enumerate(ir.declared)
+                                            if d.destination == ir.index),
+            'values': len(copies), 'locations': sum(len(copy) for copy in copies)})
+    signature, edges = planned.signature.contents, planned.order[:planned.orders]
+    parts, after = {}, {}
+    for e in edges:
+        for v in (e.source, e.sink):
+            if 2 * len(calls) <= v < signature.tasks and signature.task[v].processor % 2:
+                parts.setdefault(signature.task[v].label, set()).add(v)
+        if not e.delay:
+            after.setdefault(e.source, []).append(e.sink)
+    members = {}
+    for j in range(len(calls)):
+        members.setdefault(analysed.chains[j], []).append(j)
+    pairs = [(analysed.orders[2 * q], analysed.orders[2 * q + 1], CAUSES[analysed.causes[q]])
+             for q in range(analysed.norders)] + [(a, b, 'chain') for chain in members.values()
+                                                  for a, b in zip(chain, chain[1:])]
+    reached = {a: mesh_graph.reach(parts.get(a, ()), lambda v: after.get(v, ())) for a, _, _ in pairs}
+    here = [(a, b, cause) for a, b, cause in pairs if a in parts and b in parts]
+    operations = collections.Counter()
+    for (_, primitive), count in signed['counts'].items():
+        operations[primitive] += count
+    return {'functions': functions, 'calls': len(calls),
+            'orders': {'exported': collections.Counter(cause for _, _, cause in pairs), 'here': len(here),
+                       'absent': [(a, b, cause) for a, b, cause in here if not parts[b] & reached[a]]},
+            'edges': collections.Counter(CAUSES[c.kind] for c in planned.cause[:planned.orders]),
+            'observations': {'returned': returned,
+                             'placed': sum(isinstance(leaf, _TensorLocation)
+                                           for leaf in pytree.tree_leaves(retained['output_recipe'][0]))},
+            'synchronization': {'operations': operations, 'states': signed['states'],
+                                'redundant': signed['redundant'], 'uncovered': signed['uncovered'],
+                                'unwaited': signed['unwaited']},
+            'horizon': planned.horizon}
+
+
 # design/aot-compilation-change-request.md A1 to A3, A8 to A10 and appendix item 7;
 # design/disjoint-pages-change-request.md C3.1, D.3.2 and D.3.3; mesh-collective.h mesh_plan, struct mesh_function and
 # struct mesh_value; mesh-dataflow.h mesh_nodes_read, mesh_retire and struct mesh_ctx
@@ -7851,9 +7911,10 @@ def program(block, *example_inputs):
     compiled, of, calls, sources = exporter.compiled, exporter.of, exporter.calls, exporter.sources
     # the block's returned leaves (_Export `marks` of its output's arguments): a call's result leaf the caller receives
     # at every node of the program, delivered where its function has no section (_deliver)
-    returned = {(calls[leaf.call], leaf.leaf) for leaf in pytree.tree_leaves(map_arg(
+    produced = [leaf for leaf in pytree.tree_leaves(map_arg(
         next(n for n in gm.graph.nodes if n.op == 'output').args, lambda a: exporter.marks.get(a)))
-        if isinstance(leaf, _Produced) and leaf.call is not None}
+        if isinstance(leaf, _Produced)]
+    returned = {(calls[leaf.call], leaf.leaf) for leaf in produced if leaf.call is not None}
     # the traced block's calls of each function (`every`) and each call's ordinal among them (`place`): the static
     # call identities the analysis's bound, the capture's generations, step words and block-copy selection take
     # (mesh_plan receives `calls` and publishes the same, planned.call)
@@ -7956,6 +8017,7 @@ def program(block, *example_inputs):
         try:
             state['built'] = _built()
             _bound(context, state, state['built'], deadline)
+            state['built']['compared'] = _compared(state['built'], len(produced), state['replay']['signature'])
         except BaseException:
             _retire(context, state)
             raise
@@ -8241,5 +8303,6 @@ def _runner(context, state, make):
     run.save = save
     run.synchronize = lambda: timed(lambda: _finish(state['replay']))
     run.signature = lambda: state['replay']['signature'] if state['replay'] is not None else None
+    run.structure = lambda: state['built'].get('compared')
     weakref.finalize(run, _dropped, context, state)
     return run
