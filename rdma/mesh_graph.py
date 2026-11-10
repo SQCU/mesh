@@ -362,6 +362,12 @@ def rows(keys, key):
     return list(first), list(order[:len(key)])
 
 
+# design/aot-compilation-change-request.md A10: the successive pairs of each row of `rows`, a chain labelling's order
+def successive(keys, key):
+    first, order = rows(keys, key)
+    return [(order[i], order[i + 1]) for k in range(keys) for i in range(first[k], first[k + 1] - 1)]
+
+
 def _text(printer, signature):
     made = C.c_size_t()
     status = printer(C.byref(signature), None, 0, C.byref(made))
