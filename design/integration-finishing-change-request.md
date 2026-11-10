@@ -8,6 +8,13 @@
 
 (2026-11-08)
 
+**The operator, 2026-11-10:**
+
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+
 ## Requirements
 
 ### 1. Every mesh machine's bridge runs
@@ -31,16 +38,18 @@
   Wein; design/list-scheduling-sources-2026-11-08.md, LS).
 - **It takes** a key for each of a node's replayed commands, and the commands' dependences. A command that reads a
   received range has that range's published completion time as its key (`struct mesh_state` `times`). Every other
-  command has its dependence level as its key.
-- **It writes** the node's list of commands: `mesh_graph_heap_order` over those keys.
+  command has its dependence level as its key; no cited source states that key.
+- **It writes** the node's list of commands: `mesh_graph_heap_order` over those keys. In mesh rdma/mesh-graph.h that
+  function takes the keys as `const double *priority` and the dependences as `const uint32_t *from` and `const
+  uint32_t *to`, and writes `uint32_t *place`.
 - **Consumed by** the node's replay, which executes its commands in that list's order: Lee and Ha's self-timed order,
   as design/torch-source-lowering-change-request.md item 3 quotes it.
 
 ### 3. A weight on each task
 
 - **The data structure** is the weighting operand, of the type design/aot-compilation-change-request.md A3 gives: "a
-  weight on each task; a weight on each edge; the cables' capacities, from the map". A3's task is a function. The
-  functions' weights are the lengths of `mesh_plan`'s functions.
+  weight on each task; a weight on each edge; the cables' capacities, from the map". The task weights are the lengths
+  of `mesh_plan`'s tasks; no cited source states that.
 - **Produced by** the caller of the compilation. **Consumed by** the compilation's router and its scheduler, which
   compute no weight (A3).
 - **Replaces:** the weighting operand of one `mesh.Weight` per transfer.
