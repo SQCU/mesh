@@ -1711,8 +1711,8 @@ def _recorder():
         lib.MetalReplayNative.restype = C.c_void_p
         lib.MetalReplayNative.argtypes = [C.POINTER(Replay), C.POINTER(mesh.Q)]
         lib.MetalRecorderProgram.restype = C.c_void_p
-        lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, C.POINTER(mesh_graph.Machine),
-                                             C.POINTER(mesh.Planned), C.c_char_p, C.c_size_t]
+        lib.MetalRecorderProgram.argtypes = [C.c_void_p, C.POINTER(Call), mesh.U, C.POINTER(mesh.Planned), C.c_char_p,
+                                             C.c_size_t]
         for name in ('MetalRecorderSave', 'MetalProgramSave'):
             function = getattr(lib, name)
             function.restype = C.c_int
@@ -7221,17 +7221,14 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
         rows.append(replay)
     calls = (Call * len(rows))(*[Call(C.pointer(r) if r is not None else None, row + 1, None, 0)
                                  for row, r in enumerate(rows)])
-    # metal_recording.h MetalRecorderProgram: this node's machines (GPU, CPU), the executor's estimate of a span the plan
-    # gives no horizon; none recorded: the plan's horizon alone
-    machines = _machines()
-    given = (mesh_graph.Machine * 2)(machines[GPU], machines[CPU]) if machines else None
-    arguments = (recorder, calls, len(calls), given, C.byref(planned))
+    # metal_recording.h MetalRecorderProgram
+    arguments = (recorder, calls, len(calls), C.byref(planned))
     program = _owned(owned, lib.MetalProgramLoad(*arguments, programs['native_record'],
         len(programs['native_record']), error, len(error)) if 'native_record' in programs else
         lib.MetalRecorderProgram(*arguments, error, len(error)))
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
-    # metal_recording.h MetalProgramHorizon: the program's lag (the plan's horizon, else its spans' buffer bound), the
+    # metal_recording.h MetalProgramHorizon: the program's lag (the plan's horizon), the
     # executions in flight its allocator ring and signature window cover
     horizon = lib.MetalProgramHorizon(program)
     period = _period({k: b[3] for k, b in enumerate(bound)}, horizon)
