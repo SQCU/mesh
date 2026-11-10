@@ -30,21 +30,37 @@ The operator, 2026-11-10:
 > "which adds two whole-sequence all-gathers per attention'
 > hm, stinky, and neither grounded in citation nor a requirement
 
+> review the change requests one more time. here are three major kinds of defects to correct:
+> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
+> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
+> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+
 ## The stages
 
 Each requirement composes into the stages of the reference program `~/schedule-emit` (`schedule_emit/driver.py`,
 `compile_module`), each a function from a value to a value:
 
-- `export` writes an `Exported`;
-- `place` takes its graph and the placement operand and writes the placed graph, in which a communication is a `send`
-  node and a `recv` node (`schedule_emit/placement.py`);
-- `on_devices` takes the placed graph and writes it with each node's device;
-- `schedule` takes that graph and writes each processor's nodes in order;
-- the result is one `Scheduled`, which lowering, the runtime and the archive each take.
+- `export(module, args)` writes an `Exported` (`schedule_emit/ir.py`), whose `graph_module` is a
+  `torch.fx.GraphModule`;
+- `place(graph_module, placement)` takes that `GraphModule` and the placement operand and writes the placed
+  `GraphModule`, the output processor's name and the number of channels. Every node of the placed graph has
+  `meta["processor"]`, and a communication is a `send` node and a `recv` node (`schedule_emit/placement.py`);
+- `on_devices(graph_module, devices)` takes the placed `GraphModule` and a dict from processor name to `torch.device`
+  and writes a `GraphModule` with each node's device;
+- `schedule(module, cost)` takes that `GraphModule` and writes a dict from processor name to a `GraphModule` whose
+  nodes are in scheduled order;
+- the result is one `Scheduled` (`schedule_emit/ir.py`), which lowering, the runtime and the archive each take.
 
 A sharding is part of the placement operand. Items 1, 5, 8, 13 and 15 state what the operand carries for a sharded
 dimension. Items 6, 7 and 14 produce it before `place` runs. Items 2, 3, 4, 9, 10 and 12 state nodes that `place` adds
 to the graph. Item 11 states the form of a value.
+
+The reference program's placement operand is a function from an fx node to a processor name, and has no field for a
+sharding. Its operators are `send(value: Tensor, channel: int)` and `recv(channel: int) -> Tensor`, and have no
+argument for counts, displacements or a subarray. The types of those values below are their sources': RaggedShard's
+`local_units`, a tuple of integers whose length is the size of the mesh dimension; MPI's `recvcounts`, `sendcounts`
+and `displs`, each an integer array of length the group size; MPI's `array_of_sizes`, `array_of_subsizes` and
+`array_of_starts`, each an array of integers with one entry per dimension of the array.
 
 ## Requirements
 
@@ -72,8 +88,9 @@ to the graph. Item 11 states the form of a value.
   fraction of the tuple's sum, of the extent, set to the nearest integer; while the sizes do not sum to the extent,
   the size whose change adds the least rounding error is reduced or increased by one. It writes one whole size per
   device, the sizes summing to the extent.
-- **Stage:** the placement operand carries the tuple. `place` consumes it with the dimension's extent and writes the
-  sizes, which are the `counts` of items 2 and 3.
+- **Stage:** the placement operand carries the tuple, of `local_units`' type. `place` consumes it with the
+  dimension's extent and writes the sizes, an integer array of one entry per device, which are the `counts` of items
+  2 and 3.
 
 ### 2. A collective sends each device's block at its own size
 
@@ -104,8 +121,9 @@ to the graph. Item 11 states the form of a value.
   an all-to-all, a gather and a scatter over a dimension sharded by item 1 each carry the two arrays. The block of
   device j is sent at `counts[j]` elements and placed at `displs[j]`. A reduce-scatter's result is n consecutive
   blocks, block i of `counts[i]` elements, sent to device i.
-- **Stage:** the sends and receives of each of these collectives are nodes `place` adds to the graph, with `counts`
-  and `displs`. `on_devices` and `schedule` take the graph with those nodes.
+- **Stage:** the sends and receives of each of these collectives are `send` and `recv` nodes `place` adds to the
+  `GraphModule`, with `counts` and `displs`, each an integer array of one entry per device. `on_devices` and
+  `schedule` take the `GraphModule` with those nodes.
 
 ### 3. Every device holds the same counts
 
@@ -350,9 +368,14 @@ to the graph. Item 11 states the form of a value.
   leading dimension is at least LOCr.
 - **Algorithm:** a collective of item 2 is given, for each device, the sizes of the full array, the sizes of the
   subarray and where it starts, and sends the subarray: `counts[j]` is the subarray's number of elements. The padding
-  is not sent. HAP §2.5.1 names a second way, sending the whole padded buffer through an equal-size collective, and
-  says which is faster depends on the sharding ratios. No source states the rule that chooses between the two.
-- **Stage:** the three arrays are carried by the collective's nodes that `place` adds (item 2).
+  is not sent. HAP §2.5.1 names a second way, sending the whole padded buffer through an equal-size collective. Each
+  collective of item 2 uses the one of the two that item 6's solve finds cheaper at the solved sharding ratios, its
+  comm(i)(B) being "determined based on the collective operation type, the sharding ratio B" and the profiled
+  network; the choice is made again whenever the sharding ratios are solved again (HAP §2.5.1: "when we optimize the
+  sharding ratios, the communication methods should be updated accordingly").
+- **Stage:** item 6's solve, before `place`, writes which of the two each collective uses, with the tuple of item 1.
+  `place` consumes it and adds the collective's `send` and `recv` nodes (item 2); for the subarray these carry the
+  three arrays, each an array of integers with one entry per dimension of the buffer.
 
 ### 13. Which device holds which rows of a tensor whose rows differ in length
 
