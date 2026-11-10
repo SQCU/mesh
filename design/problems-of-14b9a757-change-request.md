@@ -312,8 +312,9 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
 - **The data structure** is ExecuTorch's tensor lifetime: the pair [index of the first graph node referring to the
   value, index of the last].
 - **The algorithm** is ExecuTorch's `update_tensor_lifetime`, with its test for two tensors sharing storage:
-  1. **A value's lifetime** is that pair, over the exported graph's nodes in order, as `update_tensor_lifetime`
-     computes it.
+  1. **A value's lifetime** is that pair, as `update_tensor_lifetime` computes it, over the graph nodes in the order
+     item 14's step 2 indexes: the node's operations in program order, which is the schedule's result (`ir.Scheduled`,
+     each node's graph in scheduled order).
   2. **A transfer's ends** each occupy their value from the graph node that starts the transfer to the graph node that
      waits for its completion (MPI §3.7; the wait is 7.2's). A send's source value is occupied until its completion is
      awaited, and a receive's destination value from the receive's start.
@@ -321,9 +322,9 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   4. **Sharing:** two blocks may share pages exactly where ExecuTorch's test finds their lifetimes disjoint.
   5. **Never freed:** a value whose data is kept across executions (a copy of lag k ≥ 1, and an invariant) is never
      freed, as ExecuTorch's mutable buffers are not. Only these have no lifetime.
-- **Composition:** the compile (rdma/mesh_compile.py) writes each value's pair into `mesh_plan`'s operand, as the
-  `begin` and the `end` of its `struct mesh_value`. `mesh_plan`
-  reads the pairs as the intervals of item 14 and writes the memory plan and the memory schedule from them.
+- **Composition:** the pairs index the schedule's result. No cited source states which stage's function writes them.
+  `mesh_plan` reads them as the `begin` and the `end` of each `struct mesh_value`, as the intervals of item 14, and
+  writes the memory plan and the memory schedule from them.
 - **Source:**
   - ExecuTorch documentation, "Concepts", sections Out variant and Memory planning:
     - "Instead of allocating returned tensors in kernel implementations, an operator's out variant will take in a
@@ -451,12 +452,10 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
 
 ## 9. Two destination instructions may write the same bytes
 
-- **The data structure** is the list of the destination byte intervals of one node and one execution, sorted by
-  start.
-- **The algorithm:** in the sorted list, an interval that begins before its predecessor ends overlaps it. Such a pair
-  is what MPI 4.1 §6.1.11 calls overlapping entries, whose use with a buffer the operation updates "is erroneous".
-- **Composition:** `mesh_plan` computes the list from the destination instructions it writes. No cited code or source
-  names a type for a destination instruction.
+- **The data structure** is MPI's overlapping entries (MPI 4.1 §6.1.11): here, two destination instructions whose byte
+  intervals at one node intersect within one execution.
+- **The algorithm:** none is determined. MPI says only that the use of such entries with a buffer the operation updates
+  "is erroneous".
 - **Code:**
   - rdma/mesh-collective.c refuses no pair of destination instructions whose byte intervals at one node intersect within
     one execution.
@@ -543,10 +542,11 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
 - **The data structure** is 7.3's counter on the send's record: libfabric's count of "operations which have completed
   in error". The record is the one at the work completion's `wr_id`, which is valid in a completion whose status is
   other than IBV_WC_SUCCESS (ibv_poll_cq(3)), `IBV_WC_WR_FLUSH_ERR` among them.
-- **The algorithm** is the Linux kernel's `ib_drain_sq`:
+- **The algorithm** is the Linux kernel's `ib_drain_sq` for steps 1 and 2, and libfabric's error count for step 3:
   1. The queue pair is moved to the error state (`IB_QPS_ERR`).
   2. All its send-queue completions are consumed.
-  3. Each SEND completion taken raises the error count of the record at its `wr_id`.
+  3. Each SEND completion taken raises the error count of the record at its `wr_id`: it is one of fi_cntr(3)'s
+     "operations which have completed in error", and its `wr_id` is valid (ibv_poll_cq(3)).
 - **Composition:** in the runtime, the port's child process writes the error count of the send's `struct
   prepared_send` where it drains (`lanes_flush`).
   The program's `wait_tensor` reads it (7.3, step 6).
