@@ -7,7 +7,7 @@ import re
 import sys
 
 LOG = '/Users/mdot/metal-microbench/output_data/agent-brief-warnings.jsonl'
-DIRECTION = re.compile(r'Read (/\S+?)(, (item|section) \d+(\.\d+)*|, lines \d+-\d+)? and act on it\.')
+DIRECTION = re.compile(r'Read (/\S+?)(, (item|section) [A-Z]{0,2}\.?\d+(\.\d+)*|, lines \d+-\d+)? and act on it\.')
 FIELDS = {'Agent': ('prompt',), 'Task': ('prompt',), 'SendMessage': ('message',), 'Workflow': ('script', 'args')}
 
 
@@ -30,8 +30,8 @@ def main():
     if not lines and payload.get('tool_name') in ('Workflow', 'SendMessage'):
         return 0
     reason = (f"{payload.get('tool_name')} was given {len(inlined)} line(s) that are not a direction to read a file "
-              f"(design/review-warnings.md rule 10). A brief is lines of the form 'Read /absolute/path, item N and act "
-              f"on it.' and nothing else; put anything more in a committed file and name the file. First such line: "
+              f"(design/review-warnings.md rule 10). A brief is lines of the form 'Read /absolute/path and act on "
+              f"it.', the path an existing file, with ', item N', ', section N' or ', lines N-M' allowed after it, and nothing else; put anything more in a committed file and name the file. First such line: "
               f"{(inlined or [''])[0][:160]!r}")
     with open(LOG, 'a') as f:
         fcntl.flock(f, fcntl.LOCK_EX)

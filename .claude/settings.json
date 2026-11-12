@@ -29,9 +29,8 @@
           },
           {
             "type": "command",
-            "if": "Bash(git *commit*)",
             "timeout": 900,
-            "statusMessage": "Change request review of the commit",
+            "statusMessage": "Measurement of commits that name a change request item",
             "async": true,
             "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-change-request-review.py"
           },

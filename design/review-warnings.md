@@ -182,3 +182,21 @@ turns says so.
   reading of the turn and of the operator's turn of 2026-11-08: "why are you 'descirbing' anything in 'briefs' instead
   of literally saying 'there is a change request document. read it and act on the topic.'"
 
+### 11. The change request measurement
+
+- **Source:** the operator, 2026-11-12:
+
+> rewrite the review hook to have those seven properties or whatever idk
+
+- **Rule:** bin/mesh-change-request-review.py replaces the review of every commit that rules 1 to 6 describe. The
+  seven properties are Claude's, stated to the operator in the turn before this one.
+  1. It reads a commit only where the commit message has a line `Change-Request: <document>, item <N>` and the
+     document is one design/change-requests-index.md links. Any other commit it leaves alone.
+  2. Its reader is given that item's text and the commit's diff, and has no tools.
+  3. Its questions are the constant `PROMPT` of the script.
+  4. It answers, for each sentence of the item, carried, not carried or not addressed, and one bit for whether the
+     diff adds what the item does not state. A sentence it quotes that is not in the item is counted as such.
+  5. Each run starts with nothing from an earlier run.
+  6. It appends to metal-microbench `output_data/change-request-measurements.jsonl` and blocks nothing.
+  7. What it tells the session is those counts. The item is the instruction; the measurement is not.
+

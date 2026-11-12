@@ -1,100 +1,119 @@
-"""design/commentary-review.md#investigative-review"""
+"""design/review-warnings.md#11-the-change-request-measurement"""
+import datetime
 import json
 import os
+import re
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
-import mesh_review as harness
+import tempfile
 
-MESH = harness.MESH
-REGISTERED = os.path.join(MESH, '.claude', 'change-requests-registered.json')
-REVIEWS = harness.REVIEWS
-c9 = harness.c9
-TASK = """Review this commit's implementation and documentary changes against the applicable operator instructions
-and cited methods. Investigate the governing documents as well as the code, including a possible change in their
-scope or authority. Registered documents are shared context hints, not a complete or authoritative assignment.
-Locate the relevant instructions even if registration is empty. Follow integration through the affected call paths
-and companion changes, and use existing measurements or synchronization evidence where relevant.
-Apply rules 4, 5 and 6 of mesh design/review-warnings.md: the clauses of the change requests that govern what the
-commit changes, a second producer of a value another stage or module produces, and each clause of anything the commit
-says is done."""
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mesh_commits
 
+MESH = '/Users/mdot/dox/mesh'
+INDEX = 'design/change-requests-index.md'
+LOG = '/Users/mdot/metal-microbench/output_data/change-request-measurements.jsonl'
+SEEN = 'change-request-measurement.head'
+NAMED = re.compile(r'^Change-Request: (\S+), item ([A-Z]{0,2}\.?\d+(?:\.\d+)*)\s*$', re.M)
+READER = ['claude', '-p', '--model', 'sonnet', '--tools', '', '--setting-sources', 'user', '--no-session-persistence',
+          '--strict-mcp-config']
+PROMPT = """You are given one item of a change request, then one git commit's diff. You have nothing else and need
+nothing else. Measure; do not advise, explain or recommend.
 
-def registrations():
-    try:
-        with open(REGISTERED) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
+For each sentence of the item that states something to be written, changed or removed, give one line:
+CLAUSE: "<the sentence, copied exactly from the item>" | CARRIED: YES
+or CARRIED: NO (the diff changes the place the sentence is about and does not do what it says)
+or CARRIED: NOT ADDRESSED (the diff does not touch what the sentence is about).
 
+Then one line:
+ADDED: YES (the diff adds behaviour, a rule, a check, a guard, a wait, a copy or an interface that no sentence of the
+item states) or ADDED: NO
 
-def register(documents):
-    revision = harness.git(MESH, 'rev-parse', 'HEAD')
-    entries = registrations()
-    for document in documents:
-        if subprocess.run(['git', '-C', MESH, 'cat-file', '-e', f'{revision}:{document}'],
-                          capture_output=True).returncode:
-            print(f'{document} is not in mesh at {revision[:10]}', file=sys.stderr)
-            return 1
-        entries.append({'document': document, 'revision': revision, 'at': harness.now()})
-    with open(REGISTERED, 'w') as f:
-        json.dump(entries, f, indent=1)
-    print('\n'.join(f"{e['document']} at {e['revision'][:10]}" for e in entries))
-    return 0
+Nothing else: no summary, no reasons, no suggestions."""
 
 
-def review(repo, sha, entries, transcript=None):
-    return harness.review(repo, sha, TASK, entries, transcript)
+def squeezed(text):
+    return re.sub(r'\s+', ' ', text).strip()
 
 
-def outstanding():
-    latest = {}
-    with open(REVIEWS) as f:
-        for line in f:
-            record = json.loads(line)
-            latest[record['repository'], record['commit'], record.get('kind', 'change-request'), record.get('file')] = record
-    for record in latest.values():
-        if 'style' in record:
-            print(f"{record['commit'][:10]} of {record['repository']}, {record['file']}: {record['style']}\n")
-        elif record['outstanding'] is not False:
-            print(f"{record['commit'][:10]} of {record['repository']}, {record.get('kind', 'change-request')}: "
-                  f"{record['subject'][:160]}\n" +
-                  (harness.render(record) if 'trace' in record else '\n'.join(record['findings'])) + '\n')
-    return 0
+def linked():
+    index = mesh_commits.git(MESH, 'show', f'HEAD:{INDEX}')
+    return {'design/' + name for name in re.findall(r'\]\(([^)\s]+\.md)\)', index)}
+
+
+def item(document, name, revision):
+    text = mesh_commits.git(MESH, 'show', f'{revision}:{document}')
+    lines = text.splitlines()
+    for at, line in enumerate(lines):
+        heading = re.match(rf'(#{{1,6}})\s+{re.escape(name)}[.:\s]', line)
+        if heading:
+            depth = len(heading.group(1))
+            end = next((later for later in range(at + 1, len(lines))
+                        if re.match(rf'#{{1,{depth}}}\s', lines[later])), len(lines))
+            return '\n'.join(lines[at:end])
+    return None
+
+
+def measured(repo, sha, document, name):
+    revision = sha if os.path.samefile(repo, MESH) else 'HEAD'
+    text = item(document, name, revision)
+    if text is None:
+        return {'item_found': False}
+    diff = mesh_commits.git(repo, 'show', '--no-color', '--format=', sha)
+    given = f'THE ITEM ({document}, item {name}):\n{text}\n\nTHE COMMIT:\n{diff[:300000]}'
+    read = subprocess.run([*READER, '--system-prompt', PROMPT, 'Measure this commit against this item.'], input=given,
+                          capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=600)
+    added = re.search(r'^ADDED: (YES|NO)', read.stdout, re.M)
+    if read.returncode or not added:
+        raise RuntimeError(f'the reader exited {read.returncode} and said {read.stdout.strip()[:200]!r}')
+    whole = squeezed(text)
+    clauses = [{'clause': clause, 'carried': carried, 'in_item': squeezed(clause) in whole}
+               for clause, carried in re.findall(r'^CLAUSE: "(.*)" \| CARRIED: (YES|NO|NOT ADDRESSED)\s*$', read.stdout, re.M)]
+    return {'item_found': True, 'clauses': clauses, 'added': added.group(1) == 'YES'}
+
+
+def told(sha, repo, document, name, result):
+    if not result['item_found']:
+        return f'Change request measurement of {sha[:10]} in {repo}: {document} has no item {name}.'
+    counted = {state: sum(1 for c in result['clauses'] if c['in_item'] and c['carried'] == state)
+               for state in ('YES', 'NO', 'NOT ADDRESSED')}
+    return (f"Change request measurement of {sha[:10]} in {repo} against {document}, item {name}: "
+            f"{counted['YES']} sentences carried, {counted['NO']} not carried, {counted['NOT ADDRESSED']} not addressed; "
+            f"{sum(1 for c in result['clauses'] if not c['in_item'])} quoted sentences are not in the item; "
+            f"the diff adds something the item does not state: {'yes' if result['added'] else 'no'}. "
+            f"The sentences are in {LOG}. This is a measurement, not an instruction; the item is the instruction.")
 
 
 def main():
-    if sys.argv[1:2] == ['register']:
-        return register(sys.argv[2:])
-    if sys.argv[1:2] == ['clear']:
-        with open(REGISTERED, 'w') as f:
-            json.dump([], f)
-        return 0
-    if sys.argv[1:2] == ['outstanding']:
-        return outstanding()
-    if sys.argv[1:2] == ['review-commits']:
-        jobs = []
-        for argument in sys.argv[2:]:
-            commit, _, named = argument.partition('=')
-            repo, sha = commit.rsplit(':', 1)
-            jobs.append((repo, sha, [{'document': n, 'by': 'explicit CLI context'} for n in named.split(',') if n]))
-        with ThreadPoolExecutor(6) as pool:
-            for record in pool.map(lambda job: review(*job), jobs):
-                state = {True: 'findings', False: 'no findings', None: 'incomplete'}[record['outstanding']]
-                print(f"{record['commit'][:10]} {state}: {record['subject'][:120]}\n{harness.render(record)}", flush=True)
-        return 0
-    findings = []
     try:
-        entries = registrations()
-        payload = json.load(sys.stdin)
-        for repo, sha in c9.made(payload):
-            record = review(repo, sha, entries, payload.get('transcript_path'))
-            if record['outstanding'] is not False:
-                findings.append(f'Change request review of {sha[:10]} in {repo}, recorded in {REVIEWS}:\n' +
-                                harness.render(record))
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        findings.append(f'Change request review incomplete: {error}')
-    return c9.feedback(findings)
+        json.load(sys.stdin)
+    except ValueError:
+        pass
+    messages = []
+    for repo in mesh_commits.REPOSITORIES:
+        lock = mesh_commits.held(repo, SEEN)
+        if lock is None:
+            continue
+        for sha in mesh_commits.new_commits(repo, SEEN):
+            named = NAMED.findall(mesh_commits.git(repo, 'show', '-s', '--format=%B', sha))
+            try:
+                for document, name in named:
+                    if document not in linked():
+                        continue
+                    result = measured(repo, sha, document, name)
+                    mesh_commits.appended(LOG, json.dumps({
+                        'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+                        'repository': repo, 'commit': sha, 'document': document, 'item': name, **result}))
+                    messages.append(told(sha, repo, document, name, result))
+            except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+                messages.append(f'Change request measurement of {sha[:10]} in {repo} was not made: {error}')
+                break
+            mesh_commits.advance(repo, SEEN, sha)
+    if messages:
+        message = '\n'.join(messages)
+        print(json.dumps({'systemMessage': message,
+                          'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': message}}))
+    return 0
 
 
 if __name__ == '__main__':
