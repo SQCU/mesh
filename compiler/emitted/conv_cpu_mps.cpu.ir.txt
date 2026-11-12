@@ -32,7 +32,7 @@ class GraphModule(torch.nn.Module):
         # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/pooling.py:1514 in forward, code: return F.adaptive_avg_pool2d(input, self.output_size)
         mean: "f32[2, 16, 1, 1]" = torch.ops.aten.mean.dim(relu_1, [-1, -2], True);  relu_1 = None
 
-        # File: /Users/mdot/dox/mesh/compiler/samples.py:76 in forward, code: return self.head(self.features(x).flatten(1))
+        # File: /Users/mdot/dox/mesh/compiler/samples.py:79 in forward, code: return self.head(self.features(x).flatten(1))
         view: "f32[2, 16]" = torch.ops.aten.view.default(mean, [2, 16]);  mean = None
 
         # File: /Users/mdot/schedule-emit/.venv/lib/python3.13/site-packages/torch/nn/modules/linear.py:134 in forward, code: return F.linear(input, self.weight, self.bias)

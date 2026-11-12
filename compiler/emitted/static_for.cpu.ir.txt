@@ -4,7 +4,7 @@ class GraphModule(torch.nn.Module):
         permute: "f32[8, 8]" = torch.ops.aten.permute.default(p_linear_weight, [1, 0])
         addmm: "f32[2, 8]" = torch.ops.aten.addmm.default(p_linear_bias, x, permute);  x = permute = None
 
-        # File: /Users/mdot/dox/mesh/compiler/samples.py:160 in forward, code: x = torch.tanh(self.linear(x)) + trip
+        # File: /Users/mdot/dox/mesh/compiler/samples.py:163 in forward, code: x = torch.tanh(self.linear(x)) + trip
         tanh: "f32[2, 8]" = torch.ops.aten.tanh.default(addmm);  addmm = None
         add: "f32[2, 8]" = torch.ops.aten.add.Tensor(tanh, 0);  tanh = None
 
@@ -12,7 +12,7 @@ class GraphModule(torch.nn.Module):
         permute_1: "f32[8, 8]" = torch.ops.aten.permute.default(p_linear_weight, [1, 0])
         addmm_1: "f32[2, 8]" = torch.ops.aten.addmm.default(p_linear_bias, add, permute_1);  add = permute_1 = None
 
-        # File: /Users/mdot/dox/mesh/compiler/samples.py:160 in forward, code: x = torch.tanh(self.linear(x)) + trip
+        # File: /Users/mdot/dox/mesh/compiler/samples.py:163 in forward, code: x = torch.tanh(self.linear(x)) + trip
         tanh_1: "f32[2, 8]" = torch.ops.aten.tanh.default(addmm_1);  addmm_1 = None
         add_1: "f32[2, 8]" = torch.ops.aten.add.Tensor(tanh_1, 1);  tanh_1 = None
 
@@ -20,7 +20,7 @@ class GraphModule(torch.nn.Module):
         permute_2: "f32[8, 8]" = torch.ops.aten.permute.default(p_linear_weight, [1, 0])
         addmm_2: "f32[2, 8]" = torch.ops.aten.addmm.default(p_linear_bias, add_1, permute_2);  add_1 = permute_2 = None
 
-        # File: /Users/mdot/dox/mesh/compiler/samples.py:160 in forward, code: x = torch.tanh(self.linear(x)) + trip
+        # File: /Users/mdot/dox/mesh/compiler/samples.py:163 in forward, code: x = torch.tanh(self.linear(x)) + trip
         tanh_2: "f32[2, 8]" = torch.ops.aten.tanh.default(addmm_2);  addmm_2 = None
         add_2: "f32[2, 8]" = torch.ops.aten.add.Tensor(tanh_2, 2);  tanh_2 = None
 
@@ -28,7 +28,7 @@ class GraphModule(torch.nn.Module):
         permute_3: "f32[8, 8]" = torch.ops.aten.permute.default(p_linear_weight, [1, 0]);  p_linear_weight = None
         addmm_3: "f32[2, 8]" = torch.ops.aten.addmm.default(p_linear_bias, add_2, permute_3);  p_linear_bias = add_2 = permute_3 = None
 
-        # File: /Users/mdot/dox/mesh/compiler/samples.py:160 in forward, code: x = torch.tanh(self.linear(x)) + trip
+        # File: /Users/mdot/dox/mesh/compiler/samples.py:163 in forward, code: x = torch.tanh(self.linear(x)) + trip
         tanh_3: "f32[2, 8]" = torch.ops.aten.tanh.default(addmm_3);  addmm_3 = None
         add_3: "f32[2, 8]" = torch.ops.aten.add.Tensor(tanh_3, 3);  tanh_3 = None
         return (add_3,)

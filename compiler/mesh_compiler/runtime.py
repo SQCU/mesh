@@ -6,7 +6,7 @@ import torch
 from torch.export.graph_signature import OutputKind
 from torch.utils import _pytree as pytree
 
-from . import ir
+from . import bridge, ir
 
 
 class Program:
@@ -15,26 +15,34 @@ class Program:
         self.output_processor = scheduled.output_processor
         self.functions = functions or scheduled.modules
         self.feedforward = set(scheduled.feedforward)
-        self.channels = [SimpleQueue() for _ in range(scheduled.channels)]
+        self.channels, self.received, machine = bridge.channels(scheduled)
+        inputs = {processor: names for processor, names in scheduled.inputs.items()
+                  if scheduled.machines[processor] == machine}
+        self.caller = self.output_processor if self.output_processor in inputs else next(iter(inputs))
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         self.arguments = {
             processor: [state[n].to(self.devices[processor]) if n in state else None for n in names]
-            for processor, names in scheduled.inputs.items()}
+            for processor, names in inputs.items()}
         self.positions = {}
-        for processor, names in scheduled.inputs.items():
+        for processor, names in inputs.items():
             for position, name in enumerate(names):
                 self.positions.setdefault(name, []).append((processor, position))
         self.key_of = {key: name for name, (key, _) in self.exported.state.items()}
-        self.argument_queues = {processor: SimpleQueue() for processor in scheduled.inputs
-                                if processor != self.output_processor}
+        self.argument_queues = {processor: SimpleQueue() for processor in inputs
+                                if processor != self.caller}
         for processor in self.argument_queues:
             Thread(target=self.run, args=(processor,), daemon=True).start()
+
+    def execute(self, processor, arguments):
+        for channel in self.received.get(processor, ()):
+            channel.start()
+        return self.functions[processor](*arguments)
 
     def run(self, processor):
         ir.LOCAL.channels = self.channels
         while True:
-            self.functions[processor](*self.argument_queues[processor].get())
+            self.execute(processor, self.argument_queues[processor].get())
 
     def bind(self, name, value):
         for processor, position in self.positions.get(name, ()):
@@ -48,7 +56,9 @@ class Program:
             arguments = self.arguments[processor]
             argument_queue.put(list(arguments) if processor in self.feedforward else arguments)
         ir.LOCAL.channels = self.channels
-        results = self.functions[self.output_processor](*self.arguments[self.output_processor])
+        results = self.execute(self.caller, self.arguments[self.caller])
+        if self.caller != self.output_processor:
+            return None
         user = []
         for (kind, key), value in zip(self.exported.outputs, results):
             if kind == OutputKind.USER_OUTPUT:

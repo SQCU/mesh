@@ -85,16 +85,21 @@ def assemble(processor, order, nodes):
     return torch.fx.GraphModule(torch.nn.Module(), graph)
 
 
+def channel_ends(modules):
+    ends = {}
+    for processor, module in modules.items():
+        for node in module.graph.nodes:
+            if channel_of(node) is not None:
+                ends.setdefault(channel_of(node), {})[node.target] = (processor, node)
+    return ends
+
+
 def argument_buffers(modules, output_processor):
     inputs = {processor: [n.target for n in module.graph.nodes if n.op == "placeholder"]
               for processor, module in modules.items()}
     others = [processor for processor in modules if processor != output_processor]
-    graph, ends = networkx.DiGraph((output_processor, processor) for processor in others), {}
+    graph = networkx.DiGraph((output_processor, processor) for processor in others)
     graph.add_node(output_processor)
-    for processor, module in modules.items():
-        for node in module.graph.nodes:
-            if channel_of(node) is not None:
-                ends.setdefault(channel_of(node), {})[node.target] = processor
-    graph.add_edges_from((end[SEND], end[RECV]) for end in ends.values())
+    graph.add_edges_from((end[SEND][0], end[RECV][0]) for end in channel_ends(modules).values())
     cycle = next(c for c in networkx.strongly_connected_components(graph) if output_processor in c)
     return inputs, sorted(set(modules) - cycle)

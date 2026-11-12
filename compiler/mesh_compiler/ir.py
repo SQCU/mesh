@@ -51,6 +51,7 @@ class Scheduled:
     exported: Exported
     modules: dict
     devices: dict
+    machines: dict
     output_processor: str
     channels: int
     inputs: dict

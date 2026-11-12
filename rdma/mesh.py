@@ -36,7 +36,37 @@ class Context(C.Structure):
 # _mapped, mesh-dataflow.h mesh_view_compose), struct mesh_value `view` being gone.  What must stay: the header's first
 # words in its order
 class Header(C.Structure):
-    _fields_ = [('magic', U), ('version', U), ('pgsz', U), ('block', U)]
+    _fields_ = [('magic', U), ('version', U), ('pgsz', U), ('block', U), ('rows', U), ('node', U), ('vacant0', U),
+                ('links', U), ('vacant1', U), ('wire_pages', U), ('vacant7', U), ('vacant14', U), ('vacant2', Q),
+                ('planes_off', Q), ('arena_off', Q), ('page_off', Q), ('buffer_off', Q), ('link_off', Q),
+                ('vacant3', Q), ('target_off', Q), ('vacant4', Q), ('vacant5', Q), ('data_off', Q), ('length', Q),
+                ('vacant6', Q), ('target_stride', Q), ('client', Q), ('bridge_pid', Q), ('device_client', Q),
+                ('serial', Q), ('control', Q), ('port_phase', U), ('port_domain', U), ('port_code', C.c_int64),
+                ('port_prepared', Q), ('view_map', Q), ('view', Q), ('vacant8', Q), ('view_off', Q),
+                ('view_nodes', Q), ('map', Q), ('map_off', Q), ('map_nodes', Q), ('map_serial', Q),
+                ('bridge_off', Q), ('client_start', Q), ('boot', Q), ('health', Q), ('busy', Q), ('idle_since', Q),
+                ('stopping', Q), ('vacant9', Q), ('vacant10', Q), ('vacant11', Q), ('vacant12', Q), ('vacant13', Q),
+                ('map_room', Q), ('algo_off', Q), ('plans', Q), ('deliveries_off', Q), ('deliveries_room', Q),
+                ('delivered', Q), ('delivery_read', Q * 8), ('view_sequencer', U), ('vacant22', U), ('view_boot', Q)]
+
+
+# mesh.h struct mesh_hop, MESH_SEND, MESH_RECEIVE
+class Hop(C.Structure):
+    _fields_ = [('page', U), ('node', U), ('direction', U), ('field', U), ('word', Q), ('count', Q), ('pages', U),
+                ('bytes', U), ('serial', Q), ('set', U), ('offset', U)]
+
+
+SEND, RECEIVE = 0, 1
+
+
+# mesh.h struct mesh_algo
+class Algo(C.Structure):
+    _fields_ = [('published', Q), ('retired', Q), ('released', Q), ('plans', U), ('nodes', U), ('group', Q),
+                ('table', Q), ('adjacent', Q)]
+
+
+# mesh.h struct mesh_state, struct mesh_delivery, struct mesh_submission
+STATE_BYTES, DELIVERY_BYTES, SUBMISSION_BYTES = 320, 32, 16
 
 
 class Section(C.Structure):
@@ -248,6 +278,8 @@ for name, result, arguments in (
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, Q]),
+        ('mesh_backing_bind', None, [CONTEXT, U, U, U, U]),
+        ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
         ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),
         ('mesh_host_publish', None, [CONTEXT, Q, U, Q]),
         ('mesh_host_started', None, [CONTEXT, Q, U, Q]),

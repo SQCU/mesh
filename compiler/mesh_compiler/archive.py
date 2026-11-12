@@ -43,6 +43,7 @@ def save(directory, scheduled):
     about = json.dumps({
         "output_processor": scheduled.output_processor,
         "processors": {processor: str(device) for processor, device in scheduled.devices.items()},
+        "machines": scheduled.machines,
         "inputs": scheduled.inputs,
         "channels": scheduled.channels,
         "feedforward": scheduled.feedforward,
@@ -91,5 +92,5 @@ def load(directory):
                         pytree.treespec_loads(about["out_spec"]))
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     modules = {processor: modules[processor] for processor in devices if processor in modules}
-    return Scheduled(exported, modules, devices, about["output_processor"], about["channels"],
+    return Scheduled(exported, modules, devices, about["machines"], about["output_processor"], about["channels"],
                      about["inputs"], about["feedforward"])

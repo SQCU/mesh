@@ -2,16 +2,19 @@
 import ast
 import collections
 import copy
+import ctypes
 import dataclasses
 import hashlib
 import itertools
 import json
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from multiprocessing.shared_memory import SharedMemory
 
 import torch
 from torch import nn
@@ -26,7 +29,7 @@ from torch._inductor import metrics
 from torch._inductor.graph import GraphLowering
 from torch._ops import OpOverload
 
-from mesh_compiler import archive, ir, lower_inductor
+from mesh_compiler import archive, bridge, ir, lower_inductor
 from mesh_compiler.devices import TO_COPY
 from mesh_compiler.driver import compile_module
 from mesh_compiler.runtime import Program
@@ -239,13 +242,18 @@ def index(rows, columns, high):
     return torch.randint(0, high, (rows, columns))
 
 
-ONE = {"cpu": "cpu"}
-TWO, THREE = {"p0": "cpu", "p1": "cpu"}, {"p0": "cpu", "p1": "cpu", "p2": "cpu"}
-MIXED = {"cpu": "cpu", "gpu": "mps"}
+def on(machine, devices):
+    return {name: (machine, device) for name, device in devices.items()}
+
+
+ONE = on(0, {"cpu": "cpu"})
+TWO, THREE = on(0, {"p0": "cpu", "p1": "cpu"}), on(0, {"p0": "cpu", "p1": "cpu", "p2": "cpu"})
+MIXED = on(0, {"cpu": "cpu", "gpu": "mps"})
 BATCH = {"x": {0: torch.export.Dim("batch", min=2, max=64)}}
 EXPERTS = {"experts.0": "p1", "experts.1": "p1", "experts.2": "p2", "experts.3": "p2"}
 EXPERTS_MIXED = {"experts.0": "gpu", "experts.1": "gpu"}
 POSITIVE = torch.full((2, 8), 0.5)
+torch.manual_seed(0)
 GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
 
 CASES = [
@@ -275,7 +283,7 @@ CASES = [
      {"processors": TWO, "placement": lambda: round_robin("p0", "p1")}),
     ("mixture of experts | 3 processors", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
      {"processors": THREE, "placement": lambda: by_module(EXPERTS, "p0"), "expect_on": EXPERTS}),
-    ("mlp | all on mps", MLP, [(r(5, 16),)], {"processors": {"gpu": "mps"}, "needs_mps": True}),
+    ("mlp | all on mps", MLP, [(r(5, 16),)], {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("conv | conv on mps, rest cpu", ConvNet, [(r(2, 3, 12, 12),)],
      {"processors": MIXED, "needs_mps": True,
       "placement": lambda: by_target({"convolution": "gpu", "p_features": "gpu"}, "cpu")}),
@@ -496,10 +504,13 @@ def save_for_review(stem, program):
     archive.save(EMITTED / f"{stem}.archive", program)
 
 
-def build(name):
+def build(name, machines=None):
     _, factory, calls, options = next(case for case in CASES if case[0] == name)
     options = {k: v for k, v in options.items() if k not in OPTION_FLAGS}
     processors = options.pop("processors", ONE)
+    if machines:
+        processors = {processor: (machines[bool(place)], device)
+                      for place, (processor, (_, device)) in enumerate(processors.items())}
     placement = options.pop("placement", lambda: lambda node: next(iter(processors)))()
     torch.manual_seed(0)
     module = factory().eval()
@@ -601,8 +612,9 @@ def check_imports():
         assert not reach(module) & (lowerers | {"archive"}), f"{module} reaches a lowerer or the archive"
     for module in lowerers | {"archive"} | compile_side:
         assert "runtime" not in reach(module), f"{module} reaches the runtime"
-    for module in lowerers | {"archive", "schedule", "runtime", "placement", "devices", "export"}:
+    for module in lowerers | {"archive", "schedule", "placement", "devices", "export"}:
         assert reach(module) == {"ir"}, f"{module} imports {reach(module)}"
+    assert reach("bridge") == {"ir", "schedule"} and reach("runtime") == {"ir", "bridge", "schedule"}
     tree = ast.parse((HERE / "mesh_compiler" / "runtime.py").read_text())
     imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     imported |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
@@ -621,7 +633,8 @@ def check_imports():
                 types = [a.name for a in node.names if isinstance(getattr(owner, a.name), type)]
                 assert not types, f"{path.stem} imports the type {types} from stage {source}"
     print("  ok: every stage module imports only ir, except driver, which imports the four")
-    print("      compile stages for their functions; the runtime examines no graph")
+    print("      compile stages for their functions, and the runtime, which imports the bridge")
+    print("      module for its channels; the runtime examines no graph")
 
 
 class Checked(nn.Module):
@@ -715,7 +728,121 @@ def check_reload_in_fresh_process():
     print("  ok: loaded and run in a fresh process, matches eager, digests equal the originals")
 
 
+def between(machines, with_inductor):
+    failed = False
+    print(f"machines {machines}: the first processor of a case on the first, the others on the second;")
+    print("max relative error against eager where the results are, `ran` where they are not:")
+    for name, _, _, options in CASES:
+        if len(options.get("processors", ONE)) < 2 or options.get("rejected"):
+            continue
+        if options.get("needs_mps") and not MPS:
+            print(f"{name:34} SKIP (no mps)")
+            continue
+        module, calls, scheduled = build(name, machines)
+        cells = []
+        for path, make in variants(scheduled, with_inductor).items():
+            if make is None:
+                continue
+
+            def outputs(make=make):
+                reference, runner, worst = copy.deepcopy(module), make(), None
+                for args in calls:
+                    with torch.no_grad():
+                        expected = reference(*copy.deepcopy(args))
+                    got = runner(*copy.deepcopy(args))
+                    if got is not None:
+                        worst = max(worst or (0.0, 0.0), errors(expected, got))
+                return worst
+
+            result = within(120, outputs)
+            text, ok = ("ran", True) if result is None else cell(result)
+            failed |= not ok
+            cells.append(f"{path} {text}")
+            if isinstance(result, Exception):
+                print(f"    {path}: {type(result).__name__}: {' '.join(str(result).split())[:300]}")
+        carried = len(bridge.carried(scheduled))
+        print(f"{name:34} {scheduled.channels:3d} channels, {carried:3d} between machines  "
+              + "  ".join(cells), flush=True)
+    sys.exit(1 if failed else 0)
+
+
+RECORD_BYTES = 304
+
+
+def region(node, nodes):
+    mesh, pages = bridge.mesh, 2048
+    header = mesh.Header(magic=0x4d455348, version=120, pgsz=16384, block=1, rows=pages, node=node,
+                         wire_pages=pages // 2, view=1, view_nodes=len(nodes))
+    header.algo_off, header.view_off, header.page_off, header.data_off = (
+        header.pgsz, 2 * header.pgsz, 3 * header.pgsz, 8 * header.pgsz)
+    header.length = header.data_off + pages * header.pgsz
+    shared = SharedMemory(create=True, size=header.length, name=f"mesh_compiler_{os.getpid()}_{node}")
+    shared.buf[:ctypes.sizeof(header)] = bytes(header)
+    for place, other in enumerate(nodes):
+        shared.buf[header.view_off + place * RECORD_BYTES:][:4] = other.to_bytes(4, "little")
+    context = mesh.Context()
+    mesh.check(mesh.LIB.mesh_attach(ctypes.byref(context), f"/{shared.name}".encode()))
+    return shared, context
+
+
+def carry(contexts):
+    mesh, wake = bridge.mesh, bridge.SYSTEM.os_sync_wake_by_address_all
+    headers = [mesh.Header.from_address(context.M) for context in contexts]
+    algos = [mesh.Algo.from_address(context.M + header.algo_off) for context, header in zip(contexts, headers)]
+    for algo in algos:
+        if algo.retired == algo.published != algo.released:
+            algo.released = algo.published
+            wake(ctypes.addressof(algo) + mesh.Algo.released.offset, 8, bridge.SHARED)
+    if not all(algo.published != algo.retired for algo in algos) or algos[0].group != algos[1].group:
+        return
+    for place in range(algos[0].plans):
+        states = [mesh.State.from_address(context.M + ctypes.c_uint64.from_address(
+            context.M + algo.table + 8 * place).value) for context, algo in zip(contexts, algos)]
+        lists = [(mesh.Hop * state.entries).from_address(context.M + state.hops)
+                 for context, state in zip(contexts, states)]
+        if not states[0].entries:
+            continue
+        source = int(lists[1][0].direction == mesh.SEND)
+        (sender, sends, origin, top), (receiver, receives, target, _) = [
+            (states[k], lists[k], contexts[k].M + headers[k].data_off, headers[k]) for k in (source, 1 - source)]
+        completion = ctypes.c_uint64.from_address(origin - top.data_off + sends[0].count)
+        supplied = ctypes.c_uint64.from_address(origin - top.data_off + sends[0].word).value
+        execution = completion.value // len(sends)
+        if min(supplied, sender.executions, receiver.executions) <= execution:
+            continue
+        there = target - headers[1 - source].data_off
+        for sent, landed in zip(sends, receives, strict=True):
+            assert sent.bytes == landed.bytes and landed.pages == len(receives), "the two ends' entries differ"
+            assert (sent.node, landed.node) == (1 - source, source), "an entry names the wrong neighbour"
+            ctypes.memmove(target + landed.page * top.pgsz, origin + sent.page * top.pgsz, sent.bytes)
+            ctypes.c_uint64.from_address(there + landed.word).value ^= 1 << (landed.field + (execution & 1))
+        count = ctypes.c_uint64.from_address(there + receives[0].count)
+        count.value += len(receives)
+        wake(ctypes.addressof(count), 8, bridge.SHARED)
+        completion.value += len(sends)
+
+
+def check_between_machines(with_inductor):
+    nodes = [3, 5]
+    shared, contexts = zip(*(region(node, nodes) for node in nodes))
+    command = [sys.executable, str(HERE / "samples.py"), "--machines", "3", "5"] + ["--fast"] * (not with_inductor)
+    runs = [subprocess.Popen(command, stdout=subprocess.PIPE, text=True,
+                             env={**os.environ, "MESH_REGION": f"/{region_.name}", "MESH_GROUP": "1"})
+            for region_ in shared]
+    while any(run.poll() is None for run in runs):
+        carry(contexts)
+    for node, run, region_ in zip(nodes, runs, shared):
+        print("".join(f"  {node}: {line}" for line in run.stdout))
+        region_.unlink()
+    assert not any(run.returncode for run in runs), "a machine's check failed"
+    print("  ok: two processes, each with a region of the bridge's layout, their entries carried by")
+    print("      this process as rdma/mesh-flow.c link_send_drain and link_receive_drain carry them")
+
+
 def main():
+    if "--machines" in sys.argv:
+        at = sys.argv.index("--machines")
+        between([int(node) for node in sys.argv[at + 1:at + 3]], "--fast" not in sys.argv)
     if "--digests" in sys.argv:
         print(json.dumps({name: digests(build(name)[2].modules) for name in KEY_CASES}))
         return
@@ -769,6 +896,8 @@ def main():
         check_shared_storage()
     print("torch.export.save of the scheduled programs, reloaded in a fresh process:")
     check_reload_in_fresh_process()
+    print("processors on two machines, the bridge's part done here:")
+    check_between_machines(with_inductor)
     sys.exit(1 if failed else 0)
 
 
