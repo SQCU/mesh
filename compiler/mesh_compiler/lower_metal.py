@@ -442,11 +442,13 @@ class Lowering:
                                  groups))
         self.vertices.append(nodes)
 
+    def copying(self, bind, form, target, linear):
+        lines, names = unravel(linear, form.shape, "i")
+        return lines + [f"{target.read(bind, names, True)} = {form.read(bind, names)};"]
+
     def store(self, form, target):
         bind = Bound()
-        lines, names = unravel("p.x", form.shape, "i")
-        lines.append(f"{target.read(bind, names, True)} = {form.read(bind, names)};")
-        self.dispatch(bind, lines, (math.prod(form.shape), 1, 1))
+        self.dispatch(bind, self.copying(bind, form, target, "p.x"), (math.prod(form.shape), 1, 1))
 
     def multiply(self, form, target):
         bind, kind = Bound(), self.types[form.dtype]
@@ -1318,11 +1320,15 @@ class Native(Lowering):
     # design/compilation-composition-change-request.md, Performance obligation
     def updated(self, value, source, domain, key, given, added):
         kind, made, bind = self.types[value.dtype], self.fresh(value.dtype, value.shape), Bound()
-        self.store(source, made)
+        count, first = math.prod(value.shape), []
+        if count < GRAIN:
+            first = [f"for (uint e = 0; e < {count}; e++) {{", *self.copying(bind, source, made, "e"), "}"]
+        else:
+            self.store(source, made)
         lines, names = unravel("q", domain, "c")
         out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
         x = self.given(bind, given, names, kind == "double")
-        self.dispatch(bind, [f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
+        self.dispatch(bind, [*first, f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
                              f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
         return made
 
