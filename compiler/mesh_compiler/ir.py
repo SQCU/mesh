@@ -57,3 +57,4 @@ class Scheduled:
     inputs: dict
     feedforward: list
     carried: list
+    engines: dict

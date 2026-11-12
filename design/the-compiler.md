@@ -25,6 +25,11 @@ Three things are mesh's and are added to it:
    - M. Abadi et al., TensorFlow, arXiv:1603.04467, section 3, "Devices": "Device names are composed of pieces that
      identify the device's type, the device's index within the worker," and "an identification of the job and task of
      the worker"; "Example device names are "/job:localhost/device:cpu:0" or "/job:worker/task:17/device:gpu:3"."
+   - A device may name an engine that is not a torch device: `(machine, 'ane')` is the machine's Neural Engine, reached
+     through Core ML; "the device's type" is read as covering it. The values of such a processor that `export`,
+     `on_devices` and `schedule` handle are host tensors: `Scheduled.devices` holds the host for it and
+     `Scheduled.engines` is `{processor: engine}`, which the archive saves and loads. The engine is where the
+     processor's function runs.
 2. **A channel between two machines is carried by the bridge.** Where a `send` and its `recv` are on processors of
    different machines, `send` writes the tensor's pages to the bridge and `recv` returns a tensor over the pages
    received.
@@ -60,6 +65,26 @@ Three things are mesh's and are added to it:
    `Program`. (Done: mesh 297c3cda, 8e78b145, 16681b92, 3d51955d, 0d70ec49. The four examples match eager execution on
    two GPU processors, worst relative error 2.3e-06; 11 sharded cases of the check pass on every path.)
 4. `lower` for Metal: a function of `Scheduled` that returns one function per processor.
+   - Core ML: `lower_coreml.lower` returns a function for each processor whose engine is `ane`. The processor's graph,
+     in scheduled order, is cut at each `send`, `recv` and copy to another device, which the function calls as torch
+     does. Each run of nodes between two cuts is one ML Program, written by the module as the protobuf of coremltools
+     9.0 `mlmodel/format/MIL.proto` and `Model.proto` (coremltools is not imported), compiled by `MLModel
+     compileModelAtURL:` when `lower` runs and loaded with `MLComputeUnitsCPUAndNeuralEngine`.
+     - State that no output mutates is a constant of the program, and a node whose operands are all constants is
+       evaluated when `lower` runs. A floating value is float16 inside the program; a float32 tensor that enters or
+       leaves it is converted by a `cast` operation of the program.
+     - An argument is an `MLMultiArray` over the caller's pages (MLMultiArray.h: "Creates the object with existing data
+       without copy."). A result's pages are proposed as its output backing; MLPredictionOptions.h: "The framework may
+       not use the specified backing object and instead allocates one by itself if the outputBacking dictionary doesn't
+       contain the entry for the feature name, the model doesn't support the user allocated buffers, or in the batch
+       prediction mode." Where it does not, the result is transferred into those pages (`transferToMultiArray:`) and
+       the function's `transferred` names the model.
+     - Where an operation runs is Core ML's choice. The function's `plan()` is MLComputePlan's preferred and supported
+       devices per operation (MLComputePlan.h: "The anticipated compute devices that would be used for executing an ML
+       Program operation").
+   - `driver.lowered(scheduled, lowerings)` takes each processor's function from the lowering the caller gives for its
+     device's type or its engine, `{'mps': lower_metal.lower, 'ane': lower_coreml.lower}`; a processor with none keeps
+     its GraphModule.
 5. `rdma/mesh_compile.py` and metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive` are
    deleted when no example calls them.
 

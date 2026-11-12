@@ -7,6 +7,7 @@ from .ir import RECV, SEND
 
 TO_COPY = torch.ops.aten._to_copy.default
 HOST = torch.device("cpu")
+ENGINES = ("ane",)
 
 
 def copied(graph, value, device, processor):

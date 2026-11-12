@@ -50,6 +50,7 @@ def save(directory, scheduled):
         "output_processor": scheduled.output_processor,
         "processors": {processor: str(device) for processor, device in scheduled.devices.items()},
         "machines": scheduled.machines,
+        "engines": scheduled.engines,
         "inputs": scheduled.inputs,
         "channels": scheduled.channels,
         "feedforward": scheduled.feedforward,
@@ -109,4 +110,4 @@ def load(directory):
     carried = [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
                for channel, sender, receiver, dtype, shape, stride in about["carried"]]
     return Scheduled(exported, modules, devices, about["machines"], about["output_processor"], about["channels"],
-                     about["inputs"], about["feedforward"], carried)
+                     about["inputs"], about["feedforward"], carried, about["engines"])
