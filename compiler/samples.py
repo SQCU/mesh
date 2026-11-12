@@ -565,7 +565,8 @@ def errors(reference, got):
         if apart.isnan().any() or apart.isinf().any():
             return float("inf"), float("inf")
         difference = apart.max().item() if a.numel() else 0.0
-        scale = a.abs().max().item() if a.numel() else 0.0
+        finite = a[a.isfinite()]
+        scale = finite.abs().max().item() if finite.numel() else 0.0
         worst_abs = max(worst_abs, difference)
         worst_rel = max(worst_rel, difference / max(scale, 1e-12))
     return worst_abs, worst_rel
