@@ -340,15 +340,19 @@ CASES = [
      {"processors": TWO, "sharded": True,
       "placement": lambda: megatron_with({(BMM, (2, 8, 32)): (1, SHARDS, (1, 3))})}),
     ("megatron | scores whole on p1", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
-     {"processors": TWO, "sharded": True, "placement": lambda: megatron_with({(BMM, (8, 8, 8)): "p1"})}),
+     {"processors": TWO, "sharded": True, "placement": lambda: megatron_with({(BMM, (8, 8, 8)): (0, ("p1",), None)})}),
     ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
      {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
-    ("parallel layers | 3:1, cpu/mps", pl.Inference, [(index(2, 8, 64),)],
-     {"processors": on(0, {"p0": "cpu", "p1": "mps"}), "sharded": True, "needs_mps": True,
+    ("parallel layers | units 3:1, mps", pl.Inference, [(index(2, 8, 64),)],
+     {"processors": on(0, {"p0": "mps", "p1": "mps"}), "sharded": True, "needs_mps": True,
       "placement": lambda: pl.placement(SHARDS, {"blocks_0": (3, 1)})}),
     ("sequence split | 2 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
-     {"processors": TWO, "sharded": True, "placement": lambda: cp.placement(SHARDS)}),
+     {"processors": TWO, "sharded": True, "placement": lambda: cp.placement(SHARDS, None)}),
     ("sequence split | 3 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
+     {"processors": THREE, "sharded": True, "placement": lambda: cp.placement(tuple(THREE), None)}),
+    ("sequence striped | 2 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "placement": lambda: cp.placement(SHARDS)}),
+    ("sequence striped | 3 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
      {"processors": THREE, "sharded": True, "placement": lambda: cp.placement(tuple(THREE))}),
     ("experts | 2 shards", lambda: ep.MoE(2), [(r(2, 6, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: ep.placement(SHARDS, ep.MoE(2).slots)}),
@@ -384,11 +388,46 @@ def call_nodes(graph):
     return [n for n in graph.nodes if n.op == "call_function"]
 
 
+ATEN = torch.ops.aten
+CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scatter.default
+PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
+          ATEN.new_zeros.default}
+BLOCK = ("dimension", "block", "counts", "displs")
+
+
+def copies(node):
+    return node.target is TO_COPY and "device" in node.kwargs
+
+
+def check_block(sent, arrived):
+    assert [sent.meta.get(key) for key in BLOCK] == [arrived.meta.get(key) for key in BLOCK], "a channel's two ends"
+    if "counts" not in arrived.meta:
+        return
+    dimension, block, counts, displs = (arrived.meta[key] for key in BLOCK)
+    assert arrived.meta["val"].shape[dimension] == counts[block], "a block's size is not its count"
+    value, readers = sent.args[0], list(arrived.users)
+    if copies(value):
+        value = value.args[0]
+    if len(readers) == 1 and copies(readers[0]):
+        arrived, readers = readers[0], list(readers[0].users)
+    places = []
+    for reader in readers:
+        if reader.target is CAT and reader.args[1] == dimension:
+            before = reader.args[0][:reader.args[0].index(arrived)]
+            places.append(sum(piece.meta["val"].shape[dimension] for piece in before))
+        elif reader.target is SLICE_SCATTER and reader.args[1] is arrived:
+            places.append(reader.args[3])
+    if not places:
+        sliced = len(counts) > 1 and value.target is SLICE and value.args[1] == dimension
+        places.append(value.args[2] if sliced else 0)
+    assert places == [displs[block]] * len(places), "a block is not placed at its displacement"
+
+
 def check_ir(scheduled, expect_on=None, sharded=False):
     exported = scheduled.exported.graph_module.graph
     assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
     original = {n.name: n.target for n in call_nodes(exported)}
-    where, added, sender, reader, ends = {}, [], {}, {}, {}
+    where, added, sender, reader, ends, shards = {}, [], {}, {}, {}, {}
     for processor, module in scheduled.modules.items():
         module.graph.lint()
         for node in module.graph.nodes:
@@ -401,9 +440,12 @@ def check_ir(scheduled, expect_on=None, sharded=False):
             assert node.meta["processor"] == processor, (node, processor)
             if node.op != "call_function":
                 continue
-            if node.name in original and node.target is original[node.name]:
+            if node.name in original and (node.target is original[node.name] or sharded):
                 assert node.name not in where, f"{node.name} scheduled twice"
                 where[node.name] = processor
+            elif node.meta.get("of") in original:
+                assert processor not in shards.setdefault(node.meta["of"], set()), f"{node.name}: two shards on {processor}"
+                shards[node.meta["of"]].add(processor)
             else:
                 added.append(node)
             channel = ir.channel_of(node)
@@ -421,17 +463,26 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     devices, machines, host = scheduled.devices, scheduled.machines, torch.device("cpu")
     crossing = sum(devices[sender[c]] != devices[reader[c]] if machines[sender[c]] == machines[reader[c]]
                    else (devices[sender[c]] != host) + (devices[reader[c]] != host) for c in sender)
-    copies = [n for n in added if n.target is TO_COPY and "device" in n.kwargs]
+    copied = [n for n in added if copies(n)]
     assert sender.keys() == reader.keys() == set(range(scheduled.channels)), "channel numbering"
     assert all(sender[c] != reader[c] for c in sender), "a send and its recv on one processor"
-    assert len(copies) == crossing, "device copies differ from cross-device channels"
-    if not sharded:
+    assert len(copied) == crossing, "device copies differ from cross-device channels"
+    if sharded:
+        assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
+        assert where.keys() | shards.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
+        assert {n.target for n in added} <= PLACED, "a node that neither export nor a collective produced"
+        sent = [end[ir.SEND].args[0] for end in ends.values()]
+        values = {(sender[c], (v.args[0] if copies(v) else v).name, reader[c]) for c, v in zip(ends, sent)}
+        assert len(values) == scheduled.channels, "channels differ from (value, reading processor) pairs"
+        for end in ends.values():
+            check_block(end[ir.SEND], end[ir.RECV])
+    else:
         assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
         where["output"] = scheduled.output_processor
         pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
                  if where[u.name] != where[n.name]}
         assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
-        assert len(added) == 2 * scheduled.channels + len(copies), "a node that export did not produce"
+        assert len(added) == 2 * scheduled.channels + len(copied), "a node that export did not produce"
     if len(scheduled.modules) == 1:
         assert not added and not Program(scheduled).argument_queues, "1-processor program differs"
 
@@ -440,7 +491,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     edges = [(at[a], at[b]) for order in orders for a, b in zip(order, order[1:])]
     edges += [(at[end[ir.SEND]], at[end[ir.RECV]]) for end in ends.values()]
     assert len(set(mesh_graph.components(len(at), edges))) == len(at), "the per-processor orders deadlock"
-    return len(original), len(copies)
+    return len(original), len(copied)
 
 
 def fx_pass(module):
@@ -473,7 +524,7 @@ def canonical(module):
     return [[node.op, literal(node.target) if node.op == "call_function" else None,
              literal(list(node.args)), literal(dict(node.kwargs)),
              None if node.op == "output" else described(node.meta.get("val")),
-             node.meta.get("processor")] for node in module.graph.nodes]
+             node.meta.get("processor"), [node.meta.get(key) for key in BLOCK]] for node in module.graph.nodes]
 
 
 def digests(modules):

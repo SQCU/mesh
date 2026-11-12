@@ -11,7 +11,9 @@ from torch.export.graph_signature import (ConstantArgument, ExportGraphSignature
                                           InputSpec, OutputKind, OutputSpec, TensorArgument)
 from torch.utils import _pytree as pytree
 
-from .ir import Exported, Scheduled
+from .ir import RECV, Exported, Scheduled, channel_of
+
+BLOCK = ("dimension", "block", "counts", "displs")
 
 
 def wrap(module, constants):
@@ -49,6 +51,8 @@ def save(directory, scheduled):
         "feedforward": scheduled.feedforward,
         "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
+        "blocks": {channel_of(node): [node.meta[key] for key in BLOCK] for module in scheduled.modules.values()
+                   for node in module.graph.nodes if node.target is RECV and "counts" in node.meta},
         "tokens": exported.tokens,
         "user_inputs": exported.user_inputs,
         "outputs": [[kind.name, key] for kind, key in exported.outputs],
@@ -86,6 +90,10 @@ def load(directory):
         about = json.loads(extra["scheduled.json"])
         targets = about["inputs"][path.stem]
         modules[path.stem] = restore(program, path.stem, targets)
+        for node in modules[path.stem].graph.nodes:
+            if str(channel_of(node)) in about["blocks"]:
+                dimension, block, counts, displs = about["blocks"][str(channel_of(node))]
+                node.meta.update(zip(BLOCK, (dimension, block, tuple(counts), tuple(displs))))
         for spec, target in zip(program.graph_signature.input_specs, targets, strict=True):
             if spec.kind == InputKind.CONSTANT_TENSOR:
                 state[target] = (spec.target, program.constants[spec.target])

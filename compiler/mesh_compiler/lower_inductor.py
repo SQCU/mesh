@@ -35,7 +35,7 @@ def lower_recv_strided(*arguments):
     return result
 
 
-def adapt(module):
+def adapt(module, device, carried):
     module = copy.deepcopy(module)
     graph = module.graph
     sent, receives = [], False
@@ -56,7 +56,7 @@ def adapt(module):
             channel, value = node.args[0], node.meta["val"]
             node.target = RECV_STRIDED
             node.args = (channel, list(value.shape), list(value.stride()), value.dtype,
-                         value.device)
+                         torch.device("cpu") if channel in carried else device)
             receives = True
     output = next(n for n in graph.nodes if n.op == "output")
     output.args = (tuple(output.args[0]) + tuple(dict.fromkeys(sent)),)
@@ -65,9 +65,9 @@ def adapt(module):
 
 
 def lower(scheduled):
-    compiled = {}
+    compiled, carried = {}, {channel for channel, *_ in scheduled.carried}
     for processor, module in scheduled.modules.items():
-        adapted, receives = adapt(module)
+        adapted, receives = adapt(module, scheduled.devices[processor], carried)
         options = {"assume_unaligned_fallback_output": True} if receives else None
         compiled[processor] = torch.compile(adapted, backend="inductor", options=options)
     return compiled

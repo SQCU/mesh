@@ -20,6 +20,8 @@ ATEN = torch.ops.aten
 ADD, ADDMM, CAT, MM, SLICE = (ATEN.add.Tensor, ATEN.addmm.default, ATEN.cat.default, ATEN.mm.default,
                               ATEN.slice.Tensor)
 EXPAND, RESHAPE, VIEW = ATEN.expand.default, ATEN.reshape.default, ATEN.view.default
+SLICE_SCATTER, ZEROS = ATEN.slice_scatter.default, ATEN.new_zeros.default
+STRIPED = "striped"
 
 
 def operands(node):
@@ -46,6 +48,8 @@ def call(graph, target, arguments, processor):
 
 # design/unequal-shards-change-request.md items 1 and 15
 def counts(extent, units, shards):
+    if units == STRIPED:
+        return STRIPED
     if units is None:
         chunk = -(-extent // shards)
         return tuple(max(0, min(chunk, extent - chunk * j)) for j in range(shards))
@@ -67,34 +71,64 @@ def folded(graph, value, at, repeats, periods, dimension, sizes, processors):
             for n, processor in zip(arrived, processors)]
 
 
-# design/unequal-shards-change-request.md items 2, 9 and 12
+# design/unequal-shards-change-request.md item 8
+def interleaved(graph, pieces, dimension, processor):
+    whole = list(shape(pieces[0]))
+    whole[dimension] = sum(shape(piece)[dimension] for piece in pieces)
+    value = call(graph, ZEROS, (pieces[0], whole), processor)
+    for residue, piece in enumerate(pieces):
+        value = call(graph, SLICE_SCATTER, (value, piece, dimension, residue, whole[dimension], len(pieces)), processor)
+    return value
+
+
+# design/unequal-shards-change-request.md items 2, 3, 8, 9 and 12
 def reshard(graph, value, dimension, sizes, processors):
     held, extents, holders, nodes = value
     if (held, extents, holders) == (dimension, sizes, processors):
         return nodes
-    if len(processors) == 1:
-        dimension = None
-    if held is not None and (whole := sum(shape(n)[held] for n in nodes)) > sum(extents):
+    if len(processors) == 1 or dimension is None:
+        dimension, sizes = None, None
+    if held is not None and extents != STRIPED and (whole := sum(shape(n)[held] for n in nodes)) > sum(extents):
         return folded(graph, value, held, whole // sum(extents), extents, dimension, sizes, processors)
-    if dimension not in (None, held) and (whole := shape(nodes[0])[dimension]) > sum(sizes):
+    if dimension not in (None, held) and sizes != STRIPED and (whole := shape(nodes[0])[dimension]) > sum(sizes):
         return folded(graph, value, dimension, whole // sum(sizes), [sum(sizes)] * len(nodes), dimension, sizes,
                       processors)
-    bounds = list(itertools.accumulate(sizes or (), initial=0))
-    starts = list(itertools.accumulate(extents or (), initial=0))
+    if held == dimension is not None and STRIPED in (extents, sizes):
+        return [reshard(graph, (None, None, (processor,), [node]), dimension, sizes, processors)[j]
+                for j, (processor, node) in enumerate(zip(processors, reshard(graph, value, None, None, processors)))]
+    if sizes == STRIPED:
+        given = tuple(len(range(j, shape(nodes[0])[dimension], len(processors))) for j in range(len(processors)))
+        displs = tuple(range(len(processors)))
+    else:
+        given, displs = sizes, tuple(itertools.accumulate(sizes or (), initial=0))
+    starts = list(itertools.accumulate(() if extents in (None, STRIPED) else extents, initial=0))
     arrived = []
     for j, processor in enumerate(processors):
         pieces = []
         for i, (holder, node) in enumerate(zip(holders, nodes)):
-            if dimension is not None:
-                low, high = bounds[j], bounds[j + 1]
+            if sizes == STRIPED:
+                node = call(graph, SLICE, (node, dimension, j, shape(node)[dimension], len(processors)),
+                            holder or processor)
+            elif dimension is not None:
+                low, high = displs[j], displs[j + 1]
                 if held == dimension:
                     low, high = max(low, starts[i]) - starts[i], min(high, starts[i + 1]) - starts[i]
-                    if low >= high and bounds[j] < bounds[j + 1]:
+                    if low >= high and displs[j] < displs[j + 1]:
                         continue
                 if (low, high) != (0, shape(node)[dimension]):
                     node = call(graph, SLICE, (node, dimension, low, max(low, high)), holder or processor)
             pieces.append(node)
-        arrived.append(pieces[0] if len(pieces) == 1 else call(graph, CAT, (pieces, held), processor))
+        if dimension in (None, held):
+            joined = tuple(shape(piece)[held] for piece in pieces) if held is not None else ()
+            placed = (tuple(range(len(pieces))) if extents == STRIPED else
+                      tuple(itertools.accumulate(joined, initial=0))[:-1])
+            blocks = [(held, k, joined, placed) for k in range(len(joined))]
+        else:
+            blocks = [(dimension, j, given, displs[:len(given)])] * len(pieces)
+        for piece, block in zip(pieces, blocks):
+            piece.meta.setdefault("blocks", {})[processor] = block
+        arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
+                       if extents == STRIPED else call(graph, CAT, (pieces, held), processor))
     return arrived
 
 
@@ -144,6 +178,10 @@ RULES = {
 def viewed(value, whole, new):
     dimension, sizes, processors, nodes = value
     stride = math.prod(whole[dimension + 1:])
+    if sizes == STRIPED:
+        at = [math.prod(new[d + 1:]) for d in range(len(new))].index(stride)
+        few, many = sorted((whole[dimension], new[at]))
+        return (at, value) if few == many or (many % few, few % len(processors)) == (0, 0) else None
     edges = [stride * edge for edge in itertools.accumulate(sizes)]
     for at in reversed(range(len(new))):
         unit = math.prod(new[at + 1:])
@@ -191,8 +229,10 @@ def partitioned(graph, node, held, want, replaced):
         shard = graph.node_copy(node, lambda n: next(arguments))
         if node.target in (EXPAND, VIEW):
             local = list(shard.args[1])
-            local[along] = out[along] * sizes[j] // sum(sizes)
+            local[along] = (len(range(j, out[along], len(processors))) if sizes == STRIPED else
+                            out[along] * sizes[j] // sum(sizes))
             shard.args = (shard.args[0], local)
+        shard.meta["of"] = node.name
         shards.append(evaluated(shard, processor))
     replaced.append(node)
     if along >= 0:
@@ -232,6 +272,8 @@ def place(graph_module, placement):
     channels = 0
     for node in placed:
         channels += insert_send_recv(graph, node, channels)
+    for node in graph.nodes:
+        node.meta.pop("blocks", None)
     graph_module.recompile()
     return graph_module, placed[-1].meta["processor"], channels
 
@@ -249,10 +291,14 @@ def insert_send_recv(graph, node, first):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
     for channel, (processor, users) in enumerate(away.items(), first):
         with graph.inserting_after(node):
-            graph.call_function(SEND, (node, channel)).meta["processor"] = here
+            sent = graph.call_function(SEND, (node, channel))
+            sent.meta["processor"] = here
         with graph.inserting_before(users[0]):
             arrived = graph.call_function(RECV, (channel,))
             arrived.meta.update(processor=processor, val=value)
+        if processor in node.meta.get("blocks", ()):
+            for end in (sent, arrived):
+                end.meta.update(zip(("dimension", "block", "counts", "displs"), node.meta["blocks"][processor]))
         for user in users:
             user.replace_input_with(node, arrived)
     return len(away)

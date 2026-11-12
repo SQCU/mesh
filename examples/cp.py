@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# design/the-compiler.md, order 3; design/unequal-shards-change-request.md items 9 and 15
+# design/the-compiler.md, order 3; design/unequal-shards-change-request.md items 8 and 9
 import os
 
 import torch
@@ -10,16 +10,16 @@ from tp import Attention, DIM, arguments, execute
 SEQ = int(os.environ.get('SEQ', '16384'))
 
 
-def placement(processors):
+def placement(processors, units='striped'):
     def choose(node):
         if node.name == 'x' or node.target is torch.ops.aten.bmm.default:
-            return 1, processors, None
+            return 1, processors, units
         return processors[0]
     return choose
 
 
 def main():
-    args = arguments('Attention with its input and its query rows split over processors along the sequence.')
+    args = arguments('Attention with its input and its query rows split over processors in stripes of the sequence.')
     torch.manual_seed(0)
     x = torch.randn(1, SEQ, DIM) / DIM ** 0.5
     return execute(Attention().eval(), (x,), placement, args)
