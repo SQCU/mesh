@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# design/aot-compilation-change-request.md A4 and A10; metal-microbench/docs/measurement.md
+# design/the-compiler.md, order 3; design/aot-compilation-change-request.md A4 and A10
 import argparse
 import io
 import json
@@ -7,8 +7,7 @@ import os
 
 import torch
 
-import mesh_compile as mesh
-import mesh_disk
+import tp
 
 
 HIDDEN = int(os.environ.get('HIDDEN', '1536'))
@@ -30,6 +29,8 @@ def arguments(description, steps=STEPS):
 
 
 def execute(block, inputs, args):
+    import mesh_compile as mesh
+    import mesh_disk
     if args.input:
         inputs = torch.load(args.input, map_location='cpu', weights_only=True)
     run = mesh.load(args.load) if args.load else mesh.program(block, *inputs)
@@ -80,19 +81,19 @@ class Chain(torch.nn.Module):
         return x, y
 
 
+def placement(processors):
+    def choose(node):
+        if node.name in ('x', 'y') or node.target is torch.ops.aten.expand.default:
+            return 0, processors, None
+        return processors[0]
+    return choose
+
+
 def main():
-    args = arguments('A compiled all-reduce dependency chain with optional interleaved numerical work.',
-                     int(os.environ.get('STEPS', '3')))
-    torch.manual_seed(0)
-    block = None
-    if not args.load:
-        model = Crossing().to(device=args.device, dtype=torch.float16)
-        def placement(gm, examples):
-            return mesh.Placement(list(range(len(args.nodes))), args.nodes,
-                                  {node.name: (0, -1) for node in gm.graph.nodes if node.op == 'placeholder'})
-        block = Chain(mesh.Function(model, placement, mesh.unit, device=args.device))
-    return execute(block, (torch.zeros(len(args.nodes), HIDDEN, dtype=torch.float16),
-                           torch.zeros(len(args.nodes), HIDDEN, dtype=torch.float16)), args)
+    args = tp.arguments('A chain of all-reduces of a sharded value, with optional numerical work between them.')
+    model = Chain(Crossing()).to(dtype=torch.float16).eval()
+    inputs = tuple(torch.zeros(len(args.nodes), HIDDEN, dtype=torch.float16) for _ in range(2))
+    return tp.execute(model, inputs, placement, args)
 
 
 if __name__ == '__main__':

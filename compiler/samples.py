@@ -258,10 +258,11 @@ torch.manual_seed(0)
 GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
 
 os.environ.update(DIM="32", HEADS="4", FFN="48", LAYERS="2", BATCH="2", SEQ="8", FF_MULT="2", VOCAB="64",
-                  EXPERTS="4", TOP_K="2", TOKENS="12")
+                  EXPERTS="4", TOP_K="2", TOKENS="12", CROSSINGS="3", HIDDEN="16")
 sys.path += [str(HERE.parent / "examples"), str(HERE.parent / "rdma")]
 import mesh_graph
 import cp
+import crossing
 import ep
 import pl
 import tp
@@ -375,6 +376,9 @@ CASES = [
      {"processors": TWO, "sharded": True, "placement": lambda: cp.placement(SHARDS)}),
     ("sequence striped | 3 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
      {"processors": THREE, "sharded": True, "placement": lambda: cp.placement(tuple(THREE))}),
+    ("crossings | 3, each sharded again", lambda: crossing.Chain(crossing.Crossing()).half(),
+     [(r(2, 16).half(), r(2, 16).half())],
+     {"processors": TWO, "sharded": True, "placement": lambda: crossing.placement(SHARDS)}),
     ("experts | 2 shards", lambda: ep.MoE(2), [(r(2, 6, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: ep.placement(SHARDS, ep.MoE(2).slots)}),
     ("experts | 3 shards, one empty", lambda: ep.MoE(3), [(r(3, 4, 32) / 32 ** 0.5,)],

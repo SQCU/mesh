@@ -176,7 +176,8 @@ def execute(model, inputs, placement, args, **told):
         pairs = list(zip(torch.utils._pytree.tree_leaves(expected), torch.utils._pytree.tree_leaves(result),
                          strict=True))
         report['outputs'] = [list(got.shape) for _, got in pairs]
-        report['error'] = max(((got.cpu() - want).abs().max() / want.abs().max()).item() for want, got in pairs)
+        report['error'] = max(((got.cpu().double() - want.double()).abs().max() /
+                               want.double().abs().max().clamp(min=1e-12)).item() for want, got in pairs)
     print(json.dumps(report), flush=True)
     return result
 

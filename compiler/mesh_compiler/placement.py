@@ -362,8 +362,9 @@ def place(graph_module, placement):
         with graph.inserting_before(placed[0] if node.op == "placeholder" else node):
             value = ((None, None, (None,), [node]) if node.op == "placeholder" else
                      partitioned(graph, node, held, want, replaced))
-            if not isinstance(want, str):
-                value = *want, reshard(graph, value, *want)
+        if not isinstance(want, str) and value[:3] != want:
+            with graph.inserting_before(placed[0] if node.op == "placeholder" else node.next):
+                value = *want, reshard(graph, plainly(graph, value), *want)
         return value
 
     mesh_graph.forward(nodes, operands, transfer)
