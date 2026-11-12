@@ -68,6 +68,6 @@ def lower(scheduled):
     compiled, carried = {}, {channel for channel, *_ in scheduled.carried}
     for processor, module in scheduled.modules.items():
         adapted, receives = adapt(module, scheduled.devices[processor], carried)
-        options = {"assume_unaligned_fallback_output": True} if receives else None
+        options = {"layout_optimization": False, **({"assume_unaligned_fallback_output": True} if receives else {})}
         compiled[processor] = torch.compile(adapted, backend="inductor", options=options)
     return compiled
