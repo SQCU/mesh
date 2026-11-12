@@ -1,6 +1,7 @@
 # Change requests: which are outstanding
 
-Every line below is a reading of the code as committed at mesh 434b9955 and metal-microbench 0b692ed8, made
+Every line below is a reading of the code as committed at mesh 434b9955 and metal-microbench 0b692ed8, or, for an
+entry the second reader moved, at mesh 6d379b7e, made
 on 2026-11-12, one reader a change request, each clause read sentence by sentence
 ([review-warnings.md](review-warnings.md), rule 6). The readings, with the lines of code each sentence rests on, are in
 metal-microbench `output_data/change-request-audit-20261112/reread.json`; the reading it replaces, made at mesh
@@ -25,12 +26,12 @@ change request follows is [change-requests.md](change-requests.md).
   moved say so, and its readings are `refute.json` beside the others.
 - [requirements-by-stage.md](requirements-by-stage.md) lists the same items under the stage that takes each, with
   each clause quoted.
-- Of 611 items: 200 covered, 396 outstanding, 10 not determined,
+- Of 611 items: 199 covered, 396 outstanding, 11 not determined,
   5 withdrawn. No request has every item covered. All eleven are outstanding.
 
 ## [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 82 items outstanding, 0 not determined, 10 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 82 items outstanding, 0 not determined, 10 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -514,7 +515,7 @@ Withdrawn:
 
 ## [aot-compilation-change-request.md](aot-compilation-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 59 items outstanding, 1 not determined, 50 covered, 2 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 59 items outstanding, 2 not determined, 49 covered, 2 withdrawn.
 
 Outstanding:
 
@@ -892,7 +893,8 @@ Covered:
   - Appendix item 2, change: remove the start's wait and the late-loading port's refusal: covered [2026-11-05, mesh
     e1525cc7]
   - Appendix item 2, change: remove the coordination's Q3′: covered [2026-11-05, mesh 71e060ba]
-  - Appendix item 3 (a slow node, "desynchronization": no handler): covered [2026-11-12, read at mesh 434b9955]
+  - Appendix item 3 (a slow node, "desynchronization": no handler): not determined [2026-11-12]. The readers at
+    mesh 434b9955 and 6d379b7e found no handler for it and named no commit in which the last of the clause landed.
   - Appendix item 4 (no truncation at one end; no handler): covered [2026-11-09, mesh fdae772b]
   - Appendix item 5: one permutation of the whole set per execution: covered [2026-11-05, mesh c2a226b0]
   - Appendix item 5: a page's round rule reads a count that only rises: covered [2026-11-05, mesh 930861b0]
@@ -916,7 +918,7 @@ Withdrawn:
 
 ## [torch-capture-change-request.md](torch-capture-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 26 items outstanding, 0 not determined, 6 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 26 items outstanding, 0 not determined, 6 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1112,7 +1114,7 @@ Covered:
 
 ## [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 29 items outstanding, 5 not determined, 12 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 29 items outstanding, 5 not determined, 12 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1290,7 +1292,7 @@ Covered:
 
 ## [synchronization-signature-change-request.md](synchronization-signature-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 14 items outstanding, 0 not determined, 6 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 14 items outstanding, 0 not determined, 6 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1410,7 +1412,7 @@ Covered:
 
 ## [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 50 items outstanding, 1 not determined, 10 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 50 items outstanding, 1 not determined, 10 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1746,7 +1748,7 @@ Covered:
 
 ## [disjoint-pages-change-request.md](disjoint-pages-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 46 items outstanding, 0 not determined, 28 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 46 items outstanding, 0 not determined, 28 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -2017,7 +2019,7 @@ Withdrawn:
 
 ## [page-queue-change-request.md](page-queue-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 26 items outstanding, 0 not determined, 12 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 26 items outstanding, 0 not determined, 12 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -2188,7 +2190,7 @@ Covered:
 
 ## [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 34 items outstanding, 0 not determined, 32 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 34 items outstanding, 0 not determined, 32 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -2383,7 +2385,7 @@ Covered:
 
 ## [unequal-shards-change-request.md](unequal-shards-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 17 items outstanding, 0 not determined, 29 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 17 items outstanding, 0 not determined, 29 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -2541,7 +2543,7 @@ Withdrawn:
 
 ## [integration-finishing-change-request.md](integration-finishing-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 13 items outstanding, 3 not determined, 5 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 13 items outstanding, 3 not determined, 5 covered, 0 withdrawn.
 
 Outstanding:
 

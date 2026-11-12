@@ -86,7 +86,7 @@ Three things are mesh's and are added to it:
    `Program`. (At mesh 297c3cda, 8e78b145, 16681b92, 3d51955d and 0d70ec49, 2026-11-11, the four examples matched eager execution on
    two GPU processors, worst relative error 2.3e-06; 11 sharded cases of the check passed on every path. The
    order is outstanding until the clauses [change-requests-index.md](change-requests-index.md) lists as outstanding
-   under unequal-shards-change-request.md hold.)
+   under unequal-shards-change-request.md, and under aot-compilation-change-request.md A2 and A4, hold.)
 4. `lower` for Metal: a function of `Scheduled` that returns one function per processor.
    - Core ML: `lower_coreml.lower` returns a function for each processor whose engine is `ane`. The processor's graph,
      in scheduled order, is cut at each `send`, `recv` and copy to another device, which the function calls as torch
