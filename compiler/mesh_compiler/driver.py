@@ -8,6 +8,7 @@ from .export import export
 from .ir import Scheduled
 from .placement import place
 from .schedule import argument_buffers, carried, planned, schedule, unit_cost
+from .signature import signature
 
 
 def compile_module(module, args, processors, placement, cost=unit_cost, **export_options):
@@ -36,3 +37,10 @@ def lowered(scheduled, lowerings):
         functions.update((processor, function) for processor, function in made.items() if processor not in modules)
         scheduled = dataclasses.replace(scheduled, modules=modules)
     return {**scheduled.modules, **functions}
+
+
+# design/synchronization-signature-change-request.md item 1
+def compiled(scheduled, lowerings, executions=1, stored=()):
+    functions = lowered(scheduled, lowerings)
+    made = signature(scheduled, functions, executions, stored)
+    return dataclasses.replace(scheduled, signature=made["record"]), functions

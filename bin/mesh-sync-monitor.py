@@ -30,8 +30,10 @@ PROBES = [
     ('host_wait', 'objc$target::-waitUntilSignaledValue?timeoutMS?:', 'entry', 'arg0', 'arg2', (LOWERED, COUNT)),
     ('host_wait', 'objc$target::-waitUntilCompleted:', 'entry', None, None, (NONE, NONE + 1)),
     ('host_wait', 'pid$target::mesh_host_arrived:', 'return', 'self->plan', 'self->arrives', (COUNT, SUBMISSION)),
+    ('host_wait', 'pid$target::_queue_SimpleQueue_get:', 'return', 'self->queue', None, (0, LOWERED)),
+    ('host_signal', 'pid$target::_queue_SimpleQueue_put:', 'entry', 'arg0', None, (0, LOWERED)),
     ('host_notify', 'objc$target::-notifyListener?atValue?block?:', 'entry', 'arg0', 'arg3', None),
-    ('host_publish', 'pid$target::mesh_host_publish:', 'entry', 'arg1', 'arg3 + 1', None),
+    ('host_publish', 'pid$target::mesh_host_publish:', 'entry', '(arg1 << 20) + arg2', 'arg3 + 1', None),
     ('bridge_start', 'pid$target::mesh_transfers_start:', 'entry', 'arg1', 'arg2', None),
 ]
 FEEDBACK = ('host_signal', 'objc$target::-setSignaledValue?:', 'arg0', 'arg2')
@@ -40,9 +42,16 @@ UNLISTED = [
     'pid$target::dispatch_semaphore_wait:entry',
     'pid$target::os_sync_wait_on_address:entry',
     'pid$target::os_sync_wait_on_address_with_timeout:entry',
+    'pid$target::pthread_cond_wait:entry',
+    'pid$target::pthread_cond_timedwait:entry',
+    'pid$target::nanosleep:entry',
+    'pid$target::usleep:entry',
 ]
+SAVED = ['pid$target::mesh_host_arrived:entry { self->plan = (arg1 << 20) + arg2, self->arrives = arg3 + 1; }',
+         'pid$target::_queue_SimpleQueue_get:entry { self->queue = arg0; }']
+INTERPRETER = 'pid$target::take_gil*:'
 COUNT_KIND = 9
-CLASSES = ('program', 'feedback', 'static', 'bridge', 'interpreter', 'elsewhere')
+CLASSES = ('program', 'feedback', 'static', 'bridge', 'elsewhere')
 
 
 def load(path):
@@ -67,10 +76,13 @@ def classify(processors, operations, node):
             return 'elsewhere'
         if KINDS[p.kind] == 'bridge':
             return 'bridge'
-        if name == 'host_signal':
-            return 'feedback' if KINDS[p.kind] == 'queue' else 'interpreter'
-        return 'interpreter' if name == 'host_wait' and o.object < LOWERED else 'program'
+        return 'feedback' if name == 'host_signal' and KINDS[p.kind] == 'queue' else 'program'
     return [which(o) for o in operations]
+
+
+def probed(operation):
+    return next(row for row in PROBES if row[0] == PRIMITIVES[operation.primitive] and (
+        not row[5] or row[5][0] <= operation.object < row[5][1]))
 
 
 def sequences(processors, operations, which, node):
@@ -108,18 +120,22 @@ def generate(operations, orders, observe, addresses):
         'exit(1);' if observe else 'stop(); exit(1);')
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
-    lines += ['self int inapi, bound;', 'self uint64_t at, cand, objects, plan, arrives;', 'self uint64_t om[uint64_t];',
-              'BEGIN { printf("mesh-sync-monitor: attached\\n"); }',
-              'pid$target::mesh_host_arrived:entry { self->plan = arg1, self->arrives = arg3 + 1; }']
+    lines += ['self int inapi, bound;', 'self uint64_t at, cand, objects, plan, arrives, queue;',
+              'self uint64_t om[uint64_t];', 'BEGIN { printf("mesh-sync-monitor: attached\\n"); }'] + SAVED
+    lines += ['%sentry { self->inapi++; }' % INTERPRETER, '%sreturn /self->inapi/ { self->inapi--; }' % INTERPRETER]
     shapes = [periodic(operations, order) for order in orders]
     local = []
     for order in orders:
         seen = {}
-        local.append({i: seen.setdefault(operations[i].object, len(seen) + 1) for i in order if any(
-            obj for name, _, _, obj, _, _ in PROBES if name == PRIMITIVES[operations[i].primitive])})
-    for name, probe, point, obj, val, objects in PROBES:
-        at, primitive = probe + point, PRIMITIVES.index(name)
+        local.append({i: seen.setdefault(operations[i].object, len(seen) + 1) for i in order
+                      if probed(operations[i])[3]})
+    for row in PROBES:
+        name, probe, point, obj, val, _ = row
+        at = probe + point
         satisfied = ' && arg1 != 0' if point == 'return' else ''
+        if point == 'return':
+            lines.append('%sentry { self->inapi++; }' % probe)
+            lines.append('%sreturn /self->inapi/ { self->inapi--; }' % probe)
         lines.append('%s { this->checked = 0; }' % at)
         lines.append('%s /self->inapi == 0%s/ { this->checked = 1, this->m = 0, this->ob = (uint64_t)(%s), this->va = (uint64_t)(%s), '
                      'this->cand = self->bound ? self->cand : %d, this->lid = self->om[(uint64_t)(%s)] ? self->om[(uint64_t)(%s)] : '
@@ -128,7 +144,7 @@ def generate(operations, orders, observe, addresses):
         for s, (order, (period, executions, steps)) in enumerate(zip(orders, shapes)):
             for k, i in enumerate(order[:period] + order[period * executions:]):
                 o = operations[i]
-                if o.primitive != primitive or objects and not objects[0] <= o.object < objects[1]:
+                if PRIMITIVES[o.primitive] != name or probed(o) is not row:
                     continue
                 where = 'self->at < %d && self->at %% %d == %d' % (period * executions, period, k) if k < period else \
                     'self->at == %d' % (period * executions + k - period)
@@ -145,7 +161,7 @@ def generate(operations, orders, observe, addresses):
                          'self->objects = this->lid; }' % at)
         lines.append('%s /this->checked && this->m/ { printf("mesh-sync-monitor: op %%d %%d %%d %d %%d\\n", tid, '
                      'self->at, this->m, this->va); self->cand = this->m, self->bound = 1, self->at++; }' %
-                     (at, primitive))
+                     (at, PRIMITIVES.index(name)))
         if point == 'entry':
             lines.append('%sentry { self->inapi++; }' % probe)
             lines.append('%sreturn /self->inapi/ { self->inapi--; }' % probe)
@@ -248,7 +264,7 @@ def observed_operations(operations, which, orders, threads, signals, failures):
         taken.add(free[0])
         for at, _, primitive, value in steps:
             i = orders[free[0]][at]
-            valued = any(val for name, _, _, _, val, _ in PROBES if PRIMITIVES[primitive] == name)
+            valued = probed(operations[i])[4]
             seen[i] = mesh_graph.Operation(operations[i].processor, primitive, operations[i].vertex, operations[i].object,
                                            operations[i].execution, value if valued else operations[i].value)
     compiled, unbound = {}, sorted(sorted(values) for values in signals.values())

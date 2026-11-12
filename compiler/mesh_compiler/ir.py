@@ -77,3 +77,4 @@ class Scheduled:
     carried: list
     engines: dict
     plan: object = None
+    signature: bytes = None

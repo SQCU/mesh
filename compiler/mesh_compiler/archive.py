@@ -71,6 +71,8 @@ def save(directory, scheduled):
                      if name in scheduled.inputs[processor]}
         torch.export.save(wrap(module, constants), directory / f"{processor}.pt2",
                           extra_files={"scheduled.json": about})
+    if scheduled.signature:
+        (directory / "signature.record").write_bytes(scheduled.signature)
 
 
 def restore(program, processor, targets):
@@ -112,14 +114,8 @@ def load(directory):
     carried = [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
                for channel, sender, receiver, dtype, shape, stride in about["carried"]]
     plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"])})
+    record = pathlib.Path(directory) / "signature.record"
     return Scheduled(exported, modules, devices, about["machines"], about["output_processor"], about["channels"],
-                     about["inputs"], about["feedforward"], carried, about["engines"], plan)
+                     about["inputs"], about["feedforward"], carried, about["engines"], plan,
+                     record.read_bytes() if record.exists() else None)
 
-
-# design/synchronization-signature-change-request.md item 1
-def save_signature(directory, record):
-    (pathlib.Path(directory) / "signature.record").write_bytes(record)
-
-
-def load_signature(directory):
-    return (pathlib.Path(directory) / "signature.record").read_bytes()

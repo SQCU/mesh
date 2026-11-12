@@ -14,7 +14,7 @@ def copied(graph, value, device, processor):
     node = graph.call_function(TO_COPY, (value,), {"device": device})
     with value.meta["val"].fake_mode:
         arrives = TO_COPY(value.meta["val"], device=device)
-    node.meta.update(processor=processor, val=arrives)
+    node.meta.update(processor=processor, val=arrives, custom={"between": True})
     return node
 
 

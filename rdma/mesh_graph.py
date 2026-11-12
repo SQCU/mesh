@@ -558,3 +558,8 @@ def orderings(edges, commit):
             barred.add(b)
             last[commit[b]] = b
     return barred, fences, waits
+
+
+# M. Lam, PLDI 1988, section 2.3; mesh-graph.h mesh_graph_contract_unrolled
+def unrolled(vertices, edges, copies):
+    return [(copy * vertices + a, copy * vertices + b) for copy in range(copies) for a, b in edges]

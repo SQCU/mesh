@@ -34,7 +34,7 @@ from torch._ops import OpOverload
 
 from mesh_compiler import archive, bridge, ir, lower_coreml, lower_inductor, lower_metal, signature
 from mesh_compiler.devices import TO_COPY
-from mesh_compiler.driver import compile_module, lowered
+from mesh_compiler.driver import compile_module, compiled, lowered
 from mesh_compiler.runtime import Program
 
 TOLERANCE = 1e-4
@@ -1032,14 +1032,16 @@ def check_signatures():
         for (_, primitive), count in made["counts"].items():
             counts[primitive] += count
         assert made["digest"] == signature.signature(scheduled, executions=2)["digest"], "the digest is not a function"
-        assert states["image"] == 2 * scheduled.channels, f"{name}: a channel's wait is not a dependence's image"
+        assert states["image"] == 2 * (scheduled.channels + len(scheduled.modules) - 1), \
+            f"{name}: a wait of a channel or of a processor's arguments is not a dependence's image"
         assert not (states["false"] or states["stronger"] or made["redundant"] or made["uncovered"]
                     or made["unwaited"]), (name, states, made["redundant"], made["uncovered"], made["unwaited"])
         assert states["unmatched"] == counts["host_wait"] - states["image"], name
         print(f"  {name:34} {made['digest'][:12]}  2 executions: {dict(counts)}, {states['image']} waits each a "
               f"dependence's image, {states['unmatched']} waits of torch's copies between devices")
     print(made["space_time"])
-    print("  ok: every channel's wait is the image of its dependence, none redundant, no dependence uncovered")
+    print("  ok: every wait of a channel or of a processor's arguments is the image of its dependence, none")
+    print("      redundant, no dependence uncovered")
     for name in METAL_SIGNED * MPS:
         scheduled = build(name)[2]
         functions = lowered(scheduled, (lower_metal.lower, lower_coreml.lower))
@@ -1059,9 +1061,10 @@ def check_signatures():
 def playback(directory, name, executions, added=False):
     _, _, calls, _ = next(case for case in CASES if case[0] == name)
     scheduled = archive.load(directory)
-    program = Program(scheduled, lowered(scheduled, (lower_metal.lower, lower_coreml.lower)))
+    functions = lowered(scheduled, (lower_metal.lower, lower_coreml.lower))
     print(f"ready {os.getpid()}", flush=True)
     sys.stdin.readline()
+    program = Program(scheduled, functions)
     for _ in range(int(executions)):
         program(*copy.deepcopy(calls[0]))
     if added:
@@ -1080,19 +1083,17 @@ def check_monitored_playback():
     if not MPS or subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode:
         print("  SKIP (no mps, or sudo -n is refused: the monitor runs dtrace under sudo)")
         return
-    name, executions = METAL_SIGNED[0], 3
+    executions = 3
     denied = subprocess.run(["sudo", "-n", "dtrace", "-w", "-q", "-n", "BEGIN { exit(0); }"], capture_output=True,
                             text=True).stderr.strip().splitlines()[-1:]
     observe = ["--observe"] * any("could not enable tracing" in line for line in denied)
     if observe:
         print(f"  dtrace -w (the destructive action that stops the process) is refused here: {denied[0]}; the "
               "monitor observes without it and fails the run at the operation")
-    scheduled = build(name)[2]
-    signed = signature.signature(scheduled, lowered(scheduled, (lower_metal.lower, lower_coreml.lower)), executions)
-    with tempfile.TemporaryDirectory() as directory:
-        archive.save(directory, scheduled)
-        archive.save_signature(directory, signed["record"])
-        for added in (False, True):
+    for name, added in ((METAL_SIGNED[0], False), (METAL_SIGNED[0], True), (METAL_SIGNED[1], False)):
+        scheduled, _ = compiled(build(name)[2], (lower_metal.lower, lower_coreml.lower), executions)
+        with tempfile.TemporaryDirectory() as directory:
+            archive.save(directory, scheduled)
             player = subprocess.Popen([sys.executable, str(HERE / "samples.py"), "--playback", directory, name,
                                        str(executions)] + ["added"] * added, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, text=True)
@@ -1133,7 +1134,7 @@ def reload_case(directory, name):
     module = factory().eval()
     scheduled = archive.load(directory)
     worst = measure(lambda: Program(scheduled), module, calls)
-    saved = mesh_graph.from_record(archive.load_signature(directory))
+    saved = mesh_graph.from_record(scheduled.signature)
     signed = [signature.signature(scheduled)["digest"], bytes(saved.digest).hex()]
     mesh_graph.free(saved)
     print(json.dumps({"abs": worst[0], "rel": worst[1], "digests": digests(scheduled.modules), "signature": signed}))
@@ -1143,11 +1144,10 @@ def check_reload_in_fresh_process():
     for name in FRESH_CASES:
         if "mps" in name and not MPS:
             continue
-        program = build(name)[2]
+        program, _ = compiled(build(name)[2], ())
+        signed = signature.signature(program)
         with tempfile.TemporaryDirectory() as directory:
             archive.save(directory, program)
-            signed = signature.signature(program)
-            archive.save_signature(directory, signed["record"])
             size = sum(f.stat().st_size for f in pathlib.Path(directory).iterdir())
             command = [sys.executable, str(HERE / "samples.py"), "--reload", directory, name]
             done = subprocess.run(command, capture_output=True, text=True, check=True)
