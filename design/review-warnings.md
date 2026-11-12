@@ -152,8 +152,19 @@ turns says so.
 > write another commit hook to, yet again, produce yet another append-only log for whether a document is inlining claims of fact or claims of requirement & whether there is any citation to a block quoted verbatim user turn. these are three different bits, and also are haiku-judgeable from a commit diff alone. a separate, distinct, script, as with the previous stage, must report an appended warning for every commit which is taking such an action, as factual claims without source, like unit tests or asserts, are strongly confirmatory proof that agents are going 'feral' and 'totally ignoring the scope of proper sanctioned work in the repository as usual'.
 
 - **Rule:** bin/mesh-claims-review.py gives Claude Haiku the lines each new commit adds to documents and appends
-  three bits to metal-microbench `output_data/document-claims-commits.jsonl`: a claim of fact, a claim of
-  requirement, a quoted user turn. bin/mesh-claims-warning.py, a separate script, appends a warning to
+  three bits for each document to metal-microbench `output_data/document-claims-commits.jsonl`: a claim of fact, a
+  claim of requirement, a block-quoted user turn. bin/mesh-claims-warning.py, a separate script, appends a warning to
   `output_data/document-claims-warnings.jsonl` for each such commit that adds a claim and quotes no user turn, and
   tells the session.
+
+### 9. A quoted turn is found where it was typed
+
+- **Source:** the operator, 2026-11-12:
+
+> now was this something the user said to do or is htis yet another thing that requires post commit hooks to act as syntax checkers or parity checkers to ensure that change requests aren't forged by subagents or briefly unattended agents...?
+
+- **Rule:** bin/mesh-quote-parity.py takes each Markdown block quote a new commit adds to a document and looks for it,
+  whitespace aside, in the turns typed into the two repositories' sessions and into Codex. It appends the commit to
+  metal-microbench `output_data/quote-parity-commits.jsonl` with the passages no typed turn contains, and tells the
+  session of each. No model reads anything.
 

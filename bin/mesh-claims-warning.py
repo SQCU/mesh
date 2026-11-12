@@ -26,16 +26,16 @@ def main():
         warned = {json.loads(line)['commit'] for line in out if line.strip()}
         for line in open(MEASURED):
             record = json.loads(line) if line.strip() else None
-            if not record or record['commit'] in warned or record['quote'] or not (record['fact'] or record['requirement']):
+            bare = [path for path, bits in ((record or {}).get('documents') or {}).items()
+                    if (bits['fact'] or bits['requirement']) and not bits['quote']]
+            if not bare or record['commit'] in warned:
                 continue
-            claims = ' and '.join(name for name in ('fact', 'requirement') if record[name])
-            warning = (f"WARNING: {record['commit'][:10]} in {record['repository']} adds claims of {claims} to a "
-                       f"document and cites no verbatim user turn (design/review-warnings.md rule 8, read by Claude "
-                       f"Haiku): {record['subject'][:160]}")
+            warning = (f"WARNING: {record['commit'][:10]} in {record['repository']} adds claims of fact or of "
+                       f"requirement to {', '.join(bare)} and block-quotes no user turn there "
+                       f"(design/review-warnings.md rule 8, read by Claude Haiku): {record['subject'][:160]}")
             out.write(json.dumps({'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
                                   'repository': record['repository'], 'commit': record['commit'],
-                                  'fact': record['fact'], 'requirement': record['requirement'], 'quote': False,
-                                  'warning': warning}) + '\n')
+                                  'documents': bare, 'warning': warning}) + '\n')
             out.flush()
             warned.add(record['commit'])
             messages.append(warning)

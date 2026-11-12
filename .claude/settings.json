@@ -63,6 +63,13 @@
             "statusMessage": "Warnings for documents' claims with no quoted user turn",
             "async": true,
             "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-claims-warning.py"
+          },
+          {
+            "type": "command",
+            "timeout": 900,
+            "statusMessage": "Parity of block-quoted turns with typed turns",
+            "async": true,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-quote-parity.py"
           }
         ]
       }

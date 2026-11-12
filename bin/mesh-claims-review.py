@@ -25,8 +25,8 @@ REQUIREMENT: does an added line state, in the document's own words and not insid
 requirement: what must, shall, should, has to, needs to or is to be done, written, kept, deleted or satisfied; a
 rule; an order of work; a condition; a definition of when something is done?
 
-QUOTE: does an added line cite a user's turn verbatim as a quotation: a Markdown block quote (the line after the '+'
-begins with '>'), or words in quotation marks that the text attributes to the operator or the user?
+QUOTE: does an added line cite a user's turn verbatim as a Markdown block quote (the line after the '+' begins
+with '>')?
 
 Answer with exactly three lines and nothing else:
 FACT: YES or FACT: NO
@@ -35,16 +35,19 @@ QUOTE: YES or QUOTE: NO"""
 
 
 def measured(repo, sha):
-    diff = mesh_commits.git(repo, 'show', '--no-color', '--unified=0', '--format=', '--diff-filter=AMR', sha, '--',
-                            *DOCUMENTS)
-    if not diff:
-        return None
-    read = subprocess.run([*mesh_commits.READER, '--system-prompt', PROMPT, 'Answer the three questions for this commit.'],
-                          input=diff[:400000], capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=170)
-    answers = dict(re.findall(r'^(FACT|REQUIREMENT|QUOTE): (YES|NO)\s*$', read.stdout, re.M))
-    if read.returncode or len(answers) != 3:
-        raise RuntimeError(f'the reader exited {read.returncode} and said {read.stdout.strip()[:200]!r}')
-    return {name.lower(): said == 'YES' for name, said in answers.items()}
+    paths = mesh_commits.git(repo, 'show', '--format=', '--name-only', '--diff-filter=AMR', sha, '--',
+                             *DOCUMENTS).split('\n')
+    documents = {}
+    for path in filter(None, paths):
+        diff = mesh_commits.git(repo, 'show', '--no-color', '--unified=0', '--format=', sha, '--', path)
+        read = subprocess.run([*mesh_commits.READER, '--system-prompt', PROMPT,
+                               'Answer the three questions for this commit.'], input=diff[:400000],
+                              capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=170)
+        answers = dict(re.findall(r'^(FACT|REQUIREMENT|QUOTE): (YES|NO)\s*$', read.stdout, re.M))
+        if read.returncode or len(answers) != 3:
+            raise RuntimeError(f'the reader exited {read.returncode} and said {read.stdout.strip()[:200]!r}')
+        documents[path] = {name.lower(): said == 'YES' for name, said in answers.items()}
+    return documents or None
 
 
 def main():
@@ -67,7 +70,7 @@ def main():
                 mesh_commits.appended(LOG, json.dumps({
                     'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
                     'repository': repo, 'commit': sha,
-                    'subject': mesh_commits.git(repo, 'show', '-s', '--format=%s', sha), **bits}))
+                    'subject': mesh_commits.git(repo, 'show', '-s', '--format=%s', sha), 'documents': bits}))
             mesh_commits.advance(repo, SEEN, sha)
     if failed:
         message = '\n'.join(failed)
