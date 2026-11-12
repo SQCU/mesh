@@ -29,12 +29,14 @@ from torch._inductor import metrics
 from torch._inductor.graph import GraphLowering
 from torch._ops import OpOverload
 
-from mesh_compiler import archive, bridge, ir, lower_inductor, lower_metal
+from mesh_compiler import archive, bridge, ir, lower_coreml, lower_inductor, lower_metal
 from mesh_compiler.devices import TO_COPY
-from mesh_compiler.driver import compile_module
+from mesh_compiler.driver import compile_module, lowered
 from mesh_compiler.runtime import Program
 
 TOLERANCE = 1e-4
+# design/the-compiler.md, order 4, "Core ML"
+TOLERANCES = {"coreml": 2.0 ** -6}
 MPS = torch.backends.mps.is_available()
 HERE = pathlib.Path(__file__).parent
 EMITTED = HERE / "emitted"
@@ -203,6 +205,15 @@ class PythonBranch(nn.Module):
         return x.relu() if x.sum() > 0 else x.neg()
 
 
+class Wide(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(1024, 1024), nn.GELU(), nn.Linear(1024, 1024))
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class MutatesInput(nn.Module):
     def forward(self, x):
         x.add_(1)
@@ -253,6 +264,9 @@ MIXED = on(0, {"cpu": "cpu", "gpu": "mps"})
 BATCH = {"x": {0: torch.export.Dim("batch", min=2, max=64)}}
 EXPERTS = {"experts.0": "p1", "experts.1": "p1", "experts.2": "p2", "experts.3": "p2"}
 EXPERTS_MIXED = {"experts.0": "gpu", "experts.1": "gpu"}
+ENGINE = on(0, {"cpu": "cpu", "npu": "ane"})
+EXPERTS_ENGINE = {"experts.0": "npu", "experts.1": "npu"}
+EXPERTS_ENGINES = {**EXPERTS_MIXED, "experts.2": "npu", "experts.3": "npu"}
 POSITIVE = torch.full((2, 8), 0.5)
 torch.manual_seed(0)
 GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
@@ -330,6 +344,14 @@ CASES = [
     ("mixture of experts | cpu/mps", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
      {"processors": MIXED, "needs_mps": True, "expect_on": EXPERTS_MIXED,
       "placement": lambda: by_module(EXPERTS_MIXED, "cpu")}),
+    ("mlp | cpu, ane", MLP, [(r(5, 16),)], {"processors": ENGINE, "placement": lambda: halves("cpu", "npu", 4)}),
+    ("mixture of experts | cpu/ane", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
+     {"processors": ENGINE, "expect_on": EXPERTS_ENGINE, "placement": lambda: by_module(EXPERTS_ENGINE, "cpu")}),
+    ("mixture of experts | cpu/mps/ane", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
+     {"processors": {**MIXED, **ENGINE}, "needs_mps": True, "expect_on": EXPERTS_ENGINES,
+      "placement": lambda: by_module(EXPERTS_ENGINES, "cpu")}),
+    ("wide mlp | all but the result on ane", Wide, [(r(256, 1024),)],
+     {"processors": ENGINE, "placement": lambda: halves("npu", "cpu", 5)}),
     ("mlp dynamic batch", MLP, [(r(5, 16),), (r(11, 16),)],
      {"dynamic_shapes": BATCH, "rejected": True}),
     ("shape arithmetic dynamic batch", ShapeDependent, [(r(5, 3, 4),), (r(9, 3, 4),)],
@@ -387,7 +409,7 @@ CASES = [
 SAVE = {"mlp": "mlp", "python for, 4 static trips": "static_for",
         "mixture of experts | 3 processors": "moe_three_processors",
         "conv | conv on mps, rest cpu": "conv_cpu_mps"}
-PATHS = ("fx direct", "inductor", "archive", "fx pass", "metal")
+PATHS = ("fx direct", "inductor", "archive", "fx pass", "metal", "coreml")
 FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 processors",
                "buffer mutation x3 | 2 processors",
                "solve | 3 processors round-robin", "mixture of experts | 3 processors",
@@ -593,6 +615,15 @@ def archived_program(scheduled):
     return Program(loaded)
 
 
+PLANNED = []
+
+
+def planned_program(scheduled):
+    functions = lowered(scheduled, {"mps": lower_metal.lower, "ane": lower_coreml.lower})
+    PLANNED.extend((processor, functions[processor]) for processor in scheduled.engines)
+    return Program(scheduled, functions)
+
+
 def variants(scheduled, with_inductor):
     passed = lambda: {p: fx_pass(copy.deepcopy(m)) for p, m in scheduled.modules.items()}
     return {
@@ -602,6 +633,7 @@ def variants(scheduled, with_inductor):
         "fx pass": lambda: Program(dataclasses.replace(scheduled, modules=passed())),
         "metal": (lambda: Program(scheduled, lower_metal.lower(scheduled)))
         if any(device.type == "mps" for device in scheduled.devices.values()) else None,
+        "coreml": (lambda: planned_program(scheduled)) if scheduled.engines else None,
     }
 
 
@@ -712,7 +744,7 @@ BREAK_REASONS = collections.Counter()
 NOT_LOWERED = []
 
 
-def cell(result):
+def cell(result, tolerance=TOLERANCE):
     if result is None:
         return "-", True
     if isinstance(result, lower_metal.NotLowered):
@@ -720,8 +752,18 @@ def cell(result):
         return "not lowered", True
     if isinstance(result, Exception):
         return "FAIL", False
-    ok = result[1] <= TOLERANCE or result[0] <= TOLERANCE
+    ok = result[1] <= tolerance or result[0] <= tolerance
     return f"{result[1]:.1e}" if ok else f"BAD {result[1]:.1e}", ok
+
+
+def planned(since):
+    for processor, function in PLANNED[since:]:
+        plans = function.plan()
+        placed = collections.Counter(f"{operation.split('.')[-1]} on {preferred} of {supported}"
+                                     for plan in plans for operation, _, preferred, supported in plan
+                                     if operation != "const")
+        print(f"    coreml {processor}: {len(plans)} programs, {len(function.transferred)} results "
+              f"transferred; {', '.join(f'{count} {name}' for name, count in placed.items())}")
 
 
 def imports_of(path):
@@ -911,7 +953,8 @@ def between(machines, with_inductor):
                 return worst
 
             result = within(120, outputs)
-            text, ok = ("ran", True) if result is None else cell(result)
+            text, ok = ("ran", True) if result is None else cell(
+                result, tolerance=TOLERANCES.get(path, TOLERANCE))
             failed |= not ok
             cells.append(f"{path} {text}")
             if isinstance(result, Exception):
@@ -1006,7 +1049,7 @@ def main():
         return
     with_inductor = "--fast" not in sys.argv
     failed, total_breaks = False, 0
-    print(f"torch {torch.__version__}  mps={MPS}  tolerance={TOLERANCE}")
+    print(f"torch {torch.__version__}  mps={MPS}  tolerance={TOLERANCE}, {TOLERANCES}")
     print("max relative error against eager, per execution path of the same scheduled IR;")
     print("nodes = call_function nodes of the exported graph; chan = channels, each one send and")
     print("one recv; copy = device copies; the scheduled graphs hold exactly nodes + 2 chan + copy,")
@@ -1018,7 +1061,7 @@ def main():
         if options.get("needs_mps") and not MPS:
             print(f"{name:34} SKIP (no mps)")
             continue
-        started = time.time()
+        started, since = time.time(), len(PLANNED)
         try:
             operators, channels, copies, results, dynamo, breaks = run_case(name, with_inductor)
         except Exception as error:
@@ -1026,11 +1069,13 @@ def main():
             detail = str(error).strip().splitlines()[0][:150]
             print(f"{name:34} {'REJECTED' if rejected else 'ERROR'}: {type(error).__name__}: {detail}")
             continue
-        cells = [cell(results[path]) for path in PATHS]
+        cells = [cell(results[path], tolerance=TOLERANCES.get(path, TOLERANCE))
+                 for path in PATHS]
         total_breaks += breaks
         failed |= rejected or breaks > 0 or not all(ok for _, ok in cells)
         print(f"{name:34} {operators:5d} {channels:4d} {copies:4d} " + " ".join(f"{text:>11}" for text, _ in cells)
               + f"  {dynamo} ({time.time() - started:.0f}s)", flush=True)
+        planned(since)
         for path in PATHS:
             if isinstance(results[path], Exception):
                 detail = " ".join(str(results[path]).split())[:300]

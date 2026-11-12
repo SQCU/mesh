@@ -82,6 +82,12 @@ Three things are mesh's and are added to it:
      - Where an operation runs is Core ML's choice. The function's `plan()` is MLComputePlan's preferred and supported
        devices per operation (MLComputePlan.h: "The anticipated compute devices that would be used for executing an ML
        Program operation").
+     - The check's path `coreml` runs every case that has an `ane` processor and passes at a relative error of 2^-6
+       against eager float32 where its other paths pass at 1e-4. Float16 has an 11-bit significand, a unit roundoff
+       of 2^-11. A contraction of n terms accumulates at most n roundoffs relative to the sum of its terms' magnitudes
+       (N. Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.1), and the square root of n
+       where the roundoffs' signs are independent; the widest contraction of the cases has 1024 terms, and 32 * 2^-11
+       is 2^-6. The check prints, per case and `ane` processor, the plan's device for each kind of operation.
    - `driver.lowered(scheduled, lowerings)` takes each processor's function from the lowering the caller gives for its
      device's type or its engine, `{'mps': lower_metal.lower, 'ane': lower_coreml.lower}`; a processor with none keeps
      its GraphModule.
