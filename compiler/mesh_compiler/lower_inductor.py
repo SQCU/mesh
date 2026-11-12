@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch._inductor import ir as inductor
+from torch._inductor.dependencies import WeakDep
 from torch._inductor.lowering import fallback_handler, register_lowering
 from torch._inductor.virtualized import V
 
@@ -122,6 +123,18 @@ def adapt(module, device, carried):
     return module, receives
 
 
+# design/torch-source-lowering-change-request.md:250; torch/_inductor/config.py _pre_fusion_custom_pass;
+# torch/_inductor/scheduler.py Scheduler.compute_dependencies, additional_buffer_deps
+def chained(nodes):
+    for written, following in zip(nodes, nodes[1:]):
+        names = written.get_buffer_names()
+        if names and not names & {dep.name for dep in following.unmet_dependencies}:
+            following.add_fake_dep(WeakDep(next(iter(names)), following.get_name(), is_fake=True))
+    for node in nodes[:1]:
+        node.scheduler.compute_ancestors()
+    return nodes
+
+
 # design/torch-source-lowering-change-request.md item 1; compiler/mesh_compiler/driver.py lowered
 def lower(scheduled):
     compiled, carried = {}, {channel for channel, *_ in scheduled.carried}
@@ -130,7 +143,7 @@ def lower(scheduled):
             compiled[processor] = module
             continue
         adapted, receives = adapt(module, scheduled.devices[processor], carried)
-        options = {"layout_optimization": False, "reorder_for_peak_memory": False,
+        options = {"layout_optimization": False, "reorder_for_peak_memory": False, "_pre_fusion_custom_pass": chained,
                    **({"assume_unaligned_fallback_output": True} if receives else {})}
         compiled[processor] = torch.compile(adapted, backend="inductor", options=options)
     return compiled
