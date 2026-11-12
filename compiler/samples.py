@@ -486,7 +486,7 @@ CASES = [
      {"processors": THREE, "sharded": True,
       "placement": lambda: lambda node: (0, tuple(THREE), "striped") if node.name == "x" else "p0"}),
     ("view over a split dimension | copied", Merged, [(r(2, 6, 4),)],
-     {"processors": TWO, "sharded": True, "copied": 2,
+     {"processors": TWO, "sharded": True, "copied": 2, "not_lowered": ["aten.clone.out", "aten.empty.memory_format"],
       "placement": lambda: lambda node: (1, SHARDS, None) if node.name == "x" else "p0"}),
     ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
      {"processors": TWO, "sharded": True, "placement": ragged_rows}),
@@ -568,7 +568,8 @@ CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scat
 PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
           ATEN.new_zeros.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
           ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
-          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.default}
+          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.out,
+          ATEN.empty.memory_format}
 BLOCK = ("dimension", "block", "counts", "displs")
 
 
@@ -615,7 +616,8 @@ def check_views(scheduled, copied=0, received=0):
             if node.target in (ATEN.view.default, ATEN.reshape.default):
                 assert "view" in node.meta, f"{node.name} is no tensor view of its operand"
                 held = node.args[0]
-                found += (held.target is ATEN.clone.default and "of" not in held.meta and node.meta["view"][0] == held.name
+                found += (held.target is ATEN.clone.out and "of" not in held.meta and held.meta.get("out", [None])[0]
+                          == node.meta["view"][0] == held.kwargs["out"].name
                           and held.kwargs.get("memory_format") is torch.contiguous_format)
             if "view" in node.meta:
                 base, offset, sizes, strides = node.meta["view"]
@@ -628,7 +630,8 @@ def check_views(scheduled, copied=0, received=0):
             for key in {"to", "out"} & node.meta.keys():
                 buffer, offset, sizes, strides = node.meta[key]
                 whole, last = names[buffer].meta["val"], offset + sum((n - 1) * s for n, s in zip(sizes, strides))
-                assert (key == "to") == (node.target is ir.RECV) and list(node.users) == [names[buffer]], node.name
+                assert (key == "to") == (node.target is ir.RECV), node.name
+                assert names[buffer] in (node.kwargs.get("out"), *node.users) and len(node.users) == 1, node.name
                 assert sizes == tuple(node.meta["val"].shape) and (not all(sizes) or last < whole.numel()), node.name
                 into += key == "to"
     assert found >= copied, f"{found} of {copied} views that fail torch's condition are of a contiguous copy"

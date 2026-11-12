@@ -31,7 +31,7 @@ SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
 MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
           ATEN.full_like.default, ATEN.where.self}
 STRIPED = "striped"
-CLONE = ATEN.clone.default
+CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format
 
 
 def operands(node):
@@ -59,7 +59,9 @@ def evaluated(node, processor):
     with detect_fake_mode(arguments):
         if node.target in (RESHAPE, VIEW) and not viewable(*arguments[0]):
             with node.graph.inserting_before(node):
-                copied = call(node.graph, CLONE, node.args[:1], processor, memory_format=torch.contiguous_format)
+                held = node.args[0]
+                out = constant(node.graph, EMPTY, (list(shape(held)),), held, processor, dtype=held.meta["val"].dtype)
+                copied = call(node.graph, CLONE, (held,), processor, memory_format=torch.contiguous_format, out=out)
             node.args = (copied, *node.args[1:])
             return evaluated(node, processor)
         node.meta.update(processor=processor, val=node.target(*arguments[0], **arguments[1]))
@@ -78,11 +80,22 @@ def aliasing(node):
         0].alias_info.is_write
 
 
+# torch/csrc/jit/frontend/function_schema_parser.cpp alias_info; ExecuTorch documentation, Concepts, Out variant
+def written(node):
+    schema = getattr(node.target, "_schema", None)
+    if node.op != "call_function" or schema is None or len(schema.returns) != 1 or schema.returns[0].alias_info is None:
+        return None
+    names, read = given(node)
+    return next((read[a.name] for a in schema.arguments if a.alias_info is not None and a.alias_info.is_write and
+                 a.alias_info.before_set == schema.returns[0].alias_info.before_set and a.name in read), None)
+
+
 def view(node):
     made = node.args[0] if node.target is operator.getitem else node
-    if not aliasing(made):
+    held = made.args[0] if aliasing(made) else written(made)
+    if held is None:
         return None
-    value, held = node.meta["val"], made.args[0]
+    value = node.meta["val"]
     return held if all(torch._C._is_alias_of(v, held.meta["val"]) for v in (
         value if isinstance(value, (tuple, list)) else [value])) else None
 
@@ -93,7 +106,11 @@ def based(node, read):
         return node, value.storage_offset() if isinstance(value, torch.Tensor) else 0
     (base, first), = read
     if isinstance(value, torch.Tensor):
-        node.meta["view"] = base.name, value.storage_offset() - first, tuple(value.shape), tuple(value.stride())
+        record = base.name, value.storage_offset() - first, tuple(value.shape), tuple(value.stride())
+        if written(node) is not None:
+            node.meta["out"] = record
+            return base, first
+        node.meta["view"] = record
         if "state" in base.meta:
             node.meta["invariant"] = base.meta["state"], *node.meta["view"][1:]
     return base, first
@@ -126,7 +143,7 @@ def views(graph):
     for node in graph.nodes:
         for held, offset in destined(node):
             if (held.op == "call_function" and held.target is not operator.getitem and len(held.users) == 1
-                    and "view" not in held.meta
+                    and not {"view", "out"} & held.meta.keys()
                     and isinstance(held.meta["val"], torch.Tensor)):
                 held.meta["to" if held.target is RECV else "out"] = (
                     node.name, offset, shape(held), tuple(node.meta["val"].stride()))
