@@ -130,6 +130,57 @@ def forward(order, neighbours, transfer):
     return values
 
 
+# R. E. Tarjan, SIAM J. Comput. 1(2), 1972
+def postorder(vertices, neighbours):
+    order, seen, stack = [], set(), list(vertices)
+    while stack:
+        v = stack[-1]
+        unseen = [u for u in neighbours(v) if u not in seen]
+        if unseen:
+            stack.extend(unseen)
+        elif stack.pop() not in seen:
+            seen.add(v)
+            order.append(v)
+    return order
+
+
+# H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, section 4.1
+def upward_rank(vertices, successors, cost):
+    def rank(v, ranks):
+        if cost(v) <= 0:
+            raise ValueError(f"cost of {v} must be positive")
+        return cost(v) + max(ranks, default=0.0)
+    return forward(postorder(vertices, successors), successors, rank)
+
+
+# H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, section 4.2
+def earliest_slot(busy, ready, width):
+    free_from = 0.0
+    for index, (start, finish, _) in enumerate(busy):
+        begin = max(free_from, ready)
+        if begin + width <= start:
+            return index, begin
+        free_from = finish
+    return len(busy), max(free_from, ready)
+
+
+# H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, sections 4.1 and 4.2
+def list_schedule(vertices, predecessors, cost, processor):
+    successors = {v: [] for v in vertices}
+    for v in vertices:
+        for u in predecessors(v):
+            successors[u].append(v)
+    rank = upward_rank(vertices, successors.__getitem__, cost)
+    timeline, finish = {}, {}
+    for v in sorted(vertices, key=lambda v: -rank[v]):
+        busy = timeline.setdefault(processor(v), [])
+        ready = max((finish[u] for u in predecessors(v)), default=0.0)
+        index, start = earliest_slot(busy, ready, cost(v))
+        finish[v] = start + cost(v)
+        busy.insert(index, (start, finish[v], v))
+    return {p: [v for _, _, v in busy] for p, busy in timeline.items()}
+
+
 # M. Poletto and V. Sarkar, Linear scan register allocation, ACM TOPLAS 21(5), 1999
 def ends(order, uses):
     last = {}

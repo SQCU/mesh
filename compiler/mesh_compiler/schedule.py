@@ -1,53 +1,20 @@
 # design/data-flow.md
 import operator
+import pathlib
+import sys
 
-import networkx
 import torch
 
 from torch.fx.node import map_arg
 
 from .ir import RECV, SEND, channel_of
 
+sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
+import mesh_graph
+
 
 def unit_cost(node):
     return 1.0
-
-
-def earliest_slot(busy, ready, width):
-    free_from = 0.0
-    for index, (start, finish, _) in enumerate(busy):
-        begin = max(free_from, ready)
-        if begin + width <= start:
-            return index, begin
-        free_from = finish
-    return len(busy), max(free_from, ready)
-
-
-def heft_placed(functions, processor, cost, preds):
-    succs = {v: [] for v in functions}
-    for v in functions:
-        for u in preds(v):
-            succs[u].append(v)
-
-    rank, stack = {}, list(functions)
-    while stack:
-        v = stack[-1]
-        unranked = [s for s in succs[v] if s not in rank]
-        if unranked:
-            stack.extend(unranked)
-            continue
-        if cost(v) <= 0:
-            raise ValueError(f"cost of {v} must be positive")
-        rank[stack.pop()] = cost(v) + max((rank[s] for s in succs[v]), default=0.0)
-
-    timeline, finish = {}, {}
-    for v in sorted(functions, key=lambda v: -rank[v]):
-        busy = timeline.setdefault(processor(v), [])
-        ready = max((finish[u] for u in preds(v)), default=0.0)
-        index, start = earliest_slot(busy, ready, cost(v))
-        finish[v] = start + cost(v)
-        busy.insert(index, (start, finish[v], v))
-    return {p: [v for _, _, v in busy] for p, busy in timeline.items()}
 
 
 def producer(node):
@@ -63,7 +30,7 @@ def schedule(module, cost=unit_cost):
         found = [producer(u) for u in node.all_input_nodes if u.op == "call_function"]
         return found + [sender[channel_of(node)]] if node.target is RECV else found
 
-    orders = heft_placed(functions, lambda n: n.meta["processor"], cost, preds)
+    orders = mesh_graph.list_schedule(functions, preds, cost, lambda n: n.meta["processor"])
     processors = dict.fromkeys(n.meta["processor"] for n in nodes if n.op != "placeholder")
     return {p: assemble(p, orders.get(p, []), nodes) for p in processors}
 
@@ -107,9 +74,8 @@ def carried(modules, machines):
 def argument_buffers(modules, output_processor):
     inputs = {processor: [n.target for n in module.graph.nodes if n.op == "placeholder"]
               for processor, module in modules.items()}
-    others = [processor for processor in modules if processor != output_processor]
-    graph = networkx.DiGraph((output_processor, processor) for processor in others)
-    graph.add_node(output_processor)
-    graph.add_edges_from((end[SEND][0], end[RECV][0]) for end in channel_ends(modules).values())
-    cycle = next(c for c in networkx.strongly_connected_components(graph) if output_processor in c)
-    return inputs, sorted(set(modules) - cycle)
+    at = {processor: index for index, processor in enumerate(modules)}
+    edges = [(at[output_processor], at[processor]) for processor in modules if processor != output_processor]
+    edges += [(at[end[SEND][0]], at[end[RECV][0]]) for end in channel_ends(modules).values()]
+    component = mesh_graph.components(len(at), edges)
+    return inputs, sorted(p for p in modules if component[at[p]] != component[at[output_processor]])
