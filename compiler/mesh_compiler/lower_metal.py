@@ -345,8 +345,9 @@ class Lowering:
                     ATEN.split_with_sizes.default: self.split, ATEN.avg_pool2d.default: self.average_pool,
                     ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers(),
                     ATEN.empty.memory_format: self.empty, ATEN.clone.out: self.cloned}
-        position, self.unread = 0, {}
+        position, self.unread, self.named = 0, {}, {}
         for node in module.graph.nodes:
+            self.named[node.name] = node
             if node.op == "placeholder":
                 self.missing += [f"{node.name} of {v.dtype}" for v in self.untyped(node)]
                 value = node.meta["val"]
@@ -382,8 +383,13 @@ class Lowering:
         value = node.meta["val"]
         return self.fresh(value.dtype, tuple(value.shape))
 
+    def placed(self, record):
+        name, offset, sizes, strides = record
+        base = self.forms[self.named[name]]
+        return View(base.storage, base.dtype, tuple(sizes), tuple(strides), base.offset + offset)
+
     def cloned(self, node):
-        target = self.forms[node.kwargs["out"]]
+        target = self.placed(node.meta["out"])
         self.settle(target.storage)
         self.store(self.reader(node.args[0]), target)
         return target
