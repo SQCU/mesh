@@ -89,8 +89,8 @@ def main():
     args = arguments('Capacity-limited top-k routing, expert all-to-all, batched FFN and weighted combine, the tokens '
                      'and the experts split over processors.')
     torch.manual_seed(0)
-    model = MoE(len(args.machines)).eval()
-    x = torch.randn(len(args.machines), model.rows, DIM) / DIM ** 0.5
+    model = MoE(len(args.nodes)).eval()
+    x = torch.randn(len(args.nodes), model.rows, DIM) / DIM ** 0.5
     return execute(model, (x,), lambda processors: placement(processors, model.slots), args)
 
 

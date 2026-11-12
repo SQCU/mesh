@@ -36,6 +36,7 @@ class Program:
         self.key_of = {key: name for name, (key, _) in self.exported.state.items()}
         self.argument_queues = {processor: SimpleQueue() for processor in inputs
                                 if processor != self.caller}
+        self.finished = SimpleQueue()
         for processor in self.argument_queues:
             Thread(target=self.run, args=(processor,), daemon=True).start()
 
@@ -48,6 +49,8 @@ class Program:
         ir.LOCAL.channels = self.channels
         while True:
             self.execute(processor, self.argument_queues[processor].get())
+            if self.caller != self.output_processor:
+                self.finished.put(processor)
 
     def bind(self, name, value):
         for processor, position in self.positions.get(name, ()):
@@ -63,6 +66,8 @@ class Program:
         ir.LOCAL.channels = self.channels
         results = self.execute(self.caller, self.arguments[self.caller])
         if self.caller != self.output_processor:
+            for _ in self.argument_queues:
+                self.finished.get()
             return None
         user = []
         for (kind, key), value in zip(self.exported.outputs, results):

@@ -65,31 +65,32 @@ class Training(torch.nn.Module):
 
 
 # M. Shoeybi et al., Megatron-LM, arXiv:1909.08053, section 3 and Figure 3; design/unequal-shards-change-request.md
-# items 1, 5 and 15
-def megatron(processors, columns, rows, units=None):
+# items 1, 5, 6 and 15
+def megatron(processors, columns, rows, units={}):
     def placement(node):
         if node.op == 'placeholder':
             for dimension, layers in enumerate((columns, rows)):
                 if any(node.target.endswith(f'_{layer}_weight') for layer in layers):
-                    return dimension, processors, units
+                    return dimension, processors, next((u for part, u in units.items() if f'_{part}_' in node.target),
+                                                       None)
         return processors[0]
     return placement
 
 
-def placement(processors, units=None):
+def placement(processors, units={}):
     return megatron(processors, ('wq', 'wk', 'wv', 'w1', 'w3'), ('wo', 'w2'), units)
 
 
 def arguments(description):
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument('--machines', type=int, nargs='+', required=True)
+    parser.add_argument('--nodes', type=int, nargs='+', required=True)
     parser.add_argument('--device', default='mps')
-    parser.add_argument('--units', type=int, nargs='+')
+    parser.add_argument('--units', type=json.loads, default={})
     return parser.parse_args()
 
 
 def execute(model, inputs, placement, args):
-    processors = {f'p{place}': (machine, args.device) for place, machine in enumerate(args.machines)}
+    processors = {f'p{place}': (node, args.device) for place, node in enumerate(args.nodes)}
     scheduled = compile_module(model, inputs, processors, placement(tuple(processors)))
     result = Program(scheduled)(*inputs)
     report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried)}
@@ -108,8 +109,7 @@ def main():
     args = arguments('A transformer forward compiled with its weights split over processors by columns and rows.')
     torch.manual_seed(0)
     x = torch.randn(BATCH, SEQ, DIM) / DIM ** 0.5
-    return execute(Training().eval(), (x,), lambda processors: placement(processors, args.units and tuple(args.units)),
-                   args)
+    return execute(Training().eval(), (x,), lambda processors: placement(processors, args.units), args)
 
 
 if __name__ == '__main__':

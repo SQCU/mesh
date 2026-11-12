@@ -92,7 +92,7 @@ class Inference(torch.nn.Module):
 
 
 # tp.py megatron
-def placement(processors, units=None):
+def placement(processors, units={}):
     return megatron(processors, ('queryproj', 'keyproj', 'valueproj', 'denseproj_in', 'denseproj_gate'),
                     ('attnoutproj', 'denseproj_out'), units)
 
@@ -102,8 +102,7 @@ def main():
                      'feed-forward outputs computed from one normalized input, its weights split over processors.')
     torch.manual_seed(0)
     input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
-    return execute(Inference().eval(), (input_ids,),
-                   lambda processors: placement(processors, args.units and tuple(args.units)), args)
+    return execute(Inference().eval(), (input_ids,), lambda processors: placement(processors, args.units), args)
 
 
 if __name__ == '__main__':
