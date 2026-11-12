@@ -154,7 +154,8 @@ LEAST = ("template <typename T> inline T mesh_least(T a, T b) { return a < b ? b
 WITH_EFFECTS = torch.ops.higher_order.with_effects
 SCATTERED = {ATEN.scatter_add.default: True, ATEN.scatter.src: False, ATEN.scatter.value: False}
 PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memory", "non_blocking"}
-SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"}}
+SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"},
+          ATEN.clone.out: {"out"}}
 
 
 @dataclass
@@ -331,7 +332,8 @@ class Lowering:
                     ATEN.constant_pad_nd.default: self.padded, ATEN.flip.default: self.flip,
                     ATEN.slice_scatter.default: self.slice_scatter, ATEN.index_put.default: self.index_put,
                     ATEN.split_with_sizes.default: self.split, ATEN.avg_pool2d.default: self.average_pool,
-                    ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers()}
+                    ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers(),
+                    ATEN.empty.memory_format: self.empty, ATEN.clone.out: self.cloned}
         position = 0
         for node in module.graph.nodes:
             if node.op == "placeholder":
@@ -357,6 +359,16 @@ class Lowering:
                                   node.name)
                     form.uses = frozenset(self.using).union(*(getattr(read, "uses", ()) for read in reads))
                 self.forms[node] = form if self.deferred(node, form) else self.settled(form, node)
+
+    # compiler/mesh_compiler/placement.py views; design/problems-of-14b9a757-change-request.md item 3
+    def empty(self, node):
+        value = node.meta["val"]
+        return self.fresh(value.dtype, tuple(value.shape))
+
+    def cloned(self, node):
+        target = self.forms[node.kwargs["out"]]
+        self.store(self.reader(node.args[0]), target)
+        return target
 
     def untyped(self, node):
         value = node.meta.get("val")
