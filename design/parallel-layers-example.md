@@ -71,7 +71,7 @@ predecessor and the order of a layer is fixed by the program. Here it is not:
 ## Status, 2026-11-11
 
 - `examples/pl.py` is compiled by `mesh_compiler.driver.compile_module` and run by `mesh_compiler.runtime.Program`
-  (design/the-compiler.md, order 3; mesh 8e78b145). Its command line is `pl.py --nodes N [N ...] [--device DEVICE]
+  (mesh 8e78b145). Its command line is `pl.py --nodes N [N ...] [--device DEVICE]
   [--units JSON]`: one processor for each entry of `--nodes`, on that node, on `--device` (default `mps`); `--units`
   gives blocks their tuples of units, for example `{"blocks_0": [3, 1]}`.
 - The placement splits `queryproj`, `keyproj`, `valueproj`, `denseproj_in` and `denseproj_gate` along their columns

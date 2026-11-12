@@ -32,8 +32,9 @@ repository, full commit identity, parents, commit message and changed paths. It 
 names both repositories and their heads when the review starts, the registered context, the invoking session's
 transcript when supplied by the hook, and the two projects' transcript directories with their top-level file lists.
 The existing reviewer style guide (design/review-warnings.md), change-request index, change-request standard, rubrics,
-principles and measurement document are discovery starting points, with design/requirements-by-stage.md and
-design/data-flow.md (mesh, 2026-11-12: design/review-warnings.md rules 4 to 6, which the prompt states). The style guide is read in its own scope; its
+principles and measurement document are discovery starting points, with design/data-flow.md and
+design/implementation-order-2026-11-09.md (mesh, 2026-11-12: design/review-warnings.md rules 4 to 6, which the prompt
+states). The style guide is read in its own scope; its
 interpretation is not encoded in a sentence parser or a fixed warning schema.
 
 The reviewer has Read, Grep, Glob, WebFetch and WebSearch, and the read tools of the upstream

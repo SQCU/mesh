@@ -51,117 +51,13 @@ Three things are mesh's and are added to it:
    - [aot-compilation-change-request.md](aot-compilation-change-request.md), A4: "The compilation must lower every
      collective A2 inserts to sends and receives of pages."
 
-## The work, in order
+## The work
 
-1. `compiler/` holds `ir`, `export`, `placement`, `devices`, `schedule`, `driver`, `runtime`, `archive` and the check.
-   The check is `~/schedule-emit` `samples.py` at f41c64a, brought in as `compiler/samples.py`. With processors on one
-   machine's CPU and GPU, every case of the check passes. (At mesh ce2e8ac9, 2026-11-10, the check's 22 cases matched eager execution. The
-   order is outstanding until the clauses its second bullet names hold.)
-   - The graph functions `schedule.py` uses are functions of `rdma/mesh_graph.py`, given the caller's operands, and
-     `schedule.py` calls them. As of mesh 81c8e9da (2026-11-12) they are `heap_order` (the order), `longest` (a
-     function's level), `postorder`, `closure` and `precedence` (the transfers' dependences), `chain`, `ends` (a
-     value's last reader, mesh 28d7a032) and `components` (the cycle test of `argument_buffers`); the rank, the list
-     scheduling and the slot search of `heft_placed` were deleted in 81c8e9da with their last caller. The operator:
-     "the literal graph algorithms header which was introduced ages ago in the repository, and is the only sensible
-     place to put graph algorithms".
-   - As of mesh 28d7a032 (2026-11-12) the order `schedule` writes is `heap_order` with a recv of a channel between
-     machines keyed by its range's completion time in `mesh_plan`'s linear program and every other function keyed by
-     its level ([integration-finishing-change-request.md](integration-finishing-change-request.md) item 2). A function
-     that reads no received range has no completion time of that linear program, which
-     [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md) item 3 and
-     [aot-compilation-change-request.md](aot-compilation-change-request.md) A6 state for every function. Neither
-     request says which governs. The code follows item 2's rule for choosing each key, over every machine's
-     functions in one `heap_order` and not over one node's commands; that is Claude's choice, made because
-     `mesh_plan`'s linear program has tasks for the carried ranges alone. Item 2's "The algorithm", its "It takes" in its scope of one
-     node's commands, its "It writes" and its "Consumed by", and item 3's and A6's completion-time order of every
-     function (`mesh_graph_completion_times`, `rdma/mesh-graph.h`), are outstanding
-     ([change-requests-index.md](change-requests-index.md)).
-   - As of mesh 2fcea174 (2026-11-12) the keys are the other way: every function of a program that
-     carries a transfer between machines is a task of `mesh_plan`'s one linear program, solved once, and each
-     processor's list is `heap_order` of its own functions by their completion
-     times (item 3 and A6). Item 2's sentences "A command that reads a received range has that range's published
-     completion time as its key" and "Every other command has its dependence level as its key" do not hold there.
-     Which request governs is still stated by neither; following item 3 and A6 is Claude's choice, made because item 2
-     says of its level key "no cited source states that key" while item 3 and A6 state the completion-time key for
-     every function. Outstanding at
-     that commit, from its review: the order is computed a second time in `schedule.py` and not taken from
-     `mesh_plan`'s global order (plan-to-bridge R5, steps 4 and 5); a program with nothing carried between machines
-     gets its times from `mesh_graph.completion_times` directly and not from `mesh_plan`; item 3's "The order is
-     published with the AOT compiled static link schedule."; and
-     [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md) 7.1 steps 1 and 4, since
-     `schedule.stored` indexes lifetimes by a postorder fixed before the solve and not by the scheduled order.
-   - As of mesh dcc05bc0 (2026-11-12) `mesh_plan` writes each function's place in its one heap order (`struct
-     mesh_function` `order`), each processor's list is that order's subsequence, and a program with nothing carried
-     between machines is ordered by `mesh_plan` called with a null context; the `heap_order` and `completion_times`
-     calls of `schedule.py` are deleted. The null context is Claude's choice, made because such a function declares
-     no transfer and no value and the region supplies only what those use. Outstanding at that commit, from its
-     review: item 3's "The order is published with the AOT compiled static link schedule." (the order is in the
-     caller's operand and `ir.Plan.order` alone), 7.1 steps 1 and 4 (lifetimes still index the postorder), and
-     item 2's two key sentences.
-2. Processors on several machines: items 1 and 2 above. The check's cases pass with their processors on two machines.
-   (Outstanding. Mesh 6d4f007b and 1a3cfe60 wrote it. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
-   entries the check carries between two regions of the bridge's layout; the 33 is the count on one machine. The run under two bridges is
-   `MESH_GROUP=<run> MESH_PROGRAM=<the two machines' places in the map, as "0,1"> python samples.py --machines <A> <B>`
-   on each machine, and has not been made; `MESH_PROGRAM` is the `program` operand of `mesh_plan`, which
-   `schedule.planned` reads since mesh 81c8e9da (2026-11-12).)
-3. Sharding: item 3 above. `examples/tp.py`, `cp.py`, `ep.py` and `pl.py` are compiled by `compile_module` and run by
-   `Program`. (At mesh 297c3cda, 8e78b145, 16681b92, 3d51955d and 0d70ec49, 2026-11-11, the four examples matched eager execution on
-   two GPU processors, worst relative error 2.3e-06; 11 sharded cases of the check passed on every path. The
-   order is outstanding until the clauses [change-requests-index.md](change-requests-index.md) lists as outstanding
-   under unequal-shards-change-request.md, and under aot-compilation-change-request.md A2 and A4, hold.)
-4. `lower` for Metal: a function of `Scheduled` that returns one function per processor.
-   - Core ML: `lower_coreml.lower` returns a function for each processor whose engine is `ane`. The processor's graph,
-     in scheduled order, is cut at each `send`, `recv` and copy to another device, which the function calls as torch
-     does; after `lower_metal.lower` no copy to the Metal device is left in it. Each run of nodes between two cuts is
-     one ML Program, written by the module as the protobuf of coremltools 9.0 `mlmodel/format/MIL.proto` and
-     `Model.proto` (coremltools is not imported), compiled by `MLModel compileModelAtURL:` when `lower` runs and loaded
-     with `MLComputeUnitsCPUAndNeuralEngine`.
-     - State that no output mutates is a constant of the program, and a node whose operands are all constants is
-       evaluated when `lower` runs. A floating value is float16 inside the program; a float32 tensor that enters or
-       leaves it is converted by a `cast` operation of the program.
-     - An argument is an `MLMultiArray` over the caller's pages (MLMultiArray.h: "Creates the object with existing data
-       without copy."). A result is a tensor of its node's compiled shape and strides, and its pages are proposed as
-       its output backing; MLPredictionOptions.h: "The framework may not use the specified backing object and instead
-       allocates one by itself if the outputBacking dictionary doesn't contain the entry for the feature name, the
-       model doesn't support the user allocated buffers, or in the batch prediction mode." Where it does not, the
-       result is transferred into those pages (`transferToMultiArray:`) and the function's `transferred` names the
-       model.
-     - Where an operation runs is Core ML's choice. The function's `plan()` is MLComputePlan's preferred and supported
-       devices per operation (MLComputePlan.h: "The anticipated compute devices that would be used for executing an ML
-       Program operation").
-     - The check's path `coreml` runs every case that has an `ane` processor and passes at a relative error of 2^-6
-       against eager float32 where its other paths pass at 1e-4; the case of float16 values, `examples/engines.py`'s
-       model, passes at 2^-6 on every path. Float16 has an 11-bit significand, a unit roundoff
-       of 2^-11. A contraction of n terms accumulates at most n roundoffs relative to the sum of its terms' magnitudes
-       (N. Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.1), and the square root of n
-       where the roundoffs' signs are independent; the widest contraction of the cases has 1024 terms, and 32 * 2^-11
-       is 2^-6. The check prints, per case and `ane` processor, the plan's device for each kind of operation.
-   - `driver.lowered(scheduled, lowerings)` applies the caller's lowerings in order, `(lower_metal.lower,
-     lower_coreml.lower)`. Each lowers its own processors and returns the others' GraphModules, which the next one is
-     given: `lower_metal.lower` returns them without their copies to the Metal device, whose function takes host pages,
-     so it is first (design/torch-source-lowering-change-request.md, item 1: "no torch Metal kernel is ever submitted or
-     recorded again."). A processor no lowering takes keeps the last GraphModule returned for it.
-5. `rdma/mesh_compile.py` with `rdma/mesh-torch.mm`, `mesh-torch.mk`, `allocate.py` and `mesh_code.py`, and
-   metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive` with the driver
-   `tools/e2b_replay.m` that links them, are deleted in the commits in which code that `compile_module` and `Program`
-   produce has all of their feature coverage at the same performance or better, which includes decoding gemma-4-e2b
-   no slower than the fastest decoding tempo ever seen, and not before.
-   - As of mesh 0956d995 (2026-11-12) no such commit exists. The six examples `tp.py`, `pl.py`, `cp.py`, `ep.py`,
-     `crossing.py` and `engines.py` are compiled by `compile_module` and run by `Program` (mesh 5098de5f). Mesh
-     a5e9e62b, d8d743d0 and c06f4029 deleted the mesh files under the earlier clause below; 0956d995 restored them
-     as they are at f03cb9ca.
-   - The operator, 2026-11-09
-     ([compilation-composition-change-request.md](compilation-composition-change-request.md), "Complete replacement,
-     all in one commit workgroup"): "removal *by supremacy* of osme other different code that has all of the same
-     feature coverage, and the same performance or better".
-   - The operator, 2026-10-01 (metal-microbench `docs/measurement.md`): "the project requirements will never allow us,
-     for any reason, to run gemma-4-e2b any slower than the fastest decoding tempo ever seen".
-   - `tools/e2b_replay.m` is the one program in either repository that decodes gemma-4-e2b; no example of `compiler/`
-     runs that model. The condition this order carried before, "when no example calls them", was Claude's and stated
-     by no operator turn. Under it metal-microbench 9dc0d5b8, fb47c346 and 07461771 deleted those files; 0b692ed8
-     restored them, and the tree is 5bc53c40's.
-   - `examples/engines.py` is compiled by `compile_module` and run by `Program` (mesh 5098de5f), its functions those of
-     `lowered(scheduled, (lower_metal.lower, lower_coreml.lower))`: `lower_metal.lower` lowers a float16 product, its
-     cooperative tensor of the product's type, and `aten.gelu` with `approximate='tanh'` (torch 2.15,
-     `torch/nn/modules/activation.py`, GELU: "When the approximate argument is 'tanh', Gelu is estimated with:" 0.5 *
-     x * (1 + Tanh(sqrt(2 / pi) * (x + 0.044715 * x^3)))). Its `cpu` processor runs its GraphModule.
+Claude writes this compiler, in mesh at `compiler/`. It has the data flow of [data-flow.md](data-flow.md), and
+`~/schedule-emit` is the example of it: each stage is a function that takes the result of the stage before it and
+returns its own, and no stage calls back into an earlier one.
+
+The steps, their order and what each one replaces are the eleven items of
+[implementation-order-2026-11-09.md](implementation-order-2026-11-09.md). One item is assigned at a time, alone, and
+the item's text is the whole assignment. An item is closed as that memorandum states: "An item is closed when what it
+replaces is deleted, checked by searching the source for the named functions, not by a status paragraph."

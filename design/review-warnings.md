@@ -106,14 +106,10 @@ turns says so.
     assignment of the lists to `mesh_plan` is one of the pre-example requirements the memorandum says must be restated
     against data-flow.md, so I don't count it as binding here."
 - **Rule:**
-  - The restatement is design/requirements-by-stage.md. It lists every item of every change request under the stage of
-    design/data-flow.md that takes it, each clause quoted from its request. It also lists the items of the graph
-    module, the bridge, the caller, the machines and the documents under those names, and under "no stage named" the
-    items whose clauses place them in another flow, which are not yet restated.
-  - A reviewer reads a commit against the clauses listed for each stage the commit changes, in the request each comes
-    from. A clause is not set aside because its request was written before design/data-flow.md.
+  - A reviewer reads a commit against the clauses of the change requests that govern what the commit changes, in the
+    requests themselves. A clause is not set aside because its request was written before design/data-flow.md.
   - Where a reviewer does set a clause aside, for any reason, the clause and the reason are written as a warning, not
-    in the summary. This and the reading of a commit by its stages are Claude's reading of turns 5 and 8.
+    in the summary. This is Claude's reading of turns 5 and 8.
 
 ### 5. One producer of each value
 
@@ -133,8 +129,7 @@ turns says so.
 
 - **Source:** turn 7: "before anyone got the impression the workload was 'done'".
 - **Rule:** where a commit, or a document it changes, says an order, an item or a request is done, covered or
-  implemented, the reviewer reads each clause design/requirements-by-stage.md lists for it against the code at that
-  commit, and writes a warning for each clause that does not hold there. Agreement of results with a reference run
+  implemented, the reviewer reads each clause of that item, in its request, against the code at that commit, and writes a warning for each clause that does not hold there. Agreement of results with a reference run
   does not show that a clause holds. This is Claude's reading of turn 7.
 
 ### 7. A commit adds no assertion and no test
