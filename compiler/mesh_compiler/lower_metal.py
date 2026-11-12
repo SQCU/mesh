@@ -1645,29 +1645,29 @@ def hosted(module, device):
     return module
 
 
-def lower(scheduled, stored=()):
-    return targeted(scheduled, stored, {"mps": Metal, "cpu": Native})
+def lower(scheduled):
+    return targeted(scheduled, {"mps": Metal, "cpu": Native})
 
 
 # design/torch-source-lowering-change-request.md item 1; compiler/mesh_compiler/lower_inductor.py lower
-def metal(scheduled, stored=()):
-    return targeted(scheduled, stored, {"mps": Metal})
+def metal(scheduled):
+    return targeted(scheduled, {"mps": Metal})
 
 
-def targeted(scheduled, stored, targets):
+def targeted(scheduled, targets):
     functions, missing = {}, {}
     lowerings = {p: targets[scheduled.devices[p].type] for p in scheduled.modules
                  if p not in scheduled.engines and scheduled.devices[p].type in targets}
     metal = [p for p, lowering in lowerings.items() if lowering is Metal]
     laid = {channel for channel, *_ in scheduled.carried} | {
         node.args[0] for p in lowerings for node in scheduled.modules[p].graph.nodes if node.target is RECV}
-    state = {name for name, (_, pages) in scheduled.exported.state.items() if pages.device.type == "mps"}
     for processor, module in scheduled.modules.items():
         if processor not in lowerings:
             functions[processor] = hosted(module, scheduled.devices[metal[0]]) if metal else module
             continue
         lowering = lowerings[processor](module, laid, frozenset(
-            position for position, name in enumerate(scheduled.inputs[processor]) if name in state or name in stored))
+            position for position, device in enumerate(scheduled.stored[processor])
+            if torch.device(device).type == "mps"))
         if lowering.missing:
             missing[processor] = sorted(set(lowering.missing))
         else:
