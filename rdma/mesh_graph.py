@@ -148,13 +148,15 @@ def separators(offsets, speeds):
     return probe(offsets, speeds, succeeded)
 
 
-# M. Poletto and V. Sarkar, Linear scan register allocation, ACM TOPLAS 21(5), 1999
-def ends(order, uses):
-    last = {}
+# L. Lamport, CACM 21(7), 1978; design/disjoint-pages-change-request.md A3 item 2;
+# design/problems-of-14b9a757-change-request.md 7.1 step 1
+def ends(order, reached, uses):
+    readers = {}
     for v in order:
         for u in uses(v):
-            last[u] = v
-    return last
+            readers.setdefault(u, []).append(v)
+    return {u: next(x for x in reversed(order) if not all(r in reached[x] for r in found))
+            for u, found in readers.items()}
 
 
 # F. Harary, Graph Theory, 1969; design/aot-compilation-change-request.md A10

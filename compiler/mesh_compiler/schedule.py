@@ -160,26 +160,31 @@ def planned(module, carried, machines, cost=unit_cost):
     return solved(plan, private, context)
 
 
-# design/problems-of-14b9a757-change-request.md 7.1 steps 1, 2 and 5, 7.2 step 3 and item 8 step 4;
-# design/disjoint-pages-change-request.md C3.2; ExecuTorch exir/memory_planning.py update_tensor_lifetime
+# design/problems-of-14b9a757-change-request.md 7.1 steps 1, 2 and 5, 7.2 step 3, item 8 step 4 and item 14 steps 3
+# and 4; design/disjoint-pages-change-request.md A3 item 2 and C3.2; ExecuTorch exir/memory_planning.py
+# update_tensor_lifetime
 def stored(plan, module, machines, mutated):
     if plan is None:
         return None
-    _, functions, _ = dependence(module)
+    _, functions, preds = dependence(module)
+    before = mesh_graph.closure(mesh_graph.postorder(functions, preds), preds)
     local = sorted((n for n in functions if machines[n.meta["processor"]] == plan.machine),
                    key=lambda n: n.meta["place"])
     index = {node: place for place, node in enumerate(local)}
     of = viewed({channel: end[SEND] for channel, end in channel_ends(functions).items()}, set(plan.channels))
     results = {mesh_graph.chain(n, of)[-1] for n in module.graph.output_node().all_input_nodes}
     roots = {f: [mesh_graph.chain(u, of)[-1] for u in f.all_input_nodes] for f in local}
-    last = mesh_graph.ends(local, lambda f: () if f.meta.get("invariant") else [
-        (root, (f if root.op == "placeholder" else root).meta["processor"]) for root in roots[f]])
+    last = mesh_graph.ends(local, before, lambda f: () if f.meta.get("invariant") else [
+        (root, (f if root.op == "placeholder" else root).meta["processor"]) for root in roots[f]] + [
+        (f, f.meta["processor"])] * (f.target is RECV and f.args[0] in plan.channels))
     named = {(node.name, node.meta["processor"]): node for node in local}
     values, places = list(plan.values), list(plan.places)
     for value, (processor, name) in enumerate(plan.places):
         node = named[name, processor]
-        begin = 0 if node.target is RECV else index[producer(node)]
-        values[value] = (*values[value][:4], begin, len(local) - 1, *values[value][6:])
+        begin, end = index[producer(node)], len(local) - 1
+        if node.target is RECV:
+            begin, end = 0, end if node in results else index[last[node, processor]]
+        values[value] = (*values[value][:4], begin, end, *values[value][6:])
     for (root, processor), reader in last.items():
         value = root.meta.get("val")
         if ((processor, root.name) in places or root in results or not isinstance(value, torch.Tensor)
