@@ -237,6 +237,12 @@ class Wide(nn.Module):
         return self.net(x)
 
 
+class Masked(nn.Module):
+    def forward(self, x):
+        keep = torch.arange(6).view(1, 6, 1) <= 3
+        return torch.where(keep, x, torch.zeros((), dtype=x.dtype)) + x.sum(1, keepdim=True)
+
+
 class MutatesInput(nn.Module):
     def forward(self, x):
         x.add_(1)
@@ -388,6 +394,10 @@ CASES = [
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True, "inputs_on": "mps"}),
     ("gather/scatter/... | on mps", Indexing, GATHER,
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
+    ("where over a viewed arange | on mps", Masked, [(r(2, 6, 3),)],
+     {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
+    ("where over a viewed arange | cpu of cpu/mps", Masked, [(r(2, 6, 3),)],
+     {"processors": MIXED, "needs_mps": True, "placement": lambda: lambda node: "cpu"}),
     ("mlp | 2 processors, one holds no node", MLP, [(r(5, 16),)],
      {"processors": TWO, "placement": lambda: lambda node: "p0"}),
     ("mlp | cpu, ane", MLP, [(r(5, 16),)], {"processors": ENGINE, "placement": lambda: halves("cpu", "npu", 4)}),

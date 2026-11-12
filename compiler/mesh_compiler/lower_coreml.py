@@ -1,4 +1,4 @@
-# design/the-compiler.md, order 4, "Core ML"; Apple, coremltools 9.0, mlmodel/format/MIL.proto and Model.proto
+# design/the-compiler.md, order 4, Core ML; Apple, coremltools 9.0, mlmodel/format/MIL.proto and Model.proto
 import ctypes as C
 import pathlib
 import sys

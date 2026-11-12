@@ -44,7 +44,7 @@ def torch_run(module):
             "operations": [("host", *operation) for operation in operations]}
 
 
-# design/compilation-composition-change-request.md item 2, "The signature is printed from what lowering emits.";
+# design/compilation-composition-change-request.md item 2;
 # compiler/mesh_compiler/lower_metal.py Lowering.ordered; rdma/mesh-metal4.m mesh_metal4_after
 def lowered_run(record, stored):
     operations, arrived = [], False
