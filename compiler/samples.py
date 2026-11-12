@@ -652,9 +652,11 @@ def check_block(sent, arrived):
     flat = all(type(n) is int for n in (*counts, *displs))
     assert flat or all(type(n) is int and len(array) == 2 for array in (counts, displs) for part in array
                        for n in part), "counts and displs are not integer arrays of one entry per device"
+    assert sent.meta.get("strides") == arrived.meta.get("strides"), "a channel's two ends"
     if arrived.meta["collective"][0] == "permute":
         assert flat and len(counts) == len(displs) > max(block), "a permute's counts"
         assert block[0] != block[1], "a permute's channel from a device to itself"
+        assert len(arrived.meta.get("strides", counts)) == len(counts), "a permute's strides"
         return
     if isinstance(block, tuple):
         (given, taken), (holder, reader) = counts, block
@@ -664,6 +666,11 @@ def check_block(sent, arrived):
             common = min(displs[0][holder] + given[holder], displs[1][reader] + taken[reader]) - max(
                 displs[0][holder], displs[1][reader])
             assert arrived.meta["val"].shape[dimension] == common, "a block is not what its holder and reader share"
+        if "strides" in arrived.meta:
+            (first, second), strides = displs, arrived.meta["strides"]
+            common = set(range(first[holder], first[holder] + given[holder] * strides[0][holder], strides[0][holder])) & set(
+                range(second[reader], second[reader] + taken[reader] * strides[1][reader], strides[1][reader]))
+            assert arrived.meta["val"].shape[dimension] == len(common), "a block is not the indices its two stripes share"
         return
     assert arrived.meta["val"].shape[dimension] == counts[block], "a block's size is not its count"
     value, readers = sent.args[0], list(arrived.users)
@@ -718,6 +725,19 @@ def check_views(scheduled, copied=0, received=0):
         ir.views([n for n in call_nodes(module.graph) if n.target is ir.RECV or copies(n)])
         assert records == [[n.meta.get(key) for key in ("view", "to", "out", "invariant")]
                            for n in module.graph.nodes], "views of the nodes on_devices rewires, and of the graph"
+    state = dict(scheduled.exported.state.values())
+    for processor, module in scheduled.modules.items():
+        returned = set(module.graph.output_node().all_input_nodes)
+        read = {m.meta.get("invariant", (m.meta.get("state"),)) for n in call_nodes(module.graph) if "view" not in n.meta
+                for m in n.all_input_nodes if {"invariant", "state"} & m.meta.keys() and m not in returned
+                and all(m.meta["val"].shape)}
+        held = scheduled.invariant.get(processor, ())
+        assert len(set(held)) == len(held) and set(held) == read, (
+            f"{processor}: the invariant record is not the distinct slices of state its nodes read")
+        for key, *window in held:
+            (offset, sizes, strides), whole = window or (0, (), ()), state[key]
+            assert offset + sum((n - 1) * s for n, s in zip(sizes, strides)) < 1 + sum(
+                (n - 1) * s for n, s in zip(whole.shape, whole.stride())), f"{processor}: a slice of {key} leaves it"
     assert found >= copied, f"{found} of {copied} views that fail torch's condition are of a contiguous copy"
     assert into >= received, f"{into} of {received} recvs name a view of the buffer made from them"
 

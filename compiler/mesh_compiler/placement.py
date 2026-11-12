@@ -232,7 +232,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         if have == take:
             devices = tuple(dict.fromkeys((*holders, *processors)))
             kind, arrays = "permute", tuple(array + (rest,) * (len(devices) - len(array))
-                                            for array, rest in zip(arrayed(have), (0, extent)))
+                                            for array, rest in zip(arrayed(have), (0, extent, 1)))
     if held == dimension is not None and STRIPED in (extents, sizes):
         arrived, exchange = [], None
         for j, processor in enumerate(processors):
@@ -278,7 +278,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             pieces.append(node)
             sources.append(i)
         if held == dimension is not None:
-            blocks = [(held, (i, devices.index(processor)), *arrays) for i in sources]
+            blocks = [(held, (i, devices.index(processor)), *arrays[:2]) for i in sources]
         elif dimension is None:
             joined = tuple(shape(piece)[held] for piece in pieces) if held is not None else ()
             placed = (tuple(range(len(pieces))) if extents == STRIPED else
@@ -303,9 +303,10 @@ def overlaps(have, take):
     return met, [[len(common) for common in row] for row in met]
 
 
-# MPI 4.1, sections 7.5 to 7.8
+# MPI 4.1, sections 7.5 to 7.8, and section 5.1.2, MPI_TYPE_VECTOR
 def arrayed(blocks):
-    return tuple(len(range(*block)) for block in blocks), tuple(block[0] for block in blocks)
+    return (tuple(len(range(*block)) for block in blocks), tuple(block[0] for block in blocks),
+            tuple(block[2] for block in blocks))
 
 
 def aligned(node, shapes, out):
@@ -756,7 +757,7 @@ def partitioned(graph, node, held, want, replaced):
             for block, low, high in zip(blocks, edges, edges[1:]):
                 keeper = to[2][kept.index(block)]
                 piece = shard if len(blocks) == 1 else call(graph, SLICE, (shard, to[0], low, high), processor)
-                piece.meta.setdefault("blocks", {})[keeper] = to[0], kept.index(block), *arrayed(kept)
+                piece.meta.setdefault("blocks", {})[keeper] = to[0], kept.index(block), *arrayed(kept)[:2]
                 parts[keeper].append(piece)
         else:
             column = reshard(graph, (None, None, (processor,), [plain(graph, shard, processor, out)]), *to, True)
@@ -869,7 +870,8 @@ def insert_send_recv(graph, node, first):
             end.meta.update(zip(("sizes", "subsizes", "starts"), subarray), collective=collective)
         if processor in node.meta.get("blocks", ()):
             for end in (sent, arrived):
-                end.meta.update(zip(("dimension", "block", "counts", "displs"), node.meta["blocks"][processor]))
+                end.meta.update(zip(("dimension", "block", "counts", "displs", "strides"),
+                                    node.meta["blocks"][processor]))
         for user in users:
             user.replace_input_with(node, arrived)
     return len(away)
