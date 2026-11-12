@@ -22,7 +22,8 @@ PROBES = [
     ('fence_update', 'objc$target::-updateFence?afterEncoderStages?:', 'entry', 'arg2', None, None),
     ('fence_wait', 'objc$target::-waitForFence?beforeEncoderStages?:', 'entry', 'arg2', None, None),
     ('pass_barrier', 'objc$target::-barrierAfterEncoderStages?beforeEncoderStages?visibilityOptions?:', 'entry', None,
-     None, None),
+     None, None, 'queue'),
+    ('pass_barrier', 'pid$target::dispatch_apply_f:', 'return', None, None, None, 'host'),
     ('queue_barrier', 'objc$target::-barrierAfterQueueStages?beforeStages?visibilityOptions?:', 'entry', None, None,
      None),
     ('producer_barrier', 'objc$target::-barrierAfterStages?beforeQueueStages?visibilityOptions?:', 'entry', None, None,
@@ -32,6 +33,7 @@ PROBES = [
     ('host_wait', 'pid$target::mesh_host_arrived:', 'return', 'self->plan', 'self->arrives', (COUNT, SUBMISSION)),
     ('host_wait', 'pid$target::_queue_SimpleQueue_get:', 'return', 'self->queue', None, (0, LOWERED)),
     ('host_signal', 'pid$target::_queue_SimpleQueue_put:', 'entry', 'arg0', None, (0, LOWERED)),
+    ('host_signal', 'objc$target::-setSignaledValue?:', 'entry', 'arg0', 'arg2', (LOWERED, COUNT)),
     ('host_notify', 'objc$target::-notifyListener?atValue?block?:', 'entry', 'arg0', 'arg3', None),
     ('host_publish', 'pid$target::mesh_host_publish:', 'entry', '(arg1 << 20) + arg2', 'arg3 + 1', None),
     ('bridge_start', 'pid$target::mesh_transfers_start:', 'entry', 'arg1', 'arg2', None),
@@ -80,9 +82,10 @@ def classify(processors, operations, node):
     return [which(o) for o in operations]
 
 
-def probed(operation):
+def probed(operation, processors):
     return next(row for row in PROBES if row[0] == PRIMITIVES[operation.primitive] and (
-        not row[5] or row[5][0] <= operation.object < row[5][1]))
+        not row[5] or row[5][0] <= operation.object < row[5][1]) and (
+        not row[6:] or KINDS[processors[operation.processor].kind] in row[6:]))
 
 
 def sequences(processors, operations, which, node):
@@ -115,7 +118,7 @@ def periodic(operations, order):
     return period, len(rows), [step(k) for k in range(period)]
 
 
-def generate(operations, orders, observe, addresses):
+def generate(processors, operations, orders, observe, addresses):
     act = 'printf("mesh-sync-monitor: failure target pid %d\\n", pid); ustack(); ' + (
         'exit(1);' if observe else 'stop(); exit(1);')
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
@@ -128,11 +131,11 @@ def generate(operations, orders, observe, addresses):
     for order in orders:
         seen = {}
         local.append({i: seen.setdefault(operations[i].object, len(seen) + 1) for i in order
-                      if probed(operations[i])[3]})
+                      if probed(operations[i], processors)[3]})
     for row in PROBES:
-        name, probe, point, obj, val, _ = row
+        name, probe, point, obj, val = row[:5]
         at = probe + point
-        satisfied = ' && arg1 != 0' if point == 'return' else ''
+        satisfied = ' && arg1 != 0' if point == 'return' and obj else ''
         if point == 'return':
             lines.append('%sentry { self->inapi++; }' % probe)
             lines.append('%sreturn /self->inapi/ { self->inapi--; }' % probe)
@@ -144,7 +147,7 @@ def generate(operations, orders, observe, addresses):
         for s, (order, (period, executions, steps)) in enumerate(zip(orders, shapes)):
             for k, i in enumerate(order[:period] + order[period * executions:]):
                 o = operations[i]
-                if PRIMITIVES[o.primitive] != name or probed(o) is not row:
+                if PRIMITIVES[o.primitive] != name or probed(o, processors) is not row:
                     continue
                 where = 'self->at < %d && self->at %% %d == %d' % (period * executions, period, k) if k < period else \
                     'self->at == %d' % (period * executions + k - period)
@@ -153,9 +156,9 @@ def generate(operations, orders, observe, addresses):
                     (val is not None)
                 lines.append('%s /this->checked && (this->cand & %d) && %s/ { this->m = this->m | (%s ? %d : 0); }' %
                              (at, 1 << s, where, ' && '.join(match) or '1', 1 << s))
-        lines.append('%s /this->checked && !this->m/ { printf("mesh-sync-monitor: unexpected %s at step %%d of thread '
+        lines.append('%s /this->checked && !this->m%s/ { printf("mesh-sync-monitor: unexpected %s at step %%d of thread '
                      '%%d value %%d object %%d of %%d\\n", self->at, tid, this->va, this->lid, self->objects); %s }' %
-                     (at, name, act))
+                     (at, ' && self->bound' * (probe == FEEDBACK[1]), name, act))
         if obj is not None:
             lines.append('%s /this->checked && this->m && !self->om[(uint64_t)this->ob]/ { self->om[(uint64_t)this->ob] = this->lid, '
                          'self->objects = this->lid; }' % at)
@@ -166,7 +169,8 @@ def generate(operations, orders, observe, addresses):
             lines.append('%sentry { self->inapi++; }' % probe)
             lines.append('%sreturn /self->inapi/ { self->inapi--; }' % probe)
     name, probe, obj, val = FEEDBACK
-    lines.append('%sentry { printf("mesh-sync-monitor: signal %%d %%d\\n", %s, %s); }' % (probe, obj, val))
+    lines.append('%sentry /!this->checked || !this->m/ { printf("mesh-sync-monitor: signal %%d %%d\\n", %s, %s); }' %
+                 (probe, obj, val))
     lines.append('%s /self->bound && self->inapi == 0/ { printf("mesh-sync-monitor: unexpected %%s %%s at step %%d of '
                  'thread %%d\\n", probeprov, probefunc, self->at, tid); %s }' %
                  (',\n'.join(u for u in UNLISTED if addresses or 'os_sync' not in u), act))
@@ -253,7 +257,7 @@ def trace_log(text):
     return threads, signals, failures
 
 
-def observed_operations(operations, which, orders, threads, signals, failures):
+def observed_operations(processors, operations, which, orders, threads, signals, failures):
     seen, taken = {}, set()
     for thread, steps in sorted(threads.items()):
         steps.sort()
@@ -264,7 +268,7 @@ def observed_operations(operations, which, orders, threads, signals, failures):
         taken.add(free[0])
         for at, _, primitive, value in steps:
             i = orders[free[0]][at]
-            valued = probed(operations[i])[4]
+            valued = probed(operations[i], processors)[4]
             seen[i] = mesh_graph.Operation(operations[i].processor, primitive, operations[i].vertex, operations[i].object,
                                            operations[i].execution, value if valued else operations[i].value)
     compiled, unbound = {}, sorted(sorted(values) for values in signals.values())
@@ -317,7 +321,7 @@ def main(argv):
         sys.stderr.write('mesh-sync-monitor: %d threads on node %d\n' % (len(orders), node))
         return 2
     addresses = not any(COUNT <= operations[i].object < SUBMISSION for order in orders for i in order)
-    script, shapes = generate(operations, orders, observe, addresses)
+    script, shapes = generate(processors, operations, orders, observe, addresses)
     target_path = os.path.splitext(path)[0] + '.monitor.d'
     open(target_path, 'w').write(script)
     before = []
@@ -376,7 +380,7 @@ def main(argv):
     threads, signals, failures = trace_log(''.join(text))
     if status:
         failures.append('dtrace exited %d' % status)
-    observed = observed_operations(operations, which, orders, threads, signals, failures)
+    observed = observed_operations(processors, operations, which, orders, threads, signals, failures)
     blind = {c: n for c, n in coverage.items() if c not in ('program', 'feedback', 'static')}
     scope = {'program', 'feedback'}
     if bridge:
