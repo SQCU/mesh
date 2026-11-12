@@ -286,7 +286,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
                             for j in range(len(processors))) for i in range(len(nodes)))
         displs = tuple(tuple(sum(row[j] for row in given[:i]) for j in range(len(processors)))
                        for i in range(len(nodes)))
-    arrived = []
+    arrived, exchange = [], None
     for j, processor in enumerate(processors):
         pieces, sources = [], []
         for i, (holder, node) in enumerate(zip(holders, nodes)):
@@ -319,7 +319,8 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         for piece, block in zip(pieces, blocks):
             piece.meta.setdefault("blocks", {})[processor] = block
             if None not in (held, dimension):
-                piece.meta.setdefault("collectives", {})[processor] = "alltoall", nodes[0].name
+                exchange = exchange or f"{nodes[0].name}:{dimension}:{piece.name}"
+                piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
         arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
                        if extents == STRIPED else call(graph, CAT, (pieces, held), processor))
         if wide and shape(arrived[-1])[dimension] < max(sizes):

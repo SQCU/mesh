@@ -661,7 +661,7 @@ def check_collectives(scheduled, expected=None):
         for node in call_nodes(module.graph):
             if ir.channel_of(node) is not None:
                 ends.setdefault(ir.channel_of(node), {})[node.target] = node
-    sources, readers = collections.defaultdict(set), collections.defaultdict(set)
+    sources, readers, pairs = collections.defaultdict(set), collections.defaultdict(set), collections.Counter()
     for end in ends.values():
         sent, arrived = end[ir.SEND], end[ir.RECV]
         assert sent.meta["collective"] == arrived.meta["collective"], "a channel's two ends name two collectives"
@@ -670,8 +670,10 @@ def check_collectives(scheduled, expected=None):
         kinds[kind].add(identity)
         sources[kind, identity].add((sent.meta["processor"], value.name))
         readers[kind, identity].add(arrived.meta["processor"])
+        pairs[kind, identity, sent.meta["processor"], arrived.meta["processor"]] += kind == "alltoall"
     assert all(len(found) == 1 for (kind, _), found in sources.items() if kind == "broadcast"), "a broadcast of two values"
     assert all(len(found) == 1 for (kind, _), found in readers.items() if kind == "reduce"), "a reduction with two roots"
+    assert max(pairs.values(), default=0) <= 1, "an all-to-all with two demands for one ordered pair"
     found = {kind: len(identities) for kind, identities in kinds.items() if kind != "broadcast"}
     assert expected is None or found == expected, f"collectives {found}, not {expected}"
 
