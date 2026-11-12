@@ -276,37 +276,19 @@ outstanding, and what of it is outstanding. The standard every change request fo
     buffer), item 10 (the halo exchange), items 11 and 13 (`Ragged`, the separators), item 12 (the subarray of a padded
     buffer).
 
-  The list below was written of the deleted code and names its functions.
-
-  Outstanding:
-  - Item 2's gather and scatter. No quoted sentence says where the program emits either: every input and constant is
-    held at every node, a resharding replicates on every device (GSPMD §4.5), and the one transfer from a single
-    device is `_deliver`'s, of a whole output.
-  - Item 12's other form, whole padded buffers through an equal-size collective, and the choice between the two forms
-    from item 6's shares.
-  - Items 4 and 5: a run. None was made of either; each was partitioned and lowered in process, rank by rank.
-  - Item 5: a convolution with a bias (`_convolution`, `Rule.fused`) still has its input channels gathered before the
-    product.
-  - Item 6: the fixed part of a rank's computation time, the calls of a stage that hold no dimension the part shards
-    ("otherwise, the number of flops does not change"): `stage_times` gives 0 for it, since no quoted sentence says
-    at which units such a call's measured time is taken. The latency of a collective's fitted model is left out; it
-    does not depend on the shares.
-  - Item 7: no measured time of any function on any node, and no fitted time of any collective, is in either
-    repository; `PARTS` has no value in any configuration. The speeds are the first approximation only: the later
-    steps of the cited algorithm, which measure again at each new distribution and fit a piecewise linear speed, are
-    not written, and item 6's program takes a constant speed.
-  - Item 14: metal-microbench `tools/prepare_e2b.py` is given shares (`--placement`, `--layer-placement`,
-    `--vocabulary-placement`) with no bound for any rank and no measured time from which a rank's computation load
-    follows; `shift` is not called there.
-  - Items 6, 7 and 14: a run. None was made; `tp.py` and `pl.py` were partitioned in process at two ranks with times
-    made up for the purpose, a tuple solved, and a tuple shifted from given shares, for each attention and
-    feed-forward block.
-  - Items 11 and 13: no client program holds a tensor whose rows differ in length, so `rows` has no caller and
-    nothing constructs a `Ragged`. No quoted sentence names the program, nor which of a program's operators take
-    such a tensor sharded by rows; neither is written. A run: none was made; `separators` was compared in process
-    with an exhaustive search, and `rows` was evaluated in process at two and three ranks for one and two ragged
-    dimensions, for no rows and for rows that are all empty.
-  - Item 8.
+  Outstanding, of the code named above:
+  - Items 4, 10, 11, 12 and 13: not implemented.
+  - Item 2: a gather onto one processor and a scatter from one are the slices and joins `reshard` adds; no case of the
+    check sends a sharded tensor between machines under a bridge (the-compiler.md order 2's run has not been made).
+  - Item 5: the partial sums of a row-split product are reduced onto one processor and the result sent to the others;
+    the backward pass of `tp.py` is not compiled.
+  - Items 6 and 7: the solve with processors on another machine; a measured time for a channel within one machine,
+    which the solve prices at zero; a latency term and a fit per link for `--comm`, whose default is one slope fitted
+    to metal-microbench `output_data/window-20260928/bandwidth.json`.
+  - Item 14: the bound from a device's memory; `--upper` is given by the caller. One unit moves per shift of Whale's
+    Algorithm 1, which its quotation does not state.
+  - Item 8: the backward pass; position ids and target ids; the stripes of a sequence that is not the program's
+    input. Blocks are skipped at the size of a processor's shard, where Striped Attention §3.1 skips a tile.
 
 - [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md), item 5 (2026-11-09): outstanding.
   Mesh 199eb9c3 deleted the lowerings of matrix exponential, Hermitian and general eigendecomposition, SVD,

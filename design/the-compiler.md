@@ -104,7 +104,8 @@ Three things are mesh's and are added to it:
    compiled by `compile_module` and run by `Program`.
    metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive`, and the driver
    `tools/e2b_replay.m` that links them, are deleted in the commits in which code that `compile_module` and `Program`
-   produce decodes gemma-4-e2b on five ranks at the fastest recorded tempo or faster, and not before.
+   produce has all of their feature coverage at the same performance or better, which includes decoding gemma-4-e2b
+   no slower than the fastest decoding tempo ever seen, and not before.
    - The operator, 2026-11-09
      ([compilation-composition-change-request.md](compilation-composition-change-request.md), "Complete replacement,
      all in one commit workgroup"): "removal *by supremacy* of osme other different code that has all of the same
