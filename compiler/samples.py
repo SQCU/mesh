@@ -528,7 +528,8 @@ CASES = [
      [(r(2, 16).half(), r(2, 16).half())],
      {"processors": TWO, "sharded": True, "placement": lambda: crossing.placement(SHARDS)}),
     ("experts | 2 shards", lambda: ep.MoE(2), [(r(2, 6, 32) / 32 ** 0.5,)],
-     {"processors": TWO, "sharded": True, "placement": lambda: ep.placement(SHARDS, ep.MoE(2).slots)}),
+     {"processors": TWO, "sharded": True, "collectives": {"alltoall": 2},
+      "placement": lambda: ep.placement(SHARDS, ep.MoE(2).slots)}),
     ("experts | 3 shards, one empty", lambda: ep.MoE(3), [(r(3, 4, 32) / 32 ** 0.5,)],
      {"processors": THREE, "sharded": True, "placement": lambda: ep.placement(tuple(THREE), ep.MoE(3).slots)}),
 ]
@@ -567,8 +568,7 @@ CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scat
 PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
           ATEN.new_zeros.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
           ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
-          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.default,
-          ATEN.full.default}
+          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.default}
 BLOCK = ("dimension", "block", "counts", "displs")
 
 
@@ -662,7 +662,6 @@ def check_collectives(scheduled, expected=None):
     for end in ends.values():
         sent, arrived = end[ir.SEND], end[ir.RECV]
         assert sent.meta["collective"] == arrived.meta["collective"], "a channel's two ends name two collectives"
-        assert arrived.meta["val"].numel(), "a channel for a value of no elements"
         kind, identity = sent.meta["collective"]
         value = sent.args[0].args[0] if copies(sent.args[0]) and sent.args[0].name != identity else sent.args[0]
         kinds[kind].add(identity)
@@ -678,8 +677,6 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     exported = scheduled.exported.graph_module.graph
     assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
     original = {n.name: n.target for n in call_nodes(exported)}
-    unread = {n.name for n in call_nodes(exported) if (
-        isinstance(n.meta.get("val"), torch.Tensor) and not n.meta["val"].numel() and n.target.__name__ == "getitem")}
     where, added, sender, reader, ends, shards, replicated = {}, [], {}, {}, {}, {}, set()
     for processor, module in scheduled.modules.items():
         module.graph.lint()
@@ -735,8 +732,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         striped = any(n.target is SLICE and len(n.args) > 4 for n in nodes)
         assert striped or all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
         assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
-        assert original.keys() - unread <= where.keys() | shards.keys() <= original.keys(), \
-            "an exported node is missing from the scheduled graphs"
+        assert where.keys() | shards.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
         assert {n.target for n in added} <= PLACED, "a node that neither export nor a collective produced"
         sent = [end[ir.SEND].args[0] for end in ends.values()]
         values = {(sender[c], (v.args[0] if copies(v) else v).name, reader[c]) for c, v in zip(ends, sent)}
@@ -747,17 +743,13 @@ def check_ir(scheduled, expect_on=None, sharded=False):
                                     else n.all_input_nodes)
             assert any(n.op == "placeholder" for n in read), "a channel carries a value no input reaches"
     else:
-        assert original.keys() - unread <= where.keys() <= original.keys(), \
-            "an exported node is missing from the scheduled graphs"
+        assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
         where["output"] = scheduled.output_processor
-        where.update((n.name, where[n.args[0].name]) for n in call_nodes(exported) if n.name not in where)
-        pairs = {(n.name, where[u.name], n.meta["val"].numel() > 0) for n in call_nodes(exported) for u in n.users
+        pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
                  if where[u.name] != where[n.name] and n.name not in replicated and any(
                      m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes))}
-        empty = [n for n in added if n.target is ATEN.full.default and not n.meta["val"].numel()]
-        assert sum(held for _, _, held in pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
-        assert len(pairs) - scheduled.channels == len(empty), "a value of no elements read on another processor"
-        assert len(added) == 2 * scheduled.channels + len(copied) + len(empty), "a node that export did not produce"
+        assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
+        assert len(added) == 2 * scheduled.channels + len(copied), "a node that export did not produce"
     if len(scheduled.modules) == 1:
         assert not added and not Program(scheduled).argument_queues, "1-processor program differs"
 

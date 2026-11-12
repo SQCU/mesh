@@ -301,7 +301,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             blocks = [(dimension, j, given, displs[:len(given)])] * len(pieces)
         for piece, block in zip(pieces, blocks):
             piece.meta.setdefault("blocks", {})[processor] = block
-            if held == dimension is not None:
+            if None not in (held, dimension):
                 piece.meta.setdefault("collectives", {})[processor] = "alltoall", nodes[0].name
         arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
                        if extents == STRIPED else call(graph, CAT, (pieces, held), processor))
@@ -768,15 +768,6 @@ def insert_send_recv(graph, node, first):
     value = node.meta.get("val")
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
-    if not value.numel():
-        for processor, users in away.items():
-            with graph.inserting_before(users[0]):
-                empty = constant(graph, ATEN.full.default, (list(value.shape), 0), node, processor, dtype=value.dtype)
-            for user in users:
-                user.replace_input_with(node, empty)
-        if node.target is operator.getitem and not node.users:
-            graph.erase_node(node)
-        return 0
     # design/unequal-shards-change-request.md item 12; MPI 4.1, section 6.1.3
     cuts = mesh_graph.chain(node, lambda n: n.args[0] if n.target is SLICE and (*n.args, 1)[4] == 1 and n.args[
         0].meta.get("processor", here) == here else None)
