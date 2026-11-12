@@ -55,7 +55,8 @@ Three things are mesh's and are added to it:
 
 1. `compiler/` holds `ir`, `export`, `placement`, `devices`, `schedule`, `driver`, `runtime`, `archive` and the check.
    The check is `~/schedule-emit` `samples.py` at f41c64a, brought in as `compiler/samples.py`. With processors on one
-   machine's CPU and GPU, every case of the check passes. (Done: mesh ce2e8ac9; 22 cases match eager execution.)
+   machine's CPU and GPU, every case of the check passes. (At mesh ce2e8ac9, 2026-11-10, the check's 22 cases matched eager execution. The
+   order is outstanding until the clauses its second bullet names hold.)
    - The graph functions `schedule.py` uses are functions of `rdma/mesh_graph.py`, given the caller's operands, and
      `schedule.py` calls them. As of mesh 81c8e9da (2026-11-12) they are `heap_order` (the order), `longest` (a
      function's level), `postorder`, `closure` and `precedence` (the transfers' dependences), `chain`, `ends` (a

@@ -23,12 +23,12 @@ change request follows is [change-requests.md](change-requests.md).
   item is outstanding until a reading shows it holds.
 - [requirements-by-stage.md](requirements-by-stage.md) lists the same items under the stage that takes each, with
   each clause quoted.
-- Of 611 items: 288 covered, 308 outstanding, 10 not determined,
+- Of 611 items: 282 covered, 314 outstanding, 10 not determined,
   5 withdrawn. No request has every item covered. All eleven are outstanding.
 
 ## [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 80 items outstanding, 0 not determined, 12 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 81 items outstanding, 0 not determined, 11 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -472,13 +472,16 @@ Outstanding:
     an extra transfer: each sent value is copied into the transfer's pages (bridge.py:73-76). "Removing the outermost
     decoder while the same dispatch runs underneath it does not satisfy the requirement.": the native target's entries
     call each kernel through a part table and callback (lower_metal.py:70-74, 1137-1139).
+  - 4 / Write: the bridge binds physical transport as R7 specifies: outstanding [2026-11-12, mesh f20efc91; review of
+    f20efc91]. "The bridge binds physical transport as R7 specifies.": R7's requirement, "The code must keep every
+    transport object and count inside the bridge", is outstanding in this index under plan-to-bridge (schedule.py
+    reads the map's cable records in the compiling process).
 
 Covered:
 
   - 1 / Replaces: covered [2026-11-08, mesh d44e3d0c]
   - 3 / Write, first bullet: covered [2026-10-30, mesh 5ccf248a]
   - 4 / Write: runtime consumes programs and remaining inputs; self-timed calls: covered [2026-11-12, mesh 81c8e9da]
-  - 4 / Write: the bridge binds physical transport as R7 specifies: covered [2026-11-12, mesh 81c8e9da]
   - 5 / Replaces, site 3: strided-view traversal: covered [2026-11-08, mesh d44e3d0c]
   - 6 / Replaces 1: covered [2026-11-12, mesh ead08ba2]
   - 6 / Replaces 2: signature printed from the resulting compilation: covered [2026-11-12, mesh 507a1ec7]
@@ -1882,7 +1885,7 @@ Covered:
 
 ## [unequal-shards-change-request.md](unequal-shards-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 7 items outstanding, 0 not determined, 39 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 8 items outstanding, 0 not determined, 38 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -1923,6 +1926,10 @@ Outstanding:
     every shard is cut to its own size by own and sent in its own channel
     (compiler/mesh_compiler/placement.py:153-156, 181-213); no time and no sharding ratio is read there, and no value
     records a method. comm in compiler/mesh_compiler/shares.py:59 is read only by the solve of the ratios.
+  - 10 - Algorithm / Stage: outstanding [2026-11-12, mesh f20efc91; review of f20efc91]. "Halos are exchanged by a
+    collective permute at the largest halo over the devices, and each device slices off what exceeds its own.":
+    compiler/mesh_compiler/placement.py `halos` caps each send at the sender's own extent (`width = min(extent,
+    ...)`), so a sender shorter than the largest halo sends what it holds.
 
 Covered:
 
@@ -1950,7 +1957,6 @@ Covered:
   - 8 - Stage: covered [2026-11-12, mesh 90843d93]
   - 9 - Stage: covered [2026-11-12, mesh 991742c8]
   - 10 - Data structure: covered [2026-11-12, mesh 3a30b7ec]
-  - 10 - Algorithm / Stage: covered [2026-11-12, mesh 3a30b7ec]
   - 11 - Data structure: covered [2026-11-12, mesh 53779b95]
   - 11 - Stage: covered [2026-11-12, mesh 53779b95]
   - 12 - Data structure: covered [2026-11-12, mesh 5d6ec153]
@@ -1974,7 +1980,7 @@ Withdrawn:
 
 ## [integration-finishing-change-request.md](integration-finishing-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 6 items outstanding, 3 not determined, 12 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 10 items outstanding, 3 not determined, 8 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -2006,6 +2012,17 @@ Outstanding:
     carries;" `feedback_start` is still in tools/e2b_replay.m:155-157 and called at :1484; it initialises one struct
     Feedback a phase (PREFILL, DECODE; :152-154), which feedback_record (:160-168) writes for every commit of that
     phase.
+  - 2 (The algorithm): outstanding [2026-11-12, mesh f20efc91; review of f20efc91]. "**The algorithm** is list
+    scheduling in the order of the linear program's completion times": compiler/mesh_compiler/schedule.py `schedule`
+    keys every function by `mesh_graph.longest` and takes the linear program's time only for the recv of a carried
+    channel.
+  - 2 (It takes): outstanding [2026-11-12, mesh f20efc91; review of f20efc91]. "It **takes** a key for each of a
+    node's replayed commands, and the commands' dependences": `schedule` takes a key for every function of every
+    machine and calls one `heap_order` over them, not one node's commands.
+  - 2 (It writes): outstanding [2026-11-12, mesh f20efc91; review of f20efc91]. "the node's list of commands:
+    `mesh_graph_heap_order` over those keys": one order over every machine's functions is sliced per processor.
+  - 2 (Consumed by): outstanding [2026-11-12, mesh f20efc91; review of f20efc91]. "**Consumed by** the node's replay,
+    which executes its commands in that list's order": the list of the entries above is not made.
 
 Not determined:
 
@@ -2016,10 +2033,6 @@ Not determined:
 
 Covered:
 
-  - 2 (The algorithm): covered [2026-11-12, mesh 81c8e9da]
-  - 2 (It takes): covered [2026-11-12, mesh 81c8e9da]
-  - 2 (It writes): covered [2026-11-12, mesh 81c8e9da]
-  - 2 (Consumed by): covered [2026-11-12, mesh 81c8e9da]
   - 3 (The data structure): covered [2026-11-12, mesh 81c8e9da]
   - 3 (Consumed by): covered [2026-11-12, mesh 81c8e9da]
   - 3 (Replaces): covered [2026-11-08, mesh 01632014]
