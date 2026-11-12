@@ -3,10 +3,9 @@ import copy
 
 import torch
 
-from .ir import JOIN, RECV, SEND
+from .ir import HOST, JOIN, RECV, SEND, views
 
 TO_COPY = torch.ops.aten._to_copy.default
-HOST = torch.device("cpu")
 ENGINES = ("ane",)
 
 
@@ -18,8 +17,8 @@ def copied(graph, value, device, processor):
     return node
 
 
-# compiler/mesh_compiler/placement.py views
-def on_devices(graph_module, processors, views):
+# compiler/mesh_compiler/ir.py views
+def on_devices(graph_module, processors):
     graph_module = copy.deepcopy(graph_module)
     graph = graph_module.graph
     nodes = [n for n in graph.nodes if n.op != "placeholder"]
@@ -31,6 +30,7 @@ def on_devices(graph_module, processors, views):
             node.kwargs = {**node.kwargs, "device": device}
         if node.target is torch.ops.aten.to.device:
             node.args = (node.args[0], device, *node.args[2:])
+            rewired.append(node)
         if node.target is SEND:
             value, channel = node.args
             arrival = receiver[channel]

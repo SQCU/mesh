@@ -11,7 +11,7 @@ import torch
 
 from torch.fx.node import map_arg
 
-from .ir import RECV, SEND, Plan, channel_of
+from .ir import HOST, RECV, SEND, Plan, channel_of
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -139,7 +139,7 @@ def viewed(sender, carried):
 
 
 def extent(value):
-    return value.dtype.itemsize * (1 + sum((n - 1) * s for n, s in zip(value.shape, value.stride()))) * all(value.shape)
+    return value.dtype.itemsize * mesh_graph.extent(value.shape, value.stride())
 
 
 # rdma/mesh-collective.h mesh_plan, mesh_plan_save
@@ -286,7 +286,7 @@ def assemble(processor, order, nodes):
 def argument_buffers(modules, output_processor, held):
     inputs = {processor: [n.target for n in module.graph.nodes if n.op == "placeholder"]
               for processor, module in modules.items()}
-    stored = {processor: [held.get(name, "cpu") for name in names] for processor, names in inputs.items()}
+    stored = {processor: [str(held.get(name, HOST)) for name in names] for processor, names in inputs.items()}
     at = {processor: index for index, processor in enumerate(modules)}
     edges = [(at[output_processor], at[processor]) for processor in modules if processor != output_processor]
     edges += [(at[end[SEND].meta["processor"]], at[end[RECV].meta["processor"]]) for end in channel_ends(

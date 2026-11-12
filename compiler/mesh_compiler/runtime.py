@@ -31,7 +31,8 @@ class Program:
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         self.arguments = {
-            processor: [self.placed(state[n], processor, k) if n in state else None for k, n in enumerate(names)]
+            processor: [state[n].to(self.devices[processor] or self.stored[processor][k]) if n in state else None
+                        for k, n in enumerate(names)]
             for processor, names in inputs.items()}
         self.positions = {}
         for processor, names in inputs.items():
@@ -50,13 +51,9 @@ class Program:
             if self.joined:
                 self.finished.put(processor)
 
-    # compiler/mesh_compiler/ir.py Scheduled
-    def placed(self, value, processor, position):
-        return value.to(self.devices[processor] or self.stored[processor][position])
-
     def bind(self, name, value):
         for processor, position in self.positions.get(name, ()):
-            self.arguments[processor][position] = self.placed(value, processor, position)
+            self.arguments[processor][position] = value.to(self.devices[processor]) if self.devices[processor] else value
 
     def __call__(self, *args, **kwargs):
         flat, _ = pytree.tree_flatten((args, kwargs))

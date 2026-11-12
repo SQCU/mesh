@@ -7,6 +7,7 @@ from torch import Tensor
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 
 LOCAL = threading.local()
+HOST = torch.device("cpu")
 
 
 @torch.library.custom_op("mesh::send", mutates_args=())
