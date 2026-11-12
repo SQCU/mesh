@@ -38,7 +38,8 @@ PIPELINES, LIBRARIES, OWNED, HOST = {}, {}, {}, torch.device("cpu")
 # design/compilation-composition-change-request.md, item 1 and Source bindings; Apple, Metal Shading Language
 # Specification 4.1, sections 2.1, 2.2 and 6.5; ISO/IEC 14882:2020 [c.math]; Apple, vecLib cblas_new.h and
 # dispatch/apply.h
-NATIVE = """#include <cmath>
+NATIVE = """#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <dispatch/dispatch.h>
@@ -1223,6 +1224,42 @@ class Native(Lowering):
 
     def drivers(self):
         return {ATEN._linalg_solve_ex.default: self.solve, ATEN.linalg_qr.default: self.qr}
+
+    # torch 2.15 documentation, torch.Tensor.scatter_ and torch.Tensor.index_put_;
+    # design/compilation-composition-change-request.md, Performance obligation
+    def updated(self, value, source, domain, key, given, added):
+        kind, made, bind = self.types[value.dtype], self.fresh(value.dtype, value.shape), Bound()
+        self.store(source, made)
+        lines, names = unravel("q", domain, "c")
+        out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
+        x = given.read(bind, names[len(names) - len(given.shape):]) if isinstance(given, (View, Fused)) else \
+            literal(given, kind == "double")
+        self.dispatch(bind, [f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
+                             f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
+        return made
+
+    # torch 2.15 documentation, torch.sort; ISO/IEC 14882:2020 [stable.sort]
+    def sorted(self, source, dim, descending):
+        count, lead = source.shape[dim], source.shape[:dim] + source.shape[dim + 1:]
+        rows, kind = math.prod(lead), self.types[source.dtype]
+        values, places = self.fresh(source.dtype, (rows, count)), self.fresh(torch.int64, (rows, count))
+        bind = Bound()
+        lines, names = unravel("p.x", lead, "r")
+        at = lambda k: source.read(bind, names[:dim] + [f"uint({k})"] + names[dim:])
+        first, second = ("b", "a") if descending else ("a", "b")
+        order = f"x{first} < x{second}" if not source.dtype.is_floating_point else \
+            f"x{first} < x{second} || (isnan(x{second}) && !isnan(x{first}))"
+        v, w = (f"({bind(made, True)} + p.x * {count})" for made in (values, places))
+        lines += [f"for (long k = 0; k < {count}; k++) {w}[k] = k;",
+                  f"std::stable_sort({w}, {w} + {count}, [&](long a, long b) {{ {kind} xa = {at('a')}, xb = {at('b')}; "
+                  f"return {order}; }});",
+                  f"for (uint k = 0; k < {count}; k++) {v}[k] = {at(f'{w}[k]')};"]
+        self.dispatch(bind, lines, (rows, 1, 1))
+        strides = [0] * len(source.shape)
+        for d, step in zip([d for d in range(len(source.shape)) if d != dim], packed(lead)):
+            strides[d] = step * count
+        strides[dim] = 1
+        return [View(made.storage, made.dtype, tuple(source.shape), tuple(strides), 0) for made in (values, places)]
 
     def columns(self, bind, lines, source, held, rows, columns, names):
         lines += [f"for (uint i = 0; i < {rows}; i++) for (uint j = 0; j < {columns}; j++) "
