@@ -68,15 +68,25 @@ predecessor and the order of a layer is fixed by the program. Here it is not:
    (compilation-composition-change-request.md, "Performance correction: compile the transformations, not their
    textual symptoms"); this program is one where it can be seen.
 
-## Status, 2026-11-09
+## Status, 2026-11-11
 
-- Run in process, small sizes (DIM 64, 4 heads, 2 layers, sequence 16, vocabulary 128): the eager model gives finite
-  logits of shape (2, 1, 128); a block equals `x * lambda + ffn(norm(x)) + attn(norm(x))`; `torch.export` succeeds;
-  `mesh_compile._static` passes for the CPU and the GPU; all 17 operators of the decomposed graph have a lowering;
-  the ancestor test of statement 1 holds.
-- Not run through the mesh: no bridge is up on this machine, and `mesh.program` stops at attaching to one. Nothing of
-  statements 1 to 4 has been observed in a compiled or running program. Which record of a run shows them is the
-  outstanding question R4 already records.
-- The placement is untested: in particular what the compiler does with the output projections' biases, which are not
-  split.
-- In the implementation order this program belongs with item 11, as a program a run is made of.
+- `examples/pl.py` is compiled by `mesh_compiler.driver.compile_module` and run by `mesh_compiler.runtime.Program`
+  (design/the-compiler.md, order 3; mesh 8e78b145). Its command line is `pl.py --nodes N [N ...] [--device DEVICE]
+  [--units JSON]`: one processor for each entry of `--nodes`, on that node, on `--device` (default `mps`); `--units`
+  gives blocks their tuples of units, for example `{"blocks_0": [3, 1]}`.
+- The placement splits `queryproj`, `keyproj`, `valueproj`, `denseproj_in` and `denseproj_gate` along their columns
+  and `attnoutproj` and `denseproj_out` along their rows. The biases are not split in the placement: each processor
+  slices the bias of `denseproj_in` and of `denseproj_gate` to its shard; the bias of `attnoutproj` and of
+  `denseproj_out` is added once, on the first processor, after that projection's partial sums are added there. A block
+  has two such sums, one for each branch.
+- `pl.py --nodes 0 0` at the default sizes (DIM 2048, 16 heads, 4 layers, sequence 1024, vocabulary 8192), two
+  processors on one machine's GPU: 40 channels, logits of shape (2, 1, 8192), relative error against eager
+  execution 1.2e-06.
+- `compiler/samples.py` has two cases of this model (DIM 32, 4 heads, 2 layers, sequence 8, vocabulary 64), 20 channels
+  each. Relative errors against eager execution, by execution path (fx direct, Inductor, archive, fx pass):
+  - "parallel layers | 2 shards", two CPU processors: 2.0e-07, 4.0e-07, 2.0e-07, 2.0e-07.
+  - "parallel layers | units 3:1, mps", two GPU processors, the first block's weights split 3 to 1: 1.5e-07, 2.3e-07,
+    1.5e-07, 1.5e-07.
+  - Both, with the two processors on two machines whose entries the check carries in place of the bridge: the same
+    errors.
+- Not run under a bridge on two nodes.
