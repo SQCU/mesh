@@ -102,23 +102,33 @@ def reshard(graph, value, dimension, sizes, processors):
     else:
         given, displs = sizes, tuple(itertools.accumulate(sizes or (), initial=0))
     starts = list(itertools.accumulate(() if extents in (None, STRIPED) else extents, initial=0))
+    if held == dimension is not None:
+        given = tuple(tuple(max(0, min(starts[i + 1], displs[j + 1]) - max(starts[i], displs[j]))
+                            for j in range(len(processors))) for i in range(len(nodes)))
+        displs = tuple(tuple(sum(row[j] for row in given[:i]) for j in range(len(processors)))
+                       for i in range(len(nodes)))
     arrived = []
     for j, processor in enumerate(processors):
-        pieces = []
+        pieces, sources = [], []
         for i, (holder, node) in enumerate(zip(holders, nodes)):
             if sizes == STRIPED:
                 node = call(graph, SLICE, (node, dimension, j, shape(node)[dimension], len(processors)),
                             holder or processor)
             elif dimension is not None:
-                low, high = displs[j], displs[j + 1]
                 if held == dimension:
-                    low, high = max(low, starts[i]) - starts[i], min(high, starts[i + 1]) - starts[i]
-                    if low >= high and displs[j] < displs[j + 1]:
+                    low = sum(given[i][:j])
+                    high = low + given[i][j]
+                    if not given[i][j] and any(row[j] for row in given):
                         continue
+                else:
+                    low, high = displs[j], displs[j + 1]
                 if (low, high) != (0, shape(node)[dimension]):
                     node = call(graph, SLICE, (node, dimension, low, max(low, high)), holder or processor)
             pieces.append(node)
-        if dimension in (None, held):
+            sources.append(i)
+        if held == dimension is not None:
+            blocks = [(held, (i, j), given, displs) for i in sources]
+        elif dimension is None:
             joined = tuple(shape(piece)[held] for piece in pieces) if held is not None else ()
             placed = (tuple(range(len(pieces))) if extents == STRIPED else
                       tuple(itertools.accumulate(joined, initial=0))[:-1])

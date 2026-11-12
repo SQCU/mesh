@@ -6,6 +6,7 @@ import os
 import pathlib
 import re
 import sys
+import threading
 import time
 
 import torch
@@ -112,14 +113,35 @@ class Timed(torch.fx.Interpreter):
         return result
 
 
+# design/unequal-shards-change-request.md items 6, 7 and 14
 def chosen(model, inputs, placement, args, heads):
-    if not args.solve:
+    if not args.upper:
         return args.units
     processors = stated(args)
     fixed, times = compile_module(model, inputs, processors, placement(tuple(processors))), {}
-    Program(fixed, {p: Timed(module, fixed.devices[p], times).run for p, module in fixed.modules.items()})(*inputs)
-    return units(fixed, tuple(processors), lambda node: times.get(node, 0.0), lambda part, index: args.comm,
-                 args.upper or [1.0] * len(processors), heads)
+    done = {p: threading.Event() for p in fixed.modules}
+
+    def timed(p):
+        interpreter = Timed(fixed.modules[p], fixed.devices[p], times)
+        return lambda *arguments: (interpreter.run(*arguments), done[p].set())[0]
+
+    program = Program(fixed, {p: timed(p) for p in fixed.modules})
+    program(*inputs)
+    for p in program.arguments:
+        done[p].wait()
+
+    def comm(node):
+        value = node.meta['val']
+        along = value.shape[node.meta['dimension']] if 'counts' in node.meta else 0
+        return args.comm * value.nbytes * sum(torch.utils._pytree.tree_leaves(node.meta['counts'])) / along if along else 0.0
+
+    staged = shares.stages(fixed, segment)
+    if args.solve:
+        return units(fixed, tuple(processors), times.__getitem__, comm, args.upper, heads)
+    slopes = shares.computation(staged, tuple(processors), times.__getitem__)
+    return {part: shares.shifted(given, args.upper,
+                                 lambda j, held: held[j] / sum(held) * sum(stage[j][1] for stage in slopes[part]))
+            for part, given in args.units.items()}
 
 
 def stated(args):
@@ -132,8 +154,8 @@ def arguments(description):
     parser.add_argument('--device', default='mps')
     parser.add_argument('--units', type=json.loads, default={})
     parser.add_argument('--solve', action='store_true')
-    parser.add_argument('--comm', type=float, default=0.0)
     parser.add_argument('--upper', type=float, nargs='+')
+    parser.add_argument('--comm', type=float, default=0.0)
     return parser.parse_args()
 
 

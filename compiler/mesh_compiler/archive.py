@@ -16,6 +16,10 @@ from .ir import RECV, Exported, Scheduled, channel_of
 BLOCK = ("dimension", "block", "counts", "displs")
 
 
+def tuples(value):
+    return tuple(map(tuples, value)) if isinstance(value, list) else value
+
+
 def wrap(module, constants):
     module = copy.deepcopy(module)
     nodes = list(module.graph.nodes)
@@ -93,7 +97,7 @@ def load(directory):
         for node in modules[path.stem].graph.nodes:
             if str(channel_of(node)) in about["blocks"]:
                 dimension, block, counts, displs = about["blocks"][str(channel_of(node))]
-                node.meta.update(zip(BLOCK, (dimension, block, tuple(counts), tuple(displs))))
+                node.meta.update(zip(BLOCK, (dimension, *map(tuples, (block, counts, displs)))))
         for spec, target in zip(program.graph_signature.input_specs, targets, strict=True):
             if spec.kind == InputKind.CONSTANT_TENSOR:
                 state[target] = (spec.target, program.constants[spec.target])

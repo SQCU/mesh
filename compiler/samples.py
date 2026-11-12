@@ -280,9 +280,15 @@ def megatron_with(stated):
 def solved_units():
     fixed = compile_module(tp.Training().eval(), (torch.zeros(2, 8, 32),), TWO, tp.placement(SHARDS))
     units = tp.units(fixed, SHARDS, lambda node: 3.0 if node.meta["processor"] == "p1" else 1.0,
-                     lambda part, stage: 0.0, [1.0, 1.0], tp.HEADS)
+                     lambda node: 0.0, [1.0, 1.0], tp.HEADS)
     assert units.keys() == {"model_0", "model_1"} and all(a > b for a, b in units.values()), units
     return units
+
+
+def shifted_units():
+    units = tp.shares.shifted((3, 1), [0.5, 1.0], lambda j, held: held[j])
+    assert units == (2, 2), units
+    return {"model_0": units, "model_1": (1, 3)}
 
 
 BMM = torch.ops.aten.bmm.default
@@ -343,6 +349,8 @@ CASES = [
       "placement": lambda: tp.placement(SHARDS, {"model_0": (1, 3), "model_1": (3, 1)})}),
     ("megatron | units solved, p1 slow", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: tp.placement(SHARDS, solved_units())}),
+    ("megatron | units 3:1 held to 1/2", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "placement": lambda: tp.placement(SHARDS, shifted_units())}),
     ("megatron | 2 shards, cpu/mps", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": on(0, {"p0": "cpu", "p1": "mps"}), "sharded": True, "needs_mps": True,
       "placement": lambda: tp.placement(SHARDS)}),
@@ -351,6 +359,9 @@ CASES = [
       "placement": lambda: megatron_with({(BMM, (2, 8, 32)): (1, SHARDS, (1, 3))})}),
     ("megatron | scores whole on p1", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: megatron_with({(BMM, (8, 8, 8)): (0, ("p1",), None)})}),
+    ("megatron | resharded 1:1 to 1:3", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True,
+      "placement": lambda: megatron_with({(ATEN.sigmoid.default, (2, 8, 48)): (2, SHARDS, (1, 3))})}),
     ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
      {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
     ("parallel layers | units 3:1, mps", pl.Inference, [(index(2, 8, 64),)],
@@ -414,6 +425,10 @@ def check_block(sent, arrived):
     if "counts" not in arrived.meta:
         return
     dimension, block, counts, displs = (arrived.meta[key] for key in BLOCK)
+    for index in block if isinstance(block, tuple) else ():
+        counts, displs = counts[index], displs[index]
+    block = 0 if isinstance(block, tuple) else block
+    counts, displs = (counts, displs) if isinstance(counts, tuple) else ((counts,), (displs,))
     assert arrived.meta["val"].shape[dimension] == counts[block], "a block's size is not its count"
     value, readers = sent.args[0], list(arrived.users)
     if copies(value):
