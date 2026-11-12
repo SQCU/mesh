@@ -496,7 +496,7 @@ CASES = [
       "placement": lambda: lambda node: {"x": (0, tuple(THREE), (1, 2, 1)), "cos": (0, tuple(THREE), "striped"),
                                          "exp": (0, tuple(THREE), (2, 1, 1))}.get(node.name, "p0")}),
     ("view over a split dimension | copied", Merged, [(r(2, 6, 4),)],
-     {"processors": TWO, "sharded": True, "copied": 2, "not_lowered": ["aten.clone.out", "aten.empty.memory_format"],
+     {"processors": TWO, "sharded": True, "copied": 2,
       "placement": lambda: lambda node: (1, SHARDS, None) if node.name == "x" else "p0"}),
     ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
      {"processors": TWO, "sharded": True, "placement": ragged_rows}),
