@@ -56,14 +56,26 @@ Three things are mesh's and are added to it:
 1. `compiler/` holds `ir`, `export`, `placement`, `devices`, `schedule`, `driver`, `runtime`, `archive` and the check.
    The check is `~/schedule-emit` `samples.py` at f41c64a, brought in as `compiler/samples.py`. With processors on one
    machine's CPU and GPU, every case of the check passes. (Done: mesh ce2e8ac9; 22 cases match eager execution.)
-   - The graph functions `schedule.py` uses (the rank and the list scheduling of `heft_placed`, the slot search of
-     `earliest_slot`, the cycle test of `argument_buffers`) are functions of `rdma/mesh_graph.py`, given the caller's
-     operands, and `schedule.py` calls them. The operator: "the literal graph algorithms header which was introduced
-     ages ago in the repository, and is the only sensible place to put graph algorithms".
+   - The graph functions `schedule.py` uses are functions of `rdma/mesh_graph.py`, given the caller's operands, and
+     `schedule.py` calls them. As of mesh 81c8e9da (2026-11-12) they are `heap_order` (the order), `longest` (a
+     function's level), `postorder`, `closure` and `precedence` (the transfers' dependences), `chain`, `ends` (a
+     value's last reader, mesh 28d7a032) and `components` (the cycle test of `argument_buffers`); the rank, the list
+     scheduling and the slot search of `heft_placed` were deleted in 81c8e9da with their last caller. The operator:
+     "the literal graph algorithms header which was introduced ages ago in the repository, and is the only sensible
+     place to put graph algorithms".
+   - As of mesh 28d7a032 (2026-11-12) the order `schedule` writes is `heap_order` with a recv of a channel between
+     machines keyed by its range's completion time in `mesh_plan`'s linear program and every other function keyed by
+     its level ([integration-finishing-change-request.md](integration-finishing-change-request.md) item 2). A function
+     that reads no received range has no completion time of that linear program, which
+     [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md) item 3 and
+     [aot-compilation-change-request.md](aot-compilation-change-request.md) A6 state for every function; neither
+     request says which governs, and the code follows item 2.
 2. Processors on several machines: items 1 and 2 above. The check's cases pass with their processors on two machines.
    (Written: mesh 6d4f007b, 1a3cfe60. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
    entries the check carries between two regions of the bridge's layout; the 33 is the count on one machine. The run under two bridges is
-   `MESH_GROUP=<run> python samples.py --machines <A> <B>` on each machine, and has not been made.)
+   `MESH_GROUP=<run> MESH_PROGRAM=<the two machines' places in the map, as "0,1"> python samples.py --machines <A> <B>`
+   on each machine, and has not been made; `MESH_PROGRAM` is the `program` operand of `mesh_plan`, which
+   `schedule.planned` reads since mesh 81c8e9da (2026-11-12).)
 3. Sharding: item 3 above. `examples/tp.py`, `cp.py`, `ep.py` and `pl.py` are compiled by `compile_module` and run by
    `Program`. (Done: mesh 297c3cda, 8e78b145, 16681b92, 3d51955d, 0d70ec49. The four examples match eager execution on
    two GPU processors, worst relative error 2.3e-06; 11 sharded cases of the check pass on every path.)
