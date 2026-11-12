@@ -99,6 +99,38 @@ def based(node, read):
     return base, first
 
 
+# design/problems-of-14b9a757-change-request.md item 1 step 1, item 2 and item 4 step 4; MPI 4.1, section 7.7, in place
+def destined(node):
+    if node.target is CAT:
+        value = node.meta["val"]
+        along, at = (*node.args, 0)[1] % value.dim(), 0
+        for held in node.args[0]:
+            if node.args[0].count(held) == 1:
+                yield held, at * value.stride(along)
+            at += shape(held)[along]
+    elif node.target is PAD and (*node.args, 0)[2] == 0 and min(node.args[1]) >= 0:
+        value = node.meta["val"]
+        yield node.args[0], sum(low * value.stride(value.dim() - 1 - d) for d, low in enumerate(node.args[1][::2]))
+
+
+# design/problems-of-14b9a757-change-request.md items 1 to 4 and 6, and item 8, step 4
+def views(graph):
+    for node in list(graph.nodes):
+        node.meta.pop("to", None)
+        node.meta.pop("out", None)
+        if aliasing(node):
+            evaluated(node, node.meta["processor"])
+        elif node.target is operator.getitem and aliasing(node.args[0]):
+            node.meta["val"] = node.args[0].meta["val"][node.args[1]]
+    mesh_graph.forward(list(graph.nodes), lambda n: [n for n in [view(n)] if n is not None], based)
+    for node in graph.nodes:
+        for held, offset in destined(node):
+            if (held.op == "call_function" and len(held.users) == 1 and "view" not in held.meta
+                    and isinstance(held.meta["val"], torch.Tensor)):
+                held.meta["to" if held.target is RECV else "out"] = (
+                    node.name, offset, shape(held), tuple(node.meta["val"].stride()))
+
+
 # design/unequal-shards-change-request.md items 1, 13 and 15
 class Sizes(tuple):
     units = None
@@ -628,11 +660,11 @@ def partitioned(graph, node, held, want, replaced):
                 sized[label] = sum(len(range(*block)) for block in blocks)
             shard.args = (shard.args[0], sized)
         shard.meta.update(of=node.name, order=order, pairs=pairs, units=(
-            len(range(j, extent, len(processors))) if sizes == STRIPED else sizes[j],
+            len(range(j, extent, len(processors))) if sizes == STRIPED else max(sizes) if uneven(sizes) else sizes[j],
             extent if sizes == STRIPED else sum(sizes)))
         shards.append(evaluated(shard, processor))
         if window and kept[j] is not None:
-            shard.meta["cut"] = kept[j], kept[j] + max(sizes)
+            shard.meta.update(cut=(kept[j], kept[j] + max(sizes)), units=(shape(shard)[along], sum(sizes)))
             if shard.meta["cut"] != (0, shape(shard)[along]):
                 shards[-1] = call(graph, SLICE, (shard, along, *shard.meta["cut"]), processor)
                 shards[-1].meta["order"] = order
@@ -688,12 +720,7 @@ def place(graph_module, placement):
     mesh_graph.forward(nodes, operands, transfer)
     for node in reversed(replaced):
         graph.erase_node(node)
-    # design/problems-of-14b9a757-change-request.md item 6
-    for node in list(graph.nodes):
-        if aliasing(node):
-            evaluated(node, node.meta["processor"])
-        elif node.target is operator.getitem and aliasing(node.args[0]):
-            node.meta["val"] = node.args[0].meta["val"][node.args[1]]
+    views(graph)
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
         "state" in n.meta if n.op == "placeholder" else view(n) is not None and all(read)))
@@ -717,8 +744,7 @@ def place(graph_module, placement):
         channels += insert_send_recv(graph, node, channels)
     for node in graph.nodes:
         node.meta.pop("blocks", None)
-    # design/problems-of-14b9a757-change-request.md item 3 and item 8, step 4
-    mesh_graph.forward(list(graph.nodes), lambda n: [n for n in [view(n)] if n is not None], based)
+    views(graph)
     graph_module.recompile()
     return graph_module, placed[-1].meta["processor"], channels
 

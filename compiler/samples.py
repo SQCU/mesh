@@ -485,7 +485,7 @@ CASES = [
     ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
      {"processors": TWO, "sharded": True, "placement": ragged_rows}),
     ("windows | rows 1:2:1, halos exchanged", Windows, [(r(2, 3, 23, 9),)],
-     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6},
+     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6}, "received": 6,
       "placement": lambda: lambda node: (2, tuple(THREE), (1, 2, 1)) if node.name == "x" else "p0"}),
     ("windows | rows 1:6:1, halos padded", Windows, [(r(2, 3, 23, 9),)],
      {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6, "padded": 2},
@@ -509,7 +509,7 @@ CASES = [
     ("megatron | 2 shards, backward", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "loss": 0, "placement": lambda: tp.placement(SHARDS)}),
     ("megatron | units 1:3 and 3:1, backward", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
-     {"processors": TWO, "sharded": True, "loss": 0,
+     {"processors": TWO, "sharded": True, "loss": 0, "received": 8,
       "placement": lambda: tp.placement(SHARDS, {"model_0": (1, 3), "model_1": (3, 1)})}),
     ("causal lm striped | 2 shards, backward", lambda: cp.Causal(6), [LM],
      {"processors": TWO, "sharded": True, "loss": 0, "placement": lambda: cp.placement(SHARDS, sequence=6)}),
@@ -533,7 +533,7 @@ FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 proc
                "conv | conv on mps, rest cpu", "megatron | 2 shards")
 METAL_SIGNED = ("mlp | all on mps", "conv | conv on mps, rest cpu", "megatron | 2 shards, cpu/mps")
 KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
-OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance", "copied", "windows")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance", "copied", "windows", "received")
 
 
 def errors(reference, got):
@@ -597,8 +597,8 @@ def check_block(sent, arrived):
 
 
 # design/problems-of-14b9a757-change-request.md items 3, 6 and 8
-def check_views(scheduled, copied=0):
-    found = 0
+def check_views(scheduled, copied=0, received=0):
+    found = into = 0
     for module in scheduled.modules.values():
         names = {n.name: n for n in module.graph.nodes}
         for node in call_nodes(module.graph):
@@ -615,7 +615,14 @@ def check_views(scheduled, copied=0):
                 held = 1 + sum((n - 1) * s for n, s in zip(whole.shape, whole.stride()))
                 assert 0 <= offset and (not all(sizes) or last < held), f"{node.name} leaves {base}"
                 assert ("invariant" in node.meta) == ("state" in names[base].meta), f"{node.name}: a slice of state"
+            for key in {"to", "out"} & node.meta.keys():
+                buffer, offset, sizes, strides = node.meta[key]
+                whole, last = names[buffer].meta["val"], offset + sum((n - 1) * s for n, s in zip(sizes, strides))
+                assert (key == "to") == (node.target is ir.RECV) and list(node.users) == [names[buffer]], node.name
+                assert sizes == tuple(node.meta["val"].shape) and (not all(sizes) or last < whole.numel()), node.name
+                into += key == "to"
     assert found >= copied, f"{found} of {copied} views that fail torch's condition are of a contiguous copy"
+    assert into >= received, f"{into} of {received} recvs name a view of the buffer made from them"
 
 
 # design/problems-of-14b9a757-change-request.md item 4, steps 1 and 2; design/unequal-shards-change-request.md item 10
@@ -899,7 +906,7 @@ def run_case(name, with_inductor):
     options = next(case for case in CASES if case[0] == name)[3]
     (operators, copies), channels = (check_ir(program, options.get("expect_on"), options.get("sharded")),
                                      program.channels)
-    check_views(program, options.get("copied", 0))
+    check_views(program, options.get("copied", 0), options.get("received", 0))
     if "windows" in options:
         check_windows(program, options["windows"])
     if name in SAVE:
