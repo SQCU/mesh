@@ -809,8 +809,8 @@ def watched(function):
 
 
 class Profiled(Program):
-    def __init__(self, scheduled):
-        super().__init__(scheduled, lower_metal.lower(scheduled))
+    def __init__(self, scheduled, stored=()):
+        super().__init__(scheduled, lower_metal.lower(scheduled, stored))
         self.ordered = [f for p, f in self.functions.items() if hasattr(f, "feedback") and p in self.arguments]
         self.functions = {p: f if p == self.caller else watched(f) for p, f in self.functions.items()}
 
@@ -838,14 +838,14 @@ def planned_program(scheduled):
     return Program(scheduled, functions)
 
 
-def variants(scheduled, with_inductor):
+def variants(scheduled, with_inductor, stored=()):
     passed = lambda: {p: fx_pass(copy.deepcopy(m)) for p, m in scheduled.modules.items()}
     return {
         "fx direct": lambda: Program(scheduled),
         "inductor": (lambda: compiled_program(scheduled)) if with_inductor else None,
         "archive": lambda: archived_program(scheduled),
         "fx pass": lambda: Program(dataclasses.replace(scheduled, modules=passed())),
-        "metal": (lambda: Profiled(scheduled)) if MPS else None,
+        "metal": (lambda: Profiled(scheduled, stored)) if MPS else None,
         "coreml": (lambda: planned_program(scheduled)) if scheduled.engines else None,
     }
 
@@ -912,7 +912,8 @@ def run_case(name, with_inductor):
     if name in SAVE:
         save_for_review(SAVE[name], program)
     results, dynamo, breaks = {}, "", 0
-    for path, make in variants(program, with_inductor).items():
+    stored = program.exported.user_inputs if options.get("inputs_on") else ()
+    for path, make in variants(program, with_inductor, stored).items():
         if make is None:
             results[path] = None
             continue

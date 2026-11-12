@@ -300,7 +300,7 @@ class Lowering:
         results = tuple(r if not isinstance(r, torch.fx.Node) else constants[r] if r in fixed else view(r)
                         for r in self.results)
         run = mesh_metal4.Function(
-            mesh_metal4.native(source).run, count, handles, [], [(slots[node], position)
+            mesh_metal4.native(source).run, count, handles, [], [(slots[node], position, False)
                                                                  for position, node in enumerate(self.arguments)],
             made, [], sends, receives, copies, results, (SEND, RECV, TO_COPY), directory,
             [(slots[node], constants[node]) for node in fixed])

@@ -565,3 +565,39 @@ def orderings(edges, commit):
 # M. Lam, PLDI 1988, section 2.3; mesh-graph.h mesh_graph_contract_unrolled
 def unrolled(vertices, edges, copies):
     return [(copy * vertices + a, copy * vertices + b) for copy in range(copies) for a, b in edges]
+
+
+# mesh-graph.h mesh_graph_dependences_views, its supplied edges; design/integration-finishing-change-request.md item 7
+def dependences_supplied(vertices, views, supplied):
+    viewed, held = (Viewed * max(len(views), 1))(), []
+    for made, (key, offset, element, pairs, vertex, write) in zip(viewed, views):
+        held.append((C.c_uint64 * max(2 * len(pairs), 1))(*[x for pair in pairs for x in pair]))
+        made.key, made.offset, made.element, made.dims, made.pairs = key, offset, element, len(pairs), held[-1]
+        made.vertex, made.write = vertex, write
+    given = [_array(C.c_uint32, [edge[end] for edge in supplied])[0] for end in range(2)]
+    count = C.c_size_t()
+    status = LIB.mesh_graph_dependences_views(len(views), viewed, len(supplied), *given, 0, None, None, None,
+                                              C.byref(count))
+    if status != errno.ERANGE:
+        _check(status)
+    room = max(count.value, 1)
+    tails, heads, causes = (C.c_uint32 * room)(), (C.c_uint32 * room)(), (Cause * room)()
+    _check(LIB.mesh_graph_dependences_views(len(views), viewed, len(supplied), *given, count.value, tails, heads,
+                                            causes, C.byref(count)))
+    found = {}
+    for tail, head, cause in zip(tails[:count.value], heads[:count.value], causes[:count.value]):
+        found.setdefault((tail, head), []).append((HAZARDS[cause.kind], cause.key))
+    edges, room = list(found), max(len(found), 1)
+    redundant, kept = (C.c_ubyte * room)(), C.c_size_t()
+    _check(LIB.mesh_graph_synchronization(vertices, len(edges), (C.c_uint32 * room)(*[a for a, _ in edges]),
+                                          (C.c_uint32 * room)(*[b for _, b in edges]), redundant, C.byref(kept)))
+    return edges, found, [bool(r) for r in redundant[:len(edges)]]
+
+
+# design/torch-source-lowering-change-request.md item 3: `commit[v]` as in orderings
+def arrivals(edges, commit):
+    found = {}
+    for a, b in sorted(edges, key=lambda edge: edge[::-1]):
+        if commit[a] is None and commit[b] is not None:
+            found.setdefault(commit[b], {}).setdefault(a, []).append((a, b))
+    return found

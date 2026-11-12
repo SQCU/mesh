@@ -36,7 +36,10 @@ for name, result, arguments in (
         ('mesh_metal4_times', None, [P, C.POINTER(C.c_double)]),
         ('mesh_metal4_commit', None, [P, C.POINTER(Dispatch), U, C.POINTER(P), U, C.POINTER(P), U, P, P]),
         ('mesh_metal4_wait', C.c_int, [C.POINTER(P), U, C.c_char_p, C.c_size_t]),
-        ('mesh_metal4_reset', None, [P])):
+        ('mesh_metal4_reset', None, [P]),
+        ('mesh_metal4_event', P, []),
+        ('mesh_metal4_signal', None, [P]),
+        ('mesh_metal4_await', None, [P])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 MESSAGE = 4096
@@ -98,7 +101,7 @@ def failed(message, ended):
 
 # design/compilation-composition-change-request.md, item 7; design/torch-source-lowering-change-request.md, item 3
 def program(entries, storages, begun, ended):
-    body = [f"uint64_t *g = a + {storages}, *o = a + {2 * storages}, *m = a + {3 * storages};", *begun]
+    body = [f"uint64_t *g = a + {storages}, *o = a + {2 * storages};", *begun]
     for kind, lines, *given in entries:
         if kind is SENT:
             body += [f"host[0]({given[0]});", "if (f->failed) {", *lines, *ended, "return; }"]
@@ -133,7 +136,7 @@ class Function:
         self.call, self.storages, self.given, self.made, self.owned = call, storages, given, made, dict(owned)
         self.sends, self.receives, self.copies, self.results = sends, receives, copies, results
         self.send, self.recv, self.copy = operators
-        self.a, self.h = (Q * max(4 * storages, 1))(), (P * max(storages + len(handles), 1))()
+        self.a, self.h = (Q * max(3 * storages, 1))(), (P * max(storages + len(handles), 1))()
         self.h[storages:storages + len(handles)] = handles
         for storage, handle, address, device in static:
             self.h[storage], self.a[storage], self.a[storages + storage] = handle, address, device
@@ -153,12 +156,10 @@ class Function:
             self.owner[storage] = torch.frombuffer(pages, dtype=dtype)
         return self.owner[storage]
 
-    def hold(self, storage, pages):
+    def hold(self, storage, pages, stored=False):
         self.owner[storage] = pages
-        on = pages.device.type == "mps"
-        self.a[storage] = pages.untyped_storage().data_ptr() if on else pages.data_ptr()
-        self.a[2 * self.storages + storage] = pages.storage_offset() * pages.itemsize if on else 0
-        self.a[3 * self.storages + storage] = on
+        self.a[storage] = pages.untyped_storage().data_ptr() if stored else pages.data_ptr()
+        self.a[2 * self.storages + storage] = pages.storage_offset() * pages.itemsize if stored else 0
         return self.a[storage]
 
     def attempt(self, call, *arguments):
@@ -183,8 +184,8 @@ class Function:
 
     def __call__(self, *arguments):
         self.owner, self.raised, self.failure.failed = dict(self.fixed), [], 0
-        for storage, position in self.given:
-            self.hold(storage, arguments[position])
+        for storage, position, stored in self.given:
+            self.hold(storage, arguments[position], stored)
         for storage, dtype, count in self.made:
             self.hold(storage, torch.empty(count, dtype=dtype))
         self.call(self.a, self.h, self.hosted, C.byref(self.failure))

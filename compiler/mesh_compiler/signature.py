@@ -44,19 +44,6 @@ def torch_run(module):
             "operations": [("host", *operation) for operation in operations]}
 
 
-# design/compilation-composition-change-request.md item 2;
-# compiler/mesh_compiler/lower_metal.py Lowering.ordered; rdma/mesh-metal4.m mesh_metal4_after
-def lowered_run(record, stored):
-    operations, arrived = [], False
-    for kind, name, task, key, every, ordinal in record["operations"]:
-        if name == "queue_wait":
-            if arrived or not stored.intersection(key[1]):
-                continue
-            arrived, key = True, key[:1]
-        operations.append((kind, name, task, key, every, ordinal))
-    return {**record, "operations": operations}
-
-
 # compiler/mesh_compiler/runtime.py Program; compiler/mesh_compiler/bridge.py Published
 def handed(records, scheduled):
     order, started = list(scheduled.devices), {p for _, sender, receiver, *_ in scheduled.carried for p in (sender, receiver)}
@@ -95,9 +82,7 @@ def operands(scheduled, functions=None, executions=1, stored=()):
     for processor in scheduled.devices:
         module = scheduled.modules[processor]
         function = functions.get(processor, module)
-        on_mps = {position for position, name in enumerate(scheduled.inputs[processor]) if name in stored or (
-            name in scheduled.exported.state and scheduled.exported.state[name][1].device.type == "mps")}
-        records[processor] = lowered_run(function.record, on_mps) if hasattr(function, "record") else torch_run(
+        records[processor] = function.record if hasattr(function, "record") else torch_run(
             function if isinstance(function, torch.fx.GraphModule) else module)
     records, handoffs = handed(records, scheduled)
     for processor in records:

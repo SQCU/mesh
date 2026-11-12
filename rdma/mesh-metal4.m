@@ -31,6 +31,13 @@ struct mesh_metal4_dispatch {
 @implementation MeshMetal4Record
 @end
 
+@interface MeshMetal4Event : NSObject
+@property id<MTLSharedEvent> event;
+@property uint64_t value;
+@end
+@implementation MeshMetal4Event
+@end
+
 static id<MTLDevice> device;
 static id<MTL4CommandQueue> queue;
 static id<MTL4Compiler> compiler;
@@ -220,4 +227,23 @@ void mesh_metal4_reset(void *of) {
     MeshMetal4Stream *stream = (__bridge MeshMetal4Stream *)of;
     [stream.allocator reset];
     [stream.viewed removeAllAllocations];
+}
+
+/* design/torch-source-lowering-change-request.md, item 3; Apple, MTL4CommandQueue.h, waitForEvent:value: */
+void *mesh_metal4_event(void) {
+    begin();
+    MeshMetal4Event *made = [MeshMetal4Event new];
+    made.event = [device newSharedEvent];
+    return (__bridge_retained void *)made;
+}
+
+void mesh_metal4_signal(void *of) {
+    MeshMetal4Event *made = (__bridge MeshMetal4Event *)of;
+    made.value = made.value + 1;
+    made.event.signaledValue = made.value;
+}
+
+void mesh_metal4_await(void *of) {
+    MeshMetal4Event *made = (__bridge MeshMetal4Event *)of;
+    [queue waitForEvent:made.event value:made.value];
 }
