@@ -299,6 +299,11 @@ def flat(view):
     return (view.storage, view.dtype, view.shape, view.stride, view.offset)
 
 
+# torch 2.15 documentation, torch.sort
+def precedes(a, b, floating):
+    return f"{a} < {b}" if not floating else f"{a} < {b} || (isnan({b}) && !isnan({a}))"
+
+
 class Lowering:
     types = TYPES
 
@@ -672,18 +677,24 @@ class Lowering:
                   f"{places.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'], True)} = p.x % {padded};"]
         self.dispatch(bind, lines, (rows * padded, 1, 1))
         first, second = ("y", "x") if descending else ("x", "y")
-        less = f"({first}0 < {second}0)" if not source.dtype.is_floating_point else \
-            f"(({first}0 < {second}0) || (isnan({second}0) && !isnan({first}0)))"
+        less = f"({precedes(f'{first}0', f'{second}0', source.dtype.is_floating_point)})"
         same = f"({first}0 == {second}0)" if not source.dtype.is_floating_point else \
             f"(({first}0 == {second}0) || (isnan({second}0) && isnan({first}0)))"
 
         self.bitonic([values, places], rows, padded, lambda a, b: (
             f"(({a}1 < {count}) != ({b}1 < {count})) ? ({a}1 < {count}) : ({less} || ({same} && {a}1 < {b}1))"))
-        strides = [0] * len(source.shape)
+        return self.rows(source, dim, padded, (values, places))
+
+    def rows(self, source, dim, width, made):
+        strides, lead = [0] * len(source.shape), source.shape[:dim] + source.shape[dim + 1:]
         for d, step in zip([d for d in range(len(source.shape)) if d != dim], packed(lead)):
-            strides[d] = step * padded
+            strides[d] = step * width
         strides[dim] = 1
-        return [View(v.storage, v.dtype, tuple(source.shape), tuple(strides), 0) for v in (values, places)]
+        return [View(v.storage, v.dtype, tuple(source.shape), tuple(strides), 0) for v in made]
+
+    def given(self, bind, value, names, kind):
+        return value.read(bind, names[len(names) - len(value.shape):]) if isinstance(value, (View, Fused)) else \
+            literal(value, kind == "double")
 
     def sort(self, node):
         source = self.view(self.forms[node.args[0]])
@@ -728,8 +739,7 @@ class Lowering:
         sums, flags = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,))
         bind = Bound()
         lines, names = unravel(f"uint({places.read(bind, ['0', 'p.x'])})", domain, "c")
-        x = given.read(bind, names[len(names) - len(given.shape):]) if isinstance(given, (View, Fused)) else \
-            literal(given, kind == "double")
+        x = self.given(bind, given, names, kind)
         lines += [f"{sums.read(bind, ['p.x'], True)} = {kind}({x});",
                   f"{flags.read(bind, ['p.x'], True)} = p.x == 0 || "
                   f"{keys.read(bind, ['0', 'p.x'])} != {keys.read(bind, ['0', 'max(p.x, 1u) - 1'])};"]
@@ -1266,8 +1276,7 @@ class Native(Lowering):
         self.store(source, made)
         lines, names = unravel("q", domain, "c")
         out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
-        x = given.read(bind, names[len(names) - len(given.shape):]) if isinstance(given, (View, Fused)) else \
-            literal(given, kind == "double")
+        x = self.given(bind, given, names, kind)
         self.dispatch(bind, [f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
                              f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
         return made
@@ -1281,19 +1290,14 @@ class Native(Lowering):
         lines, names = unravel("p.x", lead, "r")
         at = lambda k: source.read(bind, names[:dim] + [f"uint({k})"] + names[dim:])
         first, second = ("b", "a") if descending else ("a", "b")
-        order = f"x{first} < x{second}" if not source.dtype.is_floating_point else \
-            f"x{first} < x{second} || (isnan(x{second}) && !isnan(x{first}))"
+        order = precedes(f"x{first}", f"x{second}", source.dtype.is_floating_point)
         v, w = (f"({bind(made, True)} + p.x * {count})" for made in (values, places))
         lines += [f"for (long k = 0; k < {count}; k++) {w}[k] = k;",
                   f"std::stable_sort({w}, {w} + {count}, [&](long a, long b) {{ {kind} xa = {at('a')}, xb = {at('b')}; "
                   f"return {order}; }});",
                   f"for (uint k = 0; k < {count}; k++) {v}[k] = {at(f'{w}[k]')};"]
         self.dispatch(bind, lines, (rows, 1, 1))
-        strides = [0] * len(source.shape)
-        for d, step in zip([d for d in range(len(source.shape)) if d != dim], packed(lead)):
-            strides[d] = step * count
-        strides[dim] = 1
-        return [View(made.storage, made.dtype, tuple(source.shape), tuple(strides), 0) for made in (values, places)]
+        return self.rows(source, dim, count, (values, places))
 
     def columns(self, bind, lines, source, held, rows, columns, names):
         lines += [f"for (uint i = 0; i < {rows}; i++) for (uint j = 0; j < {columns}; j++) "
