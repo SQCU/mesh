@@ -84,6 +84,7 @@ def adapt(module, device, carried):
     module = copy.deepcopy(module)
     graph = module.graph
     sent, receives, written, parts = [], False, {}, set()
+    named = {node.name: node for node in graph.nodes if node.op == "call_function"}
     read = lambda node: [user for user in node.users if user in written]
     for node in list(graph.nodes):
         if node in parts:
@@ -103,7 +104,7 @@ def adapt(module, device, carried):
             graph.erase_node(node)
             node = call
         elif node.target is SEND:
-            sent.append(node.args[0])
+            sent += [named[name] for name in node.args[0].meta.get("view", ())[:1] if name in named] + [node.args[0]]
             node.target = SEND_STRIDED
             node.args = (*node.args, list(node.args[0].meta["val"].stride()), mesh_graph.extremes(list(written), read)[1])
             written = {}
