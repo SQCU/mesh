@@ -7,7 +7,7 @@ from .devices import ENGINES, HOST, on_devices
 from .export import export
 from .ir import Scheduled
 from .placement import place
-from .schedule import argument_buffers, carried, planned, schedule, unit_cost
+from .schedule import argument_buffers, carried, planned, schedule, stored, unit_cost
 from .signature import signature
 
 
@@ -23,6 +23,7 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
     between = carried(graph, machines)
     plan = planned(graph, between, machines, cost)
     modules = schedule(graph, cost, plan)
+    plan = stored(plan, graph, machines, {key for kind, key in exported.outputs if key is not None})
     inputs, feedforward = argument_buffers(modules, output_processor)
     return Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward,
                      between, engines, plan)

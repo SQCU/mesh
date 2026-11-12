@@ -62,6 +62,9 @@ class Plan:
     outstanding: int
     times: list
     record: bytes
+    machine: int
+    places: list
+    sections: list
 
 
 @dataclass
