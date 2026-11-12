@@ -125,8 +125,19 @@ class Captured(torch.fx.Interpreter):
         self.calling.meta["function"] = key
 
     def call_module(self, target, args, kwargs):
-        self.captured(target, self.fetch_attr(target), args, kwargs)
-        return super().call_module(target, args, kwargs)
+        module = self.fetch_attr(target)
+        self.captured(target, module, args, kwargs)
+        before = attributes(module)
+        result = super().call_module(target, args, kwargs)
+        after = attributes(module)
+        written = {key for kind, key in self.exported[self.calling.meta["function"]].outputs
+                   if kind == OutputKind.BUFFER_MUTATION}
+        rebound = [name for name in before if after.get(name) is not before[name] and name not in written]
+        if rebound:
+            raise NotImplementedError(f"{self.calling.name} rebinds {rebound[0]}, which torch.export captures as no "
+                                      "write; a function's writes are its node's results")
+        self.calling.meta["held"] = before, after
+        return result
 
     def call_function(self, target, args, kwargs):
         if target in self.functions:
@@ -135,6 +146,10 @@ class Captured(torch.fx.Interpreter):
             raise NotImplementedError(f"{self.calling.name} runs between the program's compiled calls; every "
                                       "function of a program is captured")
         return super().call_function(target, args, kwargs)
+
+
+def attributes(module):
+    return {**dict(module.named_parameters()), **dict(module.named_buffers())}
 
 
 def calls(program, args, functions, **export_options):
@@ -146,31 +161,38 @@ def calls(program, args, functions, **export_options):
     module = torch.fx.GraphModule(program, graph)
     captured = Captured(module, functions, export_options)
     captured.run(*args)
-    named, held = {}, {}
+    held, last = {}, {}
     for node in [n for n in module.graph.nodes if "function" in n.meta]:
         function, called = captured.exported[node.meta["function"]], node.op == "call_module"
         if not function.state:
             continue
         leaf = module.get_submodule(node.target) if called else Function(node.target)
-        own = {**dict(leaf.named_parameters()), **dict(leaf.named_buffers())} if called else {}
         state = dict(function.state.values())
+        before, after = node.meta.pop("held", ({}, {}))
         written = tuple(key for kind, key in function.outputs if kind == OutputKind.BUFFER_MUTATION)
-        paths = {key: f"{node.target}.{key}" if key in own else f"{node.name}_{key}" for key in state}
+        paths = {key: f"{node.target}.{key}" if key in before else f"{node.name}_{key}" for key in state}
         module.add_submodule(f"{node.name}_stated", Stated(leaf, tuple(state), written))
         with module.graph.inserting_before(node):
-            for key in state.keys() - own.keys():
+            for key in state.keys() - before.keys():
                 module.register_buffer(paths[key], state[key], persistent=False)
-            taken = [named.get(paths[key]) or held.get(tensor) or module.graph.get_attr(paths[key])
-                     for key, tensor in state.items()]
+            read = {key: before.get(key, tensor) for key, tensor in state.items()}
+            taken = [held[id(tensor)][1] if id(tensor) in held else module.graph.get_attr(paths[key])
+                     for key, tensor in read.items()]
             call = module.graph.call_module(f"{node.name}_stated", (*node.args, *taken), node.kwargs)
             call.meta = {**node.meta, "read": tuple(state), **({"written": written} if written else {})}
             node.replace_all_uses_with(module.graph.call_function(operator.getitem, (call, 0)) if written else call)
-            for (key, tensor), value in zip(state.items(), taken):
+            for (key, tensor), value in zip(read.items(), taken):
+                held.setdefault(id(tensor), (tensor, value))
                 if key in written:
                     value = module.graph.call_function(operator.getitem, (call, 1 + written.index(key)))
-                    named[paths[key]] = held[tensor] = value
-                named.setdefault(paths[key], value)
-                held.setdefault(tensor, value)
+                    last.pop(id(tensor), None)
+                    held[id(after[key])] = after[key], value
+                    last[id(after[key])] = paths[key], value
         module.graph.erase_node(node)
+    # torch 2.15 torch/export/graph_signature.py OutputKind.BUFFER_MUTATION
+    if last:
+        output = module.graph.output_node()
+        output.args = ((output.args[0], *(value for _, value in last.values())),)
+        module.meta["written"] = tuple(path for path, _ in last.values())
     module.recompile()
     return module, captured.exported

@@ -1220,6 +1220,39 @@ class Normed(nn.Module):
         return self.join(self.a(self.norm(x)), self.norm(y))
 
 
+class Totalled(nn.Module):
+    def __init__(self, rebind=False):
+        super().__init__()
+        self.register_buffer("total", torch.zeros(8))
+        self.rebind = rebind
+
+    def forward(self, x):
+        if self.rebind:
+            self.total = self.total + x.sum(0)
+        else:
+            self.total.add_(x.sum(0))
+        return x + self.total
+
+
+class Holder(nn.Module):
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, x):
+        return self.inner(x)
+
+
+class Shared(nn.Module):
+    def __init__(self, rebind=False):
+        super().__init__()
+        self.f = Holder(Totalled(rebind))
+        self.g, self.join = Holder(self.f.inner), Joined()
+
+    def forward(self, x, y):
+        return self.join(self.f(x), self.f(self.g(y)))
+
+
 def doubled(x):
     return x * 2
 
@@ -1314,22 +1347,43 @@ def check_calls():
     assert first.args[1:] == tuple(held) and second.args[1:3] == first.args[1:3] and [
         (n.op, *n.args) for n in second.args[3:]] == [("call_function", first, k + 1) for k in range(
             len(first.meta["written"]))], "a written buffer is no argument and no result"
+    assert graph.meta["written"] == tuple(f"norm.{name}" for name in second.meta["written"]) and [
+        (n.op, *n.args) for n in graph.graph.output_node().args[0][1:]] == [
+            ("call_function", second, k + 1) for k in range(len(second.meta["written"]))], (
+                "the last write of a buffer is no result of the calls' graph")
+    count = len(first.meta["written"])
     called = Called(graph, exported)
-    wrote = errors(reference(*args), called.run(*args))[1]
-    norm = called.programs[second.meta["function"]]
-    last = max(errors(reference.norm.get_buffer(name).float(), norm.arguments[processor][place].float())[1]
-               for name in second.meta["written"] for processor, place in norm.positions[norm.key_of[name]][:1])
+    result, *buffers = called.run(*args)
+    wrote = errors(reference(*args), result)[1]
+    last = max(errors(reference.get_buffer(path).float(), buffer.float())[1]
+               for path, buffer in zip(graph.meta["written"], buffers, strict=True))
     assert max(wrote, last) <= TOLERANCE and len(called.programs) == 3, (wrote, last)
-    print(f"  a function that writes {len(first.meta['written'])} buffers: each is an argument and a result of its "
-          f"call's node, the second call reading the first's; rel err {wrote:.1e}, of the buffers {last:.1e}")
+    shared = Shared().eval()
+    graph, exported = calls(shared, args, ("f", "g", "join"))
+    reference = copy.deepcopy(shared)
+    first, second, third = [n for n in graph.graph.nodes if "written" in n.meta]
+    assert [n.target for n in first.args[1:]] == ["f.inner.total"] and [
+        [(n.op, *n.args) for n in call.args[1:]] for call in (second, third)] == [
+            [("call_function", first, 1)], [("call_function", second, 1)]], (
+                "a buffer two functions hold under two paths is not the result of the last call that wrote it")
+    assert graph.meta["written"] == ("f.inner.total",) and graph.graph.output_node().args[0][1].args == (third, 1), (
+        "the last write of a buffer held under two paths is no result of the calls' graph")
+    result, total = graph(*args)
+    rebound = max(errors(reference(*args), result)[1], errors(reference.f.inner.total, total)[1])
+    assert rebound <= TOLERANCE, rebound
+    print(f"  a function that writes {count} buffers: each is an argument and a result of its call's node, the second "
+          f"call reading the first's, and the last write a result of the graph; rel err {wrote:.1e}, of the buffers "
+          f"{last:.1e}; a buffer held under two paths, rel err {rebound:.1e}")
     for block, given, names in ((Block(True), args, ("a", "b", "join", doubled)), (Indexed(True), args[:1], (
-            "a", "b", "join", doubled)), (Held(True), args[:1], ("a", counted))):
+            "a", "b", "join", doubled)), (Held(True), args[:1], ("a", counted)), (
+                Shared(True), args, ("f", "g", "join"))):
         try:
             calls(block.eval(), given, names)
         except (NotImplementedError, RuntimeError) as error:
             print(f"  refused: {str(error).splitlines()[0]}")
         else:
-            raise AssertionError("an operation between two compiled calls, or a plain function's write, was captured")
+            raise AssertionError("an operation between two compiled calls, a plain function's write, or a rebound "
+                                 "buffer was captured")
     print(f"  4 calls of 3 exported functions, {most} independent at once; each function compiled once and called in the "
           f"graph's order, rel err {worst:.1e}")
     print("  ok: the block's calls are the nodes of one graph, and nothing of the block runs outside a function")
