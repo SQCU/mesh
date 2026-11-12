@@ -73,6 +73,11 @@ FILLED = {ATEN.full.default, ATEN.full_like.default, ATEN.scalar_tensor.default}
 REDUCED = {ATEN.sum.dim_IntList: ("0", "a + {x}", "a"), ATEN.mean.dim: ("0", "a + {x}", "a / {n}"),
            ATEN.amax.default: ("{x}", "max(a, {x})", "a"), ATEN.amin.default: ("{x}", "min(a, {x})", "a"),
            ATEN.any.dim: ("false", "a || {x}", "a")}
+# torch 2.15 documentation, torch.remainder
+REMAINDER = "(({m} != 0 && (({m} < 0) != ({T}({1}) < 0))) ? {m} + {T}({1}) : {m})"
+REMAINDERS = {True: REMAINDER.replace("{m}", "fmod({T}({0}), {T}({1}))"),
+              False: REMAINDER.replace("{m}", "({T}({0}) % {T}({1}))")}
+SCATTERED = {ATEN.scatter_add.default: "a + {x}", ATEN.scatter.src: "{x}", ATEN.scatter.value: "{x}"}
 PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memory", "non_blocking"}
 SCALED = {ATEN.addmm.default: {"beta", "alpha"}}
 
@@ -264,6 +269,9 @@ class Lowering:
                     RECV: self.receive, SEND: self.send, operator.getitem: self.part,
                     **dict.fromkeys(FILLED, self.filled), **dict.fromkeys(REDUCED, self.reduced),
                     ATEN.arange.start_step: self.range, ATEN.embedding.default: self.embedding,
+                    ATEN.gather.default: self.gather, ATEN.index_select.default: self.index_select,
+                    ATEN.index.Tensor: self.index, ATEN.remainder.Scalar: self.remainder,
+                    ATEN.remainder.Tensor: self.remainder, **dict.fromkeys(SCATTERED, self.scattered),
                     ATEN.pow.Tensor_Scalar: self.power, ATEN.gelu.default: self.gelu,
                     ATEN.cat.default: self.concatenated,
                     ATEN._softmax.default: self.softmax,
@@ -451,10 +459,70 @@ class Lowering:
         return Fused(value.dtype, tuple(value.shape), lambda bind, index, t:
                      f"{TYPES[value.dtype]}({literal(start)} + {index[0]} * {literal(step)})")
 
+    def remainder(self, node):
+        return self.pointwise(node, REMAINDERS[node.meta["val"].dtype.is_floating_point])
+
+    # torch 2.15 documentation, torch.gather, torch.index_select, torch.nn.functional.embedding and Tensor Indexing
+    # API; NumPy User Guide, Indexing on ndarrays, Advanced indexing
+    def take(self, node, source, dims):
+        value = node.meta["val"]
+
+        def expression(bind, index, t):
+            at = []
+            for extent, (chosen, places) in zip(source.shape, dims):
+                if chosen is None:
+                    at.append(index[places])
+                else:
+                    found = f"long({chosen.read(bind, [index[k] for k in places][-len(chosen.shape) or len(places):])})"
+                    at.append(f"uint({found} < 0 ? {found} + {extent} : {found})")
+            return source.read(bind, at)
+        return Fused(value.dtype, tuple(value.shape), expression)
+
     def embedding(self, node):
-        value, (table, chosen) = node.meta["val"], (self.reader(a) for a in node.args[:2])
-        return Fused(value.dtype, tuple(value.shape), lambda bind, index, t:
-                     table.read(bind, [f"uint({chosen.read(bind, index[:-1])})", index[-1]]))
+        table, chosen = (self.reader(a) for a in node.args[:2])
+        return self.take(node, table, [(chosen, range(len(chosen.shape))), (None, len(chosen.shape))])
+
+    def gather(self, node):
+        source, chosen = self.reader(node.args[0]), self.reader(node.args[2])
+        dim, every = node.args[1] % max(len(source.shape), 1), range(len(source.shape))
+        return self.take(node, source, [(chosen, every) if d == dim else (None, d) for d in every])
+
+    def index_select(self, node):
+        source, chosen = self.reader(node.args[0]), self.reader(node.args[2])
+        dim = node.args[1] % max(len(source.shape), 1)
+        return self.take(node, source, [(chosen, [d]) if d == dim else (None, d) for d in range(len(source.shape))])
+
+    def index(self, node):
+        source = self.reader(node.args[0])
+        chosen = {d: self.reader(a) for d, a in enumerate(node.args[1]) if a is not None}
+        shape = torch.broadcast_shapes(*[c.shape for c in chosen.values()])
+        adjacent = list(chosen) == list(range(min(chosen), max(chosen) + 1))
+        start = min(chosen) if adjacent else 0
+        rest = [d for d in range(len(source.shape)) if d not in chosen]
+        over = range(start, start + len(shape))
+        return self.take(node, source, [
+            (chosen[d], over) if d in chosen else
+            (None, (d if d < start else d - len(chosen) + len(shape)) if adjacent else len(shape) + rest.index(d))
+            for d in range(len(source.shape))])
+
+    # torch 2.15 documentation, torch.Tensor.scatter_ and torch.Tensor.scatter_add_
+    def scattered(self, node):
+        value, (source, dim, chosen, given) = node.meta["val"], node.args
+        source, chosen = self.reader(source), self.reader(chosen)
+        given = self.reader(given) if isinstance(given, torch.fx.Node) else given
+        dim, kind = dim % len(source.shape), TYPES[value.dtype]
+        made, bind = self.fresh(value.dtype, value.shape), Bound()
+        lines, names = unravel("p.x", value.shape, "o")
+        along = names[:dim] + ["j"] + names[dim + 1:]
+        x = f"{kind}({given.read(bind, along)})" if isinstance(given, (View, Fused)) else f"{kind}({literal(given)})"
+        inside = [f"{name} < {n}" for d, (name, n) in enumerate(zip(names, chosen.shape))
+                  if d != dim and n < value.shape[d]]
+        lines += [f"{kind} a = {source.read(bind, names)};",
+                  f"if ({' && '.join(inside) or 'true'}) for (uint j = 0; j < {chosen.shape[dim]}; j++)",
+                  f"    if (uint({chosen.read(bind, along)}) == {names[dim]}) a = {SCATTERED[node.target].format(x=x)};",
+                  f"{made.read(bind, names, True)} = a;"]
+        self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
+        return made
 
     def viewed(self, node):
         form, shape = self.forms[node.args[0]], tuple(node.meta["val"].shape)

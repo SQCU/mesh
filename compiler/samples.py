@@ -334,9 +334,6 @@ def ragged_rows():
 
 BMM = torch.ops.aten.bmm.default
 
-NOT_LOWERED_INDEXING = ["aten.gather.default", "aten.index.Tensor", "aten.index_select.default",
-                        "aten.remainder.Scalar", "aten.scatter_add.default"]
-
 CASES = [
     ("mlp", MLP, [(r(5, 16),)], {}),
     ("sequential (input named `input`)", lambda: nn.Sequential(nn.Linear(16, 8), nn.GELU()),
@@ -378,7 +375,7 @@ CASES = [
     ("mlp | all on mps, input on mps", MLP, [(r(5, 16),)],
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True, "inputs_on": "mps"}),
     ("gather/scatter/... | on mps", Indexing, GATHER,
-     {"processors": on(0, {"gpu": "mps"}), "needs_mps": True, "not_lowered": NOT_LOWERED_INDEXING}),
+     {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("mlp | 2 processors, one holds no node", MLP, [(r(5, 16),)],
      {"processors": TWO, "placement": lambda: lambda node: "p0"}),
     ("mlp | cpu, ane", MLP, [(r(5, 16),)], {"processors": ENGINE, "placement": lambda: halves("cpu", "npu", 4)}),
