@@ -68,8 +68,11 @@ Three things are mesh's and are added to it:
      its level ([integration-finishing-change-request.md](integration-finishing-change-request.md) item 2). A function
      that reads no received range has no completion time of that linear program, which
      [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md) item 3 and
-     [aot-compilation-change-request.md](aot-compilation-change-request.md) A6 state for every function; neither
-     request says which governs, and the code follows item 2.
+     [aot-compilation-change-request.md](aot-compilation-change-request.md) A6 state for every function. Neither
+     request says which governs. The code takes item 2's keys only; that is Claude's choice, made because
+     `mesh_plan`'s linear program has tasks for the carried ranges alone. Item 2's list of one node's commands, and
+     item 3's and A6's completion-time order of every function (`mesh_graph_completion_times`, `rdma/mesh-graph.h`),
+     are outstanding ([change-requests-index.md](change-requests-index.md)).
 2. Processors on several machines: items 1 and 2 above. The check's cases pass with their processors on two machines.
    (Written: mesh 6d4f007b, 1a3cfe60. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
    entries the check carries between two regions of the bridge's layout; the 33 is the count on one machine. The run under two bridges is
