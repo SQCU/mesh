@@ -236,6 +236,11 @@ class Twice(nn.Module):
         return x.sin().cos().exp()
 
 
+class Reduced(nn.Module):
+    def forward(self, x):
+        return (x.cos() + 1).sum(0), (x.sin() + 1).sum(1)
+
+
 class Rows(nn.Module):
     def forward(self, lengths, values):
         return lengths * 2, values.sin()
@@ -503,6 +508,9 @@ CASES = [
      {"processors": THREE, "sharded": True, "collectives": {"alltoall": 2},
       "placement": lambda: lambda node: {"x": (0, tuple(THREE), (1, 2, 1)), "cos": (0, tuple(THREE), "striped"),
                                          "exp": (0, tuple(THREE), (2, 1, 1))}.get(node.name, "p0")}),
+    ("sums | 7 rows in 3 stripes", Reduced, [(r(7, 4),)],
+     {"processors": THREE, "sharded": True, "collectives": {"reduce": 1},
+      "placement": lambda: lambda node: (0, tuple(THREE), "striped") if node.name == "x" else "p0"}),
     ("view over a split dimension | copied", Merged, [(r(2, 6, 4),)],
      {"processors": TWO, "sharded": True, "copied": 2,
       "placement": lambda: lambda node: (1, SHARDS, None) if node.name == "x" else "p0"}),
@@ -765,11 +773,11 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         nodes = [n for m in scheduled.modules.values() for n in call_nodes(m.graph)]
         held = collections.defaultdict(set)
         for node in nodes:
-            if node.meta.get("of") in original and isinstance(node.meta["val"], torch.Tensor):
+            if (node.meta.get("of") in original and isinstance(node.meta["val"], torch.Tensor)
+                    and not node.meta.get("order")):
                 cut = [u for u in node.users if u.target is SLICE and tuple(u.args[2:]) == node.meta.get("cut")]
                 held[node.meta["of"]].add(tuple((cut[0] if cut else node).meta["val"].shape))
-        striped = any(n.target is SLICE and len(n.args) > 4 for n in nodes)
-        assert striped or all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
+        assert all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
         assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
         assert where.keys() | shards.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
         assert {n.target for n in added} <= PLACED, "a node that neither export nor a collective produced"
