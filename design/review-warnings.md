@@ -200,3 +200,28 @@ turns says so.
   6. It appends to metal-microbench `output_data/change-request-measurements.jsonl` and blocks nothing.
   7. What it tells the session is those counts. The item is the instruction; the measurement is not.
 
+### 12. The measurement of a change to a design document
+
+- **Source:** the operator, 2026-11-12:
+
+> apply the same approach to each or whatever
+
+- **Rule:** bin/mesh-commentary-review.py replaces the commentary review. For each document under design/ that a new
+  commit changes or deletes, Claude Haiku is given that document's diff alone and answers whether a removed line
+  states a requirement that no added line states in the same words. The script itself finds whether a removed line
+  is a block quote that no added line repeats. Both bits are appended to metal-microbench
+  `output_data/design-document-changes.jsonl`, and the session is told where either is set. The two questions are
+  Claude's choice of what to measure.
+
+### 13. The measurement of a new file's style guide
+
+- **Source:** the same turn, and the operator, 2026-11-09:
+
+> add a new post-commit hook for catching claudes adding non-executable files to the repo which have no style guide or cite a style guide but do not adhere to it, which must produce a post-commit warning that claudes are doing decadent and deceptive things as usual. existing nonexecutable files are grandfathered for now because i do'nt want to have a cutesy dialogue about this.
+
+- **Rule:** bin/mesh-style-guide-review.py replaces the style review. For each non-executable file a new commit adds,
+  Claude Haiku is given the file alone and answers which document it names as its guide, or none. Where that
+  document is in the repository, Claude Sonnet is given the guide and the file, with no tools, and answers whether
+  the file adheres. The bits are appended to metal-microbench `output_data/new-file-style-guides.jsonl`, and the
+  operator's warning is given where the file names no guide, names one that is not there, or does not adhere.
+

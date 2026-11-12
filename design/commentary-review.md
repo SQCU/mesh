@@ -1,9 +1,8 @@
 # The commentary review
 
-The change-request, document-commentary and new-file style reviews use bin/mesh_review.py. It runs a tool-using
-Claude Code session, supplies the commit's identity and context locations, and records the investigation and its
-result. The model chooses what evidence to read and how to interpret it. The harness transports that evidence and
-records feedback; it does not decide documentary meaning by parsing sentences, headings or vocabulary overlap.
+The change-request, document-commentary and new-file style hooks are described in
+[review-warnings.md](review-warnings.md), rules 11 to 13. bin/mesh_review.py, which this document describes below, was
+deleted with mesh's rewrite of those three hooks on 2026-11-12.
 
 ## Why
 

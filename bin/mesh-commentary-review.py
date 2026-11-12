@@ -1,86 +1,81 @@
-"""design/commentary-review.md#investigative-review"""
+"""design/review-warnings.md#12-the-measurement-of-a-change-to-a-design-document"""
+import datetime
 import json
 import os
-import pathlib
+import re
 import subprocess
 import sys
 import tempfile
-import traceback
-import mesh_review as harness
 
-TASK = """Review the documents under design/ changed by this commit, including deletions and renames. Investigate
-what the changes do to their meaning, scope and authority. Follow their sources, original turns, code and revision
-history as needed. Distinguish requirements, qualitative review standards, implementation descriptions and status
-claims using their actual context. Write commentary that helps subsequent review and revision, including evidence
-that supports the change as well as any concrete defects. Do not infer documentary requirements from a filename,
-heading grammar, vocabulary overlap or missing local quotation."""
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mesh_commits
 
+LOG = '/Users/mdot/metal-microbench/output_data/design-document-changes.jsonl'
+SEEN = 'design-document-changes.head'
+PROMPT = """You are given, as a diff on stdin, what one git commit changes in one document. Answer one yes/no
+question about the REMOVED lines (those that begin with '-'). Measure only whether the thing is present. Do not
+consider why, or what the commit says about itself.
 
-def write(repo, sha, transcript=None):
-    root = harness.git(repo, 'rev-parse', '--show-toplevel')
-    sha = harness.git(root, 'rev-parse', '--verify', '--end-of-options', sha + '^{commit}')
-    changed = harness.git(root, 'diff-tree', '--root', '--no-commit-id', '--name-only', '-r', sha, '--', 'design/')
-    if not changed:
-        return None
-    record = harness.review(root, sha, TASK, transcript=transcript, kind='commentary', model='sonnet')
-    store = pathlib.Path(harness.git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')) / 'review-commentary'
-    target = store / f'{sha}.md'
-    text = (f'# Commentary on {root} {sha}\n\n{record["at"]}\n\n{record["subject"]}\n\n' + harness.render(record) + '\n')
-    with tempfile.NamedTemporaryFile(mode='w', dir=store, delete=False) as staged:
-        staged.write(text)
-    os.replace(staged.name, target)
-    with open(store / 'INDEX.md', 'a') as index:
-        index.write(f'- {record["at"]} {sha}: [{record["subject"]}]({sha}.md); trace {record["trace"]}\n')
-    return str(target)
+REQUIREMENT-REMOVED: does a removed line state what must, shall, should, has to, needs to or is to be done, written,
+kept, deleted or satisfied, where no added line (beginning with '+') states the same thing in the same words?
+
+Answer with exactly one line and nothing else:
+REQUIREMENT-REMOVED: YES or REQUIREMENT-REMOVED: NO"""
 
 
-def note(error):
-    store = pathlib.Path(harness.MESH) / '.git/review-commentary'
-    store.mkdir(exist_ok=True)
-    with open(store / 'log', 'a') as f:
-        f.write(f'{harness.now()} {error}\n')
-
-
-def detached():
-    try:
-        os.setpriority(os.PRIO_DARWIN_PROCESS, 0, os.PRIO_DARWIN_BG)
-    except (AttributeError, OSError):
-        os.nice(10)
-    try:
-        payload = json.load(sys.stdin)
-        for repo, sha in harness.c9.made(payload):
-            try:
-                write(repo, sha, payload.get('transcript_path'))
-            except Exception:
-                note(traceback.format_exc())
-    except Exception:
-        note(traceback.format_exc())
-    return 0
-
-
-def hook():
-    try:
-        with tempfile.TemporaryFile() as spool:
-            spool.write(sys.stdin.buffer.read())
-            spool.seek(0)
-            subprocess.Popen([sys.executable, '-B', os.path.abspath(__file__), '--detached'], stdin=spool,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd='/', start_new_session=True)
-    except Exception:
-        note(traceback.format_exc())
-    return 0
+def measured(repo, sha):
+    paths = mesh_commits.git(repo, 'show', '--format=', '--name-only', '--diff-filter=MD', sha, '--',
+                             'design/').split('\n')
+    documents = {}
+    for path in filter(None, paths):
+        diff = mesh_commits.git(repo, 'show', '--no-color', '--unified=0', '--format=', sha, '--', path)
+        removed = [line[1:].strip() for line in diff.splitlines() if line.startswith('-') and not line.startswith('---')]
+        added = {line[1:].strip() for line in diff.splitlines() if line.startswith('+') and not line.startswith('+++')}
+        if not removed:
+            continue
+        read = subprocess.run([*mesh_commits.READER, '--system-prompt', PROMPT, 'Answer the question for this commit.'],
+                              input=diff[:400000], capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=170)
+        answer = re.search(r'^REQUIREMENT-REMOVED: (YES|NO)\s*$', read.stdout, re.M)
+        if read.returncode or not answer:
+            raise RuntimeError(f'the reader exited {read.returncode} and said {read.stdout.strip()[:200]!r}')
+        documents[path] = {'requirement_removed': answer.group(1) == 'YES',
+                           'quoted_turn_removed': any(line.startswith('>') and line not in added for line in removed)}
+    return documents or None
 
 
 def main():
-    args = sys.argv[1:]
-    if args == ['--detached']:
-        return detached()
-    if args[:1] == ['--commit'] and len(args) == 3:
-        print(write(harness.REPOSITORIES.get(args[1], os.path.abspath(args[1])), args[2]) or 'No design document changed.')
-        return 0
-    if args:
-        print('mesh-commentary-review.py --commit <mesh|metal-microbench|path> <rev>', file=sys.stderr)
-        return 1
-    return hook()
+    try:
+        json.load(sys.stdin)
+    except ValueError:
+        pass
+    messages = []
+    for repo in mesh_commits.REPOSITORIES:
+        lock = mesh_commits.held(repo, SEEN)
+        if lock is None:
+            continue
+        for sha in mesh_commits.new_commits(repo, SEEN):
+            try:
+                documents = measured(repo, sha)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+                messages.append(f'Design document changes of {sha[:10]} in {repo} were not measured: {error}')
+                break
+            if documents:
+                mesh_commits.appended(LOG, json.dumps({
+                    'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+                    'repository': repo, 'commit': sha,
+                    'subject': mesh_commits.git(repo, 'show', '-s', '--format=%s', sha), 'documents': documents}))
+                for path, bits in documents.items():
+                    found = ' and '.join(name for name, key in (('a requirement', 'requirement_removed'),
+                                                                ('a block-quoted line', 'quoted_turn_removed')) if bits[key])
+                    if found:
+                        messages.append(f'WARNING: {sha[:10]} in {repo} removes {found} from {path} '
+                                        f'(design/review-warnings.md rule 12). Appended to {LOG}.')
+            mesh_commits.advance(repo, SEEN, sha)
+    if messages:
+        message = '\n'.join(messages)
+        print(json.dumps({'systemMessage': message,
+                          'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': message}}))
+    return 0
 
 
 if __name__ == '__main__':
