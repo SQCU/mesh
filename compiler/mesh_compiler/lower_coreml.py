@@ -85,9 +85,8 @@ def immediate(given):
                                               field(1, b"".join(varint(int(v)) for v in flat.tolist())))
 
 
-def feature(name, value):
-    array = field(1, b"".join(varint(n) for n in value.shape)) + field(2, ARRAYS[value.dtype][1])
-    return field(1, name) + field(3, field(5, array))
+def feature(name, shape, array):
+    return field(1, name) + field(3, field(5, field(1, b"".join(varint(n) for n in shape)) + field(2, array)))
 
 
 def host(node):
@@ -183,10 +182,14 @@ class Lowering:
             names.append(self.made[node] if scalar == kind(value.dtype) else
                          self.operation("cast", scalar, tuple(value.shape), x=self.made[node], dtype=CASTS[scalar]))
         block = b"".join(field(2, name) for name in names) + b"".join(field(3, o) for o in self.operations)
-        function = b"".join(field(1, named(f"a{k}", self.crosses(node)[2], tuple(node.meta["val"].shape)))
-                            for k, node in enumerate(self.inputs)) + field(2, OPSET) + field(3, entry(OPSET, block))
-        described = b"".join(field(1, feature(f"a{k}", node.meta["val"])) for k, node in enumerate(self.inputs))
-        described += b"".join(field(10, feature(name, node.meta["val"])) for name, node in zip(names, outputs))
+        declared = described = b""
+        given = [f"a{k}" for k in range(len(self.inputs))]
+        for number, nodes, titles in ((1, self.inputs, given), (10, outputs, names)):
+            for node, title in zip(nodes, titles):
+                (_, array, scalar), shape = self.crosses(node), tuple(node.meta["val"].shape)
+                described += field(number, feature(title, shape, array))
+                declared += field(1, named(title, scalar, shape)) * (number == 1)
+        function = declared + field(2, OPSET) + field(3, entry(OPSET, block))
         program = field(1, 1) + field(2, entry("main", function))
         model = field(1, SPECIFICATION) + field(2, described) + field(502, program)
         self.program.append((None, (model, self.inputs, [(node, name) for node, name in zip(outputs, names)])))
