@@ -282,7 +282,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
                     first, last = (range(*kept).index(e) for e in (common[0], common[-1]))
                     piece = call(graph, SLICE, (node, held, first, last + 1, max(1, (last - first) // max(
                         1, len(common) - 1))), holder or processor)
-                    exchange = exchange or f"{nodes[0].name}:{dimension}:{piece.name}"
+                    exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
                     piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
                     pieces.append((wanted.index(common[0]), wanted.index(common[-1]), len(common), piece))
             value = pieces[0][3] if pieces else call(graph, ZEROS, (nodes[0], [
@@ -339,7 +339,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         for piece, block in zip(pieces, blocks):
             piece.meta.setdefault("blocks", {})[processor] = block
             if None not in (held, dimension):
-                exchange = exchange or f"{nodes[0].name}:{dimension}:{piece.name}"
+                exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
                 piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
         arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
                        if extents == STRIPED else call(graph, CAT, (pieces, held), processor))
