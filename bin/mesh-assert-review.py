@@ -8,11 +8,12 @@ import subprocess
 import sys
 import tempfile
 
-REPOSITORIES = ('/Users/mdot/dox/mesh', '/Users/mdot/metal-microbench')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mesh_commits
+from mesh_commits import git
+
 LOG = '/Users/mdot/metal-microbench/output_data/assert-test-commits.jsonl'
-SEEN = 'review-commentary/assert-review.head'
-READER = ['claude', '-p', '--model', 'claude-haiku-5-5', '--tools', '', '--setting-sources', 'user',
-          '--no-session-persistence', '--strict-mcp-config']
+SEEN = 'assert-review.head'
 PROMPT = """You are given one git commit as a diff on stdin. Answer two yes/no questions about what the commit ADDS:
 the lines that begin with '+', and the files it creates. Measure only whether the thing is present. Do not consider
 why it was added, whether it is justified, or what any message, comment or document says about it.
@@ -31,38 +32,11 @@ ASSERT: YES or ASSERT: NO
 TEST: YES or TEST: NO"""
 
 
-def git(repo, *args):
-    return subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True).stdout.strip()
-
-
-def marker(repo):
-    path = os.path.join(git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'), SEEN)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    return path
-
-
-def new_commits(repo):
-    head = git(repo, 'rev-parse', 'HEAD')
-    path = marker(repo)
-    seen = open(path).read().strip() if os.path.exists(path) else ''
-    if not seen or not git(repo, 'rev-parse', '--verify', '--quiet', seen + '^{commit}'):
-        advance(repo, head)
-        return []
-    return git(repo, 'rev-list', '--reverse', f'{seen}..{head}').split()
-
-
-def advance(repo, sha):
-    path = marker(repo)
-    with open(path + '.new', 'w') as f:
-        f.write(sha)
-    os.replace(path + '.new', path)
-
-
 def measured(repo, sha):
     diff = git(repo, 'show', '--no-color', '--unified=0', '--format=', '--diff-filter=AMR', sha)
     if not diff:
         return False, False
-    read = subprocess.run([*READER, '--system-prompt', PROMPT, 'Answer the two questions for this commit.'],
+    read = subprocess.run([*mesh_commits.READER, '--system-prompt', PROMPT, 'Answer the two questions for this commit.'],
                           input=diff[:400000], capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=170)
     answers = dict(re.findall(r'^(ASSERT|TEST): (YES|NO)\s*$', read.stdout, re.M))
     if read.returncode or len(answers) != 2:
@@ -88,19 +62,17 @@ def main():
     except ValueError:
         pass
     messages = []
-    for repo in REPOSITORIES:
-        held = open(marker(repo) + '.lock', 'w')
-        try:
-            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+    for repo in mesh_commits.REPOSITORIES:
+        lock = mesh_commits.held(repo, SEEN)
+        if lock is None:
             continue
-        for sha in new_commits(repo):
+        for sha in mesh_commits.new_commits(repo, SEEN):
             try:
                 asserted, tested = measured(repo, sha)
             except (RuntimeError, OSError, subprocess.SubprocessError) as error:
                 messages.append(f'Assertion and test measurement of {sha[:10]} in {repo} was not made: {error}')
                 break
-            advance(repo, sha)
+            mesh_commits.advance(repo, SEEN, sha)
             if asserted or tested:
                 found = ' and '.join(name for name, present in (('an assertion', asserted), ('a test', tested)) if present)
                 count = logged(repo, sha, asserted, tested)

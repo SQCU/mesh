@@ -49,6 +49,20 @@
             "statusMessage": "Assertion and test measurement of new commits",
             "async": true,
             "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-assert-review.py"
+          },
+          {
+            "type": "command",
+            "timeout": 900,
+            "statusMessage": "Measurement of the claims new commits add to documents",
+            "async": true,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-claims-review.py"
+          },
+          {
+            "type": "command",
+            "timeout": 60,
+            "statusMessage": "Warnings for documents' claims with no quoted user turn",
+            "async": true,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-claims-warning.py"
           }
         ]
       }

@@ -53,9 +53,7 @@ Three things are mesh's and are added to it:
 
 ## The work
 
-Claude writes this compiler, in mesh at `compiler/`. It has the data flow of [data-flow.md](data-flow.md), and
-`~/schedule-emit` is the example of it: each stage is a function that takes the result of the stage before it and
-returns its own, and no stage calls back into an earlier one.
+Claude writes the modules and functions named above, in `compiler/mesh_compiler/`.
 
 The steps, their order and what each one replaces are the eleven items of
 [implementation-order-2026-11-09.md](implementation-order-2026-11-09.md). One item is assigned at a time, alone, and
