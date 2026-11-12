@@ -36,6 +36,7 @@ from mesh_compiler import archive, bridge, ir, lower_coreml, lower_inductor, low
 from mesh_compiler.devices import TO_COPY
 from mesh_compiler.driver import compile_module, compiled, lowered
 from mesh_compiler.export import calls
+from mesh_compiler.placement import views
 from mesh_compiler.runtime import Program
 
 TOLERANCE = 1e-4
@@ -647,6 +648,10 @@ def check_views(scheduled, copied=0, received=0):
                 assert names[buffer] in (node.kwargs.get("out"), *node.users) and len(node.users) == 1, node.name
                 assert sizes == tuple(node.meta["val"].shape) and (not all(sizes) or last < whole.numel()), node.name
                 into += key == "to"
+        records = [[n.meta.get(key) for key in ("view", "to", "out", "invariant")] for n in module.graph.nodes]
+        views([n for n in call_nodes(module.graph) if n.target is ir.RECV or copies(n)])
+        assert records == [[n.meta.get(key) for key in ("view", "to", "out", "invariant")]
+                           for n in module.graph.nodes], "views of the nodes on_devices rewires, and of the graph"
     assert found >= copied, f"{found} of {copied} views that fail torch's condition are of a contiguous copy"
     assert into >= received, f"{into} of {received} recvs name a view of the buffer made from them"
 

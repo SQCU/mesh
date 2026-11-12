@@ -90,14 +90,22 @@ def written(node):
                  a.alias_info.before_set == schema.returns[0].alias_info.before_set and a.name in read), None)
 
 
-def view(node):
+def source(node):
     made = node.args[0] if node.target is operator.getitem else node
-    held = made.args[0] if aliasing(made) else written(made)
+    return made.args[0] if aliasing(made) else written(made)
+
+
+def view(node):
+    held = source(node)
     if held is None:
         return None
     value = node.meta["val"]
     return held if all(torch._C._is_alias_of(v, held.meta["val"]) for v in (
         value if isinstance(value, (tuple, list)) else [value])) else None
+
+
+def bases_of(node):
+    return [held for held in [view(node)] if held is not None]
 
 
 def based(node, read):
@@ -131,16 +139,18 @@ def destined(node):
 
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4 and 6, and item 8, step 4
-def views(graph):
-    for node in list(graph.nodes):
+def views(nodes):
+    nodes = mesh_graph.walk(list(getattr(nodes, "nodes", nodes)), lambda n: [u for u in n.users if source(u) is n])
+    inside = set(nodes)
+    for node in mesh_graph.postorder(nodes[::-1], lambda n: [m for m in [source(n)] if m in inside]):
         node.meta.pop("to", None)
         node.meta.pop("out", None)
         if aliasing(node):
             evaluated(node, node.meta["processor"])
         elif node.target is operator.getitem and aliasing(node.args[0]):
             node.meta["val"] = node.args[0].meta["val"][node.args[1]]
-    mesh_graph.forward(list(graph.nodes), lambda n: [n for n in [view(n)] if n is not None], based)
-    for node in graph.nodes:
+    mesh_graph.forward(mesh_graph.postorder(nodes, bases_of), bases_of, based)
+    for node in dict.fromkeys(reader for n in nodes for reader in (n, *n.users)):
         for held, offset in destined(node):
             if (held.op == "call_function" and held.target is not operator.getitem and len(held.users) == 1
                     and not {"view", "out"} & held.meta.keys()
