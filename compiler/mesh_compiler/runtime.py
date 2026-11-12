@@ -15,7 +15,7 @@ class Program:
         self.functions = functions or scheduled.modules
         self.devices = {processor: getattr(self.functions.get(processor), "device", device)
                         for processor, device in scheduled.devices.items()}
-        self.feedforward = set(scheduled.feedforward)
+        self.feedforward, self.stored = set(scheduled.feedforward), scheduled.stored
         self.channels, self.executions = [SimpleQueue() for _ in range(scheduled.channels)], []
         machines = set(scheduled.machines.values())
         if len(machines) > 1:
@@ -31,7 +31,7 @@ class Program:
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         self.arguments = {
-            processor: [self.placed(state[n], processor) if n in state else None for n in names]
+            processor: [self.placed(state[n], processor, k) if n in state else None for k, n in enumerate(names)]
             for processor, names in inputs.items()}
         self.positions = {}
         for processor, names in inputs.items():
@@ -50,12 +50,13 @@ class Program:
             if self.joined:
                 self.finished.put(processor)
 
-    def placed(self, value, processor):
-        return value if self.devices[processor] is None else value.to(self.devices[processor])
+    # compiler/mesh_compiler/ir.py Scheduled
+    def placed(self, value, processor, position):
+        return value.to(self.devices[processor] or self.stored[processor][position])
 
     def bind(self, name, value):
         for processor, position in self.positions.get(name, ()):
-            self.arguments[processor][position] = self.placed(value, processor)
+            self.arguments[processor][position] = self.placed(value, processor, position)
 
     def __call__(self, *args, **kwargs):
         flat, _ = pytree.tree_flatten((args, kwargs))

@@ -11,7 +11,7 @@ from .schedule import argument_buffers, carried, schedule, unit_cost
 from .signature import signature
 
 
-def compile_module(module, args, processors, placement, cost=unit_cost, **export_options):
+def compile_module(module, args, processors, placement, cost=unit_cost, stored=(), **export_options):
     engines = {name: d for name, (_, d) in processors.items() if d in ENGINES}
     processors = {name: (machine, HOST if name in engines else torch.device(d))
                   for name, (machine, d) in processors.items()}
@@ -19,14 +19,15 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
     placed, output_processor, channels = place(exported.graph_module, placement)
     devices = {name: device for name, (_, device) in processors.items()}
     machines = {name: machine for name, (machine, _) in processors.items()}
-    graph = on_devices(placed, processors)
-    views(graph.graph)
+    graph = on_devices(placed, processors, views)
     between = carried(graph, machines)
     modules, plan = schedule(graph, cost, between, machines,
                              {key for kind, key in exported.outputs if key is not None})
-    inputs, feedforward = argument_buffers(modules, output_processor)
+    held = {name: str(pages.device) for name, (_, pages) in exported.state.items()}
+    held.update(zip(exported.user_inputs, map(str, stored)))
+    inputs, feedforward, stored = argument_buffers(modules, output_processor, held)
     scheduled = Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward,
-                          between, engines, plan)
+                          between, engines, plan, stored=stored)
     return dataclasses.replace(scheduled, signature=signature(scheduled)["record"])
 
 
@@ -42,7 +43,7 @@ def lowered(scheduled, lowerings):
 
 
 # design/synchronization-signature-change-request.md item 1
-def compiled(scheduled, lowerings, executions=1, stored=()):
+def compiled(scheduled, lowerings, executions=1):
     functions = lowered(scheduled, lowerings)
-    made = signature(scheduled, functions, executions, stored)
+    made = signature(scheduled, functions, executions)
     return dataclasses.replace(scheduled, signature=made["record"]), functions

@@ -70,7 +70,7 @@ def handed(records, scheduled):
     return made, across
 
 
-def operands(scheduled, functions=None, executions=1, stored=()):
+def operands(scheduled, functions=None, executions=1):
     functions = functions or scheduled.modules
     channels, machines = ends(scheduled), list(dict.fromkeys(scheduled.machines.values()))
     carried = {channel: place for place, channel in enumerate(scheduled.plan.channels if scheduled.plan else ())}
@@ -141,5 +141,5 @@ def operands(scheduled, functions=None, executions=1, stored=()):
     return processors, tasks, dependences, operations
 
 
-def signature(scheduled, functions=None, executions=1, stored=()):
-    return mesh_graph.signature(*operands(scheduled, functions, executions, stored))
+def signature(scheduled, functions=None, executions=1):
+    return mesh_graph.signature(*operands(scheduled, functions, executions))

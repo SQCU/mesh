@@ -18,11 +18,13 @@ def copied(graph, value, device, processor):
     return node
 
 
-def on_devices(graph_module, processors):
+# compiler/mesh_compiler/placement.py views
+def on_devices(graph_module, processors, views):
     graph_module = copy.deepcopy(graph_module)
     graph = graph_module.graph
     nodes = [n for n in graph.nodes if n.op != "placeholder"]
     receiver = {n.args[0]: n for n in nodes if n.target is RECV}
+    rewired = list(receiver.values())
     for node in nodes:
         machine, device = processors[node.meta["processor"]]
         if "device" in node.kwargs:
@@ -38,11 +40,14 @@ def on_devices(graph_module, processors):
             if sent != device:
                 with graph.inserting_before(node):
                     value = copied(graph, value, sent, node.meta["processor"])
+                    rewired.append(value)
                 arrival.meta["val"] = value.meta["val"]
                 node.args = (value, channel)
             if there != sent:
                 with graph.inserting_after(arrival):
                     landed = copied(graph, arrival, there, arrival.meta["processor"])
                 arrival.replace_all_uses_with(landed, lambda user: user is not landed)
+                rewired.append(landed)
+    views(rewired)
     graph_module.recompile()
     return graph_module

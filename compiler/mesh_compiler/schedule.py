@@ -282,12 +282,14 @@ def assemble(processor, order, nodes):
     return torch.fx.GraphModule(torch.nn.Module(), graph)
 
 
-def argument_buffers(modules, output_processor):
+# compiler/mesh_compiler/ir.py Scheduled
+def argument_buffers(modules, output_processor, held):
     inputs = {processor: [n.target for n in module.graph.nodes if n.op == "placeholder"]
               for processor, module in modules.items()}
+    stored = {processor: [held.get(name, "cpu") for name in names] for processor, names in inputs.items()}
     at = {processor: index for index, processor in enumerate(modules)}
     edges = [(at[output_processor], at[processor]) for processor in modules if processor != output_processor]
     edges += [(at[end[SEND].meta["processor"]], at[end[RECV].meta["processor"]]) for end in channel_ends(
         node for module in modules.values() for node in module.graph.nodes).values()]
     component = mesh_graph.components(len(at), edges)
-    return inputs, sorted(p for p in modules if component[at[p]] != component[at[output_processor]])
+    return inputs, sorted(p for p in modules if component[at[p]] != component[at[output_processor]]), stored

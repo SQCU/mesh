@@ -990,8 +990,8 @@ def save_for_review(stem, program):
 
 
 def build(name, machines=None):
-    _, factory, calls, options = next(case for case in CASES if case[0] == name)
-    options = {k: v for k, v in options.items() if k not in OPTION_FLAGS}
+    _, factory, calls, flags = next(case for case in CASES if case[0] == name)
+    options = {k: v for k, v in flags.items() if k not in OPTION_FLAGS}
     processors = options.pop("processors", ONE)
     if machines:
         processors = {processor: (machines[bool(place)], device)
@@ -999,7 +999,8 @@ def build(name, machines=None):
     placement = options.pop("placement", lambda: lambda node: next(iter(processors)))()
     torch.manual_seed(0)
     module = factory().eval()
-    scheduled = compile_module(module, copy.deepcopy(calls[0]), processors, placement, **options)
+    scheduled = compile_module(module, copy.deepcopy(calls[0]), processors, placement,
+                               stored=[flags.get("inputs_on")] * len(calls[0]) * ("inputs_on" in flags), **options)
     return tp.Eager(module, options["loss"]) if "loss" in options else module, calls, scheduled
 
 
