@@ -102,11 +102,19 @@ class Dependence(C.Structure):
     _fields_ = [('from', U), ('to', U), ('lag', U), ('kinds', U)]
 
 
+# mesh-collective.h struct mesh_task
+class Task(C.Structure):
+    _fields_ = [('length', D), ('resource', U), ('padding', U)]
+
+
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
                 ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
                 ('padding', U), ('outstanding', Q), ('plan', Q), ('host', C.POINTER(C.c_double)),
-                ('work', C.POINTER(C.c_double)), ('edge', C.POINTER(mesh_graph.Dependence)), ('parts', U), ('edges', U)]
+                ('work', C.POINTER(C.c_double)), ('edge', C.POINTER(mesh_graph.Dependence)), ('parts', U), ('edges', U),
+                ('task', C.POINTER(Task)), ('before', C.POINTER(mesh_graph.Dependence)), ('sender', C.POINTER(U)),
+                ('receiver', C.POINTER(U)), ('completion', C.POINTER(D)), ('tasks', U), ('resources', U),
+                ('befores', U), ('padding2', U)]
 
 
 class View(C.Structure):
@@ -295,8 +303,9 @@ def check(status):
 
 
 # mesh-collective.h struct mesh_function, struct mesh_declared, struct mesh_weight, struct mesh_value, struct
-# mesh_dependence; mesh-graph.h struct mesh_strided
-def function(declared, weights, values, dependences, outstanding):
+# mesh_dependence, struct mesh_task; mesh-graph.h struct mesh_strided
+def function(declared, weights, values, dependences, outstanding, tasks=(), before=(), senders=(), receivers=(),
+             resources=0):
     held = []
 
     def view(offset, element, pairs):
@@ -312,4 +321,11 @@ def function(declared, weights, values, dependences, outstanding):
              (Dependence * max(len(dependences), 1))(*[Dependence(*edge) for edge in dependences])]
     made = (Function * 1)(Function(*held[-4:], len(declared), len(values), len(dependences), 0, outstanding, 0, None,
                                    None, None, 0, 0))
+    if tasks:
+        held += [(Task * len(tasks))(*[Task(length, resource, 0) for length, resource in tasks]),
+                 (mesh_graph.Dependence * max(len(before), 1))(*[mesh_graph.Dependence(a, b, 0) for a, b in before]),
+                 (U * max(len(senders), 1))(*senders), (U * max(len(receivers), 1))(*receivers),
+                 (D * len(tasks))()]
+        made[0].task, made[0].before, made[0].sender, made[0].receiver, made[0].completion = held[-5:]
+        made[0].tasks, made[0].resources, made[0].befores = len(tasks), resources, len(before)
     return made, held

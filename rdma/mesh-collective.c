@@ -825,9 +825,15 @@ static int plan_entry_order(const void *a,const void *b){
    O. Sinnen, Task Scheduling for Parallel Systems, Wiley, 2007; O. Sinnen and L. A. Sousa, IEEE TPDS 16(6), 2005,
    Definitions 1, 2 and 4; M. Cowan et al., MSCCLang, ASPLOS 2023, §4.2, §5.2;
    F. B. Schneider, ACM Comput. Surv. 22(4), 1990 */
-static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const struct mesh_dependence *dependence,
-                         uint32_t dependences){
-  const uint32_t n=p->n,demands=p->demands,count=p->transfers;
+static int plan_schedule(struct plan *p,const struct mesh_function *function){
+  const struct mesh_weight *weight=p->weights;
+  const struct mesh_dependence *dependence=p->dependence;
+  const uint32_t n=p->n,demands=p->demands,count=p->transfers,dependences=p->dependences,placed=function->tasks;
+  if(placed && (!function->task || !function->sender || !function->receiver || !function->completion ||
+                (function->befores && !function->before)))return EINVAL;
+  for(uint32_t k=0;k<function->befores;k++)
+    if(function->before[k].from>=placed || function->before[k].to>=placed)return EINVAL;
+  for(uint32_t i=0;placed && i<count;i++)if(function->sender[i]>=placed || function->receiver[i]>=placed)return EINVAL;
   const struct mesh_declared *declared=p->declared;
   uint32_t link_of[(size_t)n*n+1],path_link[(size_t)n+1],path_head[(size_t)n+1];
   uint32_t *reader=malloc(((size_t)demands+1)*sizeof *reader);
@@ -857,6 +863,12 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
                                         !!(x->kinds&MESH_TO_SOURCE_READ));
     if((edges+=(uint64_t)a.count*b.count)>=UINT32_MAX)status=ENOMEM;
   }
+  /* design/torch-source-lowering-change-request.md item 3; design/aot-compilation-change-request.md A6 */
+  const uint32_t first=(uint32_t)tasks;
+  tasks+=placed;
+  edges+=function->befores;
+  for(uint32_t i=0;placed && i<count;i++)edges+=1+(uint64_t)consumer[i].count;
+  if(tasks>=UINT32_MAX || edges>=UINT32_MAX)status=ENOMEM;
   const uint64_t instructions=tasks+p->comms,dependencies=edges+entries;
   if(instructions>=UINT32_MAX)status=ENOMEM;
   double *w=status?NULL:malloc(((size_t)instructions+1)*sizeof *w),
@@ -878,13 +890,17 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
     /* design/aot-compilation-change-request.md A3; design/plan-to-bridge-change-request.md R5 */
     for(uint32_t d=0;d<demands;d++){
       const struct plan_demand *x=p->demand+d;
-      w[d]=weight[x->first].produced;
+      w[d]=placed?0:weight[x->first].produced;
       resource[d]=x->source;
-      if(reader[d]!=MESH_ABSENT){w[reader[d]]=weight[x->first].read;resource[reader[d]]=x->source;}
+      if(reader[d]!=MESH_ABSENT){w[reader[d]]=placed?0:weight[x->first].read;resource[reader[d]]=x->source;}
     }
     for(uint32_t i=0;i<count;i++)for(uint32_t q=0;q<consumer[i].count;q++){
-      w[consumer[i].first+q]=weight[i].consumed;
+      w[consumer[i].first+q]=placed?0:weight[i].consumed;
       resource[consumer[i].first+q]=declared[i].destination;
+    }
+    for(uint32_t k=0;k<placed;k++){
+      w[first+k]=function->task[k].length;
+      resource[first+k]=n+2*p->pairs+function->task[k].resource;
     }
     double most=0;
     for(size_t v=0;v<(size_t)n*n;v++)link_of[v]=MESH_ABSENT;
@@ -928,6 +944,15 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
         from[e]=a.first+s;to[e]=b.first+t;cost[e]=0;route[e++]=r;
       }
     }
+    for(uint32_t k=0;k<function->befores;k++){
+      from[e]=first+function->before[k].from;to[e]=first+function->before[k].to;cost[e]=0;route[e++]=r;
+    }
+    for(uint32_t i=0;placed && i<count;i++){
+      from[e]=first+function->sender[i];to[e]=p->of[i];cost[e]=0;route[e++]=r;
+      for(uint32_t q=0;q<consumer[i].count;q++){
+        from[e]=consumer[i].first+q;to[e]=first+function->receiver[i];cost[e]=0;route[e++]=r;
+      }
+    }
     route[e]=r;
   }
   if(!status){
@@ -945,8 +970,9 @@ static int plan_schedule(struct plan *p,const struct mesh_weight *weight,const s
       resource[tasks+communication[r]]=n+link[r];
     }
     /* design/plan-to-bridge-change-request.md R5 */
-    status=mesh_graph_completion_times((uint32_t)instructions,w,resource,n+2*p->pairs,(size_t)dependencies,before,after,
-                                       completion);
+    status=mesh_graph_completion_times((uint32_t)instructions,w,resource,n+2*p->pairs+function->resources,
+                                       (size_t)dependencies,before,after,completion);
+    for(uint32_t k=0;!status && k<placed;k++)function->completion[k]=completion[first+k];
     /* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2; C.-Y. Chen,
        arXiv 2205.02474, 2022, (1a) */
     if(!status && !(p->completed=calloc((size_t)count+1,sizeof *p->completed)))status=ENOMEM;
@@ -1965,7 +1991,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     struct plan *p=plans+f;
     if(!(p->entry=malloc((p->entries+1)*sizeof *p->entry))){status=ENOMEM;goto done;}
     plan_walk(p);
-    if(p->demands && (status=plan_schedule(p,p->weights,p->dependence,p->dependences)))goto done;
+    if(p->demands && (status=plan_schedule(p,functions+f)))goto done;
   }
   if(!(page=malloc(((size_t)rows+1)*sizeof *page))){status=ENOMEM;goto done;}
   if((status=plan_rows(plans,count,m,&placed,page,rows)))goto done;
@@ -2134,7 +2160,17 @@ static int plan_inputs(struct mesh_ctx *context,uint64_t program,const struct me
   for(uint32_t n=0;n<nodes->count;n++)plan_hash(&hash,nodes->capacity[n],nodes->count*sizeof(uint64_t));
   for(uint32_t f=0;f<count;f++){
     const struct mesh_function *x=functions+f;
-    plan_hash_words(&hash,(uint64_t[]){x->count,x->values,x->dependences,x->outstanding,x->parts,x->edges},6);
+    plan_hash_words(&hash,(uint64_t[]){x->count,x->values,x->dependences,x->outstanding,x->parts,x->edges,x->tasks,
+                                       x->resources,x->befores},9);
+    for(uint32_t k=0;k<x->tasks;k++){
+      plan_hash(&hash,&x->task[k].length,sizeof x->task[k].length);
+      plan_hash_words(&hash,(uint64_t[]){x->task[k].resource},1);
+    }
+    plan_hash(&hash,x->before,(size_t)x->befores*sizeof *x->before);
+    if(x->tasks){
+      plan_hash(&hash,x->sender,(size_t)x->count*sizeof *x->sender);
+      plan_hash(&hash,x->receiver,(size_t)x->count*sizeof *x->receiver);
+    }
     plan_hash(&hash,x->weights,(size_t)x->count*sizeof *x->weights);
     plan_hash(&hash,x->dependence,(size_t)x->dependences*sizeof *x->dependence);
     plan_hash(&hash,x->host,(size_t)x->parts*sizeof *x->host);

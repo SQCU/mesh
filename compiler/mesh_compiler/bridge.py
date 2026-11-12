@@ -19,7 +19,8 @@ CONTEXT, PUBLISHED = mesh.Context(), itertools.count(1)
 class Published:
     def __init__(self, plan, group, here):
         self.function, self.held = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences,
-                                                 plan.outstanding)
+                                                 plan.outstanding, plan.tasks, plan.before, plan.senders,
+                                                 plan.receivers, plan.resources)
         calls, made = (mesh.U * 1)(0), mesh.Planned()
         mesh.LIB.mesh_retire(CONTEXT.M, CONTEXT.client)
         mesh.check(mesh.LIB.mesh_plan_load(

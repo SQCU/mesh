@@ -105,14 +105,14 @@ def extent(value):
 
 # rdma/mesh-collective.h mesh_plan, mesh_plan_save
 def solved(plan, private, context):
-    function, _ = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences, plan.outstanding)
+    function, _ = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences, plan.outstanding,
+                                plan.tasks, plan.before, plan.senders, plan.receivers, plan.resources)
     calls, made, record, length = (mesh.U * 1)(0), mesh.Planned(), C.c_void_p(), C.c_size_t()
     operands = (plan.program, function, 1, calls, 1, None, None, 0, None)
     mesh.check(mesh.LIB.mesh_plan(C.byref(context), int(os.environ["MESH_GROUP"]), *operands,
                                   time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, C.byref(made)))
     mesh.check(mesh.LIB.mesh_plan_save(C.byref(context), *operands, C.byref(made), C.byref(record), C.byref(length)))
-    state = mesh.State.from_address(context.M + function[0].plan)
-    plan.times = list((C.c_double * len(plan.declared)).from_address(context.M + state.times))
+    plan.completion = list(function[0].completion[:len(plan.tasks)])
     plan.sections = [[getattr(value.section, name) for name, _ in mesh.Section._fields_]
                      for value in function[0].value[:len(plan.values)]]
     plan.record = C.string_at(record, length.value)
@@ -121,21 +121,46 @@ def solved(plan, private, context):
     return plan
 
 
+# design/disjoint-pages-change-request.md A3 item 2 and C3.2; design/problems-of-14b9a757-change-request.md 7.1 steps 2
+# and 5, 7.2 step 3, item 8 step 4 and item 14 steps 3 and 4
+def stored(values, places, module, local, before, of, channels, mutated):
+    index = {node: place for place, node in enumerate(local)}
+    results = {mesh_graph.chain(n, of)[-1] for n in module.graph.output_node().all_input_nodes}
+    roots = {f: [mesh_graph.chain(u, of)[-1] for u in f.all_input_nodes] for f in local}
+    last = mesh_graph.ends(local, before, lambda f: () if f.meta.get("invariant") else [
+        (root, (f if root.op == "placeholder" else root).meta["processor"]) for root in roots[f]] + [
+        (f, f.meta["processor"])] * (f.target is RECV and f.args[0] in channels))
+    named = {(node.name, node.meta["processor"]): node for node in local}
+    for value, (processor, name) in enumerate(list(places)):
+        node = named[name, processor]
+        begin, end = index[producer(node)], len(local) - 1
+        if node.target is RECV:
+            begin, end = 0, end if node in results else index[last[node, processor]]
+        values[value] = (*values[value][:4], begin, end, *values[value][6:])
+    for (root, processor), reader in last.items():
+        value = root.meta.get("val")
+        if ((processor, root.name) in places or root in results or not isinstance(value, torch.Tensor)
+                or not extent(value) or root.meta.get("state") in mutated):
+            continue
+        if "state" in root.meta or root.meta.get("invariant"):
+            values.append((extent(value), mesh.INVARIANT, 0, 0, 0, 0, 0, 1))
+        elif producer(root) in index:
+            values.append((extent(value), mesh.EXECUTION, 0, 0, index[producer(root)], index[reader], 0, 1))
+        else:
+            continue
+        places.append((processor, root.name))
+
+
 # design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5;
 # design/integration-finishing-change-request.md item 3; rdma/mesh-collective.h mesh_plan
-def planned(module, carried, machines, cost=unit_cost):
-    carried = [transfer for transfer in carried if all(transfer[4])]
-    if not carried:
-        return None
+def planned(module, carried, machines, mutated, cost, functions, before, tasks, edges):
     private, context = image()
     nodes = mesh.Nodes()
     mesh.check(mesh.LIB.mesh_nodes_read(C.byref(context), C.byref(nodes)))
-    at = {nodes.node[i]: i for i in range(nodes.count)}
-    _, functions, preds = dependence(module)
-    ends, held = channel_ends(functions), set(functions)
-    of = viewed({channel: end[SEND] for channel, end in ends.items()}, {channel for channel, *_ in carried})
+    at, task = {nodes.node[i]: i for i in range(nodes.count)}, {node: k for k, node in enumerate(functions)}
+    ends, held, channels = channel_ends(functions), set(functions), {channel for channel, *_ in carried}
+    of = viewed({channel: end[SEND] for channel, end in ends.items()}, channels)
     results = {mesh_graph.chain(n, of)[-1] for n in module.graph.output_node().all_input_nodes}
-    before = mesh_graph.closure(mesh_graph.postorder(functions, preds), preds)
     declared, weights, values, places, events = [], [], [], [], []
     for transfer, (channel, sender, receiver, dtype, shape, stride) in enumerate(carried):
         sent, arrival = ends[channel][SEND], ends[channel][RECV]
@@ -155,68 +180,42 @@ def planned(module, carried, machines, cost=unit_cost):
         events += [(transfer, source, PRODUCED, [written])] * (written in held)
         events += [(transfer, source, READ, read), (transfer, destination, CONSUMED,
                                                     [arrival] + [u for u in arrival.users if u in held])]
+    stored(values, places, module, [n for n in functions if machines[n.meta["processor"]] == nodes.node[nodes.self]],
+           before, of, channels, mutated)
+    crossing = {(task[ends[channel][SEND]], task[ends[channel][RECV]]) for channel in channels}
     plan = Plan(sum(1 << int(node) for node in os.environ["MESH_PROGRAM"].split(",")), [c for c, *_ in carried],
-                declared, weights, values, dependences(events, before), 1, [], b"", nodes.node[nodes.self], places, [])
+                declared, weights, values, dependences(events, before), 1, tasks,
+                [edge for edge in edges if edge not in crossing], [task[ends[c][SEND]] for c, *_ in carried],
+                [task[ends[c][RECV]] for c, *_ in carried], 1 + max(resource for _, resource in tasks), [], b"",
+                nodes.node[nodes.self], places, [])
     return solved(plan, private, context)
 
 
-# design/problems-of-14b9a757-change-request.md 7.1 steps 1, 2 and 5, 7.2 step 3, item 8 step 4 and item 14 steps 3
-# and 4; design/disjoint-pages-change-request.md A3 item 2 and C3.2; ExecuTorch exir/memory_planning.py
-# update_tensor_lifetime
-def stored(plan, module, machines, mutated):
-    if plan is None:
-        return None
-    _, functions, preds = dependence(module)
-    before = mesh_graph.closure(mesh_graph.postorder(functions, preds), preds)
-    local = sorted((n for n in functions if machines[n.meta["processor"]] == plan.machine),
-                   key=lambda n: n.meta["place"])
-    index = {node: place for place, node in enumerate(local)}
-    of = viewed({channel: end[SEND] for channel, end in channel_ends(functions).items()}, set(plan.channels))
-    results = {mesh_graph.chain(n, of)[-1] for n in module.graph.output_node().all_input_nodes}
-    roots = {f: [mesh_graph.chain(u, of)[-1] for u in f.all_input_nodes] for f in local}
-    last = mesh_graph.ends(local, before, lambda f: () if f.meta.get("invariant") else [
-        (root, (f if root.op == "placeholder" else root).meta["processor"]) for root in roots[f]] + [
-        (f, f.meta["processor"])] * (f.target is RECV and f.args[0] in plan.channels))
-    named = {(node.name, node.meta["processor"]): node for node in local}
-    values, places = list(plan.values), list(plan.places)
-    for value, (processor, name) in enumerate(plan.places):
-        node = named[name, processor]
-        begin, end = index[producer(node)], len(local) - 1
-        if node.target is RECV:
-            begin, end = 0, end if node in results else index[last[node, processor]]
-        values[value] = (*values[value][:4], begin, end, *values[value][6:])
-    for (root, processor), reader in last.items():
-        value = root.meta.get("val")
-        if ((processor, root.name) in places or root in results or not isinstance(value, torch.Tensor)
-                or not extent(value) or root.meta.get("state") in mutated):
-            continue
-        if "state" in root.meta or root.meta.get("invariant"):
-            values.append((extent(value), mesh.INVARIANT, 0, 0, 0, 0, 0, 1))
-        elif producer(root) in index:
-            values.append((extent(value), mesh.EXECUTION, 0, 0, index[producer(root)], index[reader], 0, 1))
-        else:
-            continue
-        places.append((processor, root.name))
-    plan.values, plan.places = values, places
-    return solved(plan, *image())
-
-
+# design/torch-source-lowering-change-request.md item 3; design/aot-compilation-change-request.md A6;
 # design/integration-finishing-change-request.md item 2; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
 # Res. 22(3), 1997, section 2; M. Cowan et al., MSCCLang, ASPLOS 2023, section 5.2, step 3
-def schedule(module, cost=unit_cost, plan=None):
+def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=()):
     nodes, functions, preds = dependence(module)
-    key = mesh_graph.longest(functions, preds, lambda before, node: cost(node))
-    if plan is not None:
-        ends = channel_ends(functions)
-        key.update((ends[channel][RECV], completed) for channel, completed in zip(plan.channels, plan.times))
-    at = {node: place for place, node in enumerate(functions)}
-    place = mesh_graph.heap_order([-key[node] for node in functions],
-                                  [(at[before], at[node]) for node in functions for before in preds(node)])
-    order = sorted(functions, key=lambda node: place[at[node]])
-    for node in functions:
-        node.meta["place"] = place[at[node]]
+    functions = [node for node in mesh_graph.postorder(functions, preds)]
+    task = {node: k for k, node in enumerate(functions)}
     processors = dict.fromkeys(n.meta["processor"] for n in nodes if n.op != "placeholder")
-    return {p: assemble(p, [n for n in order if n.meta["processor"] == p], nodes) for p in processors}
+    lane = {processor: k for k, processor in enumerate(processors)}
+    tasks = [(cost(node), lane[node.meta["processor"]]) for node in functions]
+    edges = [(task[earlier], task[node]) for node in functions for earlier in dict.fromkeys(preds(node))]
+    before = mesh_graph.closure(functions, preds)
+    carried = [transfer for transfer in carried if all(transfer[4])]
+    plan = planned(module, carried, machines, mutated, cost, functions, before, tasks, edges) if carried else None
+    completed = plan.completion if plan else mesh_graph.completion_times(
+        [length for length, _ in tasks], [resource for _, resource in tasks], len(lane), edges)
+    modules = {}
+    for processor in processors:
+        own = [node for node in functions if node.meta["processor"] == processor]
+        at = {node: k for k, node in enumerate(own)}
+        place = mesh_graph.heap_order([-completed[task[node]] for node in own],
+                                      [(at[earlier], at[node]) for node in own for earlier in before[node]
+                                       if earlier in at])
+        modules[processor] = assemble(processor, sorted(own, key=lambda node: place[at[node]]), nodes)
+    return modules, plan
 
 
 def assemble(processor, order, nodes):

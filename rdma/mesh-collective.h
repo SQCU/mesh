@@ -50,13 +50,19 @@ struct mesh_dependence { uint32_t from,to,lag,kinds; };
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, (1);
    design/torch-capture-change-request.md item 2 and "Source for item 2's execution-time estimates (2026-11-09)";
    design/algorithm-sources.md#the-plans-results-for-native-preparation */
+/* design/torch-source-lowering-change-request.md item 3, "The algorithm for the order";
+   design/aot-compilation-change-request.md A6; design/plan-to-bridge-change-request.md R3 and R5 */
+struct mesh_task { double length; uint32_t resource,padding; };
 struct mesh_function { const struct mesh_declared *declared; const struct mesh_weight *weights; struct mesh_value *value;
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; const double *host,*work; const struct mesh_graph_dependence *edge;
-                       uint32_t parts,edges; };
-_Static_assert(sizeof(struct mesh_function)==96 && offsetof(struct mesh_function,count)==32 &&
+                       uint32_t parts,edges; const struct mesh_task *task; const struct mesh_graph_dependence *before;
+                       const uint32_t *sender,*receiver; double *completion; uint32_t tasks,resources,befores,padding2; };
+_Static_assert(sizeof(struct mesh_function)==152 && offsetof(struct mesh_function,count)==32 &&
                offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56 &&
-               offsetof(struct mesh_function,host)==64 && offsetof(struct mesh_function,parts)==88,
+               offsetof(struct mesh_function,host)==64 && offsetof(struct mesh_function,parts)==88 &&
+               offsetof(struct mesh_function,task)==96 && offsetof(struct mesh_function,completion)==128 &&
+               offsetof(struct mesh_function,tasks)==136 && sizeof(struct mesh_task)==16,
                "mesh_function: rdma/mesh.py Function");
 /* design/aot-compilation-change-request.md A7, A10 ("Its output" and "The calls' graph") and appendix items 2 and 6;
    design/plan-to-bridge-change-request.md R2; S. S. Bhattacharyya, S. Sriram and E. A. Lee,

@@ -60,7 +60,12 @@ class Plan:
     values: list
     dependences: list
     outstanding: int
-    times: list
+    tasks: list
+    before: list
+    senders: list
+    receivers: list
+    resources: int
+    completion: list
     record: bytes
     machine: int
     places: list
