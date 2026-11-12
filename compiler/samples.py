@@ -810,10 +810,12 @@ def state_of(program):
     return current
 
 
-def compiled_program(scheduled):
-    functions = lower_inductor.lower(scheduled)
+def compiled_program(scheduled, stored=()):
+    functions = lowered(scheduled, (lambda given: lower_metal.metal(given, stored), lower_inductor.lower))
     unwrapped = torch._dynamo.eval_frame.OptimizedModule
-    assert all(isinstance(f, unwrapped) for f in functions.values()), "a wrapped function"
+    assert all(isinstance(f, unwrapped) for p, f in functions.items()
+               if scheduled.devices[p].type == "cpu"), "a wrapped function"
+    assert not any(isinstance(f, torch.fx.GraphModule) for f in functions.values()), "a processor not lowered"
     return Program(scheduled, functions)
 
 
@@ -874,7 +876,7 @@ def variants(scheduled, with_inductor, stored=()):
     passed = lambda: {p: fx_pass(copy.deepcopy(m)) for p, m in scheduled.modules.items()}
     return {
         "fx direct": lambda: Program(scheduled),
-        "inductor": (lambda: compiled_program(scheduled)) if with_inductor else None,
+        "inductor": (lambda: compiled_program(scheduled, stored)) if with_inductor else None,
         "archive": lambda: archived_program(scheduled),
         "fx pass": lambda: Program(dataclasses.replace(scheduled, modules=passed())),
         "metal": (lambda: Profiled(scheduled, stored)) if MPS else None,

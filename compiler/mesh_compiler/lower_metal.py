@@ -1460,9 +1460,18 @@ def hosted(module, device):
 
 
 def lower(scheduled, stored=()):
+    return targeted(scheduled, stored, {"mps": Metal, "cpu": Native})
+
+
+# design/torch-source-lowering-change-request.md item 1; compiler/mesh_compiler/lower_inductor.py lower
+def metal(scheduled, stored=()):
+    return targeted(scheduled, stored, {"mps": Metal})
+
+
+def targeted(scheduled, stored, targets):
     functions, missing = {}, {}
-    lowerings = {p: Metal if scheduled.devices[p].type == "mps" else Native
-                 for p in scheduled.modules if p not in scheduled.engines}
+    lowerings = {p: targets[scheduled.devices[p].type] for p in scheduled.modules
+                 if p not in scheduled.engines and scheduled.devices[p].type in targets}
     metal = [p for p, lowering in lowerings.items() if lowering is Metal]
     laid = {channel for channel, *_ in scheduled.carried} | {
         node.args[0] for p in lowerings for node in scheduled.modules[p].graph.nodes if node.target is RECV}
