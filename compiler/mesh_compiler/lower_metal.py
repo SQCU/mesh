@@ -1,7 +1,6 @@
 # design/the-compiler.md, order 4; design/torch-source-lowering-change-request.md, items 1 and 3
 import copy
 import ctypes as C
-import errno
 import hashlib
 import math
 import mmap
@@ -19,7 +18,6 @@ import torch
 from .ir import RECV, SEND
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
-import mesh
 import mesh_graph
 import mesh_metal4
 
@@ -202,57 +200,6 @@ class Dependence:
     target: int
     causes: list
     ordering: str = None
-
-
-# mesh-graph.h struct mesh_graph_view and struct mesh_graph_cause
-class Viewed(C.Structure):
-    _fields_ = [("key", C.c_uint64), ("view", mesh.Strided), ("vertex", C.c_uint32), ("write", C.c_uint32)]
-
-
-class Cause(C.Structure):
-    _fields_ = [("key", C.c_uint64), ("kind", C.c_uint32), ("given", C.c_uint32)]
-
-
-HAZARDS = ("read after write", "write after read", "write after write", "given")
-GRAPH = mesh_graph.LIB
-GRAPH.mesh_graph_dependences_views.restype = GRAPH.mesh_graph_synchronization.restype = C.c_int
-GRAPH.mesh_graph_dependences_views.argtypes = [
-    C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.c_size_t,
-    C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.POINTER(Cause), C.POINTER(C.c_size_t)]
-GRAPH.mesh_graph_synchronization.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
-                                             C.POINTER(C.c_ubyte), C.POINTER(C.c_size_t)]
-
-
-# design/compilation-composition-change-request.md, item 6 and "Compact effects"; mesh-graph.h
-# mesh_graph_dependences_views and mesh_graph_synchronization
-def dependences(vertices, accesses):
-    accesses = [(vertex, view, write) for vertex, view, write in accesses if all(view.shape)]
-    viewed, kept = (Viewed * max(len(accesses), 1))(), []
-    for made, (vertex, view, write) in zip(viewed, accesses):
-        size = view.dtype.itemsize
-        pairs = (C.c_uint64 * (2 * len(view.shape)))(*[x for n, s in zip(view.shape, view.stride)
-                                                       for x in (n, s * size)])
-        kept.append(pairs)
-        made.key, made.vertex, made.write = view.storage, vertex, write
-        made.view = mesh.Strided(view.offset * size, size, len(view.shape), 0, pairs)
-    count = C.c_size_t()
-    status = GRAPH.mesh_graph_dependences_views(len(accesses), viewed, 0, None, None, 0, None, None, None,
-                                                C.byref(count))
-    if status not in (0, errno.ERANGE):
-        raise OSError(status, os.strerror(status))
-    room = max(count.value, 1)
-    tails, heads, causes = (C.c_uint32 * room)(), (C.c_uint32 * room)(), (Cause * room)()
-    mesh_graph._check(GRAPH.mesh_graph_dependences_views(len(accesses), viewed, 0, None, None, count.value, tails,
-                                                         heads, causes, C.byref(count)))
-    found = {}
-    for tail, head, cause in zip(tails[:count.value], heads[:count.value], causes[:count.value]):
-        found.setdefault((tail, head), []).append((HAZARDS[cause.kind], cause.key))
-    pairs, room = list(found), max(len(found), 1)
-    redundant, left = (C.c_ubyte * room)(), C.c_size_t()
-    mesh_graph._check(GRAPH.mesh_graph_synchronization(
-        vertices, len(pairs), (C.c_uint32 * room)(*[a for a, _ in pairs]), (C.c_uint32 * room)(*[b for _, b in pairs]),
-        redundant, C.byref(left)))
-    return [Dependence(a, b, found[a, b]) for a, b in pairs], [bool(r) for r in redundant[:len(pairs)]]
 
 
 class Bound(list):
@@ -885,33 +832,24 @@ class Lowering:
         accesses = [(step.vertex, view, write) for segment in segments for step in segment.steps
                     for view, write in step.accesses]
         accesses += [(vertex, view, False) for vertex, views in self.hosted for view in views]
-        self.dependences, redundant = dependences(len(self.vertices), accesses)
+        edges, causes, redundant = mesh_graph.dependences_views(len(self.vertices), [
+            (view.storage, view.offset * view.dtype.itemsize, view.dtype.itemsize,
+             [(n, step * view.dtype.itemsize) for n, step in zip(view.shape, view.stride)], vertex, write)
+            for vertex, view, write in accesses if all(view.shape)])
+        self.dependences = [Dependence(a, b, causes[a, b]) for a, b in edges]
         place = {segment.steps[0].vertex: k for k, segment in enumerate(segments)}
-        classes = [place[within[v].steps[0].vertex] if v in within else len(segments) + v
-                   for v in range(len(self.vertices))]
-        kept, causes = [], {}
-        for dependence, covered in zip(self.dependences, redundant):
-            first, second = classes[dependence.source], classes[dependence.target]
-            if not covered:
-                dependence.ordering = BARRIER if first == second else FENCE if second < len(segments) else EVENT
-                kept.append((dependence.source, dependence.target))
-                causes.setdefault((first, second), []).append(dependence)
-        awaited = {}
-        for first, second in mesh_graph.quotient(classes, kept):
-            if second < len(segments):
-                segments[second].after[first] = (segments[first], causes[first, second])
-            else:
-                awaited.setdefault(second - len(segments), {})[first] = (segments[first], causes[first, second])
+        commit = [place[within[v].steps[0].vertex] if v in within else None for v in range(len(self.vertices))]
+        found = {(d.source, d.target): d for d, covered in zip(self.dependences, redundant) if not covered}
+        barred, fences, waits = mesh_graph.orderings(list(found), commit)
+        for dependence in found.values():
+            first, second = commit[dependence.source], commit[dependence.target]
+            dependence.ordering = EVENT if second is None else BARRIER if first == second else FENCE
+        for (first, second), under in fences.items():
+            segments[second].after[first] = (segments[first], [found[edge] for edge in under])
+        awaited = {vertex: {first: (segments[first], [found[edge] for edge in under])
+                            for first, under in commits.items()} for vertex, commits in waits.items()}
         for segment in segments:
-            at = {step.vertex: k for k, step in enumerate(segment.steps)}
-            inside = [d for d in self.dependences if d.ordering is BARRIER and d.source in at]
-            before = [[at[d.source] for d in inside if at[d.target] == k] for k in range(len(at))]
-            level = mesh_graph.longest(range(len(at)), before.__getitem__, lambda a, b: 1)
-            place = mesh_graph.heap_order([level[k] for k in range(len(at))],
-                                          [(at[d.source], at[d.target]) for d in inside])
-            order = sorted(range(len(at)), key=place.__getitem__)
-            segment.steps = [segment.steps[k] for k in order]
-            segment.barriers = [bool(i) and level[k] > level[order[i - 1]] for i, k in enumerate(order)]
+            segment.barriers = [step.vertex in barred for step in segment.steps]
         program, waited = [], set()
         for entry in self.program + [(WAIT,)]:
             due = [first for first, _ in awaited.get(entry[3], {}).values()] if entry[0] is SEND else \
@@ -1062,7 +1000,7 @@ class Metal(Lowering):
                 LIB.mesh_metal4_release(view)
             return tuple(shaped(owner, r) if isinstance(r, View) else r for r in results)
         run.device, run.vertices, run.dependences, run.program = None, vertices, depended, self.program
-        run.program = self.program
+        run.storages = storages
         run.feedback = lambda: [(steps, *mesh_metal4.times(record)) for steps, record in records]
         weakref.finalize(run, released, stream, retained)
         return run
@@ -1184,6 +1122,7 @@ def hosted(module, device):
                 module.graph.erase_node(node)
             else:
                 node.kwargs = {**node.kwargs, "device": HOST}
+                node.meta.pop("custom", None)
     module.recompile()
     return module
 
