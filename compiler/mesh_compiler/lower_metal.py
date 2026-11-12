@@ -137,7 +137,8 @@ VIEWS = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default, ATE
          ATEN.squeeze.dim, ATEN.transpose.int, ATEN.alias.default}
 RESHAPES = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default}
 # design/compilation-composition-change-request.md:360-362
-ONCE = {ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.flip.default}
+ONCE = {ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.flip.default, ATEN.slice_scatter.default,
+        ATEN.scatter.src, ATEN.scatter_add.default}
 FILLED = {ATEN.full.default: True, ATEN.full_like.default: True, ATEN.scalar_tensor.default: True,
           ATEN.new_full.default: True, ATEN.new_zeros.default: False, ATEN.empty_permuted.default: False}
 REDUCED = {ATEN.sum.dim_IntList: ("0", "a + {x}", "a"), ATEN.mean.dim: ("0", "a + {x}", "a / {n}"),
