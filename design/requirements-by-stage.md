@@ -1,6 +1,8 @@
 # Requirements by stage
 
-Every item of the eleven change requests, under the stage of [data-flow.md](data-flow.md) that takes it.
+Every item of the eleven change requests, under the stage of [data-flow.md](data-flow.md) that takes it, or under one
+of the places outside those stages that "How it is written" names. The items under "no stage named" are copied here
+and are not restated.
 
 ## The turns
 
@@ -17,8 +19,20 @@ The operator, 2026-11-12:
 - The stages are those of [data-flow.md](data-flow.md) and [the-compiler.md](the-compiler.md):
   `compile_module(module, args, processors, placement, cost) -> Scheduled` is `export -> place -> on_devices ->
   schedule -> argument_buffers`; `lower(scheduled)`; `Program(scheduled, functions)`; `save` and `load`.
+- Five sections are not stages of that flow. Each names where its clauses are effected:
+  - graph module: `rdma/mesh_graph.py`, `rdma/mesh-graph.h` and `rdma/mesh-graph.c`, which `place`, `schedule` and
+    `lower` call with their operands.
+  - bridge: the bridge process and the transport, `rdma/*.c` and `rdma/*.h` other than the graph module, and
+    `compiler/mesh_compiler/bridge.py`; it takes the page lists `schedule` produces, and `Program` reaches it.
+  - caller: `examples/`, `compiler/samples.py`, launchers and measurements, which give `compile_module` its operands.
+  - machines: the condition of machines and services, which no file of either repository holds.
+  - documents: `design/` and `docs/`.
+- "no stage named" holds the items whose clauses place them in a flow that is none of the above, each with the words
+  that say so. They are not restated against [data-flow.md](data-flow.md): the operator's 2026-11-10 21:02 turn above
+  asks for that, and it is outstanding for them.
 - Each entry is an item of a change request as [change-requests-index.md](change-requests-index.md) names it, the
-  lines of its request, and its clause copied from those lines. `[...]` joins passages that are not adjacent. The
+  lines of its request, and its clause copied from those lines. `[...]` joins passages that are not adjacent. Where a
+  reading's copy differed from the file, the clause is the cited lines whole. The
   request is the text that governs; this document adds no requirement to it.
 - "Placed by" quotes the words of a document that put the clause at its stage. Where it says "the reader", no
   document says, and the stage is the assignment of the reading named below.
@@ -104,7 +118,15 @@ The operator, 2026-11-12:
 ### export: [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
 - **1 / data structure and Composes (export)** (design/compilation-composition-change-request.md:111-120)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The data structure** is the exported graph of each numerical function, and the graph of calls between
+  > functions (aot-compilation A1, A10). - **The algorithm** is full conversion (S2): every operation of the input is
+  > converted to the target, and the conversion succeeds only when all of them are. - **Composes:** export produces
+  > both graphs. Lowering takes the scheduled value and converts every function in it: for every rank, its numerical
+  > functions, its collectives (the `send` and `recv` nodes placement added), and each placed CPU or GPU function. -
+  > **Replaces:** the split in `rdma/mesh_compile.py program()` where `replayed` excludes nodes whose declarations
+  > name transferred values; also its rejection of repeated calls to a compiled function in the `replayed` block. -
+  > **Write:** Compile both each numerical function and the graph of calls between functions. Lowering covers every
+  > rank
   - Placed by: "**Composes:** export produces both graphs." design/compilation-composition-change-request.md:115
 - **2 / data structure: send and recv nodes in the one graph**
   (design/compilation-composition-change-request.md:128-132): stated under place, which its clause names with this
@@ -168,7 +190,36 @@ The operator, 2026-11-12:
     placement stage adds its `send` and `recv` nodes and before scheduling."
     (design/torch-source-lowering-change-request.md:129-130)
 - **8. The torch scope's final lowering** (design/torch-capture-change-request.md:796-830)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Replaces:** the torch scope's kernels, which are torch's MPS kernels, one ATen operator at a time (mesh
+  > 03297e52). - **Source:** read and quoted in design/final-lowering-sources-2026-11-06.md. - J. Ansel et al.,
+  > PyTorch 2, ASPLOS 2024, §1: "The framework only has visibility of a single operator at a time, and thus cannot
+  > automatically perform optimizations, like fusion or scheduling, that cross operator boundaries." - T. Chen et al.,
+  > TVM, OSDI 2018, abstract: "TVM solves optimization challenges specific to deep learning, such as high-level
+  > operator fusion, mapping to arbitrary hardware primitives, and memory latency hiding." - J. Ragan-Kelley et al.,
+  > Halide, PLDI 2013, §1: "decoupling the algorithm definition from its execution strategy". - P. Tillet, H. T. Kung,
+  > D. Cox, Triton, MAPL 2019, §5.2.1: "Nested tiling strategies … aim at decomposing tiles into micro-tiles and
+  > eventually nano-tiles in order to fit a machine's compute capabilities and memory hierarchy as tightly as
+  > possible." - B. Spector et al., ThunderKittens (arXiv:2410.20399), §1: "any high performance framework must
+  > prioritize keeping tensor cores at high utilization whenever possible." - C. Cecka, CuTe layout algebra
+  > (arXiv:2603.02298), abstract: "These instructions prescribe fixed, often complex data layouts that must be
+  > correctly propagated through the entire execution pipeline to ensure both correctness and optimal performance." -
+  > T. Dao et al., FlashAttention, NeurIPS 2022, abstract: "an IO-aware exact attention algorithm that uses tiling to
+  > reduce the number of memory reads/writes between GPU high bandwidth memory (HBM) and GPU on-chip SRAM." - Y. Xu et
+  > al., GSPMD (arXiv:2105.04663), §1: "GSPMD will run compiler passes that complete the sharding specification on the
+  > entire computation graph, and transform it into a mathematically equivalent, parallelized computation to run on
+  > each device." - N. Shazeer et al., Mesh-TensorFlow, NeurIPS 2018, abstract: "A Mesh-TensorFlow graph compiles into
+  > a SPMD program consisting of parallel operations coupled with collective communication primitives such as
+  > Allreduce." - L.-W. Chang et al., FLUX (arXiv:2406.06858), abstract: "Flux overdecomposes communication and
+  > computation operations into much finer-grained operations and further fuses them into a larger kernel to
+  > effectively hide communication without compromising kernel efficiency." - S. Zheng et al., TileLink
+  > (arXiv:2503.20313), abstract: "TileLink decouples the design space of communication and computation, linking these
+  > two parts via tile-centric primitives." - A. Jangda et al., CoCoNet, ASPLOS 2022, §1: "we need to schedule the
+  > MatMul kernel to compute chunks in the order the AllReduce kernel communicates them." - Triton-distributed
+  > (arXiv:2504.19442), §2.1: "The core of our programming model includes three concepts: symmetric memory, signal
+  > exchange, and async-task." - Metal Performance Primitives, MPPTensorOpsMatMul2d.h:216–218 (macOS 26.4 SDK):
+  > "cooperative_tensor owns thread private data and divides the data for entire tensor among threads (participating
+  > in the scope of operation) in implementation defined manner." - **Written** in
+  > design/torch-source-lowering-change-request.md, items 1–3.
   - Placed by: "Item 2 is the export stage's scope. Items 1, 5 and 6 are operator lowerings: they run where the
     exported graph is decomposed, before the placement stage adds its `send` and `recv` nodes and before scheduling."
     (design/torch-source-lowering-change-request.md:129-130); "Item 3's ordering is the schedule stage's."
@@ -285,7 +336,11 @@ The operator, 2026-11-12:
   stage.
 - **2 / data structure: send and recv nodes in the one graph**
   (design/compilation-composition-change-request.md:128-132)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The data structure** is one graph for computation and data movement together (S3's parallel computation
+  > graph): its nodes are function calls and, for each value read on another processor, a `send` and a `recv`; its
+  > edges are values, each with its sharding, consumer kind, accesses and lifetimes. - **The algorithm** is graph
+  > substitution (S3): a transformation replaces a subgraph of that graph with another. - **Composes:** export
+  > produces the graph. Placement adds the `send` and `recv` nodes to it. One schedule orders
   - Placed by: "Placement adds the `send` and `recv` nodes to it."
     design/compilation-composition-change-request.md:132
 - **2 / Write: each row's work completed with its deletion**
@@ -548,7 +603,9 @@ The operator, 2026-11-12:
     design/unequal-shards-change-request.md:130-131; "`on_devices` and `schedule` take the `GraphModule` with those
     nodes." design/unequal-shards-change-request.md:131-132
 - **3 - Data structure / Algorithm** (design/unequal-shards-change-request.md:143-146)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Data structure:** the `counts` and `displs` of item 2. - **Algorithm:** item 1's rounding. The counts of item
+  > 2 are computed from the tuple of item 1 and the dimension's extent, and every device of the collective is given
+  > the same arrays. What device j sends is `counts[j]` elements at every device's reading of it.
   - Placed by: "`place` writes the arrays once for a collective; that collective's nodes on every device carry them."
     design/unequal-shards-change-request.md:147
 - **3 - Stage** (design/unequal-shards-change-request.md:147-147)
@@ -562,7 +619,10 @@ The operator, 2026-11-12:
     size of item 1." design/unequal-shards-change-request.md:171-172; "Items 2, 3, 4, 9, 10 and 12 state nodes that
     `place` adds to the graph." design/unequal-shards-change-request.md:55-56
 - **4 - Algorithm / Stage** (design/unequal-shards-change-request.md:168-172)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Algorithm:** GSPMD §4.1's masking. Before an operator that reduces over that dimension, the elements past the
+  > device's shard are replaced by the identity of the reduction, by a select on the mask. The padding differs by
+  > device. - **Stage:** the select is a node `place` adds before the reducing operator, on each device, from that
+  > device's size of item 1.
   - Placed by: "the select is a node `place` adds before the reducing operator, on each device, from that device's
     size of item 1." design/unequal-shards-change-request.md:171-172
 - **5 - Data structure** (design/unequal-shards-change-request.md:180-180)
@@ -621,7 +681,9 @@ The operator, 2026-11-12:
   - Placed by: "the placement operand, which `place` consumes. `place` adds no communication at an attention"
     design/unequal-shards-change-request.md:301-302
 - **9 - Data structure / Algorithm** (design/unequal-shards-change-request.md:314-316)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Data structure:** the `counts` and `displs` of item 2. - **Algorithm:** GSPMD §4.5's resharding by its four
+  > operators: AllGather, AllToAll, CollectivePermute and DynamicSlice. Each of the four carries the counts of item 2
+  > where its dimension is sharded by item 1.
   - Placed by: "the four are nodes `place` adds to the graph." design/unequal-shards-change-request.md:317
 - **9 - Stage** (design/unequal-shards-change-request.md:317-317)
   > the four are nodes `place` adds to the graph.
@@ -632,7 +694,9 @@ The operator, 2026-11-12:
     design/unequal-shards-change-request.md:328; "Items 2, 3, 4, 9, 10 and 12 state nodes that `place` adds to the
     graph." design/unequal-shards-change-request.md:55-56
 - **10 - Algorithm / Stage** (design/unequal-shards-change-request.md:326-328)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Algorithm:** GSPMD §4.3's halo exchange. Halos are exchanged by a collective permute at the largest halo over
+  > the devices, and each device slices off what exceeds its own. - **Stage:** the collective permute's sends and
+  > receives and the slice are nodes `place` adds to the graph.
   - Placed by: "the collective permute's sends and receives and the slice are nodes `place` adds to the graph."
     design/unequal-shards-change-request.md:328
 - **12 - Data structure** (design/unequal-shards-change-request.md:373-376)
@@ -1328,7 +1392,8 @@ The operator, 2026-11-12:
 - **R1 data structure** (design/plan-to-bridge-change-request.md:1949-1950, 1974-1975): stated under scheduled value,
   which its clause names with this stage.
 - **R1 algorithm** (design/plan-to-bridge-change-request.md:1962-1962, 1967-1968)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The algorithm is the flattening of a type map.** [...] - Each view is flattened into its list of (row, offset,
+  > bytes) blocks, adjacent blocks merged, as datatype processing flattens a type map.
   - Placed by: "Produced by the schedule, `mesh_plan`." design/plan-to-bridge-change-request.md:1976
 - **R1 where it composes** (design/plan-to-bridge-change-request.md:1970-1977)
   > Takes: each transfer's two views. A transfer is a send node and a receive node that placement adds to the graph.
@@ -1343,7 +1408,10 @@ The operator, 2026-11-12:
     transfer is a send node and a receive node that placement adds to the graph."
     design/plan-to-bridge-change-request.md:1970
 - **R1 a value's layout is the program's own** (design/plan-to-bridge-change-request.md:1980-1981, 1983-1985)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - A part is sent from its producer's pages, whatever its layout, and it lands at its byte ranges in its
+  > destination value's layout (R2). [...] - A change of layout exists only where a consumer's operand cannot take the
+  > landed layout as its view. It is then an operator of the consumer's own, run as its out variant
+  > (design/aot-compilation-change-request.md appendix item 7), never part of a transfer.
   - Placed by: "Produced by the schedule, `mesh_plan`." design/plan-to-bridge-change-request.md:1976
 - **R1 Replaces: the share record** (design/plan-to-bridge-change-request.md:2007-2007)
   > **Replaces:** packing and unpacking; a layout chosen for a transfer's sake; the share record (`struct
@@ -1473,7 +1541,10 @@ The operator, 2026-11-12:
     design/disjoint-pages-revision-coordination.md, "The plan call"):"
     design/plan-to-bridge-change-request.md:2122-2123
 - **R3 the task graph: V and w** (design/plan-to-bridge-change-request.md:2137-2137, 2141-2141, 2143-2144)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - The code must represent one execution as a task graph and nothing more. [...] - V are tasks, each one operation
+  > of the captured graph (aot-compilation A1) executed at its node. [...] - w and c are the tasks' and edges'
+  > weights. They are given, not computed by this code: the weighting operand of
+  > design/aot-compilation-change-request.md A3.
   - Placed by: "Produced by `mesh_plan`: rdma/mesh-collective.{h,c} builds the task graph from the IR."
     design/plan-to-bridge-change-request.md:2151
 - **R3 the task graph: E are pages, with weight c** (design/plan-to-bridge-change-request.md:2142-2144)
@@ -1547,7 +1618,18 @@ The operator, 2026-11-12:
     design/plan-to-bridge-change-request.md:2358-2359
 - **R5 data structure: one linear program over completion times** (design/plan-to-bridge-change-request.md:2267-2267,
   2269-2271, 2273-2276, 2279-2280, 2285-2286)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The data structure is one linear program over completion times.** [...] - It has one variable C_j, a
+  > completion time, for each instruction j of one execution's task graph (R3): each task at its node, and each hop of
+  > each page's route, on its cable (design/compilation-coordination.md GO2). It has one more variable, C_max.
+  > Instruction j's length d_j is its weight from the weighting operand (aot-compilation A3): w for a [...] - Minimize
+  > C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a) (C.-Y. Chen, Scheduling coflows with precedence
+  > constraints for minimizing the total weighted completion time in identical parallel networks, arXiv 2205.02474,
+  > 2022, §6). Then, over (14)'s optimal solutions, minimize Σ_j C_j: Chen's (1) and Hall et al.'s (1) with unit
+  > weights. The two are one lexicographic linear program (H. Isermann, Linear lexicographic optimization, OR Spektrum
+  > [...] - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one execution. - C_j ≥ C_i + d_j
+  > for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall et al.'s (3). [...] - For
+  > each resource, and each set S of the instructions on it: Σ_{j∈S} d_j C_j ≥ ½(d(S)² + d²(S)), where d(S) is Σ_{j∈S}
+  > d_j and d²(S) is Σ_{j∈S} d_j². A resource is a cable in one direction, or a node's device. This is Hall et
   - Placed by: "Produced by `mesh_plan` (rdma/mesh-collective.c), which calls `mesh_graph_completion_times` and
     `mesh_graph_heap_order` (rdma/mesh-graph.h)." design/plan-to-bridge-change-request.md:2358-2359;
     "rdma/mesh-graph.{h,c}: the program's rows, the cutting-plane loop with Queyranne's separation, and the calls to
@@ -1556,7 +1638,13 @@ The operator, 2026-11-12:
   2319-2323): stated under graph module, which its clause names with this stage.
 - **R5 algorithm steps 3-5: priority, one global topological order, each cable's subsequence**
   (design/plan-to-bridge-change-request.md:2324-2330, 2332-2332)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > 3. Each instruction's priority is C̄_j, its completion time in the program's optimal solution, the least first.
+  > C̄_j is a relaxation's value, a lower bound, and not a time any schedule keeps. Only its order is used. 4. One
+  > global topological order of the instructions is built as MSCCLang §5.2 states in its step 3: "Sort instructions
+  > into a global topological order with respect to their dependencies with a heap using the priority to order
+  > instructions." Where two priorities are equal, the heap takes the lower instruction
+  > (design/compilation-coordination.md GO3). That order is consistent with the precedence relation, as Hall et al.'s
+  > ties require. [...] 5. Each cable's list is the subsequence of that order made of the cable's sends.
   - Placed by: "Produced by `mesh_plan` (rdma/mesh-collective.c), which calls `mesh_graph_completion_times` and
     `mesh_graph_heap_order` (rdma/mesh-graph.h). The first writes each instruction's C̄_j (`double *completion`). The
     second takes them as `priority` and writes each instruction's place in the order (`uint32_t *place`)."
@@ -1724,7 +1812,15 @@ The operator, 2026-11-12:
     UINT64_MAX − 1"." design/problems-of-14b9a757-change-request.md:436-437; "rdma/mesh_compile.py:2130 does the same
     (LOADED)." design/problems-of-14b9a757-change-request.md:438
 - **9** (design/problems-of-14b9a757-change-request.md:460-472)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The algorithm:** none is determined. MPI says only that the use of such entries with a buffer the operation
+  > updates "is erroneous". - **Composition:** `mesh_plan` writes each destination instruction as a `struct mesh_hop`
+  > (rdma/mesh.h) of direction MESH_RECEIVE, its bytes named by `page`, `offset` and `bytes`. The bridge's child
+  > process for a port reads them. No function reads their overlap, since no algorithm is determined. - **Code:** -
+  > rdma/mesh-collective.c refuses no pair of destination instructions whose byte intervals at one node intersect
+  > within one execution. - Ranges may now share a block, so such a pair is two writers of one byte. - **Source:** MPI
+  > 4.1 §6.1.11 (https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node107.htm): "A datatype may specify overlapping
+  > entries. The use of such a datatype in any communication in association with a buffer updated by the operation is
+  > erroneous." - **Change:** none is determined. No source read states what `mesh_plan` does with such a pair.
   - Placed by: "`mesh_plan` writes each destination instruction as a `struct mesh_hop` (rdma/mesh.h) of direction
     MESH_RECEIVE, its bytes named by `page`, `offset` and `bytes`. The bridge's child process for a port reads them.
     No function reads their overlap, since no algorithm is determined."
@@ -2144,7 +2240,14 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:115-121): stated under lower, which its clause names with this
   stage.
 - **2 / data structure: what each edge carries** (design/compilation-composition-change-request.md:128-136)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The data structure** is one graph for computation and data movement together (S3's parallel computation
+  > graph): its nodes are function calls and, for each value read on another processor, a `send` and a `recv`; its
+  > edges are values, each with its sharding, consumer kind, accesses and lifetimes. - **The algorithm** is graph
+  > substitution (S3): a transformation replaces a subgraph of that graph with another. - **Composes:** export
+  > produces the graph. Placement adds the `send` and `recv` nodes to it. One schedule orders functions and transfers
+  > together and produces the scheduled value. Lowering, the runtime and the archive take the scheduled value. The
+  > signature is printed from what lowering emits. - **Write:** A value's sharding, consumer kind, accesses,
+  > lifetimes, transfers and dependences describe the same program through lowering. Numerical
   - Placed by: the reader.
 - **2 / Composes: one schedule orders functions and transfers together**
   (design/compilation-composition-change-request.md:132-134): stated under schedule, which its clause names with this
@@ -2205,7 +2308,10 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   - Placed by: "Call, dependence and collective-schedule results → remapped relations through fusion, splitting and
     placement → the shared graph algorithms and native program." design/compilation-composition-change-request.md:428
 - **7 / data structure: the scheduled value** (design/compilation-composition-change-request.md:495-498)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The data structure** is the scheduled value: typed numerical IR with its dependencies, placement, storage and
+  > communication annotations, and requirement 4's static schedule. Analysis solves the abstract problem once and
+  > supplies a lowerable program to its optimizing consumers. Typed numerical IR, dependencies, placement, storage and
+  > communication annotations stay available until their last compiler consumer. Each may then be realized
   - Placed by: "**The data structure** is the scheduled value" design/compilation-composition-change-request.md:495
 - **7 / Composes: the archive stores the scheduled value** (design/compilation-composition-change-request.md:505-507):
   stated under save and load, which its clause names with this stage.
@@ -2266,7 +2372,10 @@ The type `Scheduled` and the shared headers' records: what is carried between st
 ### scheduled value: [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md)
 
 - **R1 data structure** (design/plan-to-bridge-change-request.md:1949-1950, 1974-1975)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The data structure is a list of blocks.** A transfer is a list of byte ranges of its source's pages, landing
+  > in byte ranges of its destination's pages. Each range is one block: (page-table row, offset, bytes). [...] -
+  > Writes: the blocks, as the entries of each cable's list (R5): `struct mesh_hop` `page`, `offset` and `bytes`
+  > (rdma/mesh.h). These are MSCCL-IR's steps with offset and count (aot-compilation A9).
   - Placed by: "Writes: for each copy, each cable's sends in schedule order, each entry with its page and its bytes
     (`struct mesh_hop`, rdma/mesh.h). The lists are part of the scheduled value."
     design/plan-to-bridge-change-request.md:2356-2357; "Produced by the schedule, `mesh_plan`. Consumed by the bridge
@@ -2413,7 +2522,13 @@ The type `Scheduled` and the shared headers' records: what is carried between st
     design/compilation-composition-change-request.md:115-117
 - **1 / Write: every rank, its collectives, each placed CPU or GPU function**
   (design/compilation-composition-change-request.md:115-121)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Composes:** export produces both graphs. Lowering takes the scheduled value and converts every function in it:
+  > for every rank, its numerical functions, its collectives (the `send` and `recv` nodes placement added), and each
+  > placed CPU or GPU function. - **Replaces:** the split in `rdma/mesh_compile.py program()` where `replayed`
+  > excludes nodes whose declarations name transferred values; also its rejection of repeated calls to a compiled
+  > function in the `replayed` block. - **Write:** Compile both each numerical function and the graph of calls between
+  > functions. Lowering covers every rank and its collectives, and each placed CPU or GPU function. An intermediate
+  > conversion is completed before the program
   - Placed by: "Lowering takes the scheduled value and converts every function in it"
     design/compilation-composition-change-request.md:115
 - **1 / Write: conversion completed before the program runs**
@@ -2438,7 +2553,13 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:132-134): stated under schedule, which its clause names with this
   stage.
 - **2 / the signature** (design/compilation-composition-change-request.md:134-140)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > scheduled value. The signature is printed from what lowering emits. - **Write:** A value's sharding, consumer
+  > kind, accesses, lifetimes, transfers and dependences describe the same program through lowering. Numerical
+  > decomposition, fusion and communication transformations keep the information needed by subsequent scheduling,
+  > allocation and synchronization. The output of each analysis or lowering is the operand its consumers actually use.
+  > Changes to the graph are reflected in those dependent results before emission. The signature describes that
+  > emitted program. Each row's work is completed in this composition, including its specified deletion or
+  > replacement.
   - Placed by: "The signature is printed from what lowering emits."
     design/compilation-composition-change-request.md:134
 - **2 / Write: transformations keep information; outputs are operands; changes reflected**
@@ -2457,7 +2578,12 @@ The type `Scheduled` and the shared headers' records: what is carried between st
     design/compilation-composition-change-request.md:103
 - **5 / data structure and Composes: one compiled native program per node**
   (design/compilation-composition-change-request.md:196-201)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **The data structure** is one compiled native program per node, which launches all CPU, ANE and MPS work of the
+  > graph (the operator's first turn above). Numerical functions and their calls are compilation inputs; placements,
+  > value instances and readiness are operands. CPU, ANE and MPS are resources of the Apple Silicon target. Python
+  > capture and preparation are not its CPU execution. - **The algorithm** is specialization (S6): one subject program
+  > and its static operands give the residual program. - **Composes:** lowering takes the scheduled value and emits
+  > the native program; the runtime calls it. The signature
   - Placed by: "**Composes:** lowering takes the scheduled value and emits the native program; the runtime calls it."
     design/compilation-composition-change-request.md:201
 - **5 / Composes: signature printed by the graph module's printers**
@@ -2517,7 +2643,21 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   stage.
 - **Correction: generated target source / Composes and Emission boundary**
   (design/compilation-composition-change-request.md:303-318)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > Placement, the schedule and lowering take and return them. Lowering emits MSL or native target source, which the
+  > target compiler takes. No function of mesh takes that source. - **Replaces:** recorder transformations whose
+  > semantic operands are shader strings: scalar/quantization specialization, operand promotion, epilogue/map/row
+  > fusion, reduction/packed-weight rewriting, coherent-store insertion and masked-pass construction. `MetalEntry`,
+  > `MetalRowFootprint` and `MetalMaskedPass` are among them; replacing their parsers alone does not complete the
+  > requirement. - **Write:** the producing Torch and LiteRT compiler interfaces supply the operation, binding, type,
+  > shape, indexing, effect, alias and transfer/generation facts required by their consumers. Lowerings transform
+  > those representations, preserving or updating the corresponding identities, accesses and dependencies when they
+  > fuse, split, specialize or rebind operations. Consumers query the resulting annotations and relations. A
+  > dependence edge of the schedule carries the value/effect/transfer relation that makes it necessary until the
+  > lowering that reads it has represented that obligation in the target execution. - **Emission boundary:** generated
+  > MSL or native target source is the final source emission of the mesh lowering pipeline, passed to the target
+  > compiler. Subsequent mesh transformations do not infer semantics by parsing or matching that output. Source
+  > spelling, generated identifier names and pretty-printing are not optimization preconditions. Retaining tokens for
+  > some consumers while the other passes continue rewriting emitted strings
   - Placed by: "Lowering emits MSL or native target source, which the target compiler takes."
     design/compilation-composition-change-request.md:303-304
 - **Correction: generated target source / Replaces** (design/compilation-composition-change-request.md:305-308)
@@ -2540,7 +2680,27 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   - Placed by: "Lowering emits MSL or native target source, which the target compiler takes."
     design/compilation-composition-change-request.md:303-304
 - **Performance correction / Emission** (design/compilation-composition-change-request.md:333-356)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Emission.** The data structure is Tint's IR module. Dawn/Tint's [Metal shader
+  > translation](https://github.com/google/dawn/blob/main/src/dawn/native/metal/ShaderModuleMTL.mm) obtains a program,
+  > converts it to an IR module and invokes its MSL writer. The
+  > [writer](https://github.com/google/dawn/blob/main/src/tint/lang/msl/writer/writer.cc), `Generate`, transforms the
+  > module with `Raise` before `Print`. - **Fusion and storage.** MLIR's [elementwise fusion
+  > implementation](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/Linalg/Transforms/ElementwiseOpFusion.cpp)
+  > composes operand indexing maps and remaps operation operands/results. Its
+  > [bufferization](https://mlir.llvm.org/docs/Bufferization/) uses tensor use-def, alias and equivalence relations to
+  > determine storage (S8). These supply fusion and intermediate-storage elimination, rather than rediscovery of those
+  > relations from buffer names or shader text. - **Constants.** MLIR's [SCCP
+  > pass](https://mlir.llvm.org/docs/Passes/#-sccp), based on Wegman and Zadeck (1991), propagates known constants
+  > through IR. S6 supplies the specialization equation. Static operation, dtype, shape, stride and configuration
+  > operands become the residual program's instructions/constants; generic shaders do not read them again at run time
+  > merely because their representation fits in a metadata buffer. - **Reductions.** MLIR's [workgroup reduction
+  > lowering](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/GPU/Transforms/AllReduceLowering.cpp)
+  > constructs subgroup reductions and workgroup exchanges from reduction operations. Apple's [MLX
+  > reduction](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/rms_norm.metal), [packed
+  > arithmetic](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/quantized.h) and [system-scope
+  > access](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal) provide concrete target
+  > mechanisms. - **Composes:** each of these is a function from operations to operations inside lowering, which takes
+  > the scheduled value; `Print` comes after all of them.
   - Placed by: "**Composes:** each of these is a function from operations to operations inside lowering, which takes
     the scheduled value; `Print` comes after all of them." design/compilation-composition-change-request.md:355-356
 - **Performance correction / Fusion and storage** (design/compilation-composition-change-request.md:338-343)
@@ -2553,11 +2713,43 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   - Placed by: "**Composes:** each of these is a function from operations to operations inside lowering, which takes
     the scheduled value; `Print` comes after all of them." design/compilation-composition-change-request.md:355-356
 - **Performance correction / Constants** (design/compilation-composition-change-request.md:345-366)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > propagates known constants through IR. S6 supplies the specialization equation. Static operation, dtype, shape,
+  > stride and configuration operands become the residual program's instructions/constants; generic shaders do not
+  > read them again at run time merely because their representation fits in a metadata buffer. - **Reductions.**
+  > MLIR's [workgroup reduction
+  > lowering](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/GPU/Transforms/AllReduceLowering.cpp)
+  > constructs subgroup reductions and workgroup exchanges from reduction operations. Apple's [MLX
+  > reduction](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/rms_norm.metal), [packed
+  > arithmetic](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/quantized.h) and [system-scope
+  > access](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal) provide concrete target
+  > mechanisms. - **Composes:** each of these is a function from operations to operations inside lowering, which takes
+  > the scheduled value; `Print` comes after all of them. - **Replaces:** the preceding recorder bodies,
+  > `MetalNativeProjection`/`MetalNativeArgmax`'s source-based identification and extraction, and
+  > `_pointwise`/`_reduced`/`_contract`'s premature commitment to generic dispatches where the static program still
+  > requires specialization, fusion and parallel scheduling. - **Write:** preserve the numerical operations and their
+  > permitted precision/rounding, express maps and epilogues as operation regions, retain values across their uses,
+  > and lower reductions and packed data to the selected target operations. Preserve each actual effect and observable
+  > result while removing unnecessary materialization. Compile producer publication and consumer acquisition from the
+  > same range/page dependencies used by transport scheduling. Operation equivalence and applicability follow the
+  > structured operands and effects, not an entry-point name, generated variable name or operator spelling. Carry
+  > static facts as compiler operands and keep genuinely varying values as runtime inputs.
   - Placed by: "**Composes:** each of these is a function from operations to operations inside lowering, which takes
     the scheduled value; `Print` comes after all of them." design/compilation-composition-change-request.md:355-356
 - **Performance correction / Reductions** (design/compilation-composition-change-request.md:348-362)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Reductions.** MLIR's [workgroup reduction
+  > lowering](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/GPU/Transforms/AllReduceLowering.cpp)
+  > constructs subgroup reductions and workgroup exchanges from reduction operations. Apple's [MLX
+  > reduction](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/rms_norm.metal), [packed
+  > arithmetic](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/quantized.h) and [system-scope
+  > access](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal) provide concrete target
+  > mechanisms. - **Composes:** each of these is a function from operations to operations inside lowering, which takes
+  > the scheduled value; `Print` comes after all of them. - **Replaces:** the preceding recorder bodies,
+  > `MetalNativeProjection`/`MetalNativeArgmax`'s source-based identification and extraction, and
+  > `_pointwise`/`_reduced`/`_contract`'s premature commitment to generic dispatches where the static program still
+  > requires specialization, fusion and parallel scheduling. - **Write:** preserve the numerical operations and their
+  > permitted precision/rounding, express maps and epilogues as operation regions, retain values across their uses,
+  > and lower reductions and packed data to the selected target operations. Preserve each actual effect and observable
+  > result while removing unnecessary materialization.
   - Placed by: "**Composes:** each of these is a function from operations to operations inside lowering, which takes
     the scheduled value; `Print` comes after all of them." design/compilation-composition-change-request.md:355-356
 - **Performance correction / Replaces** (design/compilation-composition-change-request.md:357-359)
@@ -3619,7 +3811,9 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:140-140): stated under no stage named, which its clause names with
   this stage.
 - **7 / Composes: the archive stores the scheduled value** (design/compilation-composition-change-request.md:505-507)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Composes:** the schedule produces the scheduled value. Lowering takes it and emits the native program: the
+  > table below gives, per operand, what the emitted program preserves and what it does not read. The runtime calls
+  > that program; the archive stores the scheduled value.
   - Placed by: "the archive stores the scheduled value." design/compilation-composition-change-request.md:507
 - **7 / Composes: lowering emits the native program, the runtime calls it**
   (design/compilation-composition-change-request.md:505-507): stated under lower, which its clause names with this
@@ -3697,7 +3891,10 @@ The type `Scheduled` and the shared headers' records: what is carried between st
     design/compilation-composition-change-request.md:153
 - **3 / Write, second bullet: callers call them, own copies deleted**
   (design/compilation-composition-change-request.md:150-155)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Composes:** placement and the one schedule call the graph functions; the schedule's result is in the scheduled
+  > value, which lowering and the runtime read. - **Write:** - `rdma/mesh_graph.py` and `rdma/mesh-graph.{h,c}` define
+  > the shared graph functions, which take the caller's operands. - Callers call those functions, and their own copies
+  > are deleted. Deleted, as the existing requests name them: the
   - Placed by: "placement and the one schedule call the graph functions"
     design/compilation-composition-change-request.md:150
 - **3 / Write, second bullet: the four named deletions** (design/compilation-composition-change-request.md:155-157):
@@ -3756,7 +3953,12 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   2269-2271, 2273-2276, 2279-2280, 2285-2286): stated under schedule, which its clause names with this stage.
 - **R5 algorithm steps 1-2: cutting planes, HiGHS dual simplex** (design/plan-to-bridge-change-request.md:2314-2314,
   2319-2323)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > 1. Solve the program by cutting planes. The rows of the last kind are one for each set, so there are exponentially
+  > [...] Programming 58, 1993). Solve the program with the rows found so far. Find each resource's violated rows by
+  > Queyranne's separation, and add them. Repeat until no row is violated. 2. Each linear program is solved by HiGHS's
+  > dual revised simplex method, through the HiGHS library (Q. Huangfu and J. A. J. Hall, Parallelizing the dual
+  > revised simplex method, Math. Program. Comput. 10(1), 2018, the paper HiGHS asks its users to cite). The code
+  > builds the rows and calls the library. It writes no solver of its own.
   - Placed by: "rdma/mesh-graph.{h,c}: the program's rows, the cutting-plane loop with Queyranne's separation, and the
     calls to HiGHS; the heap order by C̄ (`mesh_graph_heap_order`)."
     design/plan-to-bridge-change-request.md:2364-2365; "Produced by `mesh_plan` (rdma/mesh-collective.c), which calls
@@ -4208,7 +4410,9 @@ The bridge process and the transport in `rdma/*.c`, which take page lists and mo
     it. The scheduled value carries no transport object and no queue-pair count."
     design/plan-to-bridge-change-request.md:2410-2411
 - **R8 attaching holds nothing; no EADDRINUSE** (design/plan-to-bridge-change-request.md:2422-2423, 2441-2441)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - The code must hold nothing for a program but its pages. Attaching holds nothing, and there is no client word and
+  > no `EADDRINUSE`. A bridge with no function execution to serve does nothing. [...] - rdma/mesh-dataflow.c:
+  > attaching only maps the region.
   - Placed by: "rdma/mesh-dataflow.c: attaching only maps the region." design/plan-to-bridge-change-request.md:2441
 - **R8 there is no client word** (design/plan-to-bridge-change-request.md:2422-2423)
   > Attaching holds nothing, and there is no client word and no `EADDRINUSE`.
@@ -4226,7 +4430,8 @@ The bridge process and the transport in `rdma/*.c`, which take page lists and mo
     a clause of the proposal; R8 itself names no function or file for the sequencer)
 - **R8 Replaces: any rule for several programs** (design/plan-to-bridge-change-request.md:2442-2442, 2448-2448,
   2454-2454)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **No source states that several programs run at once.** The phrase appears only in Claude's text: this request's
+  > R8 [...] - **Replaces:** [...] - any rule for several programs.
   - Placed by: the reader.
 
 ### bridge: [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md)
@@ -4576,7 +4781,15 @@ What the caller of `compile_module` supplies or does.
 - **Performance correction / Performance obligation** (design/compilation-composition-change-request.md:367-374):
   stated under lower, which its clause names with this stage.
 - **Complete replacement / production E2B link** (design/compilation-composition-change-request.md:408-419)
-  - Clause: read it at the lines above; the reading's copy did not match the file.
+  > - **Replaces:** metal-microbench's production E2B linkage to the wheel's `liblitert-lm`, its generated-source
+  > interception as an optimization interface, the source transformations listed below, and their alternative
+  > preparation paths. The replacement is finished all in one commit workgroup: the compiler interface is finished and
+  > the downstream bodies are removed together, by other code with the same feature coverage and the same performance
+  > or better (the operator's turn above). **Write the connected compiler interface.** Build from source the LiteRT
+  > runtime, delegate, ML Drift and Dawn/Tint dependencies that actually execute these lowerings. Track the adapter,
+  > build description and upstream changes in canonical source, not hand edits under `.build`. The production E2B link
+  > uses those built libraries. An executable that still loads a prebuilt GPU library leaves the assignment
+  > unfinished.
   - Placed by: "with the driver `tools/e2b_replay.m` that links them" design/the-compiler.md:103-104
 - **Complete replacement / replaced-implementation table row 6**
   (design/compilation-composition-change-request.md:456-456): stated under lower, which its clause names with this

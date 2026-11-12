@@ -107,7 +107,9 @@ turns says so.
     against data-flow.md, so I don't count it as binding here."
 - **Rule:**
   - The restatement is design/requirements-by-stage.md. It lists every item of every change request under the stage of
-    design/data-flow.md that takes it, each clause quoted from its request.
+    design/data-flow.md that takes it, each clause quoted from its request. It also lists the items of the graph
+    module, the bridge, the caller, the machines and the documents under those names, and under "no stage named" the
+    items whose clauses place them in another flow, which are not yet restated.
   - A reviewer reads a commit against the clauses listed for each stage the commit changes, in the request each comes
     from. A clause is not set aside because its request was written before design/data-flow.md.
   - Where a reviewer does set a clause aside, for any reason, the clause and the reason are written as a warning, not

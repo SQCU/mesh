@@ -15,14 +15,15 @@ change request follows is [change-requests.md](change-requests.md).
   where it named none.
 - `outstanding`: the clause was not found to hold in code that has the data flow of [data-flow.md](data-flow.md). An
   item whose one implementation is in the files [the-compiler.md](the-compiler.md) order 5 names is outstanding.
-- `not determined [date]`: the clause states the condition of machines or services, which the reading did not contact.
+- `not determined [date]`: the clause states the condition of machines or services, which the reading did not contact; the item
+  is outstanding until a reading of the machines shows it holds.
 - No request has every item covered. All eleven are outstanding.
 - [requirements-by-stage.md](requirements-by-stage.md) lists the same items under the stage of
   [data-flow.md](data-flow.md) that takes each, with each clause quoted.
 
 ## [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
-Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 69 items outstanding, 23 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 70 items outstanding, 22 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -181,6 +182,9 @@ Outstanding:
     what the send reads (the dependence relation of item 6); the bridge's waits follow from the pages each publication
     reuses.
   - 7 / performance paragraph: Same as item 7 / Write and the preceding entry.
+  - 4 / Write: the bridge binds physical transport as R7 specifies: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of a7e2de47). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
 
 Covered:
 
@@ -197,7 +201,6 @@ Covered:
   - 4 / Write: placement and costs are operands: covered [2026-11-10, mesh ce2e8ac9]
   - 4 / Write: compilation realizes transfers, ordering and synchronization: covered [2026-11-10, mesh ce2e8ac9]
   - 4 / Write: runtime consumes programs and remaining inputs; self-timed calls: covered [2026-11-10, mesh ce2e8ac9]
-  - 4 / Write: the bridge binds physical transport as R7 specifies: covered [2026-11-11, mesh 6d4f007b]
   - 5 / Replaces, site 3: strided-view traversal: covered [2026-11-08, mesh d44e3d0c]
   - 6 / Replaces 2: schedule results are operands of native preparation and of the transport: covered [2026-11-12,
     mesh a86c7dc4]
@@ -222,7 +225,7 @@ Withdrawn:
 
 ## [aot-compilation-change-request.md](aot-compilation-change-request.md)
 
-Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 31 items outstanding, 80 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 34 items outstanding, 77 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -321,6 +324,15 @@ Outstanding:
   - The files and functions: metal-microbench tools/prepare_e2b.py: As the A1 delegate entry and the item 5 "every
     program declares each consumer's kind" entry state.
   - The files and functions: metal-microbench metal_recording.m: As the A1 delegate entry states.
+  - A9 here, per node: the lists: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of a7e2de47). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - A9 here, per node: the bindings and the state section: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of a7e2de47). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - A9 every address is fixed at compile time: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of a7e2de47). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
 
 Covered:
 
@@ -369,10 +381,7 @@ Covered:
   - A7 a static schedule's destinations exist before its first message: covered [2026-11-06, mesh 128f9bb5]
   - A8 data structure (the type mesh_plan takes): covered [2026-11-10, mesh 60103676]
   - A9 stage and types: covered [2026-11-08, mesh 7517cfc8]
-  - A9 here, per node: the lists: covered [2026-11-10, mesh 5889d898]
-  - A9 here, per node: the bindings and the state section: covered [2026-11-10, mesh 5889d898]
   - A9 the algorithm the bridge runs it by: the self-timed strategy: covered [2026-11-06, mesh 4fe54e5f]
-  - A9 every address is fixed at compile time: covered [2026-11-10, mesh 5889d898]
   - A10 the graph operations are the graph module's (the functions): covered [2026-11-08, mesh 38ce722e]
   - A10 its output (the receiving types): covered [2026-11-10, mesh 60103676]
   - A10 produced by, consumed by (the schedule): covered [2026-11-07, mesh 8c8094da]
