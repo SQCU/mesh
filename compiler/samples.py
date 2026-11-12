@@ -326,6 +326,7 @@ def on(machine, devices):
 ONE = on(0, {"cpu": "cpu"})
 TWO, THREE = on(0, {"p0": "cpu", "p1": "cpu"}), on(0, {"p0": "cpu", "p1": "cpu", "p2": "cpu"})
 SHARDS = ("p0", "p1")
+FOUR = on(0, {"p0": "cpu", "p1": "cpu", "p2": "cpu", "p3": "cpu"})
 MIXED = on(0, {"cpu": "cpu", "gpu": "mps"})
 BATCH = {"x": {0: torch.export.Dim("batch", min=2, max=64)}}
 EXPERTS = {"experts.0": "p1", "experts.1": "p1", "experts.2": "p2", "experts.3": "p2"}
@@ -516,6 +517,13 @@ CASES = [
     ("windows | pooling with a divisor, 3 shards", Divided, [(r(2, 3, 11, 6),)],
      {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2}, "collectives": {"permute": 1},
       "placement": lambda: lambda node: (2, tuple(THREE), None) if node.name == "x" else "p0"}),
+    ("windows | rows and columns, 2 by 2", Windows, [(r(2, 3, 23, 21),)],
+     {"processors": FOUR, "sharded": True, "windows": {"shards": 16, "masked": 12}, "collectives": {"permute": 14},
+      "placement": lambda: lambda node: ((2, 3), (("p0", "p1"), ("p2", "p3")), (None, (1, 2)))
+      if node.name == "x" else "p0"}),
+    ("windows | rows and columns, 1 by 2", Windows, [(r(2, 3, 23, 21),)],
+     {"processors": TWO, "sharded": True, "windows": {"shards": 8, "masked": 6}, "collectives": {"permute": 7},
+      "placement": lambda: lambda node: ((2, 3), (SHARDS,), (None, None)) if node.name == "x" else "p0"}),
     ("windows | 2 shards, input on p0", Windows, [(r(2, 3, 23, 9),)],
      {"processors": TWO, "sharded": True, "windows": {"shards": 8, "masked": 4, "views": 2},
       "placement": lambda: lambda node: (2, SHARDS, None) if node.name == "convolution" else "p0"}),

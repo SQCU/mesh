@@ -262,9 +262,58 @@ def interleaved(graph, pieces, dimension, processor):
     return value
 
 
+def cut(graph, node, dimension, sizes, j, shards, processor, wide):
+    if sizes == STRIPED:
+        return call(graph, SLICE, (node, dimension, j, shape(node)[dimension], shards), processor)
+    low = bases(sizes)[j] if wide else sum(sizes[:j])
+    high = low + (max(sizes) if wide else sizes[j])
+    return node if (low, high) == (0, shape(node)[dimension]) else call(
+        graph, SLICE, (node, dimension, low, max(low, high)), processor)
+
+
+def several(value):
+    return isinstance(value[0], tuple)
+
+
+def flat(processors):
+    return tuple(leaf for p in processors for leaf in (flat(p) if isinstance(p, tuple) else (p,)))
+
+
+def spans(grid, depth):
+    return [len(functools.reduce(lambda rows, _: rows[0], range(d), grid)) for d in range(depth)]
+
+
+# design/problems-of-14b9a757-change-request.md item 4 step 3; design/unequal-shards-change-request.md items 1 and 9
+def across(graph, value, dimension, sizes, processors, exact):
+    held, extents, holders, nodes = value
+    if several(value):
+        single = dimension is None or not isinstance(dimension, tuple) and len(processors) == 1
+        heads, each = tuple(flat(processors if single else (row,))[0] for row in holders), len(nodes) // len(holders)
+        rest = (held[1:], extents[1:]) if len(held) > 2 else (held[1], extents[1])
+        joined = [reshard(graph, (*rest, row, nodes[r * each:(r + 1) * each]), None, None, (head,))[0]
+                  for r, (row, head) in enumerate(zip(holders, heads))]
+        return reshard(graph, (held[0], extents[0], heads, joined), dimension, sizes, processors, exact)
+    if holders == (None,):
+        lengths, made = spans(processors, len(dimension)), []
+        for leaf, at in zip(flat(processors), itertools.product(*map(range, lengths))):
+            node = nodes[0]
+            for d, size, j, shards in zip(dimension, sizes, at, lengths):
+                node = cut(graph, node, d, size, j, shards, leaf, uneven(size) and not exact)
+            made.append(node)
+        return made
+    heads = holders * len(processors) if len(holders) == 1 else tuple(flat((row,))[0] for row in processors)
+    rest = (dimension[1:], sizes[1:]) if len(dimension) > 2 else (dimension[1], sizes[1])
+    return [node for row, head, piece in zip(processors, heads, reshard(
+        graph, value, dimension[0], sizes[0], heads, exact))
+        for node in reshard(graph, (None, None, (head,), [piece]), *rest, row, exact)]
+
+
 # design/unequal-shards-change-request.md items 2, 3, 8, 9 and 12
 def reshard(graph, value, dimension, sizes, processors, exact=False):
     held, extents, holders, nodes = value
+    if several(value) or isinstance(dimension, tuple):
+        return nodes if value[:3] == (dimension, sizes, processors) else across(
+            graph, value, dimension, sizes, processors, exact)
     if (held, extents, holders) == (dimension, sizes, processors) and not (exact and uneven(sizes)):
         return nodes
     if len(processors) == 1 or dimension is None:
@@ -318,21 +367,15 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     for j, processor in enumerate(processors):
         pieces, sources = [], []
         for i, (holder, node) in enumerate(zip(holders, nodes)):
-            if sizes == STRIPED:
-                node = call(graph, SLICE, (node, dimension, j, shape(node)[dimension], len(processors)),
-                            holder or processor)
+            if held == dimension is not None:
+                low = sum(given[i][:j])
+                if not given[i][j] and any(row[j] for row in given):
+                    continue
+                if (low, low + given[i][j]) != (0, shape(node)[dimension]):
+                    node = call(graph, SLICE, (node, dimension, low, low + given[i][j]), holder or processor)
             elif dimension is not None:
-                if held == dimension:
-                    low = sum(given[i][:j])
-                    high = low + given[i][j]
-                    if not given[i][j] and any(row[j] for row in given):
-                        continue
-                elif wide and held is None and holder in (None, processor):
-                    low, high = bases(sizes)[j], bases(sizes)[j] + max(sizes)
-                else:
-                    low, high = displs[j], displs[j + 1]
-                if (low, high) != (0, shape(node)[dimension]):
-                    node = call(graph, SLICE, (node, dimension, low, max(low, high)), holder or processor)
+                node = cut(graph, node, dimension, sizes, j, len(processors), holder or processor,
+                           wide and held is None and holder in (None, processor))
             pieces.append(node)
             sources.append(i)
         if held == dimension is not None:
@@ -602,11 +645,73 @@ def plain(graph, node, processor, extents=None):
 
 
 def plainly(graph, value):
-    return *value[:3], [plain(graph, node, holder) for node, holder in zip(value[3], value[2])]
+    return *value[:3], [plain(graph, node, holder) for node, holder in zip(value[3], flat(value[2]))]
+
+
+# design/problems-of-14b9a757-change-request.md item 4 steps 2 and 3; Y. Xu et al., GSPMD, arXiv:2105.04663,
+# section 4.3 and appendix A.2
+def meshed(graph, node, held, replaced):
+    value = next(v for v in held if several(v))
+    dims, extents, grid, nodes = value
+    leaves, out, shapes = flat(grid), shape(node), [shape(n) for n in operands(node)]
+    index = list(itertools.product(*(range(n) for n in spans(grid, len(dims)))))
+    found = windows(node) if RULES.get(node.target) is windowed else {}
+
+    def local(v, processor):
+        return reshard(graph, plainly(graph, v), None, None, (processor,))[0]
+    if (found and held[0] is value and all(d in found for d in dims) and STRIPED not in extents
+            and all(v[0] is None for v in held[1:])):
+        sizes = tuple(counts(out[d], getattr(e, "units", None), len(e)) for d, e in zip(dims, extents))
+        regions, exchanged = list(nodes), [d for d, e in zip(dims, extents) if len(e) > 1]
+        for a, d in enumerate(dims):
+            regions = [own(graph, n, d, extents[a], at[a]) for n, at in zip(regions, index)]
+        for a, d in enumerate(dims):
+            lines = {}
+            for k, at in enumerate(index):
+                lines.setdefault(at[:a] + at[a + 1:], []).append(k)
+            for line in lines.values() if d in exchanged else ():
+                members = tuple(leaves[k] for k in line)
+                made, _ = halos(graph, (d, extents[a], members, [regions[k] for k in line]), found[d], d, sizes[a],
+                                members, node.name)
+                for k, region in zip(line, made):
+                    regions[k] = region
+        columns = [regions, *([local(v, leaf) for leaf in leaves] for v in held[1:])]
+    elif node.target not in (EXPAND, FLIP) and (
+            torch.Tag.pointwise in getattr(node.target, "tags", ()) or RULES.get(node.target) is aligned):
+        rows = aligned(node, shapes, out)
+        found = {(tuple(row[d] for d in v[0]), v[1], v[2]) for v, row in zip(held, rows) if several(v)}
+        (dims, sizes, grid), exchanged = next(iter(found)), ()
+        if len(found) > 1 or None in dims or not all(v[0] is None and not set(dims) & set(row)
+                                                      for v, row in zip(held, rows) if not several(v)):
+            return None
+        columns = [v[3] if several(v) else [local(v, leaf) for leaf in leaves] for v in held]
+    else:
+        return None
+    shards = []
+    for k, (processor, at) in enumerate(zip(leaves, index)):
+        arguments = iter([column[k] for column in columns])
+        shard = graph.node_copy(node, lambda n: next(arguments))
+        for d in exchanged:
+            unpadded(shard, d - 2)
+        shard.meta.update(of=node.name, order={}, pairs=0, units=(
+            math.prod(len(range(j, out[d], shards)) if size == STRIPED else max(size) if uneven(size) else size[j]
+                      for d, size, j, shards in zip(dims, sizes, at, spans(grid, len(dims)))),
+            math.prod(out[d] for d in dims)))
+        shards.append(evaluated(shard, processor))
+    replaced.append(node)
+    return dims, sizes, grid, shards
 
 
 def partitioned(graph, node, held, want, replaced):
     target = None
+    if any(several(v) for v in held):
+        made = meshed(graph, node, held, replaced) if node.op == "call_function" else None
+        if made is not None:
+            return made
+    if not isinstance(want, str) and several(want):
+        want = flat(want[2])[0]
+    one = want if isinstance(want, str) else want[2][0]
+    held = [(None, None, (one,), reshard(graph, v, None, None, (one,))) if several(v) else v for v in held]
     if node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
         if node.target is ADDMM:
             product = graph.call_function(MM, node.args[1:])
@@ -765,8 +870,12 @@ def place(graph_module, placement):
     replaced = []
 
     def transfer(node, held):
-        want = stated[node] if node in stated else held[0][2][0]
-        if not isinstance(want, str):
+        want = stated[node] if node in stated else flat(held[0][2])[0]
+        if not isinstance(want, str) and several(want):
+            dimension, processors, units = want
+            want = dimension, tuple(counts(shape(node)[d], unit, shards) for d, unit, shards in zip(
+                dimension, units, spans(processors, len(dimension)))), processors
+        elif not isinstance(want, str):
             dimension, processors, units = want
             want = dimension, counts(shape(node)[dimension], units, len(processors)), processors
         with graph.inserting_before(placed[0] if node.op == "placeholder" else node):
