@@ -53,7 +53,7 @@ Three things are mesh's and are added to it:
      operands, and `schedule.py` calls them. The operator: "the literal graph algorithms header which was introduced
      ages ago in the repository, and is the only sensible place to put graph algorithms".
 2. Processors on several machines: items 1 and 2 above. The check's cases pass with their processors on two machines.
-   (Written: mesh 6d4f007b, 1a3cfe60. At dcc51b67 the 24 cases that have two or more processors pass with two processes whose
+   (Written: mesh 6d4f007b, 1a3cfe60. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
    entries the check carries between two regions of the bridge's layout; the 33 is the count on one machine. The run under two bridges is
    `MESH_GROUP=<run> python samples.py --machines <A> <B>` on each machine, and has not been made.)
 3. Sharding: item 3 above. `examples/tp.py`, `cp.py`, `ep.py` and `pl.py` are compiled by `compile_module` and run by
