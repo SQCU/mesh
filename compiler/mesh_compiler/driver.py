@@ -26,10 +26,8 @@ def compile_module(module, args, processors, placement, cost=unit_cost, stored=(
     held = {name: pages.device for name, (_, pages) in exported.state.items()}
     held.update(zip(exported.user_inputs, map(torch.device, stored), strict=bool(stored)))
     inputs, feedforward, stored = argument_buffers(modules, output_processor, held)
-    scheduled = Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward,
-                          between, engines, plan, stored=stored,
-                          invariant=placed.meta["invariant"])
-    return dataclasses.replace(scheduled, signature=signature(scheduled)["record"])
+    return Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward,
+                     between, engines, plan, stored=stored, invariant=placed.meta["invariant"])
 
 
 def lowered(scheduled, lowerings):

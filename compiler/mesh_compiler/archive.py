@@ -1,7 +1,6 @@
 # design/data-flow.md
 import copy
 import dataclasses
-import hashlib
 import json
 import operator
 import pathlib
@@ -15,7 +14,7 @@ from torch.utils import _pytree as pytree
 
 from torch._export.verifier import TrainingIRVerifier
 
-from .ir import Exported, Plan, Scheduled
+from .ir import Exported, Plan, Scheduled, mesh_graph
 
 # design/unequal-shards-change-request.md item 12; design/problems-of-14b9a757-change-request.md items 1 to 3, 6 and 8;
 # design/aot-compilation-change-request.md A4
@@ -67,7 +66,7 @@ def save(directory, scheduled):
         "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
         "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex()},
-        "signature": scheduled.signature and hashlib.sha256(scheduled.signature).hexdigest(),
+        "signature": scheduled.signature and bytes(mesh_graph.from_record(scheduled.signature).digest).hex(),
         "meta": {processor: {node.name: {key: node.meta[key] for key in META if key in node.meta}
                              for node in module.graph.nodes if node.meta.keys() & set(META)}
                  for processor, module in scheduled.modules.items()},
