@@ -644,6 +644,13 @@ class Lowering:
     def drivers(self):
         return {}
 
+    # ISO/IEC 14882:2020 [dcl.array]; Apple, Metal Shading Language Specification 4.1, section 2.6
+    def scratch(self, bind, lines, name, dtype, batch, count):
+        if count * dtype.itemsize > LOCAL:
+            return f"({bind(self.fresh(dtype, (batch, count)), True)} + p.x * {count})"
+        lines.append(f"{self.types[dtype]} {name}[{max(count, 1)}];")
+        return name
+
     def range(self, node):
         value, (start, _, step) = node.meta["val"], (*node.args, 1)[:3]
         return Fused(value.dtype, tuple(value.shape), lambda bind, index, t:
@@ -1218,6 +1225,82 @@ class Metal(Lowering):
         self.dispatch(bind, lines, (-(-columns // TILE), -(-rows // TILE), batch), (SIMDGROUPS, 1, 1), True,
                       PRIMITIVES)
 
+    def drivers(self):
+        return {ATEN._linalg_solve_ex.default: self.solve, ATEN.linalg_qr.default: self.qr}
+
+    # G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., algorithms 3.4.1 and 3.1.2; LAPACK, sgetf2 and
+    # sgetrs; torch 2.15 documentation, torch.linalg.solve_ex
+    def solve(self, node):
+        values, left, right = node.meta["val"], self.reader(node.args[0]), self.reader(node.args[1])
+        if values[0].dtype != torch.float32 or len(node.args) > 2 or node.kwargs:
+            self.missing.append(f"{node.target} of {values[0].dtype} or with options")
+            return None
+        n, lead = left.shape[-1], left.shape[:-2]
+        k = 1 if len(right.shape) == len(left.shape) - 1 else right.shape[-1]
+        made = [self.fresh(v.dtype, v.shape) for v in values]
+        bind = Bound()
+        lines, names = unravel("p.x", lead, "r")
+        x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
+            (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
+        swap = "for (uint j = 0; j < {w}; j++) {{ float t = {v}[c * {w} + j]; {v}[c * {w} + j] = {v}[at * {w} + j]; " \
+               "{v}[at * {w} + j] = t; }}"
+        lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
+                  f"{a}[i * {n} + j] = {left.read(bind, names + ['i', 'j'])};",
+                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
+                  f"{x}[i * {k} + j] = {right.read(bind, names + ['i', 'j'][:len(right.shape) - len(names)])};",
+                  "int failed = 0;", f"for (uint c = 0; c < {n}; c++) {{",
+                  f"    uint at = c; float best = abs({a}[c * {n} + c]);",
+                  f"    for (uint i = c + 1; i < {n}; i++) if (abs({a}[i * {n} + c]) > best) "
+                  f"{{ best = abs({a}[i * {n} + c]); at = i; }}",
+                  f"    {pivots}[c] = at + 1;",
+                  "    if (best == 0) { failed = failed ? failed : int(c + 1); continue; }",
+                  f"    if (at != c) {{ {swap.format(v=a, w=n)} {swap.format(v=x, w=k)} }}",
+                  f"    for (uint i = c + 1; i < {n}; i++) {{",
+                  f"        float f = {a}[i * {n} + c] / {a}[c * {n} + c]; {a}[i * {n} + c] = f;",
+                  f"        for (uint j = c + 1; j < {n}; j++) {a}[i * {n} + j] -= f * {a}[c * {n} + j];",
+                  f"        for (uint j = 0; j < {k}; j++) {x}[i * {k} + j] -= f * {x}[c * {k} + j];", "    }", "}",
+                  f"for (uint q = {n}; q-- > 0;) for (uint j = 0; j < {k}; j++) {{",
+                  f"    float s = {x}[q * {k} + j];",
+                  f"    for (uint c = q + 1; c < {n}; c++) s -= {a}[q * {n} + c] * {x}[c * {k} + j];",
+                  f"    {x}[q * {k} + j] = s / {a}[q * {n} + q];", "}", f"{info}[0] = failed;"]
+        self.dispatch(bind, lines, (math.prod(lead), 1, 1))
+        return made
+
+    # G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., algorithms 5.1.1, 5.2.1 and section 5.1.6; LAPACK,
+    # slarfg, sgeqr2 and sorg2r; torch 2.15 documentation, torch.linalg.qr
+    def qr(self, node):
+        values, source = node.meta["val"], self.reader(node.args[0])
+        (m, n), lead = source.shape[-2:], source.shape[:-2]
+        if values[0].dtype != torch.float32 or len(node.args) > 1 or node.kwargs or m < n:
+            self.missing.append(f"{node.target} of {values[0].dtype}, with a mode or of a wide matrix")
+            return None
+        made = [self.fresh(v.dtype, v.shape) for v in values]
+        bind = Bound()
+        lines, names = unravel("p.x", lead, "r")
+        q, r = (f"({bind(v, True)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
+        tau = self.scratch(bind, lines, "tau", values[0].dtype, math.prod(lead), n)
+        reflect = [f"    for (uint c = j + 1; c < {n}; c++) {{", f"        float w = {q}[j * {n} + c];",
+                   f"        for (uint i = j + 1; i < {m}; i++) w += {q}[i * {n} + j] * {q}[i * {n} + c];",
+                   f"        {q}[j * {n} + c] -= {tau}[j] * w;",
+                   f"        for (uint i = j + 1; i < {m}; i++) {q}[i * {n} + c] -= {tau}[j] * w * {q}[i * {n} + j];",
+                   "    }"]
+        lines += [f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
+                  f"{q}[i * {n} + j] = {source.read(bind, names + ['i', 'j'])};",
+                  f"for (uint j = 0; j < {n}; j++) {{", f"    float alpha = {q}[j * {n} + j], s = 0, beta = alpha;",
+                  f"    for (uint i = j + 1; i < {m}; i++) s += {q}[i * {n} + j] * {q}[i * {n} + j];",
+                  f"    {tau}[j] = 0;", "    if (s != 0) {",
+                  "        beta = -copysign(sqrt(alpha * alpha + s), alpha);", f"        {tau}[j] = (beta - alpha) / beta;",
+                  f"        for (uint i = j + 1; i < {m}; i++) {q}[i * {n} + j] /= alpha - beta;", "    }",
+                  f"    {q}[j * {n} + j] = beta;", *reflect, "}",
+                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
+                  f"{r}[i * {n} + j] = i <= j ? {q}[i * {n} + j] : 0;",
+                  f"for (uint j = {n}; j-- > 0;) {{", *reflect,
+                  f"    for (uint i = j + 1; i < {m}; i++) {q}[i * {n} + j] *= -{tau}[j];",
+                  f"    {q}[j * {n} + j] = 1 - {tau}[j];",
+                  f"    for (uint i = 0; i < j; i++) {q}[i * {n} + j] = 0;", "}"]
+        self.dispatch(bind, lines, (math.prod(lead), 1, 1))
+        return made
+
     def described(self):
         return {"device": None, "feedback": lambda records=self.records: [
             (steps, *mesh_metal4.times(record)) for steps, record in records]}
@@ -1391,13 +1474,6 @@ class Native(Lowering):
     def columns(self, bind, lines, source, held, rows, columns, names):
         lines += [f"for (uint i = 0; i < {rows}; i++) for (uint j = 0; j < {columns}; j++) "
                   f"{held}[j * {rows} + i] = {source.read(bind, names + ['i', 'j'][:len(source.shape) - len(names)])};"]
-
-    # ISO/IEC 14882:2020 [dcl.array]
-    def scratch(self, bind, lines, name, dtype, batch, count):
-        if count * dtype.itemsize > LOCAL:
-            return f"({bind(self.fresh(dtype, (batch, count)), True)} + p.x * {count})"
-        lines.append(f"{self.types[dtype]} {name}[{max(count, 1)}];")
-        return name
 
     # design/torch-source-lowering-change-request.md, item 5; LAPACK, sgesv and dgesv; torch 2.15 documentation,
     # torch.linalg.solve_ex

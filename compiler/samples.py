@@ -409,6 +409,8 @@ CASES = [
     ("buffer mutation x3", RunningMean, [(r(4, 8),), (r(4, 8),), (r(4, 8),)], {}),
     ("linalg.solve", Solve, [(r(6, 6), r(6, 2))], {}),
     ("linalg.qr", QR, [(r(7, 4),)], {}),
+    ("linalg.solve | on mps", Solve, [(r(6, 6), r(6, 2))], {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
+    ("linalg.qr | on mps", QR, [(r(7, 4),)], {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("lstm (5 steps, traced through)", Recurrent, [(r(2, 5, 8),)], {}),
     ("python for, 4 static trips", StaticLoop, [(r(2, 8),)], {}),
     ("gather/scatter/index/where", Indexing, GATHER, {}),
