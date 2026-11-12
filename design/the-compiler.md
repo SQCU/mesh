@@ -99,8 +99,22 @@ Three things are mesh's and are added to it:
      given: `lower_metal.lower` returns them without their copies to the Metal device, whose function takes host pages,
      so it is first (design/torch-source-lowering-change-request.md, item 1: "no torch Metal kernel is ever submitted or
      recorded again."). A processor no lowering takes keeps the last GraphModule returned for it.
-5. `rdma/mesh_compile.py` and metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive` are
-   deleted when no example calls them.
+5. `rdma/mesh_compile.py` is deleted (mesh a5e9e62b, with what only it reached in d8d743d0 and c06f4029; its last
+   revision is at f03cb9ca): the six examples `tp.py`, `pl.py`, `cp.py`, `ep.py`, `crossing.py` and `engines.py` are
+   compiled by `compile_module` and run by `Program`.
+   metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive`, and the driver
+   `tools/e2b_replay.m` that links them, are deleted in the commits in which code that `compile_module` and `Program`
+   produce decodes gemma-4-e2b on five ranks at the fastest recorded tempo or faster, and not before.
+   - The operator, 2026-11-09
+     ([compilation-composition-change-request.md](compilation-composition-change-request.md), "Complete replacement,
+     all in one commit workgroup"): "removal *by supremacy* of osme other different code that has all of the same
+     feature coverage, and the same performance or better".
+   - The operator, 2026-10-01 (metal-microbench `docs/measurement.md`): "the project requirements will never allow us,
+     for any reason, to run gemma-4-e2b any slower than the fastest decoding tempo ever seen".
+   - `tools/e2b_replay.m` is the one program in either repository that decodes gemma-4-e2b; no example of `compiler/`
+     runs that model. The condition this order carried before, "when no example calls them", was Claude's and stated
+     by no operator turn. Under it metal-microbench 9dc0d5b8, fb47c346 and 07461771 deleted those files; 0b692ed8
+     restored them, and the tree is 5bc53c40's.
    - `examples/engines.py` is compiled by `compile_module` and run by `Program` (mesh 5098de5f), its functions those of
      `lowered(scheduled, (lower_metal.lower, lower_coreml.lower))`: `lower_metal.lower` lowers a float16 product, its
      cooperative tensor of the product's type, and `aten.gelu` with `approximate='tanh'` (torch 2.15,
