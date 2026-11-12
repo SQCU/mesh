@@ -96,6 +96,16 @@ class Function(torch.nn.Module):
         return self.function(*args, **kwargs)
 
 
+class Written(torch.nn.Module):
+    def __init__(self, function, written):
+        super().__init__()
+        self.function, self.written = function, written
+
+    def forward(self, *args, **kwargs):
+        result = self.function(*args[:len(args) - len(self.written)], **kwargs)
+        return (result, *(self.function.get_buffer(name) for name in self.written))
+
+
 class Captured(torch.fx.Interpreter):
     def __init__(self, module, functions, options):
         super().__init__(module)
@@ -112,10 +122,6 @@ class Captured(torch.fx.Interpreter):
         if key not in self.exported:
             with torch.enable_grad():
                 self.exported[key] = export(module, args, kwargs=kwargs, **self.options)
-            written = [target for kind, target in self.exported[key].outputs if kind == OutputKind.BUFFER_MUTATION]
-            if written:
-                raise NotImplementedError(f"{self.calling.name} writes {written[0]}, which is no argument and no "
-                                          "result of its call")
         self.calling.meta["function"] = key
 
     def call_module(self, target, args, kwargs):
@@ -140,4 +146,22 @@ def calls(program, args, functions, **export_options):
     module = torch.fx.GraphModule(program, graph)
     captured = Captured(module, functions, export_options)
     captured.run(*args)
+    held = {}
+    for node in [n for n in module.graph.nodes if n.op == "call_module"]:
+        written = tuple(target for kind, target in captured.exported[node.meta["function"]].outputs
+                        if kind == OutputKind.BUFFER_MUTATION)
+        if written:
+            name = f"{node.target.replace('.', '_')}_written"
+            if not hasattr(module, name):
+                module.add_submodule(name, Written(module.get_submodule(node.target), written))
+            with module.graph.inserting_before(node):
+                buffers = [held.get((node.target, buffer)) or module.graph.get_attr(f"{node.target}.{buffer}")
+                           for buffer in written]
+                call = module.graph.call_module(name, (*node.args, *buffers), node.kwargs)
+                call.meta = {**node.meta, "written": written}
+                node.replace_all_uses_with(module.graph.call_function(operator.getitem, (call, 0)))
+                held.update(((node.target, buffer), module.graph.call_function(operator.getitem, (call, k + 1)))
+                            for k, buffer in enumerate(written))
+            module.graph.erase_node(node)
+    module.recompile()
     return module, captured.exported

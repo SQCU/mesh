@@ -1175,6 +1175,15 @@ class Block(nn.Module):
         return self.join(self.b(left), right * 2 if self.between else right)
 
 
+class Normed(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.norm, self.a, self.join = nn.BatchNorm1d(8), nn.Linear(8, 8), Joined()
+
+    def forward(self, x, y):
+        return self.join(self.a(self.norm(x)), self.norm(y))
+
+
 def doubled(x):
     return x * 2
 
@@ -1198,11 +1207,18 @@ class Called(torch.fx.Interpreter):
         return super().run_node(node)
 
     def call_module(self, target, args, kwargs):
-        key = self.calling.meta["function"]
+        key, written, function = self.calling.meta["function"], self.calling.meta.get("written", ()), self.fetch_attr(
+            target)
+        if written:
+            function, args = function.function, args[:len(args) - len(written)]
         if key not in self.programs:
-            assert key in self.exported and key[0] == target, f"{self.calling.name} names no exported function"
-            self.programs[key] = Program(compile_module(self.fetch_attr(target), args, TWO, round_robin("p0", "p1")))
-        return self.programs[key](*args)
+            assert key in self.exported and self.fetch_attr(key[0]) is function, (
+                f"{self.calling.name} names no exported function")
+            self.programs[key] = Program(compile_module(function, args, TWO, round_robin("p0", "p1")))
+        program = self.programs[key]
+        result = program(*args)
+        return (result, *(program.arguments[processor][place] for name in written for processor, place in
+                          program.positions[program.key_of[name]][:1])) if written else result
 
 
 # design/aot-compilation-change-request.md A1 and A10
@@ -1223,6 +1239,22 @@ def check_calls():
     plain, made = calls(Indexed(False).eval(), args[:1], ("a", doubled))
     assert [(n.op, n.target, n.meta["function"][0]) for n in plain.graph.nodes if "function" in n.meta] == [
         ("call_function", doubled, doubled), ("call_module", "a", "a")] and len(made) == 2, "a function is no leaf"
+    writer = Normed().train()
+    graph, exported = calls(writer, args, ("norm", "a", "join"))
+    reference = copy.deepcopy(writer)
+    first, second = [n for n in graph.graph.nodes if "written" in n.meta]
+    held = [n for n in graph.graph.nodes if n.op == "get_attr"]
+    assert first.meta["written"] == tuple(n.target.removeprefix("norm.") for n in held), "the buffers a call writes"
+    assert first.args[1:] == tuple(held) and [(n.op, *n.args) for n in second.args[1:]] == [
+        ("call_function", first, k + 1) for k in range(len(held))], "a written buffer is no argument and no result"
+    called = Called(graph, exported)
+    wrote = errors(reference(*args), called.run(*args))[1]
+    norm = called.programs[second.meta["function"]]
+    last = max(errors(reference.norm.get_buffer(name).float(), norm.arguments[processor][place].float())[1]
+               for name in second.meta["written"] for processor, place in norm.positions[norm.key_of[name]][:1])
+    assert max(wrote, last) <= TOLERANCE and len(called.programs) == 3, (wrote, last)
+    print(f"  a function that writes {len(held)} buffers: each is an argument and a result of its call's node, the "
+          f"second call reading the first's; rel err {wrote:.1e}, of the buffers {last:.1e}")
     for block, given in ((Block(True), args), (Indexed(True), args[:1])):
         try:
             calls(block.eval(), given, ("a", "b", "join", doubled))
