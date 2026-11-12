@@ -1,15 +1,12 @@
 # design/the-compiler.md, order 4; design/torch-source-lowering-change-request.md, items 1 and 3
 import copy
 import ctypes as C
-import hashlib
 import math
 import mmap
 import operator
 import os
 import pathlib
-import subprocess
 import sys
-import tempfile
 import weakref
 from dataclasses import dataclass, field
 
@@ -27,14 +24,14 @@ TYPES = {torch.float32: "float", torch.float16: "half", torch.int64: "long", tor
          torch.uint8: "uchar", torch.bool: "bool"}
 NATIVE_TYPES = {**TYPES, torch.float64: "double", torch.int16: "short", torch.int8: "char"}
 ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
-COMMIT, WAIT, CHECK = "commit", "wait", "check"
+COMMIT, WAIT, CHECK = mesh_metal4.COMMIT, mesh_metal4.WAIT, mesh_metal4.CHECK
 QUEUE, THREAD, KERNEL, SENT, ARRIVED = "queue", "host", "kernel", "send", "recv"
 TILE, SIMDGROUPS, GRAIN = 32, 4, 1024
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
 PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
               "using namespace mpp::tensor_ops;\n")
-PIPELINES, LIBRARIES, OWNED, HOST = {}, {}, {}, torch.device("cpu")
+PIPELINES, HOST = {}, torch.device("cpu")
 # design/compilation-composition-change-request.md, item 1 and Source bindings; Apple, Metal Shading Language
 # Specification 4.1, sections 2.1, 2.2 and 6.5; ISO/IEC 14882:2020 [c.math]; Apple, vecLib cblas_new.h and
 # dispatch/apply.h
@@ -77,8 +74,18 @@ static void each(void *context, size_t at) {
 """
 # torch/csrc/api/include/torch/mps.h: commit, get_command_buffer, get_dispatch_queue
 TORCH = [C.cast(getattr(C.CDLL(str(pathlib.Path(torch.__file__).parent / "lib/libtorch_cpu.dylib")), name),
-                C.c_void_p) for name in ("_ZN5torch3mps6commitEv", "_ZN5torch3mps18get_command_bufferEv",
+                C.c_void_p).value for name in ("_ZN5torch3mps6commitEv", "_ZN5torch3mps18get_command_bufferEv",
                                          "_ZN5torch3mps18get_dispatch_queueEv")]
+
+# rdma/mesh-metal4.m
+API = (("commit", "void", "void *, void *, uint32_t, void *const *, uint32_t, void *const *, uint32_t, void *, void *"),
+       ("wait", "int", "void *const *, uint32_t, char *, size_t"), ("view", "void *", "void *, uint64_t"),
+       ("buffer", "void *", "uint64_t"), ("release", "void", "void *"), ("address", "uint64_t", "void *"),
+       ("contents", "void *", "void *"), ("after", "void", "void *, void *, void *, void *"),
+       ("reset", "void", "void *"))
+CHECKED = {torch.bool: "bool", torch.uint8: "uint8_t", torch.int8: "int8_t", torch.int16: "int16_t",
+           torch.int32: "int32_t", torch.int64: "int64_t", torch.float16: "_Float16", torch.float32: "float",
+           torch.float64: "double"}
 
 POINTWISE = {
     ATEN.add.Tensor: "({T}({0}) + {T}({1}))", ATEN.add.Scalar: "({T}({0}) + {T}({1}))",
@@ -286,31 +293,8 @@ SHARED = {"remainder": REMAINDER % ("remainder", "a % b"), "fremainder": REMAIND
 HELPERS = {"erf": ERF, **SHARED}
 
 
-# design/compilation-composition-change-request.md, item 7
-def native(source):
-    if source not in LIBRARIES:
-        directory = tempfile.TemporaryDirectory()
-        stem = pathlib.Path(directory.name) / hashlib.sha256(source.encode()).hexdigest()[:16]
-        stem.with_suffix(".cpp").write_text(source)
-        built = subprocess.run(["/usr/bin/xcrun", "clang++", "-std=c++20", "-O2", "-dynamiclib", "-framework",
-                                "Accelerate", str(stem.with_suffix(".cpp")), "-o", str(stem.with_suffix(".dylib"))],
-                               capture_output=True, text=True)
-        if built.returncode:
-            raise RuntimeError(built.stderr)
-        LIBRARIES[source] = (C.CDLL(str(stem.with_suffix(".dylib"))), directory)
-    return LIBRARIES[source][0]
-
-
-def refused(value, message, zero):
-    if bool(((value != 0) if zero else (value == 0)).any()):
-        raise RuntimeError(message)
-
-
-def shaped(owner, view):
-    if not all(view.shape):
-        return torch.empty(view.shape, dtype=view.dtype)
-    base = owner[view.storage]
-    return base.as_strided(view.shape, view.stride, base.storage_offset() + view.offset)
+def flat(view):
+    return (view.storage, view.dtype, view.shape, view.stride, view.offset)
 
 
 class Lowering:
@@ -1038,37 +1022,42 @@ class Lowering:
             [task[vertex] for vertex in range(len(self.vertices))], [(d.source, d.target) for d in self.dependences])}
 
 
-    # design/compilation-composition-change-request.md, item 5
+    # design/compilation-composition-change-request.md, items 5 and 7
     def function(self):
-        program, begin, commit, wait, end, described = self.bound()
-        made = [(s, st) for s, st in enumerate(self.storages) if st.kind == RESULT and st.count]
+        count, self.handles, self.static, self.retained = len(self.storages), [], [], []
+        begun, ended, entries, sends, receives, issued = self.begun(), self.ended(), [], [], [], []
+        for entry in self.program:
+            if entry[0] is COMMIT:
+                entries.append((COMMIT, self.commit(entry[1])))
+                issued.append(entry[1])
+            elif entry[0] is WAIT:
+                issued = [segment for segment in issued if not any(segment is waited for waited in entry[1])]
+                entries.append((WAIT, self.wait(entry[1], self.outstanding(issued) + ended)))
+            elif entry[0] is RECV:
+                entries.append((mesh_metal4.RECEIVED, self.arrived_at(entry[1]), len(receives), entry[1], self.outstanding(issued)))
+                receives.append((entry[1], entry[2]))
+            elif entry[0] is SEND:
+                entries.append((mesh_metal4.SENT, self.outstanding(issued), len(sends)))
+                sends.append((flat(entry[1]), entry[2]))
+            else:
+                view, (message, zero) = entry[1], entry[2]
+                entries.append((CHECK, self.outstanding(issued), CHECKED[view.dtype], view.storage, view.offset,
+                                view.shape, view.stride, zero, message))
+        source = self.source(mesh_metal4.program(entries, count, begun, ended))
         given = [(s, st.position) for s, st in enumerate(self.storages) if st.kind == ARGUMENT]
-        results = self.results
-
-        def run(*arguments):
-            owner = {s: arguments[position] for s, position in given}
-            context = begin(owner, made)
-            for entry in program:
-                if entry[0] is COMMIT:
-                    commit(entry, owner, context)
-                elif entry[0] is WAIT:
-                    wait(entry)
-                elif entry[0] is RECV:
-                    owner[entry[1]] = RECV(entry[2])
-                elif entry[0] is CHECK:
-                    refused(shaped(owner, entry[1]), *entry[2])
-                else:
-                    SEND(shaped(owner, entry[1]), entry[2])
-            end(context)
-            return tuple(shaped(owner, r) if isinstance(r, View) else r for r in results)
-        run.record, run.program, run.dependences = self.record, self.program, self.dependences
-        for name, value in described.items():
+        made = [(s, st.dtype, st.count) for s, st in enumerate(self.storages) if st.kind == RESULT and st.count]
+        run = mesh_metal4.Function(
+            mesh_metal4.native(source).run, count, self.handles, self.static, given, [] if self.owning else made,
+            [(s, (dtype, n)) for s, dtype, n in made] if self.owning else [], sends, receives, [],
+            tuple(flat(r) if isinstance(r, View) else r for r in self.results), (SEND, RECV, None), self.retained)
+        run.record, run.program, run.dependences, run.source = self.record, self.program, self.dependences, source
+        for name, value in self.described().items():
             setattr(run, name, value)
         return run
 
 
 class Metal(Lowering):
-    lane = QUEUE
+    lane, owning = QUEUE, True
 
     # design/synchronization-signature-change-request.md, item 1; rdma/mesh-metal4.m mesh_metal4_commit,
     # mesh_metal4_wait and mesh_metal4_after
@@ -1137,89 +1126,110 @@ class Metal(Lowering):
         self.dispatch(bind, lines, (-(-columns // TILE), -(-rows // TILE), batch), (SIMDGROUPS, 1, 1), True,
                       PRIMITIVES)
 
+    def described(self):
+        records = self.records
+        return {"device": None, "feedback": lambda: [(steps, *mesh_metal4.times(record)) for steps, record in records]}
+
+    def handle(self, pointer):
+        self.handles.append(pointer)
+        return f"h[{len(self.storages) + len(self.handles) - 1}]"
+
+    def source(self, program):
+        return mesh_metal4.PROGRAM + program
+
     def bound(self):
-        storages = self.storages
+        return {s for entry in self.program if entry[0] is COMMIT for step in entry[1].steps for s in step.storages
+                if self.storages[s].count}
+
+    def mapped(self, s):
+        size, page = self.storages[s].count * self.storages[s].dtype.itemsize, mmap.PAGESIZE
+        return (f"{{ uint64_t first = a[{s}] / {page} * {page}; h[{s}] = view((void *)first, (a[{s}] + {size} - first "
+                f"+ {page - 1}) / {page} * {page}); g[{s}] = address(h[{s}]) + a[{s}] - first; }}")
+
+    # rdma/mesh-metal4.m mesh_metal4_after, mesh_metal4_view and mesh_metal4_buffer
+    def begun(self):
+        self.stream = None
+        lines = [f"auto {name} = ({result} (*)({arguments}))"
+                 f"{self.handle(C.cast(getattr(LIB, 'mesh_metal4_' + name), C.c_void_p).value)};"
+                 for name, result, arguments in API]
         held = {s: LIB.mesh_metal4_buffer(max(st.count * st.dtype.itemsize, 1))
-                for s, st in enumerate(storages) if st.kind == HELD}
+                for s, st in enumerate(self.storages) if st.kind == HELD}
+        self.static += [(s, made, LIB.mesh_metal4_contents(made), LIB.mesh_metal4_address(made))
+                        for s, made in held.items()]
         stream = LIB.mesh_metal4_stream((C.c_void_p * len(held))(*held.values()), len(held))
-        program, retained = [], [*held.values()]
+        self.stream, self.records, self.freed = self.handle(stream), [], [*held.values()]
+        self.retained.append(Kept(stream, self.freed))
         for entry in self.program:
-            if entry[0] is WAIT:
-                program.append((WAIT, (C.c_void_p * len(entry[1]))(*[segment.record[0] for segment in entry[1]])))
-                continue
-            if entry[0] is not COMMIT:
-                program.append(entry)
-                continue
-            segment = entry[1]
-            segment.record.append(LIB.mesh_metal4_record())
-            retained.append(segment.record[0])
-            array, patches, kept = (mesh_metal4.Dispatch * len(segment.steps))(), [], []
-            for made, step, barrier in zip(array, segment.steps, segment.barriers):
-                addresses = (C.c_uint64 * len(step.storages))()
-                kept.append(addresses)
-                for slot, s in enumerate(step.storages):
-                    if s in held:
-                        addresses[slot] = LIB.mesh_metal4_address(held[s])
-                    else:
-                        patches.append((addresses, slot, s))
-                made.pipeline, made.table = step.pipeline, LIB.mesh_metal4_table(len(step.storages))
-                made.address, made.addresses, made.barrier = addresses, len(step.storages), barrier
-                made.groups, made.grid, made.group = step.groups, step.grid, step.group
-                retained.append(made.table)
-            for earlier, _ in segment.after.values():
+            for earlier, _ in entry[1].after.values() if entry[0] is COMMIT else ():
                 if not earlier.fence:
-                    earlier.fence.append(LIB.mesh_metal4_fence())
-                    retained.append(earlier.fence[0])
-            program.append((COMMIT, array, patches, list(dict.fromkeys(s for _, _, s in patches)), segment, kept))
-        records = [(tuple(step.vertex for step in entry[1].steps), entry[1].record[0])
-                   for entry in self.program if entry[0] is COMMIT]
+                    self.freed.append(LIB.mesh_metal4_fence())
+                    earlier.fence.append(self.handle(self.freed[-1]))
+        bound = self.bound()
+        given = [s for s in sorted(bound) if self.storages[s].kind == ARGUMENT]
+        lines += [f"if ({' | '.join(f'm[{s}]' for s in given)}) after({self.stream}, "
+                  f"{', '.join(self.handle(pointer) for pointer in TORCH)});"] * bool(given)
+        for s, st in enumerate(self.storages):
+            size = st.count * st.dtype.itemsize
+            if st.kind == RESULT and st.count:
+                lines.append(f"h[{s}] = buffer({size}); a[{s}] = (uint64_t)contents(h[{s}]); g[{s}] = address(h[{s}]);")
+            elif st.kind == ARGUMENT and s in bound:
+                lines.append(f"if (m[{s}]) {{ h[{s}] = (void *)a[{s}]; g[{s}] = address(h[{s}]) + o[{s}]; a[{s}] = "
+                             f"(uint64_t)contents(h[{s}]) + o[{s}]; }} else {self.mapped(s)}")
+            elif st.kind == RECEIVED:
+                lines.append(f"h[{s}] = nullptr;")
+        return lines
 
-        def begin(owner, made):
-            handles, shifts = {}, {}
-            for s, st in made:
-                handles[s], shifts[s] = LIB.mesh_metal4_buffer(st.count * st.dtype.itemsize), 0
-                pages = (C.c_byte * (st.count * st.dtype.itemsize)).from_address(LIB.mesh_metal4_contents(handles[s]))
-                OWNED[C.addressof(pages)] = handles[s]
-                weakref.finalize(pages, disowned, C.addressof(pages))
-                owner[s] = torch.frombuffer(pages, dtype=st.dtype)
-            return handles, shifts, [], []
+    def ended(self):
+        bound = self.bound()
+        return [f"reset({self.stream});"] + [
+            f"release(h[{s}]);" if st.kind == RECEIVED else f"if (!m[{s}]) release(h[{s}]);"
+            for s, st in enumerate(self.storages) if s in bound and st.kind in (RECEIVED, ARGUMENT)]
 
-        def handle(s, owner, handles, shifts, views, ordered):
-            if s not in handles:
-                pages, shift = owner[s].untyped_storage(), owner[s].storage_offset() * owner[s].itemsize
-                handles[s], shifts[s] = OWNED.get(pages.data_ptr(), pages.data_ptr()), shift
-                if owner[s].device.type == "cpu" and pages.data_ptr() not in OWNED:
-                    first = pages.data_ptr() // mmap.PAGESIZE * mmap.PAGESIZE
-                    span = -(-(pages.data_ptr() + pages.nbytes() - first) // mmap.PAGESIZE) * mmap.PAGESIZE
-                    handles[s], shifts[s] = LIB.mesh_metal4_view(first, span), shift + pages.data_ptr() - first
-                    views.append(handles[s])
-                if owner[s].device.type == "mps" and not ordered:
-                    ordered.append(LIB.mesh_metal4_after(stream, *TORCH))
-            return handles[s]
+    def arrived_at(self, s):
+        return [self.mapped(s)] * (s in self.bound())
 
-        def commit(entry, owner, context):
-            _, array, patches, viewed, segment, _ = entry
-            handles, shifts = context[:2]
-            buffers = (C.c_void_p * len(viewed))(*[handle(s, owner, *context) for s in viewed])
-            for addresses, slot, s in patches:
-                addresses[slot] = LIB.mesh_metal4_address(handles[s]) + shifts[s]
-            after = (C.c_void_p * len(segment.after))(*[earlier.fence[0] for earlier, _ in segment.after.values()])
-            LIB.mesh_metal4_commit(stream, array, len(array), buffers, len(viewed), after, len(after),
-                                   segment.fence[0] if segment.fence else None, segment.record[0])
+    def recorded(self, segments):
+        return ", ".join(segment.record[0] for segment in segments)
 
-        def end(context):
-            LIB.mesh_metal4_reset(stream)
-            for view in context[2]:
-                LIB.mesh_metal4_release(view)
-        described = {"device": None, "kept": Kept(stream, retained),
-                     "feedback": lambda: [(steps, *mesh_metal4.times(record)) for steps, record in records]}
-        return program, begin, commit, lambda entry: mesh_metal4.wait(entry[1]), end, described
+    def outstanding(self, issued):
+        return [f"{{ void *r[] = {{{self.recorded(issued)}}}; wait(r, {len(issued)}, nullptr, 0); }}"] * bool(issued)
+
+    def wait(self, segments, ended):
+        return [f"void *r[] = {{{self.recorded(segments)}}};",
+                f"if (wait(r, {len(segments)}, f->message, sizeof f->message)) {{",
+                *mesh_metal4.failed("", ended), "}"]
+
+    # rdma/mesh-metal4.m mesh_metal4_commit
+    def commit(self, segment):
+        record = LIB.mesh_metal4_record()
+        segment.record.append(self.handle(record))
+        self.records.append((tuple(step.vertex for step in segment.steps), record))
+        array, lines, viewed = (mesh_metal4.Dispatch * len(segment.steps))(), [], []
+        held = {s: address for s, _, _, address in self.static}
+        for made, step, barrier in zip(array, segment.steps, segment.barriers):
+            addresses = (C.c_uint64 * len(step.storages))(*[held.get(s, 0) for s in step.storages])
+            made.pipeline, made.table = step.pipeline, LIB.mesh_metal4_table(len(step.storages))
+            made.address, made.addresses, made.barrier = addresses, len(step.storages), barrier
+            made.groups, made.grid, made.group = step.groups, step.grid, step.group
+            patched = [(slot, s) for slot, s in enumerate(step.storages) if s not in held]
+            at = self.handle(C.addressof(addresses)) if patched else None
+            lines += [f"((uint64_t *)({at}))[{slot}] = g[{s}];" for slot, s in patched]
+            viewed += [s for _, s in patched if self.storages[s].count]
+            self.retained.append(addresses)
+            self.freed.append(made.table)
+        viewed, after = list(dict.fromkeys(viewed)), [earlier.fence[0] for earlier, _ in segment.after.values()]
+        self.retained.append(array)
+        self.freed.append(record)
+        return lines + [
+            f"void *v[] = {{{', '.join(f'h[{s}]' for s in viewed) or 'nullptr'}}}, *w[] = {{{', '.join(after) or 'nullptr'}}};",
+            f"commit({self.stream}, {self.handle(C.addressof(array))}, {len(array)}, v, {len(viewed)}, w, {len(after)}, "
+            f"{segment.fence[0] if segment.fence else 'nullptr'}, {segment.record[0]});"]
 
 
 # design/torch-source-lowering-change-request.md, item 1; design/compilation-composition-change-request.md, items 6
 # and 7
 class Native(Lowering):
-    types, lane = NATIVE_TYPES, THREAD
+    types, lane, owning = NATIVE_TYPES, THREAD, False
 
     def committed(self, segment, task, at, given, fenced):
         return [(KERNEL, "pass_barrier", task, None, 0, 0)] * sum(segment.barriers)
@@ -1364,58 +1374,50 @@ class Native(Lowering):
                       f"    *c = {expression};", "}"]
         self.dispatch(bind, lines, (form.left.shape[0] if batched else 1, 1, 1))
 
-    def bound(self):
-        storages = self.storages
-        held = {s: mmap.mmap(-1, max(st.count * st.dtype.itemsize, 1))
-                for s, st in enumerate(storages) if st.kind == HELD}
-        placed = {s: C.addressof(C.c_char.from_buffer(pages)) for s, pages in held.items()}
-        entries, program = [], []
-        for entry in self.program:
-            if entry[0] is WAIT:
-                continue
-            if entry[0] is not COMMIT:
-                program.append(entry)
-                continue
-            slots = [s for step in entry[1].steps for s in step.storages]
-            addresses = (C.c_uint64 * max(len(slots), 1))(*[placed.get(s, 0) for s in slots])
-            levels, first = [], 0
-            for step, joined in zip(entry[1].steps, entry[1].barriers):
-                count = math.prod(step.grid)
-                chunk = count if count < GRAIN else max(1, -(-count // (4 * os.cpu_count())))
-                levels += [[]] * (joined or not levels)
-                levels[-1] = levels[-1] + [
-                    f"{{mesh::k{step.pipeline}, (void *const *)(a + {first}), {at}, {min(at + chunk, count)}}}"
-                    for at in range(0, count, chunk)]
-                first += len(step.storages)
-            calls = [f"{{ const mesh::part p[] = {{{', '.join(parts)}}}; " + (
-                "mesh::each((void *)p, 0); }" if len(parts) == 1 else
-                f"dispatch_apply_f({len(parts)}, DISPATCH_APPLY_AUTO, (void *)p, mesh::each); }}") for parts in levels]
-            program.append((COMMIT, len(entries), addresses, [(k, s) for k, s in enumerate(slots) if s not in placed]))
-            entries.append('extern "C" void s%d(const uint64_t *a) {\n    %s\n}\n'
-                           % (len(entries), "\n    ".join(calls)))
-        source = NATIVE + "".join(SHARED.values()) + "".join(self.kernels) + "}\n" + "".join(entries)
-        library = native(source)
-        program = [(COMMIT, getattr(library, f"s{entry[1]}"), *entry[2:]) if entry[0] is COMMIT else entry
-                   for entry in program]
+    def source(self, program):
+        return NATIVE + "".join(SHARED.values()) + "".join(self.kernels) + "}\n" + mesh_metal4.PROGRAM + program
 
-        def begin(owner, made):
-            owner.update((s, torch.empty(st.count, dtype=st.dtype)) for s, st in made)
+    def described(self):
+        return {"held": self.held}
 
-        def commit(entry, owner, context):
-            _, call, addresses, patches = entry
-            for slot, s in patches:
-                addresses[slot] = owner[s].data_ptr()
-            call(addresses)
-        return program, begin, commit, None, lambda context: None, {"source": source, "held": held}
+    def begun(self):
+        self.held = {s: mmap.mmap(-1, max(st.count * st.dtype.itemsize, 1))
+                     for s, st in enumerate(self.storages) if st.kind == HELD}
+        self.static += [(s, None, C.addressof(C.c_char.from_buffer(pages)), 0) for s, pages in self.held.items()]
+        return []
+
+    def ended(self):
+        return []
+
+    def arrived_at(self, s):
+        return []
+
+    def outstanding(self, issued):
+        return []
+
+    def wait(self, segments, ended):
+        return []
+
+    # Apple, dispatch/apply.h, dispatch_apply_f
+    def commit(self, segment):
+        slots = [s for step in segment.steps for s in step.storages]
+        lines = [f"void *const t[] = {{{', '.join(f'(void *)a[{s}]' for s in slots) or 'nullptr'}}};"]
+        levels, first = [], 0
+        for step, joined in zip(segment.steps, segment.barriers):
+            count = math.prod(step.grid)
+            chunk = count if count < GRAIN else max(1, -(-count // (4 * os.cpu_count())))
+            levels += [[]] * (joined or not levels)
+            levels[-1] = levels[-1] + [f"{{mesh::k{step.pipeline}, t + {first}, {at}, {min(at + chunk, count)}}}"
+                                       for at in range(0, count, chunk)]
+            first += len(step.storages)
+        return lines + [f"{{ const mesh::part p[] = {{{', '.join(parts)}}}; " + (
+            "mesh::each((void *)p, 0); }" if len(parts) == 1 else
+            f"dispatch_apply_f({len(parts)}, DISPATCH_APPLY_AUTO, (void *)p, mesh::each); }}") for parts in levels]
 
 
 class Kept:
     def __init__(self, stream, retained):
         weakref.finalize(self, released, stream, retained)
-
-
-def disowned(pages):
-    LIB.mesh_metal4_release(OWNED.pop(pages))
 
 
 def released(stream, retained):

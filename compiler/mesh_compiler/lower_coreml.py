@@ -13,6 +13,7 @@ from .ir import RECV, SEND
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_coreml
+import mesh_metal4
 
 ATEN, ENGINE, HOST, OPSET, SPECIFICATION = torch.ops.aten, "ane", torch.device("cpu"), "CoreML7", 8
 TO_COPY = ATEN._to_copy.default
@@ -31,6 +32,8 @@ PRODUCTS = {ATEN.mm.default, ATEN.bmm.default, ATEN.matmul.default, ATEN.addmm.d
 REDUCED = {ATEN.mean.dim: "reduce_mean", ATEN.sum.dim_IntList: "reduce_sum"}
 MODES = {"none": "EXACT", "tanh": "TANH_APPROXIMATION"}
 PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memory", "non_blocking"}
+# rdma/mesh-coreml.m struct mesh_coreml_view
+VIEW = "struct mesh_coreml_view { const char *name; void *pages; int64_t *shape, *stride; int32_t rank, type; };\n"
 
 
 class NotLowered(NotImplementedError):
@@ -238,54 +241,80 @@ class Lowering:
             return self.emit("identity", node, x=self.read(source))
         return self.emit("cast", node, x=self.read(source), dtype=CASTS[to])
 
+    # design/compilation-composition-change-request.md, items 5 and 7; rdma/mesh-coreml.m mesh_coreml_predict
     def function(self, stem):
-        directory = tempfile.TemporaryDirectory()
-        program, compiled = [], []
+        directory, constants = tempfile.TemporaryDirectory(), self.constants
+        fixed = [node for node in constants if node not in self.arguments]
+        held = [*self.arguments, *fixed]
         for target, segment in self.program:
-            if target is not None:
-                program.append((target, segment))
-                continue
-            model, inputs, outputs = segment
-            source = pathlib.Path(directory.name) / f"{stem}.{len(compiled)}.mlmodel"
-            source.write_bytes(model)
-            compiled.append(source.with_suffix(".mlmodelc"))
-            program.append((None, (mesh_coreml.model(source, compiled[-1]), inputs,
-                                   [f"a{k}".encode() for k in range(len(inputs))],
-                                   [node for node, _ in outputs], [name.encode() for _, name in outputs])))
-        constants, arguments, results, transferred = self.constants, self.arguments, self.results, []
+            held += [segment] * (target in (RECV, TO_COPY)) + (segment[2] and [node for node, _ in segment[2]]
+                                                                if target is None else [])
+        slots = {node: slot for slot, node in enumerate(dict.fromkeys(held))}
+        count, handles, entries, sends, receives, copies, made, compiled = len(slots) + 1, [], [], [], [], [], [], []
 
-        def views(names, tensors):
-            array = (mesh_coreml.View * len(tensors))()
-            for view, name, tensor in zip(array, names, tensors):
-                view.name, view.pages, view.rank, view.type = name, tensor.data_ptr(), tensor.dim(), \
-                    ARRAYS[tensor.dtype][0]
-                view.shape = (C.c_int64 * tensor.dim())(*tensor.shape)
-                view.stride = (C.c_int64 * tensor.dim())(*tensor.stride())
-            return array
+        def view(node):
+            value = node.meta["val"] if node not in fixed else constants[node]
+            return (slots[node], value.dtype, tuple(value.shape), tuple(value.stride()), 0)
 
-        def run(*given):
-            values = {**constants, **dict(zip(arguments, given))}
-            for target, entry_ in program:
-                if target is SEND:
-                    SEND(values[entry_.args[0]], entry_.args[1])
-                elif target is RECV:
-                    values[entry_] = RECV(entry_.args[0])
-                elif target is TO_COPY:
-                    values[entry_] = TO_COPY(values[entry_.args[0]], **entry_.kwargs)
-                else:
-                    model, inputs, read, outputs, written = entry_
-                    made = [torch.empty_strided(tuple(n.meta["val"].shape), n.meta["val"].stride(),
-                                                dtype=n.meta["val"].dtype) for n in outputs]
-                    backed = mesh_coreml.predict(model, views(read, [values[n] for n in inputs]), views(written, made))
-                    transferred.extend([model] * (backed < len(made)))
-                    values.update(zip(outputs, made))
-            return tuple(values[r] if isinstance(r, torch.fx.Node) else r for r in results)
+        def handle(pointer):
+            handles.append(pointer)
+            return f"h[{count + len(handles) - 1}]"
 
-        run.plan = lambda: [mesh_coreml.plan(path) for path in compiled]
-        run.transferred = transferred
-        weakref.finalize(run, lambda: ([mesh_coreml.LIB.mesh_coreml_release(entry_[0]) for target, entry_ in program
-                                        if target is None], directory.cleanup()))
+        begun = ["auto predict = (int (*)(void *, const mesh_coreml_view *, uint32_t, const mesh_coreml_view *, uint32_t, "
+                 f"char *, size_t)){handle(C.cast(mesh_coreml.LIB.mesh_coreml_predict, C.c_void_p).value)};"]
+        for target, segment in self.program:
+            if target is SEND:
+                entries.append((mesh_metal4.SENT, [], len(sends)))
+                sends.append((view(segment.args[0]), segment.args[1]))
+            elif target is RECV:
+                entries.append((mesh_metal4.RECEIVED, [], len(receives), slots[segment], []))
+                receives.append((slots[segment], segment.args[0]))
+            elif target is TO_COPY:
+                entries.append((mesh_metal4.COPIED, [], len(copies), slots[segment], []))
+                copies.append((slots[segment], view(segment.args[0]), dict(segment.kwargs)))
+            else:
+                model, inputs, outputs = segment
+                source = pathlib.Path(directory.name) / f"{stem}.{len(compiled)}.mlmodel"
+                source.write_bytes(model)
+                compiled.append(source.with_suffix(".mlmodelc"))
+                loaded, lines = mesh_coreml.model(source, compiled[-1]), []
+                groups = (("x", inputs, [f"a{k}" for k in range(len(inputs))]),
+                          ("y", [node for node, _ in outputs], [name for _, name in outputs]))
+                for group, nodes, names in groups:
+                    described = []
+                    for k, (node, name) in enumerate(zip(nodes, names)):
+                        slot, dtype, shape, stride, _ = view(node)
+                        lines.append(f"static int64_t {group}{k}n[] = {{{', '.join(map(str, shape))}}}, "
+                                     f"{group}{k}s[] = {{{', '.join(map(str, stride))}}};")
+                        described.append(f'{{"{name}", (void *)a[{slot}], {group}{k}n, {group}{k}s, {len(shape)}, '
+                                         f"{ARRAYS[dtype][0]}}}")
+                    lines.append(f"const mesh_coreml_view {group}[] = {{{', '.join(described)}}};")
+                lines += [f"int written = predict({handle(loaded)}, x, {len(inputs)}, y, {len(outputs)}, f->message, "
+                          "sizeof f->message);", "if (written < 0) {", *mesh_metal4.failed("", []), "}",
+                          f"a[{count - 1}] += written < {len(outputs)};"]
+                entries.append((mesh_metal4.COMMIT, lines))
+                for node, _ in outputs:
+                    slot, dtype, shape, stride, _ = view(node)
+                    made.append((slot, dtype, (1 + sum((n - 1) * step for n, step in zip(shape, stride))) * all(shape)))
+        source = mesh_metal4.PROGRAM + VIEW + mesh_metal4.program(entries, count, begun, [])
+        results = tuple(r if not isinstance(r, torch.fx.Node) else constants[r] if r in fixed else view(r)
+                        for r in self.results)
+        run = mesh_metal4.Function(
+            mesh_metal4.native(source).run, count, handles, [], [(slots[node], position)
+                                                                 for position, node in enumerate(self.arguments)],
+            made, [], sends, receives, copies, results, (SEND, RECV, TO_COPY), directory,
+            [(slots[node], constants[node]) for node in fixed])
+        run.plan, run.transferred, run.source = lambda: [mesh_coreml.plan(path) for path in compiled], Count(run.a, count - 1), source
+        weakref.finalize(run, lambda models=handles[1:]: [mesh_coreml.LIB.mesh_coreml_release(model) for model in models])
         return run
+
+
+class Count:
+    def __init__(self, table, at):
+        self.table, self.at = table, at
+
+    def __len__(self):
+        return self.table[self.at]
 
 
 def lower(scheduled):
