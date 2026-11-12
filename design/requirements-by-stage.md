@@ -33,7 +33,7 @@ The operator, 2026-11-12:
   - documents: `design/`, `docs/` and the records under metal-microbench `output_data/`. The assignment is Claude's.
 - `rdma/mesh-collective.c`, which holds `mesh_plan`, is read against the schedule stage.
   disjoint-pages-change-request.md:383-384: "**Schedule.** `mesh_plan` (mesh `rdma/mesh-collective.c`) takes the
-  program's values and its dependence graph and writes the static schedule".
+  program's values and its dependence graph and writes the static schedule, which is the scheduled value."
 - "no stage named" holds the items whose clauses place them in a flow that is none of the above, each with the words
   that say so. They are not restated against [data-flow.md](data-flow.md): the operator's 2026-11-10 21:02 turn above
   asks for that, and it is outstanding for them.
