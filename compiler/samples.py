@@ -522,6 +522,10 @@ CASES = [
      {"processors": THREE, "sharded": True, "collectives": {"alltoall": 2},
       "placement": lambda: lambda node: {"x": (0, tuple(THREE), (1, 2, 1)), "cos": (0, tuple(THREE), "striped"),
                                          "exp": (0, tuple(THREE), (2, 1, 1))}.get(node.name, "p0")}),
+    ("rows | on p0, p1 to p1, p2", Twice, [(r(6, 4),)],
+     {"processors": THREE, "sharded": True, "collectives": {"permute": 1},
+      "placement": lambda: lambda node: {"x": (0, ("p0", "p1"), None), "cos": (0, ("p1", "p2"), None)}.get(
+          node.name, "p0")}),
     ("sums | 7 rows in 3 stripes", Reduced, [(r(7, 4),)],
      {"processors": THREE, "sharded": True, "collectives": {"reduce": 1},
       "placement": lambda: lambda node: (0, tuple(THREE), "striped") if node.name == "x" else "p0"}),
@@ -650,11 +654,16 @@ def check_block(sent, arrived):
                        for n in part), "counts and displs are not integer arrays of one entry per device"
     if arrived.meta["collective"][0] == "permute":
         assert flat and len(counts) == len(displs) > max(block), "a permute's counts"
+        assert block[0] != block[1], "a permute's channel from a device to itself"
         return
     if isinstance(block, tuple):
         (given, taken), (holder, reader) = counts, block
         assert len(given) == len(displs[0]) > holder and len(taken) == len(displs[1]) > reader, "an all-to-all's counts"
         assert arrived.meta["val"].shape[dimension] <= min(given[holder], taken[reader]), "a block exceeds its counts"
+        if all(list(d) == list(itertools.accumulate(c[:-1], initial=0)) for c, d in zip(counts, displs)):
+            common = min(displs[0][holder] + given[holder], displs[1][reader] + taken[reader]) - max(
+                displs[0][holder], displs[1][reader])
+            assert arrived.meta["val"].shape[dimension] == common, "a block is not what its holder and reader share"
         return
     assert arrived.meta["val"].shape[dimension] == counts[block], "a block's size is not its count"
     value, readers = sent.args[0], list(arrived.users)
@@ -747,9 +756,10 @@ def check_collectives(scheduled, expected=None):
         sources[kind, identity].add((sent.meta["processor"], value.name))
         readers[kind, identity].add(arrived.meta["processor"])
         pairs[kind, identity, sent.meta["processor"], arrived.meta["processor"]] += kind == "alltoall"
+        pairs[kind, identity, arrived.meta["processor"]] += kind == "permute"
     assert all(len(found) == 1 for (kind, _), found in sources.items() if kind == "broadcast"), "a broadcast of two values"
     assert all(len(found) == 1 for (kind, _), found in readers.items() if kind == "reduce"), "a reduction with two roots"
-    assert max(pairs.values(), default=0) <= 1, "an all-to-all with two demands for one ordered pair"
+    assert max(pairs.values(), default=0) <= 1, "two demands for one ordered pair, or two blocks of a permute to one processor"
     found = {kind: len(identities) for kind, identities in kinds.items() if kind != "broadcast"}
     assert expected is None or found == expected, f"collectives {found}, not {expected}"
 

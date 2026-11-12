@@ -228,9 +228,11 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         extent = sum(shape(n)[held] for n in nodes)
         have, take = ranges(extents, extent, len(nodes)), ranges(sizes, extent, len(processors))
         met, given = overlaps(have, take)
-        arrays = tuple(zip(arrayed(have), arrayed(take)))
+        arrays, devices = tuple(zip(arrayed(have), arrayed(take))), processors
         if have == take:
-            kind, arrays = "permute", arrayed(have)
+            devices = tuple(dict.fromkeys((*holders, *processors)))
+            kind, arrays = "permute", tuple(array + (rest,) * (len(devices) - len(array))
+                                            for array, rest in zip(arrayed(have), (0, extent)))
     if held == dimension is not None and STRIPED in (extents, sizes):
         arrived, exchange = [], None
         for j, processor in enumerate(processors):
@@ -243,7 +245,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
                         1, len(common) - 1))), holder or processor)
                     exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
                     piece.meta.setdefault("collectives", {})[processor] = kind, exchange
-                    piece.meta.setdefault("blocks", {})[processor] = held, (i, turn(holders, processors, j)), *arrays
+                    piece.meta.setdefault("blocks", {})[processor] = held, (i, devices.index(processor)), *arrays
                     pieces.append((wanted.index(common[0]), wanted.index(common[-1]), len(common), piece))
             value = pieces[0][3] if pieces else call(graph, ZEROS, (nodes[0], [
                 0 if d == held else n for d, n in enumerate(shape(nodes[0]))]), processor)
@@ -276,7 +278,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             pieces.append(node)
             sources.append(i)
         if held == dimension is not None:
-            blocks = [(held, (i, turn(holders, processors, j)), *arrays) for i in sources]
+            blocks = [(held, (i, devices.index(processor)), *arrays) for i in sources]
         elif dimension is None:
             joined = tuple(shape(piece)[held] for piece in pieces) if held is not None else ()
             placed = (tuple(range(len(pieces))) if extents == STRIPED else
@@ -294,11 +296,6 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         if wide and shape(arrived[-1])[dimension] < most(sizes):
             arrived[-1] = padded(graph, arrived[-1], dimension, sizes, j, processor)
     return arrived
-
-
-# Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.5; design/unequal-shards-change-request.md item 9
-def turn(holders, processors, j):
-    return holders.index(processors[j]) if processors[j] in holders else j
 
 
 def overlaps(have, take):
