@@ -31,17 +31,33 @@ def stages(scheduled, segment):
             for part, levels in found.items()}
 
 
+# design/unequal-shards-change-request.md item 7; A. Lastovetsky et al., arXiv:1109.3074
+def kind(node):
+    return node.meta.get("of", node.name)
+
+
+def units(node):
+    return node.meta.get("units", (1, 1))
+
+
+def speed(times, x):
+    return x / times[x]
+
+
 # S. Zhang et al., HAP, EuroSys 2024, section 3.2; A. Lastovetsky et al., arXiv:1109.3074, steps 1 and 2
-def computation(staged, processors, time):
-    return {part: [[(sum(time(n) for n in held.get(processor, ()) if "of" not in n.meta),
-                     sum(time(n) for n in held.get(processor, ()) if "of" in n.meta) * len(processors))
+def computation(staged, processors, times):
+    def time(node, processor):
+        x, n = units(node)
+        return n / speed(times[processor][kind(node)], x)
+    return {part: [[(sum(time(n, processor) for n in held.get(processor, ()) if "of" not in n.meta),
+                     sum(time(n, processor) for n in held.get(processor, ()) if "of" in n.meta))
                     for processor in processors] for _, held in found] for part, found in staged.items()}
 
 
 # S. Zhang et al., HAP, EuroSys 2024, section 5.1, (3)
-def shares(staged, processors, time, comm, upper):
+def shares(staged, processors, times, comm, upper):
     return {part: mesh_graph.shares([max(map(comm, received), default=0.0) for received, _ in staged[part]], comp, upper)
-            for part, comp in computation(staged, processors, time).items()}
+            for part, comp in computation(staged, processors, times).items()}
 
 
 # X. Jia et al., Whale, USENIX ATC 2022, Algorithm 1

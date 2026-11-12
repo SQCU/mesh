@@ -93,8 +93,8 @@ def segment(node):
 
 
 # design/unequal-shards-change-request.md items 1, 6 and 14
-def units(fixed, processors, time, comm, upper, heads):
-    solved = shares.shares(shares.stages(fixed, segment), processors, time, comm, upper)
+def units(fixed, processors, times, comm, upper, heads):
+    solved = shares.shares(shares.stages(fixed, segment), processors, times, comm, upper)
     return {part: counts(heads, ratios, len(processors)) for part, ratios in solved.items()}
 
 
@@ -109,8 +109,25 @@ class Timed(torch.fx.Interpreter):
         result = super().run_node(node)
         if self.device.type == 'mps':
             torch.mps.synchronize()
-        self.times[node] = time.perf_counter() - started
+        if node.op == 'call_function':
+            self.times.setdefault(shares.kind(node), {})[shares.units(node)[0]] = time.perf_counter() - started
         return result
+
+
+# design/unequal-shards-change-request.md item 7
+def taken(fixed, inputs):
+    times = {p: {} for p in fixed.modules}
+    done = {p: threading.Event() for p in fixed.modules}
+
+    def timed(p):
+        interpreter = Timed(fixed.modules[p], fixed.devices[p], times[p])
+        return lambda *arguments: (interpreter.run(*arguments), done[p].set())[0]
+
+    program = Program(fixed, {p: timed(p) for p in fixed.modules})
+    program(*inputs)
+    for p in program.arguments:
+        done[p].wait()
+    return {p: times[p] for p in program.arguments}
 
 
 # design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/output_data/window-20260928/bandwidth.json
@@ -118,17 +135,12 @@ def chosen(model, inputs, placement, args, heads):
     if not args.upper:
         return args.units
     processors = stated(args)
-    fixed, times = compile_module(model, inputs, processors, placement(tuple(processors))), {}
-    done = {p: threading.Event() for p in fixed.modules}
-
-    def timed(p):
-        interpreter = Timed(fixed.modules[p], fixed.devices[p], times)
-        return lambda *arguments: (interpreter.run(*arguments), done[p].set())[0]
-
-    program = Program(fixed, {p: timed(p) for p in fixed.modules})
-    program(*inputs)
-    for p in program.arguments:
-        done[p].wait()
+    fixed = compile_module(model, inputs, processors, placement(tuple(processors)))
+    times = {p: {function: {int(x): t for x, t in held.items()} for function, held in functions.items()}
+             for path in args.times for p, functions in json.loads(pathlib.Path(path).read_text()).items()}
+    if not args.times:
+        times = taken(fixed, inputs)
+        print(json.dumps({'times': times}), flush=True)
 
     def comm(node):
         value = node.meta['val']
@@ -137,10 +149,9 @@ def chosen(model, inputs, placement, args, heads):
         return (between * args.comm * value.nbytes * sum(torch.utils._pytree.tree_leaves(node.meta['counts'])) / along
                 if along else 0.0)
 
-    staged = shares.stages(fixed, segment)
     if args.solve:
-        return units(fixed, tuple(processors), times.__getitem__, comm, args.upper, heads)
-    slopes = shares.computation(staged, tuple(processors), times.__getitem__)
+        return units(fixed, tuple(processors), times, comm, args.upper, heads)
+    slopes = shares.computation(shares.stages(fixed, segment), tuple(processors), times)
     return {part: shares.shifted(given, args.upper,
                                  lambda j, held: sum(stage[j][0] + held[j] / sum(held) * stage[j][1]
                                                      for stage in slopes[part]))
@@ -158,6 +169,7 @@ def arguments(description):
     parser.add_argument('--units', type=json.loads, default={})
     parser.add_argument('--solve', action='store_true')
     parser.add_argument('--upper', type=float, nargs='+')
+    parser.add_argument('--times', nargs='+', default=[])
     parser.add_argument('--comm', type=float, default=1.0752e-10)
     args = parser.parse_args()
     if args.solve and not args.upper:

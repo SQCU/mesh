@@ -305,6 +305,7 @@ def partitioned(graph, node, held, want, replaced):
     columns = [None if join else reshard(graph, plainly(graph, v) if (v[0], v[1], v[2]) != (
         row.index(along) if along in row else None, sizes, processors) else v,
         row.index(along) if along in row else None, sizes, processors) for v, row, join in zip(held, rows, joined)]
+    extent = out[along] if along >= 0 else next(s[row.index(along)] for s, row in zip(shapes, rows) if along in row)
     for j, processor in enumerate(processors):
         local, order = [column and column[j] for column in columns], {}
         for i, row in enumerate(rows):
@@ -340,7 +341,9 @@ def partitioned(graph, node, held, want, replaced):
             for label, blocks in order.items():
                 sized[label] = sum(len(range(*block)) for block in blocks)
             shard.args = (shard.args[0], sized)
-        shard.meta.update(of=node.name, order=order, pairs=pairs)
+        shard.meta.update(of=node.name, order=order, pairs=pairs, units=(
+            len(range(j, extent, len(processors))) if sizes == STRIPED else sizes[j],
+            extent if sizes == STRIPED else sum(sizes)))
         shards.append(evaluated(shard, processor))
     replaced.append(node)
     if along >= 0:

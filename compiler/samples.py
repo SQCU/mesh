@@ -308,8 +308,9 @@ def megatron_with(stated):
 
 def solved_units():
     fixed = compile_module(tp.Training().eval(), (torch.zeros(2, 8, 32),), TWO, tp.placement(SHARDS))
-    units = tp.units(fixed, SHARDS, lambda node: 3.0 if node.meta["processor"] == "p1" else 1.0,
-                     lambda node: 0.0, [1.0, 1.0], tp.HEADS)
+    times = {p: {tp.shares.kind(n): {tp.shares.units(n)[0]: 3.0 if p == "p1" else 1.0} for n in call_nodes(m.graph)}
+             for p, m in fixed.modules.items()}
+    units = tp.units(fixed, SHARDS, times, lambda node: 0.0, [1.0, 1.0], tp.HEADS)
     assert units.keys() == {"model_0", "model_1"} and all(a > b for a, b in units.values()), units
     return units
 
@@ -686,6 +687,7 @@ def watched(function):
 class Profiled(Program):
     def __init__(self, scheduled):
         super().__init__(scheduled, lower_metal.lower(scheduled))
+        self.ordered = [f for f in self.functions.values() if hasattr(f, "feedback")]
         self.functions = {p: f if p == self.caller else watched(f) for p, f in self.functions.items()}
 
     def __call__(self, *args, **kwargs):
@@ -694,6 +696,9 @@ class Profiled(Program):
         PROFILED.update({event.key: event.count for event in found.key_averages()})
         on_mps = sorted(name for name, on in DISPATCHED if on)
         assert not on_mps, f"torch operators on an mps tensor around a Metal function: {on_mps}"
+        for function in self.ordered:
+            assert all(d.causes and d.source < d.target < len(function.vertices) for d in function.dependences)
+            assert all(0 < start <= end for _, start, end in function.feedback()), function.feedback()
         return results
 
 
