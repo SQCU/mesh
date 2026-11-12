@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-# design/aot-compilation-change-request.md A2 and A4; metal-microbench/docs/measurement.md
+# design/the-compiler.md, order 3; design/unequal-shards-change-request.md items 9 and 15
 import os
 
 import torch
 
-import mesh_compile as mesh
-from tp import Attention, Calls, DIM, arguments, execute
+from tp import Attention, DIM, arguments, execute
 
 
 SEQ = int(os.environ.get('SEQ', '16384'))
 
 
+def placement(processors):
+    def choose(node):
+        if node.name == 'x' or node.target is torch.ops.aten.bmm.default:
+            return 1, processors, None
+        return processors[0]
+    return choose
+
+
 def main():
-    args = arguments('Compiled attention with partitioned query rows and a whole returned output.')
+    args = arguments('Attention with its input and its query rows split over processors along the sequence.')
     torch.manual_seed(0)
     x = torch.randn(1, SEQ, DIM) / DIM ** 0.5
-    block = None
-    if not args.load:
-        layer = Attention().to(device=args.device, dtype=torch.float32)
-        def placement(gm, examples):
-            return mesh.Placement(list(range(len(args.nodes))), args.nodes,
-                                  {node.name: (-1, 0, -1) for node in gm.graph.nodes if node.op == 'placeholder'})
-        block = Calls(mesh.Function(layer, placement, mesh.unit, device=args.device))
-    return execute(block, (x,), args)
+    return execute(Attention().eval(), (x,), placement, args)
 
 
 if __name__ == '__main__':

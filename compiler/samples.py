@@ -259,6 +259,7 @@ GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
 
 os.environ.update(DIM="32", HEADS="4", FFN="48", LAYERS="2", BATCH="2", SEQ="8", FF_MULT="2", VOCAB="64")
 sys.path.append(str(HERE.parent / "examples"))
+import cp
 import pl
 import tp
 
@@ -341,6 +342,10 @@ CASES = [
     ("parallel layers | units 3:1, mps", pl.Inference, [(index(2, 8, 64),)],
      {"processors": on(0, {"p0": "mps", "p1": "mps"}), "sharded": True, "needs_mps": True,
       "placement": lambda: pl.placement(SHARDS, (3, 1))}),
+    ("sequence split | 2 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "placement": lambda: cp.placement(SHARDS)}),
+    ("sequence split | 3 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
+     {"processors": THREE, "sharded": True, "placement": lambda: cp.placement(("p2", "p1", "p0"))}),
 ]
 SAVE = {"mlp": "mlp", "python for, 4 static trips": "static_for",
         "mixture of experts | 3 processors": "moe_three_processors",
