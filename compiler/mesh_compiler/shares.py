@@ -1,4 +1,5 @@
-# design/unequal-shards-change-request.md items 6, 7 and 14
+# design/unequal-shards-change-request.md items 6, 7, 11, 13 and 14
+import collections
 import pathlib
 import sys
 
@@ -54,3 +55,16 @@ def shifted(units, upper, load):
         free = [j for j, most in enumerate(upper) if (units[j] + 1) / sum(units) <= most]
         units[min(free, key=lambda j: load(j, units))] += 1
         units[peak] -= 1
+
+
+# design/unequal-shards-change-request.md item 11
+Ragged = collections.namedtuple("Ragged", "values offsets")
+
+
+# design/unequal-shards-change-request.md item 13
+def rows(ragged, speeds):
+    cuts, held = mesh_graph.separators(ragged.offsets.tolist(), speeds), []
+    while isinstance(ragged, Ragged):
+        held.append((ragged.offsets.diff(), tuple(cuts)))
+        cuts, ragged = ragged.offsets[cuts].tolist(), ragged.values
+    return *held, (ragged, tuple(cuts))

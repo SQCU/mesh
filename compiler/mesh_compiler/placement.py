@@ -50,13 +50,15 @@ def call(graph, target, arguments, processor):
     return evaluated(graph.call_function(target, arguments), processor)
 
 
-# design/unequal-shards-change-request.md items 1 and 15
+# design/unequal-shards-change-request.md items 1, 13 and 15
 def counts(extent, units, shards):
     if units == STRIPED:
         return STRIPED
     if units is None:
         chunk = -(-extent // shards)
         return tuple(max(0, min(chunk, extent - chunk * j)) for j in range(shards))
+    if len(units) == shards + 1:
+        return tuple(high - low for low, high in itertools.pairwise(units))
     exact = [extent * unit / sum(units) for unit in units]
     sizes = [round(size) for size in exact]
     while sum(sizes) != extent:

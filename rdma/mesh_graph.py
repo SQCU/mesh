@@ -3,6 +3,7 @@ import bisect
 import collections
 import ctypes as C
 import errno
+import fractions
 import math
 import os
 
@@ -175,6 +176,35 @@ def longest(vertices, predecessors, weight):
     def length(v, lengths):
         return max((at + weight(u, v) for u, at in zip(predecessors(v), lengths)), default=0)
     return forward(postorder(vertices, predecessors), predecessors, length)
+
+
+# A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008, section 4, LR-PROBE;
+# design/unequal-shards-change-request.md item 13
+def probe(offsets, speeds, load):
+    cuts = [0]
+    for speed in speeds:
+        cuts.append(bisect.bisect_right(offsets, offsets[cuts[-1]] + load * speed) - 1)
+    return cuts
+
+
+# A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008, sections 2, 3.3 and 3.3.1;
+# design/unequal-shards-change-request.md item 13
+def separators(offsets, speeds):
+    rows, speeds = len(offsets) - 1, [fractions.Fraction(speed) for speed in speeds]
+    succeeded, failed, first = (offsets[rows] - offsets[0]) / speeds[0], -1, 0
+    for speed in speeds:
+        low, high = first + 1, rows + 1
+        while low < high:
+            end = (low + high) // 2
+            load = (offsets[end] - offsets[first]) / speed
+            if failed < load < succeeded:
+                if probe(offsets, speeds, load)[-1] == rows:
+                    succeeded = load
+                else:
+                    failed = load
+            low, high = (low, end) if load >= succeeded else (end + 1, high)
+        first = low - 1
+    return probe(offsets, speeds, succeeded)
 
 
 # H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, section 4.2

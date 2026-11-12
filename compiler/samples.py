@@ -212,6 +212,11 @@ class Flipped(nn.Module):
         return torch.flip(x.sin(), (0,)).cos()
 
 
+class Rows(nn.Module):
+    def forward(self, lengths, values):
+        return lengths * 2, values.sin()
+
+
 class Wide(nn.Module):
     def __init__(self):
         super().__init__()
@@ -313,6 +318,17 @@ def shifted_units():
     units = tp.shares.shifted((3, 1), [0.5, 1.0], lambda j, held: held[j])
     assert units == (2, 2), units
     return {"model_0": units, "model_1": (1, 3)}
+
+
+LENGTHS = torch.tensor([3, 1, 4, 1, 5, 9, 2, 6])
+
+
+def ragged_rows():
+    offsets = torch.cat((torch.zeros(1, dtype=torch.long), LENGTHS.cumsum(0)))
+    (lengths, rows), (values, held) = tp.shares.rows(tp.shares.Ragged(torch.zeros(31, 4), offsets), (1, 3))
+    assert lengths.tolist() == LENGTHS.tolist() and (rows, held) == ((0, 3, 8), (0, 8, 31)), (rows, held)
+    stated = {"lengths": (0, SHARDS, rows), "values": (0, SHARDS, held)}
+    return lambda node: stated.get(node.name, "p0")
 
 
 BMM = torch.ops.aten.bmm.default
@@ -418,6 +434,8 @@ CASES = [
     ("flip of a sharded value", Flipped, [(r(6, 4),)],
      {"processors": TWO, "sharded": True,
       "placement": lambda: lambda node: (0, SHARDS, (1, 2)) if node.name in ("x", "sin") else "p0"}),
+    ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
+     {"processors": TWO, "sharded": True, "placement": ragged_rows}),
     ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
      {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
     ("parallel layers | units 3:1, mps", pl.Inference, [(index(2, 8, 64),)],
