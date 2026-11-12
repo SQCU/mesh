@@ -81,17 +81,8 @@ def image():
 
 # design/disjoint-pages-change-request.md C3.3 and C3.5; rdma/mesh-collective.h struct mesh_dependence
 def dependences(events, before):
-    def precedes(a, b):
-        (_, node, _, first), (_, other, _, second) = events[a], events[b]
-        return a != b and node == other and all(x in before[y] for x in first for y in second)
-
-    after = {a: [b for b in range(len(events)) if precedes(a, b)] for a in range(len(events))}
-    covering = mesh_graph.reduction(mesh_graph.postorder(list(after), after.__getitem__), after.__getitem__)
-    found = [(a, b, 0) for a in covering for b in covering[a]]
-    for processor in dict.fromkeys(first[0].meta["processor"] for _, _, _, first in events):
-        held = [a for a in covering if events[a][3][0].meta["processor"] == processor]
-        firsts, lasts = mesh_graph.extremes(held, lambda a: [b for b in covering[a] if b in held])
-        found += [(a, b, 1) for a in lasts for b in firsts]
+    found = mesh_graph.precedence([nodes for _, _, _, nodes in events], [place for _, place, _, _ in events],
+                                  [nodes[0].meta["processor"] for _, _, _, nodes in events], before)
     return [(events[a][0], events[b][0], lag, events[a][2][0] | events[b][2][1]) for a, b, lag in found]
 
 

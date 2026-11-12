@@ -64,6 +64,21 @@ def extremes(vertices, neighbours):
     return [v for v in vertices if v not in entered], [v for v in vertices if not neighbours(v)]
 
 
+# L. Lamport, CACM 21(7), 1978; M. Lam, PLDI 1988, section 2.3; design/disjoint-pages-change-request.md C3.3 and C3.5
+def precedence(events, place, thread, reached):
+    def precedes(a, b):
+        return a != b and place[a] == place[b] and all(x in reached[y] for x in events[a] for y in events[b])
+
+    after = {a: [b for b in range(len(events)) if precedes(a, b)] for a in range(len(events))}
+    covering = reduction(postorder(list(after), after.__getitem__), after.__getitem__)
+    found = [(a, b, 0) for a in covering for b in covering[a]]
+    for one in dict.fromkeys(thread):
+        held = [a for a in covering if thread[a] == one]
+        firsts, lasts = extremes(held, lambda a: [b for b in covering[a] if b in held])
+        found += [(a, b, 1) for a in lasts for b in firsts]
+    return found
+
+
 # G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976; GSPMD, Xu et al., arXiv 2105.04663, section 3.5
 def propagate(order, neighbours, forward, backward):
     changed = True
@@ -483,3 +498,63 @@ def quotient(class_of, edges):
     classes = (C.c_uint32 * max(len(class_of), 1))(*class_of)
     return _relation(lambda room, made, size: LIB.mesh_graph_quotient(len(class_of), classes, tails[1], tails[0],
                                                                       heads[0], room, made, size))
+
+
+# mesh-graph.h struct mesh_graph_view (its struct mesh_strided in place) and struct mesh_graph_cause,
+# mesh_graph_dependences_views and mesh_graph_synchronization; design/compilation-composition-change-request.md
+# item 6 and "Compact effects"
+class Viewed(C.Structure):
+    _fields_ = [('key', C.c_uint64), ('offset', C.c_uint64), ('element', C.c_uint64), ('dims', C.c_uint32),
+                ('padding', C.c_uint32), ('pairs', C.POINTER(C.c_uint64)), ('vertex', C.c_uint32), ('write', C.c_uint32)]
+
+
+class Cause(C.Structure):
+    _fields_ = [('key', C.c_uint64), ('kind', C.c_uint32), ('given', C.c_uint32)]
+
+
+HAZARDS = ('read after write', 'write after read', 'write after write', 'given')
+LIB.mesh_graph_dependences_views.restype = LIB.mesh_graph_synchronization.restype = C.c_int
+LIB.mesh_graph_dependences_views.argtypes = [
+    C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.c_size_t,
+    C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.POINTER(Cause), C.POINTER(C.c_size_t)]
+LIB.mesh_graph_synchronization.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
+                                           C.POINTER(C.c_ubyte), C.POINTER(C.c_size_t)]
+
+
+def dependences_views(vertices, views):
+    viewed, held = (Viewed * max(len(views), 1))(), []
+    for made, (key, offset, element, pairs, vertex, write) in zip(viewed, views):
+        held.append((C.c_uint64 * max(2 * len(pairs), 1))(*[x for pair in pairs for x in pair]))
+        made.key, made.offset, made.element, made.dims, made.pairs = key, offset, element, len(pairs), held[-1]
+        made.vertex, made.write = vertex, write
+    count = C.c_size_t()
+    status = LIB.mesh_graph_dependences_views(len(views), viewed, 0, None, None, 0, None, None, None, C.byref(count))
+    if status != errno.ERANGE:
+        _check(status)
+    room = max(count.value, 1)
+    tails, heads, causes = (C.c_uint32 * room)(), (C.c_uint32 * room)(), (Cause * room)()
+    _check(LIB.mesh_graph_dependences_views(len(views), viewed, 0, None, None, count.value, tails, heads, causes,
+                                            C.byref(count)))
+    found = {}
+    for tail, head, cause in zip(tails[:count.value], heads[:count.value], causes[:count.value]):
+        found.setdefault((tail, head), []).append((HAZARDS[cause.kind], cause.key))
+    edges, room = list(found), max(len(found), 1)
+    redundant, kept = (C.c_ubyte * room)(), C.c_size_t()
+    _check(LIB.mesh_graph_synchronization(vertices, len(edges), (C.c_uint32 * room)(*[a for a, _ in edges]),
+                                          (C.c_uint32 * room)(*[b for _, b in edges]), redundant, C.byref(kept)))
+    return edges, found, [bool(r) for r in redundant[:len(edges)]]
+
+
+# design/torch-source-lowering-change-request.md item 3; Apple, MTL4CommandEncoder.h: `commit[v]` the commit of
+# vertex v in issue order, None a host vertex
+def orderings(edges, commit):
+    barred, fences, waits, last = set(), {}, {}, {}
+    for a, b in sorted(edges, key=lambda edge: edge[::-1]):
+        if commit[b] is None:
+            waits.setdefault(b, {}).setdefault(commit[a], []).append((a, b))
+        elif commit[a] != commit[b]:
+            fences.setdefault((commit[a], commit[b]), []).append((a, b))
+        elif a >= last.get(commit[b], 0):
+            barred.add(b)
+            last[commit[b]] = b
+    return barred, fences, waits

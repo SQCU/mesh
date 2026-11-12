@@ -34,7 +34,17 @@ class Published:
         mesh.LIB.mesh_planned_free(C.byref(made))
         self.plan, self.execution = self.function[0].plan, 0
         self.state = mesh.State.from_address(CONTEXT.M + self.plan)
-        self.sends = [transfer for transfer, (source, *_) in enumerate(plan.declared) if source == here]
+        self.sends = [transfer for transfer in range(len(plan.declared)) if self.publication(transfer).sends]
+        sections = [value.section for value in self.function[0].value[:len(plan.values)]]
+        first, offset, view = ((mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(),
+                               mesh.View())
+        mesh.LIB.mesh_view_values(C.byref(CONTEXT), self.function, 1, first, offset, C.byref(view))
+        self.copies = [[(view.address + offset[at], section.bytes) for at in range(first[value], first[value + 1])]
+                       for value, section in enumerate(sections)]
+
+    # rdma/mesh.h mesh_transfer_at
+    def publication(self, transfer):
+        return mesh.Publication.from_address(CONTEXT.M + self.state.transfers + transfer * mesh.PUBLICATION_BYTES)
 
     # rdma/mesh-dataflow.h mesh_host_started, mesh_transfers_start
     def start(self):
@@ -52,14 +62,12 @@ class Published:
 
 
 class Carried:
-    def __init__(self, published, transfer, section, dtype, shape, stride):
+    def __init__(self, published, transfer, copies, dtype, shape, stride):
         self.plan, self.transfer, self.execution = published.plan, transfer, 0
-        entry = mesh.Publication.from_address(CONTEXT.M + published.state.transfers + transfer * mesh.PUBLICATION_BYTES)
-        copies = range(published.state.copies)
-        self.counts = [C.c_uint64.from_address(CONTEXT.M + entry.count + 8 * copy) for copy in copies]
-        self.flat = [torch.frombuffer((C.c_byte * section.bytes).from_address(
-            mesh.LIB.mesh_section_address(C.byref(CONTEXT), section, copy * section.stride)), dtype=dtype)
-            for copy in copies]
+        entry = published.publication(transfer)
+        self.counts = [C.c_uint64.from_address(CONTEXT.M + entry.count + 8 * copy) for copy in range(len(copies))]
+        self.flat = [torch.frombuffer((C.c_byte * size).from_address(address), dtype=dtype)
+                     for address, size in copies]
         self.pages = [flat.as_strided(shape, stride) for flat in self.flat]
 
     # rdma/mesh-collective.h mesh_host_publish
@@ -109,6 +117,5 @@ def channels(scheduled, queues):
         for transfer, channel in enumerate(plan.channels):
             value = plan.declared[transfer][4]
             if value != mesh.ABSENT:
-                queues[channel] = Carried(published, transfer, published.function[0].value[value].section,
-                                          *layouts[channel])
+                queues[channel] = Carried(published, transfer, published.copies[value], *layouts[channel])
     return found.node[found.self], executions
