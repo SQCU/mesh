@@ -56,7 +56,6 @@ def main():
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--seed', type=int, default=73)
     args = parser.parse_args()
-    assert len(args.owners) == len(args.widths) == len(args.hidden)
     root = args.directory.resolve()
     root.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)

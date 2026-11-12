@@ -136,3 +136,16 @@ turns says so.
   implemented, the reviewer reads each clause design/requirements-by-stage.md lists for it against the code at that
   commit, and writes a warning for each clause that does not hold there. Agreement of results with a reference run
   does not show that a clause holds. This is Claude's reading of turn 7.
+
+### 7. A commit adds no assertion and no test
+
+- **Source:** the operator, 2026-11-12: "delete all assertions too then, then write a commit time hook that catches
+  all examples of asserts and test introductions through a simple yes/no query assigned to a haiku or similar to
+  measure the *presence* or *absence* of those properties, without respect to any requirements or claims amde by any
+  claude. a separate distinct function in the post commit hook must then log all such commits as 'noncompliant' and
+  'outstanding' to impose thos property on all further work."
+- **Rule:** bin/mesh-assert-review.py runs after every Bash call of a session in either repository. For each commit
+  made since it last ran, `measured` asks Claude Haiku two yes/no questions about the lines the commit adds: whether
+  an assertion is present, and whether a test is present. It is given the diff alone. `logged` appends each commit
+  with either present to metal-microbench `output_data/assert-test-commits.jsonl` as `noncompliant` and
+  `outstanding`, and the session is told.

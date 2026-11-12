@@ -42,6 +42,13 @@
             "statusMessage": "Style guide review of the commit's new files",
             "async": true,
             "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-style-guide-review.py"
+          },
+          {
+            "type": "command",
+            "timeout": 900,
+            "statusMessage": "Assertion and test measurement of new commits",
+            "async": true,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-assert-review.py"
           }
         ]
       }
