@@ -152,6 +152,7 @@ def solved(plan, private, context):
                                   time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, C.byref(made)))
     mesh.check(mesh.LIB.mesh_plan_save(C.byref(context), *operands, C.byref(made), C.byref(record), C.byref(length)))
     plan.completion = list(function[0].completion[:len(plan.tasks)])
+    plan.order = list(function[0].order[:len(plan.tasks)])
     plan.sections = [[getattr(value.section, name) for name, _ in mesh.Section._fields_]
                      for value in function[0].value[:len(plan.values)]]
     plan.record = C.string_at(record, length.value)
@@ -231,7 +232,7 @@ def planned(module, carried, machines, mutated, cost, functions, before, tasks, 
     plan = Plan(sum(1 << int(node) for node in os.environ["MESH_PROGRAM"].split(",")), [c for c, *_ in carried],
                 declared, weights, values, dependences(events, before), 1, tasks,
                 [edge for edge in edges if edge not in crossing], [task[ends[c][SEND]] for c, *_ in carried],
-                [task[ends[c][RECV]] for c, *_ in carried], 1 + max(resource for _, resource in tasks), [], b"",
+                [task[ends[c][RECV]] for c, *_ in carried], 1 + max(resource for _, resource in tasks), [], [], b"",
                 nodes.node[nodes.self], places, [])
     return solved(plan, private, context)
 
@@ -250,17 +251,18 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=()):
     before = mesh_graph.closure(functions, preds)
     carried = [transfer for transfer in carried if all(transfer[4])]
     plan = planned(module, carried, machines, mutated, cost, functions, before, tasks, edges) if carried else None
-    completed = plan.completion if plan else mesh_graph.completion_times(
-        [length for length, _ in tasks], [resource for _, resource in tasks], len(lane), edges)
-    modules = {}
-    for processor in processors:
-        own = [node for node in functions if node.meta["processor"] == processor]
-        at = {node: k for k, node in enumerate(own)}
-        place = mesh_graph.heap_order([-completed[task[node]] for node in own],
-                                      [(at[earlier], at[node]) for node in own for earlier in before[node]
-                                       if earlier in at])
-        modules[processor] = assemble(processor, sorted(own, key=lambda node: place[at[node]]), nodes)
-    return modules, plan
+    order = plan.order if plan else ordered(tasks, edges, len(lane))
+    listed = sorted(functions, key=lambda node: order[task[node]])
+    return {processor: assemble(processor, [node for node in listed if node.meta["processor"] == processor], nodes)
+            for processor in processors}, plan
+
+
+# rdma/mesh-collective.h mesh_plan; design/plan-to-bridge-change-request.md R5
+def ordered(tasks, edges, resources):
+    function, _ = mesh.function((), (), (), (), 1, tasks, edges, (), (), resources)
+    mesh.check(mesh.LIB.mesh_plan(None, 1, 1, function, 1, (mesh.U * 1)(0), 1, None, None, 0, None, 0,
+                                  C.byref(mesh.Planned())))
+    return list(function[0].order[:len(tasks)])
 
 
 def assemble(processor, order, nodes):

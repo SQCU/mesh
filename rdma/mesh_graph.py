@@ -309,9 +309,6 @@ LIB.mesh_graph_signature_free.argtypes = [C.POINTER(Signature)]
 for name in PRINTERS:
     getattr(LIB, name).restype = C.c_int
     getattr(LIB, name).argtypes = [C.POINTER(Signature), C.c_char_p, C.c_size_t, C.POINTER(C.c_size_t)]
-LIB.mesh_graph_heap_order.restype = C.c_int
-LIB.mesh_graph_heap_order.argtypes = [C.c_uint32, C.POINTER(C.c_double), C.c_size_t, C.POINTER(C.c_uint32),
-                                      C.POINTER(C.c_uint32), C.POINTER(C.c_uint32)]
 
 
 def _check(status):
@@ -322,33 +319,6 @@ def _check(status):
 def _array(kind, items):
     items = list(items)
     return (kind * max(len(items), 1))(*items), len(items)
-
-
-# M. Cowan et al., MSCCLang, ASPLOS 2023, section 5.2, step 3; mesh-graph.h mesh_graph_heap_order
-def heap_order(priority, edges):
-    count = len(priority)
-    tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
-    place = (C.c_uint32 * max(count, 1))()
-    _check(LIB.mesh_graph_heap_order(count, (C.c_double * max(count, 1))(*priority), len(edges), tails[0], heads[0],
-                                     place))
-    return list(place[:count])
-
-
-# C.-Y. Chen, arXiv 2205.02474, 2022, (14), (14a), (1b) and (1c); L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein,
-# Math. Oper. Res. 22(3), 1997, (5); mesh-graph.h mesh_graph_completion_times
-LIB.mesh_graph_completion_times.restype = C.c_int
-LIB.mesh_graph_completion_times.argtypes = [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_uint32), C.c_uint32,
-                                            C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
-                                            C.POINTER(C.c_double)]
-
-
-def completion_times(length, resource, resources, edges):
-    count = len(length)
-    tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
-    completion = (C.c_double * max(count, 1))()
-    _check(LIB.mesh_graph_completion_times(count, _array(C.c_double, length)[0], _array(C.c_uint32, resource)[0],
-                                           resources, len(edges), tails[0], heads[0], completion))
-    return list(completion[:count])
 
 
 # mesh-graph.h mesh_graph_actor_time: (t(v) in ns over the recorded operands, whether every operand it needs is recorded)

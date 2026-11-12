@@ -66,6 +66,7 @@ class Plan:
     receivers: list
     resources: int
     completion: list
+    order: list
     record: bytes
     machine: int
     places: list

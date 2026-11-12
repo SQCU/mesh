@@ -830,6 +830,7 @@ static int plan_schedule(struct plan *p,const struct mesh_function *function){
   const struct mesh_dependence *dependence=p->dependence;
   const uint32_t n=p->n,demands=p->demands,count=p->transfers,dependences=p->dependences,placed=function->tasks;
   if(placed && (!function->task || !function->sender || !function->receiver || !function->completion ||
+                !function->order ||
                 (function->befores && !function->before)))return EINVAL;
   for(uint32_t k=0;k<function->befores;k++)
     if(function->before[k].from>=placed || function->before[k].to>=placed)return EINVAL;
@@ -982,6 +983,7 @@ static int plan_schedule(struct plan *p,const struct mesh_function *function){
       for(uint64_t j=0;j<instructions;j++)completion[j]=-completion[j];
       status=mesh_graph_heap_order((uint32_t)instructions,completion,(size_t)dependencies,before,after,place);
     }
+    for(uint32_t k=0;!status && k<placed;k++)function->order[k]=place[first+k];
   }
   if(!status){
     /* design/plan-to-bridge-change-request.md R5 */
@@ -1894,11 +1896,21 @@ void mesh_planned_free(struct mesh_planned *planned){
 int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
               const uint32_t *chains,uint64_t deadline,struct mesh_planned *planned){
-  struct hdr *m=context->M;
   if(!planned)return EINVAL;
   *planned=(struct mesh_planned){0};
   if(!group || !program || !count || !functions || !ncalls || !calls || (norders && (!orders || !causes)))return EINVAL;
   for(uint32_t j=0;j<ncalls;j++)if(calls[j]>=count)return EINVAL;
+  /* design/plan-to-bridge-change-request.md R5, "This is the one schedule of the data flow." */
+  if(!context){
+    int ordered=0;
+    for(uint32_t f=0;!ordered && f<count;f++){
+      struct plan p={.n=1};
+      ordered=functions[f].count || functions[f].values?EINVAL:plan_schedule(&p,functions+f);
+      free(p.completed);
+    }
+    return ordered;
+  }
+  struct hdr *m=context->M;
   /* design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: the horizon and the locations of the
      values the host writes, Bff of the host -> device edges of the calls' compiled parts in program order from their
      t(v), with each call's own dependences between its parts (mesh_graph_buffer_bound) */
@@ -1991,7 +2003,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     struct plan *p=plans+f;
     if(!(p->entry=malloc((p->entries+1)*sizeof *p->entry))){status=ENOMEM;goto done;}
     plan_walk(p);
-    if(p->demands && (status=plan_schedule(p,functions+f)))goto done;
+    if((p->demands || functions[f].tasks) && (status=plan_schedule(p,functions+f)))goto done;
   }
   if(!(page=malloc(((size_t)rows+1)*sizeof *page))){status=ENOMEM;goto done;}
   if((status=plan_rows(plans,count,m,&placed,page,rows)))goto done;

@@ -57,12 +57,14 @@ struct mesh_function { const struct mesh_declared *declared; const struct mesh_w
                        const struct mesh_dependence *dependence; uint32_t count,values,dependences,padding;
                        uint64_t outstanding,plan; const double *host,*work; const struct mesh_graph_dependence *edge;
                        uint32_t parts,edges; const struct mesh_task *task; const struct mesh_graph_dependence *before;
-                       const uint32_t *sender,*receiver; double *completion; uint32_t tasks,resources,befores,padding2; };
-_Static_assert(sizeof(struct mesh_function)==152 && offsetof(struct mesh_function,count)==32 &&
+                       const uint32_t *sender,*receiver; double *completion; uint32_t tasks,resources,befores,padding2;
+                       uint32_t *order; };
+_Static_assert(sizeof(struct mesh_function)==160 && offsetof(struct mesh_function,count)==32 &&
                offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56 &&
                offsetof(struct mesh_function,host)==64 && offsetof(struct mesh_function,parts)==88 &&
                offsetof(struct mesh_function,task)==96 && offsetof(struct mesh_function,completion)==128 &&
-               offsetof(struct mesh_function,tasks)==136 && sizeof(struct mesh_task)==16,
+               offsetof(struct mesh_function,tasks)==136 && offsetof(struct mesh_function,order)==152 &&
+               sizeof(struct mesh_task)==16,
                "mesh_function: rdma/mesh.py Function");
 /* design/aot-compilation-change-request.md A7, A10 ("Its output" and "The calls' graph") and appendix items 2 and 6;
    design/plan-to-bridge-change-request.md R2; S. S. Bhattacharyya, S. Sriram and E. A. Lee,

@@ -114,7 +114,7 @@ class Function(C.Structure):
                 ('work', C.POINTER(C.c_double)), ('edge', C.POINTER(mesh_graph.Dependence)), ('parts', U), ('edges', U),
                 ('task', C.POINTER(Task)), ('before', C.POINTER(mesh_graph.Dependence)), ('sender', C.POINTER(U)),
                 ('receiver', C.POINTER(U)), ('completion', C.POINTER(D)), ('tasks', U), ('resources', U),
-                ('befores', U), ('padding2', U)]
+                ('befores', U), ('padding2', U), ('order', C.POINTER(U))]
 
 
 class View(C.Structure):
@@ -325,7 +325,7 @@ def function(declared, weights, values, dependences, outstanding, tasks=(), befo
         held += [(Task * len(tasks))(*[Task(length, resource, 0) for length, resource in tasks]),
                  (mesh_graph.Dependence * max(len(before), 1))(*[mesh_graph.Dependence(a, b, 0) for a, b in before]),
                  (U * max(len(senders), 1))(*senders), (U * max(len(receivers), 1))(*receivers),
-                 (D * len(tasks))()]
-        made[0].task, made[0].before, made[0].sender, made[0].receiver, made[0].completion = held[-5:]
+                 (D * len(tasks))(), (U * len(tasks))()]
+        made[0].task, made[0].before, made[0].sender, made[0].receiver, made[0].completion, made[0].order = held[-6:]
         made[0].tasks, made[0].resources, made[0].befores = len(tasks), resources, len(before)
     return made, held
