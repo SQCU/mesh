@@ -179,6 +179,11 @@ def unsqueezed(node, shapes, out):
     return [[d + (d >= node.args[1] % len(out)) for d in range(len(out) - 1)]]
 
 
+# design/unequal-shards-change-request.md item 8
+def embedded(node, shapes, out):
+    return [[None, len(out) - 1], list(range(len(out) - 1))]
+
+
 # design/aot-compilation-change-request.md A2 and A4
 def replicated(node, shapes, out):
     return [[None] * len(s) for s in shapes]
@@ -195,6 +200,7 @@ RULES = {
     ATEN._softmax.default: over(1, None), ATEN.cumsum.default: over(1, None), ATEN.topk.default: over(2, -1),
     ATEN.slice.Tensor: over(1, 0), ATEN.select.int: over(1, None), ATEN.squeeze.dims: over(1, None),
     CAT: over(1, 0), ATEN.scatter_add.default: over(1, None), ATEN.gather.default: gathered,
+    ATEN.embedding.default: embedded, ATEN._log_softmax.default: over(1, None), ATEN.scatter.value: over(1, None),
 }
 
 
@@ -252,10 +258,10 @@ def chosen(graph, node, dimension, blocks, processor):
     return pieces[0] if len(pieces) == 1 else call(graph, CAT, (pieces, dimension), pieces[0].meta["processor"])
 
 
-def plain(graph, node, processor):
+def plain(graph, node, processor, extents=None):
     for dimension, blocks in node.meta.get("order", {}).items():
         whole, edges = list(shape(node)), list(itertools.accumulate((len(range(*b)) for b in blocks), initial=0))
-        whole[dimension] = max(stop for _, stop, _ in blocks)
+        whole[dimension] = extents[dimension] if extents else max(stop for _, stop, _ in blocks)
         value = call(graph, ZEROS, (node, whole), node.meta.get("processor", processor))
         for block, low, high in zip(blocks, edges, edges[1:]):
             piece = call(graph, SLICE, (node, dimension, low, high), value.meta["processor"])
@@ -281,7 +287,7 @@ def partitioned(graph, node, held, want, replaced):
         if node.target is VIEW:
             rows = [intact(shapes[0], out)]
             if held[0][0] is not None:
-                rows[0][held[0][0]], value = viewed(held[0], shapes[0], out)
+                rows[0][held[0][0]], value = viewed(held[0], shapes[0], out) or (None, held[0])
                 held = [value]
         elif torch.Tag.pointwise in getattr(node.target, "tags", ()):
             rows = aligned(node, shapes, out)
@@ -351,10 +357,21 @@ def partitioned(graph, node, held, want, replaced):
     if along >= 0:
         return along, sizes, processors, shards
     to = (None, None, (want,)) if isinstance(want, str) else want
-    columns = [reshard(graph, (None, None, (processor,), [shard]), *to)
-               for processor, shard in zip(processors, shards)]
-    return *to, [functools.reduce(lambda a, b: call(graph, ADD, (a, b), processor), parts)
-               for processor, *parts in zip(to[2], *columns)]
+    kept = ranges(to[1], out[to[0]], len(to[2])) if to[0] is not None else []
+    parts = {processor: [] for processor in to[2]}
+    for processor, shard in zip(processors, shards):
+        blocks = shard.meta["order"].get(to[0], ())
+        if shard.meta["order"].keys() == {to[0]} and set(blocks) <= set(kept):
+            edges = list(itertools.accumulate((len(range(*block)) for block in blocks), initial=0))
+            for block, low, high in zip(blocks, edges, edges[1:]):
+                parts[to[2][kept.index(block)]].append(
+                    shard if len(blocks) == 1 else call(graph, SLICE, (shard, to[0], low, high), processor))
+        else:
+            column = reshard(graph, (None, None, (processor,), [plain(graph, shard, processor, out)]), *to)
+            for keeper, part in zip(to[2], column):
+                parts[keeper].append(part)
+    return *to, [functools.reduce(lambda a, b: call(graph, ADD, (a, b), keeper), held_)
+               for keeper, held_ in parts.items()]
 
 
 def place(graph_module, placement):
@@ -382,6 +399,9 @@ def place(graph_module, placement):
     mesh_graph.forward(nodes, operands, transfer)
     for node in reversed(replaced):
         graph.erase_node(node)
+    # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
+    invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
+        n.op == "placeholder" or n.target in VIEWS and all(read)))
     onto = mesh_graph.replicas(
         [n for n in graph.nodes if n.op == "call_function"], lambda n: list(n.users),
         lambda n: invariant[n] or not any(
@@ -400,9 +420,6 @@ def place(graph_module, placement):
     channels = 0
     for node in placed:
         channels += insert_send_recv(graph, node, channels)
-    # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
-    invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
-        n.op == "placeholder" or n.target in VIEWS and all(read)))
     for node in graph.nodes:
         node.meta.pop("blocks", None)
     graph_module.recompile()

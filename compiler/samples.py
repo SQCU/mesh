@@ -449,6 +449,15 @@ CASES = [
      {"processors": THREE, "sharded": True, "placement": lambda: cp.placement(tuple(THREE))}),
     ("crossings | 3, each sharded again", lambda: crossing.Chain(crossing.Crossing()).half(),
      [(r(2, 16).half(), r(2, 16).half())],
+    ("megatron | 2 shards, backward", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "loss": 0, "placement": lambda: tp.placement(SHARDS)}),
+    ("megatron | units 1:3 and 3:1, backward", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "loss": 0,
+      "placement": lambda: tp.placement(SHARDS, {"model_0": (1, 3), "model_1": (3, 1)})}),
+    ("causal lm striped | 2 shards, backward", lambda: cp.Causal(6), [LM],
+     {"processors": TWO, "sharded": True, "loss": 0, "placement": lambda: cp.placement(SHARDS, sequence=6)}),
+    ("causal lm striped | 3 shards, backward", lambda: cp.Causal(6), [LM],
+     {"processors": THREE, "sharded": True, "loss": 0, "placement": lambda: cp.placement(tuple(THREE), sequence=6)}),
      {"processors": TWO, "sharded": True, "placement": lambda: crossing.placement(SHARDS)}),
     ("experts | 2 shards", lambda: ep.MoE(2), [(r(2, 6, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: ep.placement(SHARDS, ep.MoE(2).slots)}),
@@ -772,8 +781,8 @@ def build(name, machines=None):
     placement = options.pop("placement", lambda: lambda node: next(iter(processors)))()
     torch.manual_seed(0)
     module = factory().eval()
-    return module, calls, compile_module(module, copy.deepcopy(calls[0]), processors, placement,
-                                         **options)
+    scheduled = compile_module(module, copy.deepcopy(calls[0]), processors, placement, **options)
+    return tp.Eager(module, options["loss"]) if "loss" in options else module, calls, scheduled
 
 
 def run_case(name, with_inductor):

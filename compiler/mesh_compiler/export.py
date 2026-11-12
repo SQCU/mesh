@@ -1,15 +1,23 @@
 # design/data-flow.md
 import torch
 from torch._ops import HigherOrderOperator
+from torch.export.experimental import _export_forward_backward
 from torch.export.graph_signature import InputKind, OutputKind
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.utils import _pytree as pytree
 
 from .ir import Exported
 
 WITH_EFFECTS = torch.ops.higher_order.with_effects
 
 
-def export(module, args, **export_options):
-    return read(torch.export.export(module, args, **export_options).run_decompositions())
+# design/unequal-shards-change-request.md item 8; torch 2.15 torch/export/experimental/__init__.py
+def export(module, args, loss=None, **export_options):
+    program = torch.export.export(module, args, **export_options)
+    if loss is not None:
+        with sdpa_kernel(SDPBackend.MATH):
+            program = _export_forward_backward(program, joint_loss_index=loss)
+    return read(program.run_decompositions())
 
 
 def read(program):
@@ -47,9 +55,16 @@ def read(program):
         else:
             raise NotImplementedError(f"input kind {spec.kind}")
 
-    outputs = []
+    outputs, gradients, out_spec = [], {}, program.call_spec.out_spec
     for spec in signature.output_specs:
-        if spec.kind not in (OutputKind.USER_OUTPUT, OutputKind.BUFFER_MUTATION, OutputKind.TOKEN):
+        if spec.kind == OutputKind.GRADIENT_TO_PARAMETER:
+            gradients[spec.target] = 0
+        elif spec.kind not in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT, OutputKind.BUFFER_MUTATION,
+                               OutputKind.TOKEN):
             raise NotImplementedError(f"output kind {spec.kind}")
-        outputs.append((spec.kind, spec.target))
-    return Exported(program.graph_module, state, tokens, user_inputs, outputs, program.call_spec.out_spec)
+        returned = spec.kind in (OutputKind.LOSS_OUTPUT, OutputKind.GRADIENT_TO_PARAMETER)
+        outputs.append((OutputKind.USER_OUTPUT, None) if returned else (spec.kind, spec.target))
+    if signature.backward_signature is not None:
+        forward = pytree.tree_unflatten([0] * out_spec.num_leaves, out_spec)
+        out_spec = pytree.tree_structure((forward, gradients))
+    return Exported(program.graph_module, state, tokens, user_inputs, outputs, out_spec)

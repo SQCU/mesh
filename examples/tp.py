@@ -177,14 +177,29 @@ def arguments(description):
     return args
 
 
-def execute(model, inputs, placement, args, **told):
+# design/unequal-shards-change-request.md item 8
+class Eager(torch.nn.Module):
+    def __init__(self, model, loss):
+        super().__init__()
+        self.model, self.loss = model, loss
+
+    def forward(self, *inputs):
+        with torch.enable_grad():
+            outputs = self.model(*inputs)
+            names, parameters = zip(*self.model.named_parameters())
+            gradients = torch.autograd.grad(torch.utils._pytree.tree_leaves(outputs)[self.loss], parameters)
+        return torch.utils._pytree.tree_map(torch.Tensor.detach, outputs), dict(zip(names, gradients))
+
+
+def execute(model, inputs, placement, args, loss=None, **told):
     processors = stated(args)
-    scheduled = compile_module(model, inputs, processors, placement(tuple(processors)))
+    options = {} if loss is None else {'loss': loss}
+    scheduled = compile_module(model, inputs, processors, placement(tuple(processors)), **options)
     result = Program(scheduled)(*inputs)
     report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried), **told}
     if result is not None:
         with torch.no_grad():
-            expected = model(*inputs)
+            expected = (model if loss is None else Eager(model, loss))(*inputs)
         pairs = list(zip(torch.utils._pytree.tree_leaves(expected), torch.utils._pytree.tree_leaves(result),
                          strict=True))
         report['outputs'] = [list(got.shape) for _, got in pairs]
@@ -195,12 +210,13 @@ def execute(model, inputs, placement, args, **told):
 
 
 def main():
-    args = arguments('A transformer forward compiled with its weights split over processors by columns and rows.')
+    args = arguments('A transformer forward and backward compiled with its weights split over processors by columns '
+                     'and rows.')
     torch.manual_seed(0)
     x = torch.randn(BATCH, SEQ, DIM) / DIM ** 0.5
     model = Training().eval()
     given = chosen(model, (x,), placement, args, HEADS)
-    return execute(model, (x,), lambda processors: placement(processors, given), args, units=given)
+    return execute(model, (x,), lambda processors: placement(processors, given), args, loss=0, units=given)
 
 
 if __name__ == '__main__':
