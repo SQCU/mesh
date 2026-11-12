@@ -1305,7 +1305,7 @@ class Metal(Lowering):
         return made
 
     # G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., algorithms 5.1.1, 5.2.1 and section 5.1.6; LAPACK,
-    # slarfg, sgeqr2 and sorg2r; torch 2.15 documentation, torch.linalg.qr
+    # slarfg, slapy2, snrm2, sgeqr2 and sorg2r; torch 2.15 documentation, torch.linalg.qr
     def qr(self, node):
         values, source = node.meta["val"], self.reader(node.args[0])
         (m, n), lead = source.shape[-2:], source.shape[:-2]
@@ -1324,10 +1324,13 @@ class Metal(Lowering):
                    "    }"]
         lines += [f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
                   f"{q}[i * {n} + j] = {source.read(bind, names + ['i', 'j'])};",
-                  f"for (uint j = 0; j < {n}; j++) {{", f"    float alpha = {q}[j * {n} + j], s = 0, beta = alpha;",
-                  f"    for (uint i = j + 1; i < {m}; i++) s += {q}[i * {n} + j] * {q}[i * {n} + j];",
-                  f"    {tau}[j] = 0;", "    if (s != 0) {",
-                  "        beta = -copysign(sqrt(alpha * alpha + s), alpha);", f"        {tau}[j] = (beta - alpha) / beta;",
+                  f"for (uint j = 0; j < {n}; j++) {{",
+                  f"    float alpha = {q}[j * {n} + j], most = 0, s = 0, beta = alpha;",
+                  f"    for (uint i = j + 1; i < {m}; i++) most = max(most, abs({q}[i * {n} + j]));",
+                  f"    for (uint i = j + 1; i < {m}; i++) {{ float t = {q}[i * {n} + j] / most; s += t * t; }}",
+                  f"    {tau}[j] = 0;", "    if (most != 0) {",
+                  "        float norm = most * sqrt(s), w = max(abs(alpha), norm), z = min(abs(alpha), norm) / w;",
+                  "        beta = -copysign(w * sqrt(1 + z * z), alpha);", f"        {tau}[j] = (beta - alpha) / beta;",
                   f"        for (uint i = j + 1; i < {m}; i++) {q}[i * {n} + j] /= alpha - beta;", "    }",
                   f"    {q}[j * {n} + j] = beta;", *reflect, "}",
                   f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
