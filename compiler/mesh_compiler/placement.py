@@ -116,7 +116,7 @@ def based(node, read):
     return base, first
 
 
-# design/problems-of-14b9a757-change-request.md item 1 step 1, item 2 and item 4 step 4; MPI 4.1, section 7.7, in place
+# design/problems-of-14b9a757-change-request.md item 1 step 1, item 2 and item 4 step 4; MPI 4.1, section 7.7
 def destined(node):
     if node.target is CAT:
         value = node.meta["val"]
@@ -270,11 +270,31 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     if dimension not in (None, held) and sizes != STRIPED and (whole := shape(nodes[0])[dimension]) > sum(sizes):
         return folded(graph, (held, extents, holders, nodes), dimension, whole // sum(sizes),
                       [sum(sizes)] * len(nodes), dimension, sizes, processors, exact)
-    if held == dimension is not None and STRIPED in (extents, sizes):
-        return [reshard(graph, (None, None, (processor,), [node]), dimension, sizes, processors, exact)[j]
-                for j, (processor, node) in enumerate(zip(processors, reshard(
-                    graph, (held, extents, holders, nodes), None, None, processors)))]
     wide = not exact and dimension is not None and uneven(sizes)
+    if held == dimension is not None and STRIPED in (extents, sizes):
+        extent, arrived, exchange = sum(shape(n)[held] for n in nodes), [], None
+        have, take = ranges(extents, extent, len(nodes)), ranges(sizes, extent, len(processors))
+        for j, processor in enumerate(processors):
+            pieces, wanted = [], range(*take[j])
+            for holder, node, kept in zip(holders, nodes, have):
+                common = sorted(set(range(*kept)) & set(wanted))
+                if common:
+                    first, last = (range(*kept).index(e) for e in (common[0], common[-1]))
+                    piece = call(graph, SLICE, (node, held, first, last + 1, max(1, (last - first) // max(
+                        1, len(common) - 1))), holder or processor)
+                    exchange = exchange or f"{nodes[0].name}:{dimension}:{piece.name}"
+                    piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
+                    pieces.append((wanted.index(common[0]), wanted.index(common[-1]), len(common), piece))
+            value = pieces[0][3] if pieces else call(graph, ZEROS, (nodes[0], [
+                0 if d == held else n for d, n in enumerate(shape(nodes[0]))]), processor)
+            if len(pieces) > 1:
+                value = call(graph, ZEROS, (value, [len(wanted) if d == held else n for d, n in enumerate(
+                    shape(value))]), processor)
+                for first, last, count, piece in pieces:
+                    value = call(graph, SLICE_SCATTER, (value, piece, held, first, last + 1, max(
+                        1, (last - first) // max(1, count - 1))), processor)
+            arrived.append(padded(graph, value, dimension, sizes, j, processor) if wide else value)
+        return arrived
     if sizes == STRIPED:
         given = tuple(len(range(j, shape(nodes[0])[dimension], len(processors))) for j in range(len(processors)))
         displs = tuple(range(len(processors)))

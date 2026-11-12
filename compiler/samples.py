@@ -225,6 +225,11 @@ class Flipped(nn.Module):
         return torch.flip(x.sin(), (0,)).cos()
 
 
+class Twice(nn.Module):
+    def forward(self, x):
+        return x.sin().cos().exp()
+
+
 class Rows(nn.Module):
     def forward(self, lengths, values):
         return lengths * 2, values.sin()
@@ -485,6 +490,10 @@ CASES = [
     ("flip of a sharded value | 3 stripes", Flipped, [(r(7, 4),)],
      {"processors": THREE, "sharded": True,
       "placement": lambda: lambda node: (0, tuple(THREE), "striped") if node.name == "x" else "p0"}),
+    ("rows | 1:2:1 to stripes and to 2:1:1", Twice, [(r(7, 4),)],
+     {"processors": THREE, "sharded": True, "collectives": {"alltoall": 2},
+      "placement": lambda: lambda node: {"x": (0, tuple(THREE), (1, 2, 1)), "cos": (0, tuple(THREE), "striped"),
+                                         "exp": (0, tuple(THREE), (2, 1, 1))}.get(node.name, "p0")}),
     ("view over a split dimension | copied", Merged, [(r(2, 6, 4),)],
      {"processors": TWO, "sharded": True, "copied": 2, "not_lowered": ["aten.clone.out", "aten.empty.memory_format"],
       "placement": lambda: lambda node: (1, SHARDS, None) if node.name == "x" else "p0"}),
