@@ -13,7 +13,7 @@ class Program:
     def __init__(self, scheduled, functions=None):
         self.exported, self.output_processor = scheduled.exported, scheduled.output_processor
         self.functions = functions or scheduled.modules
-        self.devices = {processor: getattr(self.functions[processor], "device", device)
+        self.devices = {processor: getattr(self.functions.get(processor), "device", device)
                         for processor, device in scheduled.devices.items()}
         self.feedforward = set(scheduled.feedforward)
         self.channels, self.received = [SimpleQueue() for _ in range(scheduled.channels)], {}
@@ -28,7 +28,8 @@ class Program:
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         self.arguments = {
-            processor: [state[n].to(self.devices[processor]) if n in state else None for n in names]
+            processor: [state[n].to(self.devices[processor] or state[n].device) if n in state else None
+                        for n in names]
             for processor, names in inputs.items()}
         self.positions = {}
         for processor, names in inputs.items():
@@ -55,7 +56,7 @@ class Program:
 
     def bind(self, name, value):
         for processor, position in self.positions.get(name, ()):
-            self.arguments[processor][position] = value.to(self.devices[processor])
+            self.arguments[processor][position] = value.to(self.devices[processor] or value.device)
 
     def __call__(self, *args, **kwargs):
         flat, _ = pytree.tree_flatten((args, kwargs))

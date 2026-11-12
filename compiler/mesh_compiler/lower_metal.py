@@ -1,4 +1,5 @@
 # design/the-compiler.md, order 4; design/torch-source-lowering-change-request.md, items 1 and 3
+import copy
 import ctypes as C
 import math
 import mmap
@@ -27,7 +28,7 @@ STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
               "using namespace mpp::tensor_ops;\n")
 REFERENCE = pathlib.Path(torch.__file__).parent / "include/c10/metal/special_math.h"
-PIPELINES, HOST = {}, torch.device("cpu")
+PIPELINES, OWNED, HOST = {}, {}, torch.device("cpu")
 
 POINTWISE = {
     ATEN.add.Tensor: "({T}({0}) + {T}({1}))", ATEN.add.Scalar: "({T}({0}) + {T}({1}))",
@@ -102,7 +103,6 @@ class Storage:
     kind: str
     dtype: torch.dtype
     count: int
-    device: str
     position: int = None
 
 
@@ -124,14 +124,10 @@ class Segment:
     fence: list = field(default_factory=list)
 
 
-@dataclass
-class Escape:
-    view: View
-    device: str
-
-
 class NotLowered(NotImplementedError):
-    pass
+    def __init__(self, text, operators=()):
+        super().__init__(text)
+        self.operators = list(operators)
 
 
 def packed(shape):
@@ -174,9 +170,9 @@ def pipeline(source):
 
 
 class Lowering:
-    def __init__(self, module, device, carried, laid):
-        self.device, self.carried, self.laid, self.storages, self.forms = device, carried, laid, [], {}
-        self.pending, self.unwaited, self.program, self.results, self.missing, self.places = [], [], [], (), [], {}
+    def __init__(self, module, laid):
+        self.laid, self.storages, self.forms, self.missing = laid, [], {}, []
+        self.pending, self.unwaited, self.program, self.results = [], [], [], ()
         handlers = {**dict.fromkeys(POINTWISE, self.pointwise), **dict.fromkeys(VIEWS, self.viewed),
                     RECV: self.receive, SEND: self.send, operator.getitem: self.part,
                     **dict.fromkeys(FILLED, self.filled), **dict.fromkeys(REDUCED, self.reduced),
@@ -190,7 +186,6 @@ class Lowering:
             ATEN.addmm.default}
         position = 0
         for node in module.graph.nodes:
-            self.places[node] = self.place(node)
             if node.op == "placeholder":
                 self.forms[node] = self.arrived(ARGUMENT, node, position)
                 position += 1
@@ -206,22 +201,14 @@ class Lowering:
                 form = handlers[node.target](node)
                 self.forms[node] = form if self.deferred(node, form) else self.settled(form)
 
-    def place(self, node):
-        if node.target is ATEN._to_copy.default and "device" in node.kwargs:
-            return torch.device(node.kwargs["device"]).type
-        if node.target is operator.getitem:
-            return self.places[node.args[0]]
-        host = node.op == "placeholder" or node.target is RECV and node.args[0] in self.carried
-        return HOST.type if host else self.device.type
-
     def arrived(self, kind, node, position=None):
         value = node.meta["val"]
         count = (1 + sum((n - 1) * s for n, s in zip(value.shape, value.stride()))) * all(value.shape)
-        self.storages.append(Storage(kind, value.dtype, count, self.places[node], position))
+        self.storages.append(Storage(kind, value.dtype, count, position))
         return View(len(self.storages) - 1, value.dtype, tuple(value.shape), tuple(value.stride()), 0)
 
     def fresh(self, dtype, shape):
-        self.storages.append(Storage(HELD, dtype, math.prod(shape), self.device.type))
+        self.storages.append(Storage(HELD, dtype, math.prod(shape)))
         return View(len(self.storages) - 1, dtype, tuple(shape), packed(shape), 0)
 
     def deferred(self, node, form):
@@ -501,17 +488,15 @@ class Lowering:
 
     def escape(self, node, laid=False):
         value, held = node.meta["val"], self.view(self.forms[node])
-        view, device = held, self.places[node]
+        view = held
         if laid and any(n > 1 and a != b for n, a, b in zip(view.shape, view.stride, value.stride())):
-            self.storages.append(Storage(HELD, view.dtype, 0, self.device.type))
+            self.storages.append(Storage(HELD, view.dtype, 0))
             view = View(len(self.storages) - 1, view.dtype, view.shape, tuple(value.stride()), 0)
             self.storages[-1].count = 1 + sum((n - 1) * s for n, s in zip(view.shape, view.stride))
             self.store(held, view)
-        elif device != "cpu" and self.storages[view.storage].device == "cpu" and all(view.shape):
-            view = self.view(Fused(view.dtype, view.shape, lambda bind, index, t: held.read(bind, index)))
         storage = self.storages[view.storage]
         storage.kind = RESULT if storage.kind == HELD else storage.kind
-        return Escape(view, device)
+        return view
 
     # Bhattacharyya, Sriram and Lee, IEEE Trans. Signal Processing 45(6), 1997; Apple, MTL4CommandEncoder.h
     def flush(self):
@@ -548,11 +533,11 @@ class Lowering:
         self.program.append((SEND, sent, node.args[1]))
 
     def function(self):
-        storages, device = self.storages, self.device
+        storages = self.storages
         held = {s: LIB.mesh_metal4_buffer(max(st.count * st.dtype.itemsize, 1))
                 for s, st in enumerate(storages) if st.kind == HELD}
         stream = LIB.mesh_metal4_stream((C.c_void_p * len(held))(*held.values()), len(held))
-        program = []
+        program, retained = [], [*held.values()]
         for entry in self.program:
             if entry[0] is not COMMIT:
                 program.append(entry)
@@ -570,39 +555,41 @@ class Lowering:
                 made.pipeline, made.table = step.pipeline, LIB.mesh_metal4_table(len(step.storages))
                 made.address, made.addresses, made.barrier = addresses, len(step.storages), barrier
                 made.groups, made.grid, made.group = step.groups, step.grid, step.group
+                retained.append(made.table)
             for earlier in segment.after:
-                earlier.fence = earlier.fence or [LIB.mesh_metal4_fence()]
+                if not earlier.fence:
+                    earlier.fence = [LIB.mesh_metal4_fence()]
+                    retained.append(earlier.fence[0])
             program.append((COMMIT, array, patches, list(dict.fromkeys(s for _, _, s in patches)), segment, kept))
-        made = [(s, st) for s, st in enumerate(storages) if st.kind == RESULT]
+        made = [(s, st) for s, st in enumerate(storages) if st.kind == RESULT and st.count]
         given = [(s, st.position) for s, st in enumerate(storages) if st.kind == ARGUMENT]
         results = self.results
 
         def run(*arguments):
             owner = {s: arguments[position] for s, position in given}
-            owner.update((s, torch.empty(st.count, dtype=st.dtype, device=device)) for s, st in made)
             handles, shifts, views = {}, {}, []
+            for s, st in made:
+                handles[s], shifts[s] = LIB.mesh_metal4_buffer(st.count * st.dtype.itemsize), 0
+                pages = (C.c_byte * (st.count * st.dtype.itemsize)).from_address(LIB.mesh_metal4_contents(handles[s]))
+                OWNED[C.addressof(pages)] = handles[s]
+                weakref.finalize(pages, disowned, C.addressof(pages))
+                owner[s] = torch.frombuffer(pages, dtype=st.dtype)
 
             def handle(s):
                 if s not in handles:
                     pages, shift = owner[s].untyped_storage(), owner[s].storage_offset() * owner[s].itemsize
-                    handles[s], shifts[s] = pages.data_ptr(), shift
-                    if owner[s].device.type == "cpu":
+                    handles[s], shifts[s] = OWNED.get(pages.data_ptr(), pages.data_ptr()), shift
+                    if owner[s].device.type == "cpu" and pages.data_ptr() not in OWNED:
                         first = pages.data_ptr() // mmap.PAGESIZE * mmap.PAGESIZE
                         span = -(-(pages.data_ptr() + pages.nbytes() - first) // mmap.PAGESIZE) * mmap.PAGESIZE
                         handles[s], shifts[s] = LIB.mesh_metal4_view(first, span), shift + pages.data_ptr() - first
                         views.append(handles[s])
                 return handles[s]
 
-            def tensor(escape):
-                view, base = escape.view, owner[escape.view.storage]
+            def tensor(view):
                 if not all(view.shape):
-                    return torch.empty(view.shape, dtype=view.dtype, device=escape.device)
-                if base.device.type != escape.device:
-                    pages = (C.c_byte * base.untyped_storage().nbytes()).from_address(
-                        LIB.mesh_metal4_contents(base.untyped_storage().data_ptr()))
-                    pages.owner = base
-                    return torch.frombuffer(pages, dtype=view.dtype).as_strided(
-                        view.shape, view.stride, base.storage_offset() + view.offset)
+                    return torch.empty(view.shape, dtype=view.dtype)
+                base = owner[view.storage]
                 return base.as_strided(view.shape, view.stride, base.storage_offset() + view.offset)
 
             for entry in program:
@@ -622,26 +609,50 @@ class Lowering:
                     SEND(tensor(entry[1]), entry[2])
             for view in views:
                 LIB.mesh_metal4_release(view)
-            return tuple(tensor(r) if isinstance(r, Escape) else r for r in results)
-        run.device = HOST
-        weakref.finalize(run, lambda: [LIB.mesh_metal4_release(made) for made in (*held.values(), stream)])
+            return tuple(tensor(r) if isinstance(r, View) else r for r in results)
+        run.device = None
+        weakref.finalize(run, released, stream, retained)
         return run
+
+
+def disowned(pages):
+    LIB.mesh_metal4_release(OWNED.pop(pages))
+
+
+def released(stream, retained):
+    LIB.mesh_metal4_wait(stream, None, 0)
+    for made in (*retained, stream):
+        LIB.mesh_metal4_release(made)
+
+
+def hosted(module, device):
+    module = copy.deepcopy(module)
+    for node in list(module.graph.nodes):
+        if node.target is ATEN._to_copy.default and node.kwargs.get("device") == device:
+            source, value = node.args[0], node.meta["val"]
+            if source.meta["val"].dtype == value.dtype and source.meta["val"].stride() == value.stride():
+                node.replace_all_uses_with(source)
+                module.graph.erase_node(node)
+            else:
+                node.kwargs = {**node.kwargs, "device": HOST}
+    module.recompile()
+    return module
 
 
 def lower(scheduled):
     functions, missing = {}, {}
     metal = [p for p in scheduled.modules if scheduled.devices[p].type == "mps"]
-    carried = {channel for channel, *_ in scheduled.carried}
-    laid = carried | {node.args[0] for p in metal for node in scheduled.modules[p].graph.nodes if node.target is RECV}
+    laid = {channel for channel, *_ in scheduled.carried} | {node.args[0] for p in metal for node in scheduled.modules[p].graph.nodes if node.target is RECV}
     for processor, module in scheduled.modules.items():
         if processor not in metal:
-            functions[processor] = module
+            functions[processor] = hosted(module, scheduled.devices[metal[0]]) if metal else module
             continue
-        lowering = Lowering(module, scheduled.devices[processor], carried, laid)
+        lowering = Lowering(module, laid)
         if lowering.missing:
             missing[processor] = sorted(set(lowering.missing))
         else:
             functions[processor] = lowering.function()
     if missing:
-        raise NotLowered("; ".join(f"{processor}: {', '.join(names)}" for processor, names in missing.items()))
+        raise NotLowered("; ".join(f"{processor}: {', '.join(names)}" for processor, names in missing.items()),
+                         sorted(set().union(*missing.values())))
     return functions
