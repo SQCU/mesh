@@ -218,10 +218,11 @@ def intact(whole, new):
 
 # design/unequal-shards-change-request.md item 8; Brandon et al., Striped Attention, arXiv:2311.09431, section 3.1
 def unmasked(node, rows, keys, queries, held):
-    at, user = [rows, keys], next(iter(node.users))
-    while len(node.users) == 1 and user.target is VIEW:
-        at, node = [intact(shape(node), shape(user))[d] for d in at], user
-        user = next(iter(node.users))
+    at, views = [rows, keys], mesh_graph.chain(node, lambda n: next(
+        (user for user in n.users if len(n.users) == 1 and user.target is VIEW), None))
+    for before, after in zip(views, views[1:]):
+        at = [intact(shape(before), shape(after))[d] for d in at]
+    node, user = views[-1], next(iter(views[-1].users))
     every = [list(range(len(held))) for _ in queries]
     constants = [n for n in user.all_input_nodes if n is not node and not any(
         m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes))]
@@ -368,6 +369,15 @@ def place(graph_module, placement):
     mesh_graph.forward(nodes, operands, transfer)
     for node in reversed(replaced):
         graph.erase_node(node)
+    for node in reversed([n for n in graph.nodes if n.op == "call_function"]):
+        away = {user.meta["processor"] for user in node.users} - {node.meta["processor"]}
+        if away and not any(n.op == "placeholder" for n in mesh_graph.reach([node], lambda n: n.all_input_nodes)):
+            for processor in sorted(away):
+                with graph.inserting_after(node):
+                    there = graph.node_copy(node)
+                there.meta.update(processor=processor, constant=node.meta.get("constant", node.name))
+                for user in [user for user in node.users if user.meta["processor"] == processor and user is not there]:
+                    user.replace_input_with(node, there)
     placed = [n for n in graph.nodes if n.op != "placeholder"]
     channels = 0
     for node in placed:

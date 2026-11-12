@@ -468,6 +468,8 @@ def check_ir(scheduled, expect_on=None, sharded=False):
             if node.name in original and (node.target is original[node.name] or sharded):
                 assert node.name not in where, f"{node.name} scheduled twice"
                 where[node.name] = processor
+            elif node.meta.get("constant") in original:
+                assert node.target is original[node.meta["constant"]], "a constant's copy is another operator"
             elif node.meta.get("of") in original:
                 assert processor not in shards.setdefault(node.meta["of"], set()), f"{node.name}: two shards on {processor}"
                 shards[node.meta["of"]].add(processor)
@@ -501,11 +503,15 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         assert len(values) == scheduled.channels, "channels differ from (value, reading processor) pairs"
         for end in ends.values():
             check_block(end[ir.SEND], end[ir.RECV])
+            read = mesh_graph.reach([end[ir.SEND]], lambda n: [ends[ir.channel_of(n)][ir.SEND]] if n.target is ir.RECV
+                                    else n.all_input_nodes)
+            assert any(n.op == "placeholder" for n in read), "a channel carries a value no input reaches"
     else:
         assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
         where["output"] = scheduled.output_processor
         pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
-                 if where[u.name] != where[n.name]}
+                 if where[u.name] != where[n.name] and any(
+                     m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes))}
         assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
         assert len(added) == 2 * scheduled.channels + len(copied), "a node that export did not produce"
     if len(scheduled.modules) == 1:

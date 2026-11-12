@@ -100,6 +100,14 @@ def reach(starts, neighbours):
     return set(walk(starts, neighbours))
 
 
+# design/unequal-shards-change-request.md item 8
+def chain(start, following):
+    path = [start]
+    while (after := following(path[-1])) is not None:
+        path.append(after)
+    return path
+
+
 # A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988; design/aot-compilation-change-request.md A10
 def closure(order, neighbours):
     place, reached = {}, {}

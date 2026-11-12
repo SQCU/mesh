@@ -113,8 +113,7 @@ class Timed(torch.fx.Interpreter):
         return result
 
 
-# design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/docs/measurement.md, "the declared 1/beta
-# 6.45 GB/s"
+# design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/docs/measurement.md, "Preregistered budget"
 def chosen(model, inputs, placement, args, heads):
     if not args.upper:
         return args.units
