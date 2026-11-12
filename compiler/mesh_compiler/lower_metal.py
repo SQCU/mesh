@@ -28,8 +28,8 @@ COMMIT, WAIT, CHECK = mesh_metal4.COMMIT, mesh_metal4.WAIT, mesh_metal4.CHECK
 QUEUE, THREAD, SENT, ARRIVED, FEEDBACK = "queue", "host", "send", "recv", "<feedback>"
 TILE, SIMDGROUPS, GRAIN, LOCAL, CHAIN = 32, 4, 1024, 16384, 8
 # Apple, Metal feature set tables, Implementation limits, "Maximum number of entries in the buffer argument table, per
-# graphics or kernel function": 31 = 3 * LIVE + 1
-LIVE = 10
+# graphics or kernel function"
+BUFFERS = 31
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
 PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
@@ -156,7 +156,6 @@ WITHIN = "inline uint mesh_within(long i, long n) { return uint(i < 0 ? 0 : i < 
 LEAST = ("template <typename T> inline T mesh_least(T a, T b) { return a < b ? b : a; }\n"
          "template <typename T> inline T mesh_most(T a, T b) { return b < a ? b : a; }\n")
 WITH_EFFECTS = torch.ops.higher_order.with_effects
-CUTS = {RECV, SEND, ATEN._assert_async.msg, WITH_EFFECTS}
 SCATTERED = {ATEN.scatter_add.default: True, ATEN.scatter.src: False, ATEN.scatter.value: False}
 PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memory", "non_blocking"}
 SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"},
@@ -346,9 +345,7 @@ class Lowering:
                     ATEN.split_with_sizes.default: self.split, ATEN.avg_pool2d.default: self.average_pool,
                     ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers(),
                     ATEN.empty.memory_format: self.empty, ATEN.clone.out: self.cloned}
-        position, self.scope = 0, {}
-        for node in module.graph.nodes:
-            self.scope[node] = len(self.scope) and self.scope[node.prev] + (node.prev.target in CUTS)
+        position, self.unread = 0, {}
         for node in module.graph.nodes:
             if node.op == "placeholder":
                 self.missing += [f"{node.name} of {v.dtype}" for v in self.untyped(node)]
@@ -367,13 +364,18 @@ class Lowering:
                 self.missing += [f"{node.target} of {v.dtype}" for v in self.untyped(node)]
             elif node.op == "call_function" and not self.missing:
                 self.issuing, self.using = node, set()
+                self.fit(node)
                 form = handlers[node.target](node)
                 if isinstance(form, (Fused, Product)):
                     reads = [self.forms[read] for read in node.all_input_nodes]
                     form.nodes = (*dict.fromkeys(name for read in reads for name in getattr(read, "nodes", ())),
                                   node.name)
                     form.uses = frozenset(self.using).union(*(getattr(read, "uses", ()) for read in reads))
+                for read in node.all_input_nodes:
+                    self.unread.pop(read, None)
                 self.forms[node] = form if self.deferred(node, form) else self.settled(form, node)
+                if self.forms[node] is form and isinstance(form, (Fused, Product)):
+                    self.unread[node] = form
 
     # compiler/mesh_compiler/placement.py views; design/problems-of-14b9a757-change-request.md item 3
     def empty(self, node):
@@ -382,6 +384,7 @@ class Lowering:
 
     def cloned(self, node):
         target = self.forms[node.kwargs["out"]]
+        self.settle(target.storage)
         self.store(self.reader(node.args[0]), target)
         return target
 
@@ -398,9 +401,6 @@ class Lowering:
         users = list(node.users)
         if len(users) != 1 or not isinstance(form, (Fused, Product)):
             return False
-        live = self.live(form)
-        if live > LIVE or live and self.scope[users[0]] != self.scope[node]:
-            return False
         if isinstance(form, Product):
             return users[0].target in RESHAPES or \
                 users[0].target in POINTWISE and tuple(users[0].meta["val"].shape) == form.shape
@@ -412,12 +412,30 @@ class Lowering:
             or isinstance(made, torch.Tensor) and made.numel() <= math.prod(form.shape))
 
     # design/compilation-composition-change-request.md:370
-    def live(self, form):
+    def reads(self, form):
         bind, index = Bound(), ["0"] * len(form.shape)
         if isinstance(form, Product):
-            return len({form.left.storage, form.right.storage, *(form.expression(bind, index, "t") and bind)})
-        form.read(bind, index)
-        return len(bind)
+            bind(form.left), bind(form.right), form.expression(bind, index, "t")
+        else:
+            form.read(bind, index)
+        return list(bind)
+
+    def fit(self, node):
+        made = node.meta.get("val")
+        count = sum(isinstance(v, torch.Tensor) for v in (made if isinstance(made, (tuple, list)) else [made]))
+        reads = {read: len(self.reads(self.forms[read])) for read in node.all_input_nodes
+                 if isinstance(self.forms.get(read), (View, Fused, Product))}
+        count += sum(reads.values())
+        for read in sorted(reads, key=reads.get, reverse=True):
+            if count <= BUFFERS:
+                break
+            count -= reads[read] - 1
+            self.forms[read] = self.view(self.forms[read])
+
+    def settle(self, storage):
+        for node, form in list(self.unread.items()):
+            if storage in self.reads(form):
+                self.forms[node] = self.view(self.unread.pop(node))
 
     # design/compilation-composition-change-request.md, Performance correction, "removing unnecessary
     # materialization"
@@ -918,11 +936,7 @@ class Lowering:
                 self.store(form, View(made.storage, made.dtype, form.shape, made.stride, at * made.stride[dim]))
                 at += form.shape[dim]
             return made
-        forms, live = [form for form in forms if form.shape[dim]], 0
-        for k, form in enumerate(forms):
-            if live + self.live(form) > LIVE - (len(forms) - 1 - k):
-                forms[k] = self.view(form)
-            live += self.live(forms[k])
+        forms = [form for form in forms if form.shape[dim]]
 
         def expression(bind, index, t):
             made, end = None, sum(form.shape[dim] for form in forms)
