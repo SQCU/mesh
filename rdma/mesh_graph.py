@@ -514,6 +514,10 @@ def strided(offset, sizes, strides, element):
     return offset * element, element, [(n, s * element) for n, s in zip(sizes, strides)]
 
 
+def extent(sizes, strides):
+    return (1 + sum((n - 1) * s for n, s in zip(sizes, strides))) * all(sizes)
+
+
 def dependences_supplied(vertices, views, supplied):
     viewed, held = (Viewed * max(len(views), 1))(), []
     for made, (key, offset, element, pairs, vertex, write) in zip(viewed, views):

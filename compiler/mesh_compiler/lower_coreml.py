@@ -13,6 +13,7 @@ from .ir import RECV, SEND
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_coreml
+import mesh_graph
 import mesh_metal4
 
 ATEN, ENGINE, HOST, OPSET, SPECIFICATION = torch.ops.aten, "ane", torch.device("cpu"), "CoreML7", 8
@@ -295,7 +296,7 @@ class Lowering:
                 entries.append((mesh_metal4.COMMIT, lines))
                 for node, _ in outputs:
                     slot, dtype, shape, stride, _ = view(node)
-                    made.append((slot, dtype, (1 + sum((n - 1) * step for n, step in zip(shape, stride))) * all(shape)))
+                    made.append((slot, dtype, mesh_graph.extent(shape, stride)))
         source = mesh_metal4.PROGRAM + VIEW + mesh_metal4.program(entries, count, begun, [])
         results = tuple(r if not isinstance(r, torch.fx.Node) else constants[r] if r in fixed else view(r)
                         for r in self.results)

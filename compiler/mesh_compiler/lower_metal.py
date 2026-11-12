@@ -450,8 +450,7 @@ class Lowering:
         return self.view(form) if isinstance(form, (Fused, Product)) else form
 
     def strided(self, dtype, shape, stride, kind=HELD, position=None):
-        count = (1 + sum((n - 1) * s for n, s in zip(shape, stride))) * all(shape)
-        self.storages.append(Storage(kind, dtype, count, position))
+        self.storages.append(Storage(kind, dtype, mesh_graph.extent(shape, stride), position))
         return View(len(self.storages) - 1, dtype, tuple(shape), tuple(stride), 0)
 
     def view(self, form):
@@ -616,30 +615,34 @@ class Lowering:
 
     def cumsum(self, node):
         value, source = node.meta["val"], self.reader(node.args[0])
-        source = source if source.dtype == value.dtype else self.pointwise(node, "{T}({0})", [source])
         dim = node.args[1] % len(value.shape)
-        return self.scan(source, None, dim, value.shape[dim])[0]
+        return self.scan(source, None, dim, value.shape[dim], value.dtype, False)[0]
 
-    # W. D. Hillis and G. L. Steele, Data parallel algorithms, CACM 29(12), 1986; G. E. Blelloch, Prefix sums and
-    # their applications, CMU-CS-90-190, 1990, section 1.5
-    def scan(self, sums, flags, dim, count):
-        sums, reach = self.view(sums), 1
-        kind, lead = self.types[sums.dtype], sums.shape[:dim] + sums.shape[dim + 1:]
-        while reach < count:
-            after, bind = self.fresh(sums.dtype, sums.shape), Bound()
-            lines, names = unravel(f"(p.x / {count})", lead, "r")
-            here, far = (names[:dim] + [k] + names[dim:] for k in (
-                f"(p.x % {count})", f"(max(p.x % {count}, {reach}u) - {reach})"))
-            lines += [f"bool f = {flags.read(bind, here) if flags else 'false'}, "
-                      f"joined = !f && p.x % {count} >= {reach};",
-                      f"{kind} v = {sums.read(bind, here)};",
-                      f"{after.read(bind, here, True)} = joined ? {kind}({sums.read(bind, far)} + v) : v;"]
-            if flags:
-                ended = self.fresh(torch.bool, flags.shape)
-                lines += [f"{ended.read(bind, here, True)} = f || (joined && {flags.read(bind, far)});"]
-                flags = ended
-            self.dispatch(bind, lines, (math.prod(lead) * count, 1, 1))
-            sums, reach = after, 2 * reach
+    # torch 2.15 documentation, torch.cumsum; W. D. Hillis and G. L. Steele, Data parallel algorithms, CACM 29(12),
+    # 1986; G. E. Blelloch, Prefix sums and their applications, CMU-CS-90-190, 1990, section 1.5
+    def scan(self, sums, flags, dim, count, dtype, tree):
+        kind, lead = self.types[dtype], sums.shape[:dim] + sums.shape[dim + 1:]
+        along = lambda names, k: names[:dim] + [k] + names[dim:]
+        for reach in [1 << level for level in range((count - 1).bit_length())] if tree else [0]:
+            after, bind = self.fresh(dtype, sums.shape), Bound()
+            lines, names = unravel(f"(p.x / {count})" if reach else "p.x", lead, "r")
+            here = along(names, f"(p.x % {count})" if reach else "k")
+            flag = flags.read(bind, here) if flags else "false"
+            if reach:
+                far = along(names, f"(max(p.x % {count}, {reach}u) - {reach})")
+                lines += [f"bool f = {flag}, joined = !f && p.x % {count} >= {reach};",
+                          f"{kind} v = {sums.read(bind, here)};",
+                          f"{after.read(bind, here, True)} = joined ? {kind}({sums.read(bind, far)} + v) : v;"]
+                if flags:
+                    ended = self.fresh(torch.bool, flags.shape)
+                    lines += [f"{ended.read(bind, here, True)} = f || (joined && {flags.read(bind, far)});"]
+                    flags = ended
+            else:
+                lines += [f"{kind} a = 0;", f"for (uint k = 0; k < {count}; k++) {{",
+                          f"    a = ({flag} ? {kind}(0) : a) + {kind}({sums.read(bind, here)});",
+                          f"    {after.read(bind, here, True)} = a;", "}"]
+            self.dispatch(bind, lines, (math.prod(lead) * (count if reach else 1), 1, 1))
+            sums = after
         return sums, flags
 
     # design/torch-source-lowering-change-request.md, item 5; torch 2.15 torch/_higher_order_ops/effects.py
@@ -824,7 +827,7 @@ class Lowering:
                   f"{flags.read(bind, ['p.x'], True)} = p.x == 0 || "
                   f"{keys.read(bind, ['0', 'p.x'])} != {keys.read(bind, ['0', 'max(p.x, 1u) - 1'])};"]
         self.dispatch(bind, lines, (count, 1, 1))
-        sums, flags = self.scan(sums, flags, 0, count) if added else (sums, flags)
+        sums, flags = self.scan(sums, flags, 0, count, value.dtype, True) if added else (sums, flags)
         bind = Bound()
         key = keys.read(bind, ["0", "p.x"])
         out = f"{bind(made, True)}[{key}]"
@@ -1080,8 +1083,7 @@ class Lowering:
         accesses += [(vertex, view, write) for vertex, views in self.hosted for view, write in views]
         commit = [within.get(vertex) for vertex in range(len(self.vertices))]
         edges, causes, redundant = mesh_graph.dependences_supplied(len(self.vertices), [
-            (view.storage, view.offset * view.dtype.itemsize, view.dtype.itemsize,
-             [(n, step * view.dtype.itemsize) for n, step in zip(view.shape, view.stride)], vertex, write)
+            (view.storage, *mesh_graph.strided(view.offset, view.shape, view.stride, view.dtype.itemsize), vertex, write)
             for vertex, view, write in accesses if all(view.shape)], supplied)
         self.dependences = [Dependence(a, b, causes[a, b]) for a, b in edges]
         found = {(d.source, d.target): d for d in self.dependences}
@@ -1455,17 +1457,6 @@ class Native(Lowering):
 
     def chunk(self, count):
         return count if count < GRAIN else max(1, -(-count // (4 * os.cpu_count())))
-
-    # torch 2.15 documentation, torch.cumsum
-    def scan(self, sums, flags, dim, count):
-        made, bind, kind = self.fresh(sums.dtype, sums.shape), Bound(), self.types[sums.dtype]
-        lines, names = unravel("p.x", sums.shape[:dim] + sums.shape[dim + 1:], "r")
-        index = names[:dim] + ["k"] + names[dim:]
-        lines += [f"{kind} a = 0;", f"for (uint k = 0; k < {count}; k++) {{"]
-        lines += [f"    if ({flags.read(bind, index)}) a = 0;"] if flags else []
-        lines += [f"    a += {kind}({sums.read(bind, index)});", f"    {made.read(bind, index, True)} = a;", "}"]
-        self.dispatch(bind, lines, (math.prod(sums.shape) // max(count, 1), 1, 1))
-        return made, flags
 
     # torch 2.15 documentation, torch.sort; ISO/IEC 14882:2020 [stable.sort]
     def sorted(self, source, dim, descending):
