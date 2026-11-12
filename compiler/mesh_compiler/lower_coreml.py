@@ -274,7 +274,8 @@ class Lowering:
                     values[entry_] = TO_COPY(values[entry_.args[0]], **entry_.kwargs)
                 else:
                     model, inputs, read, outputs, written = entry_
-                    made = [torch.empty(tuple(n.meta["val"].shape), dtype=n.meta["val"].dtype) for n in outputs]
+                    made = [torch.empty_strided(tuple(n.meta["val"].shape), n.meta["val"].stride(),
+                                                dtype=n.meta["val"].dtype) for n in outputs]
                     backed = mesh_coreml.predict(model, views(read, [values[n] for n in inputs]), views(written, made))
                     transferred.extend([model] * (backed < len(made)))
                     values.update(zip(outputs, made))

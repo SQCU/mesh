@@ -67,18 +67,20 @@ Three things are mesh's and are added to it:
 4. `lower` for Metal: a function of `Scheduled` that returns one function per processor.
    - Core ML: `lower_coreml.lower` returns a function for each processor whose engine is `ane`. The processor's graph,
      in scheduled order, is cut at each `send`, `recv` and copy to another device, which the function calls as torch
-     does. Each run of nodes between two cuts is one ML Program, written by the module as the protobuf of coremltools
-     9.0 `mlmodel/format/MIL.proto` and `Model.proto` (coremltools is not imported), compiled by `MLModel
-     compileModelAtURL:` when `lower` runs and loaded with `MLComputeUnitsCPUAndNeuralEngine`.
+     does; after `lower_metal.lower` no copy to the Metal device is left in it. Each run of nodes between two cuts is
+     one ML Program, written by the module as the protobuf of coremltools 9.0 `mlmodel/format/MIL.proto` and
+     `Model.proto` (coremltools is not imported), compiled by `MLModel compileModelAtURL:` when `lower` runs and loaded
+     with `MLComputeUnitsCPUAndNeuralEngine`.
      - State that no output mutates is a constant of the program, and a node whose operands are all constants is
        evaluated when `lower` runs. A floating value is float16 inside the program; a float32 tensor that enters or
        leaves it is converted by a `cast` operation of the program.
      - An argument is an `MLMultiArray` over the caller's pages (MLMultiArray.h: "Creates the object with existing data
-       without copy."). A result's pages are proposed as its output backing; MLPredictionOptions.h: "The framework may
-       not use the specified backing object and instead allocates one by itself if the outputBacking dictionary doesn't
-       contain the entry for the feature name, the model doesn't support the user allocated buffers, or in the batch
-       prediction mode." Where it does not, the result is transferred into those pages (`transferToMultiArray:`) and
-       the function's `transferred` names the model.
+       without copy."). A result is a tensor of its node's compiled shape and strides, and its pages are proposed as
+       its output backing; MLPredictionOptions.h: "The framework may not use the specified backing object and instead
+       allocates one by itself if the outputBacking dictionary doesn't contain the entry for the feature name, the
+       model doesn't support the user allocated buffers, or in the batch prediction mode." Where it does not, the
+       result is transferred into those pages (`transferToMultiArray:`) and the function's `transferred` names the
+       model.
      - Where an operation runs is Core ML's choice. The function's `plan()` is MLComputePlan's preferred and supported
        devices per operation (MLComputePlan.h: "The anticipated compute devices that would be used for executing an ML
        Program operation").
@@ -88,9 +90,14 @@ Three things are mesh's and are added to it:
        (N. Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.1), and the square root of n
        where the roundoffs' signs are independent; the widest contraction of the cases has 1024 terms, and 32 * 2^-11
        is 2^-6. The check prints, per case and `ane` processor, the plan's device for each kind of operation.
-   - `driver.lowered(scheduled, lowerings)` takes each processor's function from the lowering the caller gives for its
-     device's type or its engine, `{'mps': lower_metal.lower, 'ane': lower_coreml.lower}`; a processor with none keeps
-     its GraphModule.
+   - `driver.lowered(scheduled, lowerings)` applies the caller's lowerings in order, `(lower_metal.lower,
+     lower_coreml.lower)`. Each lowers its own processors and returns the others' GraphModules, which the next one is
+     given: `lower_metal.lower` returns them without their copies to the Metal device, whose function takes host pages,
+     so it is first (design/torch-source-lowering-change-request.md, item 1: "no torch Metal kernel is ever submitted or
+     recorded again."). A processor no lowering takes keeps the last GraphModule returned for it.
 5. `rdma/mesh_compile.py` and metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive` are
    deleted when no example calls them.
+   - `examples/engines.py` is compiled by `compile_module` and run by `Program` (mesh 5098de5f). It gives `lowered`
+     `lower_coreml.lower` alone: `lower_metal.lower` does not lower its float16 `aten.mm` or its `aten.gelu` with
+     `approximate='tanh'`, so its `mps` processors run their GraphModules.
 

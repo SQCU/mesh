@@ -352,6 +352,12 @@ CASES = [
       "placement": lambda: by_module(EXPERTS_ENGINES, "cpu")}),
     ("wide mlp | all but the result on ane", Wide, [(r(256, 1024),)],
      {"processors": ENGINE, "placement": lambda: halves("npu", "cpu", 5)}),
+    ("mlp | ane then mps", MLP, [(r(5, 16),)],
+     {"processors": on(0, {"gpu": "mps", "npu": "ane"}), "needs_mps": True,
+      "placement": lambda: halves("npu", "gpu", 4)}),
+    ("mlp | mps then ane", MLP, [(r(5, 16),)],
+     {"processors": on(0, {"gpu": "mps", "npu": "ane"}), "needs_mps": True,
+      "placement": lambda: halves("gpu", "npu", 4)}),
     ("mlp dynamic batch", MLP, [(r(5, 16),), (r(11, 16),)],
      {"dynamic_shapes": BATCH, "rejected": True}),
     ("shape arithmetic dynamic batch", ShapeDependent, [(r(5, 3, 4),), (r(9, 3, 4),)],
@@ -619,7 +625,7 @@ PLANNED = []
 
 
 def planned_program(scheduled):
-    functions = lowered(scheduled, {"mps": lower_metal.lower, "ane": lower_coreml.lower})
+    functions = lowered(scheduled, (lower_metal.lower, lower_coreml.lower))
     PLANNED.extend((processor, functions[processor]) for processor in scheduled.engines)
     return Program(scheduled, functions)
 

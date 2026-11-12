@@ -1,4 +1,6 @@
 # design/the-compiler.md
+import dataclasses
+
 import torch
 
 from .devices import ENGINES, HOST, on_devices
@@ -23,8 +25,11 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
 
 
 def lowered(scheduled, lowerings):
-    kinds = {processor: scheduled.engines.get(processor, device.type)
-             for processor, device in scheduled.devices.items()}
-    made = {kind: lower(scheduled) for kind, lower in lowerings.items() if kind in kinds.values()}
-    return {processor: made[kinds[processor]][processor] if kinds[processor] in made else module
-            for processor, module in scheduled.modules.items()}
+    functions = {}
+    for lower in lowerings:
+        made = lower(scheduled)
+        modules = {processor: function for processor, function in made.items()
+                   if isinstance(function, torch.fx.GraphModule)}
+        functions.update((processor, function) for processor, function in made.items() if processor not in modules)
+        scheduled = dataclasses.replace(scheduled, modules=modules)
+    return {**scheduled.modules, **functions}

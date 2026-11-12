@@ -110,7 +110,7 @@ def execute(model, inputs, engines, args):
     processors.update((part, (args.nodes[place % len(args.nodes)], engine))
                       for place, (part, engine) in enumerate(zip(parts, engines)))
     scheduled = compile_module(model, inputs, processors, placement('projection', parts))
-    functions = lowered(scheduled, {'ane': lower_coreml.lower})
+    functions = lowered(scheduled, (lower_coreml.lower,))
     program = Program(scheduled, functions)
     started = time.perf_counter()
     result = program(*inputs)
