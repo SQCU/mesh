@@ -44,50 +44,17 @@ def torch_run(module):
             "operations": [("host", *operation) for operation in operations]}
 
 
-# design/compilation-composition-change-request.md item 6 and requirement 7's table; rdma/mesh-metal4.m
-def metal_run(function, module, stored):
-    program, named = function.program, {channel_of(n): n.name for n in module.graph.nodes if n.target is RECV}
-    tasks, operations, read, holds, order = [], [], [], {}, {}
-    given = {s for s, storage in enumerate(function.storages) if storage.kind == "argument" and storage.position in stored}
-    arrival = [("queue", "queue_wait", None, ("arrival",), 1, 1)]
-    for entry in program:
-        if entry[0] == "commit":
-            order[id(entry[1])] = len(order)
-    for index, entry in enumerate(program):
-        task, segment = len(tasks), entry[1]
-        if entry[0] == "commit":
-            tasks.append(("queue", tuple(dict.fromkeys(name for step in segment.steps for name in step.nodes))))
-            holds.update((step.vertex, task) for step in segment.steps)
-            read += [(view.storage, task) for step in segment.steps for view, write in step.accesses if not write]
-            if given & {s for step in segment.steps for s in step.storages}:
-                operations += [(kind, name, task, *rest) for kind, name, _, *rest in arrival]
-                arrival = []
-            operations += [("queue", "fence_wait", task, ("fence", order[id(earlier)]), 1, 1)
-                           for earlier, _ in segment.after.values()]
-            operations += [("queue", "pass_barrier", task, None, 0, 0)] * sum(map(bool, segment.barriers))
-            operations += [("queue", "fence_update", task, ("fence", order[id(segment)]), 1, 1)] * bool(segment.fence)
-            operations += [("queue", "submit", task, None, 0, 1),
-                           ("queue", "host_signal", task, ("event", order[id(segment)]), 1, 1)]
-        elif entry[0] == "wait":
-            after = program[index + 1][3] if index + 1 < len(program) else len(function.vertices) - 1
-            operations += [("host", "host_wait", ("vertex", after), ("event", order[id(due)]), 1, 1) for due in segment]
-        elif entry[0] is RECV:
-            tasks.append(("host", (named[entry[2]],)))
-            holds["storage", entry[1]] = task
-            operations.append(("host", RECEIVED, task, entry[2], 0, 0))
-        else:
-            tasks.append(("host", function.vertices[entry[3]]))
-            holds[entry[3]] = task
-            operations.append(("host", SENT, task, entry[2], 0, 0))
-    holds[len(function.vertices) - 1] = len(tasks)
-    tasks.append(("host", function.vertices[-1]))
-    classes = [holds[vertex] for vertex in range(len(function.vertices))]
-    dependences = mesh_graph.quotient(classes, [(d.source, d.target) for d in function.dependences])
-    dependences += dict.fromkeys((holds["storage", storage], task) for storage, task in read
-                                 if ("storage", storage) in holds and holds["storage", storage] < task)
-    return {"tasks": tasks, "dependences": dependences,
-            "operations": [(kind, name, holds[task[1]] if isinstance(task, tuple) else task, key, every, ordinal)
-                           for kind, name, task, key, every, ordinal in operations]}
+# design/compilation-composition-change-request.md item 2, "The signature is printed from what lowering emits.";
+# compiler/mesh_compiler/lower_metal.py Lowering.ordered; rdma/mesh-metal4.m mesh_metal4_after
+def lowered_run(record, stored):
+    operations, arrived = [], False
+    for kind, name, task, key, every, ordinal in record["operations"]:
+        if name == "queue_wait":
+            if arrived or not stored.intersection(key[1]):
+                continue
+            arrived, key = True, key[:1]
+        operations.append((kind, name, task, key, every, ordinal))
+    return {**record, "operations": operations}
 
 
 # compiler/mesh_compiler/runtime.py Program; compiler/mesh_compiler/bridge.py Published
@@ -128,10 +95,10 @@ def operands(scheduled, functions=None, executions=1, stored=()):
     for processor in scheduled.devices:
         module = scheduled.modules[processor]
         function = functions.get(processor, module)
-        ran = function if isinstance(function, torch.fx.GraphModule) else getattr(function, "module", module)
         on_mps = {position for position, name in enumerate(scheduled.inputs[processor]) if name in stored or (
             name in scheduled.exported.state and scheduled.exported.state[name][1].device.type == "mps")}
-        records[processor] = metal_run(function, module, on_mps) if hasattr(function, "program") else torch_run(ran)
+        records[processor] = lowered_run(function.record, on_mps) if hasattr(function, "record") else torch_run(
+            function if isinstance(function, torch.fx.GraphModule) else module)
     records, handoffs = handed(records, scheduled)
     for processor in records:
         machine = scheduled.machines[processor]

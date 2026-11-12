@@ -27,7 +27,7 @@ TYPES = {torch.float32: "float", torch.float16: "half", torch.int64: "long", tor
 NATIVE_TYPES = {**TYPES, torch.float64: "double", torch.int16: "short", torch.int8: "char"}
 ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
 COMMIT, WAIT = "commit", "wait"
-BARRIER, FENCE, EVENT = "barrier", "fence", "event"
+QUEUE, THREAD, SENT, ARRIVED = "queue", "host", "send", "recv"
 TILE, SIMDGROUPS, GRAIN = 32, 4, 1024
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
@@ -199,7 +199,6 @@ class Dependence:
     source: int
     target: int
     causes: list
-    ordering: str = None
 
 
 class Bound(list):
@@ -323,7 +322,7 @@ class Lowering:
                 self.issuing = node
                 self.results = tuple(self.escape(r) if isinstance(r, torch.fx.Node) else r for r in node.args[0])
                 self.flush()
-                self.host(node, [r for r in self.results if isinstance(r, View)])
+                self.host(node, [(r, False) for r in self.results if isinstance(r, View)])
                 self.ordered()
             elif node.op == "call_function" and (
                     node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(node.target, set())):
@@ -808,59 +807,87 @@ class Lowering:
             self.program.append((COMMIT, Segment(self.pending)))
             self.pending = []
 
-    def host(self, node, views):
-        self.hosted.append((len(self.vertices), views))
+    def host(self, node, accesses):
+        self.hosted.append((len(self.vertices), accesses))
         self.vertices.append((node.name,))
         return len(self.vertices) - 1
 
     def receive(self, node):
         self.flush()
         view = self.arrived(RECEIVED, node)
-        self.program.append((RECV, view.storage, node.args[0]))
+        self.program.append((RECV, view.storage, node.args[0], self.host(node, [(view, True)])))
         return view
 
     def send(self, node):
         sent = self.escape(node.args[0], node.args[1] in self.laid)
         self.flush()
-        self.program.append((SEND, sent, node.args[1], self.host(node, [sent])))
+        self.program.append((SEND, sent, node.args[1], self.host(node, [(sent, False)])))
 
-    # design/torch-source-lowering-change-request.md, item 3; design/compilation-composition-change-request.md, item 6;
-    # Bhattacharyya, Sriram and Lee, IEEE Trans. Signal Processing 45(6), 1997; Apple, MTL4CommandEncoder.h
+    # design/torch-source-lowering-change-request.md, item 3; design/compilation-composition-change-request.md, items 2
+    # and 6; design/synchronization-signature-change-request.md, item 1, "It holds"; Bhattacharyya, Sriram and Lee, IEEE
+    # Trans. Signal Processing 45(6), 1997; Apple, MTL4CommandEncoder.h
     def ordered(self):
         segments = [entry[1] for entry in self.program if entry[0] is COMMIT]
-        within = {step.vertex: segment for segment in segments for step in segment.steps}
+        within = {step.vertex: k for k, segment in enumerate(segments) for step in segment.steps}
         accesses = [(step.vertex, view, write) for segment in segments for step in segment.steps
                     for view, write in step.accesses]
-        accesses += [(vertex, view, False) for vertex, views in self.hosted for view in views]
+        accesses += [(vertex, view, write) for vertex, views in self.hosted for view, write in views]
         edges, causes, redundant = mesh_graph.dependences_views(len(self.vertices), [
             (view.storage, view.offset * view.dtype.itemsize, view.dtype.itemsize,
              [(n, step * view.dtype.itemsize) for n, step in zip(view.shape, view.stride)], vertex, write)
             for vertex, view, write in accesses if all(view.shape)])
+        commit = [within.get(vertex) for vertex in range(len(self.vertices))]
         self.dependences = [Dependence(a, b, causes[a, b]) for a, b in edges]
-        place = {segment.steps[0].vertex: k for k, segment in enumerate(segments)}
-        commit = [place[within[v].steps[0].vertex] if v in within else None for v in range(len(self.vertices))]
-        found = {(d.source, d.target): d for d, covered in zip(self.dependences, redundant) if not covered}
-        barred, fences, waits = mesh_graph.orderings(list(found), commit)
-        for dependence in found.values():
-            first, second = commit[dependence.source], commit[dependence.target]
-            dependence.ordering = EVENT if second is None else BARRIER if first == second else FENCE
+        found = {(d.source, d.target): d for d in self.dependences}
+        barred, fences, waits = mesh_graph.orderings([edge for edge, covered in zip(edges, redundant)
+                                                      if not covered and commit[edge[0]] is not None], commit)
         for (first, second), under in fences.items():
             segments[second].after[first] = (segments[first], [found[edge] for edge in under])
-        awaited = {vertex: {first: (segments[first], [found[edge] for edge in under])
-                            for first, under in commits.items()} for vertex, commits in waits.items()}
         for segment in segments:
             segment.barriers = [step.vertex in barred for step in segment.steps]
-        program, waited = [], set()
+        program, waited, task, tasks, operations = [], set(), {}, [], []
+        fenced, bound = {first for first, _ in fences}, set()
         for entry in self.program + [(WAIT,)]:
-            due = [first for first, _ in awaited.get(entry[3], {}).values()] if entry[0] is SEND else \
-                segments if entry[0] is WAIT else []
-            due = [segment for segment in due if id(segment) not in waited]
-            waited.update(map(id, due))
-            program += [(WAIT, due)] * bool(due) + [entry] * (entry[0] is not WAIT)
+            due = sorted(waits.get(entry[3], {})) if entry[0] is SEND else \
+                range(len(segments)) if entry[0] is WAIT else []
+            due = [first for first in due if first not in waited]
+            waited.update(due)
+            program += [(WAIT, [segments[first] for first in due])] * bool(due) + [entry] * (entry[0] is not WAIT)
+            operations += self.awaited(due, len(tasks))
+            if entry[0] is COMMIT:
+                steps, at = entry[1].steps, within[entry[1].steps[0].vertex]
+                task.update((step.vertex, len(tasks)) for step in steps)
+                given = {self.storages[s].position for step in steps for s in step.storages
+                         if self.storages[s].kind == ARGUMENT} - bound
+                bound |= given
+                operations += self.committed(entry[1], len(tasks), at, sorted(given), at in fenced)
+                tasks.append((self.lane, tuple(dict.fromkeys(name for step in steps for name in step.nodes))))
+            elif entry[0] is not WAIT:
+                task[entry[3]] = len(tasks)
+                operations.append((THREAD, SENT if entry[0] is SEND else ARRIVED, len(tasks), entry[2], 0, 0))
+                tasks.append((THREAD, self.vertices[entry[3]]))
+        task[len(self.vertices) - 1] = len(tasks)
+        tasks.append((THREAD, self.vertices[-1]))
         self.program = program
+        self.record = {"tasks": tasks, "operations": operations, "dependences": mesh_graph.quotient(
+            [task[vertex] for vertex in range(len(self.vertices))], [(d.source, d.target) for d in self.dependences])}
 
 
 class Metal(Lowering):
+    lane = QUEUE
+
+    # design/synchronization-signature-change-request.md, item 1, "It holds"; rdma/mesh-metal4.m mesh_metal4_commit,
+    # mesh_metal4_wait and mesh_metal4_after
+    def committed(self, segment, task, at, given, fenced):
+        made = [(QUEUE, "queue_wait", task, ("arrival", tuple(given)), 1, 1)] * bool(given)
+        made += [(QUEUE, "fence_wait", task, ("fence", first), 1, 1) for first in segment.after]
+        made += [(QUEUE, "pass_barrier", task, None, 0, 0)] * sum(segment.barriers)
+        made += [(QUEUE, "fence_update", task, ("fence", at), 1, 1)] * fenced
+        return made + [(QUEUE, "submit", task, None, 0, 1), (QUEUE, "host_signal", task, ("event", at), 1, 1)]
+
+    def awaited(self, due, task):
+        return [(THREAD, "host_wait", task, ("event", first), 1, 1) for first in due]
+
     def kernel(self, bound, lines, grid, group, head):
         parameters = [f"device {self.types[self.storages[s].dtype]} *b{k} [[buffer({k})]]"
                       for k, s in enumerate(bound)]
@@ -930,7 +957,7 @@ class Metal(Lowering):
                 program.append(entry)
                 continue
             segment = entry[1]
-            segment.record = [LIB.mesh_metal4_record()]
+            segment.record.append(LIB.mesh_metal4_record())
             retained.append(segment.record[0])
             array, patches, kept = (mesh_metal4.Dispatch * len(segment.steps))(), [], []
             for made, step, barrier in zip(array, segment.steps, segment.barriers):
@@ -947,12 +974,12 @@ class Metal(Lowering):
                 retained.append(made.table)
             for earlier, _ in segment.after.values():
                 if not earlier.fence:
-                    earlier.fence = [LIB.mesh_metal4_fence()]
+                    earlier.fence.append(LIB.mesh_metal4_fence())
                     retained.append(earlier.fence[0])
             program.append((COMMIT, array, patches, list(dict.fromkeys(s for _, _, s in patches)), segment, kept))
         made = [(s, st) for s, st in enumerate(storages) if st.kind == RESULT and st.count]
         given = [(s, st.position) for s, st in enumerate(storages) if st.kind == ARGUMENT]
-        results, vertices, depended = self.results, self.vertices, self.dependences
+        results = self.results
         records = [(tuple(step.vertex for step in entry[1].steps), entry[1].record[0])
                    for entry in self.program if entry[0] is COMMIT]
 
@@ -999,8 +1026,7 @@ class Metal(Lowering):
             for view in views:
                 LIB.mesh_metal4_release(view)
             return tuple(shaped(owner, r) if isinstance(r, View) else r for r in results)
-        run.device, run.vertices, run.dependences, run.program = None, vertices, depended, self.program
-        run.storages = storages
+        run.device, run.record, run.program, run.dependences = None, self.record, self.program, self.dependences
         run.feedback = lambda: [(steps, *mesh_metal4.times(record)) for steps, record in records]
         weakref.finalize(run, released, stream, retained)
         return run
@@ -1010,7 +1036,13 @@ class Metal(Lowering):
 # design/torch-source-lowering-change-request.md, item 1, "on whichever Apple silicon backend it is placed, the CPU
 # included"; design/compilation-composition-change-request.md, item 7
 class Native(Lowering):
-    types = NATIVE_TYPES
+    types, lane = NATIVE_TYPES, THREAD
+
+    def committed(self, segment, task, at, given, fenced):
+        return []
+
+    def awaited(self, due, task):
+        return []
 
     def __init__(self, module, laid):
         self.kernels = []
@@ -1078,7 +1110,8 @@ class Native(Lowering):
             program.append((COMMIT, len(entries), addresses, [(k, s) for k, s in enumerate(slots) if s not in placed]))
             entries.append('extern "C" void s%d(const uint64_t *a) {\n    %s\n}\n'
                            % (len(entries), "\n    ".join(calls)))
-        library = native(NATIVE + "".join(SHARED.values()) + "".join(self.kernels) + "}\n" + "".join(entries))
+        source = NATIVE + "".join(SHARED.values()) + "".join(self.kernels) + "}\n" + "".join(entries)
+        library = native(source)
         program = [(COMMIT, getattr(library, f"s{entry[1]}"), *entry[2:]) if entry[0] is COMMIT else entry
                    for entry in program]
         made = [(s, st) for s, st in enumerate(storages) if st.kind == RESULT and st.count]
@@ -1099,7 +1132,8 @@ class Native(Lowering):
                 else:
                     SEND(shaped(owner, entry[1]), entry[2])
             return tuple(shaped(owner, r) if isinstance(r, View) else r for r in results)
-        run.vertices, run.dependences, run.held = self.vertices, self.dependences, held
+        run.record, run.program, run.source, run.dependences = self.record, self.program, source, self.dependences
+        run.held = held
         return run
 
 
@@ -1143,8 +1177,6 @@ def lower(scheduled):
             missing[processor] = sorted(set(lowering.missing))
         else:
             functions[processor] = lowering.function()
-            if lowerings[processor] is Native:
-                functions[processor].module = hosted(module, scheduled.devices[metal[0]]) if metal else module
     if missing:
         raise NotLowered("; ".join(f"{processor}: {', '.join(names)}" for processor, names in missing.items()),
                          sorted(set().union(*missing.values())))
