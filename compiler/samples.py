@@ -552,7 +552,10 @@ def errors(reference, got):
         a, b = torch.as_tensor(a).cpu().double(), torch.as_tensor(b).cpu().double()
         if a.shape != b.shape:
             return float("inf"), float("inf")
-        difference = (a - b).abs().max().item() if a.numel() else 0.0
+        apart = torch.where(a == b, 0.0, (a - b).abs())
+        if apart.isnan().any():
+            return float("inf"), float("inf")
+        difference = apart.max().item() if a.numel() else 0.0
         scale = a.abs().max().item() if a.numel() else 0.0
         worst_abs = max(worst_abs, difference)
         worst_rel = max(worst_rel, difference / max(scale, 1e-12))
