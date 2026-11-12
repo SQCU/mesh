@@ -206,8 +206,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
     56e33484, e34e7a5e and b482a825. A received operand's reader is masked, the threadgroups whose pages have not
     landed are compacted into a worklist and run by a later pass's indirect dispatch, and the later passes are placed
     by the heap order over the commands' dependence levels and their ranges' published completion times. Checked on
-    this Mac by the scratch mask harness, and by the five-rank E2B decode on the five machines, 71 later passes a step
-    (integration-finishing item 1).
+    this Mac by the scratch mask harness.
   - Open implementation: item 2's execution-time estimates t(v), on which its buffer bound depends. The
     2026-11-09 appendix supplies the analytical cost-model source and its connection to the existing buffer-bound
     method. The replacement connects dispatch actor records to `mesh_graph_actor_time`, `mesh_plan`'s existing
@@ -305,11 +304,7 @@ outstanding, and what of it is outstanding. The standard every change request fo
      deleted etc/bridge profiles set them) and mesh_block_pages=1, and no window, so the window is mesh-bridge.sh's
      default, a bank's pages; the mini's configuration.plist is rewritten by the same start. The window was refused
      on every port at the provider's advertised max_mr_size; device_up registers it in 1 GiB regions as M09 states
-     (mesh b59c579a, e6eda244), four a port, and all five maps list all five nodes. The five-rank E2B decode
-     (metal-microbench tools/mesh/placements/even-5.json, 03298a79) runs to its end on all five machines: in
-     output_data/e2b-five-2026-11-08 and its three repeats in output_data/e2b-five-2026-11-08-repeats, every rank's
-     prefill and decode end, every rank exits 0 and decodes the same 256 tokens, 33.7 tok/s (29.7 ms a step, the
-     median of three).
+     (mesh b59c579a, e6eda244), four a port, and all five maps list all five nodes.
   2. Implemented in metal-microbench c0a067fc and 6b8f7c3c with mesh b482a825.
   3. Implemented in mesh 01632014.
   4. Implemented in mesh e34e7a5e and metal-microbench c0a067fc, which C9 passes for MetalMaskedPass.

@@ -99,13 +99,15 @@ Three things are mesh's and are added to it:
      given: `lower_metal.lower` returns them without their copies to the Metal device, whose function takes host pages,
      so it is first (design/torch-source-lowering-change-request.md, item 1: "no torch Metal kernel is ever submitted or
      recorded again."). A processor no lowering takes keeps the last GraphModule returned for it.
-5. `rdma/mesh_compile.py` is deleted (mesh a5e9e62b, with what only it reached in d8d743d0 and c06f4029; its last
-   revision is at f03cb9ca): the six examples `tp.py`, `pl.py`, `cp.py`, `ep.py`, `crossing.py` and `engines.py` are
-   compiled by `compile_module` and run by `Program`.
-   metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive`, and the driver
+5. `rdma/mesh_compile.py` with `rdma/mesh-torch.mm`, `mesh-torch.mk`, `allocate.py` and `mesh_code.py`, and
+   metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive` with the driver
    `tools/e2b_replay.m` that links them, are deleted in the commits in which code that `compile_module` and `Program`
    produce has all of their feature coverage at the same performance or better, which includes decoding gemma-4-e2b
    no slower than the fastest decoding tempo ever seen, and not before.
+   - As of mesh 0956d995 (2026-11-12) no such commit exists. The six examples `tp.py`, `pl.py`, `cp.py`, `ep.py`,
+     `crossing.py` and `engines.py` are compiled by `compile_module` and run by `Program` (mesh 5098de5f). Mesh
+     a5e9e62b, d8d743d0 and c06f4029 deleted the mesh files under the earlier clause below; 0956d995 restored them
+     as they are at f03cb9ca.
    - The operator, 2026-11-09
      ([compilation-composition-change-request.md](compilation-composition-change-request.md), "Complete replacement,
      all in one commit workgroup"): "removal *by supremacy* of osme other different code that has all of the same
