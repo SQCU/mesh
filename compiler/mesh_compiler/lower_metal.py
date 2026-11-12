@@ -28,7 +28,7 @@ TYPES = {torch.float32: "float", torch.float16: "half", torch.int64: "long", tor
 NATIVE_TYPES = {**TYPES, torch.float64: "double", torch.int16: "short", torch.int8: "char"}
 ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
 COMMIT, WAIT, CHECK = "commit", "wait", "check"
-QUEUE, THREAD, SENT, ARRIVED = "queue", "host", "send", "recv"
+QUEUE, THREAD, KERNEL, SENT, ARRIVED = "queue", "host", "kernel", "send", "recv"
 TILE, SIMDGROUPS, GRAIN = 32, 4, 1024
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
@@ -168,6 +168,7 @@ class Fused:
     expression: object
     nodes: tuple = ()
     uses: frozenset = frozenset()
+    free: bool = False
 
     def read(self, bind, index):
         bind.note(self)
@@ -387,7 +388,11 @@ class Lowering:
         if isinstance(form, Product):
             return users[0].target in RESHAPES or \
                 users[0].target in POINTWISE and tuple(users[0].meta["val"].shape) == form.shape
-        return users[0].op == "call_function" and pytree.tree_leaves((users[0].args, users[0].kwargs)).count(node) == 1
+        made = users[0].meta.get("val")
+        made = made[0] if isinstance(made, (tuple, list)) else made
+        return users[0].op == "call_function" and (
+            pytree.tree_leaves((users[0].args, users[0].kwargs)).count(node) == 1) and (
+            form.free or isinstance(made, torch.Tensor) and made.numel() <= math.prod(form.shape))
 
     def settled(self, form):
         return self.view(form) if isinstance(form, (Fused, Product)) else form
@@ -490,7 +495,7 @@ class Lowering:
     def filled(self, node):
         value, given = node.meta["val"], node.args[-1] if FILLED[node.target] else 0
         return Fused(value.dtype, tuple(value.shape),
-                     lambda bind, index, t: f"{self.types[value.dtype]}({literal(given)})")
+                     lambda bind, index, t: f"{self.types[value.dtype]}({literal(given)})", free=True)
 
     def inverted(self, node):
         return self.pointwise(node, "(!bool({0}))" if node.meta["val"].dtype == torch.bool else "{T}(~{T}({0}))")
@@ -585,7 +590,7 @@ class Lowering:
     def range(self, node):
         value, (start, _, step) = node.meta["val"], (*node.args, 1)[:3]
         return Fused(value.dtype, tuple(value.shape), lambda bind, index, t:
-                     f"{self.types[value.dtype]}({literal(start)} + {index[0]} * {literal(step)})")
+                     f"{self.types[value.dtype]}({literal(start)} + {index[0]} * {literal(step)})", free=True)
 
     def remainder(self, node):
         name = "fremainder" if node.meta["val"].dtype.is_floating_point else "remainder"
@@ -1217,7 +1222,7 @@ class Native(Lowering):
     types, lane = NATIVE_TYPES, THREAD
 
     def committed(self, segment, task, at, given, fenced):
-        return []
+        return [(KERNEL, "pass_barrier", task, None, 0, 0)] * sum(segment.barriers)
 
     def awaited(self, due, task):
         return []
