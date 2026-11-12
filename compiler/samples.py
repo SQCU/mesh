@@ -518,7 +518,9 @@ def call_nodes(graph):
 ATEN = torch.ops.aten
 CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scatter.default
 PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
-          ATEN.new_zeros.default, ATEN.new_full.default}
+          ATEN.new_zeros.default, ATEN.new_full.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
+          ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
+          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self}
 BLOCK = ("dimension", "block", "counts", "displs")
 
 
@@ -606,6 +608,13 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     assert all(sender[c] != reader[c] for c in sender), "a send and its recv on one processor"
     assert len(copied) == crossing, "device copies differ from cross-device channels"
     if sharded:
+        nodes = [n for m in scheduled.modules.values() for n in call_nodes(m.graph)]
+        held = collections.defaultdict(set)
+        for node in nodes:
+            if node.meta.get("of") in original and isinstance(node.meta["val"], torch.Tensor):
+                held[node.meta["of"]].add(tuple(node.meta["val"].shape))
+        striped = any(n.target is SLICE and len(n.args) > 4 for n in nodes)
+        assert striped or all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
         assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
         assert where.keys() | shards.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
         assert {n.target for n in added} <= PLACED, "a node that neither export nor a collective produced"
