@@ -125,7 +125,8 @@ def views(graph):
     mesh_graph.forward(list(graph.nodes), lambda n: [n for n in [view(n)] if n is not None], based)
     for node in graph.nodes:
         for held, offset in destined(node):
-            if (held.op == "call_function" and len(held.users) == 1 and "view" not in held.meta
+            if (held.op == "call_function" and held.target is not operator.getitem and len(held.users) == 1
+                    and "view" not in held.meta
                     and isinstance(held.meta["val"], torch.Tensor)):
                 held.meta["to" if held.target is RECV else "out"] = (
                     node.name, offset, shape(held), tuple(node.meta["val"].stride()))
