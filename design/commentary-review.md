@@ -32,7 +32,8 @@ repository, full commit identity, parents, commit message and changed paths. It 
 names both repositories and their heads when the review starts, the registered context, the invoking session's
 transcript when supplied by the hook, and the two projects' transcript directories with their top-level file lists.
 The existing reviewer style guide (design/review-warnings.md), change-request index, change-request standard, rubrics,
-principles and measurement document are discovery starting points. The style guide is read in its own scope; its
+principles and measurement document are discovery starting points, with design/requirements-by-stage.md and
+design/data-flow.md (mesh, 2026-11-12: design/review-warnings.md rules 4 to 6, which the prompt states). The style guide is read in its own scope; its
 interpretation is not encoded in a sentence parser or a fixed warning schema.
 
 The reviewer has Read, Grep, Glob, WebFetch and WebSearch, and the read tools of the upstream
@@ -103,4 +104,5 @@ not implementation approval. Explicit comment-review commands retain their diagn
 Both repositories' existing .claude/settings.json entries continue to invoke these scripts. The document-commentary
 hook remains detached; the C9, comment, change-request and style hooks return feedback to the invoking session on its
 next turn. C9 and source
-comment review retain their focused implementations.
+comment review retain their focused implementations. From 2026-11-12 the C9 reader also reports a second producer
+of a value one module already produces (design/rubrics.md, C9; design/review-warnings.md, rule 5).

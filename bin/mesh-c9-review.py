@@ -19,7 +19,22 @@ rdma/mesh_graph.py), whose functions take the consumer's weights and visits as o
 through libmesh and writes none of its own. Code in that module, and code that only calls it or builds its inputs,
 passes. Report each function the commit adds or changes (a + or - line inside it) that carries such an algorithm
 anywhere else, one line each: `path:line function(): the algorithm; it moves into the graph module`, the line from the
-hunk's new-file numbering. If there is none, answer exactly PASS. Nothing else: no style, correctness or naming remarks."""
+hunk's new-file numbering.
+Report also each function the commit adds or changes that is a second producer of a value one module already produces:
+(a) where a value's bytes lie in a region (its pages, page lists, hop lists, routes between machines, byte or page
+offsets, copies, lifetimes), whose one producer is mesh_plan (rdma/mesh-collective.c), reached from the compiler's
+schedule stage (compiler/mesh_compiler/schedule.py);
+(b) the fields or bytes of a record a shared header declares (rdma/*.h: struct mesh_state, mesh_hop, mesh_section,
+mesh_declared, mesh_planned and the like), computed anywhere but in the rdma C file that implements that header;
+(c) which functions, commands or nodes of a program must run before which (a dependence relation over accesses, or
+an execution order), whose one home is the graph module;
+(d) a record of a program's synchronization edges (struct mesh_graph_signature), built anywhere but through the graph
+module's signature functions.
+These pass: a declaration that only mirrors a record's layout so that operands can be passed to the library; code that
+calls the producer; a tensor's shard sizes, slices and concatenations; an operator's rule for which dimension of its
+result follows which of its operands; names and counters. Report only what the changed lines plainly do. One line
+each: `path:line function(): what it produces a second time; its one producer is <the producer>`. If there is nothing
+of either kind, answer exactly PASS. Nothing else: no style, correctness or naming remarks."""
 SKIPPED = [':(exclude)*.md', ':(exclude)*.json', ':(exclude)*.jsonl', ':(exclude)*.csv', ':(exclude)*.txt',
            ':(exclude)*.svg', ':(exclude)*.html']
 

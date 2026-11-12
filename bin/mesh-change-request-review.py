@@ -14,7 +14,10 @@ TASK = """Review this commit's implementation and documentary changes against th
 and cited methods. Investigate the governing documents as well as the code, including a possible change in their
 scope or authority. Registered documents are shared context hints, not a complete or authoritative assignment.
 Locate the relevant instructions even if registration is empty. Follow integration through the affected call paths
-and companion changes, and use existing measurements or synchronization evidence where relevant."""
+and companion changes, and use existing measurements or synchronization evidence where relevant.
+Apply rules 4, 5 and 6 of mesh design/review-warnings.md: the clauses design/requirements-by-stage.md lists for each
+stage the commit changes, a second producer of a value another stage or module produces, and each clause of anything
+the commit says is done."""
 
 
 def registrations():

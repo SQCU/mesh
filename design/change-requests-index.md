@@ -10,12 +10,15 @@ change request follows is [change-requests.md](change-requests.md).
   factual claims." This index's earlier text is at mesh 9aa74ed1.
 - The operator, 2026-11-12: "if they weren't finished, they still need to be finished beacuse they are not optional
   'would be nice to haves'. if any are finished, mark them as 'covered [datestamp,commitstamp]'."
-- `covered [date, commit]`: the item's clause was read as holding in the code at 9aa74ed1 or 0b692ed8; the date and
+- `covered [date, commit]`: the item's clause was read as holding in the code at mesh 9aa74ed1 or metal-microbench 0b692ed8; the date and
   commit, with the commit's repository, are those of the commit the reader found the code landed in, or of the reading
   where it named none.
 - `outstanding`: the clause was not found to hold in code that has the data flow of [data-flow.md](data-flow.md). An
   item whose one implementation is in the files [the-compiler.md](the-compiler.md) order 5 names is outstanding.
+- `not determined [date]`: the clause states the condition of machines or services, which the reading did not contact.
 - No request has every item covered. All eleven are outstanding.
+- [requirements-by-stage.md](requirements-by-stage.md) lists the same items under the stage of
+  [data-flow.md](data-flow.md) that takes each, with each clause quoted.
 
 ## [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
@@ -188,7 +191,7 @@ Covered:
   - 2 / data structure: send and recv nodes in the one graph: covered [2026-11-10, mesh ce2e8ac9]
   - 2 / Composes: one schedule orders functions and transfers together: covered [2026-11-11, mesh 29aed586]
   - 2 / Write: transformations keep information; outputs are operands; changes reflected: covered [2026-11-10,
-    ce2e8ac9]
+    mesh ce2e8ac9]
   - 3 / Write, first bullet: covered [2026-11-11, mesh 29aed586]
   - 3 / Write, second bullet: callers call them, own copies deleted: covered [2026-11-11, mesh 29aed586]
   - 4 / Write: placement and costs are operands: covered [2026-11-10, mesh ce2e8ac9]
@@ -197,7 +200,7 @@ Covered:
   - 4 / Write: the bridge binds physical transport as R7 specifies: covered [2026-11-11, mesh 6d4f007b]
   - 5 / Replaces, site 3: strided-view traversal: covered [2026-11-08, mesh d44e3d0c]
   - 6 / Replaces 2: schedule results are operands of native preparation and of the transport: covered [2026-11-12,
-    a86c7dc4]
+    mesh a86c7dc4]
   - Correction: generated target source / Write: an edge carries its cause: covered [2026-11-10, mesh ce2e8ac9]
   - Performance correction / Constants: covered [2026-11-12, mesh a86c7dc4]
   - Complete replacement / build from source: covered [2026-11-09, metal-microbench 6eca7d7a]
@@ -346,7 +349,7 @@ Covered:
   - A6 produced by, consumed by (the lists): covered [2026-11-10, mesh 5889d898]
   - A7 stage: covered [2026-11-11, mesh 1a3cfe60]
   - A7 one order; total order multicast by a fixed sequencer (primitives, properties, steps of Fig. 5): covered
-    [2026-11-06, a172596f]
+    [2026-11-06, mesh a172596f]
   - A7 multicast to many groups: covered [2026-11-06, mesh 128f9bb5]
   - A7 data structures: m, sn(m), Dest(m): covered [2026-11-06, mesh 33a03e35]
   - A7 sender(m) (the bridge's and mesh_plan's part): covered [2026-11-10, mesh 5889d898]
@@ -378,14 +381,14 @@ Covered:
   - Appendix item 2: what is ordered, and what is not; interleaving: covered [2026-11-06, mesh 128f9bb5]
   - Appendix item 2: recorded order: covered [2026-11-06, mesh 4fe54e5f]
   - Appendix item 2: delivery at a node (Fig. 5's destinations; no wait on an earlier call): covered [2026-11-06,
-    a172596f]
+    mesh a172596f]
   - Appendix item 2: work and transfers run at once: covered [2026-11-06, mesh 4fe54e5f]
   - Appendix item 2: the queue is laid out with the schedule's pages and read in place: covered [2026-11-10, mesh 5889d898]
   - Appendix item 2: which files define them: covered [2026-11-10, mesh 60103676]
   - Appendix item 2, change: the queues replace the sequence counters, taken[p] and the one channel: covered
-    [2026-11-08, 7517cfc8]
+    [2026-11-08, mesh 7517cfc8]
   - Appendix item 2, change: remove the start's wait and the late-loading port's refusal: covered [2026-11-06,
-    4fe54e5f]
+    mesh 4fe54e5f]
   - Appendix item 2, change: remove the coordination's Q3′: covered [2026-11-06, mesh 128f9bb5]
   - Appendix item 4 (no truncation at one end; no handler): covered [2026-11-10, mesh 5889d898]
   - Appendix item 5: the set: covered [2026-11-10, mesh 5889d898]
@@ -396,7 +399,7 @@ Covered:
   - Appendix item 6: the compiled function's name; alike at every rank: covered [2026-11-10, mesh 5889d898]
   - Appendix item 6, change: any number of compiled functions at once (mesh_plan): covered [2026-11-10, mesh 5889d898]
   - Appendix item 6, change: one allocation over the whole program; deferred reclamation: covered [2026-11-10,
-    5889d898]
+    mesh 5889d898]
   - Appendix item 6, change: each call launches one execution: covered [2026-11-08, mesh b880b808]
   - Appendix item 8 (the heartbeat's holders): covered [2026-11-06, mesh 31ee5d4a]
   - The files and functions: rdma/mesh_graph.py: covered [2026-11-08, mesh 38ce722e]
@@ -1016,7 +1019,7 @@ Covered:
   - Claude's proposal: The page lists: Replaces: covered [2026-11-03, mesh 4ac5cbdc]
   - Claude's proposal: The schedule: It takes: covered [2026-11-10, mesh 60103676]
   - Claude's proposal: The assignment of pages to cables and queue pairs: the algorithm: covered [2026-11-03,
-    c193b11a]
+    mesh c193b11a]
   - Claude's proposal: The assignment: It takes: covered [2026-11-06, mesh 33a03e35]
   - Claude's proposal: The assignment: It writes: covered [2026-11-12, read at mesh 9aa74ed1]
   - Claude's proposal: The changes, by file: The bridge: covered [2026-11-06, mesh 4fe54e5f]

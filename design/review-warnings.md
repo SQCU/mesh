@@ -28,6 +28,22 @@ turns says so.
 
 (4. 2026-11-07 22:07 PST)
 
+> if they're still outstanding then this is still correct. are they still outstanding? if they wren't finished, they still need to be finished beacuse they are not optional 'would be nice to haves'. if any are finished, mark them as 'covered [datestamp,commitstamp]'.
+
+(5. 2026-11-12)
+
+> the current scope of work, which is only about the direction of data flow and control flow, the removal of attempts ot use inversion of control or wacky callback spaghetti code to avoid using the functional-direction-of-inputs-to-compilation and singular, centralized, shared, compilation and scheduling related headers, operands, intermediates, and outputs replacing incoherent and irreconciliable inlinings of many different algorithms in many different places.
+
+(6. 2026-11-12)
+
+> "The compiler I wrote never calls " why is this the case and what code review could or should have caught this iteratively before anyone got the impression the workload was 'done'?
+
+(7. 2026-11-12)
+
+> "- Not yet changed: the earlier requests are still not restated against data-flow.md, so reviewers will keep discounting them.' then address this at priority, up to and including all 'hooks' or scripted review functionalities
+
+(8. 2026-11-12)
+
 ## Rules
 
 ### 1. A warning does not stop work
@@ -78,3 +94,43 @@ turns says so.
     arbitrary claude-on-claude theory of mind problems as an external oracle"; turn 2).
   - The host reads the record to send further instructions to the agents it launched, or to launch agents to revise
     the code (turn 3).
+
+### 4. A clause binds whenever it was written
+
+- **Source:**
+  - turn 5: "they are not optional 'would be nice to haves'"; turn 8.
+  - design/data-flow.md, the operator, 2026-11-10 21:02: "a definite data flow be written exactly as documentation and
+    used to recondition and restate all outstanding requirements".
+  - The review of mesh 6d4f007b (metal-microbench output_data/change-request-reviews.jsonl) read that
+    compiler/mesh_compiler/bridge.py wrote again what `plan_layout` and `plan_publish` write, and set it aside: "A9's
+    assignment of the lists to `mesh_plan` is one of the pre-example requirements the memorandum says must be restated
+    against data-flow.md, so I don't count it as binding here."
+- **Rule:**
+  - The restatement is design/requirements-by-stage.md. It lists every item of every change request under the stage of
+    design/data-flow.md that takes it, each clause quoted from its request.
+  - A reviewer reads a commit against the clauses listed for each stage the commit changes, in the request each comes
+    from. A clause is not set aside because its request was written before design/data-flow.md.
+  - Where a reviewer does set a clause aside, for any reason, the clause and the reason are written as a warning, not
+    in the summary. This and the reading of a commit by its stages are Claude's reading of turns 5 and 8.
+
+### 5. One producer of each value
+
+- **Source:**
+  - turn 6.
+  - design/rubrics.md, C9: "Ranks higher: the form with fewer copies of each primitive, offered for others to call
+    rather than spliced into their code."
+  - design/commentary-review.md, the operator: "removing duplicate lowerings from the codebase is one of the first
+    basic prerequisites for compiler optimizations to be applied and not regressed later."
+- **Rule:** a commit that computes, outside the stage or shared module that produces it, a value that stage or module
+  already produces gets a warning that quotes turn 6 and names the one producer. Such values are a page or hop list, a
+  storage placement or lifetime, a dependence relation, an order, a synchronization signature, and the contents of a
+  record a shared header declares. The C9 hook (bin/mesh-c9-review.py) reads every commit for this as well. The list
+  of values is Claude's reading of turn 6.
+
+### 6. A statement that work is done is read clause by clause
+
+- **Source:** turn 7: "before anyone got the impression the workload was 'done'".
+- **Rule:** where a commit, or a document it changes, says an order, an item or a request is done, covered or
+  implemented, the reviewer reads each clause design/requirements-by-stage.md lists for it against the code at that
+  commit, and writes a warning for each clause that does not hold there. Agreement of results with a reference run
+  does not show that a clause holds. This is Claude's reading of turn 7.
