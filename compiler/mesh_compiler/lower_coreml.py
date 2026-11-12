@@ -131,7 +131,7 @@ class Lowering:
             self.missing.append(f"{node.name} crosses as {value.dtype} of rank {value.dim()}")
         return ARRAYS.get(value.dtype, ARRAYS[torch.float16])
 
-    def operation(self, name, scalar, shape, **inputs):
+    def operation(self, name, scalar, shape, /, **inputs):
         bound = b""
         for key, given in inputs.items():
             several = given if isinstance(given, tuple) else (given,)
@@ -153,7 +153,7 @@ class Lowering:
                                + field(5, entry("val", value)))
         return made
 
-    def emit(self, name, node, **inputs):
+    def emit(self, name, node, /, **inputs):
         value = node.meta["val"]
         return self.operation(name, kind(value.dtype), tuple(value.shape), **inputs)
 
