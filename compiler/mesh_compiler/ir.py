@@ -86,3 +86,13 @@ class Scheduled:
     engines: dict
     plan: object = None
     signature: bytes = None
+
+
+# design/synchronization-signature-change-request.md item 1; compiler/mesh_compiler/runtime.py Program;
+# compiler/mesh_compiler/signature.py handed
+def call(scheduled, machine):
+    local = [processor for processor in scheduled.inputs if scheduled.machines[processor] == machine]
+    caller = scheduled.output_processor if scheduled.output_processor in local else next(iter(local), None)
+    others = [processor for processor in local if processor != caller]
+    started = scheduled.plan is not None
+    return caller, others, others if caller != scheduled.output_processor or started else [], started

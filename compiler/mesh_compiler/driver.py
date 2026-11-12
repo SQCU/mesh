@@ -25,8 +25,9 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
     modules, plan = schedule(graph, cost, between, machines,
                              {key for kind, key in exported.outputs if key is not None})
     inputs, feedforward = argument_buffers(modules, output_processor)
-    return Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward,
-                     between, engines, plan)
+    scheduled = Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward,
+                          between, engines, plan)
+    return dataclasses.replace(scheduled, signature=signature(scheduled)["record"])
 
 
 def lowered(scheduled, lowerings):

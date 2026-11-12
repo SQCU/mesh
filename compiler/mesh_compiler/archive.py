@@ -1,6 +1,7 @@
 # design/data-flow.md
 import copy
 import dataclasses
+import hashlib
 import json
 import operator
 import pathlib
@@ -60,6 +61,7 @@ def save(directory, scheduled):
         "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
         "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex()},
+        "signature": scheduled.signature and hashlib.sha256(scheduled.signature).hexdigest(),
         "blocks": {channel_of(node): [node.meta[key] for key in BLOCK] for module in scheduled.modules.values()
                    for node in module.graph.nodes if node.target is RECV and "counts" in node.meta},
         "subarrays": {channel_of(node): [node.meta[key] for key in SUBARRAY] for module in scheduled.modules.values()

@@ -26,8 +26,8 @@ class Program:
         machine = machines.pop()
         inputs = {processor: names for processor, names in scheduled.inputs.items()
                   if scheduled.machines[processor] == machine}
-        self.caller = self.output_processor if self.output_processor in inputs else next(iter(inputs), None)
-        self.joined = self.caller != self.output_processor or bool(self.executions)
+        self.caller, others, joined, _ = ir.call(scheduled, machine)
+        self.joined = bool(joined)
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         self.arguments = {
@@ -38,8 +38,7 @@ class Program:
             for position, name in enumerate(names):
                 self.positions.setdefault(name, []).append((processor, position))
         self.key_of = {key: name for name, (key, _) in self.exported.state.items()}
-        self.argument_queues = {processor: SimpleQueue() for processor in inputs
-                                if processor != self.caller}
+        self.argument_queues = {processor: SimpleQueue() for processor in others}
         self.finished = SimpleQueue()
         for processor in self.argument_queues:
             Thread(target=self.run, args=(processor,), daemon=True).start()

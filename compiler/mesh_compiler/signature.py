@@ -4,7 +4,7 @@ import sys
 
 import torch
 
-from .ir import RECV, SEND, channel_of
+from .ir import RECV, SEND, call, channel_of
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -46,22 +46,18 @@ def torch_run(module):
 
 # compiler/mesh_compiler/runtime.py Program; compiler/mesh_compiler/bridge.py Published
 def handed(records, scheduled):
-    order, started = list(scheduled.devices), {p for _, sender, receiver, *_ in scheduled.carried for p in (sender, receiver)}
-    made, across = {}, []
+    order, made, across = list(scheduled.devices), {}, []
     for place, machine in enumerate(dict.fromkeys(scheduled.machines.values())):
-        local = [p for p in scheduled.inputs if scheduled.machines[p] == machine]
-        caller = scheduled.output_processor if scheduled.output_processor in local else local[0]
-        others = [p for p in local if p != caller]
-        joined = others * (caller != scheduled.output_processor or bool(scheduled.carried))
+        caller, others, joined, started = call(scheduled, machine)
         finished = scheduled.channels + len(order) + place
-        for processor in local:
+        for processor in (p for p in scheduled.inputs if p == caller or p in others):
             record, queue = records[processor], scheduled.channels + order.index(processor)
             last = len(record["tasks"]) + 1
             first = [("host", "host_wait", 0, queue, 1, 1)]
             after = [("host", "host_signal", last, finished, len(joined), k + 1)
                      for k, other in enumerate(joined) if other == processor]
             if processor == caller:
-                first = [("host", "bridge_start", 0, mesh_graph.PLAN_SUBMISSION, 1, 1)] * bool(started & set(local))
+                first = [("host", "bridge_start", 0, mesh_graph.PLAN_SUBMISSION, 1, 1)] * started
                 first += [("host", "host_signal", 0, scheduled.channels + order.index(p), 1, 1) for p in others]
                 after = [("host", "host_wait", last, finished, len(joined), k + 1) for k in range(len(joined))]
             made[processor] = {
@@ -77,9 +73,9 @@ def handed(records, scheduled):
 def operands(scheduled, functions=None, executions=1, stored=()):
     functions = functions or scheduled.modules
     channels, machines = ends(scheduled), list(dict.fromkeys(scheduled.machines.values()))
-    carried = {channel: place for place, (channel, *_) in enumerate(scheduled.carried)}
+    carried = {channel: place for place, channel in enumerate(scheduled.plan.channels if scheduled.plan else ())}
     records, processors, lane, threads = {}, [], {}, dict.fromkeys(machines, 0)
-    for processor in scheduled.devices:
+    for processor in (p for p in scheduled.devices if p in scheduled.modules):
         module = scheduled.modules[processor]
         function = functions.get(processor, module)
         records[processor] = function.record if hasattr(function, "record") else torch_run(
@@ -116,7 +112,8 @@ def operands(scheduled, functions=None, executions=1, stored=()):
               for channel, end in sorted(channels.items())] + [(holder[a], holder[b]) for a, b in handoffs]
     across += [(first[processor] + a, first[processor] + b)
                for processor, record in records.items() for a, b in record["dependences"]]
-    dependences = [mesh_graph.Dependence(a, b, 0) for a, b in mesh_graph.unrolled(count, across, executions)]
+    dependences = [mesh_graph.Dependence(a, b, 0)
+                   for a, b in mesh_graph.unrolled(count, [(a, b, 0) for a, b in across], executions)]
     tasks, operations = [], []
     for execution in range(executions):
         base = execution * count
