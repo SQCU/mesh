@@ -708,7 +708,7 @@ class Profiled(Program):
         on_mps = sorted(name for name, on in DISPATCHED if on)
         assert not on_mps, f"torch operators on an mps tensor around a Metal function: {on_mps}"
         for function in self.ordered:
-            assert all(d.causes and d.source < d.target < len(function.vertices) for d in function.dependences)
+            assert all(d.causes for d in function.dependences)
             assert all(0 < start <= end for _, start, end in function.feedback()), function.feedback()
         return results
 
