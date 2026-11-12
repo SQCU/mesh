@@ -32,6 +32,7 @@ MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, A
           ATEN.full_like.default, ATEN.where.self}
 STRIPED = "striped"
 CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format
+COPY, FILL, STRIDED = ATEN.copy_.default, ATEN.fill_.Scalar, ATEN.as_strided.default
 
 
 def operands(node):
@@ -64,7 +65,8 @@ def evaluated(node, processor):
                 copied = call(node.graph, CLONE, (held,), processor, memory_format=torch.contiguous_format, out=out)
             node.args = (copied, *node.args[1:])
             return evaluated(node, processor)
-        node.meta.update(processor=processor, val=node.target(*arguments[0], **arguments[1]))
+        with torch.set_grad_enabled(written(node) is None):
+            node.meta.update(processor=processor, val=node.target(*arguments[0], **arguments[1]))
     return node
 
 
@@ -116,18 +118,67 @@ def based(node, read):
     return base, first
 
 
-# design/problems-of-14b9a757-change-request.md item 1 step 1, item 2 and item 4 step 4; MPI 4.1, section 7.7, in place
-def destined(node):
+# ExecuTorch documentation, Concepts, Out variant
+def outward(target):
+    packet = getattr(target, "overloadpacket", None)
+    if packet is None:
+        return None
+    takes = [(a.name, str(a.type)) for a in target._schema.arguments]
+    found = [getattr(packet, name) for name in packet.overloads()]
+    return next((o for o in found if len(o._schema.returns) == 1 and o._schema.arguments[-1].name == "out" and [
+        (a.name, str(a.type)) for a in o._schema.arguments[:-1]] == takes), None)
+
+
+# design/problems-of-14b9a757-change-request.md items 1, 2, 4 and 5; MPI 4.1, sections 7.7 and 7.8
+def blocks(node):
+    extents = shape(node)
     if node.target is CAT:
-        value = node.meta["val"]
-        along, at = (*node.args, 0)[1] % value.dim(), 0
-        for held in node.args[0]:
-            if node.args[0].count(held) == 1:
-                yield held, at * value.stride(along)
-            at += shape(held)[along]
-    elif node.target is PAD and (*node.args, 0)[2] == 0 and min(node.args[1]) >= 0:
-        value = node.meta["val"]
-        yield node.args[0], sum(low * value.stride(value.dim() - 1 - d) for d, low in enumerate(node.args[1][::2]))
+        along = (*node.args, 0)[1] % len(extents)
+        edges = list(itertools.accumulate((shape(held)[along] for held in node.args[0]), initial=0))
+        return [(held, along, low, high) for held, low, high in zip(node.args[0], edges, edges[1:])]
+    lows, fill = node.args[1][::2], (*node.args, 0)[2]
+    wide = [d for d in range(len(node.args[1]) // 2) if node.args[1][2 * d] or node.args[1][2 * d + 1]]
+    if len(wide) != 1 or min(node.args[1]) < 0:
+        return []
+    along, low = len(extents) - 1 - wide[0], lows[wide[0]]
+    high = low + shape(node.args[0])[along]
+    return [(fill, along, 0, low), (node.args[0], along, low, high), (fill, along, high, extents[along])]
+
+
+def buffered(graph, node, position):
+    found, processor, value = blocks(node), node.meta["processor"], node.meta["val"]
+    if not found:
+        return
+    sizes, strides, held = list(value.shape), list(value.stride()), [block[0] for block in found]
+    direct = {n for n in held if isinstance(n, torch.fx.Node) and n.op == "call_function" and n.target not in (
+        RECV, operator.getitem) and held.count(n) == 1 and view(n) is None and isinstance(
+            n.meta["val"], torch.Tensor) and outward(n.target) is not None}
+    zeros = {n for n in held if isinstance(n, torch.fx.Node) and n.target is ZEROS and list(n.users) == [node]}
+    found = [(0 if block[0] in zeros else block[0], *block[1:]) for block in found]
+    first = min((n for n in direct), key=position.__getitem__, default=node)
+    with graph.inserting_before(first):
+        buffer = constant(graph, EMPTY, (sizes,), node, processor, dtype=value.dtype)
+    wrote = []
+    for source, along, low, high in found:
+        if low == high:
+            continue
+        with graph.inserting_before(source if source in direct else node):
+            window = call(graph, SLICE, (buffer, along, low, high), processor)
+            if source in direct:
+                source.target, source.kwargs = outward(source.target), {**source.kwargs, "out": window}
+                wrote.append(evaluated(source, processor))
+            else:
+                wrote.append(call(graph, COPY if isinstance(source, torch.fx.Node) else FILL, (window, source),
+                                  processor))
+    with graph.inserting_before(node):
+        whole = buffer
+        for after in wrote:
+            sized = call(graph, STRIDED, (after, sizes, [0] * len(sizes), after.meta["val"].storage_offset()), processor)
+            whole = call(graph, ATEN.view_as.default, (whole, sized), processor)
+    whole.meta = {**node.meta, **whole.meta}
+    node.replace_all_uses_with(whole)
+    for unread in (node, *zeros):
+        graph.erase_node(unread)
 
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4 and 6, and item 8, step 4
@@ -141,12 +192,8 @@ def views(graph):
             node.meta["val"] = node.args[0].meta["val"][node.args[1]]
     mesh_graph.forward(list(graph.nodes), lambda n: [n for n in [view(n)] if n is not None], based)
     for node in graph.nodes:
-        for held, offset in destined(node):
-            if (held.op == "call_function" and held.target is not operator.getitem and len(held.users) == 1
-                    and not {"view", "out"} & held.meta.keys()
-                    and isinstance(held.meta["val"], torch.Tensor)):
-                held.meta["to" if held.target is RECV else "out"] = (
-                    node.name, offset, shape(held), tuple(node.meta["val"].stride()))
+        if node.target is COPY and node.args[1].target is RECV and len(node.args[1].users) == 1:
+            node.args[1].meta["to"] = node.meta["out"]
 
 
 # design/unequal-shards-change-request.md items 1, 13 and 15
@@ -724,6 +771,7 @@ def place(graph_module, placement):
     graph_module = copy.deepcopy(graph_module)
     graph = graph_module.graph
     nodes = list(graph.nodes)
+    exported = {n.name for n in nodes}
     placed = [n for n in nodes if n.op != "placeholder"]
     stated = {n: placement(n) for n in placed if n.target is not operator.getitem}
     stated.update((n, placement(n)) for n in nodes if n.op == "placeholder")
@@ -767,9 +815,12 @@ def place(graph_module, placement):
     channels = 0
     for node in placed:
         channels += insert_send_recv(graph, node, channels)
-    for node in graph.nodes:
+    position = {n: at for at, n in enumerate(graph.nodes)}
+    for node in list(graph.nodes):
         node.meta.pop("blocks", None)
         node.meta.pop("collectives", None)
+        if node.target in (CAT, PAD) and node.meta.get("of", node.meta.get("constant", node.name)) not in exported:
+            buffered(graph, node, position)
     views(graph)
     graph_module.recompile()
     return graph_module, placed[-1].meta["processor"], channels
