@@ -6,7 +6,7 @@ import re
 import sys
 
 LOG = '/Users/mdot/metal-microbench/output_data/agent-brief-warnings.jsonl'
-DIRECTION = re.compile(r'Read (/\S+?)(, [^.\n]{1,120})?( and act on it)?\.')
+DIRECTION = re.compile(r'Read (/\S+?)(, (item|section|lines) [A-Za-z0-9.\-]+)? and act on it\.')
 FIELDS = {'Agent': ('prompt',), 'Task': ('prompt',), 'SendMessage': ('message',), 'Workflow': ('script', 'args')}
 
 
@@ -43,4 +43,9 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                                                 'permissionDecisionReason': f'the brief gate failed: {error}'}}))
+        sys.exit(0)

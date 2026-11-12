@@ -175,7 +175,8 @@ turns says so.
 > is there any mechanism e.g. a system prompt to induce subagnets to immediately fail and log to a file as a warning if they are given 'agent briefs' or any inlined instructions or contents *at all* besides directions to read files using file read tools
 
 - **Rule:** bin/mesh-brief-gate.py runs before each Agent, SendMessage and Workflow call of a session in either
-  repository. Where the call's text holds a line that is not `Read /absolute/path, item N and act on it.` the call is
+  repository. Where the call's text holds a line that is not `Read /absolute/path and act on it.`, with `, item N`,
+  `, section N` or `, lines N-M` allowed after the path, the call is
   refused before any agent starts, and a warning is appended to metal-microbench
   `output_data/agent-brief-warnings.jsonl`. No model reads anything. The form of the permitted line is Claude's
   reading of the turn and of the operator's turn of 2026-11-08: "why are you 'descirbing' anything in 'briefs' instead
