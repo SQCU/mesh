@@ -25,7 +25,7 @@ TYPES = {torch.float32: "float", torch.float16: "half", torch.int64: "long", tor
 NATIVE_TYPES = {**TYPES, torch.float64: "double", torch.int16: "short", torch.int8: "char"}
 ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
 COMMIT, WAIT, CHECK = mesh_metal4.COMMIT, mesh_metal4.WAIT, mesh_metal4.CHECK
-QUEUE, THREAD, KERNEL, SENT, ARRIVED, FEEDBACK = "queue", "host", "kernel", "send", "recv", "<feedback>"
+QUEUE, THREAD, SENT, ARRIVED, FEEDBACK = "queue", "host", "send", "recv", "<feedback>"
 TILE, SIMDGROUPS, GRAIN = 32, 4, 1024
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
@@ -340,10 +340,7 @@ class Lowering:
                 self.issuing = node
                 self.results = tuple(self.escape(r) if isinstance(r, torch.fx.Node) else r for r in node.args[0])
                 self.flush()
-                self.host(node, [(r, False) for r in self.results if isinstance(r, View)])
-                self.hosted.append((len(self.vertices), []))
-                self.vertices.append((FEEDBACK,))
-                self.ordered()
+                self.ordered(self.host(node, [(r, False) for r in self.results if isinstance(r, View)]))
             elif node.op == "call_function" and (
                     node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(node.target, set())):
                 self.missing.append(str(node.target))
@@ -988,19 +985,18 @@ class Lowering:
     # design/torch-source-lowering-change-request.md, item 3; design/compilation-composition-change-request.md, items 2
     # and 6; design/synchronization-signature-change-request.md, item 1; Bhattacharyya, Sriram and Lee, IEEE
     # Trans. Signal Processing 45(6), 1997; Apple, MTL4CommandEncoder.h
-    def ordered(self):
+    def ordered(self, output):
         segments = [entry[1] for entry in self.program if entry[0] is COMMIT]
+        supplied = self.read(segments)
         within = {step.vertex: k for k, segment in enumerate(segments) for step in segment.steps}
         accesses = [(step.vertex, view, write) for segment in segments for step in segment.steps
                     for view, write in step.accesses]
         accesses += [(vertex, view, write) for vertex, views in self.hosted for view, write in views]
         commit = [within.get(vertex) for vertex in range(len(self.vertices))]
-        last = len(self.vertices) - 1
         edges, causes, redundant = mesh_graph.dependences_supplied(len(self.vertices), [
             (view.storage, view.offset * view.dtype.itemsize, view.dtype.itemsize,
              [(n, step * view.dtype.itemsize) for n, step in zip(view.shape, view.stride)], vertex, write)
-            for vertex, view, write in accesses if all(view.shape)],
-            [(segment.steps[-1].vertex, last) for segment in segments])
+            for vertex, view, write in accesses if all(view.shape)], supplied)
         self.dependences = [Dependence(a, b, causes[a, b]) for a, b in edges]
         found = {(d.source, d.target): d for d in self.dependences}
         kept = [edge for edge, covered in zip(edges, redundant) if not covered]
@@ -1014,8 +1010,9 @@ class Lowering:
             segment.arrived = sorted(arrivals.get(k, ()))
         program, waited, task, tasks, operations, arrival = [], set(), {}, [], [], False
         fenced = {first for first, _ in fences}
-        for entry in self.program + [(WAIT, None, None, last - 1), (WAIT, None, None, last)]:
-            due = [] if entry[0] is COMMIT else range(len(segments)) if entry[3] == last else sorted(
+        readers = {reader for _, reader in supplied}
+        for entry in self.program + [(WAIT, None, None, vertex) for vertex in (output, *sorted(readers))]:
+            due = [] if entry[0] is COMMIT else range(len(segments)) if entry[3] in readers else sorted(
                 waits.get(entry[3], {}))
             due = [first for first in due if first not in waited]
             waited.update(due)
@@ -1090,7 +1087,13 @@ class Metal(Lowering):
         return made + [(QUEUE, "submit", task, None, 0, 1), (QUEUE, "host_signal", task, ("event", at), 1, 1)]
 
     def signal(self, task, vertex):
-        return [(QUEUE, "host_signal", task, ("arrived", vertex), 1, 1)]
+        return [(THREAD, "host_signal", task, ("arrived", vertex), 1, 1)]
+
+    # design/integration-finishing-change-request.md, item 7; rdma/mesh-metal4.m mesh_metal4_commit, its record
+    def read(self, segments):
+        self.hosted.append((len(self.vertices), []))
+        self.vertices.append((FEEDBACK,))
+        return [(segment.steps[-1].vertex, len(self.vertices) - 1) for segment in segments]
 
     def awaited(self, due, task):
         return [(THREAD, "host_wait", task, ("event", first), 1, 1) for first in due]
@@ -1258,7 +1261,10 @@ class Native(Lowering):
     types, lane, owning = NATIVE_TYPES, THREAD, False
 
     def committed(self, segment, task, at, fenced):
-        return [(KERNEL, "pass_barrier", task, None, 0, 0)] * sum(segment.barriers)
+        return [(THREAD, "pass_barrier", task, None, 0, 0)] * sum(segment.barriers)
+
+    def read(self, segments):
+        return []
 
     def signal(self, task, vertex):
         return []
