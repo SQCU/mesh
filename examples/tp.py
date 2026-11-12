@@ -113,7 +113,7 @@ class Timed(torch.fx.Interpreter):
         return result
 
 
-# design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/docs/measurement.md, "Preregistered budget"
+# design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/output_data/window-20260928/bandwidth.json
 def chosen(model, inputs, placement, args, heads):
     if not args.upper:
         return args.units
@@ -158,7 +158,7 @@ def arguments(description):
     parser.add_argument('--units', type=json.loads, default={})
     parser.add_argument('--solve', action='store_true')
     parser.add_argument('--upper', type=float, nargs='+')
-    parser.add_argument('--comm', type=float, default=1 / 6.45e9)
+    parser.add_argument('--comm', type=float, default=1.0752e-10)
     args = parser.parse_args()
     if args.solve and not args.upper:
         parser.error('--solve takes its bounds from --upper')
