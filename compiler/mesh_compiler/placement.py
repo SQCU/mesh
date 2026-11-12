@@ -11,7 +11,7 @@ import torch
 from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
 
-from .ir import RECV, SEND
+from .ir import PAGES, RECV, SEND
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -300,6 +300,8 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             blocks = [(dimension, j, given, displs[:len(given)])] * len(pieces)
         for piece, block in zip(pieces, blocks):
             piece.meta.setdefault("blocks", {})[processor] = block
+            if held == dimension is not None:
+                piece.meta.setdefault("collectives", {})[processor] = "alltoall", nodes[0].name
         arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
                        if extents == STRIPED else call(graph, CAT, (pieces, held), processor))
         if wide and shape(arrived[-1])[dimension] < max(sizes):
@@ -365,7 +367,7 @@ def windows(node):
             fill = -math.inf if dtype.is_floating_point else torch.iinfo(dtype).min
             if any(user.args[1] for user in node.users):
                 return {}
-        elif read.get("divisor_override") is not None or not read.get("count_include_pad", True) and any(low):
+        elif read.get("divisor_override") is None and not read.get("count_include_pad", True) and any(low):
             return {}
         if read.get("ceil_mode", False):
             return {}
@@ -389,7 +391,7 @@ def unpadded(node, at):
 
 # Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.3 and appendix A.2; design/unequal-shards-change-request.md item 10;
 # design/problems-of-14b9a757-change-request.md items 4 and 5
-def halos(graph, value, window, dimension, sizes, processors):
+def halos(graph, value, window, dimension, sizes, processors, name):
     (span, stride, low, fill), (held, extents, holders, nodes) = window, value
     size = shape(nodes[0])[dimension] if held is None else sum(extents)
 
@@ -430,6 +432,7 @@ def halos(graph, value, window, dimension, sizes, processors):
                 elif width > extent:
                     node = call(graph, PAD, (node, [0, 0] * (rank - 1 - dimension) + [
                         width - extent, 0][::1 if p < q else -1], 0), processors[p])
+                node.meta.setdefault("collectives", {})[processor] = "permute", f"{name}:{dimension}:{q - p}"
                 if shared[q][p] < width:
                     skip = width - cover[q][p] if p < q else first
                     node = call(graph, SLICE, (node, dimension, skip, skip + shared[q][p]), processor)
@@ -594,7 +597,7 @@ def partitioned(graph, node, held, want, replaced):
             value = *value[:3], reshard(graph, plainly(graph, held[0]), *value[:3], True)
         elif value[0] is not None:
             value = *value[:3], [own(graph, n, along, value[1], k) for k, n in enumerate(value[3])]
-        regions, kept = halos(graph, value, window, along, sizes, processors)
+        regions, kept = halos(graph, value, window, along, sizes, processors, node.name)
     shards, whole = [], along >= 0 and (sizes == STRIPED or sum(sizes) == out[along])
     queries = ranges(sizes, out[along], len(processors)) if whole else ()
     joined = [v[0] is not None and along not in row and row[v[0]] is not None and
@@ -689,6 +692,9 @@ def partitioned(graph, node, held, want, replaced):
             column = reshard(graph, (None, None, (processor,), [plain(graph, shard, processor, out)]), *to, True)
             for keeper, part in zip(to[2], column):
                 parts[keeper].append(part)
+    for k, held_ in enumerate(parts.values()):
+        for part in held_:
+            part.meta.setdefault("collectives", {})[to[2][k]] = "reduce", f"{node.name}:{k}"
     return *to, [padded(graph, functools.reduce(lambda a, b: call(graph, ADD, (a, b), keeper), held_), to[0], to[1],
                         k, keeper) if to[0] is not None else functools.reduce(
                             lambda a, b: call(graph, ADD, (a, b), keeper), held_)
@@ -744,6 +750,7 @@ def place(graph_module, placement):
         channels += insert_send_recv(graph, node, channels)
     for node in graph.nodes:
         node.meta.pop("blocks", None)
+        node.meta.pop("collectives", None)
     views(graph)
     graph_module.recompile()
     return graph_module, placed[-1].meta["processor"], channels
@@ -760,6 +767,15 @@ def insert_send_recv(graph, node, first):
     value = node.meta.get("val")
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
+    if not value.numel():
+        for processor, users in away.items():
+            with graph.inserting_before(users[0]):
+                empty = constant(graph, ATEN.full.default, (list(value.shape), 0), node, processor, dtype=value.dtype)
+            for user in users:
+                user.replace_input_with(node, empty)
+        if node.target is operator.getitem and not node.users:
+            graph.erase_node(node)
+        return 0
     # design/unequal-shards-change-request.md item 12; MPI 4.1, section 6.1.3
     cuts = mesh_graph.chain(node, lambda n: n.args[0] if n.target is SLICE and (*n.args, 1)[4] == 1 and n.args[
         0].meta.get("processor", here) == here else None)
@@ -773,8 +789,12 @@ def insert_send_recv(graph, node, first):
         with graph.inserting_before(users[0]):
             arrived = graph.call_function(RECV, (channel,))
             arrived.meta.update(processor=processor, val=value)
+        # design/aot-compilation-change-request.md A4 and appendix item 5; design/plan-to-bridge-change-request.md R4
+        collective = node.meta.get("collectives", {}).get(processor, ("broadcast", node.name))
+        if collective[0] == "reduce":
+            arrived.meta["consumer"] = PAGES
         for end in (sent, arrived):
-            end.meta.update(zip(("sizes", "subsizes", "starts"), subarray))
+            end.meta.update(zip(("sizes", "subsizes", "starts"), subarray), collective=collective)
         if processor in node.meta.get("blocks", ()):
             for end in (sent, arrived):
                 end.meta.update(zip(("dimension", "block", "counts", "displs"), node.meta["blocks"][processor]))

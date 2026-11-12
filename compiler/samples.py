@@ -239,6 +239,11 @@ class Windows(nn.Module):
         return nn.functional.avg_pool2d(y, 2)
 
 
+class Divided(nn.Module):
+    def forward(self, x):
+        return nn.functional.avg_pool2d(x.sin(), 3, stride=2, padding=1, count_include_pad=False, divisor_override=5)
+
+
 class Wide(nn.Module):
     def __init__(self):
         super().__init__()
@@ -454,7 +459,7 @@ CASES = [
     ("python branch on tensor data", PythonBranch, [(r(3, 4),)], {"rejected": True}),
     ("input mutation", MutatesInput, [(r(3, 4),)], {"rejected": True}),
     ("megatron | 2 shards", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
-     {"processors": TWO, "sharded": True, "placement": lambda: tp.placement(SHARDS)}),
+     {"processors": TWO, "sharded": True, "collectives": {"reduce": 4}, "placement": lambda: tp.placement(SHARDS)}),
     ("megatron | units 1:3 and 3:1", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True,
       "placement": lambda: tp.placement(SHARDS, {"model_0": (1, 3), "model_1": (3, 1)})}),
@@ -471,7 +476,7 @@ CASES = [
     ("megatron | scores whole on p1", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: megatron_with({(BMM, (8, 8, 8)): (0, ("p1",), None)})}),
     ("megatron | resharded 1:1 to 1:3", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
-     {"processors": TWO, "sharded": True,
+     {"processors": TWO, "sharded": True, "collectives": {"reduce": 4, "alltoall": 2},
       "placement": lambda: megatron_with({(ATEN.sigmoid.default, (2, 8, 48)): (2, SHARDS, (1, 3))})}),
     ("flip of a sharded value | 1:2", Flipped, [(r(6, 4),)],
      {"processors": TWO, "sharded": True,
@@ -490,6 +495,9 @@ CASES = [
     ("windows | rows 1:6:1, halos padded", Windows, [(r(2, 3, 23, 9),)],
      {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6, "padded": 2},
       "placement": lambda: lambda node: (2, tuple(THREE), (1, 6, 1)) if node.name == "x" else "p0"}),
+    ("windows | pooling with a divisor, 3 shards", Divided, [(r(2, 3, 11, 6),)],
+     {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2}, "collectives": {"permute": 1},
+      "placement": lambda: lambda node: (2, tuple(THREE), None) if node.name == "x" else "p0"}),
     ("windows | 2 shards, input on p0", Windows, [(r(2, 3, 23, 9),)],
      {"processors": TWO, "sharded": True, "windows": {"shards": 8, "masked": 4, "views": 2},
       "placement": lambda: lambda node: (2, SHARDS, None) if node.name == "convolution" else "p0"}),
@@ -533,7 +541,7 @@ FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 proc
                "conv | conv on mps, rest cpu", "megatron | 2 shards")
 METAL_SIGNED = ("mlp | all on mps", "conv | conv on mps, rest cpu", "megatron | 2 shards, cpu/mps")
 KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
-OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance", "copied", "windows", "received")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance", "copied", "windows", "received", "collectives")
 
 
 def errors(reference, got):
@@ -558,7 +566,8 @@ CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scat
 PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
           ATEN.new_zeros.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
           ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
-          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.default}
+          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.default,
+          ATEN.full.default}
 BLOCK = ("dimension", "block", "counts", "displs")
 
 
@@ -641,10 +650,35 @@ def check_windows(scheduled, expected):
     assert +found == expected, f"windowed shards {dict(+found)}, not {expected}"
 
 
+# design/aot-compilation-change-request.md A4
+def check_collectives(scheduled, expected=None):
+    ends, kinds = {}, collections.defaultdict(set)
+    for processor, module in scheduled.modules.items():
+        for node in call_nodes(module.graph):
+            if ir.channel_of(node) is not None:
+                ends.setdefault(ir.channel_of(node), {})[node.target] = node
+    sources, readers = collections.defaultdict(set), collections.defaultdict(set)
+    for end in ends.values():
+        sent, arrived = end[ir.SEND], end[ir.RECV]
+        assert sent.meta["collective"] == arrived.meta["collective"], "a channel's two ends name two collectives"
+        assert arrived.meta["val"].numel(), "a channel for a value of no elements"
+        kind, identity = sent.meta["collective"]
+        value = sent.args[0].args[0] if copies(sent.args[0]) and sent.args[0].name != identity else sent.args[0]
+        kinds[kind].add(identity)
+        sources[kind, identity].add((sent.meta["processor"], value.name))
+        readers[kind, identity].add(arrived.meta["processor"])
+    assert all(len(found) == 1 for (kind, _), found in sources.items() if kind == "broadcast"), "a broadcast of two values"
+    assert all(len(found) == 1 for (kind, _), found in readers.items() if kind == "reduce"), "a reduction with two roots"
+    found = {kind: len(identities) for kind, identities in kinds.items() if kind != "broadcast"}
+    assert expected is None or found == expected, f"collectives {found}, not {expected}"
+
+
 def check_ir(scheduled, expect_on=None, sharded=False):
     exported = scheduled.exported.graph_module.graph
     assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
     original = {n.name: n.target for n in call_nodes(exported)}
+    unread = {n.name for n in call_nodes(exported) if (
+        isinstance(n.meta.get("val"), torch.Tensor) and not n.meta["val"].numel() and n.target.__name__ == "getitem")}
     where, added, sender, reader, ends, shards, replicated = {}, [], {}, {}, {}, {}, set()
     for processor, module in scheduled.modules.items():
         module.graph.lint()
@@ -700,7 +734,8 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         striped = any(n.target is SLICE and len(n.args) > 4 for n in nodes)
         assert striped or all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
         assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
-        assert where.keys() | shards.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
+        assert original.keys() - unread <= where.keys() | shards.keys() <= original.keys(), \
+            "an exported node is missing from the scheduled graphs"
         assert {n.target for n in added} <= PLACED, "a node that neither export nor a collective produced"
         sent = [end[ir.SEND].args[0] for end in ends.values()]
         values = {(sender[c], (v.args[0] if copies(v) else v).name, reader[c]) for c, v in zip(ends, sent)}
@@ -711,13 +746,17 @@ def check_ir(scheduled, expect_on=None, sharded=False):
                                     else n.all_input_nodes)
             assert any(n.op == "placeholder" for n in read), "a channel carries a value no input reaches"
     else:
-        assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
+        assert original.keys() - unread <= where.keys() <= original.keys(), \
+            "an exported node is missing from the scheduled graphs"
         where["output"] = scheduled.output_processor
-        pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
+        where.update((n.name, where[n.args[0].name]) for n in call_nodes(exported) if n.name not in where)
+        pairs = {(n.name, where[u.name], n.meta["val"].numel() > 0) for n in call_nodes(exported) for u in n.users
                  if where[u.name] != where[n.name] and n.name not in replicated and any(
                      m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes))}
-        assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
-        assert len(added) == 2 * scheduled.channels + len(copied), "a node that export did not produce"
+        empty = [n for n in added if n.target is ATEN.full.default and not n.meta["val"].numel()]
+        assert sum(held for _, _, held in pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
+        assert len(pairs) - scheduled.channels == len(empty), "a value of no elements read on another processor"
+        assert len(added) == 2 * scheduled.channels + len(copied) + len(empty), "a node that export did not produce"
     if len(scheduled.modules) == 1:
         assert not added and not Program(scheduled).argument_queues, "1-processor program differs"
 
@@ -909,6 +948,7 @@ def run_case(name, with_inductor):
     check_views(program, options.get("copied", 0), options.get("received", 0))
     if "windows" in options:
         check_windows(program, options["windows"])
+    check_collectives(program, options.get("collectives"))
     if name in SAVE:
         save_for_review(SAVE[name], program)
     results, dynamo, breaks = {}, "", 0
