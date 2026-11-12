@@ -9,9 +9,12 @@ TO_COPY = torch.ops.aten._to_copy.default
 HOST = torch.device("cpu")
 
 
-def moved(value, device):
-    with value.fake_mode:
-        return TO_COPY(value, device=device)
+def copied(graph, value, device, processor):
+    node = graph.call_function(TO_COPY, (value,), {"device": device})
+    with value.meta["val"].fake_mode:
+        arrives = TO_COPY(value.meta["val"], device=device)
+    node.meta.update(processor=processor, val=arrives)
+    return node
 
 
 def on_devices(graph_module, processors):
@@ -29,19 +32,15 @@ def on_devices(graph_module, processors):
             value, channel = node.args
             arrival = receiver[channel]
             away, there = processors[arrival.meta["processor"]]
-            if away != machine:
-                arrival.meta["val"] = moved(value.meta["val"], HOST)
-                if there != HOST:
-                    with graph.inserting_after(arrival):
-                        copy_ = graph.call_function(TO_COPY, (arrival,), {"device": there})
-                    arrival.replace_all_uses_with(copy_, lambda user: user is not copy_)
-                    copy_.meta.update(processor=arrival.meta["processor"],
-                                      val=moved(arrival.meta["val"], there))
-            elif there != device:
+            sent = there if away == machine else HOST
+            if sent != device:
                 with graph.inserting_before(node):
-                    copy_ = graph.call_function(TO_COPY, (value,), {"device": there})
-                copy_.meta.update(processor=node.meta["processor"], val=moved(value.meta["val"], there))
-                arrival.meta["val"] = copy_.meta["val"]
-                node.args = (copy_, channel)
+                    value = copied(graph, value, sent, node.meta["processor"])
+                arrival.meta["val"] = value.meta["val"]
+                node.args = (value, channel)
+            if there != sent:
+                with graph.inserting_after(arrival):
+                    landed = copied(graph, arrival, there, arrival.meta["processor"])
+                arrival.replace_all_uses_with(landed, lambda user: user is not landed)
     graph_module.recompile()
     return graph_module

@@ -47,6 +47,8 @@ def save(directory, scheduled):
         "inputs": scheduled.inputs,
         "channels": scheduled.channels,
         "feedforward": scheduled.feedforward,
+        "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
+                    for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
         "tokens": exported.tokens,
         "user_inputs": exported.user_inputs,
         "outputs": [[kind.name, key] for kind, key in exported.outputs],
@@ -92,5 +94,7 @@ def load(directory):
                         pytree.treespec_loads(about["out_spec"]))
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     modules = {processor: modules[processor] for processor in devices if processor in modules}
+    carried = [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
+               for channel, sender, receiver, dtype, shape, stride in about["carried"]]
     return Scheduled(exported, modules, devices, about["machines"], about["output_processor"], about["channels"],
-                     about["inputs"], about["feedforward"])
+                     about["inputs"], about["feedforward"], carried)

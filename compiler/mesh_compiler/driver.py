@@ -5,7 +5,7 @@ from .devices import on_devices
 from .export import export
 from .ir import Scheduled
 from .placement import place
-from .schedule import argument_buffers, schedule, unit_cost
+from .schedule import argument_buffers, carried, schedule, unit_cost
 
 
 def compile_module(module, args, processors, placement, cost=unit_cost, **export_options):
@@ -16,4 +16,5 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
     inputs, feedforward = argument_buffers(modules, output_processor)
     devices = {name: device for name, (_, device) in processors.items()}
     machines = {name: machine for name, (machine, _) in processors.items()}
-    return Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward)
+    return Scheduled(exported, modules, devices, machines, output_processor, channels, inputs, feedforward,
+                     carried(modules, machines))

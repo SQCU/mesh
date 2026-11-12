@@ -372,12 +372,14 @@ def check_ir(scheduled, expect_on=None):
     where["output"] = scheduled.output_processor
     pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
              if where[u.name] != where[n.name]}
-    crossing = [c for c in sender if scheduled.devices[sender[c]] != scheduled.devices[reader[c]]]
+    devices, machines, host = scheduled.devices, scheduled.machines, torch.device("cpu")
+    crossing = sum(devices[sender[c]] != devices[reader[c]] if machines[sender[c]] == machines[reader[c]]
+                   else (devices[sender[c]] != host) + (devices[reader[c]] != host) for c in sender)
     copies = [n for n in added if n.target is TO_COPY]
     assert sender.keys() == reader.keys() == set(range(scheduled.channels)), "channel numbering"
     assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
     assert all(sender[c] != reader[c] for c in sender), "a send and its recv on one processor"
-    assert len(copies) == len(crossing), "device copies differ from cross-device channels"
+    assert len(copies) == crossing, "device copies differ from cross-device channels"
     assert len(added) == 2 * scheduled.channels + len(copies), "a node that export did not produce"
     if len(scheduled.modules) == 1:
         assert not added and not Program(scheduled).argument_queues, "1-processor program differs"
@@ -614,13 +616,14 @@ def check_imports():
         assert "runtime" not in reach(module), f"{module} reaches the runtime"
     for module in lowerers | {"archive", "schedule", "placement", "devices", "export"}:
         assert reach(module) == {"ir"}, f"{module} imports {reach(module)}"
-    assert reach("bridge") == {"ir", "schedule"} and reach("runtime") == {"ir", "bridge", "schedule"}
-    tree = ast.parse((HERE / "mesh_compiler" / "runtime.py").read_text())
-    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-    imported |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
-    touched = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-    assert not imported & {"networkx", "torch.fx"} and not touched & {"graph", "nodes"}, \
-        "the runtime must not examine graphs"
+    assert not reach("bridge") and reach("runtime") == {"ir", "bridge"}
+    for name, attributes in (("runtime", {"graph", "nodes"}), ("bridge", {"graph", "modules"})):
+        tree = ast.parse((HERE / "mesh_compiler" / f"{name}.py").read_text())
+        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        imported |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+        touched = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert not imported & {"networkx", "torch.fx"} and not touched & attributes, \
+            f"{name} must not examine graphs"
     stages = compile_side | lowerers | {"runtime", "archive"}
     between = {(a, b) for a in stages for b in direct[a] & stages}
     assert between == {("driver", stage) for stage in compile_side - {"driver"}}, between
@@ -634,7 +637,7 @@ def check_imports():
                 assert not types, f"{path.stem} imports the type {types} from stage {source}"
     print("  ok: every stage module imports only ir, except driver, which imports the four")
     print("      compile stages for their functions, and the runtime, which imports the bridge")
-    print("      module for its channels; the runtime examines no graph")
+    print("      module for its channels; the runtime and the bridge module examine no graph")
 
 
 class Checked(nn.Module):
@@ -739,6 +742,7 @@ def between(machines, with_inductor):
             print(f"{name:34} SKIP (no mps)")
             continue
         module, calls, scheduled = build(name, machines)
+        check_ir(scheduled, options.get("expect_on"))
         cells = []
         for path, make in variants(scheduled, with_inductor).items():
             if make is None:
@@ -760,8 +764,7 @@ def between(machines, with_inductor):
             cells.append(f"{path} {text}")
             if isinstance(result, Exception):
                 print(f"    {path}: {type(result).__name__}: {' '.join(str(result).split())[:300]}")
-        carried = len(bridge.carried(scheduled))
-        print(f"{name:34} {scheduled.channels:3d} channels, {carried:3d} between machines  "
+        print(f"{name:34} {scheduled.channels:3d} channels, {len(scheduled.carried):3d} between machines  "
               + "  ".join(cells), flush=True)
     sys.exit(1 if failed else 0)
 

@@ -56,3 +56,4 @@ class Scheduled:
     channels: int
     inputs: dict
     feedforward: list
+    carried: list

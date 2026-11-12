@@ -6,7 +6,7 @@ import torch
 from torch.export.graph_signature import OutputKind
 from torch.utils import _pytree as pytree
 
-from . import bridge, ir
+from . import ir
 
 
 class Program:
@@ -15,7 +15,12 @@ class Program:
         self.output_processor = scheduled.output_processor
         self.functions = functions or scheduled.modules
         self.feedforward = set(scheduled.feedforward)
-        self.channels, self.received, machine = bridge.channels(scheduled)
+        self.channels, self.received = [SimpleQueue() for _ in range(scheduled.channels)], {}
+        machines = set(scheduled.machines.values())
+        if len(machines) > 1:
+            from . import bridge
+            machines = {bridge.channels(scheduled, self.channels, self.received)}
+        machine = machines.pop()
         inputs = {processor: names for processor, names in scheduled.inputs.items()
                   if scheduled.machines[processor] == machine}
         self.caller = self.output_processor if self.output_processor in inputs else next(iter(inputs))

@@ -1,4 +1,5 @@
 # design/the-compiler.md
+import atexit
 import ctypes as C
 import errno
 import itertools
@@ -7,12 +8,8 @@ import pathlib
 import struct
 import sys
 from dataclasses import dataclass
-from queue import SimpleQueue
 
 import torch
-
-from .ir import RECV, SEND
-from .schedule import channel_ends
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -24,14 +21,16 @@ SYSTEM.os_sync_wait_on_address.argtypes = [C.c_void_p, C.c_uint64, C.c_size_t, C
 SYSTEM.os_sync_wake_by_address_all.argtypes = [C.c_void_p, C.c_size_t, C.c_uint32]
 SHARED = 1
 ROOM = 2
-CONTEXT, PUBLISHED = mesh.Context(), itertools.count(1)
+CONTEXT, PUBLISHED, SENDING = mesh.Context(), itertools.count(1), []
 
 
 @dataclass
 class Plan:
     channel: int
     receiver: str
-    value: torch.Tensor
+    dtype: torch.dtype
+    shape: list
+    stride: list
     ends: list
     direction: int
     row: int
@@ -40,21 +39,6 @@ class Plan:
     size: int
     base: int = 0
     image: bytearray = None
-
-
-def carried(scheduled):
-    ends = channel_ends(scheduled.modules)
-    found = []
-    for channel in sorted(ends):
-        (sender, _), (receiver, arrival) = ends[channel][SEND], ends[channel][RECV]
-        if scheduled.machines[sender] != scheduled.machines[receiver]:
-            found.append((channel, sender, receiver, arrival.meta["val"]))
-    return found
-
-
-def extent(value):
-    reach = 1 + sum((n - 1) * s for n, s in zip(value.shape, value.stride()))
-    return value.dtype.itemsize * reach if value.numel() else 0
 
 
 def align(at):
@@ -67,13 +51,13 @@ def entries(scheduled, nodes, header, group):
     arena = (header.length - header.data_off) // quantum * header.block
     window = min(header.wire_pages, arena)
     plans, row, wire = [], 0, 0
-    for channel, sender, receiver, value in carried(scheduled):
+    for channel, sender, receiver, dtype, shape, stride in scheduled.carried:
         ends = [index[scheduled.machines[processor]] for processor in (sender, receiver)]
-        size = extent(value)
+        size = dtype.itemsize * (1 + sum((n - 1) * s for n, s in zip(shape, stride))) * all(shape)
         blocks = -(-size // quantum)
         direction = ends.index(nodes.self) if nodes.self in ends else None
         held = blocks * (direction is not None)
-        plans.append(Plan(channel, receiver, value, ends, direction, row, wire, blocks, size))
+        plans.append(Plan(channel, receiver, dtype, shape, stride, ends, direction, row, wire, blocks, size))
         row, wire = row + held, wire + held * header.block
     local = wire if window == arena else window
     for place, plan in enumerate(plans):
@@ -122,8 +106,17 @@ def entries(scheduled, nodes, header, group):
     return plans, header.data_off + local * header.pgsz, table
 
 
+def settle():
+    for channel in SENDING:
+        channel.settle()
+
+
+atexit.register(settle)
+
+
 def publish(header, plans, at, table, group, count):
     algo = mesh.Algo.from_address(CONTEXT.M + header.algo_off)
+    settle()
     mesh.LIB.mesh_retire(CONTEXT.M, CONTEXT.client)
     while True:
         released = algo.released
@@ -149,21 +142,27 @@ class Carried:
         self.count = C.c_uint64.from_address(CONTEXT.M + self.state.counts)
         section = mesh.Section(plan.row, plan.blocks * header.block, plan.size, 1, plan.blocks)
         address = mesh.LIB.mesh_section_address(C.byref(CONTEXT), section, 0)
-        self.flat = torch.empty(0, dtype=plan.value.dtype)
+        self.flat = torch.empty(0, dtype=plan.dtype)
         if plan.size:
-            self.flat = torch.frombuffer((C.c_byte * plan.size).from_address(address), dtype=plan.value.dtype)
-        self.pages = self.flat.as_strided(tuple(plan.value.shape), plan.value.stride())
+            self.flat = torch.frombuffer((C.c_byte * plan.size).from_address(address), dtype=plan.dtype)
+        self.pages = self.flat.as_strided(plan.shape, plan.stride)
+
+    def settle(self):
+        execution = self.state.submissions - 1
+        while execution >= 0:
+            sent = mesh.LIB.mesh_host_sent(C.byref(CONTEXT), self.plan, 0, execution)
+            if sent == mesh.FAILED:
+                raise OSError(errno.ECANCELED, f"the bridge did not carry execution {execution} of a channel")
+            if sent:
+                break
 
     def put(self, value):
         execution = self.state.submissions
+        self.settle()
         self.flat.copy_(value.as_strided(self.flat.shape, (1,)))
         mesh.LIB.mesh_host_publish(C.byref(CONTEXT), self.plan, 0, execution)
         mesh.LIB.mesh_host_started(C.byref(CONTEXT), self.plan, 0, execution)
         mesh.check(mesh.LIB.mesh_transfers_start(C.byref(CONTEXT), self.plan, execution + 1))
-        while not (sent := mesh.LIB.mesh_host_sent(C.byref(CONTEXT), self.plan, 0, execution)):
-            pass
-        if sent == mesh.FAILED:
-            raise OSError(errno.ECANCELED, f"the bridge did not carry execution {execution} of a channel")
 
     def start(self):
         mesh.LIB.mesh_host_started(C.byref(CONTEXT), self.plan, 0, self.state.executions)
@@ -181,11 +180,7 @@ class Carried:
         return self.pages
 
 
-def channels(scheduled):
-    queues, received = [SimpleQueue() for _ in range(scheduled.channels)], {}
-    machines = set(scheduled.machines.values())
-    if len(machines) == 1:
-        return queues, received, machines.pop()
+def channels(scheduled, queues, received):
     mesh.check(mesh.LIB.mesh_attach(C.byref(CONTEXT), None))
     nodes, header = mesh.Nodes(), mesh.Header.from_address(CONTEXT.M)
     mesh.check(mesh.LIB.mesh_nodes_read(C.byref(CONTEXT), C.byref(nodes)))
@@ -193,9 +188,12 @@ def channels(scheduled):
     plans, at, table = entries(scheduled, nodes, header, group)
     if plans:
         publish(header, plans, at, table, group, nodes.count)
+    SENDING.clear()
     for plan in plans:
         if plan.direction is not None:
             queues[plan.channel] = Carried(plan, header)
+        if plan.direction == mesh.SEND:
+            SENDING.append(queues[plan.channel])
         if plan.direction == mesh.RECEIVE:
             received.setdefault(plan.receiver, []).append(queues[plan.channel])
-    return queues, received, nodes.node[nodes.self]
+    return nodes.node[nodes.self]

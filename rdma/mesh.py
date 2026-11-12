@@ -23,18 +23,7 @@ class Context(C.Structure):
                 ('start', Q)]
 
 
-# mesh.h struct hdr, its first words (magic, version, pgsz, block, in the header's order): the region's page size, the
-# length unit of a placed value's copies (mesh-call.h struct mesh_section `pages`), which the MPS binding's buffer
-# over a value's copies needs, whole pages long as metal-microbench tools/e2b_replay.m placed_buffer makes it
-# (design/compilation-coordination.md, "The appendix's revisions", K1; rdma/mesh_compile.py _placed_buffer)
-# 2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", points 6 and 7, and "The
-# revisions of 4e78f6f4"): read for a copy's place in the program's mapping (mesh-collective.h struct mesh_value
-# `view`: copy c at view + c x section.pages x pgsz) and for a block's bytes (block x pgsz), which a part of a value
-# must begin at (struct mesh_declared `first`).  What must stay: the header's first words in its order
-# 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3; "The
-# revisions of 55b9cbad"): the page size places a copy in the program's own mapping of its rows (rdma/mesh_compile.py
-# _mapped, mesh-dataflow.h mesh_view_compose), struct mesh_value `view` being gone.  What must stay: the header's first
-# words in its order
+# mesh.h struct hdr
 class Header(C.Structure):
     _fields_ = [('magic', U), ('version', U), ('pgsz', U), ('block', U), ('rows', U), ('node', U), ('vacant0', U),
                 ('links', U), ('vacant1', U), ('wire_pages', U), ('vacant7', U), ('vacant14', U), ('vacant2', Q),
@@ -230,9 +219,7 @@ CONTEXT = C.POINTER(Context)
 # revisions of 4e78f6f4"; mesh dd215cbe): mesh_plan takes the whole program, its compiled functions (Function) and
 # its calls of them in program order, and gives its one mapping (View); mesh_plan_retire is void; mesh_view_release
 # releases the mapping; mesh_retire, the program's retirement (mesh-dataflow.h: its root closed where its `owner` is
-# the client), takes the region and the client word.  mesh_section_address's binding goes: a value's copies are bound
-# at their places in the mapping (mesh-collective.h struct mesh_value `view`), and nothing here reads one row.  What
-# must stay: each binding the header's declaration
+# the client), takes the region and the client word.  What must stay: each binding the header's declaration
 # 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G3 and B1; "The
 # revisions of 55b9cbad"): mesh_plan gives no mapping (the program maps its `run` values' rows by mesh_view_compose);
 # mesh_transfers_start takes the execution's one absolute deadline, CLOCK_MONOTONIC nanoseconds

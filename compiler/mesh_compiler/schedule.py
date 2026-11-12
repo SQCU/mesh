@@ -94,6 +94,16 @@ def channel_ends(modules):
     return ends
 
 
+def carried(modules, machines):
+    found = []
+    for channel, end in sorted(channel_ends(modules).items()):
+        (sender, _), (receiver, arrival) = end[SEND], end[RECV]
+        if machines[sender] != machines[receiver]:
+            value = arrival.meta["val"]
+            found.append((channel, sender, receiver, value.dtype, list(value.shape), list(value.stride())))
+    return found
+
+
 def argument_buffers(modules, output_processor):
     inputs = {processor: [n.target for n in module.graph.nodes if n.op == "placeholder"]
               for processor, module in modules.items()}
