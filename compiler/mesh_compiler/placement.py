@@ -352,7 +352,8 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     if held == dimension is not None:
         extent = sum(shape(n)[held] for n in nodes)
         have, take = ranges(extents, extent, len(nodes)), ranges(sizes, extent, len(processors))
-        met, given, displs = overlaps(have, take)
+        met, given = overlaps(have, take)
+        arrays = tuple(zip(arrayed(have), arrayed(take)))
     if held == dimension is not None and STRIPED in (extents, sizes):
         arrived, exchange = [], None
         for j, processor in enumerate(processors):
@@ -365,7 +366,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
                         1, len(common) - 1))), holder or processor)
                     exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
                     piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
-                    piece.meta.setdefault("blocks", {})[processor] = held, (i, j), given, displs
+                    piece.meta.setdefault("blocks", {})[processor] = held, (i, j), *arrays
                     pieces.append((wanted.index(common[0]), wanted.index(common[-1]), len(common), piece))
             value = pieces[0][3] if pieces else call(graph, ZEROS, (nodes[0], [
                 0 if d == held else n for d, n in enumerate(shape(nodes[0]))]), processor)
@@ -398,7 +399,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             pieces.append(node)
             sources.append(i)
         if held == dimension is not None:
-            blocks = [(held, (i, j), given, displs) for i in sources]
+            blocks = [(held, (i, j), *arrays) for i in sources]
         elif dimension is None:
             joined = tuple(shape(piece)[held] for piece in pieces) if held is not None else ()
             placed = (tuple(range(len(pieces))) if extents == STRIPED else
@@ -420,9 +421,12 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
 
 def overlaps(have, take):
     met = [[sorted(set(range(*kept)) & set(range(*wanted))) for wanted in take] for kept in have]
-    return met, tuple(tuple(len(common) for common in row) for row in met), tuple(
-        tuple(sum(e < (common[0] if common else kept[0]) for e in range(*wanted)) for common, wanted in zip(row, take))
-        for row, kept in zip(met, have))
+    return met, [[len(common) for common in row] for row in met]
+
+
+# MPI 4.1, sections 7.5 to 7.8
+def arrayed(blocks):
+    return tuple(len(range(*block)) for block in blocks), tuple(block[0] for block in blocks)
 
 
 def aligned(node, shapes, out):
@@ -549,6 +553,7 @@ def halos(graph, value, window, dimension, sizes, processors, name):
                     node = call(graph, PAD, (node, [0, 0] * (rank - 1 - dimension) + [
                         width - extent, 0][::1 if p < q else -1], 0), processors[p])
                 node.meta.setdefault("collectives", {})[processor] = "permute", f"{name}:{dimension}:{q - p}"
+                node.meta.setdefault("blocks", {})[processor] = dimension, (p, q), tuple(extents), tuple(starts[:-1])
                 if shared[q][p] < width:
                     skip = width - cover[q][p] if p < q else first
                     node = call(graph, SLICE, (node, dimension, skip, skip + shared[q][p]), processor)
@@ -817,10 +822,11 @@ def partitioned(graph, node, held, want, replaced):
                     picked = unmasked(node, along, label, queries, kept)[j] if whole and label >= 0 else range(len(kept))
                     order[label] = tuple(kept[s] for s in picked)
                 pieces = [exact[i][kept.index(block)] for block in order[label]]
-                extents = tuple(shape(piece)[v[0]] for piece in pieces)
-                for k, piece in enumerate(pieces):
+                placed = dict(zip(order[label], itertools.accumulate((len(range(*b)) for b in order[label]), initial=0)))
+                for block, piece in zip(order[label], pieces):
                     piece.meta.setdefault("blocks", {})[processor] = (
-                        v[0], k, extents, tuple(itertools.accumulate(extents, initial=0))[:-1])
+                        v[0], kept.index(block), tuple(len(range(*b)) * (b in placed) for b in kept),
+                        tuple(placed.get(b, 0) for b in kept))
                 local[i] = pieces[0] if len(pieces) == 1 else call(graph, CAT, (pieces, v[0]), processor)
         for i, row in enumerate(rows):
             for dimension, label in enumerate(row):
@@ -866,9 +872,7 @@ def partitioned(graph, node, held, want, replaced):
             for block, low, high in zip(blocks, edges, edges[1:]):
                 keeper = to[2][kept.index(block)]
                 piece = shard if len(blocks) == 1 else call(graph, SLICE, (shard, to[0], low, high), processor)
-                piece.meta.setdefault("blocks", {})[keeper] = (
-                    to[0], kept.index(block), tuple(len(range(*b)) for b in kept),
-                    tuple(range(len(kept))) if to[1] == STRIPED else tuple(b[0] for b in kept))
+                piece.meta.setdefault("blocks", {})[keeper] = to[0], kept.index(block), *arrayed(kept)
                 parts[keeper].append(piece)
         else:
             column = reshard(graph, (None, None, (processor,), [plain(graph, shard, processor, out)]), *to, True)

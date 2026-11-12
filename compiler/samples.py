@@ -619,10 +619,17 @@ def check_block(sent, arrived):
     if "counts" not in arrived.meta:
         return
     dimension, block, counts, displs = (arrived.meta[key] for key in BLOCK)
-    for index in block if isinstance(block, tuple) else ():
-        counts, displs = counts[index], displs[index]
-    block = 0 if isinstance(block, tuple) else block
-    counts, displs = (counts, displs) if isinstance(counts, tuple) else ((counts,), (displs,))
+    flat = all(type(n) is int for n in (*counts, *displs))
+    assert flat or all(type(n) is int and len(array) == 2 for array in (counts, displs) for part in array
+                       for n in part), "counts and displs are not integer arrays of one entry per device"
+    if arrived.meta["collective"][0] == "permute":
+        assert flat and len(counts) == len(displs) > max(block), "a permute's counts"
+        return
+    if isinstance(block, tuple):
+        (given, taken), (holder, reader) = counts, block
+        assert len(given) == len(displs[0]) > holder and len(taken) == len(displs[1]) > reader, "an all-to-all's counts"
+        assert arrived.meta["val"].shape[dimension] <= min(given[holder], taken[reader]), "a block exceeds its counts"
+        return
     assert arrived.meta["val"].shape[dimension] == counts[block], "a block's size is not its count"
     value, readers = sent.args[0], list(arrived.users)
     if copies(value):
@@ -639,7 +646,8 @@ def check_block(sent, arrived):
     if not places:
         if dimension in (value.args[0] if value.target is SLICE else value).meta.get("order", {}):
             return
-        sliced = len(counts) > 1 and value.target is SLICE and value.args[1] == dimension
+        sliced = (len(counts) > 1 and value.target is SLICE and value.args[1] == dimension
+                  and value.args[2] == displs[block])
         places.append(value.args[2] if sliced else 0)
     assert places == [displs[block]] * len(places), "a block is not placed at its displacement"
 
@@ -707,7 +715,7 @@ def check_collectives(scheduled, expected=None):
         sent, arrived = end[ir.SEND], end[ir.RECV]
         assert sent.meta["collective"] == arrived.meta["collective"], "a channel's two ends name two collectives"
         kind, identity = sent.meta["collective"]
-        assert kind != "alltoall" or "counts" in arrived.meta, "an all-to-all's ends carry no counts"
+        assert kind not in ("alltoall", "permute") or "counts" in arrived.meta, f"the ends of {kind} carry no counts"
         value = sent.args[0].args[0] if copies(sent.args[0]) and sent.args[0].name != identity else sent.args[0]
         kinds[kind].add(identity)
         sources[kind, identity].add((sent.meta["processor"], value.name))
