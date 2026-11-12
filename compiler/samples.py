@@ -260,6 +260,11 @@ class Ceiled(nn.Module):
         return nn.functional.max_pool2d(x.sin(), 3, stride=2, padding=1, ceil_mode=True)
 
 
+class Averaged(nn.Module):
+    def forward(self, x):
+        return nn.functional.avg_pool2d(x.sin(), 3, stride=2, padding=1, ceil_mode=True, count_include_pad=False)
+
+
 class Divided(nn.Module):
     def forward(self, x):
         return nn.functional.avg_pool2d(x.sin(), 3, stride=2, padding=1, count_include_pad=False, divisor_override=5)
@@ -534,6 +539,12 @@ CASES = [
     ("windows | pooling with a divisor, 3 shards", Divided, [(r(2, 3, 11, 6),)],
      {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2}, "collectives": {"permute": 1},
       "placement": lambda: lambda node: (2, tuple(THREE), None) if node.name == "x" else "p0"}),
+    ("windows | average pooling, ceil_mode, 3 shards", Averaged, [(r(2, 3, 12, 6),)],
+     {"processors": THREE, "sharded": True, "windows": {"shards": 3}, "collectives": {"permute": 2},
+      "placement": lambda: lambda node: (2, tuple(THREE), (1, 2, 1)) if node.name == "x" else "p0"}),
+    ("windows | average pooling, ceil_mode, input on p0", Averaged, [(r(2, 3, 12, 6),)],
+     {"processors": THREE, "sharded": True, "windows": {"shards": 3},
+      "placement": lambda: lambda node: (2, tuple(THREE), None) if node.name == "avg_pool2d" else "p0"}),
     ("windows | max pooling, ceil_mode, 3 shards", Ceiled, [(r(2, 3, 12, 6),)],
      {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2},
       "placement": lambda: lambda node: (2, tuple(THREE), (1, 2, 1)) if node.name == "x" else "p0"}),
@@ -653,7 +664,7 @@ def check_block(sent, arrived):
         arrived, readers = readers[0], list(readers[0].users)
     places = []
     for reader in readers:
-        if reader.target is CAT and reader.args[1] == dimension:
+        if reader.target is CAT and reader.args[1] == dimension and reader.meta["val"].shape[dimension] == sum(counts):
             before = reader.args[0][:reader.args[0].index(arrived)]
             places.append(sum(piece.meta["val"].shape[dimension] for piece in before))
         elif reader.target is SLICE_SCATTER and reader.args[1] is arrived:

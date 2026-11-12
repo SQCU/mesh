@@ -353,7 +353,7 @@ def spread(value, count):
 def windows(node):
     names, read = given(node)
     count, dtype = len(shape(node)) - 2, node.all_input_nodes[0].meta["val"].dtype
-    low = spread(read.get("padding", 0), count)
+    low, edged = spread(read.get("padding", 0), count), False
     if node.target is CONVOLUTION:
         kernel, fill = shape(node.args[1])[2:], 0
         if read["transposed"] or len(kernel) != count:
@@ -364,13 +364,12 @@ def windows(node):
             fill = -math.inf if dtype.is_floating_point else torch.iinfo(dtype).min
             if any(user.args[1] for user in node.users):
                 return {}
-        elif read.get("divisor_override") is None and not read.get("count_include_pad", True) and any(low):
-            return {}
-        if read.get("ceil_mode", False) and node.target not in MAXIMA:
-            return {}
+        else:
+            edged = read.get("divisor_override") is None and (read.get("ceil_mode", False) or (
+                not read.get("count_include_pad", True) and any(low)))
     dilation = spread(read.get("dilation", 1), count)
     stride = spread(read.get("stride") or kernel, count)
-    return {2 + k: (dilation[k] * (kernel[k] - 1) + 1, stride[k], low[k], fill) for k in range(count)}
+    return {2 + k: (dilation[k] * (kernel[k] - 1) + 1, stride[k], low[k], fill, edged) for k in range(count)}
 
 
 def windowed(node, shapes, out):
@@ -389,7 +388,7 @@ def unpadded(node, at):
 # Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.3 and appendix A.2; design/unequal-shards-change-request.md item 10;
 # design/problems-of-14b9a757-change-request.md items 4 and 5
 def halos(graph, value, window, dimension, sizes, processors, name):
-    (span, stride, low, fill), (held, extents, holders, nodes) = window, value
+    (span, stride, low, fill, edged), (held, extents, holders, nodes) = window, value
     size = shape(nodes[0])[dimension] if held is None else sum(extents)
 
     def read(first, count):
@@ -406,6 +405,11 @@ def halos(graph, value, window, dimension, sizes, processors, name):
         return regions, kept
     real = [(max(0, min(size, first)), max(0, min(size, last if count else first))) for count, (first, last) in zip(
         sizes, map(read, itertools.accumulate(sizes[:-1], initial=0), sizes))]
+    kept = [None if not edged or 0 <= low_ and high <= size else first - max(0, first - -(-low // stride))
+            for first, (low_, high) in zip(bases(sizes), reads)]
+    for q, (first, (low_, high)) in enumerate(zip(bases(sizes), reads)):
+        if kept[q] is not None:
+            reads[q] = real[q] = (first - kept[q]) * stride, min(size, high)
     starts = list(itertools.accumulate(extents, initial=0))
     cuts = [[(max(low_, real[q][0], starts[p]), min(high, real[q][1], starts[p + 1]))
              for p in range(len(starts) - 1)] for q, (low_, high) in enumerate(reads)]
@@ -443,7 +447,7 @@ def halos(graph, value, window, dimension, sizes, processors, name):
         if low_ < 0 or high > size:
             region = selected(graph, region, dimension, max(0, -low_), min(high, size) - low_, fill, processor)
         regions.append(region)
-    return regions, [None] * len(regions)
+    return regions, kept
 
 
 # design/unequal-shards-change-request.md item 8
@@ -561,7 +565,7 @@ def meshed(graph, node, held, replaced):
 
     def local(v, processor):
         return reshard(graph, plainly(graph, v), None, None, (processor,))[0]
-    if (found and held[0] is value and all(d in found for d in dims) and STRIPED not in extents
+    if (found and held[0] is value and all(d in found and not found[d][4] for d in dims) and STRIPED not in extents
             and all(v[0] is None for v in held[1:])):
         sizes = tuple(counts(out[d], getattr(e, "units", None), len(e)) for d, e in zip(dims, extents))
         regions, exchanged = list(nodes), [d for d, e in zip(dims, extents) if len(e) > 1]
