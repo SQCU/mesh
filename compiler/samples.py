@@ -35,6 +35,7 @@ from torch._ops import OpOverload
 from mesh_compiler import archive, bridge, ir, lower_coreml, lower_inductor, lower_metal, signature
 from mesh_compiler.devices import TO_COPY
 from mesh_compiler.driver import compile_module, compiled, lowered
+from mesh_compiler.export import calls
 from mesh_compiler.runtime import Program
 
 TOLERANCE = 1e-4
@@ -1109,6 +1110,65 @@ def check_products():
     print("  ok: a pair the causal mask inhibits entirely is in no product; no value is interleaved before a product")
 
 
+class Joined(nn.Module):
+    def forward(self, p, q):
+        return p + q, p * q
+
+
+class Block(nn.Module):
+    def __init__(self, between=False):
+        super().__init__()
+        self.a, self.b, self.join = nn.Linear(8, 8), nn.Sequential(nn.Linear(8, 8), nn.Tanh()), Joined()
+        self.between = between
+
+    def forward(self, x, y):
+        left, right = self.a(x), self.a(y)
+        return self.join(self.b(left), right * 2 if self.between else right)
+
+
+class Called(torch.fx.Interpreter):
+    def __init__(self, module, exported):
+        super().__init__(module)
+        self.exported, self.programs = exported, {}
+
+    def run_node(self, node):
+        self.calling = node
+        return super().run_node(node)
+
+    def call_module(self, target, args, kwargs):
+        key = self.calling.meta["function"]
+        if key not in self.programs:
+            assert key in self.exported and key[0] == target, f"{self.calling.name} names no exported function"
+            self.programs[key] = Program(compile_module(self.fetch_attr(target), args, TWO, round_robin("p0", "p1")))
+        return self.programs[key](*args)
+
+
+# design/aot-compilation-change-request.md A1 and A10
+def check_calls():
+    torch.manual_seed(0)
+    program, args = Block().eval(), (r(2, 8), r(2, 8))
+    graph, exported = calls(program, args, ("a", "b", "join"))
+    nodes = [n for n in graph.graph.nodes if n.op == "call_module"]
+    assert [n.target for n in nodes] == ["a", "a", "b", "join"], "a call of a function is not one node"
+    assert {n.op for n in graph.graph.nodes} == {"placeholder", "call_module", "output"}, "a function was traced into"
+    assert sorted(key[0] for key in exported) == ["a", "b", "join"], "a function called twice is exported twice"
+    assert all(isinstance(made, ir.Exported) and call_nodes(made.graph_module.graph) for made in exported.values())
+    most = mesh_graph.width(nodes, lambda n: [u for u in n.users if u.op == "call_module"])
+    assert most == 2, f"{most} calls are independent at once, not the two of `a`"
+    called = Called(graph, exported)
+    worst = errors(program(*args), called.run(*args))[1]
+    assert worst <= TOLERANCE and len(called.programs) == 3, (worst, len(called.programs))
+    try:
+        calls(Block(True).eval(), args, ("a", "b", "join"))
+    except NotImplementedError as error:
+        print(f"  refused: {error}")
+    else:
+        raise AssertionError("a multiplication between two compiled calls was captured as no function")
+    print(f"  4 calls of 3 exported functions, {most} independent at once; each function compiled once and called in the "
+          f"graph's order, rel err {worst:.1e}")
+    print("  ok: the block's calls are the nodes of one graph, and nothing of the block runs outside a function")
+
+
 def check_overlapping_calls():
     assert not build("encoder | 3 processors round-robin")[2].feedforward, "every processor is read by the output processor"
     torch.manual_seed(0)
@@ -1481,6 +1541,8 @@ def main():
         check_inductor_structure()
     print("attention's products where the sequence is sharded (Striped Attention, section 3.1):")
     check_products()
+    print("a block that calls several functions (the calls' graph and each function's exported graph):")
+    check_calls()
     print("overlapping calls (a processor with no path to the output processor):")
     check_overlapping_calls()
     if with_inductor:

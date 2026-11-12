@@ -1,4 +1,6 @@
 # design/data-flow.md
+import operator
+
 import torch
 from torch._ops import HigherOrderOperator
 from torch.export.experimental import _export_forward_backward
@@ -72,3 +74,45 @@ def read(program):
         forward = pytree.tree_unflatten([0] * out_spec.num_leaves, out_spec)
         out_spec = pytree.tree_structure((forward, gradients))
     return Exported(program.graph_module, state, tokens, user_inputs, outputs, out_spec)
+
+
+# design/aot-compilation-change-request.md A1 and A10; P. Barham et al., Pathways, arXiv:2203.12533, section 3;
+# J. Reed et al., torch.fx, MLSys 2022
+class Calls(torch.fx.Tracer):
+    def __init__(self, functions):
+        super().__init__()
+        self.functions = functions
+
+    def is_leaf_module(self, module, qualified_name):
+        return qualified_name in self.functions
+
+
+class Captured(torch.fx.Interpreter):
+    def __init__(self, module, options):
+        super().__init__(module)
+        self.options, self.exported = options, {}
+
+    def run_node(self, node):
+        self.calling = node
+        return super().run_node(node)
+
+    def call_module(self, target, args, kwargs):
+        key = target, tuple((str(value.dtype), tuple(value.shape)) for value in pytree.tree_leaves((args, kwargs))
+                            if isinstance(value, torch.Tensor))
+        if key not in self.exported:
+            self.exported[key] = export(self.fetch_attr(target), args, kwargs=kwargs, **self.options)
+        self.calling.meta["function"] = key
+        return super().call_module(target, args, kwargs)
+
+
+def calls(program, args, functions, **export_options):
+    graph = Calls(functions).trace(program)
+    for node in graph.nodes:
+        if node.op not in ("placeholder", "call_module", "output") and node.target is not operator.getitem:
+            raise NotImplementedError(f"{node.name} runs between the program's compiled calls; every function of a "
+                                      "program is captured")
+    module = torch.fx.GraphModule(program, graph)
+    captured = Captured(module, export_options)
+    with torch.no_grad():
+        captured.run(*args)
+    return module, captured.exported
