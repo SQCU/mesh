@@ -307,6 +307,13 @@ def precedes(a, b, floating):
     return f"{a} < {b}" if not floating else f"{a} < {b} || (isnan({b}) && !isnan({a}))"
 
 
+def ahead(a, b, count, floating, descending=False):
+    first, second = (b, a) if descending else (a, b)
+    same = f"{first}0 == {second}0" + f" || (isnan({second}0) && isnan({first}0))" * floating
+    return (f"(({a}1 < {count}) != ({b}1 < {count})) ? ({a}1 < {count}) : "
+            f"(({precedes(f'{first}0', f'{second}0', floating)}) || (({same}) && {a}1 < {b}1))")
+
+
 class Lowering:
     types = TYPES
 
@@ -338,7 +345,8 @@ class Lowering:
         for node in module.graph.nodes:
             if node.op == "placeholder":
                 self.missing += [f"{node.name} of {v.dtype}" for v in self.untyped(node)]
-                self.forms[node] = self.arrived(ARGUMENT, node, position)
+                value = node.meta["val"]
+                self.forms[node] = self.strided(value.dtype, value.shape, value.stride(), ARGUMENT, position)
                 position += 1
             elif node.op == "output" and not self.missing:
                 self.issuing = node
@@ -375,12 +383,6 @@ class Lowering:
         values = value if isinstance(value, (tuple, list)) else [value]
         return [v for v in values if isinstance(v, torch.Tensor) and v.dtype not in self.types]
 
-    def arrived(self, kind, node, position=None):
-        value = node.meta["val"]
-        count = (1 + sum((n - 1) * s for n, s in zip(value.shape, value.stride()))) * all(value.shape)
-        self.storages.append(Storage(kind, value.dtype, count, position))
-        return View(len(self.storages) - 1, value.dtype, tuple(value.shape), tuple(value.stride()), 0)
-
     def fresh(self, dtype, shape):
         self.storages.append(Storage(HELD, dtype, math.prod(shape)))
         return View(len(self.storages) - 1, dtype, tuple(shape), packed(shape), 0)
@@ -411,9 +413,9 @@ class Lowering:
             self.storages.pop()
         return self.view(form) if isinstance(form, (Fused, Product)) else form
 
-    def strided(self, dtype, shape, stride):
+    def strided(self, dtype, shape, stride, kind=HELD, position=None):
         count = (1 + sum((n - 1) * s for n, s in zip(shape, stride))) * all(shape)
-        self.storages.append(Storage(HELD, dtype, count))
+        self.storages.append(Storage(kind, dtype, count, position))
         return View(len(self.storages) - 1, dtype, tuple(shape), tuple(stride), 0)
 
     def view(self, form):
@@ -577,15 +579,32 @@ class Lowering:
         return made
 
     def cumsum(self, node):
-        source, value = self.reader(node.args[0]), node.meta["val"]
-        dim, kind = node.args[1] % len(source.shape), self.types[value.dtype]
-        made, bind = self.fresh(value.dtype, source.shape), Bound()
-        lines, names = unravel("p.x", source.shape[:dim] + source.shape[dim + 1:], "r")
-        index = names[:dim] + ["k"] + names[dim:]
-        lines += [f"{kind} a = 0;", f"for (uint k = 0; k < {source.shape[dim]}; k++) {{",
-                  f"    a += {kind}({source.read(bind, index)});", f"    {made.read(bind, index, True)} = a;", "}"]
-        self.dispatch(bind, lines, (math.prod(source.shape) // max(source.shape[dim], 1), 1, 1))
-        return made
+        value, source = node.meta["val"], self.reader(node.args[0])
+        source = source if source.dtype == value.dtype else self.pointwise(node, "{T}({0})", [source])
+        dim = node.args[1] % len(value.shape)
+        return self.scan(source, None, dim, value.shape[dim])[0]
+
+    # W. D. Hillis and G. L. Steele, Data parallel algorithms, CACM 29(12), 1986; G. E. Blelloch, Prefix sums and
+    # their applications, CMU-CS-90-190, 1990, section 1.5
+    def scan(self, sums, flags, dim, count):
+        sums, reach = self.view(sums), 1
+        kind, lead = self.types[sums.dtype], sums.shape[:dim] + sums.shape[dim + 1:]
+        while reach < count:
+            after, bind = self.fresh(sums.dtype, sums.shape), Bound()
+            lines, names = unravel(f"(p.x / {count})", lead, "r")
+            here, far = (names[:dim] + [k] + names[dim:] for k in (
+                f"(p.x % {count})", f"(max(p.x % {count}, {reach}u) - {reach})"))
+            lines += [f"bool f = {flags.read(bind, here) if flags else 'false'}, "
+                      f"joined = !f && p.x % {count} >= {reach};",
+                      f"{kind} v = {sums.read(bind, here)};",
+                      f"{after.read(bind, here, True)} = joined ? {kind}({sums.read(bind, far)} + v) : v;"]
+            if flags:
+                ended = self.fresh(torch.bool, flags.shape)
+                lines += [f"{ended.read(bind, here, True)} = f || (joined && {flags.read(bind, far)});"]
+                flags = ended
+            self.dispatch(bind, lines, (math.prod(lead) * count, 1, 1))
+            sums, reach = after, 2 * reach
+        return sums, flags
 
     # design/torch-source-lowering-change-request.md, item 5; torch 2.15 torch/_higher_order_ops/effects.py
     def checked(self, node, read, message, zero):
@@ -703,13 +722,8 @@ class Lowering:
         lines += [f"{values.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'], True)} = {source.read(bind, at)};",
                   f"{places.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'], True)} = p.x % {padded};"]
         self.dispatch(bind, lines, (rows * padded, 1, 1))
-        first, second = ("y", "x") if descending else ("x", "y")
-        less = f"({precedes(f'{first}0', f'{second}0', source.dtype.is_floating_point)})"
-        same = f"({first}0 == {second}0)" if not source.dtype.is_floating_point else \
-            f"(({first}0 == {second}0) || (isnan({second}0) && isnan({first}0)))"
-
-        self.bitonic([values, places], rows, padded, lambda a, b: (
-            f"(({a}1 < {count}) != ({b}1 < {count})) ? ({a}1 < {count}) : ({less} || ({same} && {a}1 < {b}1))"))
+        self.bitonic([values, places], rows, padded, lambda a, b: ahead(
+            a, b, count, source.dtype.is_floating_point, descending))
         return self.rows(source, dim, padded, (values, places))
 
     def rows(self, source, dim, width, made):
@@ -734,9 +748,7 @@ class Lowering:
         made = self.sorted(source, dim, node.args[3] if len(node.args) > 3 else True)
         return [View(v.storage, v.dtype, v.shape[:dim] + (k,) + v.shape[dim + 1:], v.stride, 0) for v in made]
 
-    # torch 2.15 documentation, torch.Tensor.scatter_ and torch.Tensor.scatter_add_; W. D. Hillis and G. L. Steele,
-    # Data parallel algorithms, CACM 29(12), 1986; G. E. Blelloch, Prefix sums and their applications,
-    # CMU-CS-90-190, 1990, section 1.5
+    # torch 2.15 documentation, torch.Tensor.scatter_ and torch.Tensor.scatter_add_
     def scattered(self, node):
         value, (source, dim, chosen, given) = node.meta["val"], node.args
         source, chosen = self.reader(source), self.stored(chosen)
@@ -760,9 +772,7 @@ class Lowering:
         lines += [f"{keys.read(bind, ['0', 'p.x'], True)} = {target};",
                   f"{places.read(bind, ['0', 'p.x'], True)} = p.x;"]
         self.dispatch(bind, lines, (padded, 1, 1))
-        self.bitonic([keys, places], 1, padded, lambda a, b: (
-            f"(({a}1 < {count}) != ({b}1 < {count})) ? ({a}1 < {count}) : "
-            f"({a}0 < {b}0 || ({a}0 == {b}0 && {a}1 < {b}1))"))
+        self.bitonic([keys, places], 1, padded, lambda a, b: ahead(a, b, count, False))
         sums, flags = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,))
         bind = Bound()
         lines, names = unravel(f"uint({places.read(bind, ['0', 'p.x'])})", domain, "c")
@@ -771,16 +781,7 @@ class Lowering:
                   f"{flags.read(bind, ['p.x'], True)} = p.x == 0 || "
                   f"{keys.read(bind, ['0', 'p.x'])} != {keys.read(bind, ['0', 'max(p.x, 1u) - 1'])};"]
         self.dispatch(bind, lines, (count, 1, 1))
-        reach = 1
-        while added and reach < count:
-            after, ended, bind = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,)), Bound()
-            far = [f"max(p.x, {reach}u) - {reach}"]
-            self.dispatch(bind, [
-                f"bool f = {flags.read(bind, ['p.x'])}, joined = !f && p.x >= {reach};",
-                f"{kind} v = {sums.read(bind, ['p.x'])};",
-                f"{after.read(bind, ['p.x'], True)} = joined ? {kind}({sums.read(bind, far)} + v) : v;",
-                f"{ended.read(bind, ['p.x'], True)} = f || (joined && {flags.read(bind, far)});"], (count, 1, 1))
-            sums, flags, reach = after, ended, 2 * reach
+        sums, flags = self.scan(sums, flags, 0, count) if added else (sums, flags)
         bind = Bound()
         key = keys.read(bind, ["0", "p.x"])
         out = f"{bind(made, True)}[{key}]"
@@ -1014,7 +1015,8 @@ class Lowering:
 
     def receive(self, node):
         self.flush()
-        view = self.arrived(RECEIVED, node)
+        value = node.meta["val"]
+        view = self.strided(value.dtype, value.shape, value.stride(), RECEIVED)
         self.program.append((RECV, view.storage, node.args[0], self.host(node, [(view, True)])))
         return view
 
@@ -1321,7 +1323,7 @@ class Native(Lowering):
     def updated(self, value, source, domain, key, given, added):
         kind, made, bind = self.types[value.dtype], self.fresh(value.dtype, value.shape), Bound()
         count, first = math.prod(value.shape), []
-        if count < GRAIN:
+        if self.chunk(count) == count:
             first = [f"for (uint e = 0; e < {count}; e++) {{", *self.copying(bind, source, made, "e"), "}"]
         else:
             self.store(source, made)
@@ -1331,6 +1333,20 @@ class Native(Lowering):
         self.dispatch(bind, [*first, f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
                              f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
         return made
+
+    def chunk(self, count):
+        return count if count < GRAIN else max(1, -(-count // (4 * os.cpu_count())))
+
+    # torch 2.15 documentation, torch.cumsum
+    def scan(self, sums, flags, dim, count):
+        made, bind, kind = self.fresh(sums.dtype, sums.shape), Bound(), self.types[sums.dtype]
+        lines, names = unravel("p.x", sums.shape[:dim] + sums.shape[dim + 1:], "r")
+        index = names[:dim] + ["k"] + names[dim:]
+        lines += [f"{kind} a = 0;", f"for (uint k = 0; k < {count}; k++) {{"]
+        lines += [f"    if ({flags.read(bind, index)}) a = 0;"] if flags else []
+        lines += [f"    a += {kind}({sums.read(bind, index)});", f"    {made.read(bind, index, True)} = a;", "}"]
+        self.dispatch(bind, lines, (math.prod(sums.shape) // max(count, 1), 1, 1))
+        return made, flags
 
     # torch 2.15 documentation, torch.sort; ISO/IEC 14882:2020 [stable.sort]
     def sorted(self, source, dim, descending):
@@ -1487,7 +1503,7 @@ class Native(Lowering):
         levels, first = [], 0
         for step, joined in zip(segment.steps, segment.barriers):
             count = math.prod(step.grid)
-            chunk = count if count < GRAIN else max(1, -(-count // (4 * os.cpu_count())))
+            chunk = self.chunk(count)
             levels += [[]] * (joined or not levels)
             levels[-1] = levels[-1] + [f"{{mesh::k{step.pipeline}, t + {first}, {at}, {min(at + chunk, count)}}}"
                                        for at in range(0, count, chunk)]

@@ -194,6 +194,11 @@ class Updates(nn.Module):
         return put, whole, real, apart, back, ordered, places
 
 
+class Sums(nn.Module):
+    def forward(self, x, index):
+        return x.cumsum(1), index.cumsum(1), (x > 0).cumsum(0), (x * 2).cumsum(0)
+
+
 class MixtureOfExperts(nn.Module):
     def __init__(self, width=16, experts=4, k=2):
         super().__init__()
@@ -428,6 +433,8 @@ CASES = [
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("scatter.value/remainder/index/sort", Updates, GATHER, {}),
     ("scatter.value/remainder/... | on mps", Updates, GATHER, {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
+    ("cumsum", Sums, GATHER, {}),
+    ("cumsum | on mps", Sums, GATHER, {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("where over a viewed arange | on mps", Masked, [(r(2, 6, 3),)],
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("where over a viewed arange | cpu of cpu/mps", Masked, [(r(2, 6, 3),)],
