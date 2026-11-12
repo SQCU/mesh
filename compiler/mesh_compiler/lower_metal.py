@@ -1425,7 +1425,7 @@ class Native(Lowering):
     types, lane, owning = NATIVE_TYPES, THREAD, False
 
     def committed(self, segment, task, at, fenced):
-        return [(THREAD, "pass_barrier", task, None, 0, 0)] * sum(segment.barriers)
+        return [(THREAD, "pass_barrier", task, None, 0, 0)] * sum(len(parts) > 1 for parts in self.levels(segment))
 
     def read(self, segments):
         return []
@@ -1603,6 +1603,12 @@ class Native(Lowering):
     def commit(self, segment):
         slots = [s for step in segment.steps for s in step.storages]
         lines = [f"void *const t[] = {{{', '.join(f'(void *)a[{s}]' for s in slots) or 'nullptr'}}};"]
+        return lines + [f"{{ const mesh::part p[] = {{{', '.join(parts)}}}; " + (
+            "mesh::each((void *)p, 0); }" if len(parts) == 1 else
+            f"dispatch_apply_f({len(parts)}, DISPATCH_APPLY_AUTO, (void *)p, mesh::each); }}")
+            for parts in self.levels(segment)]
+
+    def levels(self, segment):
         levels, first = [], 0
         for step, joined in zip(segment.steps, segment.barriers):
             count = math.prod(step.grid)
@@ -1611,9 +1617,7 @@ class Native(Lowering):
             levels[-1] = levels[-1] + [f"{{mesh::k{step.pipeline}, t + {first}, {at}, {min(at + chunk, count)}}}"
                                        for at in range(0, count, chunk)]
             first += len(step.storages)
-        return lines + [f"{{ const mesh::part p[] = {{{', '.join(parts)}}}; " + (
-            "mesh::each((void *)p, 0); }" if len(parts) == 1 else
-            f"dispatch_apply_f({len(parts)}, DISPATCH_APPLY_AUTO, (void *)p, mesh::each); }}") for parts in levels]
+        return levels
 
 
 class Kept:
