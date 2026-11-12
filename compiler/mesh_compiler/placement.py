@@ -278,6 +278,16 @@ def halos(graph, value, window, dimension, sizes, processors):
     return regions
 
 
+# design/unequal-shards-change-request.md item 8
+def accumulated(node, shapes, out):
+    table, indices = node.args[:2]
+    if not (given(node)[1].get("accumulate") and len(indices) == 1 and table.target is ATEN.full.default
+            and table.args[1] == 0):
+        return replicated(node, shapes, out)
+    summed = [-1 - d for d in range(len(shapes[1]))]
+    return [list(range(len(out))), summed, summed + list(range(1, len(out)))]
+
+
 # design/aot-compilation-change-request.md A2 and A4
 def replicated(node, shapes, out):
     return [[None] * len(s) for s in shapes]
@@ -287,6 +297,7 @@ RULES = {
     ATEN.alias.default: aligned, EXPAND: aligned, ATEN.full_like.default: aligned, ATEN._to_copy.default: aligned,
     operator.getitem: aligned, FLIP: aligned,
     CONVOLUTION: windowed, MAXIMUM: windowed, AVERAGE: windowed,
+    ATEN.index_put.default: accumulated,
     ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
     MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
     ATEN.bmm.default: lambda node, shapes, out: [[0, 1, -1], [0, -1, 2]],
@@ -484,8 +495,12 @@ def partitioned(graph, node, held, want, replaced):
         if shard.meta["order"].keys() == {to[0]} and set(blocks) <= set(kept):
             edges = list(itertools.accumulate((len(range(*block)) for block in blocks), initial=0))
             for block, low, high in zip(blocks, edges, edges[1:]):
-                parts[to[2][kept.index(block)]].append(
-                    shard if len(blocks) == 1 else call(graph, SLICE, (shard, to[0], low, high), processor))
+                keeper = to[2][kept.index(block)]
+                piece = shard if len(blocks) == 1 else call(graph, SLICE, (shard, to[0], low, high), processor)
+                piece.meta.setdefault("blocks", {})[keeper] = (
+                    to[0], kept.index(block), tuple(len(range(*b)) for b in kept),
+                    tuple(range(len(kept))) if to[1] == STRIPED else tuple(b[0] for b in kept))
+                parts[keeper].append(piece)
         else:
             column = reshard(graph, (None, None, (processor,), [plain(graph, shard, processor, out)]), *to)
             for keeper, part in zip(to[2], column):
@@ -521,7 +536,10 @@ def place(graph_module, placement):
         graph.erase_node(node)
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
-        n.op == "placeholder" or n.target in VIEWS and all(read)))
+        "state" in n.meta if n.op == "placeholder" else n.target in VIEWS and all(read)))
+    for node, held in invariant.items():
+        if held and node.op == "call_function":
+            node.meta["invariant"] = True
     onto = mesh_graph.replicas(
         [n for n in graph.nodes if n.op == "call_function"], lambda n: list(n.users),
         lambda n: invariant[n] or not any(

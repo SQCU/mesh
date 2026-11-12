@@ -55,6 +55,10 @@ def read(program):
         else:
             raise NotImplementedError(f"input kind {spec.kind}")
 
+    for node in nodes:
+        if node.op == "placeholder" and node.name in state:
+            node.meta["state"] = state[node.name][0]
+
     outputs, gradients, out_spec = [], {}, program.call_spec.out_spec
     for spec in signature.output_specs:
         if spec.kind == OutputKind.GRADIENT_TO_PARAMETER:

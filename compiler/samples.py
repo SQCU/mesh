@@ -549,6 +549,8 @@ def check_block(sent, arrived):
         elif reader.target is SLICE_SCATTER and reader.args[1] is arrived:
             places.append(reader.args[3])
     if not places:
+        if dimension in (value.args[0] if value.target is SLICE else value).meta.get("order", {}):
+            return
         sliced = len(counts) > 1 and value.target is SLICE and value.args[1] == dimension
         places.append(value.args[2] if sliced else 0)
     assert places == [displs[block]] * len(places), "a block is not placed at its displacement"
