@@ -73,6 +73,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task|SendMessage|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-brief-gate.py"
+          }
+        ]
+      }
     ]
   }
 }

@@ -168,3 +168,16 @@ turns says so.
   metal-microbench `output_data/quote-parity-commits.jsonl` with the passages no typed turn contains, and tells the
   session of each. No model reads anything.
 
+### 10. A brief is a direction to read a file
+
+- **Source:** the operator, 2026-11-12:
+
+> is there any mechanism e.g. a system prompt to induce subagnets to immediately fail and log to a file as a warning if they are given 'agent briefs' or any inlined instructions or contents *at all* besides directions to read files using file read tools
+
+- **Rule:** bin/mesh-brief-gate.py runs before each Agent, SendMessage and Workflow call of a session in either
+  repository. Where the call's text holds a line that is not `Read /absolute/path, item N and act on it.` the call is
+  refused before any agent starts, and a warning is appended to metal-microbench
+  `output_data/agent-brief-warnings.jsonl`. No model reads anything. The form of the permitted line is Claude's
+  reading of the turn and of the operator's turn of 2026-11-08: "why are you 'descirbing' anything in 'briefs' instead
+  of literally saying 'there is a change request document. read it and act on the topic.'"
+
