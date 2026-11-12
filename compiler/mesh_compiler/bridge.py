@@ -55,11 +55,13 @@ class Published:
 
 
 class Carried:
-    def __init__(self, published, transfer, copies, dtype, shape, stride):
+    def __init__(self, published, transfer, copies, dtype, shape, view):
         self.plan, self.transfer, self.execution = published.plan, transfer, 0
-        self.flat = [torch.frombuffer((C.c_byte * size).from_address(address), dtype=dtype)
-                     for address, size in copies]
-        self.pages = [flat.as_strided(shape, stride) for flat in self.flat]
+        offset, element, pairs = view
+        flat = [torch.frombuffer((C.c_byte * size).from_address(address), dtype=dtype) for address, size in copies]
+        strides = [stride // element for _, stride in pairs]
+        self.pages = [pages.as_strided(shape, strides, offset // element) for pages in flat]
+        self.distinct = [pages.as_strided([size for size, _ in pairs], strides, offset // element) for pages in flat]
 
     # design/plan-to-bridge-change-request.md R1
     def out(self):
@@ -72,8 +74,8 @@ class Carried:
 
     # design/problems-of-14b9a757-change-request.md item 3, "Only a result torch allocates"
     def put(self, value):
-        flat = self.flat[self.execution % len(self.flat)]
-        flat.copy_(value.as_strided(flat.shape, (1,)))
+        distinct = self.distinct[self.execution % len(self.distinct)]
+        distinct.copy_(value.as_strided(distinct.shape, value.stride()))
         self.publish()
 
     # rdma/mesh-collective.h mesh_host_wait
@@ -108,5 +110,7 @@ def channels(scheduled, queues):
         for transfer, channel in enumerate(plan.channels):
             value = plan.declared[transfer][4]
             if value != mesh.ABSENT:
-                queues[channel] = Carried(published, transfer, published.copies[value], *layouts[channel])
+                source, *_, sent, landed = plan.declared[transfer]
+                queues[channel] = Carried(published, transfer, published.copies[value], *layouts[channel][:2],
+                                          sent if source == found.self else landed)
     return found.node[found.self], executions

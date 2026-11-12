@@ -309,12 +309,12 @@ def function(declared, weights, values, dependences, outstanding, tasks=(), befo
     held = []
 
     def view(offset, element, pairs):
-        held.append((Q * max(len(pairs), 1))(*pairs))
-        return Strided(offset, element, len(pairs) // 2, 0, held[-1])
+        held.append((Q * max(2 * len(pairs), 1))(*[word for pair in pairs for word in pair]))
+        return Strided(offset, element, len(pairs), 0, held[-1])
 
     held += [(Declared * max(len(declared), 1))(*[
-                 Declared(source, destination, identity, kind, value, 0, view(*layout), view(*layout))
-                 for source, destination, identity, kind, value, layout in declared]),
+                 Declared(source, destination, identity, kind, value, 0, view(*sent), view(*landed))
+                 for source, destination, identity, kind, value, sent, landed in declared]),
              (Weight * max(len(weights), 1))(*[Weight(*weight) for weight in weights]),
              (Value * max(len(values), 1))(*[Value(Section(0, 0, size, 0, 0), *fields, 0, 0)
                                              for size, *fields in values]),

@@ -511,7 +511,7 @@ LIB.mesh_graph_synchronization.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c
 
 # mesh-graph.h struct mesh_strided; torch 2.14.0 c10/core/TensorImpl.h, storage_offset_ and sizes_and_strides_
 def strided(offset, sizes, strides, element):
-    return offset * element, element, [(n, s * element) for n, s in zip(sizes, strides)]
+    return offset * element, element, [(n if s else min(n, 1), s * element) for n, s in zip(sizes, strides)]
 
 
 def extent(sizes, strides):

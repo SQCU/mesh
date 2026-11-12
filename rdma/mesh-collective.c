@@ -1706,9 +1706,19 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     key[i]=(struct plan_key){t->source,t->identity,i};
   }
   qsort(key,count,sizeof *key,plan_key_order);
-  for(uint32_t k=0;k<count;k++)
-    placed[key[k].index]=!k || key[k].source!=key[k-1].source || key[k].identity!=key[k-1].identity?key[k].index:
-                         placed[key[k-1].index];
+  /* design/aot-compilation-change-request.md A4, AllGather, CollectivePermute and AllToAll */
+  for(uint32_t k=0;k<count;k++){
+    const uint32_t i=key[k].index;
+    placed[i]=i;
+    for(uint32_t b=k;placed[i]==i && b-- && key[b].source==key[k].source && key[b].identity==key[k].identity;){
+      const uint32_t j=key[b].index;
+      uint32_t c=k;
+      if(placed[j]!=j || !plan_alike(&declared[i].from,&declared[j].from) ||
+         weights[i].produced!=weights[j].produced || weights[i].read!=weights[j].read)continue;
+      while(c-->b && (placed[key[c].index]!=j || declared[key[c].index].destination!=declared[i].destination));
+      if(c+1==b)placed[i]=j;
+    }
+  }
   for(uint32_t i=0;i<count;i++){
     const struct mesh_declared *t=declared+i;
     uint64_t bytes,end;
@@ -1721,10 +1731,6 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
     struct plan_demand *d=p->demand+p->of[i];
     /* design/aot-compilation-change-request.md, appendix item 5; design/plan-to-bridge-change-request.md R5 */
     if(t->kind!=MESH_PAGES)d->set=0;
-    if(!plan_alike(&t->from,&declared[d->first].from) || d->leaves>>t->destination&1 ||
-       weights[i].produced!=weights[d->first].produced || weights[i].read!=weights[d->first].read){
-      status=EINVAL;goto done;
-    }
     d->leaves|=UINT64_C(1)<<t->destination;
     /* design/plan-to-bridge-change-request.md R2; torch 2.14.0 torch/export/exported_program.py, ExportedProgram;
        Xu et al., GSPMD, arXiv 2105.04663, §4.5 */

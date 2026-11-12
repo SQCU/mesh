@@ -173,11 +173,12 @@ def stored(values, places, module, local, before, of, channels, mutated):
     named, slices, first = {(node.name, node.meta["processor"]): node for node in local}, set(), {}
     for node in reversed(local):
         first.update((record[0], index[node]) for record in wrote(node))
+    landed = {(f.meta["processor"], f.name) for f in local if f.target is RECV and f.args[0] in channels}
     for value, (processor, name) in enumerate(list(places)):
-        node = named[name, processor]
-        begin, end = index[producer(node)], len(local) - 1
-        if node.target is RECV:
-            begin, end = 0, end if node in results else index[last[node, processor]]
+        node = named.get((name, processor))
+        begin, end = index[producer(node)] if node and (processor, name) not in landed else 0, len(local) - 1
+        if (node, processor) in last and node.target is RECV and node not in results:
+            end = index[last[node, processor]]
         values[value] = (*values[value][:4], begin, end, *values[value][6:])
     for (root, processor), reader in last.items():
         value = root.meta.get("val")
@@ -207,20 +208,23 @@ def planned(module, carried, machines, mutated, cost, functions, before, tasks, 
     ends, held, channels = channel_ends(functions), set(functions), {channel for channel, *_ in carried}
     of = viewed({channel: end[SEND] for channel, end in ends.items()}, channels)
     results = {mesh_graph.chain(n, of)[-1] for n in module.graph.output_node().all_input_nodes}
-    declared, weights, values, places, events = [], [], [], [], []
+    declared, weights, values, places, events, identities = [], [], [], [], [], {}
+    named = {node.name: node for node in module.graph.nodes}
     for transfer, (channel, sender, receiver, dtype, shape, stride) in enumerate(carried):
         sent, arrival = ends[channel][SEND], ends[channel][RECV]
         source, destination = at[machines[sender]], at[machines[receiver]]
+        start = sent.args[0].meta.get("view") or sent.args[0].meta.get("out") or whole(sent.args[0])
+        finish = whole(arrival)
         written, value = producer(sent.args[0]), mesh.ABSENT
-        own = sent.args[0] in held and of(sent.args[0]) is None and sent.args[0] not in results
-        writer = (sender, (sent.args[0] if own else sent).name) if source == nodes.self else (receiver, arrival.name)
         if nodes.self in (source, destination):
+            writer = (sender, start[0]) if source == nodes.self else (receiver, finish[0])
             if writer not in places:
                 places.append(writer)
-                values.append((extent(arrival.meta["val"]), mesh.EXECUTION, 1, 0, 0, 0, 0, 1))
+                values.append((extent(named[writer[1]].meta["val"]), mesh.EXECUTION, 1, 0, 0, 0, 0, 1))
             value = places.index(writer)
-        layout = (0, dtype.itemsize, [x for n, s in zip(shape, stride) for x in (n if s else 1, s * dtype.itemsize)])
-        declared.append((source, destination, channel, arrival.meta["consumer"], value, layout))
+        identity = identities.setdefault((sent.meta["collective"], start[0]), len(identities))
+        declared.append((source, destination, identity, arrival.meta["consumer"], value,
+                         *(mesh_graph.strided(*record[1:], dtype.itemsize) for record in (start, finish))))
         weights.append((cost(written if written in held else sent), cost(arrival), cost(sent), cost((sent, arrival))))
         read = [sent] + [u for u in sent.args[0].users if u in held and u is not sent]
         events += [(transfer, source, PRODUCED, [written])] * (written in held)
