@@ -578,6 +578,11 @@ def insert_send_recv(graph, node, first):
     value = node.meta.get("val")
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
+    # design/unequal-shards-change-request.md item 12; MPI 4.1, section 6.1.3
+    cuts = mesh_graph.chain(node, lambda n: n.args[0] if n.target is SLICE and len(n.args) == 4 and n.args[0].meta.get(
+        "processor", here) == here else None)
+    subarray = (shape(cuts[-1]), tuple(value.shape), tuple(
+        sum(cut.args[2] for cut in cuts[:-1] if cut.args[1] % value.dim() == d) for d in range(value.dim())))
     for channel, (processor, users) in enumerate(away.items(), first):
         with graph.inserting_after(node):
             sent = graph.call_function(SEND, (node, channel))
@@ -585,6 +590,8 @@ def insert_send_recv(graph, node, first):
         with graph.inserting_before(users[0]):
             arrived = graph.call_function(RECV, (channel,))
             arrived.meta.update(processor=processor, val=value)
+        for end in (sent, arrived):
+            end.meta.update(zip(("sizes", "subsizes", "starts"), subarray))
         if processor in node.meta.get("blocks", ()):
             for end in (sent, arrived):
                 end.meta.update(zip(("dimension", "block", "counts", "displs"), node.meta["blocks"][processor]))
