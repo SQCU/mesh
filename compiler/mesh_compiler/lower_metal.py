@@ -450,8 +450,8 @@ class Lowering:
     # design/compilation-composition-change-request.md, Performance correction, "removing unnecessary
     # materialization"
     def settled(self, form, node):
-        value, users = node.meta.get("val"), list(node.users)
-        if isinstance(form, Fused) and len(users) == 1 and users[0].target is SEND and users[0].args[1] in self.laid:
+        value = node.meta.get("val")
+        if isinstance(form, Fused) and isinstance(value, torch.Tensor):
             made = self.strided(form.dtype, form.shape, tuple(value.stride()))
             if self.storages[made.storage].count == math.prod(form.shape):
                 self.store(form, made)
