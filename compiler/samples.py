@@ -527,7 +527,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     exported = scheduled.exported.graph_module.graph
     assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
     original = {n.name: n.target for n in call_nodes(exported)}
-    where, added, sender, reader, ends, shards = {}, [], {}, {}, {}, {}
+    where, added, sender, reader, ends, shards, replicated = {}, [], {}, {}, {}, {}, set()
     for processor, module in scheduled.modules.items():
         module.graph.lint()
         for node in module.graph.nodes:
@@ -557,6 +557,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
             if channel is not None:
                 side = sender if node.target is ir.SEND else reader
                 assert channel not in side, "a channel with two sends or two recvs"
+                replicated.add(node.meta["constant"])
                 side[channel] = processor
                 ends.setdefault(channel, {})[node.target] = node
             for key_, wanted in (expect_on or {}).items():
@@ -587,7 +588,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
         where["output"] = scheduled.output_processor
         pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
-                 if where[u.name] != where[n.name] and any(
+                 if where[u.name] != where[n.name] and n.name not in replicated and any(
                      m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes))}
         assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
         assert len(added) == 2 * scheduled.channels + len(copied), "a node that export did not produce"

@@ -26,6 +26,8 @@ SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
 MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
           ATEN.full_like.default, ATEN.where.self}
 STRIPED = "striped"
+VIEWS = {EXPAND, SLICE, VIEW, ATEN.alias.default, ATEN.permute.default, ATEN.select.int, ATEN.squeeze.dims,
+         ATEN.unsqueeze.default}
 
 
 def operands(node):
@@ -382,7 +384,8 @@ def place(graph_module, placement):
         graph.erase_node(node)
     onto = mesh_graph.replicas(
         [n for n in graph.nodes if n.op == "call_function"], lambda n: list(n.users),
-        lambda n: not any(m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes)),
+        lambda n: invariant[n] or not any(
+            m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes)),
         lambda n: n.meta["processor"])
     copies = {}
     for node in [n for n in graph.nodes if n in onto]:
@@ -397,6 +400,9 @@ def place(graph_module, placement):
     channels = 0
     for node in placed:
         channels += insert_send_recv(graph, node, channels)
+    # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
+    invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
+        n.op == "placeholder" or n.target in VIEWS and all(read)))
     for node in graph.nodes:
         node.meta.pop("blocks", None)
     graph_module.recompile()
