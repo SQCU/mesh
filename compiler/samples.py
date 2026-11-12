@@ -333,6 +333,7 @@ def ragged_rows():
 
 
 BMM = torch.ops.aten.bmm.default
+LM = (index(2, 6, 64), torch.arange(6).expand(2, 6), index(2, 6, 64))
 
 CASES = [
     ("mlp", MLP, [(r(5, 16),)], {}),
