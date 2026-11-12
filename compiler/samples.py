@@ -839,7 +839,7 @@ def check_between_machines(with_inductor):
         region_.unlink()
     assert not any(run.returncode for run in runs), "a machine's check failed"
     print("  ok: two processes, each with a region of the bridge's layout, their entries carried by")
-    print("      this process as rdma/mesh-flow.c link_send_drain and link_receive_drain carry them")
+    print("      this process; no bridge ran")
 
 
 def main():
@@ -899,7 +899,7 @@ def main():
         check_shared_storage()
     print("torch.export.save of the scheduled programs, reloaded in a fresh process:")
     check_reload_in_fresh_process()
-    print("processors on two machines, the bridge's part done here:")
+    print("processors on two machines, their entries carried by this process in place of the bridge:")
     check_between_machines(with_inductor)
     sys.exit(1 if failed else 0)
 
