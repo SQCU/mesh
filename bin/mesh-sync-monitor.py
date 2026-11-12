@@ -52,6 +52,10 @@ UNLISTED = [
 SAVED = ['pid$target::mesh_host_arrived:entry { self->plan = (arg1 << 20) + arg2, self->arrives = arg3 + 1; }',
          'pid$target::_queue_SimpleQueue_get:entry { self->queue = arg0; }']
 INTERPRETER = 'pid$target::take_gil*:'
+APPLY = ['pid$target::dispatch_apply_f:entry { self->applying++; }',
+         'pid$target::dispatch_apply_f:return /self->applying/ { self->applying--; }',
+         'pid$target::_dispatch_client_callout2:entry /self->applying && self->inapi/ { self->inapi--, self->called++; }',
+         'pid$target::_dispatch_client_callout2:return /self->called/ { self->inapi++, self->called--; }']
 COUNT_KIND = 9
 CLASSES = ('program', 'feedback', 'static', 'bridge', 'elsewhere')
 
@@ -123,8 +127,8 @@ def generate(processors, operations, orders, observe, addresses):
         'exit(1);' if observe else 'stop(); exit(1);')
     lines = ['#pragma D option quiet', '#pragma D option strsize=512', '#pragma D option bufsize=64m',
              '#pragma D option dynvarsize=64m'] + ([] if observe else ['#pragma D option destructive'])
-    lines += ['self int inapi, bound;', 'self uint64_t at, cand, objects, plan, arrives, queue;',
-              'self uint64_t om[uint64_t];', 'BEGIN { printf("mesh-sync-monitor: attached\\n"); }'] + SAVED
+    lines += ['self int inapi, bound, applying, called;', 'self uint64_t at, cand, objects, plan, arrives, queue;',
+              'self uint64_t om[uint64_t];', 'BEGIN { printf("mesh-sync-monitor: attached\\n"); }'] + SAVED + APPLY
     lines += ['%sentry { self->inapi++; }' % INTERPRETER, '%sreturn /self->inapi/ { self->inapi--; }' % INTERPRETER]
     shapes = [periodic(operations, order) for order in orders]
     local = []
