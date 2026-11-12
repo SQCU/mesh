@@ -17,6 +17,7 @@ sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
 
 WITH_EFFECTS = torch.ops.higher_order.with_effects
+COPY = torch.ops.aten.copy_.default
 
 
 @torch.library.custom_op("mesh::recv_strided", mutates_args=())
@@ -80,8 +81,16 @@ def lower_send_strided(value, channel, stride, after):
     return in_order(call_send_strided, after, stated, channel, stride)
 
 
+# torch 2.15 aten/src/ATen/native/native_functions.yaml, the overloads that take `out`;
+# torch/_dynamo/variables/torch.py, "Attempted to call op with non-contiguous `out=` tensor"
+def functional(target):
+    given = [(a.name, str(a.type)) for a in target._schema.arguments[:-1]]
+    overloads = (getattr(target.overloadpacket, name) for name in target.overloadpacket.overloads())
+    return next(over for over in overloads if [(a.name, str(a.type)) for a in over._schema.arguments] == given)
+
+
 # design/torch-source-lowering-change-request.md item 3; rdma/mesh_graph.py extremes
-def adapt(module, device, carried):
+def adapt(module, device, carried, laid):
     module = copy.deepcopy(module)
     graph = module.graph
     sent, receives, written, parts = [], False, {}, set()
@@ -112,9 +121,15 @@ def adapt(module, device, carried):
         elif node.target is RECV:
             channel, value = node.args[0], node.meta["val"]
             node.target = RECV_STRIDED
-            node.args = (channel, list(value.shape), list(value.stride()), value.dtype,
+            node.args = (channel, list(value.shape), laid.get(channel, list(value.stride())), value.dtype,
                          torch.device("cpu") if channel in carried else device, mesh_graph.extremes(list(written), read)[1])
             receives, written = True, {}
+        elif node.op == "call_function" and "out" in node.kwargs:
+            with graph.inserting_before(node):
+                made = graph.call_function(functional(node.target), node.args,
+                                           {key: value for key, value in node.kwargs.items() if key != "out"})
+            made.meta["val"], written[made] = node.meta["val"], None
+            node.target, node.args, node.kwargs = COPY, (node.kwargs["out"], made), {}
         if node.op == "call_function" and isinstance(node.meta.get("val"), Tensor):
             written[node] = None
     output = next(n for n in graph.nodes if n.op == "output")
@@ -138,11 +153,13 @@ def chained(nodes):
 # design/torch-source-lowering-change-request.md item 1; compiler/mesh_compiler/driver.py lowered
 def lower(scheduled):
     compiled, carried = {}, {channel for channel, *_ in scheduled.carried}
+    laid = {node.args[1]: list(node.args[0].meta["val"].stride()) for module in scheduled.modules.values()
+            for node in module.graph.nodes if node.target is SEND}
     for processor, module in scheduled.modules.items():
         if scheduled.devices[processor].type == "mps":
             compiled[processor] = module
             continue
-        adapted, receives = adapt(module, scheduled.devices[processor], carried)
+        adapted, receives = adapt(module, scheduled.devices[processor], carried, laid)
         options = {"layout_optimization": False, "reorder_for_peak_memory": False, "_pre_fusion_custom_pass": chained,
                    **({"assume_unaligned_fallback_output": True} if receives else {})}
         compiled[processor] = torch.compile(adapted, backend="inductor", options=options)
