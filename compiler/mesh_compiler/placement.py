@@ -21,6 +21,10 @@ ADD, ADDMM, CAT, MM, SLICE = (ATEN.add.Tensor, ATEN.addmm.default, ATEN.cat.defa
                               ATEN.slice.Tensor)
 EXPAND, RESHAPE, VIEW = ATEN.expand.default, ATEN.reshape.default, ATEN.view.default
 SLICE_SCATTER, ZEROS = ATEN.slice_scatter.default, ATEN.new_zeros.default
+BMM, SOFTMAX = ATEN.bmm.default, ATEN._softmax.default
+SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
+MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
+          ATEN.full_like.default, ATEN.where.self}
 STRIPED = "striped"
 
 
@@ -199,6 +203,61 @@ def viewed(value, whole, new):
             return at, (dimension, tuple(stride * size // unit for size in sizes), processors, nodes)
 
 
+def ranges(sizes, extent, shards):
+    if sizes == STRIPED:
+        return [(j, extent, shards) for j in range(shards)]
+    edges = list(itertools.accumulate(sizes, initial=0))
+    return [(low, high, 1) for low, high in zip(edges, edges[1:])]
+
+
+def intact(whole, new):
+    units = [math.prod(new[d + 1:]) for d in range(len(new))]
+    return [next((at for at in range(len(new)) if (units[at], new[at]) == (math.prod(whole[d + 1:]), whole[d])), None)
+            for d in range(len(whole))]
+
+
+# design/unequal-shards-change-request.md item 8; Brandon et al., Striped Attention, arXiv:2311.09431, section 3.1
+def unmasked(node, rows, keys, queries, held):
+    at, user = [rows, keys], next(iter(node.users))
+    while len(node.users) == 1 and user.target is VIEW:
+        at, node = [intact(shape(node), shape(user))[d] for d in at], user
+        user = next(iter(node.users))
+    every = [list(range(len(held))) for _ in queries]
+    constants = [n for n in user.all_input_nodes if n is not node and not any(
+        m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes))]
+    reached = mesh_graph.reach([user], lambda n: () if n.target is BMM else list(n.users))
+    if len(node.users) != 1 or user.target is not ADD or None in at or not constants or not all(
+            n.target in MASKED for n in reached):
+        return every
+    order = mesh_graph.postorder(constants[:1], lambda n: n.all_input_nodes)
+    mask = mesh_graph.forward(order, lambda n: n.all_input_nodes, lambda n, read: n.target(
+        *map_arg(n.args, lambda m: read[n.all_input_nodes.index(m)]), **n.kwargs))[constants[0]]
+    mask = mask.expand(shape(user)).movedim(at, (-2, -1))
+    return [[s for s, key in enumerate(held)
+             if not (mask[..., list(range(*query)), :][..., list(range(*key))] == -math.inf).all()] for query in queries]
+
+
+def chosen(graph, node, dimension, blocks, processor):
+    pieces = [call(graph, SLICE, (node, dimension, *block), node.meta.get("processor", processor)) for block in blocks]
+    return pieces[0] if len(pieces) == 1 else call(graph, CAT, (pieces, dimension), pieces[0].meta["processor"])
+
+
+def plain(graph, node, processor):
+    for dimension, blocks in node.meta.get("order", {}).items():
+        whole, edges = list(shape(node)), list(itertools.accumulate((len(range(*b)) for b in blocks), initial=0))
+        whole[dimension] = max(stop for _, stop, _ in blocks)
+        value = call(graph, ZEROS, (node, whole), node.meta.get("processor", processor))
+        for block, low, high in zip(blocks, edges, edges[1:]):
+            piece = call(graph, SLICE, (node, dimension, low, high), value.meta["processor"])
+            value = call(graph, SLICE_SCATTER, (value, piece, dimension, *block), value.meta["processor"])
+        node = value
+    return node
+
+
+def plainly(graph, value):
+    return *value[:3], [plain(graph, node, holder) for node, holder in zip(value[3], value[2])]
+
+
 def partitioned(graph, node, held, want, replaced):
     target = None
     if node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
@@ -210,7 +269,7 @@ def partitioned(graph, node, held, want, replaced):
             node.target, node.args = ADD, (product, node.args[0])
         shapes, out = [shape(n) for n in operands(node)], shape(node)
         if node.target is VIEW:
-            rows = [[None] * len(shapes[0])]
+            rows = [intact(shapes[0], out)]
             if held[0][0] is not None:
                 rows[0][held[0][0]], value = viewed(held[0], shapes[0], out)
                 held = [value]
@@ -226,23 +285,54 @@ def partitioned(graph, node, held, want, replaced):
             target = found.pop()
     if target is None:
         processor = want if isinstance(want, str) else want[2][0]
-        arguments = iter([reshard(graph, v, None, None, (processor,))[0] for v in held])
+        arguments = iter([reshard(graph, plainly(graph, v), None, None, (processor,))[0] for v in held])
         node.args, node.kwargs = map_arg((node.args, node.kwargs), lambda n: next(arguments))
         node.meta["processor"] = processor
         return None, None, (processor,), [node]
     along, sizes, processors = target
-    columns = [reshard(graph, v, row.index(along) if along in row else None, sizes, processors)
-               for v, row in zip(held, rows)]
-    shards = []
+    shards, whole = [], along >= 0 and (sizes == STRIPED or sum(sizes) == out[along])
+    queries = ranges(sizes, out[along], len(processors)) if whole else ()
+    joined = [v[0] is not None and along not in row and row[v[0]] is not None and
+              (v[1] == STRIPED or sum(v[1]) == shapes[i][v[0]]) for i, (v, row) in enumerate(zip(held, rows))]
+    columns = [None if join else reshard(graph, plainly(graph, v) if (v[0], v[1], v[2]) != (
+        row.index(along) if along in row else None, sizes, processors) else v,
+        row.index(along) if along in row else None, sizes, processors) for v, row, join in zip(held, rows, joined)]
     for j, processor in enumerate(processors):
-        arguments = iter([column[j] for column in columns])
+        local, order = [column and column[j] for column in columns], {}
+        for i, row in enumerate(rows):
+            for dimension, blocks in (local[i].meta.get("order", {}) if local[i] else {}).items():
+                label = row[dimension] if row[dimension] is not None or node.target not in SYMMETRIC else (
+                    dimension if node.target is SOFTMAX else -1 - len(out) - dimension)
+                if label is None or order.setdefault(label, blocks) != blocks:
+                    local[i] = plain(graph, local[i], processor)
+        for i, (v, row) in enumerate(zip(held, rows)):
+            if joined[i]:
+                label, kept = row[v[0]], ranges(v[1], shapes[i][v[0]], len(v[2]))
+                if label not in order:
+                    picked = unmasked(node, along, label, queries, kept)[j] if whole and label >= 0 else range(len(kept))
+                    order[label] = tuple(kept[s] for s in picked)
+                pieces = [v[3][kept.index(block)] for block in order[label]]
+                extents = tuple(shape(piece)[v[0]] for piece in pieces)
+                for k, piece in enumerate(pieces):
+                    piece.meta.setdefault("blocks", {})[processor] = (
+                        v[0], k, extents, tuple(itertools.accumulate(extents, initial=0))[:-1])
+                local[i] = pieces[0] if len(pieces) == 1 else call(graph, CAT, (pieces, v[0]), processor)
+        for i, row in enumerate(rows):
+            for dimension, label in enumerate(row):
+                if label in order and not joined[i] and dimension not in local[i].meta.get("order", {}):
+                    local[i] = chosen(graph, local[i], dimension, order[label], processor)
+        pairs = sum(len(order[row[v[0]]]) for v, row, join in zip(held, rows, joined) if join)
+        order = {label: blocks for label, blocks in order.items() if label >= 0 and
+                 [index for block in blocks for index in range(*block)] != list(range(out[label]))}
+        arguments = iter(local)
         shard = graph.node_copy(node, lambda n: next(arguments))
         if node.target in (EXPAND, VIEW):
-            local = list(shard.args[1])
-            local[along] = (len(range(j, out[along], len(processors))) if sizes == STRIPED else
-                            out[along] * sizes[j] // sum(sizes))
-            shard.args = (shard.args[0], local)
-        shard.meta["of"] = node.name
+            sized = list(shard.args[1])
+            sized[along] = (len(range(*queries[j])) if sizes == STRIPED else out[along] * sizes[j] // sum(sizes))
+            for label, blocks in order.items():
+                sized[label] = sum(len(range(*block)) for block in blocks)
+            shard.args = (shard.args[0], sized)
+        shard.meta.update(of=node.name, order=order, pairs=pairs)
         shards.append(evaluated(shard, processor))
     replaced.append(node)
     if along >= 0:

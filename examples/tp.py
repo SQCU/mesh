@@ -113,7 +113,8 @@ class Timed(torch.fx.Interpreter):
         return result
 
 
-# design/unequal-shards-change-request.md items 6, 7 and 14
+# design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/docs/measurement.md, "the declared 1/beta
+# 6.45 GB/s"
 def chosen(model, inputs, placement, args, heads):
     if not args.upper:
         return args.units
@@ -133,14 +134,17 @@ def chosen(model, inputs, placement, args, heads):
     def comm(node):
         value = node.meta['val']
         along = value.shape[node.meta['dimension']] if 'counts' in node.meta else 0
-        return args.comm * value.nbytes * sum(torch.utils._pytree.tree_leaves(node.meta['counts'])) / along if along else 0.0
+        between = node.args[0] in {channel for channel, *_ in fixed.carried}
+        return (between * args.comm * value.nbytes * sum(torch.utils._pytree.tree_leaves(node.meta['counts'])) / along
+                if along else 0.0)
 
     staged = shares.stages(fixed, segment)
     if args.solve:
         return units(fixed, tuple(processors), times.__getitem__, comm, args.upper, heads)
     slopes = shares.computation(staged, tuple(processors), times.__getitem__)
     return {part: shares.shifted(given, args.upper,
-                                 lambda j, held: held[j] / sum(held) * sum(stage[j][1] for stage in slopes[part]))
+                                 lambda j, held: sum(stage[j][0] + held[j] / sum(held) * stage[j][1]
+                                                     for stage in slopes[part]))
             for part, given in args.units.items()}
 
 
@@ -155,8 +159,11 @@ def arguments(description):
     parser.add_argument('--units', type=json.loads, default={})
     parser.add_argument('--solve', action='store_true')
     parser.add_argument('--upper', type=float, nargs='+')
-    parser.add_argument('--comm', type=float, default=0.0)
-    return parser.parse_args()
+    parser.add_argument('--comm', type=float, default=1 / 6.45e9)
+    args = parser.parse_args()
+    if args.solve and not args.upper:
+        parser.error('--solve takes its bounds from --upper')
+    return args
 
 
 def execute(model, inputs, placement, args, **told):

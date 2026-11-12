@@ -516,6 +516,9 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     edges = [(at[a], at[b]) for order in orders for a, b in zip(order, order[1:])]
     edges += [(at[end[ir.SEND]], at[end[ir.RECV]]) for end in ends.values()]
     assert len(set(mesh_graph.components(len(at), edges))) == len(at), "the per-processor orders deadlock"
+    after = mesh_graph.reach([n for n in at if n.target is SLICE_SCATTER], lambda n: [
+        *n.users, *([ends[ir.channel_of(n)][ir.RECV]] if n.target is ir.SEND else [])])
+    assert not any(n.target is BMM for n in after), "a value is interleaved before a product reads it"
     return len(original), len(copied)
 
 
@@ -782,6 +785,17 @@ class SharedValue(nn.Module):
         return z, w
 
 
+def check_products():
+    for name, pairs in (("sequence split | 2 shards", 6), ("sequence split | 3 shards", 12),
+                        ("sequence striped | 2 shards", 8), ("sequence striped | 3 shards", 18)):
+        scheduled = build(name)[2]
+        found = sum(n.meta.get("pairs", 0) for m in scheduled.modules.values() for n in m.graph.nodes if n.target is BMM)
+        assert found == pairs, (name, found)
+        print(f"  {name:34} {scheduled.channels:3d} channels, {found:3d} of {2 * len(scheduled.modules) ** 2} "
+              "(query block, key block) pairs in its two products")
+    print("  ok: a pair the causal mask inhibits entirely is in no product; no value is interleaved before a product")
+
+
 def check_overlapping_calls():
     assert not build("encoder | 3 processors round-robin")[2].feedforward, "every processor is read by the output processor"
     torch.manual_seed(0)
@@ -1022,6 +1036,8 @@ def main():
     if with_inductor:
         print("Inductor's generated code, scheduled against exported, single-processor cases:")
         check_inductor_structure()
+    print("attention's products where the sequence is sharded (Striped Attention, section 3.1):")
+    check_products()
     print("overlapping calls (a processor with no path to the output processor):")
     check_overlapping_calls()
     if with_inductor:
