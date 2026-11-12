@@ -90,6 +90,14 @@ Three things are mesh's and are added to it:
      published with the AOT compiled static link schedule."; and
      [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md) 7.1 steps 1 and 4, since
      `schedule.stored` indexes lifetimes by a postorder fixed before the solve and not by the scheduled order.
+   - As of mesh dcc05bc0 (2026-11-12) `mesh_plan` writes each function's place in its one heap order (`struct
+     mesh_function` `order`), each processor's list is that order's subsequence, and a program with nothing carried
+     between machines is ordered by `mesh_plan` called with a null context; the `heap_order` and `completion_times`
+     calls of `schedule.py` are deleted. The null context is Claude's choice, made because such a function declares
+     no transfer and no value and the region supplies only what those use. Outstanding at that commit, from its
+     review: item 3's "The order is published with the AOT compiled static link schedule." (the order is in the
+     caller's operand and `ir.Plan.order` alone), 7.1 steps 1 and 4 (lifetimes still index the postorder), and
+     item 2's two key sentences.
 2. Processors on several machines: items 1 and 2 above. The check's cases pass with their processors on two machines.
    (Outstanding. Mesh 6d4f007b and 1a3cfe60 wrote it. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
    entries the check carries between two regions of the bridge's layout; the 33 is the count on one machine. The run under two bridges is
