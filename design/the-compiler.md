@@ -85,7 +85,8 @@ Three things are mesh's and are added to it:
        devices per operation (MLComputePlan.h: "The anticipated compute devices that would be used for executing an ML
        Program operation").
      - The check's path `coreml` runs every case that has an `ane` processor and passes at a relative error of 2^-6
-       against eager float32 where its other paths pass at 1e-4. Float16 has an 11-bit significand, a unit roundoff
+       against eager float32 where its other paths pass at 1e-4; the case of float16 values, `examples/engines.py`'s
+       model, passes at 2^-6 on every path. Float16 has an 11-bit significand, a unit roundoff
        of 2^-11. A contraction of n terms accumulates at most n roundoffs relative to the sum of its terms' magnitudes
        (N. Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.1), and the square root of n
        where the roundoffs' signs are independent; the widest contraction of the cases has 1024 terms, and 32 * 2^-11
@@ -97,7 +98,8 @@ Three things are mesh's and are added to it:
      recorded again."). A processor no lowering takes keeps the last GraphModule returned for it.
 5. `rdma/mesh_compile.py` and metal-microbench's `metal_recording`, `metal_lower`, `metal_ir` and `metal_archive` are
    deleted when no example calls them.
-   - `examples/engines.py` is compiled by `compile_module` and run by `Program` (mesh 5098de5f). It gives `lowered`
-     `lower_coreml.lower` alone: `lower_metal.lower` does not lower its float16 `aten.mm` or its `aten.gelu` with
-     `approximate='tanh'`, so its `mps` processors run their GraphModules.
-
+   - `examples/engines.py` is compiled by `compile_module` and run by `Program` (mesh 5098de5f), its functions those of
+     `lowered(scheduled, (lower_metal.lower, lower_coreml.lower))`: `lower_metal.lower` lowers a float16 product, its
+     cooperative tensor of the product's type, and `aten.gelu` with `approximate='tanh'` (torch 2.15,
+     `torch/nn/modules/activation.py`, GELU: "When the approximate argument is 'tanh', Gelu is estimated with:" 0.5 *
+     x * (1 + Tanh(sqrt(2 / pi) * (x + 0.044715 * x^3)))). Its `cpu` processor runs its GraphModule.

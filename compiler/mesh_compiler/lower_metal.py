@@ -54,6 +54,9 @@ POINTWISE = {
     ATEN.clone.default: "{0}",
     ATEN._to_copy.default: "{T}({0})",
 }
+# design/the-compiler.md, order 5; torch 2.15, torch/nn/modules/activation.py, GELU
+GELU = {"none": POINTWISE[ATEN.gelu.default],
+        "tanh": "(0.5f * {0} * (1 + tanh(0.7978845608f * ({0} + 0.044715f * {0} * {0} * {0}))))"}
 VIEWS = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default, ATEN.permute.default,
          ATEN.expand.default, ATEN.slice.Tensor, ATEN.select.int, ATEN.unsqueeze.default, ATEN.squeeze.dims,
          ATEN.squeeze.dim, ATEN.transpose.int, ATEN.alias.default}
@@ -177,7 +180,8 @@ class Lowering:
                     RECV: self.receive, SEND: self.send, operator.getitem: self.part,
                     **dict.fromkeys(FILLED, self.filled), **dict.fromkeys(REDUCED, self.reduced),
                     ATEN.arange.start_step: self.range, ATEN.embedding.default: self.embedding,
-                    ATEN.pow.Tensor_Scalar: self.power, ATEN.cat.default: self.concatenated,
+                    ATEN.pow.Tensor_Scalar: self.power, ATEN.gelu.default: self.gelu,
+                    ATEN.cat.default: self.concatenated,
                     ATEN._softmax.default: self.softmax,
                     ATEN.native_layer_norm.default: self.layer_norm, ATEN.convolution.default: self.convolution,
                     ATEN.mm.default: self.product, ATEN.bmm.default: self.product, ATEN.addmm.default: self.product}
@@ -194,8 +198,7 @@ class Lowering:
                 self.flush()
                 self.wait()
             elif node.op == "call_function" and (
-                    node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(node.target, set())
-                    or node.kwargs.get("approximate", "none") != "none"):
+                    node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(node.target, set())):
                 self.missing.append(str(node.target))
             elif node.op == "call_function" and not self.missing:
                 form = handlers[node.target](node)
@@ -293,7 +296,8 @@ class Lowering:
         if expression == "t[i]":
             lines.append("op.run(mA, mB, mC);")
         else:
-            lines += ["auto t = op.get_destination_cooperative_tensor<decltype(mA), decltype(mB), float>();",
+            lines += ["auto t = op.get_destination_cooperative_tensor<decltype(mA), decltype(mB), "
+                      f"{TYPES[form.dtype]}>();",
                       "for (uint16_t i = 0; i < t.get_capacity(); ++i) if (t.is_valid_element(i)) t[i] = 0;",
                       "op.run(mA, mB, t);",
                       "for (uint16_t i = 0; i < t.get_capacity(); ++i) if (t.is_valid_element(i)) {",
@@ -313,7 +317,7 @@ class Lowering:
 
     def product(self, node):
         value = node.meta["val"]
-        if value.dtype != torch.float32:
+        if value.dtype not in (torch.float32, torch.float16):
             self.missing.append(f"{node.target} of {value.dtype}")
             return None
         left, right = (self.matrix(a) for a in node.args[-2:])
@@ -342,6 +346,9 @@ class Lowering:
                 for o in operands), T=kind)
         return Product(base.left, base.right, value.dtype, shape, expression) if base else \
             Fused(value.dtype, shape, expression)
+
+    def gelu(self, node):
+        return self.pointwise(node, GELU[node.kwargs.get("approximate", "none")])
 
     def power(self, node):
         whole = float(node.args[1]).is_integer() and 1 <= node.args[1] <= 4

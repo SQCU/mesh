@@ -280,6 +280,8 @@ import crossing
 import ep
 import pl
 import tp
+os.environ.update(K="48", N="48")
+import engines
 
 
 def megatron_with(stated):
@@ -358,6 +360,10 @@ CASES = [
     ("mlp | mps then ane", MLP, [(r(5, 16),)],
      {"processors": on(0, {"gpu": "mps", "npu": "ane"}), "needs_mps": True,
       "placement": lambda: halves("gpu", "npu", 4)}),
+    ("engines | float16 on mps, cpu, ane", lambda: engines.Engines((16, 16, 16)), [(r(8, 48).half() / 4,)],
+     {"processors": on(0, {"projection": "mps", "part0": "mps", "part1": "cpu", "part2": "ane"}), "needs_mps": True,
+      "tolerance": TOLERANCES["coreml"],
+      "placement": lambda: engines.placement("projection", ("part0", "part1", "part2"))}),
     ("mlp dynamic batch", MLP, [(r(5, 16),), (r(11, 16),)],
      {"dynamic_shapes": BATCH, "rejected": True}),
     ("shape arithmetic dynamic batch", ShapeDependent, [(r(5, 3, 4),), (r(9, 3, 4),)],
@@ -421,7 +427,7 @@ FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 proc
                "solve | 3 processors round-robin", "mixture of experts | 3 processors",
                "conv | conv on mps, rest cpu", "megatron | 2 shards")
 KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
-OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "tolerance")
 
 
 def errors(reference, got):
@@ -758,7 +764,7 @@ def cell(result, tolerance=TOLERANCE):
         return "not lowered", True
     if isinstance(result, Exception):
         return "FAIL", False
-    ok = result[1] <= tolerance or result[0] <= tolerance
+    ok = result[1] <= tolerance or result[0] <= TOLERANCE
     return f"{result[1]:.1e}" if ok else f"BAD {result[1]:.1e}", ok
 
 
@@ -960,7 +966,7 @@ def between(machines, with_inductor):
 
             result = within(120, outputs)
             text, ok = ("ran", True) if result is None else cell(
-                result, tolerance=TOLERANCES.get(path, TOLERANCE))
+                result, tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
             failed |= not ok
             cells.append(f"{path} {text}")
             if isinstance(result, Exception):
@@ -1075,7 +1081,7 @@ def main():
             detail = str(error).strip().splitlines()[0][:150]
             print(f"{name:34} {'REJECTED' if rejected else 'ERROR'}: {type(error).__name__}: {detail}")
             continue
-        cells = [cell(results[path], tolerance=TOLERANCES.get(path, TOLERANCE))
+        cells = [cell(results[path], tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
                  for path in PATHS]
         total_breaks += breaks
         failed |= rejected or breaks > 0 or not all(ok for _, ok in cells)

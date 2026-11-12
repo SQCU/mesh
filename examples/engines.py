@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
-from mesh_compiler import lower_coreml
+from mesh_compiler import lower_coreml, lower_metal
 from mesh_compiler.driver import compile_module, lowered
 from mesh_compiler.runtime import Program
 
@@ -110,7 +110,7 @@ def execute(model, inputs, engines, args):
     processors.update((part, (args.nodes[place % len(args.nodes)], engine))
                       for place, (part, engine) in enumerate(zip(parts, engines)))
     scheduled = compile_module(model, inputs, processors, placement('projection', parts))
-    functions = lowered(scheduled, (lower_coreml.lower,))
+    functions = lowered(scheduled, (lower_metal.lower, lower_coreml.lower))
     program = Program(scheduled, functions)
     started = time.perf_counter()
     result = program(*inputs)
