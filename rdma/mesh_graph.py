@@ -101,6 +101,15 @@ def reach(starts, neighbours):
 
 
 # design/unequal-shards-change-request.md item 8
+def replicas(order, users, replicated, place):
+    onto = {}
+    for v in reversed(order):
+        if replicated(v):
+            onto[v] = {q for u in users(v) for q in {place(u)} | onto.get(u, set())} - {place(v)}
+    return {v: sorted(found) for v, found in onto.items() if found}
+
+
+# design/unequal-shards-change-request.md item 8
 def chain(start, following):
     path = [start]
     while (after := following(path[-1])) is not None:

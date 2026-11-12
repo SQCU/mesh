@@ -370,15 +370,19 @@ def place(graph_module, placement):
     mesh_graph.forward(nodes, operands, transfer)
     for node in reversed(replaced):
         graph.erase_node(node)
-    for node in reversed([n for n in graph.nodes if n.op == "call_function"]):
-        away = {user.meta["processor"] for user in node.users} - {node.meta["processor"]}
-        if away and not any(n.op == "placeholder" for n in mesh_graph.reach([node], lambda n: n.all_input_nodes)):
-            for processor in sorted(away):
-                with graph.inserting_after(node):
-                    there = graph.node_copy(node)
-                there.meta.update(processor=processor, constant=node.meta.get("constant", node.name))
-                for user in [user for user in node.users if user.meta["processor"] == processor and user is not there]:
-                    user.replace_input_with(node, there)
+    onto = mesh_graph.replicas(
+        [n for n in graph.nodes if n.op == "call_function"], lambda n: list(n.users),
+        lambda n: not any(m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes)),
+        lambda n: n.meta["processor"])
+    copies = {}
+    for node in [n for n in graph.nodes if n in onto]:
+        copies[node, node.meta["processor"]] = node
+        for processor in onto[node]:
+            with graph.inserting_after(node):
+                there = graph.node_copy(node, lambda n: copies.get((copies.get(n, n), processor), n))
+            there.meta.update(processor=processor, constant=there.meta.pop("of", node.name))
+            node.replace_all_uses_with(there, lambda user: user is not there and user.meta["processor"] == processor)
+            copies[node, processor], copies[there] = there, node
     placed = [n for n in graph.nodes if n.op != "placeholder"]
     channels = 0
     for node in placed:

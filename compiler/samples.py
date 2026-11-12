@@ -506,8 +506,10 @@ def check_ir(scheduled, expect_on=None, sharded=False):
             if node.name in original and (node.target is original[node.name] or sharded):
                 assert node.name not in where, f"{node.name} scheduled twice"
                 where[node.name] = processor
-            elif node.meta.get("constant") in original:
-                assert node.target is original[node.meta["constant"]], "a constant's copy is another operator"
+            elif "constant" in node.meta:
+                assert "of" not in node.meta, "a constant's copy is also a shard"
+                if node.meta["constant"] not in original:
+                    added.append(node)
             elif node.meta.get("of") in original:
                 assert processor not in shards.setdefault(node.meta["of"], set()), f"{node.name}: two shards on {processor}"
                 shards[node.meta["of"]].add(processor)
