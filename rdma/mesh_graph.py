@@ -583,3 +583,19 @@ def arrivals(edges, commit):
         if commit[a] is None and commit[b] is not None:
             found.setdefault(commit[b], {}).setdefault(a, []).append((a, b))
     return found
+
+
+# design/torch-source-lowering-change-request.md item 3; torch/_inductor/scheduler.py additional_buffer_deps
+def adjacent(positions, written, read):
+    order = sorted(range(len(positions)), key=positions.__getitem__)
+    return [(a, b) for a, b in zip(order, order[1:]) if written[a] and not set(written[a]) & set(read[b])]
+
+
+# design/synchronization-signature-change-request.md item 1; E. A. Lee and D. G. Messerschmitt, Proc. IEEE 75(9), 1987;
+# A. J. Bernstein, IEEE Trans. Electronic Computers EC-15(5), 1966
+def handled(vertices, commit, accesses):
+    handler = {c: vertices + k for k, c in enumerate(dict.fromkeys(c for c in commit if c is not None))}
+    edges = [(v, handler[c], 0) for v, c in enumerate(commit) if c is not None]
+    edges += [(a, b, 1) for held, a, first in accesses for other, b, second in accesses
+              if held == other and (first or second)]
+    return handler, edges
