@@ -46,9 +46,16 @@ def new_commits(repo):
     path = marker(repo)
     seen = open(path).read().strip() if os.path.exists(path) else ''
     if not seen or not git(repo, 'rev-parse', '--verify', '--quiet', seen + '^{commit}'):
-        open(path, 'w').write(head)
+        advance(repo, head)
         return []
     return git(repo, 'rev-list', '--reverse', f'{seen}..{head}').split()
+
+
+def advance(repo, sha):
+    path = marker(repo)
+    with open(path + '.new', 'w') as f:
+        f.write(sha)
+    os.replace(path + '.new', path)
 
 
 def measured(repo, sha):
@@ -82,13 +89,18 @@ def main():
         pass
     messages = []
     for repo in REPOSITORIES:
+        held = open(marker(repo) + '.lock', 'w')
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            continue
         for sha in new_commits(repo):
             try:
                 asserted, tested = measured(repo, sha)
             except (RuntimeError, OSError, subprocess.SubprocessError) as error:
                 messages.append(f'Assertion and test measurement of {sha[:10]} in {repo} was not made: {error}')
                 break
-            open(marker(repo), 'w').write(sha)
+            advance(repo, sha)
             if asserted or tested:
                 found = ' and '.join(name for name, present in (('an assertion', asserted), ('a test', tested)) if present)
                 count = logged(repo, sha, asserted, tested)
