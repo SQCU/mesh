@@ -96,14 +96,14 @@ class Function(torch.nn.Module):
         return self.function(*args, **kwargs)
 
 
-class Written(torch.nn.Module):
-    def __init__(self, function, written):
+class Stated(torch.nn.Module):
+    def __init__(self, function, read, written):
         super().__init__()
-        self.function, self.written = function, written
+        self.function, self.read, self.written = function, read, written
 
     def forward(self, *args, **kwargs):
-        result = self.function(*args[:len(args) - len(self.written)], **kwargs)
-        return (result, *(self.function.get_buffer(name) for name in self.written))
+        result = self.function(*args[:len(args) - len(self.read)], **kwargs)
+        return (result, *(self.function.get_buffer(name) for name in self.written)) if self.written else result
 
 
 class Captured(torch.fx.Interpreter):
@@ -146,22 +146,31 @@ def calls(program, args, functions, **export_options):
     module = torch.fx.GraphModule(program, graph)
     captured = Captured(module, functions, export_options)
     captured.run(*args)
-    held = {}
-    for node in [n for n in module.graph.nodes if n.op == "call_module"]:
-        written = tuple(target for kind, target in captured.exported[node.meta["function"]].outputs
-                        if kind == OutputKind.BUFFER_MUTATION)
-        if written:
-            name = f"{node.target.replace('.', '_')}_written"
-            if not hasattr(module, name):
-                module.add_submodule(name, Written(module.get_submodule(node.target), written))
-            with module.graph.inserting_before(node):
-                buffers = [held.get((node.target, buffer)) or module.graph.get_attr(f"{node.target}.{buffer}")
-                           for buffer in written]
-                call = module.graph.call_module(name, (*node.args, *buffers), node.kwargs)
-                call.meta = {**node.meta, "written": written}
-                node.replace_all_uses_with(module.graph.call_function(operator.getitem, (call, 0)))
-                held.update(((node.target, buffer), module.graph.call_function(operator.getitem, (call, k + 1)))
-                            for k, buffer in enumerate(written))
-            module.graph.erase_node(node)
+    named, held = {}, {}
+    for node in [n for n in module.graph.nodes if "function" in n.meta]:
+        function, called = captured.exported[node.meta["function"]], node.op == "call_module"
+        if not function.state:
+            continue
+        leaf = module.get_submodule(node.target) if called else Function(node.target)
+        own = {**dict(leaf.named_parameters()), **dict(leaf.named_buffers())} if called else {}
+        state = dict(function.state.values())
+        written = tuple(key for kind, key in function.outputs if kind == OutputKind.BUFFER_MUTATION)
+        paths = {key: f"{node.target}.{key}" if key in own else f"{node.name}_{key}" for key in state}
+        module.add_submodule(f"{node.name}_stated", Stated(leaf, tuple(state), written))
+        with module.graph.inserting_before(node):
+            for key in state.keys() - own.keys():
+                module.register_buffer(paths[key], state[key], persistent=False)
+            taken = [named.get(paths[key]) or held.get(tensor) or module.graph.get_attr(paths[key])
+                     for key, tensor in state.items()]
+            call = module.graph.call_module(f"{node.name}_stated", (*node.args, *taken), node.kwargs)
+            call.meta = {**node.meta, "read": tuple(state), **({"written": written} if written else {})}
+            node.replace_all_uses_with(module.graph.call_function(operator.getitem, (call, 0)) if written else call)
+            for (key, tensor), value in zip(state.items(), taken):
+                if key in written:
+                    value = module.graph.call_function(operator.getitem, (call, 1 + written.index(key)))
+                    named[paths[key]] = held[tensor] = value
+                named.setdefault(paths[key], value)
+                held.setdefault(tensor, value)
+        module.graph.erase_node(node)
     module.recompile()
     return module, captured.exported

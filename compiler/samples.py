@@ -1202,6 +1202,18 @@ def doubled(x):
     return x * 2
 
 
+SHIFT = torch.ones(8)
+
+
+def shifted(x):
+    return doubled(x) + SHIFT
+
+
+def counted(x):
+    SHIFT.add_(1)
+    return doubled(x)
+
+
 class Indexed(nn.Module):
     def __init__(self, index):
         super().__init__()
@@ -1209,6 +1221,15 @@ class Indexed(nn.Module):
 
     def forward(self, x):
         return self.a(doubled(x)[0] if self.index else doubled(x))
+
+
+class Held(nn.Module):
+    def __init__(self, write):
+        super().__init__()
+        self.a, self.write = nn.Linear(8, 8), write
+
+    def forward(self, x):
+        return self.a(counted(x) if self.write else shifted(x))
 
 
 class Called(torch.fx.Interpreter):
@@ -1223,8 +1244,8 @@ class Called(torch.fx.Interpreter):
     def call_module(self, target, args, kwargs):
         key, written, function = self.calling.meta["function"], self.calling.meta.get("written", ()), self.fetch_attr(
             target)
-        if written:
-            function, args = function.function, args[:len(args) - len(written)]
+        if "read" in self.calling.meta:
+            function, args = function.function, args[:len(args) - len(self.calling.meta["read"])]
         if key not in self.programs:
             assert key in self.exported and self.fetch_attr(key[0]) is function, (
                 f"{self.calling.name} names no exported function")
@@ -1241,8 +1262,12 @@ def check_calls():
     program, args = Block().eval(), (r(2, 8), r(2, 8))
     graph, exported = calls(program, args, ("a", "b", "join"))
     nodes = [n for n in graph.graph.nodes if n.op == "call_module"]
-    assert [n.target for n in nodes] == ["a", "a", "b", "join"], "a call of a function is not one node"
-    assert {n.op for n in graph.graph.nodes} == {"placeholder", "call_module", "output"}, "a function was traced into"
+    assert [n.meta["function"][0] for n in nodes] == ["a", "a", "b", "join"], "a call of a function is not one node"
+    assert {n.op for n in graph.graph.nodes} == {"placeholder", "get_attr", "call_module", "output"}, (
+        "a function was traced into")
+    assert [[m.target for m in n.args if m.op == "get_attr"] for n in nodes] == [
+        ["a.weight", "a.bias"], ["a.weight", "a.bias"], ["b.0.weight", "b.0.bias"], []] and nodes[0].args[1:] == nodes[
+            1].args[1:], "a parameter a function reads is no argument of its call's node"
     assert sorted(key[0] for key in exported) == ["a", "b", "join"], "a function called twice is exported twice"
     assert all(isinstance(made, ir.Exported) and call_nodes(made.graph_module.graph) for made in exported.values())
     most = mesh_graph.width(nodes, lambda n: [u for u in n.users if u.op == "call_module"])
@@ -1251,31 +1276,38 @@ def check_calls():
     worst = errors(program(*args), called.run(*args))[1]
     assert worst <= TOLERANCE and len(called.programs) == 3, (worst, len(called.programs))
     plain, made = calls(Indexed(False).eval(), args[:1], ("a", doubled))
-    assert [(n.op, n.target, n.meta["function"][0]) for n in plain.graph.nodes if "function" in n.meta] == [
-        ("call_function", doubled, doubled), ("call_module", "a", "a")] and len(made) == 2, "a function is no leaf"
+    assert [(n.op, n.meta["function"][0]) for n in plain.graph.nodes if "function" in n.meta] == [
+        ("call_function", doubled), ("call_module", "a")] and len(made) == 2, "a function is no leaf"
+    plain, made = calls(Held(False).eval(), args[:1], ("a", shifted))
+    shift, = [n for n in plain.graph.nodes if n.meta.get("function", [None])[0] is shifted]
+    assert shift.op == "call_module" and [getattr(plain, m.target) is SHIFT for m in shift.args[1:]] == [
+        True], "a tensor a plain function reads is no argument of its call's node"
     writer = Normed().train()
     graph, exported = calls(writer, args, ("norm", "a", "join"))
     reference = copy.deepcopy(writer)
     first, second = [n for n in graph.graph.nodes if "written" in n.meta]
-    held = [n for n in graph.graph.nodes if n.op == "get_attr"]
-    assert first.meta["written"] == tuple(n.target.removeprefix("norm.") for n in held), "the buffers a call writes"
-    assert first.args[1:] == tuple(held) and [(n.op, *n.args) for n in second.args[1:]] == [
-        ("call_function", first, k + 1) for k in range(len(held))], "a written buffer is no argument and no result"
+    held = [n for n in graph.graph.nodes if n.op == "get_attr" and n.target.startswith("norm.")]
+    assert first.meta["read"] == tuple(n.target.removeprefix("norm.") for n in held) and first.meta["read"][
+        2:] == first.meta["written"], "the state a call reads and the buffers it writes"
+    assert first.args[1:] == tuple(held) and second.args[1:3] == first.args[1:3] and [
+        (n.op, *n.args) for n in second.args[3:]] == [("call_function", first, k + 1) for k in range(
+            len(first.meta["written"]))], "a written buffer is no argument and no result"
     called = Called(graph, exported)
     wrote = errors(reference(*args), called.run(*args))[1]
     norm = called.programs[second.meta["function"]]
     last = max(errors(reference.norm.get_buffer(name).float(), norm.arguments[processor][place].float())[1]
                for name in second.meta["written"] for processor, place in norm.positions[norm.key_of[name]][:1])
     assert max(wrote, last) <= TOLERANCE and len(called.programs) == 3, (wrote, last)
-    print(f"  a function that writes {len(held)} buffers: each is an argument and a result of its call's node, the "
-          f"second call reading the first's; rel err {wrote:.1e}, of the buffers {last:.1e}")
-    for block, given in ((Block(True), args), (Indexed(True), args[:1])):
+    print(f"  a function that writes {len(first.meta['written'])} buffers: each is an argument and a result of its "
+          f"call's node, the second call reading the first's; rel err {wrote:.1e}, of the buffers {last:.1e}")
+    for block, given, names in ((Block(True), args, ("a", "b", "join", doubled)), (Indexed(True), args[:1], (
+            "a", "b", "join", doubled)), (Held(True), args[:1], ("a", counted))):
         try:
-            calls(block.eval(), given, ("a", "b", "join", doubled))
-        except NotImplementedError as error:
-            print(f"  refused: {error}")
+            calls(block.eval(), given, names)
+        except (NotImplementedError, RuntimeError) as error:
+            print(f"  refused: {str(error).splitlines()[0]}")
         else:
-            raise AssertionError("an operation between two compiled calls was captured as no function")
+            raise AssertionError("an operation between two compiled calls, or a plain function's write, was captured")
     print(f"  4 calls of 3 exported functions, {most} independent at once; each function compiled once and called in the "
           f"graph's order, rel err {worst:.1e}")
     print("  ok: the block's calls are the nodes of one graph, and nothing of the block runs outside a function")
