@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# design/parallel-layers-example.md; design/aot-compilation-change-request.md A1 to A4 and A10;
-# design/plan-to-bridge-change-request.md R4; metal-microbench/docs/measurement.md
+# design/parallel-layers-example.md; design/the-compiler.md, order 3
 import os
 
 import torch
 import torch.nn.functional as F
 
-import mesh_compile as mesh
-from tp import Calls, arguments, execute, measured, megatron
+from tp import arguments, execute, megatron
 
 
 DIM, HEADS, FF_MULT, LAYERS, BATCH, SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in
@@ -94,23 +92,18 @@ class Inference(torch.nn.Module):
 
 
 # tp.py megatron
-def placement(nodes, measured=None):
-    def choose(gm, examples):
-        return megatron(gm, nodes, ('queryproj', 'keyproj', 'valueproj', 'denseproj_in', 'denseproj_gate'),
-                        ('attnoutproj', 'denseproj_out'), {}, measured)
-    return choose
+def placement(processors, units=None):
+    return megatron(processors, ('queryproj', 'keyproj', 'valueproj', 'denseproj_in', 'denseproj_gate'),
+                    ('attnoutproj', 'denseproj_out'), units)
 
 
 def main():
-    args = arguments('Compiled inference of a randomly initialized language model whose blocks add attention and '
-                     'feed-forward outputs computed from one normalized input.')
+    args = arguments('Inference of a randomly initialized language model whose blocks add attention and '
+                     'feed-forward outputs computed from one normalized input, its weights split over processors.')
     torch.manual_seed(0)
     input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
-    block = None
-    if not args.load:
-        model = Inference().to(device=args.device, dtype=torch.float32)
-        block = Calls(mesh.Function(model, placement(args.nodes, measured()), mesh.unit, device=args.device))
-    return execute(block, (input_ids,), args)
+    return execute(Inference().eval(), (input_ids,),
+                   lambda processors: placement(processors, args.units and tuple(args.units)), args)
 
 
 if __name__ == '__main__':

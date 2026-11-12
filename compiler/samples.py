@@ -257,8 +257,9 @@ POSITIVE = torch.full((2, 8), 0.5)
 torch.manual_seed(0)
 GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
 
-os.environ.update(DIM="32", HEADS="4", FFN="48", LAYERS="2", BATCH="2", SEQ="8")
+os.environ.update(DIM="32", HEADS="4", FFN="48", LAYERS="2", BATCH="2", SEQ="8", FF_MULT="2", VOCAB="64")
 sys.path.append(str(HERE.parent / "examples"))
+import pl
 import tp
 
 
@@ -335,6 +336,11 @@ CASES = [
       "placement": lambda: megatron_with({(BMM, (2, 8, 32)): (1, SHARDS, (1, 3))})}),
     ("megatron | scores whole on p1", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: megatron_with({(BMM, (8, 8, 8)): "p1"})}),
+    ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
+     {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
+    ("parallel layers | units 3:1, mps", pl.Inference, [(index(2, 8, 64),)],
+     {"processors": on(0, {"p0": "mps", "p1": "mps"}), "sharded": True, "needs_mps": True,
+      "placement": lambda: pl.placement(SHARDS, (3, 1))}),
 ]
 SAVE = {"mlp": "mlp", "python for, 4 static trips": "static_for",
         "mixture of experts | 3 processors": "moe_three_processors",
