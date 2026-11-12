@@ -23,17 +23,21 @@ The operator, 2026-11-12:
   - graph module: `rdma/mesh_graph.py`, `rdma/mesh-graph.h` and `rdma/mesh-graph.c`, which `place`, `schedule` and
     `lower` call with their operands. compilation-composition-change-request.md:153: "`rdma/mesh_graph.py` and
     `rdma/mesh-graph.{h,c}` define the shared graph functions, which take the caller's operands."
-  - bridge: the bridge process and the transport, `rdma/*.c` and `rdma/*.h` other than the graph module and
-    `rdma/mesh-collective.c`, and `compiler/mesh_compiler/bridge.py`; it takes the page lists `schedule` produces,
-    and `Program` reaches it. No document assigns these files; the assignment is Claude's, made from where the
-    section's clauses say they are effected.
+  - bridge: the bridge process and the transport, and `compiler/mesh_compiler/bridge.py`; it takes the page lists
+    `schedule` produces, and `Program` reaches it. disjoint-pages-change-request.md:397-398: "**Runtime.** The bridge
+    (mesh `rdma/mesh-flow.c`) reads the `struct mesh_hop` entries and, for sends, the words at `word`, and writes the
+    phases at `field` and the counts at `count`." aot-compilation-change-request.md:367-368 names "rdma/mesh-bridge.h
+    `struct mesh_order`" under its "**Stage:** the runtime." (:319). The other `rdma/*.c` and `rdma/*.h`, apart from
+    the graph module and `rdma/mesh-collective.{c,h}`, and `bridge.py`, no request assigns; placing them here is
+    Claude's, made from where the section's clauses say they are effected.
   - caller: `examples/`, `compiler/samples.py`, launchers and measurements, which give `compile_module` its operands.
     The assignment is Claude's, as the bridge's is.
   - machines: the condition of machines and services, which no file of either repository holds.
   - documents: `design/`, `docs/` and the records under metal-microbench `output_data/`. The assignment is Claude's.
-- `rdma/mesh-collective.c`, which holds `mesh_plan`, is read against the schedule stage.
-  disjoint-pages-change-request.md:383-384: "**Schedule.** `mesh_plan` (mesh `rdma/mesh-collective.c`) takes the
-  program's values and its dependence graph and writes the static schedule, which is the scheduled value."
+- `rdma/mesh-collective.c`, which holds `mesh_plan`, and `rdma/mesh-collective.h`, which declares what it takes and
+  returns, are read against the schedule stage. disjoint-pages-change-request.md:383-385: "**Schedule.** `mesh_plan`
+  (mesh `rdma/mesh-collective.c`) takes the program's values and its dependence graph and writes the static schedule,
+  which is the scheduled value." and "what it takes (`rdma/mesh-collective.h`): an array of `struct mesh_function`".
 - "no stage named" holds the items whose clauses place them in a flow that is none of the above, each with the words
   that say so. They are not restated against [data-flow.md](data-flow.md): the operator's 2026-11-10 21:02 turn above
   asks for that, and it is outstanding for them.

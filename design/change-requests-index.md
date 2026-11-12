@@ -225,7 +225,7 @@ Withdrawn:
 
 ## [aot-compilation-change-request.md](aot-compilation-change-request.md)
 
-Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 36 items outstanding, 75 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 42 items outstanding, 69 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -339,6 +339,24 @@ Outstanding:
   - A5 data structure and algorithm: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
     `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 3e2c97b3). Mesh
     81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - A3 produced by, consumed by (router and scheduler): outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, nothing in the `compile_module`
+    chain called `mesh_plan`, whose code the stamp rested on (review of b0342f88). Mesh 81c8e9da has the schedule
+    stage call it; the clause is not yet read against it.
+  - A4 data structure and algorithm: packed spanning trees, packing: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, nothing in the `compile_module`
+    chain called `mesh_plan`, whose code the stamp rested on (review of b0342f88). Mesh 81c8e9da has the schedule
+    stage call it; the clause is not yet read against it.
+  - A4 algorithm: joint routing: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, nothing in the `compile_module`
+    chain called `mesh_plan`, whose code the stamp rested on (review of b0342f88). Mesh 81c8e9da has the schedule
+    stage call it; the clause is not yet read against it.
+  - A6 data structure and algorithm: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, nothing in the `compile_module`
+    chain called `mesh_plan`, whose code the stamp rested on (review of b0342f88). Mesh 81c8e9da has the schedule
+    stage call it; the clause is not yet read against it.
+  - Appendix item 2: the queue is laid out with the schedule's pages and read in place: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, nothing in the `compile_module`
+    chain called `mesh_plan`, whose code the stamp rested on (review of b0342f88). Mesh 81c8e9da has the schedule
+    stage call it; the clause is not yet read against it.
+  - The files and functions: rdma/mesh-collective.c (routing, u, queue sizes, sets): outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, nothing in the `compile_module`
+    chain called `mesh_plan`, whose code the stamp rested on (review of b0342f88). Mesh 81c8e9da has the schedule
+    stage call it; the clause is not yet read against it.
 
 Covered:
 
@@ -354,15 +372,11 @@ Covered:
   - A2 the chooser is separate: covered [2026-11-12, mesh 991742c8]
   - A3 data structure: covered [2026-11-10, mesh 60103676]
   - A3 no algorithm computes them: covered [2026-11-10, mesh 5889d898]
-  - A3 produced by, consumed by (router and scheduler): covered [2026-11-10, mesh 5889d898]
   - A3 the chooser of the weights: covered [2026-11-12, mesh 52b2f91d]
   - A4 data structure: the instruction DAG: covered [2026-11-10, mesh 5889d898]
-  - A4 data structure and algorithm: packed spanning trees, packing: covered [2026-11-10, mesh 5889d898]
-  - A4 algorithm: joint routing: covered [2026-11-10, mesh 5889d898]
   - A4 produced by, consumed by (mesh_plan's types): covered [2026-11-10, mesh 60103676]
   - A4 which nodes hold a function's static schedule: covered [2026-11-10, mesh 5889d898]
   - A4 a node to which the placement operand maps no device (mesh_plan's part): covered [2026-11-10, mesh 5889d898]
-  - A6 data structure and algorithm: covered [2026-11-10, mesh 5889d898]
   - A7 stage: covered [2026-11-11, mesh 1a3cfe60]
   - A7 one order; total order multicast by a fixed sequencer (primitives, properties, steps of Fig. 5): covered
     [2026-11-06, mesh a172596f]
@@ -396,7 +410,6 @@ Covered:
   - Appendix item 2: delivery at a node (Fig. 5's destinations; no wait on an earlier call): covered [2026-11-06,
     mesh a172596f]
   - Appendix item 2: work and transfers run at once: covered [2026-11-06, mesh 4fe54e5f]
-  - Appendix item 2: the queue is laid out with the schedule's pages and read in place: covered [2026-11-10, mesh 5889d898]
   - Appendix item 2: which files define them: covered [2026-11-10, mesh 60103676]
   - Appendix item 2, change: the queues replace the sequence counters, taken[p] and the one channel: covered
     [2026-11-08, mesh 7517cfc8]
@@ -417,7 +430,6 @@ Covered:
   - Appendix item 8 (the heartbeat's holders): covered [2026-11-06, mesh 31ee5d4a]
   - The files and functions: rdma/mesh_graph.py: covered [2026-11-08, mesh 38ce722e]
   - The files and functions: rdma/mesh-graph.h, mesh-graph.c: covered [2026-11-10, mesh 60103676]
-  - The files and functions: rdma/mesh-collective.c (routing, u, queue sizes, sets): covered [2026-11-10, mesh 5889d898]
   - The files and functions: rdma/mesh-bridge.h: covered [2026-11-06, mesh 33a03e35]
   - The files and functions: rdma/mesh-records.c: covered [2026-11-06, mesh 128f9bb5]
   - The files and functions: rdma/mesh-flow.c: covered [2026-11-06, mesh 4fe54e5f]
