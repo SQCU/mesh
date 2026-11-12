@@ -565,8 +565,8 @@ def call_nodes(graph):
 
 ATEN = torch.ops.aten
 CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scatter.default
-PLACED = {ir.SEND, ir.RECV, TO_COPY, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.add.out, ATEN.mm.default, ATEN.reshape.default,
-          ATEN.new_zeros.default, ATEN.as_strided.default, ATEN.view_as.default, ATEN.copy_.default, ATEN.fill_.Scalar, ATEN.arange.start_step,
+PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
+          ATEN.new_zeros.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
           ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
           ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.out,
           ATEN.empty.memory_format}
@@ -594,12 +594,9 @@ def check_block(sent, arrived):
         arrived, readers = readers[0], list(readers[0].users)
     places = []
     for reader in readers:
-        if reader.target is ATEN.copy_.default:
-            buffer, offset, sizes, strides = reader.meta["out"]
-            whole = next(n for n in reader.graph.nodes if n.name == buffer).meta["val"].shape[dimension]
-            padding = any(n.target is ATEN.fill_.Scalar and n.meta["out"][0] == buffer for n in reader.graph.nodes)
-            if sizes[dimension] < whole and not padding:
-                places.append(offset // strides[dimension] % whole)
+        if reader.target is CAT and reader.args[1] == dimension:
+            before = reader.args[0][:reader.args[0].index(arrived)]
+            places.append(sum(piece.meta["val"].shape[dimension] for piece in before))
         elif reader.target is SLICE_SCATTER and reader.args[1] is arrived:
             places.append(reader.args[3])
     if not places:
@@ -634,10 +631,7 @@ def check_views(scheduled, copied=0, received=0):
                 buffer, offset, sizes, strides = node.meta[key]
                 whole, last = names[buffer].meta["val"], offset + sum((n - 1) * s for n, s in zip(sizes, strides))
                 assert (key == "to") == (node.target is ir.RECV), node.name
-                writer = next(iter(node.users)) if key == "to" else node
-                through = writer.kwargs["out"] if "out" in writer.kwargs else writer.args[0]
-                assert writer.meta["out"] == node.meta[key] and buffer in (through.name, through.meta.get("view", [0])[0])
-                assert names[buffer].target is ATEN.empty.memory_format, f"{node.name} writes {buffer}"
+                assert names[buffer] in (node.kwargs.get("out"), *node.users) and len(node.users) == 1, node.name
                 assert sizes == tuple(node.meta["val"].shape) and (not all(sizes) or last < whole.numel()), node.name
                 into += key == "to"
     assert found >= copied, f"{found} of {copied} views that fail torch's condition are of a contiguous copy"
@@ -656,9 +650,7 @@ def check_windows(scheduled, expected):
                 found["masked"] += held.target is ATEN.where.self
                 found["views"] += names[held.meta["view"][0]].op == "placeholder" if "view" in held.meta else (
                     held.op == "placeholder")
-            buffer, _, sizes, _ = node.args[0].meta.get("view", (None, 0, (), ())) if node.target is ir.SEND else [None] * 4
-            found["padded"] += buffer is not None and sizes == tuple(names[buffer].meta["val"].shape) and any(
-                n.target is ATEN.fill_.Scalar and n.meta["out"][0] == buffer for n in names.values())
+            found["padded"] += node.target is ir.SEND and node.args[0].target is ATEN.constant_pad_nd.default
     assert +found == expected, f"windowed shards {dict(+found)}, not {expected}"
 
 
@@ -746,7 +738,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         assert striped or all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
         assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
         assert where.keys() | shards.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
-        assert {n.target for n in added} <= PLACED, {n.target for n in added} - PLACED
+        assert {n.target for n in added} <= PLACED, "a node that neither export nor a collective produced"
         sent = [end[ir.SEND].args[0] for end in ends.values()]
         values = {(sender[c], (v.args[0] if copies(v) else v).name, reader[c]) for c, v in zip(ends, sent)}
         assert len(values) == scheduled.channels, "channels differ from (value, reading processor) pairs"
