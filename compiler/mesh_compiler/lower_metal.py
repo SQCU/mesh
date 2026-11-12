@@ -155,8 +155,7 @@ LEAST = ("template <typename T> inline T mesh_least(T a, T b) { return a < b ? b
 WITH_EFFECTS = torch.ops.higher_order.with_effects
 SCATTERED = {ATEN.scatter_add.default: True, ATEN.scatter.src: False, ATEN.scatter.value: False}
 PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memory", "non_blocking"}
-SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"},
-          ATEN.clone.out: {"out"}}
+SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"}}
 
 
 @dataclass
@@ -299,6 +298,17 @@ SHARED = {"remainder": REMAINDER % ("remainder", "a % b"), "fremainder": REMAIND
 HELPERS = {"erf": ERF, **SHARED}
 
 
+# torch 2.15 aten/src/ATen/native/native_functions.yaml, the overloads that take `out`
+def outward(target):
+    given = [(a.name, str(a.type)) for a in getattr(target, "_schema", None).arguments] if hasattr(
+        target, "overloadpacket") else None
+    for name in target.overloadpacket.overloads() if given is not None else ():
+        over = getattr(target.overloadpacket, name)
+        taken = [(a.name, str(a.type)) for a in over._schema.arguments]
+        if taken[:-1] == given and taken[-1][0] == "out" and len(over._schema.returns) == 1:
+            yield over
+
+
 def flat(view):
     return (view.storage, view.dtype, view.shape, view.stride, view.offset)
 
@@ -319,7 +329,8 @@ class Lowering:
     types, buffers = TYPES, math.inf
 
     def __init__(self, module, laid, stored=frozenset()):
-        self.laid, self.metal, self.storages, self.forms, self.missing = laid, stored, [], {}, []
+        self.laid, self.metal, self.storages, self.forms, self.missing = dict.fromkeys(laid), stored, [], {}, []
+        self.laid.update(laid if isinstance(laid, dict) else {})
         self.pending, self.program, self.results, self.vertices, self.hosted = [], [], (), [], []
         handlers = {**dict.fromkeys(POINTWISE, self.pointwise), **dict.fromkeys(VIEWS, self.viewed),
                     RECV: self.receive, SEND: self.send, operator.getitem: self.part,
@@ -341,7 +352,11 @@ class Lowering:
                     ATEN.slice_scatter.default: self.slice_scatter, ATEN.index_put.default: self.index_put,
                     ATEN.split_with_sizes.default: self.split, ATEN.avg_pool2d.default: self.average_pool,
                     ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers(),
-                    ATEN.empty.memory_format: self.empty, ATEN.clone.out: self.cloned}
+                    ATEN.empty.memory_format: self.empty, ATEN.copy_.default: self.copied,
+                    ATEN.fill_.Scalar: self.fill}
+        self.inward = {over: target for target in list(handlers) for over in outward(target)}
+        handlers.update(dict.fromkeys(self.inward, self.out))
+        self.destination, self.handlers = None, handlers
         position, self.unread, self.named = 0, {}, {}
         for node in module.graph.nodes:
             self.named[node.name] = node
@@ -356,7 +371,8 @@ class Lowering:
                 self.flush()
                 self.ordered(self.host(node, [(r, False) for r in self.results if isinstance(r, View)]))
             elif node.op == "call_function" and (
-                    node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(node.target, set())):
+                    node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(
+                        self.inward.get(node.target, node.target), set()) - ({"out"} if node.target in self.inward else set())):
                 self.missing.append(str(node.target))
             elif node.op == "call_function" and self.untyped(node):
                 self.missing += [f"{node.target} of {v.dtype}" for v in self.untyped(node)]
@@ -385,11 +401,39 @@ class Lowering:
         base = self.forms[self.named[name]]
         return View(base.storage, base.dtype, tuple(sizes), tuple(strides), base.offset + offset)
 
-    def cloned(self, node):
+    # design/problems-of-14b9a757-change-request.md items 1, 2 and 5; torch 2.15 documentation, torch.Tensor.copy_
+    # and torch.Tensor.fill_
+    def written(self, node, form):
         target = self.placed(node.meta["out"])
         self.settle(target)
-        self.store(self.reader(node.args[0]), target)
+        kind, wide = self.types[target.dtype], target.dtype == torch.float64
+        self.store(Fused(target.dtype, target.shape, lambda bind, index, t:
+                         f"{kind}({self.given(bind, form, index, wide)})"), target)
         return target
+
+    def copied(self, node):
+        return self.written(node, self.reader(node.args[1]))
+
+    def fill(self, node):
+        return self.written(node, node.args[1])
+
+    def out(self, node):
+        target = self.placed(node.meta["out"])
+        self.settle(target)
+        self.destination = target
+        form = self.handlers[self.inward[node.target]](node)
+        self.destination = None
+        if isinstance(form, Product) and target.stride == packed(target.shape):
+            self.multiply(form, target)
+            return target
+        return form if form is target else self.written(node, self.view(form) if isinstance(form, Product) else form)
+
+    def target(self, node):
+        return self.inward.get(node.target, node.target)
+
+    def result(self, value):
+        made, self.destination = self.destination, None
+        return made or self.fresh(value.dtype, value.shape)
 
     def untyped(self, node):
         value = node.meta.get("val")
@@ -529,7 +573,7 @@ class Lowering:
     def product(self, node):
         value = node.meta["val"]
         left, right = (self.matrix(a) for a in node.args[-2:])
-        if node.target is not ATEN.addmm.default:
+        if self.target(node) is not ATEN.addmm.default:
             return Product(left, right, value.dtype, tuple(value.shape), lambda bind, index, t: t, True)
         added, beta, alpha = self.reader(node.args[0]), node.kwargs.get("beta", 1), node.kwargs.get("alpha", 1)
         wide = value.dtype == torch.float64
@@ -541,9 +585,9 @@ class Lowering:
 
     def pointwise(self, node, template=None, given=None):
         value = node.meta["val"]
-        template, kind, shape = template or POINTWISE[node.target], self.types[value.dtype], tuple(value.shape)
+        template, kind, shape = template or POINTWISE[self.target(node)], self.types[value.dtype], tuple(value.shape)
         operands = [self.forms[a] if isinstance(a, torch.fx.Node) else a for a in given or node.args]
-        if node.target is ATEN._to_copy.default and value.dtype == node.args[0].meta["val"].dtype:
+        if self.target(node) is ATEN._to_copy.default and value.dtype == node.args[0].meta["val"].dtype:
             return operands[0]
         base = next((o for o in operands if isinstance(o, Product) and o.shape == shape), None)
         operands = [self.view(o) if isinstance(o, Product) and o is not base else o for o in operands]
@@ -567,7 +611,7 @@ class Lowering:
                               "{T}({0})" if node.args[1] == 1 else "pow({T}({0}), {T}({1}))")
 
     def filled(self, node):
-        value, given = node.meta["val"], node.args[-1] if FILLED[node.target] else 0
+        value, given = node.meta["val"], node.args[-1] if FILLED[self.target(node)] else 0
         return Fused(value.dtype, tuple(value.shape),
                      lambda bind, index, t: f"{self.types[value.dtype]}({literal(given)})", free=True)
 
@@ -819,7 +863,7 @@ class Lowering:
         return self.updated(value, source, chosen.shape, lambda bind, names, steps: " + ".join(
             f"long({chosen.read(bind, names) if d == dim else name}) * {step}"
             for d, (name, step) in enumerate(zip(names, steps))),
-            self.reader(given) if isinstance(given, torch.fx.Node) else given, SCATTERED[node.target])
+            self.reader(given) if isinstance(given, torch.fx.Node) else given, SCATTERED[self.target(node)])
 
     def updated(self, value, source, domain, key, given, added):
         kind = self.types[value.dtype]
@@ -900,7 +944,7 @@ class Lowering:
         kernel, stride, padding, ceil, padded, divisor = (
             *node.args[1:], *([], node.kwargs.get("padding", [0, 0]), False, True, None)[len(node.args) - 2:])
         stride, kind = stride or kernel, self.accumulated(value.dtype)
-        made, bind = self.fresh(value.dtype, value.shape), Bound()
+        made, bind = self.result(value), Bound()
         lines, names = unravel("p.x", value.shape, "o")
         high, wide = source.shape[-2:]
         lines += [f"int y0 = int({names[-2]} * {stride[0]}) - {padding[0]}, x0 = int({names[-1]} * {stride[1]}) - "
@@ -978,7 +1022,7 @@ class Lowering:
         out, x = made.read(bind, index, True), source.read(bind, index)
         loop = f"for (uint k = 0; k < {source.shape[dim]}; k++)"
         wide = self.accumulated(source.dtype)
-        last = f"{wide}({x}) - m - log(s)" if node.target is ATEN._log_softmax.default else f"exp({wide}({x}) - m) / s"
+        last = f"{wide}({x}) - m - log(s)" if self.target(node) is ATEN._log_softmax.default else f"exp({wide}({x}) - m) / s"
         lines += [f"{wide} m = -INFINITY, s = 0;", f"{loop} m = max(m, {wide}({x}));",
                   f"{loop} s += exp({wide}({x}) - m);", f"{loop} {out} = {last};"]
         self.dispatch(bind, lines, (math.prod(source.shape) // source.shape[dim], 1, 1))
@@ -986,22 +1030,24 @@ class Lowering:
 
     def reduced(self, node):
         source, value = self.reader(node.args[0]), node.meta["val"]
-        first, step, last = REDUCED[node.target]
+        first, step, last = REDUCED[self.target(node)]
         over = node.args[1] if len(node.args) > 1 else None
         over = sorted(d % len(source.shape) for d in ([over] if isinstance(over, int) else
                                                       over or range(len(source.shape))))
         kept = [d for d in range(len(source.shape)) if d not in over]
-        made, kind = self.fresh(value.dtype, value.shape), self.types[value.dtype]
+        made, kind = self.result(value), self.types[value.dtype]
         bind = Bound()
-        out, count = bind(made, True), math.prod(source.shape[d] for d in over)
+        count = math.prod(source.shape[d] for d in over)
         lines, outer = unravel("p.x", [source.shape[d] for d in kept], "r")
         within, inner = unravel("j", [source.shape[d] for d in over], "q")
         index = dict(zip(kept + over, outer + inner))
+        out = made.read(bind, outer if len(value.shape) == len(kept) else
+                        [index[d] if d in kept else "0" for d in range(len(source.shape))], True)
         x = f"{kind}({source.read(bind, [index[d] for d in range(len(source.shape))])})"
         lines += [f"uint j = 0; {' '.join(within)}", f"{kind} a = {first.format(x=x)};",
                   f"for (j = {int(first == '{x}')}; j < {count}; j++) {{ "
                   f"{' '.join(w.removeprefix('uint ') for w in within)} a = {step.format(x=x)}; }}",
-                  f"{out}[p.x] = {last.format(n=count)};"]
+                  f"{out} = {last.format(n=count)};"]
         self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
         return made
 
@@ -1038,10 +1084,10 @@ class Lowering:
             return None
         source, weight = self.stored(source), self.stored(weight)
         bias = bias if bias is None else self.reader(bias)
-        made = self.fresh(value.dtype, value.shape)
+        made = self.result(value)
         bind = Bound()
-        out = bind(made, True)
         lines, (n, o, y, x) = unravel("p.x", value.shape, "o")
+        out = made.read(bind, [n, o, y, x], True)
         _, per, high, wide = weight.shape
         taken = source.read(bind, [n, f"({o} / {value.shape[1] // groups} * {per} + c)", "uint(y)", "uint(x)"])
         kind = self.accumulated(value.dtype)
@@ -1052,7 +1098,7 @@ class Lowering:
                   f"    int x = int({x} * {stride[1]} + v * {dilation[1]}) - {padding[1]};",
                   f"    if (y >= 0 && y < {source.shape[2]} && x >= 0 && x < {source.shape[3]})" * any(padding),
                   f"    a += {kind}({taken}) * {kind}({weight.read(bind, [o, 'c', 'u', 'v'])});", "}",
-                  f"{out}[p.x] = a;"]
+                  f"{out} = a;"]
         self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
         return made
 
@@ -1079,7 +1125,7 @@ class Lowering:
     def receive(self, node):
         self.flush()
         value = node.meta["val"]
-        view = self.strided(value.dtype, value.shape, value.stride(), RECEIVED)
+        view = self.strided(value.dtype, value.shape, self.laid.get(node.args[0]) or value.stride(), RECEIVED)
         self.program.append((RECV, view.storage, node.args[0], self.host(node, [(view, True)])))
         return view
 
@@ -1222,7 +1268,7 @@ class Metal(Lowering):
         bind.note(form)
         rows, columns = form.left.shape[-2], form.right.shape[-1]
         batch = form.left.shape[0] if len(form.left.shape) == 3 else 1
-        out = bind(target, True)
+        out = f"({bind(target, True)} + {target.offset})"
         lines, flags, slices = [], [], []
         for name, operand, tile in (("A", form.left, "0, g.y * {T}"), ("B", form.right, "g.x * {T}, 0")):
             (m, n), (sm, sn) = operand.shape[-2:], operand.stride[-2:]
@@ -1582,7 +1628,7 @@ class Native(Lowering):
         bind.note(form)
         rows, inner, columns = form.left.shape[-2], form.left.shape[-1], form.right.shape[-1]
         batched = len(form.left.shape) == 3
-        out, given = f"{bind(target, True)} + p.x * {rows * columns}", []
+        out, given = f"{bind(target, True)} + {target.offset} + p.x * {rows * columns}", []
         for operand in (form.left, form.right):
             (m, n), (sm, sn) = operand.shape[-2:], operand.stride[-2:]
             turned = not (n == 1 or sn == 1)
@@ -1686,8 +1732,10 @@ def targeted(scheduled, targets):
     lowerings = {p: targets[scheduled.devices[p].type] for p in scheduled.modules
                  if p not in scheduled.engines and scheduled.devices[p].type in targets}
     metal = [p for p, lowering in lowerings.items() if lowering is Metal]
-    laid = {channel for channel, *_ in scheduled.carried} | {
+    received = {channel for channel, *_ in scheduled.carried} | {
         node.args[0] for p in lowerings for node in scheduled.modules[p].graph.nodes if node.target is RECV}
+    laid = {node.args[1]: tuple(node.args[0].meta["val"].stride()) for module in scheduled.modules.values()
+            for node in module.graph.nodes if node.target is SEND and node.args[1] in received}
     for processor, module in scheduled.modules.items():
         if processor not in lowerings:
             functions[processor] = hosted(module, scheduled.devices[metal[0]]) if metal else module
