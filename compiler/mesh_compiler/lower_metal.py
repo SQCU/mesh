@@ -27,9 +27,6 @@ ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
 COMMIT, WAIT, CHECK = mesh_metal4.COMMIT, mesh_metal4.WAIT, mesh_metal4.CHECK
 QUEUE, THREAD, SENT, ARRIVED, FEEDBACK = "queue", "host", "send", "recv", "<feedback>"
 TILE, SIMDGROUPS, GRAIN, LOCAL, CHAIN = 32, 4, 1024, 16384, 8
-# Apple, Metal feature set tables, Implementation limits, "Maximum number of entries in the buffer argument table, per
-# graphics or kernel function"
-BUFFERS = 31
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
 PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
@@ -319,7 +316,7 @@ def ahead(a, b, count, floating, descending=False):
 
 
 class Lowering:
-    types = TYPES
+    types, buffers = TYPES, math.inf
 
     def __init__(self, module, laid, stored=frozenset()):
         self.laid, self.metal, self.storages, self.forms, self.missing = laid, stored, [], {}, []
@@ -390,7 +387,7 @@ class Lowering:
 
     def cloned(self, node):
         target = self.placed(node.meta["out"])
-        self.settle(target.storage)
+        self.settle(target)
         self.store(self.reader(node.args[0]), target)
         return target
 
@@ -417,14 +414,13 @@ class Lowering:
             form.free or users[0].target in ONCE
             or isinstance(made, torch.Tensor) and made.numel() <= math.prod(form.shape))
 
-    # design/compilation-composition-change-request.md:370
     def reads(self, form):
         bind, index = Bound(), ["0"] * len(form.shape)
         if isinstance(form, Product):
             bind(form.left), bind(form.right), form.expression(bind, index, "t")
         else:
             form.read(bind, index)
-        return list(bind)
+        return bind
 
     def fit(self, node):
         made = node.meta.get("val")
@@ -433,15 +429,23 @@ class Lowering:
                  if isinstance(self.forms.get(read), (View, Fused, Product))}
         count += sum(reads.values())
         for read in sorted(reads, key=reads.get, reverse=True):
-            if count <= BUFFERS:
+            if count <= self.buffers:
                 break
             count -= reads[read] - 1
             self.forms[read] = self.view(self.forms[read])
+            self.unread.pop(read, None)
 
-    def settle(self, storage):
-        for node, form in list(self.unread.items()):
-            if storage in self.reads(form):
-                self.forms[node] = self.view(self.unread.pop(node))
+    # rdma/mesh-graph.h mesh_graph_dependences_views
+    def settle(self, target):
+        held = list(self.unread)
+        accesses = [(vertex, view, False) for vertex, node in enumerate(held)
+                    for view, _ in self.reads(self.unread[node]).accesses] + [(len(held), target, True)]
+        for vertex, _ in mesh_graph.dependences_views(len(held) + 1, self.viewed_by(accesses))[0]:
+            self.forms[held[vertex]] = self.view(self.unread.pop(held[vertex]))
+
+    def viewed_by(self, accesses):
+        return [(view.storage, *mesh_graph.strided(view.offset, view.shape, view.stride, view.dtype.itemsize), vertex,
+                 write) for vertex, view, write in accesses if all(view.shape)]
 
     # design/compilation-composition-change-request.md, Performance correction, "removing unnecessary
     # materialization"
@@ -1088,9 +1092,8 @@ class Lowering:
                     for view, write in step.accesses]
         accesses += [(vertex, view, write) for vertex, views in self.hosted for view, write in views]
         commit = [within.get(vertex) for vertex in range(len(self.vertices))]
-        edges, causes, redundant = mesh_graph.dependences_supplied(len(self.vertices), [
-            (view.storage, *mesh_graph.strided(view.offset, view.shape, view.stride, view.dtype.itemsize), vertex, write)
-            for vertex, view, write in accesses if all(view.shape)], supplied)
+        edges, causes, redundant = mesh_graph.dependences_supplied(len(self.vertices), self.viewed_by(accesses),
+                                                                   supplied)
         self.dependences = [Dependence(a, b, causes[a, b]) for a, b in edges]
         found = {(d.source, d.target): d for d in self.dependences}
         kept = [edge for edge, covered in zip(edges, redundant) if not covered]
@@ -1168,7 +1171,9 @@ class Lowering:
 
 
 class Metal(Lowering):
-    lane, owning = QUEUE, True
+    # Apple, Metal feature set tables, Implementation limits, "Maximum number of entries in the buffer argument
+    # table, per graphics or kernel function"
+    lane, owning, buffers = QUEUE, True, 31
 
     # design/synchronization-signature-change-request.md, item 1; rdma/mesh-metal4.m mesh_metal4_commit,
     # mesh_metal4_wait and mesh_metal4_after
