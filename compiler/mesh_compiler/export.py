@@ -80,39 +80,64 @@ def read(program):
 # J. Reed et al., torch.fx, MLSys 2022
 class Calls(torch.fx.Tracer):
     def __init__(self, functions):
-        super().__init__()
+        super().__init__(autowrap_functions=tuple(f for f in functions if callable(f)))
         self.functions = functions
 
     def is_leaf_module(self, module, qualified_name):
         return qualified_name in self.functions
 
 
+class Function(torch.nn.Module):
+    def __init__(self, function):
+        super().__init__()
+        self.function = function
+
+    def forward(self, *args, **kwargs):
+        return self.function(*args, **kwargs)
+
+
 class Captured(torch.fx.Interpreter):
-    def __init__(self, module, options):
+    def __init__(self, module, functions, options):
         super().__init__(module)
-        self.options, self.exported = options, {}
+        self.functions, self.options, self.exported = functions, options, {}
 
     def run_node(self, node):
         self.calling = node
         return super().run_node(node)
 
-    def call_module(self, target, args, kwargs):
-        key = target, tuple((str(value.dtype), tuple(value.shape)) for value in pytree.tree_leaves((args, kwargs))
-                            if isinstance(value, torch.Tensor))
+    def captured(self, target, module, args, kwargs):
+        leaves, structure = pytree.tree_flatten((args, kwargs))
+        key = target, str(structure), tuple((str(leaf.dtype), tuple(leaf.shape)) if isinstance(leaf, torch.Tensor)
+                                            else repr(leaf) for leaf in leaves)
         if key not in self.exported:
-            self.exported[key] = export(self.fetch_attr(target), args, kwargs=kwargs, **self.options)
+            with torch.enable_grad():
+                self.exported[key] = export(module, args, kwargs=kwargs, **self.options)
+            written = [target for kind, target in self.exported[key].outputs if kind == OutputKind.BUFFER_MUTATION]
+            if written:
+                raise NotImplementedError(f"{self.calling.name} writes {written[0]}, which is no argument and no "
+                                          "result of its call")
         self.calling.meta["function"] = key
+
+    def call_module(self, target, args, kwargs):
+        self.captured(target, self.fetch_attr(target), args, kwargs)
         return super().call_module(target, args, kwargs)
+
+    def call_function(self, target, args, kwargs):
+        if target in self.functions:
+            self.captured(target, Function(target), args, kwargs)
+        elif target is not operator.getitem or not isinstance(args[0], (tuple, list, dict)):
+            raise NotImplementedError(f"{self.calling.name} runs between the program's compiled calls; every "
+                                      "function of a program is captured")
+        return super().call_function(target, args, kwargs)
 
 
 def calls(program, args, functions, **export_options):
     graph = Calls(functions).trace(program)
     for node in graph.nodes:
-        if node.op not in ("placeholder", "call_module", "output") and node.target is not operator.getitem:
+        if node.op not in ("placeholder", "call_module", "call_function", "output"):
             raise NotImplementedError(f"{node.name} runs between the program's compiled calls; every function of a "
                                       "program is captured")
     module = torch.fx.GraphModule(program, graph)
-    captured = Captured(module, export_options)
-    with torch.no_grad():
-        captured.run(*args)
+    captured = Captured(module, functions, export_options)
+    captured.run(*args)
     return module, captured.exported

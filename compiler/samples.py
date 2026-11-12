@@ -1126,6 +1126,19 @@ class Block(nn.Module):
         return self.join(self.b(left), right * 2 if self.between else right)
 
 
+def doubled(x):
+    return x * 2
+
+
+class Indexed(nn.Module):
+    def __init__(self, index):
+        super().__init__()
+        self.a, self.index = nn.Linear(8, 8), index
+
+    def forward(self, x):
+        return self.a(doubled(x)[0] if self.index else doubled(x))
+
+
 class Called(torch.fx.Interpreter):
     def __init__(self, module, exported):
         super().__init__(module)
@@ -1158,12 +1171,16 @@ def check_calls():
     called = Called(graph, exported)
     worst = errors(program(*args), called.run(*args))[1]
     assert worst <= TOLERANCE and len(called.programs) == 3, (worst, len(called.programs))
-    try:
-        calls(Block(True).eval(), args, ("a", "b", "join"))
-    except NotImplementedError as error:
-        print(f"  refused: {error}")
-    else:
-        raise AssertionError("a multiplication between two compiled calls was captured as no function")
+    plain, made = calls(Indexed(False).eval(), args[:1], ("a", doubled))
+    assert [(n.op, n.target, n.meta["function"][0]) for n in plain.graph.nodes if "function" in n.meta] == [
+        ("call_function", doubled, doubled), ("call_module", "a", "a")] and len(made) == 2, "a function is no leaf"
+    for block, given in ((Block(True), args), (Indexed(True), args[:1])):
+        try:
+            calls(block.eval(), given, ("a", "b", "join", doubled))
+        except NotImplementedError as error:
+            print(f"  refused: {error}")
+        else:
+            raise AssertionError("an operation between two compiled calls was captured as no function")
     print(f"  4 calls of 3 exported functions, {most} independent at once; each function compiled once and called in the "
           f"graph's order, rel err {worst:.1e}")
     print("  ok: the block's calls are the nodes of one graph, and nothing of the block runs outside a function")
