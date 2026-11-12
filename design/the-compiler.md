@@ -71,7 +71,7 @@ Three things are mesh's and are added to it:
      [aot-compilation-change-request.md](aot-compilation-change-request.md) A6 state for every function. Neither
      request says which governs. The code follows item 2's rule for choosing each key, over every machine's
      functions in one `heap_order` and not over one node's commands; that is Claude's choice, made because
-     `mesh_plan`'s linear program has tasks for the carried ranges alone. Item 2's "It takes" in its scope of one
+     `mesh_plan`'s linear program has tasks for the carried ranges alone. Item 2's "The algorithm", its "It takes" in its scope of one
      node's commands, its "It writes" and its "Consumed by", and item 3's and A6's completion-time order of every
      function (`mesh_graph_completion_times`, `rdma/mesh-graph.h`), are outstanding
      ([change-requests-index.md](change-requests-index.md)).
