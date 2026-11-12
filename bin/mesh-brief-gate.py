@@ -2,11 +2,12 @@
 import datetime
 import fcntl
 import json
+import os
 import re
 import sys
 
 LOG = '/Users/mdot/metal-microbench/output_data/agent-brief-warnings.jsonl'
-DIRECTION = re.compile(r'Read (/\S+?)(, (item|section|lines) [A-Za-z0-9.\-]+)? and act on it\.')
+DIRECTION = re.compile(r'Read (/\S+?)(, (item|section) \d+(\.\d+)*|, lines \d+-\d+)? and act on it\.')
 FIELDS = {'Agent': ('prompt',), 'Task': ('prompt',), 'SendMessage': ('message',), 'Workflow': ('script', 'args')}
 
 
@@ -22,7 +23,8 @@ def main():
         return 0
     text = given(payload)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    inlined = [line for line in lines if not DIRECTION.fullmatch(line)]
+    inlined = [line for line in lines
+               if not (DIRECTION.fullmatch(line) and os.path.isfile(DIRECTION.fullmatch(line).group(1)))]
     if not inlined and lines:
         return 0
     if not lines and payload.get('tool_name') in ('Workflow', 'SendMessage'):
