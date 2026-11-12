@@ -26,7 +26,7 @@ NATIVE_TYPES = {**TYPES, torch.float64: "double", torch.int16: "short", torch.in
 ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
 COMMIT, WAIT, CHECK = mesh_metal4.COMMIT, mesh_metal4.WAIT, mesh_metal4.CHECK
 QUEUE, THREAD, SENT, ARRIVED, FEEDBACK = "queue", "host", "send", "recv", "<feedback>"
-TILE, SIMDGROUPS, GRAIN = 32, 4, 1024
+TILE, SIMDGROUPS, GRAIN, LOCAL, CHAIN = 32, 4, 1024, 16384, 8
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
 PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
@@ -136,6 +136,8 @@ VIEWS = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default, ATE
          ATEN.expand.default, ATEN.slice.Tensor, ATEN.select.int, ATEN.unsqueeze.default, ATEN.squeeze.dims,
          ATEN.squeeze.dim, ATEN.transpose.int, ATEN.alias.default}
 RESHAPES = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default}
+# review of 15a47389: each element of the operand is read at most once
+ONCE = {ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.flip.default}
 FILLED = {ATEN.full.default: True, ATEN.full_like.default: True, ATEN.scalar_tensor.default: True,
           ATEN.new_full.default: True, ATEN.new_zeros.default: False, ATEN.empty_permuted.default: False}
 REDUCED = {ATEN.sum.dim_IntList: ("0", "a + {x}", "a"), ATEN.mean.dim: ("0", "a + {x}", "a / {n}"),
@@ -354,7 +356,7 @@ class Lowering:
                     form.nodes = (*dict.fromkeys(name for read in reads for name in getattr(read, "nodes", ())),
                                   node.name)
                     form.uses = frozenset(self.using).union(*(getattr(read, "uses", ()) for read in reads))
-                self.forms[node] = form if self.deferred(node, form) else self.settled(form)
+                self.forms[node] = form if self.deferred(node, form) else self.settled(form, node)
 
     def untyped(self, node):
         value = node.meta.get("val")
@@ -382,10 +384,25 @@ class Lowering:
         made = made[0] if isinstance(made, (tuple, list)) else made
         return users[0].op == "call_function" and (
             pytree.tree_leaves((users[0].args, users[0].kwargs)).count(node) == 1) and (
-            form.free or isinstance(made, torch.Tensor) and made.numel() <= math.prod(form.shape))
+            form.free or users[0].target in ONCE
+            or isinstance(made, torch.Tensor) and made.numel() <= math.prod(form.shape))
 
-    def settled(self, form):
+    # design/compilation-composition-change-request.md, Performance correction, "removing unnecessary
+    # materialization"
+    def settled(self, form, node):
+        value, users = node.meta.get("val"), list(node.users)
+        if isinstance(form, Fused) and len(users) == 1 and users[0].target is SEND and users[0].args[1] in self.laid:
+            made = self.strided(form.dtype, form.shape, tuple(value.stride()))
+            if self.storages[made.storage].count == math.prod(form.shape):
+                self.store(form, made)
+                return made
+            self.storages.pop()
         return self.view(form) if isinstance(form, (Fused, Product)) else form
+
+    def strided(self, dtype, shape, stride):
+        count = (1 + sum((n - 1) * s for n, s in zip(shape, stride))) * all(shape)
+        self.storages.append(Storage(HELD, dtype, count))
+        return View(len(self.storages) - 1, dtype, tuple(shape), tuple(stride), 0)
 
     def view(self, form):
         if isinstance(form, View):
@@ -827,7 +844,8 @@ class Lowering:
         if isinstance(form, Product) and node.target in RESHAPES:
             return Product(form.left, form.right, form.dtype, shape, lambda bind, index, t:
                            form.expression(bind, reshaped(index, shape, form.shape), t), form.plain)
-        if isinstance(form, Fused) and node.target in RESHAPES:
+        if isinstance(form, Fused) and (node.target in RESHAPES or node.target is ATEN.expand.default
+                                        and shape == form.shape):
             return Fused(form.dtype, shape,
                          lambda bind, index, t: form.read(bind, reshaped(index, shape, form.shape)))
         view = self.view(form)
@@ -849,17 +867,29 @@ class Lowering:
     def part(self, node):
         return self.forms[node.args[0]][node.args[1]]
 
+    # design/compilation-composition-change-request.md, Performance correction, Fusion and storage; MLIR
+    # mlir/lib/Dialect/Linalg/Transforms/ElementwiseOpFusion.cpp
     def concatenated(self, node):
         value = node.meta["val"]
-        made, at = self.fresh(value.dtype, value.shape), 0
-        dim = (node.args[1] if len(node.args) > 1 else 0) % len(value.shape)
-        for operand in node.args[0]:
-            form = self.reader(operand)
-            if len(form.shape) == len(value.shape):
-                self.store(form, View(made.storage, made.dtype, form.shape, made.stride,
-                                      at * made.stride[dim]))
+        dim, kind = (node.args[1] if len(node.args) > 1 else 0) % len(value.shape), self.types[value.dtype]
+        forms = [form for form in map(self.reader, node.args[0]) if len(form.shape) == len(value.shape)]
+        if len(forms) > CHAIN:
+            made, at = self.fresh(value.dtype, value.shape), 0
+            for form in forms:
+                self.store(form, View(made.storage, made.dtype, form.shape, made.stride, at * made.stride[dim]))
                 at += form.shape[dim]
-        return made
+            return made
+        forms = [form for form in forms if form.shape[dim]]
+
+        def expression(bind, index, t):
+            made, end = None, sum(form.shape[dim] for form in forms)
+            for form in reversed(forms):
+                start = end - form.shape[dim]
+                read = f"{kind}({form.read(bind, index[:dim] + [f'({index[dim]} - {start})'] + index[dim + 1:])})"
+                made, end = read if made is None else f"({index[dim]} < {end} ? {read} : {made})", start
+            return made
+        return Fused(value.dtype, tuple(value.shape), expression if forms and all(value.shape) else
+                     lambda bind, index, t: f"{kind}(0)")
 
     def softmax(self, node):
         source = self.stored(node.args[0])
@@ -953,9 +983,7 @@ class Lowering:
         value, held = node.meta["val"], self.view(self.forms[node])
         view = held
         if laid and any(n > 1 and a != b for n, a, b in zip(view.shape, view.stride, value.stride())):
-            self.storages.append(Storage(HELD, view.dtype, 0))
-            view = View(len(self.storages) - 1, view.dtype, view.shape, tuple(value.stride()), 0)
-            self.storages[-1].count = 1 + sum((n - 1) * s for n, s in zip(view.shape, view.stride))
+            view = self.strided(view.dtype, view.shape, tuple(value.stride()))
             self.store(held, view)
         storage = self.storages[view.storage]
         storage.kind = RESULT if storage.kind == HELD else storage.kind
@@ -1279,11 +1307,13 @@ class Native(Lowering):
     # design/compilation-composition-change-request.md, Performance obligation
     def updated(self, value, source, domain, key, given, added):
         kind, made, bind = self.types[value.dtype], self.fresh(value.dtype, value.shape), Bound()
-        self.store(source, made)
+        first, every = unravel("e", value.shape, "s")
         lines, names = unravel("q", domain, "c")
         out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
         x = self.given(bind, given, names, kind)
-        self.dispatch(bind, [f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
+        self.dispatch(bind, [f"for (uint e = 0; e < {math.prod(value.shape)}; e++) {{", *first,
+                             f"{made.read(bind, every, True)} = {source.read(bind, every)};", "}",
+                             f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
                              f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
         return made
 
@@ -1309,6 +1339,13 @@ class Native(Lowering):
         lines += [f"for (uint i = 0; i < {rows}; i++) for (uint j = 0; j < {columns}; j++) "
                   f"{held}[j * {rows} + i] = {source.read(bind, names + ['i', 'j'][:len(source.shape) - len(names)])};"]
 
+    # ISO/IEC 14882:2020 [dcl.array]
+    def scratch(self, bind, lines, name, dtype, batch, count):
+        if count * dtype.itemsize > LOCAL:
+            return f"({bind(self.fresh(dtype, (batch, count)), True)} + p.x * {count})"
+        lines.append(f"{self.types[dtype]} {name}[{max(count, 1)}];")
+        return name
+
     # design/torch-source-lowering-change-request.md, item 5; LAPACK, sgesv and dgesv; torch 2.15 documentation,
     # torch.linalg.solve_ex
     def solve(self, node):
@@ -1319,24 +1356,25 @@ class Native(Lowering):
             return None
         n, lead = left.shape[-1], left.shape[:-2]
         vector = len(right.shape) == len(left.shape) - 1
-        k, batch, kind = 1 if vector else right.shape[-1], math.prod(lead), self.types[values[0].dtype]
+        k, batch = 1 if vector else right.shape[-1], math.prod(lead)
         made = [self.fresh(v.dtype, v.shape) for v in values]
-        factors, unknown = self.fresh(values[0].dtype, (batch, n * n)), self.fresh(values[0].dtype, (batch, n * k))
         bind = Bound()
         lines, names = unravel("p.x", lead, "r")
-        a, b, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
-            (factors, n * n), (unknown, n * k), (made[2], n), (made[3], 1)))
+        x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
+            (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
+        b = x if k == 1 else self.scratch(bind, lines, "b", values[0].dtype, batch, n * k)
         self.columns(bind, lines, left, a, n, n, names)
         self.columns(bind, lines, right, b, n, k, names)
         lines += [f"int n = {n}, k = {k};", f"{letter}gesv_(&n, &k, {a}, &n, {pivots}, {b}, &n, {info});",
-                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
-                  f"{bind(made[0], True)}[(p.x * {n} + i) * {k} + j] = {b}[j * {n} + i];",
-                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{bind(made[1], True)}[(p.x * {n} + i) * {n} + j] = {a}[j * {n} + i];"]
+                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < i; j++) "
+                  f"std::swap({a}[i * {n} + j], {a}[j * {n} + i]);"]
+        lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
+                  f"{x}[i * {k} + j] = {b}[j * {n} + i];"] * (k != 1)
         self.dispatch(bind, lines, (batch, 1, 1))
         return made
 
-    # LAPACK, sgeqrf and sorgqr; torch 2.15 documentation, torch.linalg.qr
+    # LAPACK, sgelqf and sorglq; G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., section 5.2:
+    # A = QR <=> A^T = R^T Q^T; torch 2.15 documentation, torch.linalg.qr
     def qr(self, node):
         values, source = node.meta["val"], self.reader(node.args[0])
         letter = {torch.float32: "s", torch.float64: "d"}.get(values[0].dtype)
@@ -1346,18 +1384,18 @@ class Native(Lowering):
             return None
         batch, room = math.prod(lead), 64 * n
         made = [self.fresh(v.dtype, v.shape) for v in values]
-        held, scalars, work = (self.fresh(values[0].dtype, (batch, size)) for size in (m * n, n, room))
         bind = Bound()
         lines, names = unravel("p.x", lead, "r")
-        a, tau, w = (f"({bind(v, True)} + p.x * {step})" for v, step in ((held, m * n), (scalars, n), (work, room)))
-        self.columns(bind, lines, source, a, m, n, names)
-        lines += [f"int m = {m}, n = {n}, room = {room}, info;",
-                  f"{letter}geqrf_(&m, &n, {a}, &m, {tau}, {w}, &room, &info);",
+        q, r = (f"({bind(v, True)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
+        tau = self.scratch(bind, lines, "tau", values[0].dtype, batch, n)
+        w = self.scratch(bind, lines, "w", values[0].dtype, batch, room)
+        lines += [f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
+                  f"{q}[i * {n} + j] = {source.read(bind, names + ['i', 'j'])};",
+                  f"int m = {m}, n = {n}, room = {room}, info;",
+                  f"{letter}gelqf_(&n, &m, {q}, &n, {tau}, {w}, &room, &info);",
                   f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{bind(made[1], True)}[(p.x * {n} + i) * {n} + j] = i <= j ? {a}[j * {m} + i] : 0;",
-                  f"{letter}orgqr_(&m, &n, &n, {a}, &m, {tau}, {w}, &room, &info);",
-                  f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{bind(made[0], True)}[(p.x * {m} + i) * {n} + j] = {a}[j * {m} + i];"]
+                  f"{r}[i * {n} + j] = i <= j ? {q}[i * {n} + j] : 0;",
+                  f"{letter}orglq_(&n, &m, &n, {q}, &n, {tau}, {w}, &room, &info);"]
         self.dispatch(bind, lines, (batch, 1, 1))
         return made
 
