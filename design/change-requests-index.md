@@ -255,65 +255,28 @@ outstanding, and what of it is outstanding. The standard every change request fo
     a shared-cut handover after all deferred passes at that cut. Transport/overlap evidence remains pending, so these
     source changes do not close R4.
 
-- [unequal-shards-change-request.md](unequal-shards-change-request.md): outstanding, items 1–15. Written 2026-11-09
-  from `design/heterogeneity.md`; nothing of it is implemented at mesh 7df87fe4. Written since, 2026-11-10, in
-  `rdma/mesh_compile.py` unless another file is named:
-  - Items 1, 15 and 3: `Shard` (an entry of `splits[name]`: the mesh dimension with its tuple), `_sizes` and
-    `IR.counts`, read by a slice and by `IR.local`; an all-gather, an all-to-all and a reduce-scatter carry the counts
-    (`Collective.counts`) and rank j's block is `counts[j]` elements, placed after the blocks of the ranks before it.
-  - Items 2, 12, 9 and 10: a rank's buffer is the `max(counts)` elements of the dimension from its base and its shard
-    the subarray at `starts[rank]` (`IR.bases`, `IR.starts`); `Collective` carries `counts`, `displs` and `starts`, and
-    each lowering sends and places the subarray; the slice of a replicated dimension is a view at the rank's base;
-    `_partition_pad`, the `pad` item and the `narrow` item are deleted; `_region` exchanges the halo from the rank j
-    places away by one collective permute at the largest size over the ranks, and a rank copies its own part where a
-    sender's shard is smaller than that size. Where a resharding keeps the sharded dimensions and their counts and
-    changes their mesh dimensions, `_reshard` emits one collective permute (XLA's `ReshardWithCollectivePermute`), its
-    record carrying each place's counts, displacements and starts, and `_collective_permute` sends and places the
-    subarray.
-  - Item 4: before a call that contracts a dimension whose ranks' shards differ, each operand holding the dimension is
-    written through `_shard_select`, a select on the index along the dimension compared with the rank's `starts` and
-    `counts`, 0 outside the shard, at a rank whose shard is smaller than its buffer (`IR.masks`). The select is its own
-    operation writing a temporary; it is not part of the contraction's region. The narrowing of a contraction's
-    operands (`IR.trims`) is deleted.
-  - Item 5: `examples/tp.py` and `examples/pl.py` `placement` cut the feed-forward block's first weights along
-    dimension 0 and its second along dimension 1 by one entry, `Shard(0, units)` where the environment gives `UNITS`;
-    `_partition` then contracts each rank's shard and emits one reduction, with no collective before the second
-    product. A linear with a bias is contracted at each rank without the bias, and the bias is added to the reduced
-    output once, by a call the partition adds after the collective. metal-microbench `tools/prepare_e2b.py`
-    `column_cuts` accumulates item 1's sizes into its cuts, with the packed-column alignment after; `partition` is
-    kept as it is.
-  - Items 6 and 14: `rdma/mesh-graph.h` `mesh_graph_shares` (`rdma/mesh_graph.py` `shares`) solves HAP's program (3)
-    with HiGHS: the shares minimise, summed over the stages, the stage's collective time a unit of the largest share
-    times the largest share, plus the largest over ranks of the rank's computation time, a fixed part and a part a unit
-    of its share; the shares sum to 1 and each lies between 0 and the rank's upper bound, the variable's bound.
-    `stages(ir)` divides a partitioned program as HAP §3.2 does, a stage a collective and the calls after it, the first
-    stage calls alone. `stage_times(ir, part, times, collectives)` gives (3)'s times for the dimensions one part
-    shards: a stage's collective time, where its blocks are that part's shards, the fitted time a byte of that kind of
-    collective times the bytes of its whole tensor; a rank's computation time a unit of its share, the sum over the
-    stage's calls that hold a dimension the part shards (calls that return a view of an operand left out) of the
-    dimension's n elements over the rank's speed for that kind of function. `shard(m, extent, comm, comp, upper,
-    shares)` gives one part's placement, its tuple the whole sizes of the solved shares by `_sizes`; where `shares` are
-    given it does not solve, and the tuple is the whole sizes of `rdma/allocate.py` `shift` of them (Whale's Algorithm
-    1: while a rank exceeds its bound, the rank furthest over gives up load to the rank with room whose computation
-    time at its share is lowest; with no rank with room it raises). `examples/tp.py` `megatron`, which `tp.py` and
-    `pl.py` `placement` call, partitions the function's graph with every part's shards even (`partitioned`), takes each
-    part's times from that program's stages and calls `shard` for each attention block and each feed-forward block
-    named in the operand's `parts`. `PARTS` gives the operand as JSON: `parts` (each part's `upper`, and `shares` where
-    they are given), `times` (each rank's measured times of each kind of function, by units) and `collectives` (the
-    time a byte of each kind of collective). The one tuple for every block (`UNITS`), the stages given as JSON, and
-    `rdma/allocate.py` `min_max`'s `shared` argument are deleted.
-  - Item 7: `rdma/allocate.py` `speed(times, x)` is x / t(x) from one node's measured times of one kind of function;
-    `stage_times` takes it at x = n / p, the constant model of Lastovetsky et al.'s step 2.
-  - Items 11 and 13: `Ragged(values, offsets)` is a tensor whose rows differ in length, the values of all rows
-    concatenated and nrows+1 offsets; for a second ragged dimension its `values` is a `Ragged`. `rdma/allocate.py`
-    `separators(offsets, speeds)` gives the nranks+1 separator indices that minimise the largest load, a rank's load
-    the weight of its rows over its speed, by `probe` (each rank in order the longest run of rows whose weight does
-    not exceed the candidate times its speed, a binary search in the offsets) and Nicol's search over the ranks in
-    order, with the smallest candidate that succeeded and the largest that failed. `rows(m, ragged, speeds)` gives
-    what the ranks hold, each a tensor with its placement (`Shard`): the rows' lengths, `offsets[i+1] - offsets[i]`,
-    each inner dimension's rows' lengths, and the values, each tuple the ranks' counts between the separators; a
-    slice and the collectives read them as items 1, 3 and 12 write. A tuple that sums to its extent is the ranks'
-    sizes as it stands (`_sizes`), so a tensor with no rows, or with every row empty, has a tuple of zeros.
+- [unequal-shards-change-request.md](unequal-shards-change-request.md): outstanding. Written 2026-11-09 from
+  `design/heterogeneity.md`. Its 2026-11-10 implementations in `rdma/mesh_compile.py` and `rdma/allocate.py` (`Shard`,
+  `_sizes`, `IR.counts`, `_reshard`, `_region`, `_partition`, `_collective_permute`, `_shard_select`, `stage_times`,
+  `shard`, `rows`, `Ragged`, `separators`) were deleted in mesh a5e9e62b and d8d743d0; their last revision is
+  f03cb9ca. What `compiler/mesh_compiler` and `rdma/mesh_graph.py` implement, with the check's cases in
+  `compiler/samples.py`:
+  - Items 1 and 15: `placement.counts` (mesh 297c3cda).
+  - Items 2, 3 and 9: `placement.reshard` adds the slices and joins of a gather, a reduction onto a sharding and a
+    resharding, and writes the collective's `counts` and `displs` once on its `send` and `recv` nodes; `check_ir`
+    reads them and the archive keeps them (mesh d3eecd18, 991742c8).
+  - Item 5: `placement.partitioned` and `examples/tp.py` `megatron` (mesh 297c3cda, 0d70ec49). metal-microbench
+    `tools/prepare_e2b.py` `column_cuts` is as it was.
+  - Items 6, 7 and 14: `shares.stages`, `shares.shares` and `shares.shifted` with `mesh_graph.shares` and
+    `mesh_graph.longest`; `tp.py` and `pl.py` `--solve`, `--upper`, `--comm` (mesh 1b2faa3f, 991742c8, 90843d93,
+    5f90f7e5). The solve with processors on another machine is not written: it fails on that machine's missing times.
+  - Item 8: the striped sharding, the joined order at an attention, the blocks the mask inhibits entirely, and
+    constants computed on each processor that reads them (mesh d3eecd18, 90843d93, 6022d108, f03cb9ca).
+  - Not implemented in `compiler/`: item 4 (each processor's graph has its shard's exact size, so there is no padded
+    buffer), item 10 (the halo exchange), items 11 and 13 (`Ragged`, the separators), item 12 (the subarray of a padded
+    buffer).
+
+  The list below was written of the deleted code and names its functions.
 
   Outstanding:
   - Item 2's gather and scatter. No quoted sentence says where the program emits either: every input and constant is
