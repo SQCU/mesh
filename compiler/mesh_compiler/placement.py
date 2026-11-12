@@ -21,7 +21,7 @@ ADD, ADDMM, CAT, MM, SLICE = (ATEN.add.Tensor, ATEN.addmm.default, ATEN.cat.defa
                               ATEN.slice.Tensor)
 EXPAND, RESHAPE, VIEW = ATEN.expand.default, ATEN.reshape.default, ATEN.view.default
 SLICE_SCATTER, ZEROS = ATEN.slice_scatter.default, ATEN.new_zeros.default
-BMM, SOFTMAX = ATEN.bmm.default, ATEN._softmax.default
+BMM, FLIP, SOFTMAX = ATEN.bmm.default, ATEN.flip.default, ATEN._softmax.default
 SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
 MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
           ATEN.full_like.default, ATEN.where.self}
@@ -191,7 +191,7 @@ def replicated(node, shapes, out):
 
 RULES = {
     ATEN.alias.default: aligned, EXPAND: aligned, ATEN.full_like.default: aligned, ATEN._to_copy.default: aligned,
-    operator.getitem: aligned,
+    operator.getitem: aligned, FLIP: aligned,
     ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
     MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
     ATEN.bmm.default: lambda node, shapes, out: [[0, 1, -1], [0, -1, 2]],
@@ -313,6 +313,11 @@ def partitioned(graph, node, held, want, replaced):
     columns = [None if join else reshard(graph, plainly(graph, v) if (v[0], v[1], v[2]) != (
         row.index(along) if along in row else None, sizes, processors) else v,
         row.index(along) if along in row else None, sizes, processors) for v, row, join in zip(held, rows, joined)]
+    # Y. Xu et al., GSPMD, arXiv:2105.04663, sections 4.3 and 4.5; design/aot-compilation-change-request.md A4
+    if node.target is FLIP and along in [d % len(out) for d in node.args[1]]:
+        columns[0] = ([columns[0][(out[along] - 1 - j) % len(processors)] for j in range(len(processors))]
+                      if sizes == STRIPED else reshard(graph, (along, sizes, processors, columns[0]), along,
+                                                       sizes[::-1], processors[::-1])[::-1])
     extent = out[along] if along >= 0 else next(s[row.index(along)] for s, row in zip(shapes, rows) if along in row)
     for j, processor in enumerate(processors):
         local, order = [column and column[j] for column in columns], {}
