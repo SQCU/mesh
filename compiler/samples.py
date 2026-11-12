@@ -181,6 +181,17 @@ class Indexing(nn.Module):
         return torch.where(x > 0, rows, spread) + x[index[:, 1] % 4]
 
 
+class Updates(nn.Module):
+    def forward(self, x, index):
+        put = torch.zeros_like(x).scatter(1, index, 2.5)
+        whole = torch.remainder(index, index[:, :1] + 1)
+        real = torch.remainder(x, 0.75) + torch.remainder(x, x.abs() + 0.5)
+        apart = x.view(2, 2, 8)[index[0, :2] % 2, :, index[1, :2]]
+        back = x[index[:, 0] % 4 - 4]
+        ordered, places = torch.sort(x, dim=1)
+        return put, whole, real, apart, back, ordered, places
+
+
 class MixtureOfExperts(nn.Module):
     def __init__(self, width=16, experts=4, k=2):
         super().__init__()
@@ -394,6 +405,8 @@ CASES = [
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True, "inputs_on": "mps"}),
     ("gather/scatter/... | on mps", Indexing, GATHER,
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
+    ("scatter.value/remainder/index/sort", Updates, GATHER, {}),
+    ("scatter.value/remainder/... | on mps", Updates, GATHER, {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("where over a viewed arange | on mps", Masked, [(r(2, 6, 3),)],
      {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
     ("where over a viewed arange | cpu of cpu/mps", Masked, [(r(2, 6, 3),)],
@@ -771,8 +784,7 @@ def variants(scheduled, with_inductor):
         "inductor": (lambda: compiled_program(scheduled)) if with_inductor else None,
         "archive": lambda: archived_program(scheduled),
         "fx pass": lambda: Program(dataclasses.replace(scheduled, modules=passed())),
-        "metal": (lambda: Profiled(scheduled))
-        if any(device.type == "mps" for device in scheduled.devices.values()) else None,
+        "metal": (lambda: Profiled(scheduled)) if MPS else None,
         "coreml": (lambda: planned_program(scheduled)) if scheduled.engines else None,
     }
 

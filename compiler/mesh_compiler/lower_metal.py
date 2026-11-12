@@ -27,7 +27,7 @@ TYPES = {torch.float32: "float", torch.float16: "half", torch.int64: "long", tor
          torch.uint8: "uchar", torch.bool: "bool"}
 NATIVE_TYPES = {**TYPES, torch.float64: "double", torch.int16: "short", torch.int8: "char"}
 ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
-COMMIT, WAIT = "commit", "wait"
+COMMIT, WAIT, CHECK = "commit", "wait", "check"
 QUEUE, THREAD, SENT, ARRIVED = "queue", "host", "send", "recv"
 TILE, SIMDGROUPS, GRAIN = 32, 4, 1024
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
@@ -44,6 +44,7 @@ NATIVE = """#include <cmath>
 #include <dispatch/dispatch.h>
 #define ACCELERATE_NEW_LAPACK 1
 #include <vecLib/cblas_new.h>
+#include <vecLib/lapack.h>
 namespace mesh {
 typedef unsigned int uint;
 typedef unsigned char uchar;
@@ -88,6 +89,8 @@ POINTWISE = {
     ATEN.gt.Scalar: "({0} > {1})", ATEN.gt.Tensor: "({0} > {1})",
     ATEN.lt.Scalar: "({0} < {1})", ATEN.lt.Tensor: "({0} < {1})",
     ATEN.ge.Scalar: "({0} >= {1})", ATEN.le.Scalar: "({0} <= {1})",
+    ATEN.ge.Tensor: "({0} >= {1})", ATEN.le.Tensor: "({0} <= {1})",
+    ATEN.bitwise_and.Tensor: "{T}({T}({0}) & {T}({1}))", ATEN.bitwise_or.Tensor: "{T}({T}({0}) | {T}({1}))",
     ATEN.logical_not.default: "(!bool({0}))",
     ATEN.logical_and.default: "(bool({0}) && bool({1}))", ATEN.logical_or.default: "(bool({0}) || bool({1}))",
     ATEN.where.self: "(bool({0}) ? {T}({1}) : {T}({2}))",
@@ -125,17 +128,23 @@ VIEWS = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default, ATE
          ATEN.expand.default, ATEN.slice.Tensor, ATEN.select.int, ATEN.unsqueeze.default, ATEN.squeeze.dims,
          ATEN.squeeze.dim, ATEN.transpose.int, ATEN.alias.default}
 RESHAPES = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default}
-FILLED = {ATEN.full.default, ATEN.full_like.default, ATEN.scalar_tensor.default}
+FILLED = {ATEN.full.default: True, ATEN.full_like.default: True, ATEN.scalar_tensor.default: True,
+          ATEN.new_full.default: True, ATEN.new_zeros.default: False, ATEN.empty_permuted.default: False}
 REDUCED = {ATEN.sum.dim_IntList: ("0", "a + {x}", "a"), ATEN.mean.dim: ("0", "a + {x}", "a / {n}"),
            ATEN.amax.default: ("{x}", "max(a, {x})", "a"), ATEN.amin.default: ("{x}", "min(a, {x})", "a"),
-           ATEN.any.dim: ("false", "a || {x}", "a")}
+           ATEN.any.dim: ("false", "a || {x}", "a"), ATEN.any.dims: ("false", "a || {x}", "a")}
 # torch 2.15 documentation, torch.remainder
 REMAINDER = ("template <typename T> inline T mesh_%s(T a, T b) {\n    T m = %s;\n"
              "    return (m != 0 && ((m < 0) != (b < 0))) ? T(m + b) : m;\n}\n")
 WRAP = "inline uint mesh_wrap(long i, long n) { return uint(i < 0 ? i + n : i); }\n"
+WITHIN = "inline uint mesh_within(long i, long n) { return uint(i < 0 ? 0 : i < n ? i : n - 1); }\n"
+# torch 2.15 documentation, torch.clamp
+LEAST = ("template <typename T> inline T mesh_least(T a, T b) { return a < b ? b : a; }\n"
+         "template <typename T> inline T mesh_most(T a, T b) { return b < a ? b : a; }\n")
+WITH_EFFECTS = torch.ops.higher_order.with_effects
 SCATTERED = {ATEN.scatter_add.default: True, ATEN.scatter.src: False, ATEN.scatter.value: False}
 PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memory", "non_blocking"}
-SCALED = {ATEN.addmm.default: {"beta", "alpha"}}
+SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"}}
 
 
 @dataclass
@@ -268,7 +277,7 @@ def pipeline(source):
 
 
 SHARED = {"remainder": REMAINDER % ("remainder", "a % b"), "fremainder": REMAINDER % ("fremainder", "fmod(a, b)"),
-          "wrap": WRAP, "gelu": GELU % ("gelu", "erf(x * M_SQRT1_2_F)"),
+          "wrap": WRAP, "within": WITHIN, "least": LEAST, "gelu": GELU % ("gelu", "erf(x * M_SQRT1_2_F)"),
           "gelu_tanh": GELU % ("gelu_tanh", "tanh(0.7978845608f * (x + 0.044715f * x * x * x))"),
           **{f"power{n}": f"template <typename T> inline T mesh_power{n}(T a) {{ return {' * '.join('a' * n)}; }}\n"
              for n in (2, 3, 4)}}
@@ -288,6 +297,11 @@ def native(source):
             raise RuntimeError(built.stderr)
         LIBRARIES[source] = (C.CDLL(str(stem.with_suffix(".dylib"))), directory)
     return LIBRARIES[source][0]
+
+
+def refused(value, message, zero):
+    if bool(((value != 0) if zero else (value == 0)).any()):
+        raise RuntimeError(message)
 
 
 def shaped(owner, view):
@@ -316,7 +330,13 @@ class Lowering:
                     ATEN.max_pool2d_with_indices.default: self.max_pool,
                     ATEN._softmax.default: self.softmax,
                     ATEN.native_layer_norm.default: self.layer_norm, ATEN.convolution.default: self.convolution,
-                    ATEN.mm.default: self.product, ATEN.bmm.default: self.product, ATEN.addmm.default: self.product}
+                    ATEN.mm.default: self.product, ATEN.bmm.default: self.product, ATEN.addmm.default: self.product,
+                    ATEN._log_softmax.default: self.softmax, ATEN.cumsum.default: self.cumsum,
+                    ATEN.bitwise_not.default: self.inverted, ATEN.clamp.default: self.clamp,
+                    ATEN.constant_pad_nd.default: self.padded, ATEN.flip.default: self.flip,
+                    ATEN.slice_scatter.default: self.slice_scatter, ATEN.index_put.default: self.index_put,
+                    ATEN.split_with_sizes.default: self.split, ATEN.avg_pool2d.default: self.average_pool,
+                    ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers()}
         position = 0
         for node in module.graph.nodes:
             if node.op == "placeholder":
@@ -438,10 +458,10 @@ class Lowering:
                    f"{literal(alpha, wide)} * {t})"
         return Product(left, right, value.dtype, tuple(value.shape), expression)
 
-    def pointwise(self, node, template=None):
+    def pointwise(self, node, template=None, given=None):
         value = node.meta["val"]
         template, kind, shape = template or POINTWISE[node.target], self.types[value.dtype], tuple(value.shape)
-        operands = [self.forms[a] if isinstance(a, torch.fx.Node) else a for a in node.args]
+        operands = [self.forms[a] if isinstance(a, torch.fx.Node) else a for a in given or node.args]
         if node.target is ATEN._to_copy.default and value.dtype == node.args[0].meta["val"].dtype:
             return operands[0]
         base = next((o for o in operands if isinstance(o, Product) and o.shape == shape), None)
@@ -467,9 +487,99 @@ class Lowering:
                               "{T}({0})" if node.args[1] == 1 else "pow({T}({0}), {T}({1}))")
 
     def filled(self, node):
-        value = node.meta["val"]
+        value, given = node.meta["val"], node.args[-1] if FILLED[node.target] else 0
         return Fused(value.dtype, tuple(value.shape),
-                     lambda bind, index, t: f"{self.types[value.dtype]}({literal(node.args[-1])})")
+                     lambda bind, index, t: f"{self.types[value.dtype]}({literal(given)})")
+
+    def inverted(self, node):
+        return self.pointwise(node, "(!bool({0}))" if node.meta["val"].dtype == torch.bool else "{T}(~{T}({0}))")
+
+    def clamp(self, node):
+        low, high = (*node.args[1:], None, None)[:2]
+        self.using.add("least")
+        made = "{T}({0})"
+        made = made if low is None else "mesh_least(%s, {T}(%s))" % (made, literal(low))
+        return self.pointwise(node, made if high is None else "mesh_most(%s, {T}(%s))" % (made, literal(high)),
+                              node.args[:1])
+
+    # torch 2.15 documentation, torch.nn.functional.pad, torch.flip and torch.slice_scatter
+    def padded(self, node):
+        value, source = node.meta["val"], self.reader(node.args[0])
+        pads, given = node.args[1], node.args[2] if len(node.args) > 2 else 0
+        before = [0] * (len(source.shape) - len(pads) // 2) + list(pads[-2::-2])
+        kind = self.types[value.dtype]
+        self.using.add("within")
+
+        def expression(bind, index, t):
+            moved = [(f"(long({i}) - {b})", n) for i, b, n in zip(index, before, source.shape)]
+            inside = " && ".join(f"{at} >= 0 && {at} < {n}" for (at, n), size in zip(moved, value.shape)
+                                 if size != n) or "true"
+            found = source.read(bind, [f"mesh_within({at}, {n})" for at, n in moved])
+            return f"(({inside}) ? {kind}({found}) : {kind}({literal(given)}))"
+        return Fused(value.dtype, tuple(value.shape), expression if all(source.shape) else
+                     lambda bind, index, t: f"{kind}({literal(given)})")
+
+    def flip(self, node):
+        value, source = node.meta["val"], self.reader(node.args[0])
+        over = {d % len(source.shape) for d in node.args[1]}
+        return Fused(value.dtype, tuple(value.shape), lambda bind, index, t: source.read(bind, [
+            f"({n - 1} - {i})" if d in over else i for d, (i, n) in enumerate(zip(index, source.shape))]))
+
+    def slice_scatter(self, node):
+        value, source, given = node.meta["val"], self.reader(node.args[0]), self.reader(node.args[1])
+        dim, start, end, step = (*node.args[2:], *(0, None, None, 1)[len(node.args) - 2:])
+        dim = dim % len(source.shape)
+        start, end, step = slice(start, end, step).indices(source.shape[dim])
+        kind = self.types[value.dtype]
+        self.using.add("within")
+
+        def expression(bind, index, t):
+            i = index[dim]
+            at = f"mesh_within((long({i}) - {start}) / {step}, {given.shape[dim]})"
+            return f"(({i} >= {start} && {i} < {end} && ({i} - {start}) % {step} == 0) ? " \
+                   f"{kind}({given.read(bind, index[:dim] + [at] + index[dim + 1:])}) : " \
+                   f"{kind}({source.read(bind, index)}))"
+        return Fused(value.dtype, tuple(value.shape), expression) if all(given.shape) else source
+
+    def split(self, node):
+        source, dim = self.stored(node.args[0]), (node.args[2] if len(node.args) > 2 else 0)
+        dim, made, at = dim % len(source.shape), [], 0
+        for size in node.args[1]:
+            made.append(View(source.storage, source.dtype, source.shape[:dim] + (size,) + source.shape[dim + 1:],
+                             source.stride, source.offset + at * source.stride[dim]))
+            at += size
+        return made
+
+    def cumsum(self, node):
+        source, value = self.reader(node.args[0]), node.meta["val"]
+        dim, kind = node.args[1] % len(source.shape), self.types[value.dtype]
+        made, bind = self.fresh(value.dtype, source.shape), Bound()
+        lines, names = unravel("p.x", source.shape[:dim] + source.shape[dim + 1:], "r")
+        index = names[:dim] + ["k"] + names[dim:]
+        lines += [f"{kind} a = 0;", f"for (uint k = 0; k < {source.shape[dim]}; k++) {{",
+                  f"    a += {kind}({source.read(bind, index)});", f"    {made.read(bind, index, True)} = a;", "}"]
+        self.dispatch(bind, lines, (math.prod(source.shape) // max(source.shape[dim], 1), 1, 1))
+        return made
+
+    # design/torch-source-lowering-change-request.md, item 5; torch 2.15 torch/_higher_order_ops/effects.py
+    def checked(self, node, read, message, zero):
+        view = self.escape(read)
+        self.flush()
+        self.program.append((CHECK, view, (message, zero), self.host(node, [(view, False)])))
+
+    def asserted(self, node):
+        self.checked(node, node.args[0], node.args[1], False)
+
+    def effect(self, node):
+        token, made, *given = node.args
+        if made is not ATEN._linalg_check_errors.default:
+            self.missing.append(f"with_effects of {made}")
+            return None
+        self.checked(node, given[0], f"{given[1]}: the LAPACK routine's INFO is not zero", True)
+        return [self.forms[token], None]
+
+    def drivers(self):
+        return {}
 
     def range(self, node):
         value, (start, _, step) = node.meta["val"], (*node.args, 1)[:3]
@@ -487,16 +597,13 @@ class Lowering:
         value = node.meta["val"]
         self.using.add("wrap")
 
-        def expression(bind, index, t):
-            at = []
-            for extent, (chosen, places) in zip(source.shape, dims):
-                if chosen is None:
-                    at.append(index[places])
-                else:
-                    found = chosen.read(bind, [index[k] for k in places][-len(chosen.shape) or len(places):])
-                    at.append(f"mesh_wrap(long({found}), {extent})")
-            return source.read(bind, at)
-        return Fused(value.dtype, tuple(value.shape), expression)
+        return Fused(value.dtype, tuple(value.shape),
+                     lambda bind, index, t: source.read(bind, self.found(bind, index, source.shape, dims)))
+
+    def found(self, bind, index, shape, dims):
+        return [index[places] if chosen is None else "mesh_wrap(long(%s), %d)" % (
+            chosen.read(bind, [index[k] for k in places][-len(chosen.shape) or len(places):]), extent)
+            for extent, (chosen, places) in zip(shape, dims)]
 
     def embedding(self, node):
         table, chosen = self.stored(node.args[0]), self.reader(node.args[1])
@@ -512,18 +619,31 @@ class Lowering:
         dim = node.args[1] % max(len(source.shape), 1)
         return self.take(node, source, [(chosen, [d]) if d == dim else (None, d) for d in range(len(source.shape))])
 
-    def index(self, node):
-        source = self.stored(node.args[0])
-        chosen = {d: self.reader(a) for d, a in enumerate(node.args[1]) if a is not None}
+    def advanced(self, extents, given):
+        chosen = {d: self.reader(a) for d, a in enumerate(given) if a is not None}
         shape = torch.broadcast_shapes(*[c.shape for c in chosen.values()])
         adjacent = list(chosen) == list(range(min(chosen), max(chosen) + 1))
         start = min(chosen) if adjacent else 0
-        rest = [d for d in range(len(source.shape)) if d not in chosen]
+        rest = [d for d in range(len(extents)) if d not in chosen]
         over = range(start, start + len(shape))
-        return self.take(node, source, [
+        domain = (*extents[:start], *shape, *(extents[d] for d in rest if d >= start))
+        return domain, [
             (chosen[d], over) if d in chosen else
             (None, (d if d < start else d - len(chosen) + len(shape)) if adjacent else len(shape) + rest.index(d))
-            for d in range(len(source.shape))])
+            for d in range(len(extents))]
+
+    def index(self, node):
+        source = self.stored(node.args[0])
+        return self.take(node, source, self.advanced(source.shape, node.args[1])[1])
+
+    # torch 2.15 documentation, torch.Tensor.index_put_
+    def index_put(self, node):
+        value, source = node.meta["val"], self.reader(node.args[0])
+        domain, dims = self.advanced(source.shape, node.args[1])
+        self.using.add("wrap")
+        return self.updated(value, source, domain, lambda bind, names, steps: " + ".join(
+            f"long({at}) * {step}" for at, step in zip(self.found(bind, names, source.shape, dims), steps)),
+            self.reader(node.args[2]), len(node.args) > 3 and node.args[3])
 
     # K. E. Batcher, Sorting networks and their applications, AFIPS Spring Joint Computer Conference, 1968
     def bitonic(self, fields, rows, padded, before):
@@ -587,19 +707,24 @@ class Lowering:
     # CMU-CS-90-190, 1990, section 1.5
     def scattered(self, node):
         value, (source, dim, chosen, given) = node.meta["val"], node.args
-        source, chosen = self.reader(source), self.view(self.forms[chosen])
-        given = self.reader(given) if isinstance(given, torch.fx.Node) else given
-        dim, kind = dim % len(source.shape), self.types[value.dtype]
-        made, count = self.fresh(value.dtype, value.shape), math.prod(chosen.shape)
+        source, chosen = self.reader(source), self.stored(chosen)
+        dim = dim % len(source.shape)
+        return self.updated(value, source, chosen.shape, lambda bind, names, steps: " + ".join(
+            f"long({chosen.read(bind, names) if d == dim else name}) * {step}"
+            for d, (name, step) in enumerate(zip(names, steps))),
+            self.reader(given) if isinstance(given, torch.fx.Node) else given, SCATTERED[node.target])
+
+    def updated(self, value, source, domain, key, given, added):
+        kind = self.types[value.dtype]
+        made, count = self.fresh(value.dtype, value.shape), math.prod(domain)
         self.store(source, made)
         if not count:
             return made
         padded = 1 << (count - 1).bit_length()
         keys, places = (self.fresh(torch.int64, (1, padded)) for _ in range(2))
         bind = Bound()
-        lines, names = unravel(f"min(p.x, {count - 1}u)", chosen.shape, "c")
-        target = " + ".join(f"long({chosen.read(bind, names) if d == dim else name}) * {step}"
-                            for d, (name, step) in enumerate(zip(names, made.stride)))
+        lines, names = unravel(f"min(p.x, {count - 1}u)", domain, "c")
+        target = key(bind, names, made.stride)
         lines += [f"{keys.read(bind, ['0', 'p.x'], True)} = {target};",
                   f"{places.read(bind, ['0', 'p.x'], True)} = p.x;"]
         self.dispatch(bind, lines, (padded, 1, 1))
@@ -608,14 +733,15 @@ class Lowering:
             f"({a}0 < {b}0 || ({a}0 == {b}0 && {a}1 < {b}1))"))
         sums, flags = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,))
         bind = Bound()
-        lines, names = unravel(f"uint({places.read(bind, ['0', 'p.x'])})", chosen.shape, "c")
-        x = given.read(bind, names) if isinstance(given, (View, Fused)) else literal(given, kind == "double")
+        lines, names = unravel(f"uint({places.read(bind, ['0', 'p.x'])})", domain, "c")
+        x = given.read(bind, names[len(names) - len(given.shape):]) if isinstance(given, (View, Fused)) else \
+            literal(given, kind == "double")
         lines += [f"{sums.read(bind, ['p.x'], True)} = {kind}({x});",
                   f"{flags.read(bind, ['p.x'], True)} = p.x == 0 || "
                   f"{keys.read(bind, ['0', 'p.x'])} != {keys.read(bind, ['0', 'max(p.x, 1u) - 1'])};"]
         self.dispatch(bind, lines, (count, 1, 1))
         reach = 1
-        while SCATTERED[node.target] and reach < count:
+        while added and reach < count:
             after, ended, bind = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,)), Bound()
             far = [f"max(p.x, {reach}u) - {reach}"]
             self.dispatch(bind, [
@@ -629,7 +755,7 @@ class Lowering:
         out = f"{bind(made, True)}[{key}]"
         self.dispatch(bind, [
             f"if (p.x == {count - 1} || {keys.read(bind, ['0', f'min(p.x + 1, {count - 1}u)'])} != {key})",
-            f"    {out} = {f'{out} + ' * SCATTERED[node.target]}{sums.read(bind, ['p.x'])};"], (count, 1, 1))
+            f"    {out} = {f'{out} + ' * bool(added)}{sums.read(bind, ['p.x'])};"], (count, 1, 1))
         return made
 
     # torch 2.15 aten/src/ATen/native/Normalization.cpp, batch_norm_cpu_transform_input_template
@@ -671,6 +797,28 @@ class Lowering:
                   f"    if (at < 0 || c > m || isnan(c)) {{ m = c; at = y * {wide} + x; }}", "}"]
         lines += [f"{view.read(bind, names, True)} = {found};" for view, found in zip(made, ("m", "at")) if view]
         self.dispatch(bind, lines, (math.prod(values[0].shape), 1, 1))
+        return made
+
+    # torch 2.15 aten/src/ATen/native/AveragePool2d.cpp, avg_pool2d_out_frame
+    def average_pool(self, node):
+        value, source = node.meta["val"], self.stored(node.args[0])
+        kernel, stride, padding, ceil, padded, divisor = (
+            *node.args[1:], *([], node.kwargs.get("padding", [0, 0]), False, True, None)[len(node.args) - 2:])
+        stride, kind = stride or kernel, self.accumulated(value.dtype)
+        made, bind = self.fresh(value.dtype, value.shape), Bound()
+        lines, names = unravel("p.x", value.shape, "o")
+        high, wide = source.shape[-2:]
+        lines += [f"int y0 = int({names[-2]} * {stride[0]}) - {padding[0]}, x0 = int({names[-1]} * {stride[1]}) - "
+                  f"{padding[1]};",
+                  f"int y1 = min(y0 + {kernel[0]}, {high + padding[0]}), x1 = min(x0 + {kernel[1]}, "
+                  f"{wide + padding[1]});",
+                  "int all = (y1 - y0) * (x1 - x0);",
+                  f"y0 = max(y0, 0); x0 = max(x0, 0); y1 = min(y1, {high}); x1 = min(x1, {wide});",
+                  f"{kind} a = 0;", "for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++)",
+                  f"    a += {kind}({source.read(bind, names[:-2] + ['uint(y)', 'uint(x)'])});",
+                  f"{made.read(bind, names, True)} = a / {kind}("
+                  f"{divisor or ('all' if padded else '((y1 - y0) * (x1 - x0))')});"]
+        self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
         return made
 
     def viewed(self, node):
@@ -722,8 +870,9 @@ class Lowering:
         out, x = made.read(bind, index, True), source.read(bind, index)
         loop = f"for (uint k = 0; k < {source.shape[dim]}; k++)"
         wide = self.accumulated(source.dtype)
+        last = f"{wide}({x}) - m - log(s)" if node.target is ATEN._log_softmax.default else f"exp({wide}({x}) - m) / s"
         lines += [f"{wide} m = -INFINITY, s = 0;", f"{loop} m = max(m, {wide}({x}));",
-                  f"{loop} s += exp({wide}({x}) - m);", f"{loop} {out} = exp({wide}({x}) - m) / s;"]
+                  f"{loop} s += exp({wide}({x}) - m);", f"{loop} {out} = {last};"]
         self.dispatch(bind, lines, (math.prod(source.shape) // source.shape[dim], 1, 1))
         return made
 
@@ -857,7 +1006,7 @@ class Lowering:
         program, waited, task, tasks, operations = [], set(), {}, [], []
         fenced, bound = {first for first, _ in fences}, set()
         for entry in self.program + [(WAIT,)]:
-            due = sorted(waits.get(entry[3], {})) if entry[0] is SEND else \
+            due = sorted(waits.get(entry[3], {})) if entry[0] in (SEND, CHECK) else \
                 range(len(segments)) if entry[0] is WAIT else []
             due = [first for first in due if first not in waited]
             waited.update(due)
@@ -873,7 +1022,8 @@ class Lowering:
                 tasks.append((self.lane, tuple(dict.fromkeys(name for step in steps for name in step.nodes))))
             elif entry[0] is not WAIT:
                 task[entry[3]] = len(tasks)
-                operations.append((THREAD, SENT if entry[0] is SEND else ARRIVED, len(tasks), entry[2], 0, 0))
+                operations += [(THREAD, SENT if entry[0] is SEND else ARRIVED, len(tasks), entry[2], 0, 0)] * (
+                    entry[0] is not CHECK)
                 tasks.append((THREAD, self.vertices[entry[3]]))
         task[len(self.vertices) - 1] = len(tasks)
         tasks.append((THREAD, self.vertices[-1]))
@@ -899,6 +1049,8 @@ class Lowering:
                     wait(entry)
                 elif entry[0] is RECV:
                     owner[entry[1]] = RECV(entry[2])
+                elif entry[0] is CHECK:
+                    refused(shaped(owner, entry[1]), *entry[2])
                 else:
                     SEND(shaped(owner, entry[1]), entry[2])
             end(context)
@@ -1068,6 +1220,65 @@ class Native(Lowering):
 
     def awaited(self, due, task):
         return []
+
+    def drivers(self):
+        return {ATEN._linalg_solve_ex.default: self.solve, ATEN.linalg_qr.default: self.qr}
+
+    def columns(self, bind, lines, source, held, rows, columns, names):
+        lines += [f"for (uint i = 0; i < {rows}; i++) for (uint j = 0; j < {columns}; j++) "
+                  f"{held}[j * {rows} + i] = {source.read(bind, names + ['i', 'j'][:len(source.shape) - len(names)])};"]
+
+    # design/torch-source-lowering-change-request.md, item 5; LAPACK, sgesv and dgesv; torch 2.15 documentation,
+    # torch.linalg.solve_ex
+    def solve(self, node):
+        values, left, right = node.meta["val"], self.reader(node.args[0]), self.reader(node.args[1])
+        letter = {torch.float32: "s", torch.float64: "d"}.get(values[0].dtype)
+        if letter is None or len(node.args) > 2 or node.kwargs:
+            self.missing.append(f"{node.target} of {values[0].dtype} or with options")
+            return None
+        n, lead = left.shape[-1], left.shape[:-2]
+        vector = len(right.shape) == len(left.shape) - 1
+        k, batch, kind = 1 if vector else right.shape[-1], math.prod(lead), self.types[values[0].dtype]
+        made = [self.fresh(v.dtype, v.shape) for v in values]
+        factors, unknown = self.fresh(values[0].dtype, (batch, n * n)), self.fresh(values[0].dtype, (batch, n * k))
+        bind = Bound()
+        lines, names = unravel("p.x", lead, "r")
+        a, b, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
+            (factors, n * n), (unknown, n * k), (made[2], n), (made[3], 1)))
+        self.columns(bind, lines, left, a, n, n, names)
+        self.columns(bind, lines, right, b, n, k, names)
+        lines += [f"int n = {n}, k = {k};", f"{letter}gesv_(&n, &k, {a}, &n, {pivots}, {b}, &n, {info});",
+                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
+                  f"{bind(made[0], True)}[(p.x * {n} + i) * {k} + j] = {b}[j * {n} + i];",
+                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
+                  f"{bind(made[1], True)}[(p.x * {n} + i) * {n} + j] = {a}[j * {n} + i];"]
+        self.dispatch(bind, lines, (batch, 1, 1))
+        return made
+
+    # LAPACK, sgeqrf and sorgqr; torch 2.15 documentation, torch.linalg.qr
+    def qr(self, node):
+        values, source = node.meta["val"], self.reader(node.args[0])
+        letter = {torch.float32: "s", torch.float64: "d"}.get(values[0].dtype)
+        (m, n), lead = source.shape[-2:], source.shape[:-2]
+        if letter is None or len(node.args) > 1 or node.kwargs or m < n:
+            self.missing.append(f"{node.target} of {values[0].dtype}, with a mode or of a wide matrix")
+            return None
+        batch, room = math.prod(lead), 64 * n
+        made = [self.fresh(v.dtype, v.shape) for v in values]
+        held, scalars, work = (self.fresh(values[0].dtype, (batch, size)) for size in (m * n, n, room))
+        bind = Bound()
+        lines, names = unravel("p.x", lead, "r")
+        a, tau, w = (f"({bind(v, True)} + p.x * {step})" for v, step in ((held, m * n), (scalars, n), (work, room)))
+        self.columns(bind, lines, source, a, m, n, names)
+        lines += [f"int m = {m}, n = {n}, room = {room}, info;",
+                  f"{letter}geqrf_(&m, &n, {a}, &m, {tau}, {w}, &room, &info);",
+                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
+                  f"{bind(made[1], True)}[(p.x * {n} + i) * {n} + j] = i <= j ? {a}[j * {m} + i] : 0;",
+                  f"{letter}orgqr_(&m, &n, &n, {a}, &m, {tau}, {w}, &room, &info);",
+                  f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
+                  f"{bind(made[0], True)}[(p.x * {m} + i) * {n} + j] = {a}[j * {m} + i];"]
+        self.dispatch(bind, lines, (batch, 1, 1))
+        return made
 
     def __init__(self, module, laid):
         self.kernels = []
