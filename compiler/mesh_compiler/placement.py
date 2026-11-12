@@ -791,6 +791,13 @@ def place(graph_module, placement):
         node.meta.pop("blocks", None)
         node.meta.pop("collectives", None)
     views(graph)
+    # design/problems-of-14b9a757-change-request.md item 8, steps 4 and 6
+    held = {}
+    for node in graph.nodes:
+        for read in [node] if "invariant" in node.meta else [n for n in node.all_input_nodes if "state" in n.meta and (
+                view(node) is None or "invariant" not in node.meta)]:
+            held.setdefault(node.meta["processor"], {})[read.meta.get("invariant", (read.meta.get("state"),))] = None
+    graph_module.meta["invariant"] = {processor: tuple(slices) for processor, slices in held.items()}
     graph_module.recompile()
     return graph_module, placed[-1].meta["processor"], channels
 
