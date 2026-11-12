@@ -136,7 +136,7 @@ VIEWS = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default, ATE
          ATEN.expand.default, ATEN.slice.Tensor, ATEN.select.int, ATEN.unsqueeze.default, ATEN.squeeze.dims,
          ATEN.squeeze.dim, ATEN.transpose.int, ATEN.alias.default}
 RESHAPES = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default}
-# review of 15a47389: each element of the operand is read at most once
+# design/compilation-composition-change-request.md:360-362
 ONCE = {ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.flip.default}
 FILLED = {ATEN.full.default: True, ATEN.full_like.default: True, ATEN.scalar_tensor.default: True,
           ATEN.new_full.default: True, ATEN.new_zeros.default: False, ATEN.empty_permuted.default: False}
@@ -484,8 +484,7 @@ class Lowering:
         def expression(bind, index, t):
             return template.format(*(
                 o.expression(bind, index, t) if o is base else
-                o.read(bind, index[len(index) - len(o.shape):]) if isinstance(o, (View, Fused)) else
-                literal(o, wide) for o in operands), T=kind)
+                self.given(bind, o, index, wide) for o in operands), T=kind)
         return Product(base.left, base.right, value.dtype, shape, expression) if base else \
             Fused(value.dtype, shape, expression)
 
@@ -706,9 +705,9 @@ class Lowering:
         strides[dim] = 1
         return [View(v.storage, v.dtype, tuple(source.shape), tuple(strides), 0) for v in made]
 
-    def given(self, bind, value, names, kind):
+    def given(self, bind, value, names, wide):
         return value.read(bind, names[len(names) - len(value.shape):]) if isinstance(value, (View, Fused)) else \
-            literal(value, kind == "double")
+            literal(value, wide)
 
     def sort(self, node):
         source = self.view(self.forms[node.args[0]])
@@ -753,7 +752,7 @@ class Lowering:
         sums, flags = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,))
         bind = Bound()
         lines, names = unravel(f"uint({places.read(bind, ['0', 'p.x'])})", domain, "c")
-        x = self.given(bind, given, names, kind)
+        x = self.given(bind, given, names, kind == "double")
         lines += [f"{sums.read(bind, ['p.x'], True)} = {kind}({x});",
                   f"{flags.read(bind, ['p.x'], True)} = p.x == 0 || "
                   f"{keys.read(bind, ['0', 'p.x'])} != {keys.read(bind, ['0', 'max(p.x, 1u) - 1'])};"]
@@ -1310,7 +1309,7 @@ class Native(Lowering):
         first, every = unravel("e", value.shape, "s")
         lines, names = unravel("q", domain, "c")
         out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
-        x = self.given(bind, given, names, kind)
+        x = self.given(bind, given, names, kind == "double")
         self.dispatch(bind, [f"for (uint e = 0; e < {math.prod(value.shape)}; e++) {{", *first,
                              f"{made.read(bind, every, True)} = {source.read(bind, every)};", "}",
                              f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
@@ -1373,8 +1372,9 @@ class Native(Lowering):
         self.dispatch(bind, lines, (batch, 1, 1))
         return made
 
-    # LAPACK, sgelqf and sorglq; G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., section 5.2:
-    # A = QR <=> A^T = R^T Q^T; torch 2.15 documentation, torch.linalg.qr
+    # LAPACK, sgelqf and sorglq; G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., section 5.2;
+    # torch 2.15 documentation, torch.linalg.qr
+    # A = Q R  <=>  A^T = R^T Q^T
     def qr(self, node):
         values, source = node.meta["val"], self.reader(node.args[0])
         letter = {torch.float32: "s", torch.float64: "d"}.get(values[0].dtype)

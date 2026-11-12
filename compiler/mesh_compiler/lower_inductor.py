@@ -1,5 +1,7 @@
 # design/data-flow.md; design/torch-source-lowering-change-request.md item 3
 import copy
+import pathlib
+import sys
 
 import torch
 from torch import Tensor
@@ -9,6 +11,9 @@ from torch._inductor.lowering import fallback_handler, register_lowering
 from torch._inductor.virtualized import V
 
 from .ir import RECV, SEND
+
+sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
+import mesh_graph
 
 WITH_EFFECTS = torch.ops.higher_order.with_effects
 
@@ -74,15 +79,12 @@ def lower_send_strided(value, channel, stride, after):
     return in_order(call_send_strided, after, stated, channel, stride)
 
 
-# design/torch-source-lowering-change-request.md item 3
-def ordered(written):
-    return [node for node in written if not any(user in written for user in node.users)]
-
-
+# design/torch-source-lowering-change-request.md item 3; rdma/mesh_graph.py extremes
 def adapt(module, device, carried):
     module = copy.deepcopy(module)
     graph = module.graph
     sent, receives, written, parts = [], False, {}, set()
+    read = lambda node: [user for user in node.users if user in written]
     for node in list(graph.nodes):
         if node in parts:
             continue
@@ -103,13 +105,13 @@ def adapt(module, device, carried):
         elif node.target is SEND:
             sent.append(node.args[0])
             node.target = SEND_STRIDED
-            node.args = (*node.args, list(node.args[0].meta["val"].stride()), ordered(written))
+            node.args = (*node.args, list(node.args[0].meta["val"].stride()), mesh_graph.extremes(list(written), read)[1])
             written = {}
         elif node.target is RECV:
             channel, value = node.args[0], node.meta["val"]
             node.target = RECV_STRIDED
             node.args = (channel, list(value.shape), list(value.stride()), value.dtype,
-                         torch.device("cpu") if channel in carried else device, ordered(written))
+                         torch.device("cpu") if channel in carried else device, mesh_graph.extremes(list(written), read)[1])
             receives, written = True, {}
         if node.op == "call_function" and isinstance(node.meta.get("val"), Tensor):
             written[node] = None
