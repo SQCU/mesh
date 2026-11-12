@@ -1,5 +1,6 @@
 /* design/the-compiler.md, order 4 */
 /* design/torch-source-lowering-change-request.md, items 1 and 3 */
+/* design/integration-finishing-change-request.md, item 7 */
 #import <Metal/Metal.h>
 #include <stdint.h>
 #include <string.h>
@@ -15,11 +16,19 @@ struct mesh_metal4_dispatch {
 @property id<MTL4CommandAllocator> allocator;
 @property id<MTL4CommandBuffer> commands;
 @property id<MTLResidencySet> held, viewed;
-@property id<MTLSharedEvent> event, arrival;
-@property uint64_t value, arrived;
-@property(atomic) NSError *error;
+@property id<MTLSharedEvent> arrival;
+@property uint64_t arrived;
 @end
 @implementation MeshMetal4Stream
+@end
+
+@interface MeshMetal4Record : NSObject
+@property id<MTLSharedEvent> event;
+@property uint64_t value;
+@property(atomic) NSError *error;
+@property(atomic) double start, end;
+@end
+@implementation MeshMetal4Record
 @end
 
 static id<MTLDevice> device;
@@ -113,7 +122,6 @@ void *mesh_metal4_stream(void *const *buffer, uint32_t buffers) {
     stream.commands = [device newCommandBuffer];
     stream.held = [device newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
     stream.viewed = [device newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
-    stream.event = [device newSharedEvent];
     stream.arrival = [device newSharedEvent];
     add(stream.held, buffer, buffers);
     return (__bridge_retained void *)stream;
@@ -138,9 +146,26 @@ void *mesh_metal4_fence(void) {
     return (__bridge_retained void *)[device newFence];
 }
 
+void *mesh_metal4_record(void) {
+    begin();
+    MeshMetal4Record *record = [MeshMetal4Record new];
+    record.event = [device newSharedEvent];
+    return (__bridge_retained void *)record;
+}
+
+void mesh_metal4_times(void *of, double *times) {
+    MeshMetal4Record *record = (__bridge MeshMetal4Record *)of;
+    times[0] = record.start;
+    times[1] = record.end;
+}
+
 void mesh_metal4_commit(void *of, const struct mesh_metal4_dispatch *dispatch, uint32_t dispatches,
-                        void *const *buffer, uint32_t buffers, void *const *after, uint32_t afters, void *before) {
+                        void *const *buffer, uint32_t buffers, void *const *after, uint32_t afters, void *before,
+                        void *into) {
     MeshMetal4Stream *stream = (__bridge MeshMetal4Stream *)of;
+    MeshMetal4Record *record = (__bridge MeshMetal4Record *)into;
+    uint64_t value = record.value + 1;
+    record.value = value;
     add(stream.viewed, buffer, buffers);
     id<MTL4CommandBuffer> commands = stream.commands;
     [commands beginCommandBufferWithAllocator:stream.allocator];
@@ -172,18 +197,27 @@ void mesh_metal4_commit(void *of, const struct mesh_metal4_dispatch *dispatch, u
     [commands endCommandBuffer];
     MTL4CommitOptions *options = [MTL4CommitOptions new];
     [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
-        if (feedback.error) stream.error = feedback.error;
+        record.error = feedback.error;
+        record.start = feedback.GPUStartTime;
+        record.end = feedback.GPUEndTime;
+        record.event.signaledValue = value;
     }];
     [queue commit:&commands count:1 options:options];
-    [queue signalEvent:stream.event value:++stream.value];
 }
 
-int mesh_metal4_wait(void *of, char *message, size_t room) {
-    MeshMetal4Stream *stream = (__bridge MeshMetal4Stream *)of;
-    [stream.event waitUntilSignaledValue:stream.value timeoutMS:UINT64_MAX];
-    [stream.allocator reset];
-    [stream.viewed removeAllAllocations];
-    NSError *error = stream.error;
+int mesh_metal4_wait(void *const *of, uint32_t records, char *message, size_t room) {
+    NSError *error = nil;
+    for (uint32_t i = 0; i < records; i++) {
+        MeshMetal4Record *record = (__bridge MeshMetal4Record *)of[i];
+        [record.event waitUntilSignaledValue:record.value timeoutMS:UINT64_MAX];
+        if (!error) error = record.error;
+    }
     report(error, message, room);
     return error != nil;
+}
+
+void mesh_metal4_reset(void *of) {
+    MeshMetal4Stream *stream = (__bridge MeshMetal4Stream *)of;
+    [stream.allocator reset];
+    [stream.viewed removeAllAllocations];
 }

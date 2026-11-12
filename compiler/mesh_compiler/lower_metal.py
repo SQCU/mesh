@@ -1,9 +1,11 @@
 # design/the-compiler.md, order 4; design/torch-source-lowering-change-request.md, items 1 and 3
 import copy
 import ctypes as C
+import errno
 import math
 import mmap
 import operator
+import os
 import pathlib
 import sys
 import weakref
@@ -14,6 +16,7 @@ import torch
 from .ir import RECV, SEND
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
+import mesh
 import mesh_graph
 import mesh_metal4
 
@@ -22,6 +25,7 @@ TYPES = {torch.float32: "float", torch.float16: "half", torch.int64: "long", tor
          torch.uint8: "uchar", torch.bool: "bool"}
 ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
 COMMIT, WAIT = "commit", "wait"
+BARRIER, FENCE, EVENT = "barrier", "fence", "event"
 TILE, SIMDGROUPS = 32, 4
 STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 # Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
@@ -81,9 +85,9 @@ class View:
     stride: tuple
     offset: int
 
-    def read(self, bind, index):
+    def read(self, bind, index, write=False):
         terms = [f"{i} * {s}" for i, s, n in zip(index, self.stride, self.shape) if n > 1 and s]
-        return f"{bind(self.storage)}[{' + '.join([str(self.offset)] * bool(self.offset) + terms) or '0'}]"
+        return f"{bind(self, write)}[{' + '.join([str(self.offset)] * bool(self.offset) + terms) or '0'}]"
 
 
 @dataclass
@@ -91,6 +95,7 @@ class Fused:
     dtype: torch.dtype
     shape: tuple
     expression: object
+    nodes: tuple = ()
 
     def read(self, bind, index):
         return self.expression(bind, index, None)
@@ -103,6 +108,7 @@ class Product:
     dtype: torch.dtype
     shape: tuple
     expression: object
+    nodes: tuple = ()
 
 
 @dataclass
@@ -115,9 +121,11 @@ class Storage:
 
 @dataclass
 class Step:
+    vertex: int
+    nodes: tuple
     pipeline: int
     storages: list
-    writes: set
+    accesses: list
     grid: tuple
     group: tuple
     groups: bool
@@ -126,9 +134,81 @@ class Step:
 @dataclass
 class Segment:
     steps: list
-    writes: set
-    after: list
+    barriers: list = field(default_factory=list)
+    after: dict = field(default_factory=dict)
     fence: list = field(default_factory=list)
+    record: list = field(default_factory=list)
+
+
+@dataclass
+class Dependence:
+    source: int
+    target: int
+    causes: list
+    ordering: str = None
+
+
+# mesh-graph.h struct mesh_graph_view and struct mesh_graph_cause
+class Viewed(C.Structure):
+    _fields_ = [("key", C.c_uint64), ("view", mesh.Strided), ("vertex", C.c_uint32), ("write", C.c_uint32)]
+
+
+class Cause(C.Structure):
+    _fields_ = [("key", C.c_uint64), ("kind", C.c_uint32), ("given", C.c_uint32)]
+
+
+HAZARDS = ("read after write", "write after read", "write after write", "given")
+GRAPH = mesh_graph.LIB
+GRAPH.mesh_graph_dependences_views.restype = GRAPH.mesh_graph_synchronization.restype = C.c_int
+GRAPH.mesh_graph_dependences_views.argtypes = [
+    C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.c_size_t,
+    C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.POINTER(Cause), C.POINTER(C.c_size_t)]
+GRAPH.mesh_graph_synchronization.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
+                                             C.POINTER(C.c_ubyte), C.POINTER(C.c_size_t)]
+
+
+# design/compilation-composition-change-request.md, item 6 and "Compact effects"; mesh-graph.h
+# mesh_graph_dependences_views and mesh_graph_synchronization
+def dependences(vertices, accesses):
+    accesses = [(vertex, view, write) for vertex, view, write in accesses if all(view.shape)]
+    viewed, kept = (Viewed * max(len(accesses), 1))(), []
+    for made, (vertex, view, write) in zip(viewed, accesses):
+        size = view.dtype.itemsize
+        pairs = (C.c_uint64 * (2 * len(view.shape)))(*[x for n, s in zip(view.shape, view.stride)
+                                                       for x in (n, s * size)])
+        kept.append(pairs)
+        made.key, made.vertex, made.write = view.storage, vertex, write
+        made.view = mesh.Strided(view.offset * size, size, len(view.shape), 0, pairs)
+    count = C.c_size_t()
+    status = GRAPH.mesh_graph_dependences_views(len(accesses), viewed, 0, None, None, 0, None, None, None,
+                                                C.byref(count))
+    if status not in (0, errno.ERANGE):
+        raise OSError(status, os.strerror(status))
+    room = max(count.value, 1)
+    tails, heads, causes = (C.c_uint32 * room)(), (C.c_uint32 * room)(), (Cause * room)()
+    mesh_graph._check(GRAPH.mesh_graph_dependences_views(len(accesses), viewed, 0, None, None, count.value, tails,
+                                                         heads, causes, C.byref(count)))
+    found = {}
+    for tail, head, cause in zip(tails[:count.value], heads[:count.value], causes[:count.value]):
+        found.setdefault((tail, head), []).append((HAZARDS[cause.kind], cause.key))
+    pairs, room = list(found), max(len(found), 1)
+    redundant, left = (C.c_ubyte * room)(), C.c_size_t()
+    mesh_graph._check(GRAPH.mesh_graph_synchronization(
+        vertices, len(pairs), (C.c_uint32 * room)(*[a for a, _ in pairs]), (C.c_uint32 * room)(*[b for _, b in pairs]),
+        redundant, C.byref(left)))
+    return [Dependence(a, b, found[a, b]) for a, b in pairs], [bool(r) for r in redundant[:len(pairs)]]
+
+
+class Bound(list):
+    def __init__(self):
+        super().__init__()
+        self.accesses = []
+
+    def __call__(self, view, write=False):
+        self.accesses.append((view, write))
+        if view.storage not in self:
+            self.append(view.storage)
+        return f"b{self.index(view.storage)}"
 
 
 class NotLowered(NotImplementedError):
@@ -179,7 +259,7 @@ def pipeline(source):
 class Lowering:
     def __init__(self, module, laid):
         self.laid, self.storages, self.forms, self.missing = laid, [], {}, []
-        self.pending, self.unwaited, self.program, self.results = [], [], [], ()
+        self.pending, self.program, self.results, self.vertices, self.hosted = [], [], (), [], []
         handlers = {**dict.fromkeys(POINTWISE, self.pointwise), **dict.fromkeys(VIEWS, self.viewed),
                     RECV: self.receive, SEND: self.send, operator.getitem: self.part,
                     **dict.fromkeys(FILLED, self.filled), **dict.fromkeys(REDUCED, self.reduced),
@@ -198,14 +278,20 @@ class Lowering:
                 self.forms[node] = self.arrived(ARGUMENT, node, position)
                 position += 1
             elif node.op == "output" and not self.missing:
+                self.issuing = node
                 self.results = tuple(self.escape(r) if isinstance(r, torch.fx.Node) else r for r in node.args[0])
                 self.flush()
-                self.wait()
+                self.host(node, [r for r in self.results if isinstance(r, View)])
+                self.ordered()
             elif node.op == "call_function" and (
                     node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(node.target, set())):
                 self.missing.append(str(node.target))
             elif node.op == "call_function" and not self.missing:
+                self.issuing = node
                 form = handlers[node.target](node)
+                if isinstance(form, (Fused, Product)):
+                    form.nodes = (*dict.fromkeys(name for read in node.all_input_nodes
+                                                 for name in getattr(self.forms[read], "nodes", ())), node.name)
                 self.forms[node] = form if self.deferred(node, form) else self.settled(form)
 
     def arrived(self, kind, node, position=None):
@@ -244,47 +330,41 @@ class Lowering:
         form = self.forms[node]
         return self.view(form) if isinstance(form, Product) else form
 
-    def dispatch(self, storages, lines, grid, writes, group=None, head=""):
+    def dispatch(self, bound, lines, grid, group=None, head="", nodes=()):
         if not math.prod(grid):
             return
         parameters = [f"device {TYPES[self.storages[s].dtype]} *b{k} [[buffer({k})]]"
-                      for k, s in enumerate(storages)]
+                      for k, s in enumerate(bound)]
         parameters += ["uint3 p [[thread_position_in_grid]]", "uint3 g [[threadgroup_position_in_grid]]"]
         body = "\n    ".join(lines)
         head += reference("erf") * ("erf(" in body)
         made = pipeline(f"{STDLIB}{head}kernel void k({', '.join(parameters)}) {{\n    {body}\n}}\n")
         width = LIB.mesh_metal4_width(made)
         group = (width, 1, 1) if group is None else tuple(n * width for n in group[:1]) + tuple(group[1:])
-        self.pending.append(Step(made, list(storages), writes, tuple(grid), group, head.startswith(PRIMITIVES)))
-
-    def binder(self):
-        storages = []
-
-        def bind(storage):
-            if storage not in storages:
-                storages.append(storage)
-            return f"b{storages.index(storage)}"
-        return storages, bind
+        nodes = tuple(dict.fromkeys((*nodes, self.issuing.name)))
+        self.pending.append(Step(len(self.vertices), nodes, made, list(bound), bound.accesses, tuple(grid), group,
+                                 head.startswith(PRIMITIVES)))
+        self.vertices.append(nodes)
 
     def store(self, form, target):
-        storages, bind = self.binder()
+        bind = Bound()
         lines, names = unravel("p.x", form.shape, "i")
-        lines.append(f"{target.read(bind, names)} = {form.read(bind, names)};")
-        self.dispatch(storages, lines, (math.prod(form.shape), 1, 1), {target.storage})
+        lines.append(f"{target.read(bind, names, True)} = {form.read(bind, names)};")
+        self.dispatch(bind, lines, (math.prod(form.shape), 1, 1), nodes=getattr(form, "nodes", ()))
 
     # Apple, MPPTensorOpsMatMul2d.h:207-294, macOS 26.4 SDK
     def multiply(self, form, target):
-        storages, bind = self.binder()
+        bind = Bound()
         rows, columns = form.left.shape[-2], form.right.shape[-1]
         batch = form.left.shape[0] if len(form.left.shape) == 3 else 1
-        out = bind(target.storage)
+        out = bind(target, True)
         lines, flags, slices = [], [], []
         for name, operand, tile in (("A", form.left, "0, g.y * {T}"), ("B", form.right, "g.x * {T}, 0")):
             (m, n), (sm, sn) = operand.shape[-2:], operand.stride[-2:]
             turned = not (n == 1 or sn == 1)
             extents, pitch = ((m, n), sn) if turned else ((n, m), sm)
             step = operand.stride[0] if len(operand.shape) == 3 else 0
-            lines.append(f"auto {name} = tensor({bind(operand.storage)} + {operand.offset} + g.z * {step}, "
+            lines.append(f"auto {name} = tensor({bind(operand)} + {operand.offset} + g.z * {step}, "
                          f"dextents<int, 2>({extents[0]}, {extents[1]}), array<int, 2>{{1, {max(pitch, 1)}}});")
             flags.append("true" if turned else "false")
             first, second = tile.format(T=TILE).split(", ")
@@ -311,8 +391,8 @@ class Lowering:
                       f"    uint row = min(g.y * {TILE} + uint(at[1]), {rows - 1}u);",
                       f"    uint column = min(g.x * {TILE} + uint(at[0]), {columns - 1}u);",
                       f"    t[i] = {expression};", "}", "t.store(mC);"]
-        self.dispatch(storages, lines, (-(-columns // TILE), -(-rows // TILE), batch), {target.storage},
-                      (SIMDGROUPS, 1, 1), PRIMITIVES)
+        self.dispatch(bind, lines, (-(-columns // TILE), -(-rows // TILE), batch), (SIMDGROUPS, 1, 1), PRIMITIVES,
+                      form.nodes)
 
     def matrix(self, node):
         view = self.view(self.forms[node])
@@ -419,14 +499,14 @@ class Lowering:
         source = self.reader(node.args[0])
         dim = node.args[1] % len(source.shape)
         made = self.fresh(node.meta["val"].dtype, source.shape)
-        storages, bind = self.binder()
+        bind = Bound()
         lines, names = unravel("p.x", source.shape[:dim] + source.shape[dim + 1:], "r")
         index = names[:dim] + ["k"] + names[dim:]
-        out, x = made.read(bind, index), source.read(bind, index)
+        out, x = made.read(bind, index, True), source.read(bind, index)
         loop = f"for (uint k = 0; k < {source.shape[dim]}; k++)"
         lines += ["float m = -INFINITY, s = 0;", f"{loop} m = max(m, float({x}));",
                   f"{loop} s += exp(float({x}) - m);", f"{loop} {out} = exp(float({x}) - m) / s;"]
-        self.dispatch(storages, lines, (math.prod(source.shape) // source.shape[dim], 1, 1), {made.storage})
+        self.dispatch(bind, lines, (math.prod(source.shape) // source.shape[dim], 1, 1))
         return made
 
     def reduced(self, node):
@@ -437,8 +517,8 @@ class Lowering:
                                                       over or range(len(source.shape))))
         kept = [d for d in range(len(source.shape)) if d not in over]
         made, kind = self.fresh(value.dtype, value.shape), TYPES[value.dtype]
-        storages, bind = self.binder()
-        out, count = bind(made.storage), math.prod(source.shape[d] for d in over)
+        bind = Bound()
+        out, count = bind(made, True), math.prod(source.shape[d] for d in over)
         lines, outer = unravel("p.x", [source.shape[d] for d in kept], "r")
         within, inner = unravel("j", [source.shape[d] for d in over], "q")
         index = dict(zip(kept + over, outer + inner))
@@ -447,7 +527,7 @@ class Lowering:
                   f"for (j = {int(first == '{x}')}; j < {count}; j++) {{ "
                   f"{' '.join(w.removeprefix('uint ') for w in within)} a = {step.format(x=x)}; }}",
                   f"{out}[p.x] = {last.format(n=count)};"]
-        self.dispatch(storages, lines, (math.prod(value.shape), 1, 1), {made.storage})
+        self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
         return made
 
     def layer_norm(self, node):
@@ -457,8 +537,8 @@ class Lowering:
         lead, count = source.shape[:len(source.shape) - len(inner)], math.prod(inner)
         used = {u.args[1] for u in node.users}
         made = [self.fresh(v.dtype, v.shape) if place in used else None for place, v in enumerate(values)]
-        storages, bind = self.binder()
-        outs = [m and bind(m.storage) for m in made]
+        bind = Bound()
+        outs = [m and bind(m, True) for m in made]
         lines, names = unravel("p.x", lead, "r")
         within, inside = unravel("j", inner, "q")
         x = source.read(bind, names + inside)
@@ -471,7 +551,7 @@ class Lowering:
                   f"float r = rsqrt(v / {count} + {literal(float(epsilon))});"]
         lines += [f"{loop} {outs[0]}[p.x * {count} + j] = {scaled}; }}"] * (0 in used)
         lines += [f"{outs[1]}[p.x] = m;"] * (1 in used) + [f"{outs[2]}[p.x] = r;"] * (2 in used)
-        self.dispatch(storages, lines, (math.prod(lead), 1, 1), {m.storage for m in made if m is not None})
+        self.dispatch(bind, lines, (math.prod(lead), 1, 1))
         return made
 
     def convolution(self, node):
@@ -483,8 +563,8 @@ class Lowering:
         source, weight = self.reader(source), self.reader(weight)
         bias = bias if bias is None else self.reader(bias)
         made = self.fresh(value.dtype, value.shape)
-        storages, bind = self.binder()
-        out = bind(made.storage)
+        bind = Bound()
+        out = bind(made, True)
         lines, (n, o, y, x) = unravel("p.x", value.shape, "o")
         _, per, high, wide = weight.shape
         taken = source.read(bind, [n, f"({o} / {value.shape[1] // groups} * {per} + c)", "uint(y)", "uint(x)"])
@@ -496,7 +576,7 @@ class Lowering:
                   f"    if (y >= 0 && y < {source.shape[2]} && x >= 0 && x < {source.shape[3]})" * any(padding),
                   f"    a += float({taken}) * float({weight.read(bind, [o, 'c', 'u', 'v'])});", "}",
                   f"{out}[p.x] = a;"]
-        self.dispatch(storages, lines, (math.prod(value.shape), 1, 1), {made.storage})
+        self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
         return made
 
     def escape(self, node, laid=False):
@@ -511,27 +591,15 @@ class Lowering:
         storage.kind = RESULT if storage.kind == HELD else storage.kind
         return view
 
-    # Bhattacharyya, Sriram and Lee, IEEE Trans. Signal Processing 45(6), 1997; Apple, MTL4CommandEncoder.h
     def flush(self):
-        if not self.pending:
-            return
-        steps, self.pending = self.pending, []
-        reads = [set(step.storages) - step.writes for step in steps]
+        if self.pending:
+            self.program.append((COMMIT, Segment(self.pending)))
+            self.pending = []
 
-        def before(k):
-            return [k - 1] * bool(k) + [j for j in range(k) if steps[j].writes & reads[k]]
-        stage = mesh_graph.forward(range(len(steps)), before,
-                                   lambda k, found: max(found[:1] + [s + 1 for s in found[1:]], default=0))
-        barriers = [bool(k) and stage[k] > stage[k - 1] for k in range(len(steps))]
-        after = [earlier for earlier in self.unwaited if earlier.writes & set().union(*reads)]
-        segment = Segment(list(zip(steps, barriers)), set().union(*(step.writes for step in steps)), after)
-        self.unwaited.append(segment)
-        self.program.append((COMMIT, segment))
-
-    def wait(self):
-        if self.unwaited:
-            self.unwaited = []
-            self.program.append((WAIT,))
+    def host(self, node, views):
+        self.hosted.append((len(self.vertices), views))
+        self.vertices.append((node.name,))
+        return len(self.vertices) - 1
 
     def receive(self, node):
         self.flush()
@@ -542,8 +610,48 @@ class Lowering:
     def send(self, node):
         sent = self.escape(node.args[0], node.args[1] in self.laid)
         self.flush()
-        self.wait()
-        self.program.append((SEND, sent, node.args[1]))
+        self.program.append((SEND, sent, node.args[1], self.host(node, [sent])))
+
+    # design/torch-source-lowering-change-request.md, item 3; design/compilation-composition-change-request.md, item 6;
+    # Bhattacharyya, Sriram and Lee, IEEE Trans. Signal Processing 45(6), 1997; Apple, MTL4CommandEncoder.h
+    def ordered(self):
+        segments = [entry[1] for entry in self.program if entry[0] is COMMIT]
+        within = {step.vertex: segment for segment in segments for step in segment.steps}
+        accesses = [(step.vertex, view, write) for segment in segments for step in segment.steps
+                    for view, write in step.accesses]
+        accesses += [(vertex, view, False) for vertex, views in self.hosted for view in views]
+        self.dependences, redundant = dependences(len(self.vertices), accesses)
+        awaited = {}
+        for dependence, covered in zip(self.dependences, redundant):
+            first, second = within[dependence.source], within.get(dependence.target)
+            if covered:
+                continue
+            if second is None:
+                dependence.ordering = EVENT
+                awaited.setdefault(dependence.target, {}).setdefault(id(first), (first, []))[1].append(dependence)
+            elif first is second:
+                dependence.ordering = BARRIER
+            else:
+                dependence.ordering = FENCE
+                second.after.setdefault(id(first), (first, []))[1].append(dependence)
+        for segment in segments:
+            at = {step.vertex: k for k, step in enumerate(segment.steps)}
+            inside = [d for d in self.dependences if d.ordering is BARRIER and d.source in at]
+            before = [[at[d.source] for d in inside if at[d.target] == k] for k in range(len(at))]
+            level = mesh_graph.longest(range(len(at)), before.__getitem__, lambda a, b: 1)
+            place = mesh_graph.heap_order([level[k] for k in range(len(at))],
+                                          [(at[d.source], at[d.target]) for d in inside])
+            order = sorted(range(len(at)), key=place.__getitem__)
+            segment.steps = [segment.steps[k] for k in order]
+            segment.barriers = [bool(i) and level[k] > level[order[i - 1]] for i, k in enumerate(order)]
+        program, waited = [], set()
+        for entry in self.program + [(WAIT,)]:
+            due = [first for first, _ in awaited.get(entry[3], {}).values()] if entry[0] is SEND else \
+                segments if entry[0] is WAIT else []
+            due = [segment for segment in due if id(segment) not in waited]
+            waited.update(map(id, due))
+            program += [(WAIT, due)] * bool(due) + [entry] * (entry[0] is not WAIT)
+        self.program = program
 
     def function(self):
         storages = self.storages
@@ -552,12 +660,17 @@ class Lowering:
         stream = LIB.mesh_metal4_stream((C.c_void_p * len(held))(*held.values()), len(held))
         program, retained = [], [*held.values()]
         for entry in self.program:
+            if entry[0] is WAIT:
+                program.append((WAIT, (C.c_void_p * len(entry[1]))(*[segment.record[0] for segment in entry[1]])))
+                continue
             if entry[0] is not COMMIT:
                 program.append(entry)
                 continue
             segment = entry[1]
+            segment.record = [LIB.mesh_metal4_record()]
+            retained.append(segment.record[0])
             array, patches, kept = (mesh_metal4.Dispatch * len(segment.steps))(), [], []
-            for made, (step, barrier) in zip(array, segment.steps):
+            for made, step, barrier in zip(array, segment.steps, segment.barriers):
                 addresses = (C.c_uint64 * len(step.storages))()
                 kept.append(addresses)
                 for slot, s in enumerate(step.storages):
@@ -569,14 +682,16 @@ class Lowering:
                 made.address, made.addresses, made.barrier = addresses, len(step.storages), barrier
                 made.groups, made.grid, made.group = step.groups, step.grid, step.group
                 retained.append(made.table)
-            for earlier in segment.after:
+            for earlier, _ in segment.after.values():
                 if not earlier.fence:
                     earlier.fence = [LIB.mesh_metal4_fence()]
                     retained.append(earlier.fence[0])
             program.append((COMMIT, array, patches, list(dict.fromkeys(s for _, _, s in patches)), segment, kept))
         made = [(s, st) for s, st in enumerate(storages) if st.kind == RESULT and st.count]
         given = [(s, st.position) for s, st in enumerate(storages) if st.kind == ARGUMENT]
-        results = self.results
+        results, vertices, depended = self.results, self.vertices, self.dependences
+        records = [(tuple(step.vertex for step in entry[1].steps), entry[1].record[0])
+                   for entry in self.program if entry[0] is COMMIT]
 
         def run(*arguments):
             owner = {s: arguments[position] for s, position in given}
@@ -613,19 +728,22 @@ class Lowering:
                     buffers = (C.c_void_p * len(viewed))(*[handle(s) for s in viewed])
                     for addresses, slot, s in patches:
                         addresses[slot] = LIB.mesh_metal4_address(handles[s]) + shifts[s]
-                    after = (C.c_void_p * len(segment.after))(*[earlier.fence[0] for earlier in segment.after])
+                    after = (C.c_void_p * len(segment.after))(*[earlier.fence[0]
+                                                                for earlier, _ in segment.after.values()])
                     LIB.mesh_metal4_commit(stream, array, len(array), buffers, len(viewed), after, len(after),
-                                           segment.fence[0] if segment.fence else None)
+                                           segment.fence[0] if segment.fence else None, segment.record[0])
                 elif entry[0] is WAIT:
-                    mesh_metal4.wait(stream)
+                    mesh_metal4.wait(entry[1])
                 elif entry[0] is RECV:
                     owner[entry[1]] = RECV(entry[2])
                 else:
                     SEND(tensor(entry[1]), entry[2])
+            LIB.mesh_metal4_reset(stream)
             for view in views:
                 LIB.mesh_metal4_release(view)
             return tuple(tensor(r) if isinstance(r, View) else r for r in results)
-        run.device = None
+        run.device, run.vertices, run.dependences = None, vertices, depended
+        run.feedback = lambda: [(steps, *mesh_metal4.times(record)) for steps, record in records]
         weakref.finalize(run, released, stream, retained)
         return run
 
@@ -635,7 +753,6 @@ def disowned(pages):
 
 
 def released(stream, retained):
-    LIB.mesh_metal4_wait(stream, None, 0)
     for made in (*retained, stream):
         LIB.mesh_metal4_release(made)
 

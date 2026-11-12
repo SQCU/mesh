@@ -23,8 +23,11 @@ for name, result, arguments in (
         ('mesh_metal4_after', None, [P, P, P, P]),
         ('mesh_metal4_fence', P, []),
         ('mesh_metal4_stream', P, [C.POINTER(P), U]),
-        ('mesh_metal4_commit', None, [P, C.POINTER(Dispatch), U, C.POINTER(P), U, C.POINTER(P), U, P]),
-        ('mesh_metal4_wait', C.c_int, [P, C.c_char_p, C.c_size_t])):
+        ('mesh_metal4_record', P, []),
+        ('mesh_metal4_times', None, [P, C.POINTER(C.c_double)]),
+        ('mesh_metal4_commit', None, [P, C.POINTER(Dispatch), U, C.POINTER(P), U, C.POINTER(P), U, P, P]),
+        ('mesh_metal4_wait', C.c_int, [C.POINTER(P), U, C.c_char_p, C.c_size_t]),
+        ('mesh_metal4_reset', None, [P])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 MESSAGE = 4096
@@ -38,7 +41,13 @@ def pipeline(source, name):
     return made
 
 
-def wait(stream):
+def wait(records):
     message = C.create_string_buffer(MESSAGE)
-    if LIB.mesh_metal4_wait(stream, message, MESSAGE):
+    if LIB.mesh_metal4_wait(records, len(records), message, MESSAGE):
         raise RuntimeError(message.value.decode())
+
+
+def times(record):
+    found = (C.c_double * 2)()
+    LIB.mesh_metal4_times(record, found)
+    return tuple(found)

@@ -687,7 +687,7 @@ def watched(function):
 class Profiled(Program):
     def __init__(self, scheduled):
         super().__init__(scheduled, lower_metal.lower(scheduled))
-        self.ordered = [f for f in self.functions.values() if hasattr(f, "feedback")]
+        self.ordered = [f for p, f in self.functions.items() if hasattr(f, "feedback") and p in self.arguments]
         self.functions = {p: f if p == self.caller else watched(f) for p, f in self.functions.items()}
 
     def __call__(self, *args, **kwargs):
