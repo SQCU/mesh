@@ -97,6 +97,7 @@ class Scheduled:
     plan: object = None
     signature: bytes = None
     stored: dict = None
+    invariant: dict = None
 
 
 # design/synchronization-signature-change-request.md item 1; compiler/mesh_compiler/runtime.py Program;

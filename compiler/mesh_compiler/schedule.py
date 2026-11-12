@@ -21,6 +21,8 @@ SYSTEM = C.CDLL("/usr/lib/libSystem.B.dylib")
 SYSTEM.free.argtypes = [C.c_void_p]
 PRODUCED, READ, CONSUMED = ((mesh.FROM_PRODUCED, mesh.TO_PRODUCED), (mesh.FROM_SOURCE_READ, mesh.TO_SOURCE_READ),
                             (0, 0))
+# design/disjoint-pages-change-request.md D.3.3
+HOST_LAG = 2
 
 
 def unit_cost(task):
@@ -31,7 +33,7 @@ def producer(node):
     return mesh_graph.chain(node, lambda n: n.args[0] if n.target is operator.getitem else None)[-1]
 
 
-# compiler/mesh_compiler/placement.py based, views
+# compiler/mesh_compiler/ir.py based, views
 def based(node):
     record = node.meta.get("view") or node.meta.get("out")
     return record[0] if record else node.name
@@ -126,7 +128,7 @@ def dependences(events, before):
     return [(events[a][0], events[b][0], lag, events[a][2][0] | events[b][2][1]) for a, b, lag in found]
 
 
-# compiler/mesh_compiler/placement.py views; design/problems-of-14b9a757-change-request.md items 3 and 6, and item 8,
+# compiler/mesh_compiler/ir.py views; design/problems-of-14b9a757-change-request.md items 3 and 6, and item 8,
 # step 4
 def viewed(sender, carried):
     def of(node):
@@ -163,7 +165,7 @@ def solved(plan, private, context):
 
 # design/disjoint-pages-change-request.md A3 item 2 and C3.2; design/problems-of-14b9a757-change-request.md 7.1 steps 2
 # and 5, 7.2 step 3, item 8 step 4 and item 14 steps 3 and 4
-def stored(values, places, module, local, before, of, channels, mutated):
+def stored(values, places, module, local, before, of, channels, mutated, invariant):
     index = {node: place for place, node in enumerate(local)}
     results = {mesh_graph.chain(n, of)[-1] for n in module.graph.output_node().all_input_nodes}
     roots = {f: [mesh_graph.chain(u, of)[-1] for u in f.all_input_nodes] for f in local}
@@ -182,20 +184,31 @@ def stored(values, places, module, local, before, of, channels, mutated):
         values[value] = (*values[value][:4], begin, end, *values[value][6:])
     for (root, processor), reader in last.items():
         value = root.meta.get("val")
-        if ((processor, root.name) in places or root in results or not isinstance(value, torch.Tensor)
-                or not extent(value) or root.meta.get("state") in mutated):
+        if (processor, root.name) in places or not isinstance(value, torch.Tensor) or not extent(value):
             continue
-        if "state" in root.meta or "invariant" in root.meta:
-            if root.meta.get("invariant", root.meta.get("state")) in slices:
+        if root.meta.get("state") in mutated:
+            values.append((extent(value), mesh.INVARIANT, 0, 1, 0, 0, 0, 1))
+        elif "state" in root.meta or "invariant" in root.meta:
+            record = root.meta.get("invariant", (root.meta.get("state"),))
+            if record not in invariant or record in slices:
                 continue
-            slices.add(root.meta.get("invariant", root.meta.get("state")))
+            slices.add(record)
             values.append((extent(value), mesh.INVARIANT, 0, 0, 0, 0, 0, 1))
+        elif root.op == "placeholder":
+            values.append((extent(value), mesh.EXECUTION, 0, 0, 0, 0, HOST_LAG, 1))
         elif producer(root) in index:
             values.append((extent(value), mesh.EXECUTION, 0, 0, first.get(root.name, index[producer(root)]),
-                           index[reader], 0, 1))
+                           len(local) - 1 if root in results else index[reader], 0, 1))
         else:
             continue
         places.append((processor, root.name))
+    for root in results:
+        value = root.meta.get("val")
+        if producer(root) in index and (root.meta["processor"], root.name) not in places and isinstance(
+                value, torch.Tensor) and extent(value):
+            values.append((extent(value), mesh.EXECUTION, 0, 0, first.get(root.name, index[producer(root)]),
+                           len(local) - 1, 0, 1))
+            places.append((root.meta["processor"], root.name))
 
 
 # design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5;
@@ -231,7 +244,9 @@ def planned(module, carried, machines, mutated, cost, functions, before, tasks, 
         events += [(transfer, source, READ, read), (transfer, destination, CONSUMED,
                                                     [arrival] + [u for u in arrival.users if u in held])]
     stored(values, places, module, [n for n in functions if machines[n.meta["processor"]] == nodes.node[nodes.self]],
-           before, of, channels, mutated)
+           before, of, channels, mutated,
+           {record for processor, records in module.meta["invariant"].items()
+            if machines[processor] == nodes.node[nodes.self] for record in records})
     crossing = {(task[ends[channel][SEND]], task[ends[channel][RECV]]) for channel in channels}
     plan = Plan(sum(1 << int(node) for node in os.environ["MESH_PROGRAM"].split(",")), [c for c, *_ in carried],
                 declared, weights, values, dependences(events, before), 1, tasks,

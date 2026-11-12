@@ -63,6 +63,7 @@ def save(directory, scheduled):
         "channels": scheduled.channels,
         "feedforward": scheduled.feedforward,
         "stored": scheduled.stored,
+        "invariant": scheduled.invariant,
         "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
         "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex()},
@@ -125,5 +126,6 @@ def load(directory):
     record = pathlib.Path(directory) / "signature.record"
     return Scheduled(exported, modules, devices, about["machines"], about["output_processor"], about["channels"],
                      about["inputs"], about["feedforward"], carried, about["engines"], plan,
-                     record.read_bytes() if record.exists() else None, about["stored"])
+                     record.read_bytes() if record.exists() else None, about["stored"],
+                     {processor: tuples(records) for processor, records in about["invariant"].items()})
 
