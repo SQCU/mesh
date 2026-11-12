@@ -1,10 +1,18 @@
 # design/data-flow.md
+import operator
+import pathlib
+import sys
 import threading
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
+from torch._guards import detect_fake_mode
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+from torch.fx.node import map_arg
+
+sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
+import mesh_graph
 
 LOCAL = threading.local()
 HOST = torch.device("cpu")
@@ -102,16 +110,6 @@ def call(scheduled, machine):
 
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4, 6 and 8; design/review-warnings.md rule 5
-import operator  # noqa: E402
-import pathlib  # noqa: E402
-import sys  # noqa: E402
-
-from torch._guards import detect_fake_mode  # noqa: E402
-from torch.fx.node import map_arg  # noqa: E402
-
-sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
-import mesh_graph  # noqa: E402
-
 ATEN = torch.ops.aten
 CAT, PAD, RESHAPE, VIEW = ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.reshape.default, ATEN.view.default
 CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format

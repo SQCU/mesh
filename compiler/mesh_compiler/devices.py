@@ -34,7 +34,7 @@ def on_devices(graph_module, processors):
         if node.target is SEND:
             value, channel = node.args
             arrival = receiver[channel]
-            arrival.meta["consumer"] = JOIN
+            arrival.meta.setdefault("consumer", JOIN)
             away, there = processors[arrival.meta["processor"]]
             sent = there if away == machine else HOST
             if sent != device:
