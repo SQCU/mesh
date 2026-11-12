@@ -225,7 +225,7 @@ Withdrawn:
 
 ## [aot-compilation-change-request.md](aot-compilation-change-request.md)
 
-Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 34 items outstanding, 77 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 35 items outstanding, 76 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -333,6 +333,9 @@ Outstanding:
   - A9 every address is fixed at compile time: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
     `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of a7e2de47). Mesh
     81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - A6 produced by, consumed by (the lists): outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 03c18ada). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
 
 Covered:
 
@@ -358,7 +361,6 @@ Covered:
   - A4 a node to which the placement operand maps no device (mesh_plan's part): covered [2026-11-10, mesh 5889d898]
   - A5 data structure and algorithm: covered [2026-11-10, mesh 5889d898]
   - A6 data structure and algorithm: covered [2026-11-10, mesh 5889d898]
-  - A6 produced by, consumed by (the lists): covered [2026-11-10, mesh 5889d898]
   - A7 stage: covered [2026-11-11, mesh 1a3cfe60]
   - A7 one order; total order multicast by a fixed sequencer (primitives, properties, steps of Fig. 5): covered
     [2026-11-06, mesh a172596f]
@@ -834,7 +836,7 @@ Covered:
 
 ## [disjoint-pages-change-request.md](disjoint-pages-change-request.md)
 
-Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 31 items outstanding, 43 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 33 items outstanding, 41 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -918,11 +920,16 @@ Outstanding:
     aot-compilation A7's view rule replaces this is for the documents to say; this one does not.
   - D.4 mesh: rdma/mesh-flow.c written: Same as D.3.6.
   - D.4 metal-microbench deleted (2): per-step instances: Same as D.3.3 for the compile_module chain.
+  - A3 "What it writes": outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 03c18ada). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - C3.7 "Written by, read by": outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 03c18ada). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
 
 Covered:
 
   - A3 "What it takes": covered [2026-11-04, mesh baede218]
-  - A3 "What it writes": covered [2026-11-10, mesh 5889d898]
   - A3 "The bridge's record pages": covered [2026-11-06, mesh fa089c56]
   - A4 deleted (1): covered [2026-11-03, mesh ae0bc2f1]
   - A4 deleted (2): covered [2026-11-03, mesh fd49e3b5]
@@ -947,7 +954,6 @@ Covered:
   - C3.7 algorithm 3: covered [2026-11-10, mesh 5889d898]
   - C3.7 algorithm 4: covered [2026-11-04, mesh 04b5e561]
   - C3.7 algorithm 5: covered [2026-11-05, mesh 876b1d69]
-  - C3.7 "Written by, read by": covered [2026-11-10, mesh 5889d898]
   - C3.7 data pages: covered [2026-11-04, mesh baede218]
   - C3.7 projection kernels: covered [2026-11-09, metal-microbench f08d3c7b]
   - C4 mesh deleted: rdma/mesh-collective.c (executions, per-execution items): covered [2026-11-04, mesh baede218]

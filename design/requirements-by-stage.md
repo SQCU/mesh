@@ -19,20 +19,22 @@ The operator, 2026-11-12:
 - The stages are those of [data-flow.md](data-flow.md) and [the-compiler.md](the-compiler.md):
   `compile_module(module, args, processors, placement, cost) -> Scheduled` is `export -> place -> on_devices ->
   schedule -> argument_buffers`; `lower(scheduled)`; `Program(scheduled, functions)`; `save` and `load`.
-- Five sections are not stages of that flow. Each names where its clauses are effected:
+- Five sections are not stages of that flow. No document assigns files to them: the assignment below is Claude's, made
+  so that a commit's changed files say which clauses it is read against, and it follows where each section's clauses
+  say they are effected.
   - graph module: `rdma/mesh_graph.py`, `rdma/mesh-graph.h` and `rdma/mesh-graph.c`, which `place`, `schedule` and
     `lower` call with their operands.
   - bridge: the bridge process and the transport, `rdma/*.c` and `rdma/*.h` other than the graph module, and
     `compiler/mesh_compiler/bridge.py`; it takes the page lists `schedule` produces, and `Program` reaches it.
   - caller: `examples/`, `compiler/samples.py`, launchers and measurements, which give `compile_module` its operands.
   - machines: the condition of machines and services, which no file of either repository holds.
-  - documents: `design/` and `docs/`.
+  - documents: `design/`, `docs/` and the records under metal-microbench `output_data/`.
 - "no stage named" holds the items whose clauses place them in a flow that is none of the above, each with the words
   that say so. They are not restated against [data-flow.md](data-flow.md): the operator's 2026-11-10 21:02 turn above
   asks for that, and it is outstanding for them.
 - Each entry is an item of a change request as [change-requests-index.md](change-requests-index.md) names it, the
   lines of its request, and its clause copied from those lines. `[...]` joins passages that are not adjacent. Where a
-  reading's copy differed from the file, the clause is the cited lines whole. The
+  reading's copy differed from the file, the clause is the whole paragraphs or list items of the cited lines. The
   request is the text that governs; this document adds no requirement to it.
 - "Placed by" quotes the words of a document that put the clause at its stage. Where it says "the reader", no
   document says, and the stage is the assignment of the reading named below.
@@ -117,7 +119,7 @@ The operator, 2026-11-12:
 
 ### export: [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
-- **1 / data structure and Composes (export)** (design/compilation-composition-change-request.md:111-120)
+- **1 / data structure and Composes (export)** (design/compilation-composition-change-request.md:111-122)
   > - **The data structure** is the exported graph of each numerical function, and the graph of calls between
   > functions (aot-compilation A1, A10). - **The algorithm** is full conversion (S2): every operation of the input is
   > converted to the target, and the conversion succeeds only when all of them are. - **Composes:** export produces
@@ -126,10 +128,12 @@ The operator, 2026-11-12:
   > **Replaces:** the split in `rdma/mesh_compile.py program()` where `replayed` excludes nodes whose declarations
   > name transferred values; also its rejection of repeated calls to a compiled function in the `replayed` block. -
   > **Write:** Compile both each numerical function and the graph of calls between functions. Lowering covers every
-  > rank
+  > rank and its collectives, and each placed CPU or GPU function. An intermediate conversion is completed before the
+  > program runs. A missing lowering within the assigned domain is unfinished work, not a new restriction on that
+  > domain.
   - Placed by: "**Composes:** export produces both graphs." design/compilation-composition-change-request.md:115
 - **2 / data structure: send and recv nodes in the one graph**
-  (design/compilation-composition-change-request.md:128-132): stated under place, which its clause names with this
+  (design/compilation-composition-change-request.md:128-134): stated under place, which its clause names with this
   stage.
 - **2 / Write: each row's work completed with its deletion**
   (design/compilation-composition-change-request.md:140-140): stated under no stage named, which its clause names with
@@ -332,22 +336,24 @@ The operator, 2026-11-12:
 ### place: [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
 - **1 / Write: every rank, its collectives, each placed CPU or GPU function**
-  (design/compilation-composition-change-request.md:115-121): stated under lower, which its clause names with this
+  (design/compilation-composition-change-request.md:115-122): stated under lower, which its clause names with this
   stage.
 - **2 / data structure: send and recv nodes in the one graph**
-  (design/compilation-composition-change-request.md:128-132)
+  (design/compilation-composition-change-request.md:128-134)
   > - **The data structure** is one graph for computation and data movement together (S3's parallel computation
   > graph): its nodes are function calls and, for each value read on another processor, a `send` and a `recv`; its
   > edges are values, each with its sharding, consumer kind, accesses and lifetimes. - **The algorithm** is graph
   > substitution (S3): a transformation replaces a subgraph of that graph with another. - **Composes:** export
-  > produces the graph. Placement adds the `send` and `recv` nodes to it. One schedule orders
+  > produces the graph. Placement adds the `send` and `recv` nodes to it. One schedule orders functions and transfers
+  > together and produces the scheduled value. Lowering, the runtime and the archive take the scheduled value. The
+  > signature is printed from what lowering emits.
   - Placed by: "Placement adds the `send` and `recv` nodes to it."
     design/compilation-composition-change-request.md:132
 - **2 / Write: each row's work completed with its deletion**
   (design/compilation-composition-change-request.md:140-140): stated under no stage named, which its clause names with
   this stage.
 - **3 / Write, second bullet: callers call them, own copies deleted**
-  (design/compilation-composition-change-request.md:150-155): stated under graph module, which its clause names with
+  (design/compilation-composition-change-request.md:150-157): stated under graph module, which its clause names with
   this stage.
 - **3 / Write, second bullet: the four named deletions** (design/compilation-composition-change-request.md:155-157):
   stated under schedule, which its clause names with this stage.
@@ -1055,7 +1061,7 @@ The operator, 2026-11-12:
   (design/compilation-composition-change-request.md:140-140): stated under no stage named, which its clause names with
   this stage.
 - **3 / Write, second bullet: callers call them, own copies deleted**
-  (design/compilation-composition-change-request.md:150-155): stated under graph module, which its clause names with
+  (design/compilation-composition-change-request.md:150-157): stated under graph module, which its clause names with
   this stage.
 - **3 / Write, second bullet: the four named deletions** (design/compilation-composition-change-request.md:155-157)
   > Deleted, as the existing requests name them: the second scheduling solve, copied graph walks, placement of program
@@ -1616,35 +1622,43 @@ The operator, 2026-11-12:
     design/plan-to-bridge-change-request.md:2351; "Produced by `mesh_plan` (rdma/mesh-collective.c), which calls
     `mesh_graph_completion_times` and `mesh_graph_heap_order` (rdma/mesh-graph.h)."
     design/plan-to-bridge-change-request.md:2358-2359
-- **R5 data structure: one linear program over completion times** (design/plan-to-bridge-change-request.md:2267-2267,
-  2269-2271, 2273-2276, 2279-2280, 2285-2286)
-  > - **The data structure is one linear program over completion times.** [...] - It has one variable C_j, a
-  > completion time, for each instruction j of one execution's task graph (R3): each task at its node, and each hop of
-  > each page's route, on its cable (design/compilation-coordination.md GO2). It has one more variable, C_max.
-  > Instruction j's length d_j is its weight from the weighting operand (aot-compilation A3): w for a [...] - Minimize
-  > C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a) (C.-Y. Chen, Scheduling coflows with precedence
-  > constraints for minimizing the total weighted completion time in identical parallel networks, arXiv 2205.02474,
-  > 2022, §6). Then, over (14)'s optimal solutions, minimize Σ_j C_j: Chen's (1) and Hall et al.'s (1) with unit
-  > weights. The two are one lexicographic linear program (H. Isermann, Linear lexicographic optimization, OR Spektrum
-  > [...] - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one execution. - C_j ≥ C_i + d_j
-  > for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall et al.'s (3). [...] - For
-  > each resource, and each set S of the instructions on it: Σ_{j∈S} d_j C_j ≥ ½(d(S)² + d²(S)), where d(S) is Σ_{j∈S}
-  > d_j and d²(S) is Σ_{j∈S} d_j². A resource is a cable in one direction, or a node's device. This is Hall et
+- **R5 data structure: one linear program over completion times** (design/plan-to-bridge-change-request.md:2267-2288)
+  > - **The data structure is one linear program over completion times.** > then we need a LP solver, citing chen for
+  > why, how, and what this means. - It has one variable C_j, a completion time, for each instruction j of one
+  > execution's task graph (R3): each task at its node, and each hop of each page's route, on its cable
+  > (design/compilation-coordination.md GO2). It has one more variable, C_max. Instruction j's length d_j is its
+  > weight from the weighting operand (aot-compilation A3): w for a task, and for a hop c(e) over its cable's
+  > bandwidth. - Minimize C_max, with C_max ≥ C_j for every j: Chen's (14) and (14a) (C.-Y. Chen, Scheduling coflows
+  > with precedence constraints for minimizing the total weighted completion time in identical parallel networks,
+  > arXiv 2205.02474, 2022, §6). Then, over (14)'s optimal solutions, minimize Σ_j C_j: Chen's (1) and Hall et al.'s
+  > (1) with unit weights. The two are one lexicographic linear program (H. Isermann, Linear lexicographic
+  > optimization, OR Spektrum 4, 1982). They are solved in sequence, the second with C_max held at the first's
+  > optimum. The second objective fixes C̄_j off the critical path, which (14) alone leaves to whichever optimal
+  > vertex the solver returns. - C_j ≥ d_j for every j: Chen's (1b), with every release time zero within one
+  > execution. - C_j ≥ C_i + d_j for every edge i → j of the graph: Chen's (1c), "the precedence constraint", and Hall
+  > et al.'s (3). R4's edges are among them. The synchronous, complete, contiguous consumer's task has an edge from
+  > every page of its operand, which with (1c) is Chen's (1a): "the completion time of coflow k is bounded by all its
+  > flows". Each of the asynchronous, incomplete, noncontiguous consumer's tasks has one edge, from its own page, so
+  > its pages are independent flows. - For each resource, and each set S of the instructions on it: Σ_{j∈S} d_j C_j ≥
+  > ½(d(S)² + d²(S)), where d(S) is Σ_{j∈S} d_j and d²(S) is Σ_{j∈S} d_j². A resource is a cable in one direction, or
+  > a node's device. This is Hall et al.'s (5), "introduced by Queyranne (1993)". Chen's (1d) and (1e) take it for
+  > each input and output port, here with one network core (m = 1).
   - Placed by: "Produced by `mesh_plan` (rdma/mesh-collective.c), which calls `mesh_graph_completion_times` and
     `mesh_graph_heap_order` (rdma/mesh-graph.h)." design/plan-to-bridge-change-request.md:2358-2359;
     "rdma/mesh-graph.{h,c}: the program's rows, the cutting-plane loop with Queyranne's separation, and the calls to
     HiGHS" design/plan-to-bridge-change-request.md:2364-2365
-- **R5 algorithm steps 1-2: cutting planes, HiGHS dual simplex** (design/plan-to-bridge-change-request.md:2314-2314,
-  2319-2323): stated under graph module, which its clause names with this stage.
+- **R5 algorithm steps 1-2: cutting planes, HiGHS dual simplex** (design/plan-to-bridge-change-request.md:2314-2323):
+  stated under graph module, which its clause names with this stage.
 - **R5 algorithm steps 3-5: priority, one global topological order, each cable's subsequence**
-  (design/plan-to-bridge-change-request.md:2324-2330, 2332-2332)
+  (design/plan-to-bridge-change-request.md:2324-2332)
   > 3. Each instruction's priority is C̄_j, its completion time in the program's optimal solution, the least first.
   > C̄_j is a relaxation's value, a lower bound, and not a time any schedule keeps. Only its order is used. 4. One
   > global topological order of the instructions is built as MSCCLang §5.2 states in its step 3: "Sort instructions
   > into a global topological order with respect to their dependencies with a heap using the priority to order
   > instructions." Where two priorities are equal, the heap takes the lower instruction
   > (design/compilation-coordination.md GO3). That order is consistent with the precedence relation, as Hall et al.'s
-  > ties require. [...] 5. Each cable's list is the subsequence of that order made of the cable's sends.
+  > ties require. > what algorithm is cited here, if any? no citations? use the reference algorithm instead. 5. Each
+  > cable's list is the subsequence of that order made of the cable's sends.
   - Placed by: "Produced by `mesh_plan` (rdma/mesh-collective.c), which calls `mesh_graph_completion_times` and
     `mesh_graph_heap_order` (rdma/mesh-graph.h). The first writes each instruction's C̄_j (`double *completion`). The
     second takes them as `priority` and writes each instruction's place in the order (`uint32_t *place`)."
@@ -2237,9 +2251,9 @@ The type `Scheduled` and the shared headers' records: what is carried between st
     `devices`, `output_processor`, `channels`, `inputs`, `feedforward` |"
     design/compilation-composition-change-request.md:30
 - **1 / Write: every rank, its collectives, each placed CPU or GPU function**
-  (design/compilation-composition-change-request.md:115-121): stated under lower, which its clause names with this
+  (design/compilation-composition-change-request.md:115-122): stated under lower, which its clause names with this
   stage.
-- **2 / data structure: what each edge carries** (design/compilation-composition-change-request.md:128-136)
+- **2 / data structure: what each edge carries** (design/compilation-composition-change-request.md:128-140)
   > - **The data structure** is one graph for computation and data movement together (S3's parallel computation
   > graph): its nodes are function calls and, for each value read on another processor, a `send` and a `recv`; its
   > edges are values, each with its sharding, consumer kind, accesses and lifetimes. - **The algorithm** is graph
@@ -2247,7 +2261,11 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   > produces the graph. Placement adds the `send` and `recv` nodes to it. One schedule orders functions and transfers
   > together and produces the scheduled value. Lowering, the runtime and the archive take the scheduled value. The
   > signature is printed from what lowering emits. - **Write:** A value's sharding, consumer kind, accesses,
-  > lifetimes, transfers and dependences describe the same program through lowering. Numerical
+  > lifetimes, transfers and dependences describe the same program through lowering. Numerical decomposition, fusion
+  > and communication transformations keep the information needed by subsequent scheduling, allocation and
+  > synchronization. The output of each analysis or lowering is the operand its consumers actually use. Changes to the
+  > graph are reflected in those dependent results before emission. The signature describes that emitted program. Each
+  > row's work is completed in this composition, including its specified deletion or replacement.
   - Placed by: the reader.
 - **2 / Composes: one schedule orders functions and transfers together**
   (design/compilation-composition-change-request.md:132-134): stated under schedule, which its clause names with this
@@ -2262,7 +2280,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:140-140): stated under no stage named, which its clause names with
   this stage.
 - **3 / Write, second bullet: callers call them, own copies deleted**
-  (design/compilation-composition-change-request.md:150-155): stated under graph module, which its clause names with
+  (design/compilation-composition-change-request.md:150-157): stated under graph module, which its clause names with
   this stage.
 - **4 / Write: placement and costs are operands** (design/compilation-composition-change-request.md:170-173): stated
   under caller, which its clause names with this stage.
@@ -2270,7 +2288,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:175-176): stated under Program, which its clause names with this
   stage.
 - **5 / data structure and Composes: one compiled native program per node**
-  (design/compilation-composition-change-request.md:196-201): stated under lower, which its clause names with this
+  (design/compilation-composition-change-request.md:196-202): stated under lower, which its clause names with this
   stage.
 - **5 / Write: producer and consumer agree at both ends** (design/compilation-composition-change-request.md:218-220)
   > Producer and consumer change in the same revision: page groups and sent counters, native result bindings, and
@@ -2307,11 +2325,14 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   > value/effect/transfer that causes it. Update affected results when transformation changes their operands. |
   - Placed by: "Call, dependence and collective-schedule results → remapped relations through fusion, splitting and
     placement → the shared graph algorithms and native program." design/compilation-composition-change-request.md:428
-- **7 / data structure: the scheduled value** (design/compilation-composition-change-request.md:495-498)
+- **7 / data structure: the scheduled value** (design/compilation-composition-change-request.md:495-501)
   > - **The data structure** is the scheduled value: typed numerical IR with its dependencies, placement, storage and
   > communication annotations, and requirement 4's static schedule. Analysis solves the abstract problem once and
   > supplies a lowerable program to its optimizing consumers. Typed numerical IR, dependencies, placement, storage and
-  > communication annotations stay available until their last compiler consumer. Each may then be realized
+  > communication annotations stay available until their last compiler consumer. Each may then be realized in
+  > instructions, addresses, target commands and synchronization without preserving its original runtime encoding. A
+  > property is preserved through the meaning of the generated program, whether its descriptive metadata is erased or
+  > retained separately for loading, inspection or the required signature.
   - Placed by: "**The data structure** is the scheduled value" design/compilation-composition-change-request.md:495
 - **7 / Composes: the archive stores the scheduled value** (design/compilation-composition-change-request.md:505-507):
   stated under save and load, which its clause names with this stage.
@@ -2521,14 +2542,15 @@ The type `Scheduled` and the shared headers' records: what is carried between st
     functions, its collectives (the `send` and `recv` nodes placement added), and each placed CPU or GPU function."
     design/compilation-composition-change-request.md:115-117
 - **1 / Write: every rank, its collectives, each placed CPU or GPU function**
-  (design/compilation-composition-change-request.md:115-121)
+  (design/compilation-composition-change-request.md:115-122)
   > - **Composes:** export produces both graphs. Lowering takes the scheduled value and converts every function in it:
   > for every rank, its numerical functions, its collectives (the `send` and `recv` nodes placement added), and each
   > placed CPU or GPU function. - **Replaces:** the split in `rdma/mesh_compile.py program()` where `replayed`
   > excludes nodes whose declarations name transferred values; also its rejection of repeated calls to a compiled
   > function in the `replayed` block. - **Write:** Compile both each numerical function and the graph of calls between
   > functions. Lowering covers every rank and its collectives, and each placed CPU or GPU function. An intermediate
-  > conversion is completed before the program
+  > conversion is completed before the program runs. A missing lowering within the assigned domain is unfinished work,
+  > not a new restriction on that domain.
   - Placed by: "Lowering takes the scheduled value and converts every function in it"
     design/compilation-composition-change-request.md:115
 - **1 / Write: conversion completed before the program runs**
@@ -2547,12 +2569,14 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   - Placed by: "Lowering takes the scheduled value and converts every function in it"
     design/compilation-composition-change-request.md:115; the file named: "`rdma/mesh_compile.py program()`"
     design/compilation-composition-change-request.md:118
-- **2 / data structure: what each edge carries** (design/compilation-composition-change-request.md:128-136): stated
+- **2 / data structure: what each edge carries** (design/compilation-composition-change-request.md:128-140): stated
   under scheduled value, which its clause names with this stage.
 - **2 / Composes: one schedule orders functions and transfers together**
   (design/compilation-composition-change-request.md:132-134): stated under schedule, which its clause names with this
   stage.
-- **2 / the signature** (design/compilation-composition-change-request.md:134-140)
+- **2 / the signature** (design/compilation-composition-change-request.md:132-140)
+  > - **Composes:** export produces the graph. Placement adds the `send` and `recv` nodes to it. One schedule orders
+  > functions and transfers together and produces the scheduled value. Lowering, the runtime and the archive take the
   > scheduled value. The signature is printed from what lowering emits. - **Write:** A value's sharding, consumer
   > kind, accesses, lifetimes, transfers and dependences describe the same program through lowering. Numerical
   > decomposition, fusion and communication transformations keep the information needed by subsequent scheduling,
@@ -2569,7 +2593,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:140-140): stated under no stage named, which its clause names with
   this stage.
 - **3 / Write, second bullet: callers call them, own copies deleted**
-  (design/compilation-composition-change-request.md:150-155): stated under graph module, which its clause names with
+  (design/compilation-composition-change-request.md:150-157): stated under graph module, which its clause names with
   this stage.
 - **4 / Write: signature and external observation cover this execution**
   (design/compilation-composition-change-request.md:176-177)
@@ -2577,13 +2601,14 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   - Placed by: "lowering → the signature; the monitor reads it outside the program"
     design/compilation-composition-change-request.md:103
 - **5 / data structure and Composes: one compiled native program per node**
-  (design/compilation-composition-change-request.md:196-201)
+  (design/compilation-composition-change-request.md:196-202)
   > - **The data structure** is one compiled native program per node, which launches all CPU, ANE and MPS work of the
   > graph (the operator's first turn above). Numerical functions and their calls are compilation inputs; placements,
   > value instances and readiness are operands. CPU, ANE and MPS are resources of the Apple Silicon target. Python
   > capture and preparation are not its CPU execution. - **The algorithm** is specialization (S6): one subject program
   > and its static operands give the residual program. - **Composes:** lowering takes the scheduled value and emits
-  > the native program; the runtime calls it. The signature
+  > the native program; the runtime calls it. The signature is printed from that program by the graph module's
+  > printers.
   - Placed by: "**Composes:** lowering takes the scheduled value and emits the native program; the runtime calls it."
     design/compilation-composition-change-request.md:201
 - **5 / Composes: signature printed by the graph module's printers**
@@ -2642,7 +2667,8 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:302-303): stated under export, which its clause names with this
   stage.
 - **Correction: generated target source / Composes and Emission boundary**
-  (design/compilation-composition-change-request.md:303-318)
+  (design/compilation-composition-change-request.md:302-319)
+  > - **Composes:** the Torch and LiteRT compiler interfaces produce the operations and their annotations at export.
   > Placement, the schedule and lowering take and return them. Lowering emits MSL or native target source, which the
   > target compiler takes. No function of mesh takes that source. - **Replaces:** recorder transformations whose
   > semantic operands are shader strings: scalar/quantization specialization, operand promotion, epilogue/map/row
@@ -2657,7 +2683,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   > MSL or native target source is the final source emission of the mesh lowering pipeline, passed to the target
   > compiler. Subsequent mesh transformations do not infer semantics by parsing or matching that output. Source
   > spelling, generated identifier names and pretty-printing are not optimization preconditions. Retaining tokens for
-  > some consumers while the other passes continue rewriting emitted strings
+  > some consumers while the other passes continue rewriting emitted strings leaves this requirement incomplete.
   - Placed by: "Lowering emits MSL or native target source, which the target compiler takes."
     design/compilation-composition-change-request.md:303-304
 - **Correction: generated target source / Replaces** (design/compilation-composition-change-request.md:305-308)
@@ -2712,7 +2738,8 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   > relations from buffer names or shader text.
   - Placed by: "**Composes:** each of these is a function from operations to operations inside lowering, which takes
     the scheduled value; `Print` comes after all of them." design/compilation-composition-change-request.md:355-356
-- **Performance correction / Constants** (design/compilation-composition-change-request.md:345-366)
+- **Performance correction / Constants** (design/compilation-composition-change-request.md:344-366)
+  > - **Constants.** MLIR's [SCCP pass](https://mlir.llvm.org/docs/Passes/#-sccp), based on Wegman and Zadeck (1991),
   > propagates known constants through IR. S6 supplies the specialization equation. Static operation, dtype, shape,
   > stride and configuration operands become the residual program's instructions/constants; generic shaders do not
   > read them again at run time merely because their representation fits in a metadata buffer. - **Reductions.**
@@ -2735,7 +2762,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   > static facts as compiler operands and keep genuinely varying values as runtime inputs.
   - Placed by: "**Composes:** each of these is a function from operations to operations inside lowering, which takes
     the scheduled value; `Print` comes after all of them." design/compilation-composition-change-request.md:355-356
-- **Performance correction / Reductions** (design/compilation-composition-change-request.md:348-362)
+- **Performance correction / Reductions** (design/compilation-composition-change-request.md:348-366)
   > - **Reductions.** MLIR's [workgroup reduction
   > lowering](https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/GPU/Transforms/AllReduceLowering.cpp)
   > constructs subgroup reductions and workgroup exchanges from reduction operations. Apple's [MLX
@@ -2749,7 +2776,10 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   > requires specialization, fusion and parallel scheduling. - **Write:** preserve the numerical operations and their
   > permitted precision/rounding, express maps and epilogues as operation regions, retain values across their uses,
   > and lower reductions and packed data to the selected target operations. Preserve each actual effect and observable
-  > result while removing unnecessary materialization.
+  > result while removing unnecessary materialization. Compile producer publication and consumer acquisition from the
+  > same range/page dependencies used by transport scheduling. Operation equivalence and applicability follow the
+  > structured operands and effects, not an entry-point name, generated variable name or operator spelling. Carry
+  > static facts as compiler operands and keep genuinely varying values as runtime inputs.
   - Placed by: "**Composes:** each of these is a function from operations to operations inside lowering, which takes
     the scheduled value; `Print` comes after all of them." design/compilation-composition-change-request.md:355-356
 - **Performance correction / Replaces** (design/compilation-composition-change-request.md:357-359)
@@ -3520,7 +3550,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:140-140): stated under no stage named, which its clause names with
   this stage.
 - **3 / Write, second bullet: callers call them, own copies deleted**
-  (design/compilation-composition-change-request.md:150-155): stated under graph module, which its clause names with
+  (design/compilation-composition-change-request.md:150-157): stated under graph module, which its clause names with
   this stage.
 - **3 / Write, second bullet: the four named deletions** (design/compilation-composition-change-request.md:155-157):
   stated under schedule, which its clause names with this stage.
@@ -3543,7 +3573,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   (design/compilation-composition-change-request.md:176-177): stated under lower, which its clause names with this
   stage.
 - **5 / data structure and Composes: one compiled native program per node**
-  (design/compilation-composition-change-request.md:196-201): stated under lower, which its clause names with this
+  (design/compilation-composition-change-request.md:196-202): stated under lower, which its clause names with this
   stage.
 - **5 / Replaces, site 2** (design/compilation-composition-change-request.md:208-210): stated under lower, which its
   clause names with this stage.
@@ -3551,7 +3581,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   stated under lower, which its clause names with this stage.
 - **6 / Write: what the emitted program preserves** (design/compilation-composition-change-request.md:263-266): stated
   under lower, which its clause names with this stage.
-- **Performance correction / Constants** (design/compilation-composition-change-request.md:345-366): stated under
+- **Performance correction / Constants** (design/compilation-composition-change-request.md:344-366): stated under
   lower, which its clause names with this stage.
 - **Complete replacement / all in one commit workgroup** (design/compilation-composition-change-request.md:412-414):
   stated under lower, which its clause names with this stage.
@@ -3890,11 +3920,12 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   - Placed by: "`rdma/mesh_graph.py` and `rdma/mesh-graph.{h,c}` define the shared graph functions"
     design/compilation-composition-change-request.md:153
 - **3 / Write, second bullet: callers call them, own copies deleted**
-  (design/compilation-composition-change-request.md:150-155)
+  (design/compilation-composition-change-request.md:150-157)
   > - **Composes:** placement and the one schedule call the graph functions; the schedule's result is in the scheduled
   > value, which lowering and the runtime read. - **Write:** - `rdma/mesh_graph.py` and `rdma/mesh-graph.{h,c}` define
   > the shared graph functions, which take the caller's operands. - Callers call those functions, and their own copies
-  > are deleted. Deleted, as the existing requests name them: the
+  > are deleted. Deleted, as the existing requests name them: the second scheduling solve, copied graph walks,
+  > placement of program values at run time and alternative execution paths.
   - Placed by: "placement and the one schedule call the graph functions"
     design/compilation-composition-change-request.md:150
 - **3 / Write, second bullet: the four named deletions** (design/compilation-composition-change-request.md:155-157):
@@ -3949,12 +3980,15 @@ The type `Scheduled` and the shared headers' records: what is carried between st
   clause names with this stage.
 - **R3 where it composes** (design/plan-to-bridge-change-request.md:2147-2155): stated under schedule, which its
   clause names with this stage.
-- **R5 data structure: one linear program over completion times** (design/plan-to-bridge-change-request.md:2267-2267,
-  2269-2271, 2273-2276, 2279-2280, 2285-2286): stated under schedule, which its clause names with this stage.
-- **R5 algorithm steps 1-2: cutting planes, HiGHS dual simplex** (design/plan-to-bridge-change-request.md:2314-2314,
-  2319-2323)
+- **R5 data structure: one linear program over completion times** (design/plan-to-bridge-change-request.md:2267-2288):
+  stated under schedule, which its clause names with this stage.
+- **R5 algorithm steps 1-2: cutting planes, HiGHS dual simplex** (design/plan-to-bridge-change-request.md:2314-2323)
   > 1. Solve the program by cutting planes. The rows of the last kind are one for each set, so there are exponentially
-  > [...] Programming 58, 1993). Solve the program with the rows found so far. Find each resource's violated rows by
+  > many. Hall et al.: "Queyranne (1993) has shown that the linear program given by (1), (3) and (5) is solvable in
+  > polynomial time via the ellipsoid algorithm; the key observation is that there is a polynomial-time separation
+  > algorithm for the exponentially large class of constraints (5)." Queyranne's separation takes O(n log n) time, and
+  > he proposes it for cutting-plane algorithms (M. Queyranne, Structure of a simple scheduling polyhedron, Math.
+  > Programming 58, 1993). Solve the program with the rows found so far. Find each resource's violated rows by
   > Queyranne's separation, and add them. Repeat until no row is violated. 2. Each linear program is solved by HiGHS's
   > dual revised simplex method, through the HiGHS library (Q. Huangfu and J. A. J. Hall, Parallelizing the dual
   > revised simplex method, Math. Program. Comput. 10(1), 2018, the paper HiGHS asks its users to cite). The code
@@ -3965,8 +3999,7 @@ The type `Scheduled` and the shared headers' records: what is carried between st
     `mesh_graph_completion_times` and `mesh_graph_heap_order` (rdma/mesh-graph.h)."
     design/plan-to-bridge-change-request.md:2358-2359
 - **R5 algorithm steps 3-5: priority, one global topological order, each cable's subsequence**
-  (design/plan-to-bridge-change-request.md:2324-2330, 2332-2332): stated under schedule, which its clause names with
-  this stage.
+  (design/plan-to-bridge-change-request.md:2324-2332): stated under schedule, which its clause names with this stage.
 - **R5 where it composes** (design/plan-to-bridge-change-request.md:2351-2362): stated under schedule, which its
   clause names with this stage.
 - **R5 changes by file: rdma/mesh-graph.{h,c}** (design/plan-to-bridge-change-request.md:2364-2365)
@@ -4409,10 +4442,14 @@ The bridge process and the transport in `rdma/*.c`, which take page lists and mo
   - Placed by: "The bridge computes `max_pairs`, a `uint32_t`, for each device on each run, and only the bridge reads
     it. The scheduled value carries no transport object and no queue-pair count."
     design/plan-to-bridge-change-request.md:2410-2411
-- **R8 attaching holds nothing; no EADDRINUSE** (design/plan-to-bridge-change-request.md:2422-2423, 2441-2441)
+- **R8 attaching holds nothing; no EADDRINUSE** (design/plan-to-bridge-change-request.md:2422-2428, 2441-2441)
   > - The code must hold nothing for a program but its pages. Attaching holds nothing, and there is no client word and
-  > no `EADDRINUSE`. A bridge with no function execution to serve does nothing. [...] - rdma/mesh-dataflow.c:
-  > attaching only maps the region.
+  > no `EADDRINUSE`. A bridge with no function execution to serve does nothing. > in this istuation is there a real
+  > problem solved by this extra allocator? is this a fictitious problem with no > origin, whose error correcting code
+  > nevertheless can cause real errors? is this a misplaced solution (there are two > allocation goals which are both
+  > solved by the compiler at compile time and applied through a combination of > constraints (at compile time))? a
+  > superflujous solution? > why do you think you need special rules about 'numbers of programs at once'? [...] -
+  > rdma/mesh-dataflow.c: attaching only maps the region.
   - Placed by: "rdma/mesh-dataflow.c: attaching only maps the region." design/plan-to-bridge-change-request.md:2441
 - **R8 there is no client word** (design/plan-to-bridge-change-request.md:2422-2423)
   > Attaching holds nothing, and there is no client word and no `EADDRINUSE`.
@@ -4428,10 +4465,14 @@ The bridge process and the transport in `rdma/*.c`, which take page lists and mo
   - Placed by: "The fixed sequencer runs in the bridge of the island's highest-numbered live node, as Défago et al.
     and Garcia-Molina describe." design/plan-to-bridge-change-request.md:962 (a quoted Claude turn in "The turns", not
     a clause of the proposal; R8 itself names no function or file for the sequencer)
-- **R8 Replaces: any rule for several programs** (design/plan-to-bridge-change-request.md:2442-2442, 2448-2448,
-  2454-2454)
+- **R8 Replaces: any rule for several programs** (design/plan-to-bridge-change-request.md:2442-2448, 2454-2454)
   > - **No source states that several programs run at once.** The phrase appears only in Claude's text: this request's
-  > R8 [...] - **Replaces:** [...] - any rule for several programs.
+  > R8 table, the disjoint-pages request's C3 item 4, D.3 item 1 and D.5, and deliverables.md's "T7. Multi-tenant
+  > fabric by lease". The operator's one turn on it rejects run-time allocation: "is attaching conceptually real or do
+  > programs do nothing but what the allocator lets them, with the shapes and coarse bin packing requierments of
+  > allocation known aot? do you think we're supporting dynamic runtime allocations or dynamic runtime page->page
+  > access patterns outside of the types and reuirements presented so far?" (the turns, above). - **Replaces:** [...]
+  > - any rule for several programs.
   - Placed by: the reader.
 
 ### bridge: [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md)
