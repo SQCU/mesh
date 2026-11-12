@@ -26,7 +26,7 @@ change request follows is [change-requests.md](change-requests.md).
   moved say so, and its readings are `refute.json` beside the others.
 - [requirements-by-stage.md](requirements-by-stage.md) lists the same items under the stage that takes each, with
   each clause quoted.
-- Of 611 items: 199 covered, 396 outstanding, 11 not determined,
+- Of 611 items: 197 covered, 398 outstanding, 11 not determined,
   5 withdrawn. No request has every item covered. All eleven are outstanding.
 
 ## [compilation-composition-change-request.md](compilation-composition-change-request.md)
@@ -846,6 +846,9 @@ Not determined:
     a rule for how an implementer records a decision; it has no sentence that code holds or fails.
     design/the-compiler.md:73 records one such decision as "Claude's choice, made because ...". Whether every decision
     taken where the request is silent is recorded, no file shows.
+  - Appendix item 3 (a slow node, "desynchronization": no handler): not determined [2026-11-12]. The clause
+    says "No such event has been observed or recorded", a condition of records that no file shows; the readers at
+    mesh 434b9955 and 6d379b7e found no handler for it in the code.
 
 Covered:
 
@@ -893,8 +896,6 @@ Covered:
   - Appendix item 2, change: remove the start's wait and the late-loading port's refusal: covered [2026-11-05, mesh
     e1525cc7]
   - Appendix item 2, change: remove the coordination's Q3′: covered [2026-11-05, mesh 71e060ba]
-  - Appendix item 3 (a slow node, "desynchronization": no handler): not determined [2026-11-12]. The readers at
-    mesh 434b9955 and 6d379b7e found no handler for it and named no commit in which the last of the clause landed.
   - Appendix item 4 (no truncation at one end; no handler): covered [2026-11-09, mesh fdae772b]
   - Appendix item 5: one permutation of the whole set per execution: covered [2026-11-05, mesh c2a226b0]
   - Appendix item 5: a page's round rule reads a count that only rises: covered [2026-11-05, mesh 930861b0]
@@ -1114,7 +1115,7 @@ Covered:
 
 ## [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 29 items outstanding, 5 not determined, 12 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 30 items outstanding, 5 not determined, 11 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1259,6 +1260,10 @@ Outstanding:
     outstanding or not determined in the same reading. compiler/mesh_compiler has no lowering of svd, eigh, eig,
     eigvals, pinv, lstsq or matrix_exp on any processor: the handlers of lower_metal.py:322-341 hold none, the native
     drivers are solve and qr only (:1230-1231), and such a node is reported as missing (:354-356, :1457-1459).
+  - 3 / Write: the order is published: outstanding [2026-11-12, mesh 2fcea174; review of 2fcea174]. "The order is
+    published with the AOT compiled static link schedule." The functions' completion times are in `Plan.completion`
+    alone, which schedule.py `solved` writes and the archive saves; nothing writes them or each processor's order
+    into the region `mesh_plan` publishes.
 
 Not determined:
 
@@ -1284,7 +1289,6 @@ Covered:
   - 2 / Write: a dimension known only at run time: covered [2026-11-10, mesh ce2e8ac9]
   - 3 / Write: each function's processor: covered [2026-11-11, mesh 297c3cda]
   - 3 / Write: each task's length: covered [2026-11-12, mesh 81c8e9da]
-  - 3 / Write: the order is published: covered [2026-11-12, mesh 81c8e9da]
   - 3 / Write: same encoder: covered [2026-11-12, mesh 7d8092e1]
   - 3 / Write: another queue, another device or the CPU: covered [2026-11-12, mesh 7d8092e1]
   - 5 / Replaces: covered [2026-11-09, mesh 6904370b]
@@ -2190,7 +2194,7 @@ Covered:
 
 ## [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 34 items outstanding, 0 not determined, 32 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955 and 6d379b7e, metal-microbench 0b692ed8]: 35 items outstanding, 0 not determined, 31 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -2347,6 +2351,11 @@ Outstanding:
     longer served without raising either count. For such a send the range's count plus error count never reaches the
     execution's total, so the wait the program makes (compiler/mesh_compiler/bridge.py:47) returns 0 from
     mesh_host_sent (rdma/mesh-collective.c:60) until mesh-collective.c:76 returns ETIMEDOUT, not ECANCELED.
+  - 7.1, step 4: outstanding [2026-11-12, mesh 2fcea174; review of 2fcea174]. "two blocks may share pages exactly
+    where ExecuTorch's test finds their lifetimes disjoint." schedule.py `stored` indexes each value's begin and end
+    by the machine's functions in `mesh_graph.postorder` order, fixed before the solve, and an end is
+    `mesh_graph.ends`' last function that some reader does not precede; neither is the pair of step 1 over the
+    scheduled order.
 
 Covered:
 
@@ -2357,7 +2366,6 @@ Covered:
   - 5, Change: the refusal is deleted: covered [2026-11-06, mesh 30afa696]
   - 7 (Code): covered [2026-11-06, mesh 6a8a8524]
   - 7.1, step 3: covered [2026-11-08, mesh b880b808]
-  - 7.1, step 4: covered [2026-11-08, mesh b880b808]
   - 7.1, step 5: covered [2026-11-12, mesh 28d7a032]
   - 7.2, Change: PLAN_SENT is deleted: covered [2026-11-06, mesh 6a8a8524]
   - 7.3, step 1: covered [2026-11-06, mesh 6a8a8524]

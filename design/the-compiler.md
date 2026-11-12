@@ -76,15 +76,20 @@ Three things are mesh's and are added to it:
      node's commands, its "It writes" and its "Consumed by", and item 3's and A6's completion-time order of every
      function (`mesh_graph_completion_times`, `rdma/mesh-graph.h`), are outstanding
      ([change-requests-index.md](change-requests-index.md)).
-   - As of mesh 2fcea174 (2026-11-12) the keys are the other way: every function is a task of `mesh_plan`'s one
-     linear program, solved once, and each processor's list is `heap_order` of its own functions by their completion
+   - As of mesh 2fcea174 (2026-11-12) the keys are the other way: every function of a program that
+     carries a transfer between machines is a task of `mesh_plan`'s one linear program, solved once, and each
+     processor's list is `heap_order` of its own functions by their completion
      times (item 3 and A6). Item 2's sentences "A command that reads a received range has that range's published
      completion time as its key" and "Every other command has its dependence level as its key" do not hold there.
-     Which request governs is still stated by neither; following item 3 and A6 is Claude's choice. Outstanding at
+     Which request governs is still stated by neither; following item 3 and A6 is Claude's choice, made because item 2
+     says of its level key "no cited source states that key" while item 3 and A6 state the completion-time key for
+     every function. Outstanding at
      that commit, from its review: the order is computed a second time in `schedule.py` and not taken from
      `mesh_plan`'s global order (plan-to-bridge R5, steps 4 and 5); a program with nothing carried between machines
-     gets its times from `mesh_graph.completion_times` directly and not from `mesh_plan`; and item 3's "The order is
-     published with the AOT compiled static link schedule."
+     gets its times from `mesh_graph.completion_times` directly and not from `mesh_plan`; item 3's "The order is
+     published with the AOT compiled static link schedule."; and
+     [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md) 7.1 steps 1 and 4, since
+     `schedule.stored` indexes lifetimes by a postorder fixed before the solve and not by the scheduled order.
 2. Processors on several machines: items 1 and 2 above. The check's cases pass with their processors on two machines.
    (Outstanding. Mesh 6d4f007b and 1a3cfe60 wrote it. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
    entries the check carries between two regions of the bridge's layout; the 33 is the count on one machine. The run under two bridges is
