@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-# design/aot-compilation-change-request.md A1 to A3 and A10; docs/soc_compute_backends.md
+# design/the-compiler.md, order 5 and "Core ML"
+import argparse
+import collections
+import copy
+import json
 import os
+import pathlib
+import re
+import sys
+import time
 
 import torch
 import torch.nn.functional as F
+
+sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
+from mesh_compiler import lower_coreml
+from mesh_compiler.driver import compile_module, lowered
+from mesh_compiler.runtime import Program
 
 
 ROWS, K, N, LAYERS = (int(os.environ.get(k, v)) for k, v in
@@ -53,33 +66,21 @@ class Layer(torch.nn.Module):
         return self.combine(*(part(projected) for part in self.parts))
 
 
-class Program(torch.nn.Module):
-    def __init__(self, nodes, engines, widths, projection_device, coded=None):
+class Engines(torch.nn.Module):
+    def __init__(self, widths):
         super().__init__()
-        import mesh_compile as mesh
-        def placement(gm, examples):
-            return mesh.Placement(list(range(len(nodes))), nodes, {})
-        def compiled(module, device, encoded=False):
-            return mesh.Function(module if encoded else module.to('cpu' if device == 'ane' else device),
-                                 placement, mesh.unit, device=device, source_device='cpu' if encoded else None)
         layers = []
-        for layer in range(LAYERS):
-            projection = compiled(Projection((torch.randn(K, K) / K ** 0.5).half()), projection_device)
-            weights = None if coded is not None else [(torch.randn(K, K) / K ** 0.5).half()] if KIND == 'linear' else [
+        for _ in range(LAYERS):
+            projection = Projection((torch.randn(K, K) / K ** 0.5).half())
+            weights = [(torch.randn(K, K) / K ** 0.5).half()] if KIND == 'linear' else [
                 (torch.randn(N, K) / K ** 0.5).half(), (torch.randn(N, K) / K ** 0.5).half(),
                 (torch.randn(K, N) / N ** 0.5).half()]
             parts, offset = [], 0
-            for device, count in zip(engines, widths, strict=True):
-                if coded is not None:
-                    import mesh_code
-                    part = mesh_code.FFN(coded[layer], offset, count)
-                else:
-                    matrices = [weight[:, offset:offset + count] if j == 2 else weight[offset:offset + count]
-                                for j, weight in enumerate(weights)]
-                    part = Shared(matrices)
-                parts.append(compiled(part, device, coded is not None))
+            for count in widths:
+                parts.append(Shared([weight[:, offset:offset + count] if j == 2 else weight[offset:offset + count]
+                                     for j, weight in enumerate(weights)]))
                 offset += count
-            layers.append(Layer(projection, parts, compiled(Combine(), projection_device)))
+            layers.append(Layer(projection, parts, Combine()))
         self.layers = torch.nn.ModuleList(layers)
 
     def forward(self, x):
@@ -88,31 +89,61 @@ class Program(torch.nn.Module):
         return x
 
 
+def placement(first, parts):
+    def placed(node):
+        where = ' '.join([str(path) for path, _ in node.meta.get('nn_module_stack', {}).values()] + [str(node.target)])
+        found = re.search(r'layers[._]\d+[._]parts[._](\d+)', where)
+        return parts[int(found[1])] if found else first
+    return placed
+
+
+def arguments(description):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument('--nodes', type=int, nargs='+', required=True)
+    parser.add_argument('--device', default='mps')
+    return parser.parse_args()
+
+
+def execute(model, inputs, engines, args):
+    processors = {'projection': (args.nodes[0], args.device)}
+    parts = [f'part{place}' for place in range(len(engines))]
+    processors.update((part, (args.nodes[place % len(args.nodes)], engine))
+                      for place, (part, engine) in enumerate(zip(parts, engines)))
+    scheduled = compile_module(model, inputs, processors, placement('projection', parts))
+    functions = lowered(scheduled, {'ane': lower_coreml.lower})
+    program = Program(scheduled, functions)
+    started = time.perf_counter()
+    result = program(*inputs)
+    report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried),
+              'processors': {name: [machine, engine] for name, (machine, engine) in processors.items()},
+              'seconds': time.perf_counter() - started,
+              'core ml': {name: dict(collections.Counter(
+                  f'{operation} on {preferred}' for plan in function.plan()
+                  for operation, _, preferred, _ in plan if operation != 'const'))
+                  for name, function in functions.items() if scheduled.engines.get(name)}}
+    if result is not None:
+        with torch.no_grad():
+            expected = copy.deepcopy(model).to(args.device)(*(value.to(args.device) for value in inputs))
+        pairs = list(zip(torch.utils._pytree.tree_leaves(expected), torch.utils._pytree.tree_leaves(result),
+                         strict=True))
+        report['outputs'] = [list(got.shape) for _, got in pairs]
+        report['error'] = max(((got.cpu().float() - want.cpu().float()).abs().max()
+                               / want.cpu().float().abs().max()).item() for want, got in pairs)
+    print(json.dumps(report), flush=True)
+    return result
+
+
 def main():
-    global K, N
-    from crossing import arguments, execute
-    args = arguments('Compiled projections and FFN or linear partitions across configured CPU, MPS and ANE engines.',
-                     int(os.environ.get('STEPS', '40')))
-    coded = None
-    if os.environ.get('CODES'):
-        import mesh_code
-        exported = mesh_code.load(os.environ['CODES'])
-        first = int(os.environ.get('FIRST', '0'))
-        coded = [[exported['model.language_model.layers.%d.mlp.%s_proj' % (layer, part)]
-                  for part in ('gate', 'up', 'down')] for layer in range(first, first + LAYERS)]
-        N, K = coded[0][0].shape
-        if KIND != 'ffn':
-            raise ValueError('CODES supplies the gate/up/down matrices of the OP=ffn workload')
+    args = arguments('Projections and FFN or linear partitions compiled over CPU, MPS and ANE processors.')
     engines = os.environ.get('ENGINES', 'mps,cpu,ane').split(',')
     width = K if KIND == 'linear' else N
     widths = [int(x) for x in os.environ['PARTS'].split(',')] if 'PARTS' in os.environ else [
         (j + 1) * width // len(engines) - j * width // len(engines) for j in range(len(engines))]
-    if len(widths) != len(engines) or any(n < 0 for n in widths) or sum(widths) != width:
-        raise ValueError('PARTS supplies one nonnegative width per engine, summing to %d' % width)
+    if len(widths) != len(engines) or any(n <= 0 for n in widths) or sum(widths) != width:
+        raise ValueError('PARTS supplies one positive width per engine, summing to %d' % width)
     torch.manual_seed(0)
     x = torch.randn(ROWS, K).half() / 4
-    block = None if args.load else Program(args.nodes, engines, widths, args.device, coded)
-    return execute(block, (x,), args)
+    return execute(Engines(widths).eval(), (x,), engines, args)
 
 
 if __name__ == '__main__':
