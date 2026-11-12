@@ -259,7 +259,8 @@ GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
 
 os.environ.update(DIM="32", HEADS="4", FFN="48", LAYERS="2", BATCH="2", SEQ="8", FF_MULT="2", VOCAB="64",
                   EXPERTS="4", TOP_K="2", TOKENS="12")
-sys.path.append(str(HERE.parent / "examples"))
+sys.path += [str(HERE.parent / "examples"), str(HERE.parent / "rdma")]
+import mesh_graph
 import cp
 import ep
 import pl
@@ -387,7 +388,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     exported = scheduled.exported.graph_module.graph
     assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
     original = {n.name: n.target for n in call_nodes(exported)}
-    where, added, sender, reader = {}, [], {}, {}
+    where, added, sender, reader, ends = {}, [], {}, {}, {}
     for processor, module in scheduled.modules.items():
         module.graph.lint()
         for node in module.graph.nodes:
@@ -411,6 +412,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
                 side = sender if node.target is ir.SEND else reader
                 assert channel not in side, "a channel with two sends or two recvs"
                 side[channel] = processor
+                ends.setdefault(channel, {})[node.target] = node
             for key_, wanted in (expect_on or {}).items():
                 stack = [str(path) for path, _ in node.meta.get("nn_module_stack", {}).values()]
                 if any(path == key_ or path.startswith(key_ + ".") for path in stack):
@@ -433,17 +435,11 @@ def check_ir(scheduled, expect_on=None, sharded=False):
     if len(scheduled.modules) == 1:
         assert not added and not Program(scheduled).argument_queues, "1-processor program differs"
 
-    queues = {p: collections.deque(call_nodes(m.graph)) for p, m in scheduled.modules.items()}
-    sent, moved = set(), True
-    while moved:
-        moved = False
-        for queue in queues.values():
-            while queue and (queue[0].target is not ir.RECV or ir.channel_of(queue[0]) in sent):
-                node = queue.popleft()
-                moved = True
-                if node.target is ir.SEND:
-                    sent.add(ir.channel_of(node))
-    assert not any(queues.values()), "the per-processor orders deadlock"
+    orders = [call_nodes(m.graph) for m in scheduled.modules.values()]
+    at = {node: place for place, node in enumerate(itertools.chain(*orders))}
+    edges = [(at[a], at[b]) for order in orders for a, b in zip(order, order[1:])]
+    edges += [(at[end[ir.SEND]], at[end[ir.RECV]]) for end in ends.values()]
+    assert len(set(mesh_graph.components(len(at), edges))) == len(at), "the per-processor orders deadlock"
     return len(original), len(copies)
 
 
