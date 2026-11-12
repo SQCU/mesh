@@ -25,7 +25,8 @@ BMM, FLIP, SOFTMAX = ATEN.bmm.default, ATEN.flip.default, ATEN._softmax.default
 ARANGE, LE, AND, NOT = ATEN.arange.start_step, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default
 PAD = ATEN.constant_pad_nd.default
 CONVOLUTION, FULL = ATEN.convolution.default, ATEN.new_full.default
-MAXIMUM, AVERAGE = ATEN.max_pool2d_with_indices.default, ATEN.avg_pool2d.default
+MAXIMA = {ATEN.max_pool2d_with_indices.default, ATEN.max_pool3d_with_indices.default}
+AVERAGES = {ATEN.avg_pool1d.default, ATEN.avg_pool2d.default, ATEN.avg_pool3d.default}
 SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
 MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
           ATEN.full_like.default, ATEN.where.self}
@@ -269,7 +270,7 @@ def windows(node):
             return {}
     else:
         kernel, fill = spread(read["kernel_size"], count), 0
-        if node.target is MAXIMUM:
+        if node.target in MAXIMA:
             fill = -math.inf if dtype.is_floating_point else torch.iinfo(dtype).min
             if any(user.args[1] for user in node.users):
                 return {}
@@ -352,6 +353,17 @@ def accumulated(node, shapes, out):
     return [list(range(len(out))), summed, summed + list(range(1, len(out)))]
 
 
+# design/problems-of-14b9a757-change-request.md item 6, step 1
+def viewable(node):
+    value = node.args[0].meta["val"]
+    with value.fake_mode:
+        try:
+            value.view(node.args[1])
+        except RuntimeError:
+            return False
+    return True
+
+
 # design/aot-compilation-change-request.md A2 and A4
 def replicated(node, shapes, out):
     return [[None] * len(s) for s in shapes]
@@ -360,7 +372,7 @@ def replicated(node, shapes, out):
 RULES = {
     ATEN.alias.default: aligned, EXPAND: aligned, ATEN.full_like.default: aligned, ATEN._to_copy.default: aligned,
     operator.getitem: aligned, FLIP: aligned,
-    CONVOLUTION: windowed, MAXIMUM: windowed, AVERAGE: windowed,
+    CONVOLUTION: windowed, **dict.fromkeys(MAXIMA | AVERAGES, windowed),
     ATEN.index_put.default: accumulated,
     ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
     MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
@@ -474,7 +486,8 @@ def partitioned(graph, node, held, want, replaced):
             target = found.pop()
     window = target and RULES.get(node.target) is windowed and windows(node).get(target[0])
     if window:
-        target = target[0], counts(out[target[0]], target[1], len(target[2])), target[2]
+        units = None if target[1] == counts(sum(target[1]), None, len(target[2])) else target[1]
+        target = target[0], counts(out[target[0]], units, len(target[2])), target[2]
     if target is None:
         processor = want if isinstance(want, str) else want[2][0]
         arguments = iter([reshard(graph, plainly(graph, v), None, None, (processor,))[0] for v in held])
@@ -485,7 +498,7 @@ def partitioned(graph, node, held, want, replaced):
     if window:
         value = held[0]
         if (value[0], value[2]) not in ((None, (None,)), (along, processors)):
-            value = along, counts(shapes[0][along], sizes, len(processors)), processors, None
+            value = along, counts(shapes[0][along], units, len(processors)), processors, None
             value = *value[:3], reshard(graph, plainly(graph, held[0]), *value[:3], True)
         elif value[0] is not None:
             value = *value[:3], [own(graph, n, along, value[1], k) for k, n in enumerate(value[3])]
@@ -612,7 +625,8 @@ def place(graph_module, placement):
         graph.erase_node(node)
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
-        "state" in n.meta if n.op == "placeholder" else n.target in VIEWS and all(read)))
+        "state" in n.meta if n.op == "placeholder" else n.target in VIEWS and all(read) and (
+            n.target is not RESHAPE or viewable(n))))
     for node, held in invariant.items():
         if held and node.op == "call_function":
             node.meta["invariant"] = True
@@ -652,10 +666,11 @@ def insert_send_recv(graph, node, first):
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
     # design/unequal-shards-change-request.md item 12; MPI 4.1, section 6.1.3
-    cuts = mesh_graph.chain(node, lambda n: n.args[0] if n.target is SLICE and len(n.args) == 4 and n.args[0].meta.get(
-        "processor", here) == here else None)
+    cuts = mesh_graph.chain(node, lambda n: n.args[0] if n.target is SLICE and (*n.args, 1)[4] == 1 and n.args[
+        0].meta.get("processor", here) == here else None)
     subarray = (shape(cuts[-1]), tuple(value.shape), tuple(
-        sum(cut.args[2] for cut in cuts[:-1] if cut.args[1] % value.dim() == d) for d in range(value.dim())))
+        sum(range(shape(cut.args[0])[d])[cut.args[2]:cut.args[3]].start for cut in cuts[:-1]
+            if cut.args[1] % value.dim() == d) for d in range(value.dim())))
     for channel, (processor, users) in enumerate(away.items(), first):
         with graph.inserting_after(node):
             sent = graph.call_function(SEND, (node, channel))
