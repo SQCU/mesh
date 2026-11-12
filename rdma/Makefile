@@ -1,4 +1,4 @@
-BINS = mesh-flow mesh-heartbeat mesh-stat libmesh.dylib
+BINS = mesh-flow mesh-heartbeat mesh-stat libmesh.dylib libmesh-metal4.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 MESH_PREFIX ?= /usr/local/mesh
 # the provider's own queue pairs on each device, which a link's budget leaves to it (tag pre-return-20261103
@@ -123,6 +123,9 @@ mesh-stat: mesh-stat.c mesh.h mesh-map.h mesh-holders.h
 	cc -O2 -o $@ mesh-stat.c
 libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEADERS) $(HIGHS_BUILT) $(ISL_ARCHIVE) Makefile
 	cc $(CPPFLAGS) $(CFLAGS_EXACT) $(HIGHS_CFLAGS) $(ISL_CFLAGS) -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c -lobjc $(HIGHS_LIBS) $(ISL_ARCHIVE)
+# design/the-compiler.md, order 4
+libmesh-metal4.dylib: mesh-metal4.m Makefile
+	cc -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh-metal4.dylib -o $@ mesh-metal4.m -framework Metal -framework Foundation
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit FORCE

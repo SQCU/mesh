@@ -29,7 +29,7 @@ from torch._inductor import metrics
 from torch._inductor.graph import GraphLowering
 from torch._ops import OpOverload
 
-from mesh_compiler import archive, bridge, ir, lower_inductor
+from mesh_compiler import archive, bridge, ir, lower_inductor, lower_metal
 from mesh_compiler.devices import TO_COPY
 from mesh_compiler.driver import compile_module
 from mesh_compiler.runtime import Program
@@ -383,7 +383,7 @@ CASES = [
 SAVE = {"mlp": "mlp", "python for, 4 static trips": "static_for",
         "mixture of experts | 3 processors": "moe_three_processors",
         "conv | conv on mps, rest cpu": "conv_cpu_mps"}
-PATHS = ("fx direct", "inductor", "archive", "fx pass")
+PATHS = ("fx direct", "inductor", "archive", "fx pass", "metal")
 FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 processors",
                "buffer mutation x3 | 2 processors",
                "solve | 3 processors round-robin", "mixture of experts | 3 processors",
@@ -587,6 +587,8 @@ def variants(scheduled, with_inductor):
         "inductor": (lambda: compiled_program(scheduled)) if with_inductor else None,
         "archive": lambda: archived_program(scheduled),
         "fx pass": lambda: Program(dataclasses.replace(scheduled, modules=passed())),
+        "metal": (lambda: Program(scheduled, lower_metal.lower(scheduled)))
+        if any(device.type == "mps" for device in scheduled.devices.values()) else None,
     }
 
 
@@ -694,11 +696,15 @@ def check_inductor_structure():
 
 
 BREAK_REASONS = collections.Counter()
+NOT_LOWERED = []
 
 
 def cell(result):
     if result is None:
         return "-", True
+    if isinstance(result, lower_metal.NotLowered):
+        NOT_LOWERED.append(str(result))
+        return "not lowered", True
     if isinstance(result, Exception):
         return "FAIL", False
     ok = result[1] <= TOLERANCE or result[0] <= TOLERANCE
@@ -1006,6 +1012,7 @@ def main():
                 detail = " ".join(str(results[path]).split())[:300]
                 print(f"    {path}: {type(results[path]).__name__}: {detail}")
     print(f"torch.compile graph breaks over all cases: {total_breaks}")
+    print(f"operators with no Metal source lowering, by processor: {NOT_LOWERED or 'none'}")
     for reason, count in BREAK_REASONS.most_common():
         print(f"  {count:5d}  {reason}")
     print("import separation (from the modules' syntax trees):")
