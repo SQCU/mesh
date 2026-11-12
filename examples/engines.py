@@ -2,7 +2,6 @@
 # design/the-compiler.md, order 5 and "Core ML"
 import argparse
 import collections
-import copy
 import json
 import os
 import pathlib
@@ -123,12 +122,12 @@ def execute(model, inputs, engines, args):
                   for name, function in functions.items() if scheduled.engines.get(name)}}
     if result is not None:
         with torch.no_grad():
-            expected = copy.deepcopy(model).to(args.device)(*(value.to(args.device) for value in inputs))
+            expected = model(*inputs)
         pairs = list(zip(torch.utils._pytree.tree_leaves(expected), torch.utils._pytree.tree_leaves(result),
                          strict=True))
         report['outputs'] = [list(got.shape) for _, got in pairs]
-        report['error'] = max(((got.cpu().float() - want.cpu().float()).abs().max()
-                               / want.cpu().float().abs().max()).item() for want, got in pairs)
+        report['error'] = max(((got.cpu().float() - want.float()).abs().max() / want.float().abs().max()).item()
+                              for want, got in pairs)
     print(json.dumps(report), flush=True)
     return result
 
