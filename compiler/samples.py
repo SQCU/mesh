@@ -9,6 +9,7 @@ import itertools
 import json
 import os
 import pathlib
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1178,13 +1179,16 @@ def region(node, nodes):
     mesh, pages = bridge.mesh, 2048
     header = mesh.Header(magic=0x4d455348, version=120, pgsz=16384, block=1, rows=pages, node=node,
                          wire_pages=pages // 2, view=1, view_nodes=len(nodes))
-    header.algo_off, header.view_off, header.page_off, header.data_off = (
-        header.pgsz, 2 * header.pgsz, 3 * header.pgsz, 8 * header.pgsz)
+    header.algo_off, header.view_off, header.page_off, header.buffer_off, header.data_off = (
+        header.pgsz, 2 * header.pgsz, 3 * header.pgsz, 7 * header.pgsz, 11 * header.pgsz)
     header.length = header.data_off + pages * header.pgsz
     shared = SharedMemory(create=True, size=header.length, name=f"mesh_compiler_{os.getpid()}_{node}")
     shared.buf[:ctypes.sizeof(header)] = bytes(header)
     for place, other in enumerate(nodes):
-        shared.buf[header.view_off + place * RECORD_BYTES:][:4] = other.to_bytes(4, "little")
+        record, peers = header.view_off + place * RECORD_BYTES, [peer for peer in nodes if peer != other]
+        shared.buf[record:record + 8] = struct.pack("II", other, len(peers))
+        for cable, peer in enumerate(peers):
+            shared.buf[record + 72 + 24 * cable:][:24] = struct.pack("IIIIQ", peer, 0, 0, 1, 10 ** 10)
     context = mesh.Context()
     mesh.check(mesh.LIB.mesh_attach(ctypes.byref(context), f"/{shared.name}".encode()))
     return shared, context
@@ -1200,31 +1204,36 @@ def carry(contexts):
             wake(ctypes.addressof(algo) + mesh.Algo.released.offset, 8, bridge.SHARED)
     if not all(algo.published != algo.retired for algo in algos) or algos[0].group != algos[1].group:
         return
+    word = lambda k, at: ctypes.c_uint64.from_address(contexts[k].M + at)
     for place in range(algos[0].plans):
-        states = [mesh.State.from_address(context.M + ctypes.c_uint64.from_address(
-            context.M + algo.table + 8 * place).value) for context, algo in zip(contexts, algos)]
+        states = [mesh.State.from_address(contexts[k].M + word(k, algo.table + 8 * place).value)
+                  for k, algo in enumerate(algos)]
         lists = [(mesh.Hop * state.entries).from_address(context.M + state.hops)
                  for context, state in zip(contexts, states)]
-        if not states[0].entries:
-            continue
-        source = int(lists[1][0].direction == mesh.SEND)
-        (sender, sends, origin, top), (receiver, receives, target, _) = [
-            (states[k], lists[k], contexts[k].M + headers[k].data_off, headers[k]) for k in (source, 1 - source)]
-        completion = ctypes.c_uint64.from_address(origin - top.data_off + sends[0].count)
-        supplied = ctypes.c_uint64.from_address(origin - top.data_off + sends[0].word).value
-        execution = completion.value // len(sends)
-        if min(supplied, sender.executions, receiver.executions) <= execution:
-            continue
-        there = target - headers[1 - source].data_off
-        for sent, landed in zip(sends, receives, strict=True):
-            assert sent.bytes == landed.bytes and landed.pages == len(receives), "the two ends' entries differ"
-            assert (sent.node, landed.node) == (1 - source, source), "an entry names the wrong neighbour"
-            ctypes.memmove(target + landed.page * top.pgsz, origin + sent.page * top.pgsz, sent.bytes)
-            ctypes.c_uint64.from_address(there + landed.word).value ^= 1 << (landed.field + (execution & 1))
-        count = ctypes.c_uint64.from_address(there + receives[0].count)
-        count.value += len(receives)
-        wake(ctypes.addressof(count), 8, bridge.SHARED)
-        completion.value += len(sends)
+        copies, started = states[0].copies, min(state.executions for state in states)
+        assert copies == states[1].copies, "the two ends' copies differ"
+        for source, copy in itertools.product((0, 1), range(copies)):
+            ends = [[hop for hop in hops[copy * len(hops) // copies:(copy + 1) * len(hops) // copies]
+                     if hop.direction == direction] for hops, direction in (
+                         (lists[source], mesh.SEND), (lists[1 - source], mesh.RECEIVE))]
+            ranges = {}
+            for sent, landed in zip(*ends, strict=True):
+                assert (sent.bytes, sent.node, landed.node) == (landed.bytes, 1 - source, source), "the two ends' entries differ"
+                ranges.setdefault(sent.word, []).append((sent, landed))
+            for supplied, pairs in ranges.items():
+                completion, count = word(source, pairs[0][0].count), word(1 - source, pairs[0][1].count)
+                turn = completion.value // len(pairs)
+                if min(word(source, supplied).value, started) <= turn * copies + copy:
+                    continue
+                for sent, landed in pairs:
+                    assert landed.pages == len(pairs) and landed.count == pairs[0][1].count, "a range's entries differ"
+                    ctypes.memmove(contexts[1 - source].M + headers[1 - source].data_off + landed.page * headers[0].pgsz
+                                   + landed.offset, contexts[source].M + headers[source].data_off
+                                   + sent.page * headers[0].pgsz + sent.offset, sent.bytes)
+                    word(1 - source, landed.word).value ^= 1 << (landed.field + (turn & 1))
+                count.value += len(pairs)
+                wake(ctypes.addressof(count), 8, bridge.SHARED)
+                completion.value += len(pairs)
 
 
 def check_between_machines(with_inductor):
@@ -1232,7 +1241,8 @@ def check_between_machines(with_inductor):
     shared, contexts = zip(*(region(node, nodes) for node in nodes))
     command = [sys.executable, str(HERE / "samples.py"), "--machines", "3", "5"] + ["--fast"] * (not with_inductor)
     runs = [subprocess.Popen(command, stdout=subprocess.PIPE, text=True,
-                             env={**os.environ, "MESH_REGION": f"/{region_.name}", "MESH_GROUP": "1"})
+                             env={**os.environ, "MESH_REGION": f"/{region_.name}", "MESH_GROUP": "1",
+                                  "MESH_PROGRAM": "0,1"})
             for region_ in shared]
     while any(run.poll() is None for run in runs):
         carry(contexts)

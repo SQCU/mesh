@@ -3,7 +3,7 @@ import copy
 
 import torch
 
-from .ir import RECV, SEND
+from .ir import JOIN, RECV, SEND
 
 TO_COPY = torch.ops.aten._to_copy.default
 HOST = torch.device("cpu")
@@ -32,6 +32,7 @@ def on_devices(graph_module, processors):
         if node.target is SEND:
             value, channel = node.args
             arrival = receiver[channel]
+            arrival.meta["consumer"] = JOIN
             away, there = processors[arrival.meta["processor"]]
             sent = there if away == machine else HOST
             if sent != device:

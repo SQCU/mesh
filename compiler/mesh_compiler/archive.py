@@ -1,5 +1,6 @@
 # design/data-flow.md
 import copy
+import dataclasses
 import json
 import operator
 import pathlib
@@ -11,7 +12,7 @@ from torch.export.graph_signature import (ConstantArgument, ExportGraphSignature
                                           InputSpec, OutputKind, OutputSpec, TensorArgument)
 from torch.utils import _pytree as pytree
 
-from .ir import RECV, Exported, Scheduled, channel_of
+from .ir import RECV, Exported, Plan, Scheduled, channel_of
 
 BLOCK = ("dimension", "block", "counts", "displs")
 
@@ -56,6 +57,7 @@ def save(directory, scheduled):
         "feedforward": scheduled.feedforward,
         "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
+        "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex()},
         "blocks": {channel_of(node): [node.meta[key] for key in BLOCK] for module in scheduled.modules.values()
                    for node in module.graph.nodes if node.target is RECV and "counts" in node.meta},
         "tokens": exported.tokens,
@@ -109,8 +111,9 @@ def load(directory):
     modules = {processor: modules[processor] for processor in devices if processor in modules}
     carried = [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
                for channel, sender, receiver, dtype, shape, stride in about["carried"]]
+    plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"])})
     return Scheduled(exported, modules, devices, about["machines"], about["output_processor"], about["channels"],
-                     about["inputs"], about["feedforward"], carried, about["engines"])
+                     about["inputs"], about["feedforward"], carried, about["engines"], plan)
 
 
 # design/synchronization-signature-change-request.md item 1

@@ -30,6 +30,10 @@ SEND = torch.ops.mesh.send.default
 RECV = torch.ops.mesh.recv.default
 
 
+# rdma/mesh-collective.h MESH_JOIN, MESH_PAGES
+JOIN, PAGES = 0, 1
+
+
 def channel_of(node):
     if node.target is SEND:
         return node.args[1]
@@ -46,6 +50,20 @@ class Exported:
     out_spec: object
 
 
+# rdma/mesh-collective.h struct mesh_function, mesh_plan, mesh_plan_save
+@dataclass
+class Plan:
+    program: int
+    channels: list
+    declared: list
+    weights: list
+    values: list
+    dependences: list
+    outstanding: int
+    times: list
+    record: bytes
+
+
 @dataclass
 class Scheduled:
     exported: Exported
@@ -58,3 +76,4 @@ class Scheduled:
     feedforward: list
     carried: list
     engines: dict
+    plan: object = None

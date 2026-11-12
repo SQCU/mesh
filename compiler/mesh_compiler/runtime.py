@@ -16,15 +16,17 @@ class Program:
         self.devices = {processor: getattr(self.functions.get(processor), "device", device)
                         for processor, device in scheduled.devices.items()}
         self.feedforward = set(scheduled.feedforward)
-        self.channels, self.received = [SimpleQueue() for _ in range(scheduled.channels)], {}
+        self.channels, self.executions = [SimpleQueue() for _ in range(scheduled.channels)], []
         machines = set(scheduled.machines.values())
         if len(machines) > 1:
             from . import bridge
-            machines = {bridge.channels(scheduled, self.channels, self.received)}
+            machine, self.executions = bridge.channels(scheduled, self.channels)
+            machines = {machine}
         machine = machines.pop()
         inputs = {processor: names for processor, names in scheduled.inputs.items()
                   if scheduled.machines[processor] == machine}
         self.caller = self.output_processor if self.output_processor in inputs else next(iter(inputs), None)
+        self.joined = self.caller != self.output_processor or bool(self.executions)
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         self.arguments = {
@@ -41,16 +43,11 @@ class Program:
         for processor in self.argument_queues:
             Thread(target=self.run, args=(processor,), daemon=True).start()
 
-    def execute(self, processor, arguments):
-        for channel in self.received.get(processor, ()):
-            channel.start()
-        return self.functions[processor](*arguments)
-
     def run(self, processor):
         ir.LOCAL.channels = self.channels
         while True:
-            self.execute(processor, self.argument_queues[processor].get())
-            if self.caller != self.output_processor:
+            self.functions[processor](*self.argument_queues[processor].get())
+            if self.joined:
                 self.finished.put(processor)
 
     def placed(self, value, processor):
@@ -64,16 +61,20 @@ class Program:
         flat, _ = pytree.tree_flatten((args, kwargs))
         for name, value in zip(self.exported.user_inputs, flat, strict=True):
             self.bind(name, value)
+        for published in self.executions:
+            published.start()
         for processor, argument_queue in self.argument_queues.items():
             arguments = self.arguments[processor]
             argument_queue.put(list(arguments) if processor in self.feedforward else arguments)
-        if self.caller is None:
-            return None
-        ir.LOCAL.channels = self.channels
-        results = self.execute(self.caller, self.arguments[self.caller])
-        if self.caller != self.output_processor:
+        if self.caller is not None:
+            ir.LOCAL.channels = self.channels
+            results = self.functions[self.caller](*self.arguments[self.caller])
+        if self.joined:
             for _ in self.argument_queues:
                 self.finished.get()
+        for published in self.executions:
+            published.end()
+        if self.caller != self.output_processor:
             return None
         user = []
         for (kind, key), value in zip(self.exported.outputs, results):

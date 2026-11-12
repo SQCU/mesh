@@ -51,6 +51,19 @@ def closure(order, neighbours):
     return reached
 
 
+# A. V. Aho, M. R. Garey and J. D. Ullman, The transitive reduction of a directed graph, SIAM J. Comput. 1(2), 1972
+def reduction(order, neighbours):
+    reached = closure(order, neighbours)
+    return {v: [u for u in dict.fromkeys(neighbours(v)) if not any(u in reached[w] for w in neighbours(v))]
+            for v in order}
+
+
+# F. Harary, Graph Theory, 1969
+def extremes(vertices, neighbours):
+    entered = {u for v in vertices for u in neighbours(v)}
+    return [v for v in vertices if v not in entered], [v for v in vertices if not neighbours(v)]
+
+
 # G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976; GSPMD, Xu et al., arXiv 2105.04663, section 3.5
 def propagate(order, neighbours, forward, backward):
     changed = True
@@ -82,15 +95,6 @@ def postorder(vertices, neighbours):
             seen.add(v)
             order.append(v)
     return order
-
-
-# H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, section 4.1
-def upward_rank(vertices, successors, cost):
-    def rank(v, ranks):
-        if cost(v) <= 0:
-            raise ValueError(f"cost of {v} must be positive")
-        return cost(v) + max(ranks, default=0.0)
-    return forward(postorder(vertices, successors), successors, rank)
 
 
 # S. Zhang et al., HAP, EuroSys 2024, section 3.2; design/unequal-shards-change-request.md item 6
@@ -127,34 +131,6 @@ def separators(offsets, speeds):
             low, high = (low, end) if load >= succeeded else (end + 1, high)
         first = low - 1
     return probe(offsets, speeds, succeeded)
-
-
-# H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, section 4.2
-def earliest_slot(busy, ready, width):
-    free_from = 0.0
-    for index, (start, finish, _) in enumerate(busy):
-        begin = max(free_from, ready)
-        if begin + width <= start:
-            return index, begin
-        free_from = finish
-    return len(busy), max(free_from, ready)
-
-
-# H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, sections 4.1 and 4.2
-def list_schedule(vertices, predecessors, cost, processor):
-    successors = {v: [] for v in vertices}
-    for v in vertices:
-        for u in predecessors(v):
-            successors[u].append(v)
-    rank = upward_rank(vertices, successors.__getitem__, cost)
-    timeline, finish = {}, {}
-    for v in sorted(vertices, key=lambda v: -rank[v]):
-        busy = timeline.setdefault(processor(v), [])
-        ready = max((finish[u] for u in predecessors(v)), default=0.0)
-        index, start = earliest_slot(busy, ready, cost(v))
-        finish[v] = start + cost(v)
-        busy.insert(index, (start, finish[v], v))
-    return {p: [v for _, _, v in busy] for p, busy in timeline.items()}
 
 
 # M. Poletto and V. Sarkar, Linear scan register allocation, ACM TOPLAS 21(5), 1999

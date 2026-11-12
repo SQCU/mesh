@@ -290,3 +290,24 @@ def extents(view):
 def check(status):
     if status:
         raise OSError(status, os.strerror(status))
+
+
+# mesh-collective.h struct mesh_function, struct mesh_declared, struct mesh_weight, struct mesh_value, struct
+# mesh_dependence; mesh-graph.h struct mesh_strided
+def function(declared, weights, values, dependences, outstanding):
+    held = []
+
+    def view(offset, element, pairs):
+        held.append((Q * max(len(pairs), 1))(*pairs))
+        return Strided(offset, element, len(pairs) // 2, 0, held[-1])
+
+    held += [(Declared * max(len(declared), 1))(*[
+                 Declared(source, destination, identity, kind, value, 0, view(*layout), view(*layout))
+                 for source, destination, identity, kind, value, layout in declared]),
+             (Weight * max(len(weights), 1))(*[Weight(*weight) for weight in weights]),
+             (Value * max(len(values), 1))(*[Value(Section(0, 0, size, 0, 0), *fields, 0, 0)
+                                             for size, *fields in values]),
+             (Dependence * max(len(dependences), 1))(*[Dependence(*edge) for edge in dependences])]
+    made = (Function * 1)(Function(*held[-4:], len(declared), len(values), len(dependences), 0, outstanding, 0, None,
+                                   None, None, 0, 0))
+    return made, held
