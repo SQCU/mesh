@@ -562,7 +562,7 @@ def errors(reference, got):
         if a.shape != b.shape:
             return float("inf"), float("inf")
         apart = torch.where(a == b, 0.0, (a - b).abs())
-        if apart.isnan().any():
+        if apart.isnan().any() or apart.isinf().any():
             return float("inf"), float("inf")
         difference = apart.max().item() if a.numel() else 0.0
         scale = a.abs().max().item() if a.numel() else 0.0
