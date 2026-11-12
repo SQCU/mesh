@@ -175,6 +175,11 @@ def unsqueezed(node, shapes, out):
     return [[d + (d >= node.args[1] % len(out)) for d in range(len(out) - 1)]]
 
 
+# design/aot-compilation-change-request.md A2 and A4
+def replicated(node, shapes, out):
+    return [[None] * len(s) for s in shapes]
+
+
 RULES = {
     ATEN.alias.default: aligned, EXPAND: aligned, ATEN.full_like.default: aligned, ATEN._to_copy.default: aligned,
     operator.getitem: aligned,
@@ -277,7 +282,7 @@ def partitioned(graph, node, held, want, replaced):
         elif torch.Tag.pointwise in getattr(node.target, "tags", ()):
             rows = aligned(node, shapes, out)
         else:
-            rows = RULES[node.target](node, shapes, out)
+            rows = RULES.get(node.target, replicated)(node, shapes, out)
         found = {(row[v[0]], v[1], v[2]) for v, row in zip(held, rows) if v[0] is not None}
         summed = len(found) == 1 and (next(iter(found))[0] or 0) < 0
         if not summed and not isinstance(want, str) and any(want[0] in row for row in rows):

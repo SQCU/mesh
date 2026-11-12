@@ -207,6 +207,11 @@ class PythonBranch(nn.Module):
         return x.relu() if x.sum() > 0 else x.neg()
 
 
+class Flipped(nn.Module):
+    def forward(self, x):
+        return torch.flip(x.sin(), (0,)).cos()
+
+
 class Wide(nn.Module):
     def __init__(self):
         super().__init__()
@@ -410,6 +415,9 @@ CASES = [
     ("megatron | resharded 1:1 to 1:3", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True,
       "placement": lambda: megatron_with({(ATEN.sigmoid.default, (2, 8, 48)): (2, SHARDS, (1, 3))})}),
+    ("flip of a sharded value", Flipped, [(r(6, 4),)],
+     {"processors": TWO, "sharded": True,
+      "placement": lambda: lambda node: (0, SHARDS, (1, 2)) if node.name in ("x", "sin") else "p0"}),
     ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
      {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
     ("parallel layers | units 3:1, mps", pl.Inference, [(index(2, 8, 64),)],
