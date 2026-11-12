@@ -90,7 +90,7 @@ class Program(torch.nn.Module):
 
 def main():
     global K, N
-    from tp import arguments, execute
+    from crossing import arguments, execute
     args = arguments('Compiled projections and FFN or linear partitions across configured CPU, MPS and ANE engines.',
                      int(os.environ.get('STEPS', '40')))
     coded = None

@@ -1,19 +1,234 @@
-# design/data-flow.md
+# design/the-compiler.md; design/data-flow.md
 import copy
+import functools
+import itertools
+import math
 import operator
+import pathlib
+import sys
 
 import torch
+from torch._guards import detect_fake_mode
+from torch.fx.node import map_arg
 
 from .ir import RECV, SEND
+
+sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
+import mesh_graph
+
+ATEN = torch.ops.aten
+ADD, ADDMM, CAT, MM, SLICE = (ATEN.add.Tensor, ATEN.addmm.default, ATEN.cat.default, ATEN.mm.default,
+                              ATEN.slice.Tensor)
+EXPAND, RESHAPE, VIEW = ATEN.expand.default, ATEN.reshape.default, ATEN.view.default
+
+
+def operands(node):
+    found = []
+    map_arg((node.args, node.kwargs), found.append)
+    return found
+
+
+def shape(node):
+    value = node.meta["val"]
+    return tuple((value[0] if isinstance(value, (tuple, list)) else value).shape)
+
+
+def evaluated(node, processor):
+    arguments = map_arg((node.args, node.kwargs), lambda n: n.meta["val"])
+    with detect_fake_mode(arguments):
+        node.meta.update(processor=processor, val=node.target(*arguments[0], **arguments[1]))
+    return node
+
+
+def call(graph, target, arguments, processor):
+    return evaluated(graph.call_function(target, arguments), processor)
+
+
+# design/unequal-shards-change-request.md items 1 and 15
+def counts(extent, units, shards):
+    if units is None:
+        chunk = -(-extent // shards)
+        return tuple(max(0, min(chunk, extent - chunk * j)) for j in range(shards))
+    exact = [extent * unit / sum(units) for unit in units]
+    sizes = [round(size) for size in exact]
+    while sum(sizes) != extent:
+        step = 1 if sum(sizes) < extent else -1
+        sizes[min(range(shards), key=lambda j: abs(sizes[j] + step - exact[j]))] += step
+    return tuple(sizes)
+
+
+def folded(graph, value, at, repeats, periods, dimension, sizes, processors):
+    held, extents, holders, nodes = value
+    nodes = [call(graph, RESHAPE, (n, [*shape(n)[:at], repeats, period, *shape(n)[at + 1:]]), holder or processors[0])
+             for n, period, holder in zip(nodes, periods, holders)]
+    held, dimension = (d if d is None or d < at else d + 1 for d in (held, dimension))
+    arrived = reshard(graph, (held, extents, holders, nodes), dimension, sizes, processors)
+    return [call(graph, RESHAPE, (n, [*shape(n)[:at], repeats * shape(n)[at + 1], *shape(n)[at + 2:]]), processor)
+            for n, processor in zip(arrived, processors)]
+
+
+# design/unequal-shards-change-request.md items 2, 9 and 12
+def reshard(graph, value, dimension, sizes, processors):
+    held, extents, holders, nodes = value
+    if (held, extents, holders) == (dimension, sizes, processors):
+        return nodes
+    if len(processors) == 1:
+        dimension = None
+    if held is not None and (whole := sum(shape(n)[held] for n in nodes)) > sum(extents):
+        return folded(graph, value, held, whole // sum(extents), extents, dimension, sizes, processors)
+    if dimension not in (None, held) and (whole := shape(nodes[0])[dimension]) > sum(sizes):
+        return folded(graph, value, dimension, whole // sum(sizes), [sum(sizes)] * len(nodes), dimension, sizes,
+                      processors)
+    bounds = list(itertools.accumulate(sizes or (), initial=0))
+    starts = list(itertools.accumulate(extents or (), initial=0))
+    arrived = []
+    for j, processor in enumerate(processors):
+        pieces = []
+        for i, (holder, node) in enumerate(zip(holders, nodes)):
+            if dimension is not None:
+                low, high = bounds[j], bounds[j + 1]
+                if held == dimension:
+                    low, high = max(low, starts[i]) - starts[i], min(high, starts[i + 1]) - starts[i]
+                    if low >= high and bounds[j] < bounds[j + 1]:
+                        continue
+                if (low, high) != (0, shape(node)[dimension]):
+                    node = call(graph, SLICE, (node, dimension, low, max(low, high)), holder or processor)
+            pieces.append(node)
+        arrived.append(pieces[0] if len(pieces) == 1 else call(graph, CAT, (pieces, held), processor))
+    return arrived
+
+
+def aligned(node, shapes, out):
+    return [[len(out) - len(s) + k if extent == out[len(out) - len(s) + k] else None
+             for k, extent in enumerate(s)] for s in shapes]
+
+
+def over(position, default, summed=False):
+    def rule(node, shapes, out):
+        rank = len(shapes[0])
+        dims = node.args[position] if len(node.args) > position else default
+        dims = {d % rank for d in ([dims] if isinstance(dims, int) else dims or range(rank))}
+        drops = len(out) < rank
+        row = [(-1 - d if summed else None) if d in dims else d - drops * sum(e < d for e in dims)
+               for d in range(rank)]
+        return [row] * len(shapes)
+    return rule
+
+
+def gathered(node, shapes, out):
+    return [over(1, None)(node, shapes, out)[0], list(range(len(out)))]
+
+
+def permuted(node, shapes, out):
+    return [[node.args[1].index(d) for d in range(len(out))]]
+
+
+def unsqueezed(node, shapes, out):
+    return [[d + (d >= node.args[1] % len(out)) for d in range(len(out) - 1)]]
+
+
+RULES = {
+    ATEN.alias.default: aligned, EXPAND: aligned, ATEN.full_like.default: aligned, ATEN._to_copy.default: aligned,
+    operator.getitem: aligned,
+    ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
+    MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
+    ATEN.bmm.default: lambda node, shapes, out: [[0, 1, -1], [0, -1, 2]],
+    ATEN.sum.dim_IntList: over(1, None, True), ATEN.mean.dim: over(1, None),
+    ATEN.any.dim: over(1, None), ATEN.any.dims: over(1, None),
+    ATEN._softmax.default: over(1, None), ATEN.cumsum.default: over(1, None), ATEN.topk.default: over(2, -1),
+    ATEN.slice.Tensor: over(1, 0), ATEN.select.int: over(1, None), ATEN.squeeze.dims: over(1, None),
+    CAT: over(1, 0), ATEN.scatter_add.default: over(1, None), ATEN.gather.default: gathered,
+}
+
+
+def viewed(value, whole, new):
+    dimension, sizes, processors, nodes = value
+    stride = math.prod(whole[dimension + 1:])
+    edges = [stride * edge for edge in itertools.accumulate(sizes)]
+    for at in reversed(range(len(new))):
+        unit = math.prod(new[at + 1:])
+        if all(edge % unit == 0 for edge in edges) and unit * new[at] % edges[-1] == 0:
+            return at, (dimension, tuple(stride * size // unit for size in sizes), processors, nodes)
+
+
+def partitioned(graph, node, held, want, replaced):
+    target = None
+    if node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
+        if node.target is ADDMM:
+            product = graph.call_function(MM, node.args[1:])
+            product.meta = dict(node.meta)
+            first = want if isinstance(want, str) else want[2][0]
+            held = [partitioned(graph, product, held[1:], first, replaced), held[0]]
+            node.target, node.args = ADD, (product, node.args[0])
+        shapes, out = [shape(n) for n in operands(node)], shape(node)
+        if node.target is VIEW:
+            rows = [[None] * len(shapes[0])]
+            if held[0][0] is not None:
+                rows[0][held[0][0]], value = viewed(held[0], shapes[0], out)
+                held = [value]
+        elif torch.Tag.pointwise in getattr(node.target, "tags", ()):
+            rows = aligned(node, shapes, out)
+        else:
+            rows = RULES[node.target](node, shapes, out)
+        found = {(row[v[0]], v[1], v[2]) for v, row in zip(held, rows) if v[0] is not None}
+        summed = len(found) == 1 and (next(iter(found))[0] or 0) < 0
+        if not summed and not isinstance(want, str) and any(want[0] in row for row in rows):
+            target = want
+        elif len(found) == 1 and next(iter(found))[0] is not None:
+            target = found.pop()
+    if target is None:
+        processor = want if isinstance(want, str) else want[2][0]
+        arguments = iter([reshard(graph, v, None, None, (processor,))[0] for v in held])
+        node.args, node.kwargs = map_arg((node.args, node.kwargs), lambda n: next(arguments))
+        node.meta["processor"] = processor
+        return None, None, (processor,), [node]
+    along, sizes, processors = target
+    columns = [reshard(graph, v, row.index(along) if along in row else None, sizes, processors)
+               for v, row in zip(held, rows)]
+    shards = []
+    for j, processor in enumerate(processors):
+        arguments = iter([column[j] for column in columns])
+        shard = graph.node_copy(node, lambda n: next(arguments))
+        if node.target in (EXPAND, VIEW):
+            local = list(shard.args[1])
+            local[along] = out[along] * sizes[j] // sum(sizes)
+            shard.args = (shard.args[0], local)
+        shards.append(evaluated(shard, processor))
+    replaced.append(node)
+    if along >= 0:
+        return along, sizes, processors, shards
+    to = (None, None, (want,)) if isinstance(want, str) else want
+    columns = [reshard(graph, (None, None, (processor,), [shard]), *to)
+               for processor, shard in zip(processors, shards)]
+    return *to, [functools.reduce(lambda a, b: call(graph, ADD, (a, b), processor), parts)
+               for processor, *parts in zip(to[2], *columns)]
 
 
 def place(graph_module, placement):
     graph_module = copy.deepcopy(graph_module)
     graph = graph_module.graph
+    nodes = list(graph.nodes)
+    placed = [n for n in nodes if n.op != "placeholder"]
+    stated = {n: placement(n) for n in placed if n.target is not operator.getitem}
+    stated.update((n, placement(n)) for n in nodes if n.op == "placeholder")
+    replaced = []
+
+    def transfer(node, held):
+        want = stated[node] if node in stated else held[0][2][0]
+        if not isinstance(want, str):
+            dimension, processors, units = want
+            want = dimension, counts(shape(node)[dimension], units, len(processors)), processors
+        with graph.inserting_before(placed[0] if node.op == "placeholder" else node):
+            value = ((None, None, (None,), [node]) if node.op == "placeholder" else
+                     partitioned(graph, node, held, want, replaced))
+            if not isinstance(want, str):
+                value = *want, reshard(graph, value, *want)
+        return value
+
+    mesh_graph.forward(nodes, operands, transfer)
+    for node in reversed(replaced):
+        graph.erase_node(node)
     placed = [n for n in graph.nodes if n.op != "placeholder"]
-    for node in placed:
-        getitem = node.target is operator.getitem
-        node.meta["processor"] = node.args[0].meta["processor"] if getitem else placement(node)
     channels = 0
     for node in placed:
         channels += insert_send_recv(graph, node, channels)

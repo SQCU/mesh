@@ -248,6 +248,7 @@ def on(machine, devices):
 
 ONE = on(0, {"cpu": "cpu"})
 TWO, THREE = on(0, {"p0": "cpu", "p1": "cpu"}), on(0, {"p0": "cpu", "p1": "cpu", "p2": "cpu"})
+SHARDS = ("p0", "p1")
 MIXED = on(0, {"cpu": "cpu", "gpu": "mps"})
 BATCH = {"x": {0: torch.export.Dim("batch", min=2, max=64)}}
 EXPERTS = {"experts.0": "p1", "experts.1": "p1", "experts.2": "p2", "experts.3": "p2"}
@@ -255,6 +256,23 @@ EXPERTS_MIXED = {"experts.0": "gpu", "experts.1": "gpu"}
 POSITIVE = torch.full((2, 8), 0.5)
 torch.manual_seed(0)
 GATHER = [(r(4, 8), index(4, 3, 8)), (r(4, 8), index(4, 3, 8))]
+
+os.environ.update(DIM="32", HEADS="4", FFN="48", LAYERS="2", BATCH="2", SEQ="8")
+sys.path.append(str(HERE.parent / "examples"))
+import tp
+
+
+def megatron_with(stated):
+    megatron = tp.placement(SHARDS)
+
+    def placement(node):
+        value = node.meta.get("val")
+        shape = tuple(value.shape) if isinstance(value, torch.Tensor) else None
+        return stated.get((node.target, shape)) or megatron(node)
+    return placement
+
+
+BMM = torch.ops.aten.bmm.default
 
 CASES = [
     ("mlp", MLP, [(r(5, 16),)], {}),
@@ -305,6 +323,18 @@ CASES = [
     ("map higher-order operator", Mapped, [(r(3, 4),)], {"rejected": True}),
     ("python branch on tensor data", PythonBranch, [(r(3, 4),)], {"rejected": True}),
     ("input mutation", MutatesInput, [(r(3, 4),)], {"rejected": True}),
+    ("megatron | 2 shards", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "placement": lambda: tp.placement(SHARDS)}),
+    ("megatron | 2 shards, units 1:3", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "placement": lambda: tp.placement(SHARDS, (1, 3))}),
+    ("megatron | 2 shards, cpu/mps", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": on(0, {"p0": "cpu", "p1": "mps"}), "sharded": True, "needs_mps": True,
+      "placement": lambda: tp.placement(SHARDS)}),
+    ("megatron | sum onto the sequence", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True,
+      "placement": lambda: megatron_with({(BMM, (2, 8, 32)): (1, SHARDS, (1, 3))})}),
+    ("megatron | scores whole on p1", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "placement": lambda: megatron_with({(BMM, (8, 8, 8)): "p1"})}),
 ]
 SAVE = {"mlp": "mlp", "python for, 4 static trips": "static_for",
         "mixture of experts | 3 processors": "moe_three_processors",
@@ -313,9 +343,9 @@ PATHS = ("fx direct", "inductor", "archive", "fx pass")
 FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 processors",
                "buffer mutation x3 | 2 processors",
                "solve | 3 processors round-robin", "mixture of experts | 3 processors",
-               "conv | conv on mps, rest cpu")
-KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors")
-OPTION_FLAGS = ("rejected", "needs_mps", "expect_on")
+               "conv | conv on mps, rest cpu", "megatron | 2 shards")
+KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded")
 
 
 def errors(reference, got):
@@ -335,7 +365,7 @@ def call_nodes(graph):
     return [n for n in graph.nodes if n.op == "call_function"]
 
 
-def check_ir(scheduled, expect_on=None):
+def check_ir(scheduled, expect_on=None, sharded=False):
     exported = scheduled.exported.graph_module.graph
     assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
     original = {n.name: n.target for n in call_nodes(exported)}
@@ -368,19 +398,20 @@ def check_ir(scheduled, expect_on=None):
                 if any(path == key_ or path.startswith(key_ + ".") for path in stack):
                     assert processor == wanted, f"{node.name} of {key_} is on {processor}, not {wanted}"
 
-    assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
-    where["output"] = scheduled.output_processor
-    pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
-             if where[u.name] != where[n.name]}
     devices, machines, host = scheduled.devices, scheduled.machines, torch.device("cpu")
     crossing = sum(devices[sender[c]] != devices[reader[c]] if machines[sender[c]] == machines[reader[c]]
                    else (devices[sender[c]] != host) + (devices[reader[c]] != host) for c in sender)
-    copies = [n for n in added if n.target is TO_COPY]
+    copies = [n for n in added if n.target is TO_COPY and "device" in n.kwargs]
     assert sender.keys() == reader.keys() == set(range(scheduled.channels)), "channel numbering"
-    assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
     assert all(sender[c] != reader[c] for c in sender), "a send and its recv on one processor"
     assert len(copies) == crossing, "device copies differ from cross-device channels"
-    assert len(added) == 2 * scheduled.channels + len(copies), "a node that export did not produce"
+    if not sharded:
+        assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
+        where["output"] = scheduled.output_processor
+        pairs = {(n.name, where[u.name]) for n in call_nodes(exported) for u in n.users
+                 if where[u.name] != where[n.name]}
+        assert len(pairs) == scheduled.channels, "channels differ from (value, reading processor) pairs"
+        assert len(added) == 2 * scheduled.channels + len(copies), "a node that export did not produce"
     if len(scheduled.modules) == 1:
         assert not added and not Program(scheduled).argument_queues, "1-processor program differs"
 
@@ -522,8 +553,9 @@ def build(name, machines=None):
 
 def run_case(name, with_inductor):
     module, calls, program = build(name)
-    expect_on = next(case for case in CASES if case[0] == name)[3].get("expect_on")
-    (operators, copies), channels = check_ir(program, expect_on), program.channels
+    options = next(case for case in CASES if case[0] == name)[3]
+    (operators, copies), channels = (check_ir(program, options.get("expect_on"), options.get("sharded")),
+                                     program.channels)
     if name in SAVE:
         save_for_review(SAVE[name], program)
     results, dynamo, breaks = {}, "", 0
@@ -742,7 +774,7 @@ def between(machines, with_inductor):
             print(f"{name:34} SKIP (no mps)")
             continue
         module, calls, scheduled = build(name, machines)
-        check_ir(scheduled, options.get("expect_on"))
+        check_ir(scheduled, options.get("expect_on"), options.get("sharded"))
         cells = []
         for path, make in variants(scheduled, with_inductor).items():
             if make is None:
@@ -857,7 +889,8 @@ def main():
     print(f"torch {torch.__version__}  mps={MPS}  tolerance={TOLERANCE}")
     print("max relative error against eager, per execution path of the same scheduled IR;")
     print("nodes = call_function nodes of the exported graph; chan = channels, each one send and")
-    print("one recv; copy = device copies; the scheduled graphs hold exactly nodes + 2 chan + copy:")
+    print("one recv; copy = device copies; the scheduled graphs hold exactly nodes + 2 chan + copy,")
+    print("except where a placement shards (the last cases), whose graphs hold each shard's nodes:")
     print(f"{'case':34} {'nodes':>5} {'chan':>4} {'copy':>4} " + " ".join(f"{p:>11}" for p in PATHS)
           + "  torch.compile")
     for name, _, _, options in CASES:
