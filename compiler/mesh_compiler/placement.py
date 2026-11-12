@@ -348,12 +348,14 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     if dimension not in (None, held) and sizes != STRIPED and (whole := shape(nodes[0])[dimension]) > sum(sizes):
         return folded(graph, (held, extents, holders, nodes), dimension, whole // sum(sizes),
                       [sum(sizes)] * len(nodes), dimension, sizes, processors, exact)
-    wide = not exact and dimension is not None and uneven(sizes)
+    wide, kind = not exact and dimension is not None and uneven(sizes), "alltoall"
     if held == dimension is not None:
         extent = sum(shape(n)[held] for n in nodes)
         have, take = ranges(extents, extent, len(nodes)), ranges(sizes, extent, len(processors))
         met, given = overlaps(have, take)
         arrays = tuple(zip(arrayed(have), arrayed(take)))
+        if have == take:
+            kind, arrays = "permute", arrayed(have)
     if held == dimension is not None and STRIPED in (extents, sizes):
         arrived, exchange = [], None
         for j, processor in enumerate(processors):
@@ -365,8 +367,8 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
                     piece = call(graph, SLICE, (node, held, first, last + 1, max(1, (last - first) // max(
                         1, len(common) - 1))), holder or processor)
                     exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
-                    piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
-                    piece.meta.setdefault("blocks", {})[processor] = held, (i, j), *arrays
+                    piece.meta.setdefault("collectives", {})[processor] = kind, exchange
+                    piece.meta.setdefault("blocks", {})[processor] = held, (i, turn(holders, processors, j)), *arrays
                     pieces.append((wanted.index(common[0]), wanted.index(common[-1]), len(common), piece))
             value = pieces[0][3] if pieces else call(graph, ZEROS, (nodes[0], [
                 0 if d == held else n for d, n in enumerate(shape(nodes[0]))]), processor)
@@ -399,7 +401,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             pieces.append(node)
             sources.append(i)
         if held == dimension is not None:
-            blocks = [(held, (i, j), *arrays) for i in sources]
+            blocks = [(held, (i, turn(holders, processors, j)), *arrays) for i in sources]
         elif dimension is None:
             joined = tuple(shape(piece)[held] for piece in pieces) if held is not None else ()
             placed = (tuple(range(len(pieces))) if extents == STRIPED else
@@ -411,12 +413,17 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             piece.meta.setdefault("blocks", {})[processor] = block
             if None not in (held, dimension):
                 exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
-                piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
+                piece.meta.setdefault("collectives", {})[processor] = kind, exchange
         arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
                        if extents == STRIPED else call(graph, CAT, (pieces, held), processor))
         if wide and shape(arrived[-1])[dimension] < most(sizes):
             arrived[-1] = padded(graph, arrived[-1], dimension, sizes, j, processor)
     return arrived
+
+
+# Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.5; design/unequal-shards-change-request.md item 9
+def turn(holders, processors, j):
+    return holders.index(processors[j]) if processors[j] in holders else j
 
 
 def overlaps(have, take):
@@ -799,12 +806,18 @@ def partitioned(graph, node, held, want, replaced):
         columns[0] = [plain(graph, shard, shard.meta["processor"]) if {d % len(out) for d in node.args[1]} & set(
             shard.meta.get("order", {})) else shard for shard in columns[0]]
     turned = node.target is FLIP and along in [d % len(out) for d in node.args[1]]
-    if turned:
-        columns[0] = ([padded(graph, own(graph, columns[0][(out[along] - 1 - j) % len(processors)], along, sizes, (
-            out[along] - 1 - j) % len(processors)), along, sizes, j, processors[j], True)
-            for j in range(len(processors))] if sizes == STRIPED else [padded(graph, n, along, sizes, j, processors[j], True) for j, n in
-                                                enumerate(reshard(graph, (along, sizes, processors, columns[0]), along,
-                                                                  sizes[::-1], processors[::-1], True)[::-1])])
+    if turned and sizes == STRIPED:
+        stripes = [own(graph, columns[0][s], along, sizes, s) for s in (
+            (out[along] - 1 - j) % len(processors) for j in range(len(processors)))]
+        for j, stripe in enumerate(stripes):
+            source = (out[along] - 1 - j) % len(processors)
+            stripe.meta.setdefault("collectives", {})[processors[j]] = "permute", f"{node.name}:{along}"
+            stripe.meta.setdefault("blocks", {})[processors[j]] = along, (source, j), *arrayed(
+                ranges(sizes, out[along], len(processors)))
+        columns[0] = [padded(graph, n, along, sizes, j, processors[j], True) for j, n in enumerate(stripes)]
+    elif turned:
+        columns[0] = [padded(graph, n, along, sizes, j, processors[j], True) for j, n in enumerate(reshard(
+            graph, (along, sizes, processors, columns[0]), along, sizes[::-1], processors[::-1], True)[::-1])]
     exact = [[own(graph, n, v[0], v[1], k) for k, n in enumerate(v[3])] if join else None
              for v, join in zip(held, joined)]
     for j, processor in enumerate(processors):
