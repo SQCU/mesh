@@ -459,6 +459,13 @@ class Lowering:
             self.storages.pop()
         return self.view(form) if isinstance(form, (Fused, Product)) else form
 
+    # torch 2.15 aten/src/ATen/native/BatchLinearAlgebra.cpp, linalg_solve_ex_out; LAPACK, sgesv, B and A
+    def matrices(self, value):
+        shape, stride = tuple(value.shape), tuple(value.stride())
+        if len(shape) > 1 and stride[:-2] == packed(shape)[:-2] and stride[-2:] in ((shape[-1], 1), (1, shape[-2])):
+            return self.strided(value.dtype, shape, stride)
+        return self.fresh(value.dtype, shape)
+
     def strided(self, dtype, shape, stride, kind=HELD, position=None):
         self.storages.append(Storage(kind, dtype, mesh_graph.extent(shape, stride), position))
         return View(len(self.storages) - 1, dtype, tuple(shape), tuple(stride), 0)
@@ -1263,33 +1270,37 @@ class Metal(Lowering):
             self.missing.append(f"{node.target} of {values[0].dtype} or with options")
             return None
         n, lead = left.shape[-1], left.shape[:-2]
-        k = 1 if len(right.shape) == len(left.shape) - 1 else right.shape[-1]
-        made = [self.fresh(v.dtype, v.shape) for v in values]
+        vector = len(right.shape) == len(left.shape) - 1
+        k = 1 if vector else right.shape[-1]
+        made = [self.fresh(values[0].dtype, values[0].shape) if vector else self.matrices(values[0]),
+                self.matrices(values[1]), *(self.fresh(v.dtype, v.shape) for v in values[2:])]
         bind = Bound()
         lines, names = unravel("p.x", lead, "r")
         x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
             (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
-        swap = "for (uint j = 0; j < {w}; j++) {{ float t = {v}[c * {w} + j]; {v}[c * {w} + j] = {v}[at * {w} + j]; " \
-               "{v}[at * {w} + j] = t; }}"
+        A, X = (lambda i, j, v=v, steps=steps: f"{v}[({i}) * {steps[0]} + ({j}) * {steps[1]}]"
+                for v, steps in ((a, made[1].stride[-2:]), (x, (1, 0) if vector else made[0].stride[-2:])))
+        swap = lambda at, w: f"for (uint j = 0; j < {w}; j++) {{ float t = {at('c', 'j')}; " \
+                             f"{at('c', 'j')} = {at('at', 'j')}; {at('at', 'j')} = t; }}"
         lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{a}[i * {n} + j] = {left.read(bind, names + ['i', 'j'])};",
+                  f"{A('i', 'j')} = {left.read(bind, names + ['i', 'j'])};",
                   f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
-                  f"{x}[i * {k} + j] = {right.read(bind, names + ['i', 'j'][:len(right.shape) - len(names)])};",
+                  f"{X('i', 'j')} = {right.read(bind, names + ['i', 'j'][:len(right.shape) - len(names)])};",
                   "int failed = 0;", f"for (uint c = 0; c < {n}; c++) {{",
-                  f"    uint at = c; float best = abs({a}[c * {n} + c]);",
-                  f"    for (uint i = c + 1; i < {n}; i++) if (abs({a}[i * {n} + c]) > best) "
-                  f"{{ best = abs({a}[i * {n} + c]); at = i; }}",
+                  f"    uint at = c; float best = abs({A('c', 'c')});",
+                  f"    for (uint i = c + 1; i < {n}; i++) if (abs({A('i', 'c')}) > best) "
+                  f"{{ best = abs({A('i', 'c')}); at = i; }}",
                   f"    {pivots}[c] = at + 1;",
                   "    if (best == 0) { failed = failed ? failed : int(c + 1); continue; }",
-                  f"    if (at != c) {{ {swap.format(v=a, w=n)} {swap.format(v=x, w=k)} }}",
+                  f"    if (at != c) {{ {swap(A, n)} {swap(X, k)} }}",
                   f"    for (uint i = c + 1; i < {n}; i++) {{",
-                  f"        float f = {a}[i * {n} + c] / {a}[c * {n} + c]; {a}[i * {n} + c] = f;",
-                  f"        for (uint j = c + 1; j < {n}; j++) {a}[i * {n} + j] -= f * {a}[c * {n} + j];",
-                  f"        for (uint j = 0; j < {k}; j++) {x}[i * {k} + j] -= f * {x}[c * {k} + j];", "    }", "}",
+                  f"        float f = {A('i', 'c')} / {A('c', 'c')}; {A('i', 'c')} = f;",
+                  f"        for (uint j = c + 1; j < {n}; j++) {A('i', 'j')} -= f * {A('c', 'j')};",
+                  f"        for (uint j = 0; j < {k}; j++) {X('i', 'j')} -= f * {X('c', 'j')};", "    }", "}",
                   f"for (uint q = {n}; q-- > 0;) for (uint j = 0; j < {k}; j++) {{",
-                  f"    float s = {x}[q * {k} + j];",
-                  f"    for (uint c = q + 1; c < {n}; c++) s -= {a}[q * {n} + c] * {x}[c * {k} + j];",
-                  f"    {x}[q * {k} + j] = s / {a}[q * {n} + q];", "}", f"{info}[0] = failed;"]
+                  f"    float s = {X('q', 'j')};",
+                  f"    for (uint c = q + 1; c < {n}; c++) s -= {A('q', 'c')} * {X('c', 'j')};",
+                  f"    {X('q', 'j')} = s / {A('q', 'q')};", "}", f"{info}[0] = failed;"]
         self.dispatch(bind, lines, (math.prod(lead), 1, 1))
         return made
 
@@ -1502,19 +1513,21 @@ class Native(Lowering):
         n, lead = left.shape[-1], left.shape[:-2]
         vector = len(right.shape) == len(left.shape) - 1
         k, batch = 1 if vector else right.shape[-1], math.prod(lead)
-        made = [self.fresh(v.dtype, v.shape) for v in values]
+        made = [self.fresh(values[0].dtype, values[0].shape) if vector else self.matrices(values[0]),
+                self.matrices(values[1]), *(self.fresh(v.dtype, v.shape) for v in values[2:])]
         bind = Bound()
         lines, names = unravel("p.x", lead, "r")
         x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
             (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
-        b = x if k == 1 else self.scratch(bind, lines, "b", values[0].dtype, batch, n * k)
+        columns = [n == 1 or view.stride[-2] == 1 for view in made[:2]]
+        b = x if vector or columns[0] else self.scratch(bind, lines, "b", values[0].dtype, batch, n * k)
         self.columns(bind, lines, left, a, n, n, names)
         self.columns(bind, lines, right, b, n, k, names)
-        lines += [f"int n = {n}, k = {k};", f"{letter}gesv_(&n, &k, {a}, &n, {pivots}, {b}, &n, {info});",
-                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < i; j++) "
-                  f"std::swap({a}[i * {n} + j], {a}[j * {n} + i]);"]
+        lines += [f"int n = {n}, k = {k};", f"{letter}gesv_(&n, &k, {a}, &n, {pivots}, {b}, &n, {info});"]
+        lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < i; j++) "
+                  f"std::swap({a}[i * {n} + j], {a}[j * {n} + i]);"] * (not columns[1])
         lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
-                  f"{x}[i * {k} + j] = {b}[j * {n} + i];"] * (k != 1)
+                  f"{x}[i * {k} + j] = {b}[j * {n} + i];"] * (b is not x)
         self.dispatch(bind, lines, (batch, 1, 1))
         return made
 
