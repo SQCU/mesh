@@ -35,20 +35,20 @@ def git(repo, *args):
     return subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True).stdout.strip()
 
 
-def new_commits(repo):
-    head = git(repo, 'rev-parse', 'HEAD')
+def marker(repo):
     path = os.path.join(git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'), SEEN)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'a+') as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.seek(0)
-        seen = f.read().strip()
-        f.seek(0)
-        f.truncate()
-        f.write(head)
-    if not seen or seen == head or not git(repo, 'rev-parse', '--verify', '--quiet', seen + '^{commit}'):
+    return path
+
+
+def new_commits(repo):
+    head = git(repo, 'rev-parse', 'HEAD')
+    path = marker(repo)
+    seen = open(path).read().strip() if os.path.exists(path) else ''
+    if not seen or not git(repo, 'rev-parse', '--verify', '--quiet', seen + '^{commit}'):
+        open(path, 'w').write(head)
         return []
-    return git(repo, 'rev-list', '--reverse', '--max-count=50', f'{seen}..{head}').split()
+    return git(repo, 'rev-list', '--reverse', f'{seen}..{head}').split()
 
 
 def measured(repo, sha):
@@ -87,7 +87,8 @@ def main():
                 asserted, tested = measured(repo, sha)
             except (RuntimeError, OSError, subprocess.SubprocessError) as error:
                 messages.append(f'Assertion and test measurement of {sha[:10]} in {repo} was not made: {error}')
-                continue
+                break
+            open(marker(repo), 'w').write(sha)
             if asserted or tested:
                 found = ' and '.join(name for name, present in (('an assertion', asserted), ('a test', tested)) if present)
                 count = logged(repo, sha, asserted, tested)
