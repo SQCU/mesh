@@ -19,16 +19,21 @@ The operator, 2026-11-12:
 - The stages are those of [data-flow.md](data-flow.md) and [the-compiler.md](the-compiler.md):
   `compile_module(module, args, processors, placement, cost) -> Scheduled` is `export -> place -> on_devices ->
   schedule -> argument_buffers`; `lower(scheduled)`; `Program(scheduled, functions)`; `save` and `load`.
-- Five sections are not stages of that flow. No document assigns files to them: the assignment below is Claude's, made
-  so that a commit's changed files say which clauses it is read against, and it follows where each section's clauses
-  say they are effected.
+- Five sections are not stages of that flow. A commit's changed files say which sections it is read against:
   - graph module: `rdma/mesh_graph.py`, `rdma/mesh-graph.h` and `rdma/mesh-graph.c`, which `place`, `schedule` and
-    `lower` call with their operands.
-  - bridge: the bridge process and the transport, `rdma/*.c` and `rdma/*.h` other than the graph module, and
-    `compiler/mesh_compiler/bridge.py`; it takes the page lists `schedule` produces, and `Program` reaches it.
+    `lower` call with their operands. compilation-composition-change-request.md:153: "`rdma/mesh_graph.py` and
+    `rdma/mesh-graph.{h,c}` define the shared graph functions, which take the caller's operands."
+  - bridge: the bridge process and the transport, `rdma/*.c` and `rdma/*.h` other than the graph module and
+    `rdma/mesh-collective.c`, and `compiler/mesh_compiler/bridge.py`; it takes the page lists `schedule` produces,
+    and `Program` reaches it. No document assigns these files; the assignment is Claude's, made from where the
+    section's clauses say they are effected.
   - caller: `examples/`, `compiler/samples.py`, launchers and measurements, which give `compile_module` its operands.
+    The assignment is Claude's, as the bridge's is.
   - machines: the condition of machines and services, which no file of either repository holds.
-  - documents: `design/`, `docs/` and the records under metal-microbench `output_data/`.
+  - documents: `design/`, `docs/` and the records under metal-microbench `output_data/`. The assignment is Claude's.
+- `rdma/mesh-collective.c`, which holds `mesh_plan`, is read against the schedule stage.
+  disjoint-pages-change-request.md:383-384: "**Schedule.** `mesh_plan` (mesh `rdma/mesh-collective.c`) takes the
+  program's values and its dependence graph and writes the static schedule".
 - "no stage named" holds the items whose clauses place them in a flow that is none of the above, each with the words
   that say so. They are not restated against [data-flow.md](data-flow.md): the operator's 2026-11-10 21:02 turn above
   asks for that, and it is outstanding for them.

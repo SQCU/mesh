@@ -225,7 +225,7 @@ Withdrawn:
 
 ## [aot-compilation-change-request.md](aot-compilation-change-request.md)
 
-Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 35 items outstanding, 76 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 36 items outstanding, 75 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -336,6 +336,9 @@ Outstanding:
   - A6 produced by, consumed by (the lists): outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
     `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 03c18ada). Mesh
     81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - A5 data structure and algorithm: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 3e2c97b3). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
 
 Covered:
 
@@ -359,7 +362,6 @@ Covered:
   - A4 produced by, consumed by (mesh_plan's types): covered [2026-11-10, mesh 60103676]
   - A4 which nodes hold a function's static schedule: covered [2026-11-10, mesh 5889d898]
   - A4 a node to which the placement operand maps no device (mesh_plan's part): covered [2026-11-10, mesh 5889d898]
-  - A5 data structure and algorithm: covered [2026-11-10, mesh 5889d898]
   - A6 data structure and algorithm: covered [2026-11-10, mesh 5889d898]
   - A7 stage: covered [2026-11-11, mesh 1a3cfe60]
   - A7 one order; total order multicast by a fixed sequencer (primitives, properties, steps of Fig. 5): covered
@@ -836,7 +838,7 @@ Covered:
 
 ## [disjoint-pages-change-request.md](disjoint-pages-change-request.md)
 
-Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 33 items outstanding, 41 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 9aa74ed1, metal-microbench 0b692ed8]: 35 items outstanding, 39 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -926,6 +928,12 @@ Outstanding:
   - C3.7 "Written by, read by": outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
     `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 03c18ada). Mesh
     81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - C3.3 compile-time bound: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 3e2c97b3). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
+  - C3.7 algorithm 3: outstanding [2026-11-12, mesh a7e2de47]. Read at that commit, the clause did not hold in the
+    `compile_module` chain: `compiler/mesh_compiler/bridge.py` wrote the records itself (review of 3e2c97b3). Mesh
+    81c8e9da has the schedule stage call `mesh_plan`; the clause is not yet read against it.
 
 Covered:
 
@@ -942,7 +950,6 @@ Covered:
   - C3.3 algorithm 1 (L): covered [2026-11-04, mesh baede218]
   - C3.3 algorithm 2 (u): covered [2026-11-04, mesh baede218]
   - C3.3 algorithm 3 (copies, t mod u): covered [2026-11-04, mesh baede218]
-  - C3.3 compile-time bound: covered [2026-11-10, mesh 5889d898]
   - C3.4 (a) no claim: covered [2026-11-05, mesh c6c9c77f]
   - C3.4 (c) deferred reclamation: covered [2026-11-08, mesh b880b808]
   - C3.4 "Written by, read by": covered [2026-11-08, mesh b880b808]
@@ -951,7 +958,6 @@ Covered:
   - C3.7 data structures: covered [2026-11-08, mesh 7517cfc8]
   - C3.7 algorithm 1: covered [2026-11-04, mesh 04b5e561]
   - C3.7 algorithm 2: covered [2026-11-04, mesh baede218]
-  - C3.7 algorithm 3: covered [2026-11-10, mesh 5889d898]
   - C3.7 algorithm 4: covered [2026-11-04, mesh 04b5e561]
   - C3.7 algorithm 5: covered [2026-11-05, mesh 876b1d69]
   - C3.7 data pages: covered [2026-11-04, mesh baede218]
