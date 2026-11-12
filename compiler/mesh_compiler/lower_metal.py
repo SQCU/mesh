@@ -27,7 +27,7 @@ STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
 PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
               "using namespace mpp::tensor_ops;\n")
 REFERENCE = pathlib.Path(torch.__file__).parent / "include/c10/metal/special_math.h"
-PIPELINES = {}
+PIPELINES, HOST = {}, torch.device("cpu")
 
 POINTWISE = {
     ATEN.add.Tensor: "({T}({0}) + {T}({1}))", ATEN.add.Scalar: "({T}({0}) + {T}({1}))",
@@ -211,7 +211,8 @@ class Lowering:
             return torch.device(node.kwargs["device"]).type
         if node.target is operator.getitem:
             return self.places[node.args[0]]
-        return "cpu" if node.target is RECV and node.args[0] in self.carried else self.device.type
+        host = node.op == "placeholder" or node.target is RECV and node.args[0] in self.carried
+        return HOST.type if host else self.device.type
 
     def arrived(self, kind, node, position=None):
         value = node.meta["val"]
@@ -506,7 +507,7 @@ class Lowering:
             view = View(len(self.storages) - 1, view.dtype, view.shape, tuple(value.stride()), 0)
             self.storages[-1].count = 1 + sum((n - 1) * s for n, s in zip(view.shape, view.stride))
             self.store(held, view)
-        elif device != "cpu" and self.storages[view.storage].device == "cpu":
+        elif device != "cpu" and self.storages[view.storage].device == "cpu" and all(view.shape):
             view = self.view(Fused(view.dtype, view.shape, lambda bind, index, t: held.read(bind, index)))
         storage = self.storages[view.storage]
         storage.kind = RESULT if storage.kind == HELD else storage.kind
@@ -622,6 +623,7 @@ class Lowering:
             for view in views:
                 LIB.mesh_metal4_release(view)
             return tuple(tensor(r) if isinstance(r, Escape) else r for r in results)
+        run.device = HOST
         weakref.finalize(run, lambda: [LIB.mesh_metal4_release(made) for made in (*held.values(), stream)])
         return run
 

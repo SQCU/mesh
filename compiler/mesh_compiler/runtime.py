@@ -11,9 +11,10 @@ from . import ir
 
 class Program:
     def __init__(self, scheduled, functions=None):
-        self.exported, self.devices = scheduled.exported, scheduled.devices
-        self.output_processor = scheduled.output_processor
+        self.exported, self.output_processor = scheduled.exported, scheduled.output_processor
         self.functions = functions or scheduled.modules
+        self.devices = {processor: getattr(self.functions[processor], "device", device)
+                        for processor, device in scheduled.devices.items()}
         self.feedforward = set(scheduled.feedforward)
         self.channels, self.received = [SimpleQueue() for _ in range(scheduled.channels)], {}
         machines = set(scheduled.machines.values())
