@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# design/aot-compilation-change-request.md A2 and A4; Lepikhin et al., GShard, arXiv:2006.16668, Algorithm 1
+# design/the-compiler.md, order 3; Lepikhin et al., GShard, arXiv:2006.16668, Algorithm 1
 import os
 
 import torch
 import torch.nn.functional as F
+
+from tp import arguments, execute
 
 
 DIM, FFN, EXPERTS, TOP_K, TOKENS = (int(os.environ.get(k, v)) for k, v in
@@ -68,36 +70,28 @@ class MoE(torch.nn.Module):
         return result.flatten(0, 1)[:TOKENS]
 
 
-def placement(nodes, module):
-    def choose(gm, examples):
-        import mesh_compile as mesh
-        splits, packed = {}, {}
-        for node in gm.graph.nodes:
-            if node.op == 'placeholder':
-                splits[node.name] = (0, -1, -1)
-            elif node.op == 'get_attr' and node.target.startswith('experts.'):
-                splits[node.target] = (0, -1, -1)
-            value = node.meta.get('val')
-            if isinstance(value, torch.Tensor) and tuple(value.shape) == (EXPERTS, len(nodes), module.slots, DIM):
-                paths = {path for path, _ in node.meta.get('nn_module_stack', {}).values()}
-                for name in ('dispatch', 'experts'):
-                    if name in paths:
-                        packed[name] = node.name
-        splits.update({packed['dispatch']: (-1, 0, -1, -1), packed['experts']: (0, -1, -1, -1)})
-        return mesh.Placement(list(range(len(nodes))), nodes, splits)
+# design/unequal-shards-change-request.md item 9
+def placement(processors, slots):
+    def choose(node):
+        if node.name == 'x' or node.name.startswith('p_experts_'):
+            return 0, processors, None
+        value = node.meta.get('val')
+        if isinstance(value, torch.Tensor) and tuple(value.shape) == (EXPERTS, len(processors), slots, DIM):
+            modules = [{path for path, _ in n.meta.get('nn_module_stack', {}).values()} for n in (node, *node.users)]
+            for dimension, name in enumerate(('dispatch', 'experts')):
+                if name in modules[0] and not any(name in read for read in modules[1:]):
+                    return dimension, processors, None
+        return processors[0]
     return choose
 
 
 def main():
-    import mesh_compile as mesh
-    from tp import Calls, arguments, execute
-    args = arguments('Compiled capacity-limited top-k routing, expert all-to-all, batched FFN and weighted combine.')
+    args = arguments('Capacity-limited top-k routing, expert all-to-all, batched FFN and weighted combine, the tokens '
+                     'and the experts split over processors.')
     torch.manual_seed(0)
-    model = MoE(len(args.nodes))
-    x = torch.randn(len(args.nodes), model.rows, DIM) / DIM ** 0.5
-    block = None if args.load else Calls(mesh.Function(model.to(args.device), placement(args.nodes, model), mesh.unit,
-                                                       device=args.device))
-    return execute(block, (x,), args)
+    model = MoE(len(args.machines)).eval()
+    x = torch.randn(len(args.machines), model.rows, DIM) / DIM ** 0.5
+    return execute(model, (x,), lambda processors: placement(processors, model.slots), args)
 
 
 if __name__ == '__main__':
