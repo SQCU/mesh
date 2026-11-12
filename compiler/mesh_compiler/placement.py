@@ -31,8 +31,7 @@ SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
 MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
           ATEN.full_like.default, ATEN.where.self}
 STRIPED = "striped"
-VIEWS = {EXPAND, RESHAPE, SLICE, VIEW, ATEN.alias.default, ATEN.permute.default, ATEN.select.int, ATEN.squeeze.dims,
-         ATEN.unsqueeze.default}
+CLONE = ATEN.clone.default
 
 
 def operands(node):
@@ -46,15 +45,58 @@ def shape(node):
     return tuple((value[0] if isinstance(value, (tuple, list)) else value).shape)
 
 
+# design/problems-of-14b9a757-change-request.md item 6; torch 2.15 torch/_tensor_docs.py view, reshape and contiguous
+def viewable(value, sizes):
+    try:
+        value.view(sizes)
+    except (RuntimeError, ValueError):
+        return False
+    return True
+
+
 def evaluated(node, processor):
     arguments = map_arg((node.args, node.kwargs), lambda n: n.meta["val"])
     with detect_fake_mode(arguments):
+        if node.target in (RESHAPE, VIEW) and not viewable(*arguments[0]):
+            with node.graph.inserting_before(node):
+                copied = call(node.graph, CLONE, node.args[:1], processor, memory_format=torch.contiguous_format)
+            node.args = (copied, *node.args[1:])
+            return evaluated(node, processor)
         node.meta.update(processor=processor, val=node.target(*arguments[0], **arguments[1]))
     return node
 
 
-def call(graph, target, arguments, processor):
-    return evaluated(graph.call_function(target, arguments), processor)
+def call(graph, target, arguments, processor, **kwargs):
+    return evaluated(graph.call_function(target, arguments, kwargs), processor)
+
+
+# design/problems-of-14b9a757-change-request.md items 3 and 6; torch/csrc/jit/frontend/function_schema_parser.cpp
+# alias_info
+def aliasing(node):
+    returns = getattr(getattr(node.target, "_schema", None), "returns", ())
+    return node.op == "call_function" and bool(returns) and returns[0].alias_info is not None and not returns[
+        0].alias_info.is_write
+
+
+def view(node):
+    made = node.args[0] if node.target is operator.getitem else node
+    if not aliasing(made):
+        return None
+    value, held = node.meta["val"], made.args[0]
+    return held if all(torch._C._is_alias_of(v, held.meta["val"]) for v in (
+        value if isinstance(value, (tuple, list)) else [value])) else None
+
+
+def based(node, read):
+    value = node.meta.get("val")
+    if not read:
+        return node, value.storage_offset() if isinstance(value, torch.Tensor) else 0
+    (base, first), = read
+    if isinstance(value, torch.Tensor):
+        node.meta["view"] = base.name, value.storage_offset() - first, tuple(value.shape), tuple(value.stride())
+        if "state" in base.meta:
+            node.meta["invariant"] = base.meta["state"], *node.meta["view"][1:]
+    return base, first
 
 
 # design/unequal-shards-change-request.md items 1, 13 and 15
@@ -353,17 +395,6 @@ def accumulated(node, shapes, out):
     return [list(range(len(out))), summed, summed + list(range(1, len(out)))]
 
 
-# design/problems-of-14b9a757-change-request.md item 6, step 1
-def viewable(node):
-    value = node.args[0].meta["val"]
-    with value.fake_mode:
-        try:
-            value.view(node.args[1])
-        except RuntimeError:
-            return False
-    return True
-
-
 # design/aot-compilation-change-request.md A2 and A4
 def replicated(node, shapes, out):
     return [[None] * len(s) for s in shapes]
@@ -623,13 +654,15 @@ def place(graph_module, placement):
     mesh_graph.forward(nodes, operands, transfer)
     for node in reversed(replaced):
         graph.erase_node(node)
+    # design/problems-of-14b9a757-change-request.md item 6
+    for node in list(graph.nodes):
+        if aliasing(node):
+            evaluated(node, node.meta["processor"])
+        elif node.target is operator.getitem and aliasing(node.args[0]):
+            node.meta["val"] = node.args[0].meta["val"][node.args[1]]
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
-        "state" in n.meta if n.op == "placeholder" else n.target in VIEWS and all(read) and (
-            n.target is not RESHAPE or viewable(n))))
-    for node, held in invariant.items():
-        if held and node.op == "call_function":
-            node.meta["invariant"] = True
+        "state" in n.meta if n.op == "placeholder" else view(n) is not None and all(read)))
     onto = mesh_graph.replicas(
         [n for n in graph.nodes if n.op == "call_function"], lambda n: list(n.users),
         lambda n: invariant[n] or not any(
@@ -650,6 +683,8 @@ def place(graph_module, placement):
         channels += insert_send_recv(graph, node, channels)
     for node in graph.nodes:
         node.meta.pop("blocks", None)
+    # design/problems-of-14b9a757-change-request.md item 3 and item 8, step 4
+    mesh_graph.forward(list(graph.nodes), lambda n: [n for n in [view(n)] if n is not None], based)
     graph_module.recompile()
     return graph_module, placed[-1].meta["processor"], channels
 

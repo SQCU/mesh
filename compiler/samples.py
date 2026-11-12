@@ -254,6 +254,15 @@ class Masked(nn.Module):
         return torch.where(keep, x, torch.zeros((), dtype=x.dtype)) + x.sum(1, keepdim=True)
 
 
+class Merged(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.table = nn.Parameter(torch.randn(6, 4))
+
+    def forward(self, x):
+        return x.view(12, 4).sin() + self.table[1:5].reshape(2, 8).sum()
+
+
 class MutatesInput(nn.Module):
     def forward(self, x):
         x.add_(1)
@@ -470,6 +479,9 @@ CASES = [
     ("flip of a sharded value | 3 stripes", Flipped, [(r(7, 4),)],
      {"processors": THREE, "sharded": True,
       "placement": lambda: lambda node: (0, tuple(THREE), "striped") if node.name == "x" else "p0"}),
+    ("view over a split dimension | copied", Merged, [(r(2, 6, 4),)],
+     {"processors": TWO, "sharded": True, "copied": 2,
+      "placement": lambda: lambda node: (1, SHARDS, None) if node.name == "x" else "p0"}),
     ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
      {"processors": TWO, "sharded": True, "placement": ragged_rows}),
     ("windows | rows 1:2:1, halos exchanged", Windows, [(r(2, 3, 23, 9),)],
@@ -518,7 +530,7 @@ FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 proc
                "conv | conv on mps, rest cpu", "megatron | 2 shards")
 METAL_SIGNED = ("mlp | all on mps", "conv | conv on mps, rest cpu", "megatron | 2 shards, cpu/mps")
 KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
-OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance", "copied")
 
 
 def errors(reference, got):
@@ -543,7 +555,7 @@ CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scat
 PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
           ATEN.new_zeros.default, ATEN.new_full.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
           ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
-          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self}
+          ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.default}
 BLOCK = ("dimension", "block", "counts", "displs")
 
 
@@ -579,6 +591,28 @@ def check_block(sent, arrived):
         sliced = len(counts) > 1 and value.target is SLICE and value.args[1] == dimension
         places.append(value.args[2] if sliced else 0)
     assert places == [displs[block]] * len(places), "a block is not placed at its displacement"
+
+
+# design/problems-of-14b9a757-change-request.md items 3, 6 and 8
+def check_views(scheduled, copied=0):
+    found = 0
+    for module in scheduled.modules.values():
+        names = {n.name: n for n in module.graph.nodes}
+        for node in call_nodes(module.graph):
+            if node.target in (ATEN.view.default, ATEN.reshape.default):
+                assert "view" in node.meta, f"{node.name} is no tensor view of its operand"
+                held = node.args[0]
+                found += (held.target is ATEN.clone.default and "of" not in held.meta and node.meta["view"][0] == held.name
+                          and held.kwargs.get("memory_format") is torch.contiguous_format)
+            if "view" in node.meta:
+                base, offset, sizes, strides = node.meta["view"]
+                value, whole = node.meta["val"], names[base].meta["val"]
+                assert "view" not in names[base].meta and sizes == tuple(value.shape), f"{node.name}: {node.meta['view']}"
+                last = offset + sum((n - 1) * s for n, s in zip(sizes, strides))
+                held = 1 + sum((n - 1) * s for n, s in zip(whole.shape, whole.stride()))
+                assert 0 <= offset and (not all(sizes) or last < held), f"{node.name} leaves {base}"
+                assert ("invariant" in node.meta) == ("state" in names[base].meta), f"{node.name}: a slice of state"
+    assert found >= copied, f"{found} of {copied} views that fail torch's condition are of a contiguous copy"
 
 
 def check_ir(scheduled, expect_on=None, sharded=False):
@@ -845,6 +879,7 @@ def run_case(name, with_inductor):
     options = next(case for case in CASES if case[0] == name)[3]
     (operators, copies), channels = (check_ir(program, options.get("expect_on"), options.get("sharded")),
                                      program.channels)
+    check_views(program, options.get("copied", 0))
     if name in SAVE:
         save_for_review(SAVE[name], program)
     results, dynamo, breaks = {}, "", 0
