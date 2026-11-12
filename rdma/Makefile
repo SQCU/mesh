@@ -1,4 +1,4 @@
-BINS = mesh-flow mesh-heartbeat mesh-stat libmesh.dylib libmesh-metal4.dylib
+BINS = mesh-flow mesh-heartbeat mesh-stat libmesh.dylib libmesh-metal4.dylib libmesh-coreml.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 MESH_PREFIX ?= /usr/local/mesh
 # the provider's own queue pairs on each device, which a link's budget leaves to it (tag pre-return-20261103
@@ -126,6 +126,8 @@ libmesh.dylib: mesh-dataflow.c mesh-call.c mesh-collective.c mesh-graph.c $(HEAD
 # design/the-compiler.md, order 4
 libmesh-metal4.dylib: mesh-metal4.m Makefile
 	cc -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh-metal4.dylib -o $@ mesh-metal4.m -framework Metal -framework Foundation
+libmesh-coreml.dylib: mesh-coreml.m Makefile
+	cc -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m -framework CoreML -framework Foundation
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit FORCE
