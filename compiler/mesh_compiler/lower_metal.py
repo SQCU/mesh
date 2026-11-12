@@ -54,7 +54,7 @@ POINTWISE = {
     ATEN.clone.default: "{0}",
     ATEN._to_copy.default: "{T}({0})",
 }
-# design/the-compiler.md, order 5; torch 2.15, torch/nn/modules/activation.py, GELU
+# design/the-compiler.md, order 5; torch/nn/modules/activation.py, GELU
 GELU = {"none": POINTWISE[ATEN.gelu.default],
         "tanh": "(0.5f * {0} * (1 + tanh(0.7978845608f * ({0} + 0.044715f * {0} * {0} * {0}))))"}
 VIEWS = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default, ATEN.permute.default,
@@ -241,6 +241,8 @@ class Lowering:
         return self.view(form) if isinstance(form, Product) else form
 
     def dispatch(self, storages, lines, grid, writes, group=None, head=""):
+        if not math.prod(grid):
+            return
         parameters = [f"device {TYPES[self.storages[s].dtype]} *b{k} [[buffer({k})]]"
                       for k, s in enumerate(storages)]
         parameters += ["uint3 p [[thread_position_in_grid]]", "uint3 g [[threadgroup_position_in_grid]]"]
@@ -591,6 +593,9 @@ class Lowering:
                         span = -(-(pages.data_ptr() + pages.nbytes() - first) // mmap.PAGESIZE) * mmap.PAGESIZE
                         handles[s], shifts[s] = LIB.mesh_metal4_view(first, span), shift + pages.data_ptr() - first
                         views.append(handles[s])
+                    # torch/mps/__init__.py, synchronize; torch-source-lowering-change-request.md item 3
+                    if owner[s].device.type == "mps":
+                        torch.mps.synchronize()
                 return handles[s]
 
             def tensor(view):

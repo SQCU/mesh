@@ -23,7 +23,9 @@ from torch._higher_order_ops.map import map as hop_map
 from torch._higher_order_ops.while_loop import while_loop
 from torch._ops import HigherOrderOperator
 from torch.fx.passes.dialect.common.cse_pass import CSEPass
+from torch.profiler import ProfilerActivity, profile
 from torch.utils import _pytree as pytree
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from torch._inductor import metrics
 from torch._inductor.graph import GraphLowering
@@ -35,7 +37,7 @@ from mesh_compiler.driver import compile_module, lowered
 from mesh_compiler.runtime import Program
 
 TOLERANCE = 1e-4
-# design/the-compiler.md, order 4, "Core ML"
+# design/the-compiler.md, order 4
 TOLERANCES = {"coreml": 2.0 ** -6}
 MPS = torch.backends.mps.is_available()
 HERE = pathlib.Path(__file__).parent
@@ -310,6 +312,9 @@ def shifted_units():
 
 BMM = torch.ops.aten.bmm.default
 
+NOT_LOWERED_INDEXING = ["aten.gather.default", "aten.index.Tensor", "aten.index_select.default",
+                        "aten.remainder.Scalar", "aten.scatter_add.default"]
+
 CASES = [
     ("mlp", MLP, [(r(5, 16),)], {}),
     ("sequential (input named `input`)", lambda: nn.Sequential(nn.Linear(16, 8), nn.GELU()),
@@ -346,6 +351,14 @@ CASES = [
     ("mixture of experts | cpu/mps", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
      {"processors": MIXED, "needs_mps": True, "expect_on": EXPERTS_MIXED,
       "placement": lambda: by_module(EXPERTS_MIXED, "cpu")}),
+    ("buffer mutation x3 | on mps", RunningMean, [(r(4, 8),), (r(4, 8),), (r(4, 8),)],
+     {"processors": on(0, {"gpu": "mps"}), "needs_mps": True}),
+    ("mlp | all on mps, input on mps", MLP, [(r(5, 16),)],
+     {"processors": on(0, {"gpu": "mps"}), "needs_mps": True, "inputs_on": "mps"}),
+    ("gather/scatter/... | on mps", Indexing, GATHER,
+     {"processors": on(0, {"gpu": "mps"}), "needs_mps": True, "not_lowered": NOT_LOWERED_INDEXING}),
+    ("mlp | 2 processors, one holds no node", MLP, [(r(5, 16),)],
+     {"processors": TWO, "placement": lambda: lambda node: "p0"}),
     ("mlp | cpu, ane", MLP, [(r(5, 16),)], {"processors": ENGINE, "placement": lambda: halves("cpu", "npu", 4)}),
     ("mixture of experts | cpu/ane", MixtureOfExperts, [(r(2, 6, 16),), (r(2, 6, 16),)],
      {"processors": ENGINE, "expect_on": EXPERTS_ENGINE, "placement": lambda: by_module(EXPERTS_ENGINE, "cpu")}),
@@ -427,7 +440,7 @@ FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 proc
                "solve | 3 processors round-robin", "mixture of experts | 3 processors",
                "conv | conv on mps, rest cpu", "megatron | 2 shards")
 KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
-OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "tolerance")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance")
 
 
 def errors(reference, got):
@@ -629,6 +642,38 @@ def archived_program(scheduled):
     return Program(loaded)
 
 
+class Watched(TorchDispatchMode):
+    def __torch_dispatch__(self, function, types, args=(), kwargs=None):
+        made = function(*args, **(kwargs or {}))
+        DISPATCHED[function.name(), any(isinstance(v, torch.Tensor) and v.device.type == "mps"
+                                        for v in pytree.tree_leaves((args, kwargs, made)))] += 1
+        return made
+
+
+def watched(function):
+    def call(*arguments):
+        with Watched():
+            return function(*arguments)
+    return call
+
+
+class Profiled(Program):
+    def __init__(self, scheduled):
+        super().__init__(scheduled, lower_metal.lower(scheduled))
+        self.functions = {p: f if p == self.caller else watched(f) for p, f in self.functions.items()}
+
+    def __call__(self, *args, **kwargs):
+        with profile(activities=[ProfilerActivity.CPU]) as found, Watched():
+            results = super().__call__(*args, **kwargs)
+        PROFILED.update({event.key: event.count for event in found.key_averages()})
+        on_mps = sorted(name for name, on in DISPATCHED if on)
+        assert not on_mps, f"torch operators on an mps tensor around a Metal function: {on_mps}"
+        return results
+
+
+DISPATCHED, PROFILED, PROFILES = collections.Counter(), collections.Counter(), {}
+
+
 PLANNED = []
 
 
@@ -645,7 +690,7 @@ def variants(scheduled, with_inductor):
         "inductor": (lambda: compiled_program(scheduled)) if with_inductor else None,
         "archive": lambda: archived_program(scheduled),
         "fx pass": lambda: Program(dataclasses.replace(scheduled, modules=passed())),
-        "metal": (lambda: Program(scheduled, lower_metal.lower(scheduled)))
+        "metal": (lambda: Profiled(scheduled))
         if any(device.type == "mps" for device in scheduled.devices.values()) else None,
         "coreml": (lambda: planned_program(scheduled)) if scheduled.engines else None,
     }
@@ -670,12 +715,12 @@ def within(seconds, thunk):
     return box[0] if box else TimeoutError(f"no result; a thread raised {RAISED[-1:] or 'nothing'}")
 
 
-def measure(make, module, calls):
+def measure(make, module, calls, inputs_on=None):
     reference, runner, worst = copy.deepcopy(module), make(), (0.0, 0.0)
     for args in calls:
         with torch.no_grad():
             expected = reference(*copy.deepcopy(args))
-        got = runner(*copy.deepcopy(args))
+        got = runner(*(a.to(inputs_on or a.device) for a in copy.deepcopy(args)))
         state = state_of(runner)
         buffers = {key: value for key, value in reference.named_buffers() if key in state}
         worst = max(worst, errors((expected, buffers), (got, {key: state[key] for key in buffers})))
@@ -715,7 +760,11 @@ def run_case(name, with_inductor):
             results[path] = None
             continue
         counters.clear()
-        results[path] = within(120, lambda: measure(make, module, calls))
+        DISPATCHED.clear()
+        PROFILED.clear()
+        results[path] = within(120, lambda: measure(make, module, calls, options.get("inputs_on")))
+        if path == "metal":
+            PROFILES[name] = (dict(DISPATCHED), dict(PROFILED))
         if path == "inductor":
             breaks = sum(counters["graph_break"].values())
             dynamo = (f"{counters['stats']['unique_graphs']} graphs / {len(program.modules)} processors, "
@@ -758,12 +807,12 @@ BREAK_REASONS = collections.Counter()
 NOT_LOWERED = []
 
 
-def cell(result, tolerance=TOLERANCE):
+def cell(result, expected=None, tolerance=TOLERANCE):
     if result is None:
         return "-", True
     if isinstance(result, lower_metal.NotLowered):
         NOT_LOWERED.append(str(result))
-        return "not lowered", True
+        return "not lowered", result.operators == expected
     if isinstance(result, Exception):
         return "FAIL", False
     ok = result[1] <= tolerance or result[0] <= TOLERANCE
@@ -968,7 +1017,7 @@ def between(machines, with_inductor):
 
             result = within(120, outputs)
             text, ok = ("ran", True) if result is None else cell(
-                result, tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
+                result, options.get("not_lowered"), tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
             failed |= not ok
             cells.append(f"{path} {text}")
             if isinstance(result, Exception):
@@ -1083,7 +1132,8 @@ def main():
             detail = str(error).strip().splitlines()[0][:150]
             print(f"{name:34} {'REJECTED' if rejected else 'ERROR'}: {type(error).__name__}: {detail}")
             continue
-        cells = [cell(results[path], tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
+        cells = [cell(results[path], options.get("not_lowered"),
+                      tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
                  for path in PATHS]
         total_breaks += breaks
         failed |= rejected or breaks > 0 or not all(ok for _, ok in cells)
@@ -1096,6 +1146,12 @@ def main():
                 print(f"    {path}: {type(results[path]).__name__}: {detail}")
     print(f"torch.compile graph breaks over all cases: {total_breaks}")
     print(f"operators with no Metal source lowering, by processor: {NOT_LOWERED or 'none'}")
+    print("torch operators during each metal path: dispatched on every processor's thread (how many on an mps")
+    print("tensor), and torch.profiler's events on the caller's thread:")
+    for name, (dispatched, profiled) in PROFILES.items():
+        aten = {key: count for (key, _), count in dispatched.items() if key.startswith("aten::")}
+        print(f"  {name:34} {sum(aten.values())} aten calls, {sum(c for (_, on), c in dispatched.items() if on)} on "
+              f"an mps tensor; profiler: {dict(sorted(profiled.items()))}")
     for reason, count in BREAK_REASONS.most_common():
         print(f"  {count:5d}  {reason}")
     print("import separation (from the modules' syntax trees):")

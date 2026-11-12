@@ -24,12 +24,11 @@ class Program:
         machine = machines.pop()
         inputs = {processor: names for processor, names in scheduled.inputs.items()
                   if scheduled.machines[processor] == machine}
-        self.caller = self.output_processor if self.output_processor in inputs else next(iter(inputs))
+        self.caller = self.output_processor if self.output_processor in inputs else next(iter(inputs), None)
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         self.arguments = {
-            processor: [state[n].to(self.devices[processor] or state[n].device) if n in state else None
-                        for n in names]
+            processor: [self.placed(state[n], processor) if n in state else None for n in names]
             for processor, names in inputs.items()}
         self.positions = {}
         for processor, names in inputs.items():
@@ -54,9 +53,12 @@ class Program:
             if self.caller != self.output_processor:
                 self.finished.put(processor)
 
+    def placed(self, value, processor):
+        return value if self.devices[processor] is None else value.to(self.devices[processor])
+
     def bind(self, name, value):
         for processor, position in self.positions.get(name, ()):
-            self.arguments[processor][position] = value.to(self.devices[processor] or value.device)
+            self.arguments[processor][position] = self.placed(value, processor)
 
     def __call__(self, *args, **kwargs):
         flat, _ = pytree.tree_flatten((args, kwargs))
@@ -65,6 +67,8 @@ class Program:
         for processor, argument_queue in self.argument_queues.items():
             arguments = self.arguments[processor]
             argument_queue.put(list(arguments) if processor in self.feedforward else arguments)
+        if self.caller is None:
+            return None
         ir.LOCAL.channels = self.channels
         results = self.execute(self.caller, self.arguments[self.caller])
         if self.caller != self.output_processor:
