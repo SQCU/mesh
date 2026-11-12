@@ -5,6 +5,7 @@ import mmap
 import operator
 import pathlib
 import sys
+import weakref
 from dataclasses import dataclass, field
 
 import torch
@@ -173,9 +174,9 @@ def pipeline(source):
 
 
 class Lowering:
-    def __init__(self, module, device, laid):
-        self.device, self.laid, self.storages, self.forms, self.missing = device, laid, [], {}, []
-        self.pending, self.unwaited, self.program, self.results = [], [], [], ()
+    def __init__(self, module, device, carried, laid):
+        self.device, self.carried, self.laid, self.storages, self.forms = device, carried, laid, [], {}
+        self.pending, self.unwaited, self.program, self.results, self.missing, self.places = [], [], [], (), [], {}
         handlers = {**dict.fromkeys(POINTWISE, self.pointwise), **dict.fromkeys(VIEWS, self.viewed),
                     RECV: self.receive, SEND: self.send, operator.getitem: self.part,
                     **dict.fromkeys(FILLED, self.filled), **dict.fromkeys(REDUCED, self.reduced),
@@ -189,8 +190,9 @@ class Lowering:
             ATEN.addmm.default}
         position = 0
         for node in module.graph.nodes:
+            self.places[node] = self.place(node)
             if node.op == "placeholder":
-                self.forms[node] = self.arrived(ARGUMENT, node.meta["val"], position)
+                self.forms[node] = self.arrived(ARGUMENT, node, position)
                 position += 1
             elif node.op == "output" and not self.missing:
                 self.results = tuple(self.escape(r) if isinstance(r, torch.fx.Node) else r for r in node.args[0])
@@ -204,9 +206,17 @@ class Lowering:
                 form = handlers[node.target](node)
                 self.forms[node] = form if self.deferred(node, form) else self.settled(form)
 
-    def arrived(self, kind, value, position=None):
+    def place(self, node):
+        if node.target is ATEN._to_copy.default and "device" in node.kwargs:
+            return torch.device(node.kwargs["device"]).type
+        if node.target is operator.getitem:
+            return self.places[node.args[0]]
+        return "cpu" if node.target is RECV and node.args[0] in self.carried else self.device.type
+
+    def arrived(self, kind, node, position=None):
+        value = node.meta["val"]
         count = (1 + sum((n - 1) * s for n, s in zip(value.shape, value.stride()))) * all(value.shape)
-        self.storages.append(Storage(kind, value.dtype, count, value.device.type, position))
+        self.storages.append(Storage(kind, value.dtype, count, self.places[node], position))
         return View(len(self.storages) - 1, value.dtype, tuple(value.shape), tuple(value.stride()), 0)
 
     def fresh(self, dtype, shape):
@@ -411,7 +421,8 @@ class Lowering:
         storages, bind = self.binder()
         lines, names = unravel("p.x", source.shape[:dim] + source.shape[dim + 1:], "r")
         index = names[:dim] + ["k"] + names[dim:]
-        out, x, loop = made.read(bind, index), source.read(bind, index), f"for (uint k = 0; k < {source.shape[dim]}; k++)"
+        out, x = made.read(bind, index), source.read(bind, index)
+        loop = f"for (uint k = 0; k < {source.shape[dim]}; k++)"
         lines += ["float m = -INFINITY, s = 0;", f"{loop} m = max(m, float({x}));",
                   f"{loop} s += exp(float({x}) - m);", f"{loop} {out} = exp(float({x}) - m) / s;"]
         self.dispatch(storages, lines, (math.prod(source.shape) // source.shape[dim], 1, 1), {made.storage})
@@ -489,7 +500,7 @@ class Lowering:
 
     def escape(self, node, laid=False):
         value, held = node.meta["val"], self.view(self.forms[node])
-        view, device = held, value.device.type
+        view, device = held, self.places[node]
         if laid and any(n > 1 and a != b for n, a, b in zip(view.shape, view.stride, value.stride())):
             self.storages.append(Storage(HELD, view.dtype, 0, self.device.type))
             view = View(len(self.storages) - 1, view.dtype, view.shape, tuple(value.stride()), 0)
@@ -525,7 +536,7 @@ class Lowering:
 
     def receive(self, node):
         self.flush()
-        view = self.arrived(RECEIVED, node.meta["val"])
+        view = self.arrived(RECEIVED, node)
         self.program.append((RECV, view.storage, node.args[0]))
         return view
 
@@ -611,19 +622,20 @@ class Lowering:
             for view in views:
                 LIB.mesh_metal4_release(view)
             return tuple(tensor(r) if isinstance(r, Escape) else r for r in results)
+        weakref.finalize(run, lambda: [LIB.mesh_metal4_release(made) for made in (*held.values(), stream)])
         return run
 
 
 def lower(scheduled):
     functions, missing = {}, {}
     metal = [p for p in scheduled.modules if scheduled.devices[p].type == "mps"]
-    laid = {channel for channel, *_ in scheduled.carried}
-    laid |= {node.args[0] for p in metal for node in scheduled.modules[p].graph.nodes if node.target is RECV}
+    carried = {channel for channel, *_ in scheduled.carried}
+    laid = carried | {node.args[0] for p in metal for node in scheduled.modules[p].graph.nodes if node.target is RECV}
     for processor, module in scheduled.modules.items():
         if processor not in metal:
             functions[processor] = module
             continue
-        lowering = Lowering(module, scheduled.devices[processor], laid)
+        lowering = Lowering(module, scheduled.devices[processor], carried, laid)
         if lowering.missing:
             missing[processor] = sorted(set(lowering.missing))
         else:
