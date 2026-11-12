@@ -31,7 +31,7 @@ from torch._inductor import metrics
 from torch._inductor.graph import GraphLowering
 from torch._ops import OpOverload
 
-from mesh_compiler import archive, bridge, ir, lower_coreml, lower_inductor, lower_metal
+from mesh_compiler import archive, bridge, ir, lower_coreml, lower_inductor, lower_metal, signature
 from mesh_compiler.devices import TO_COPY
 from mesh_compiler.driver import compile_module, lowered
 from mesh_compiler.runtime import Program
@@ -493,6 +493,7 @@ def errors(reference, got):
     return worst_abs, worst_rel
 
 
+METAL_SIGNED = ("mlp | all on mps", "conv | conv on mps, rest cpu", "megatron | 2 shards, cpu/mps")
 def call_nodes(graph):
     return [n for n in graph.nodes if n.op == "call_function"]
 
@@ -1009,7 +1010,105 @@ def reload_case(directory, name):
     module = factory().eval()
     scheduled = archive.load(directory)
     worst = measure(lambda: Program(scheduled), module, calls)
-    print(json.dumps({"abs": worst[0], "rel": worst[1], "digests": digests(scheduled.modules)}))
+# design/synchronization-signature-change-request.md items 1, 2 and 4
+def check_signatures():
+    for name in dict.fromkeys(KEY_CASES + FRESH_CASES):
+        if "mps" in name and not MPS:
+            continue
+        scheduled = build(name)[2]
+        made = signature.signature(scheduled, executions=2)
+        states, counts = made["states"], collections.Counter()
+        for (_, primitive), count in made["counts"].items():
+            counts[primitive] += count
+        assert made["digest"] == signature.signature(scheduled, executions=2)["digest"], "the digest is not a function"
+        assert states["image"] == 2 * scheduled.channels, f"{name}: a channel's wait is not a dependence's image"
+        assert not (states["false"] or states["stronger"] or made["redundant"] or made["uncovered"]
+                    or made["unwaited"]), (name, states, made["redundant"], made["uncovered"], made["unwaited"])
+        assert states["unmatched"] == counts["host_wait"] - states["image"], name
+        print(f"  {name:34} {made['digest'][:12]}  2 executions: {dict(counts)}, {states['image']} waits each a "
+              f"dependence's image, {states['unmatched']} waits of torch's copies between devices")
+    print(made["space_time"])
+    print("  ok: every channel's wait is the image of its dependence, none redundant, no dependence uncovered")
+    for name in METAL_SIGNED * MPS:
+        scheduled = build(name)[2]
+        functions = lowered(scheduled, (lower_metal.lower, lower_coreml.lower))
+        made = signature.signature(scheduled, functions)
+        assert made["digest"] == signature.signature(scheduled, functions)["digest"], "the digest is not a function"
+        assert not made["unwaited"] and not made["states"]["unmatched"], (name, made["unwaited"], made["states"])
+        counts = collections.Counter()
+        for (_, primitive), count in made["counts"].items():
+            counts[primitive] += count
+        print(f"  {name:34} {made['digest'][:12]}  lowered to Metal: {dict(counts)}; edges {made['states']['image']} images, "
+              f"{made['states']['false']} with no dependence under them, {made['redundant']} redundant; "
+              f"{made['uncovered']} dependences with no signal-to-wait path")
+        print(made["space_time"] * (name == METAL_SIGNED[0]), end="")
+
+
+# design/synchronization-signature-change-request.md items 3, 4 and 5
+def playback(directory, name, executions, added=False):
+    _, _, calls, _ = next(case for case in CASES if case[0] == name)
+    scheduled = archive.load(directory)
+    program = Program(scheduled, lowered(scheduled, (lower_metal.lower, lower_coreml.lower)))
+    print(f"ready {os.getpid()}", flush=True)
+    sys.stdin.readline()
+    for _ in range(int(executions)):
+        program(*copy.deepcopy(calls[0]))
+    if added:
+        objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+        metal = ctypes.CDLL("/System/Library/Frameworks/Metal.framework/Metal")
+        metal.MTLCreateSystemDefaultDevice.restype = objc.sel_registerName.restype = ctypes.c_void_p
+        made = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+        wait = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64)(
+            ("objc_msgSend", objc))
+        event = made(metal.MTLCreateSystemDefaultDevice(), objc.sel_registerName(b"newSharedEvent"))
+        wait(event, objc.sel_registerName(b"waitUntilSignaledValue:timeoutMS:"), 0, 0)
+    print("played", flush=True)
+
+
+def check_monitored_playback():
+    if not MPS or subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode:
+        print("  SKIP (no mps, or sudo -n is refused: the monitor runs dtrace under sudo)")
+        return
+    name, executions = METAL_SIGNED[0], 3
+    denied = subprocess.run(["sudo", "-n", "dtrace", "-w", "-q", "-n", "BEGIN { exit(0); }"], capture_output=True,
+                            text=True).stderr.strip().splitlines()[-1:]
+    observe = ["--observe"] * any("could not enable tracing" in line for line in denied)
+    if observe:
+        print(f"  dtrace -w (the destructive action that stops the process) is refused here: {denied[0]}; the "
+              "monitor observes without it and fails the run at the operation")
+    scheduled = build(name)[2]
+    signed = signature.signature(scheduled, lowered(scheduled, (lower_metal.lower, lower_coreml.lower)), executions)
+    with tempfile.TemporaryDirectory() as directory:
+        archive.save(directory, scheduled)
+        archive.save_signature(directory, signed["record"])
+        for added in (False, True):
+            player = subprocess.Popen([sys.executable, str(HERE / "samples.py"), "--playback", directory, name,
+                                       str(executions)] + ["added"] * added, stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, text=True)
+            ready = player.stdout.readline().split()
+            monitor = subprocess.Popen([sys.executable, str(HERE.parent / "bin" / "mesh-sync-monitor.py"), "run",
+                                        str(pathlib.Path(directory) / "signature.record"), "-p", ready[1]] + observe,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            seen = [monitor.stdout.readline()]
+            player.stdin.write("\n")
+            player.stdin.flush()
+            out, report = monitor.communicate()
+            played = "played" in player.stdout.readline()
+            player.kill()
+            stopped = [line for line in (seen[0] + out).splitlines() if "unexpected" in line]
+            verdict = report.strip().splitlines()[-1]
+            assert "attached" in seen[0], (seen, report)
+            assert (monitor.returncode, bool(stopped)) == (int(added), added), (monitor.returncode, stopped, report)
+            assert played == (not added or bool(observe)), "the process ran past the operation that stops it"
+            print(f"  {name}, {executions} executions{', then a wait its signature does not have' * added}: "
+                  f"{stopped[0] if stopped else verdict}")
+    print("  ok: the playback that ran to completion ran the compiler's signature; the added wait failed its run")
+
+
+    saved = mesh_graph.from_record(archive.load_signature(directory))
+    signed = [signature.signature(scheduled)["digest"], bytes(saved.digest).hex()]
+    mesh_graph.free(saved)
+    print(json.dumps({"abs": worst[0], "rel": worst[1], "digests": digests(scheduled.modules), "signature": signed}))
 
 
 def check_reload_in_fresh_process():
@@ -1036,12 +1135,15 @@ def between(machines, with_inductor):
     print("max relative error against eager where the results are, `ran` where they are not:")
     for name, _, _, options in CASES:
         if len(options.get("processors", ONE)) < 2 or options.get("rejected"):
+            signed = signature.signature(program)
+            archive.save_signature(directory, signed["record"])
             continue
         if options.get("needs_mps") and not MPS:
             print(f"{name:34} SKIP (no mps)")
             continue
         module, calls, scheduled = build(name, machines)
         check_ir(scheduled, options.get("expect_on"), options.get("sharded"))
+        assert report["signature"] == [signed["digest"]] * 2, "the signature's digest changed by reload"
         cells = []
         for path, make in variants(scheduled, with_inductor).items():
             if make is None:
@@ -1175,6 +1277,9 @@ def main():
             print(f"{name:34} {'REJECTED' if rejected else 'ERROR'}: {type(error).__name__}: {detail}")
             continue
         cells = [cell(results[path], options.get("not_lowered"),
+    if "--playback" in sys.argv:
+        playback(*sys.argv[sys.argv.index("--playback") + 1:])
+        return
                       tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
                  for path in PATHS]
         total_breaks += breaks
@@ -1219,3 +1324,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+    print("synchronization signatures of the scheduled programs (the last one's space-time diagram):")
+    check_signatures()
+    print("a saved program played back under bin/mesh-sync-monitor.py (DTrace, attached to the playing process):")
+    check_monitored_playback()

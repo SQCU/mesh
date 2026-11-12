@@ -19,84 +19,6 @@ def walk(starts, neighbours):
     return order
 
 
-# Rabin and Scott, IBM JRD 3(2), 1959, Definition 11 and Theorem 11; design/synchronization-signature-change-request.md 3–4.
-def trace_machine(operations, program, metadata, objects, lanes):
-    spans = metadata.get('spans') or [Span(0, 1 + max((operations[i].execution for i in program), default=0), 0, len(operations))]
-    code, at = [], 0
-    for span in range(len(spans)):
-        first, end = (bisect.bisect_left(program, getattr(spans[span], name)) for name in ('begin', 'end'))
-        code += [('op', k) for k in range(at, first)] + [('enter', span)] + [('op', k) for k in range(first, end)] + \
-                [('leave', span)]
-        at = end
-    code += [('op', k) for k in range(at, len(program))]
-    object_ids, lane_ids = sorted(set(objects.values())), sorted(set(lanes.values()))
-    object_at, lane_at = {v: k for k, v in enumerate(object_ids)}, {v: k for k, v in enumerate(lane_ids)}
-    bound, queues, transitions = [0] * len(object_ids), [0] * len(lane_ids), []
-    for source, (kind, value) in enumerate(code):
-        ob, ln = 0, 0
-        if kind == 'op' and value in objects:
-            slot = object_at[objects[value]]
-            bound[slot] = bound[slot] or max(bound, default=0) + 1
-            ob = bound[slot]
-        if kind == 'op' and value in lanes:
-            slot = lane_at[lanes[value]]
-            queues[slot] = queues[slot] or max(queues, default=0) + 1
-            ln = queues[slot]
-        transitions.append((source, source + 1, kind, value, ob, ln))
-    return {'transitions': transitions, 'accepting': [len(code)], 'objects': object_ids, 'spans': spans}
-
-
-def trace_groups(machine, labels):
-    groups = {}
-    for source, target, kind, index, ob, lane in machine['transitions']:
-        key = (kind, labels[(source, kind, index)], ob, lane, index - source, target - source, source // 64, target // 64)
-        if key not in groups:
-            groups[key] = [source, target, kind, index, ob, lane, 0]
-        groups[key][-1] |= 1 << (source % 64)
-    return list(groups.values())
-
-
-def trace_matches(machine, labels):
-    groups = collections.defaultdict(list)
-    for row in trace_groups(machine, labels):
-        source, _, kind, index, ob, lane, _ = row
-        groups[(kind, labels[source, kind, index], ob, lane)].append(row)
-    result = []
-    for key, rows in groups.items():
-        words = collections.defaultdict(lambda: collections.defaultdict(lambda: collections.defaultdict(int)))
-        for source, target, _, _, _, _, mask in rows:
-            words[source // 64][target // 64][target % 64 - source % 64] |= mask
-        result.append((key, rows, words))
-    return result
-
-
-def trace_paths(records, accepting):
-    at = collections.defaultdict(list)
-    for record in records:
-        at[record[0]].append(record)
-    steps = max(at, default=-1) + 1
-    finals = {state for count, state in accepting if count == steps}
-    if not finals:
-        raise ValueError('no accepting compiled state at observation end')
-    targets, layers = finals, [None] * steps
-    for step in reversed(range(steps)):
-        layers[step] = [row for row in at[step] if row[2] in targets]
-        targets = {row[1] for row in layers[step]}
-    if 0 not in targets:
-        raise ValueError('trace does not start in the compiled initial state')
-    reached = {0}
-    for step in range(steps):
-        layers[step] = [row for row in layers[step] if row[1] in reached]
-        reached = {row[2] for row in layers[step]}
-    finals &= reached
-    target, witness = min(finals), []
-    for layer in reversed(layers):
-        row = next(row for row in layer if row[2] == target)
-        witness.append(row)
-        target = row[1]
-    return list(reversed(witness)), layers, finals
-
-
 def reach(starts, neighbours):
     return set(walk(starts, neighbours))
 
@@ -298,7 +220,7 @@ KINDS = ('queue', 'host', 'bridge', 'kernel')
 PRIMITIVES = ('submit', 'queue_signal', 'queue_wait', 'fence_update', 'fence_wait', 'pass_barrier', 'queue_barrier',
               'host_wait', 'host_notify', 'bridge_start', 'threadgroup_barrier', 'simdgroup_barrier', 'atomic',
               'producer_barrier', 'bridge_raise', 'initial', 'host_publish', 'kernel_fence', 'host_signal')
-NODES, PLAN_COUNT, PLAN_SUBMISSION = 64, 0x80000000, 0xC0000000
+NODES, PLAN_COUNT, PLAN_SUBMISSION, LOWERED = 64, 0x80000000, 0xC0000000, 0x40000000
 STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed')
 
 
@@ -527,7 +449,7 @@ def signature(processors, tasks, dependences, operations):
     operation, o = _array(Operation, operations)
     _check(LIB.mesh_graph_signature(p, processor, t, task, d, dependence, o, operation, C.byref(made)))
     try:
-        return forms(made)
+        return dict(forms(made), record=record(made))
     finally:
         free(made)
 
@@ -554,3 +476,34 @@ def from_record(data):
     buffer, made = C.create_string_buffer(bytes(data), len(data)), Signature()
     _check(LIB.mesh_graph_record_read(C.addressof(buffer), C.byref(made)))
     return made
+
+
+# design/compilation-composition-change-request.md item 6.2; mesh-graph.h mesh_graph_contract, mesh_graph_quotient
+LIB.mesh_graph_contract.restype = LIB.mesh_graph_quotient.restype = C.c_int
+LIB.mesh_graph_contract.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_ubyte), C.c_size_t,
+                                    C.POINTER(Dependence), C.POINTER(C.c_size_t)]
+LIB.mesh_graph_quotient.argtypes = [C.c_uint32, C.POINTER(C.c_uint32), C.c_size_t, C.POINTER(C.c_uint32),
+                                    C.POINTER(C.c_uint32), C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_size_t)]
+
+
+def _relation(call):
+    count = C.c_size_t()
+    status = call(0, None, C.byref(count))
+    if status != errno.ERANGE:
+        _check(status)
+    made = (Dependence * max(count.value, 1))()
+    _check(call(count.value, made, C.byref(count)))
+    return [(e.source, e.sink) for e in made[:count.value]]
+
+
+def contract(kept, edges):
+    edge, count = _array(Dependence, [Dependence(a, b, 0) for a, b in edges])
+    marks = (C.c_ubyte * max(len(kept), 1))(*kept)
+    return _relation(lambda room, made, size: LIB.mesh_graph_contract(len(kept), count, edge, marks, room, made, size))
+
+
+def quotient(class_of, edges):
+    tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
+    classes = (C.c_uint32 * max(len(class_of), 1))(*class_of)
+    return _relation(lambda room, made, size: LIB.mesh_graph_quotient(len(class_of), classes, tails[1], tails[0],
+                                                                      heads[0], room, made, size))

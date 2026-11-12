@@ -111,3 +111,12 @@ def load(directory):
                for channel, sender, receiver, dtype, shape, stride in about["carried"]]
     return Scheduled(exported, modules, devices, about["machines"], about["output_processor"], about["channels"],
                      about["inputs"], about["feedforward"], carried, about["engines"])
+
+
+# design/synchronization-signature-change-request.md item 1
+def save_signature(directory, record):
+    (pathlib.Path(directory) / "signature.record").write_bytes(record)
+
+
+def load_signature(directory):
+    return (pathlib.Path(directory) / "signature.record").read_bytes()

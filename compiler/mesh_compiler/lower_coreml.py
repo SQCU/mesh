@@ -303,6 +303,7 @@ def lower(scheduled):
             missing[processor] = sorted(set(lowering.missing))
         else:
             functions[processor] = lowering.function(processor)
+            functions[processor].module = module
     if missing:
         raise NotLowered("; ".join(f"{processor}: {', '.join(names)}" for processor, names in missing.items()))
     return functions

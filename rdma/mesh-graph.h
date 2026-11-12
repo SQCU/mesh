@@ -222,6 +222,7 @@ struct mesh_graph_processor { uint32_t kind, index; };
 #define MESH_GRAPH_NODES 64u
 #define MESH_GRAPH_PLAN_COUNT UINT32_C(0x80000000)
 #define MESH_GRAPH_PLAN_SUBMISSION UINT32_C(0xC0000000)
+#define MESH_GRAPH_LOWERED UINT32_C(0x40000000)
 struct mesh_graph_task { uint32_t processor, place, label, copy; };
 struct mesh_graph_dependence { uint32_t from, to; uint64_t delay; };
 struct mesh_graph_operation { uint32_t processor, primitive, vertex, object; uint64_t execution, value; };
