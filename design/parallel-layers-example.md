@@ -90,6 +90,7 @@ predecessor and the order of a layer is fixed by the program. Here it is not:
   - Both, with the two processors on two machines whose entries the check carries in place of the bridge: the same
     errors.
 - Not run under a bridge on two nodes.
-- These runs show agreement with eager execution. No record of a run shows statements 1 to 4; which record of a run
-  shows them is the outstanding question R4 records.
+- These runs show agreement with eager execution. No record of a run shows statements 1 to 4 of "What this program
+  makes plain". For its statements 2 and 3, which use R4's statements, which record of a run shows them is the open
+  question R4 records for its own statements 1 to 3. Its statements 1 and 4 have no R4 question behind them.
 - In the implementation order this program belongs with item 11, as a program a run is made of.
