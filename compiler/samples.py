@@ -679,6 +679,7 @@ def check_collectives(scheduled, expected=None):
         sent, arrived = end[ir.SEND], end[ir.RECV]
         assert sent.meta["collective"] == arrived.meta["collective"], "a channel's two ends name two collectives"
         kind, identity = sent.meta["collective"]
+        assert kind != "alltoall" or "counts" in arrived.meta, "an all-to-all's ends carry no counts"
         value = sent.args[0].args[0] if copies(sent.args[0]) and sent.args[0].name != identity else sent.args[0]
         kinds[kind].add(identity)
         sources[kind, identity].add((sent.meta["processor"], value.name))

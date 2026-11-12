@@ -271,19 +271,23 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         return folded(graph, (held, extents, holders, nodes), dimension, whole // sum(sizes),
                       [sum(sizes)] * len(nodes), dimension, sizes, processors, exact)
     wide = not exact and dimension is not None and uneven(sizes)
-    if held == dimension is not None and STRIPED in (extents, sizes):
-        extent, arrived, exchange = sum(shape(n)[held] for n in nodes), [], None
+    if held == dimension is not None:
+        extent = sum(shape(n)[held] for n in nodes)
         have, take = ranges(extents, extent, len(nodes)), ranges(sizes, extent, len(processors))
+        met, given, displs = overlaps(have, take)
+    if held == dimension is not None and STRIPED in (extents, sizes):
+        arrived, exchange = [], None
         for j, processor in enumerate(processors):
             pieces, wanted = [], range(*take[j])
-            for holder, node, kept in zip(holders, nodes, have):
-                common = sorted(set(range(*kept)) & set(wanted))
+            for i, (holder, node, kept) in enumerate(zip(holders, nodes, have)):
+                common = met[i][j]
                 if common:
                     first, last = (range(*kept).index(e) for e in (common[0], common[-1]))
                     piece = call(graph, SLICE, (node, held, first, last + 1, max(1, (last - first) // max(
                         1, len(common) - 1))), holder or processor)
                     exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
                     piece.meta.setdefault("collectives", {})[processor] = "alltoall", exchange
+                    piece.meta.setdefault("blocks", {})[processor] = held, (i, j), given, displs
                     pieces.append((wanted.index(common[0]), wanted.index(common[-1]), len(common), piece))
             value = pieces[0][3] if pieces else call(graph, ZEROS, (nodes[0], [
                 0 if d == held else n for d, n in enumerate(shape(nodes[0]))]), processor)
@@ -298,14 +302,8 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     if sizes == STRIPED:
         given = tuple(len(range(j, shape(nodes[0])[dimension], len(processors))) for j in range(len(processors)))
         displs = tuple(range(len(processors)))
-    else:
+    elif held != dimension or dimension is None:
         given, displs = sizes, tuple(itertools.accumulate(sizes or (), initial=0))
-    starts = list(itertools.accumulate(() if extents in (None, STRIPED) else extents, initial=0))
-    if held == dimension is not None:
-        given = tuple(tuple(max(0, min(starts[i + 1], displs[j + 1]) - max(starts[i], displs[j]))
-                            for j in range(len(processors))) for i in range(len(nodes)))
-        displs = tuple(tuple(sum(row[j] for row in given[:i]) for j in range(len(processors)))
-                       for i in range(len(nodes)))
     arrived, exchange = [], None
     for j, processor in enumerate(processors):
         pieces, sources = [], []
@@ -346,6 +344,13 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         if wide and shape(arrived[-1])[dimension] < max(sizes):
             arrived[-1] = padded(graph, arrived[-1], dimension, sizes, j, processor)
     return arrived
+
+
+def overlaps(have, take):
+    met = [[sorted(set(range(*kept)) & set(range(*wanted))) for wanted in take] for kept in have]
+    return met, tuple(tuple(len(common) for common in row) for row in met), tuple(
+        tuple(sum(e < (common[0] if common else kept[0]) for e in range(*wanted)) for common, wanted in zip(row, take))
+        for row, kept in zip(met, have))
 
 
 def aligned(node, shapes, out):
