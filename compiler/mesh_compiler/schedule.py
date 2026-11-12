@@ -31,14 +31,54 @@ def producer(node):
     return mesh_graph.chain(node, lambda n: n.args[0] if n.target is operator.getitem else None)[-1]
 
 
+# compiler/mesh_compiler/placement.py based, views
+def based(node):
+    record = node.meta.get("view") or node.meta.get("out")
+    return record[0] if record else node.name
+
+
+def wrote(node):
+    return [node.meta[key] for key in ("out", "to") if key in node.meta]
+
+
+def whole(node):
+    value = node.meta.get("val")
+    return (node.name, 0, tuple(value.shape), tuple(value.stride())) if isinstance(value, torch.Tensor) else None
+
+
+# design/problems-of-14b9a757-change-request.md items 1, 2 and 6; rdma/mesh-graph.h struct mesh_graph_view
+def accesses(functions):
+    named, key = {n.name: n for n in functions}, {record[0]: None for n in functions for record in wrote(n)}
+    key.update((name, place) for place, name in enumerate(key))
+
+    def access(record, element, vertex, write):
+        name, offset, sizes, strides = record if min(record[3], default=0) >= 0 else whole(named[record[0]])
+        return (key[name], offset * element, element, [(n, s * element) for n, s in zip(sizes, strides)], vertex, write)
+
+    found = []
+    for vertex, node in enumerate(functions):
+        found += [access(record, node.meta["val"].dtype.itemsize, vertex, 1) for record in wrote(node)]
+        for held in () if "view" in node.meta else dict.fromkeys(node.all_input_nodes):
+            record = held.meta.get("view") or held.meta.get("out") or whole(held)
+            if record and record[0] in key and record not in wrote(node):
+                found.append(access(record, held.meta["val"].dtype.itemsize, vertex, 0))
+    return found
+
+
+# design/problems-of-14b9a757-change-request.md items 1, 2 and 6; A. J. Bernstein, IEEE Trans. Electronic Computers
+# EC-15(5), 1966
 def dependence(module):
     nodes = list(module.graph.nodes)
     functions = [n for n in nodes if n.op == "call_function" and producer(n) is n]
     sender = {channel_of(n): n for n in functions if n.target is SEND}
+    after = {}
+    for earlier, later in mesh_graph.dependences_views(len(functions), accesses(functions))[0]:
+        after.setdefault(functions[later], []).append(functions[earlier])
 
     def preds(node):
-        found = [producer(u) for u in node.all_input_nodes if u.op == "call_function"]
+        found = [producer(u) for u in node.all_input_nodes if u.op == "call_function"] + after.get(node, [])
         return found + [sender[channel_of(node)]] if node.target is RECV else found
+
 
     return nodes, functions, preds
 
@@ -92,7 +132,9 @@ def viewed(sender, carried):
     def of(node):
         if node.target is RECV:
             return None if node.args[0] in carried else sender[node.args[0]].args[0]
-        return producer(node).args[0] if "view" in node.meta and "invariant" not in node.meta else None
+        if "view" in node.meta:
+            return None if "invariant" in node.meta else producer(node).args[0]
+        return next((u for u in node.all_input_nodes if "out" in node.meta and based(u) == node.meta["out"][0]), None)
     return of
 
 
@@ -127,7 +169,9 @@ def stored(values, places, module, local, before, of, channels, mutated):
     last = mesh_graph.ends(local, before, lambda f: () if f.meta.get("invariant") else [
         (root, (f if root.op == "placeholder" else root).meta["processor"]) for root in roots[f]] + [
         (f, f.meta["processor"])] * (f.target is RECV and f.args[0] in channels))
-    named, slices = {(node.name, node.meta["processor"]): node for node in local}, set()
+    named, slices, first = {(node.name, node.meta["processor"]): node for node in local}, set(), {}
+    for node in reversed(local):
+        first.update((record[0], index[node]) for record in wrote(node))
     for value, (processor, name) in enumerate(list(places)):
         node = named[name, processor]
         begin, end = index[producer(node)], len(local) - 1
@@ -145,7 +189,8 @@ def stored(values, places, module, local, before, of, channels, mutated):
             slices.add(root.meta.get("invariant", root.meta.get("state")))
             values.append((extent(value), mesh.INVARIANT, 0, 0, 0, 0, 0, 1))
         elif producer(root) in index:
-            values.append((extent(value), mesh.EXECUTION, 0, 0, index[producer(root)], index[reader], 0, 1))
+            values.append((extent(value), mesh.EXECUTION, 0, 0, first.get(root.name, index[producer(root)]),
+                           index[reader], 0, 1))
         else:
             continue
         places.append((processor, root.name))
