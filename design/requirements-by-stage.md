@@ -39,7 +39,8 @@ The operator, 2026-11-12:
   (mesh `rdma/mesh-collective.c`) takes the program's values and its dependence graph and writes the static schedule,
   which is the scheduled value." and "what it takes (`rdma/mesh-collective.h`): an array of `struct mesh_function`".
   `rdma/mesh-collective.h` is read against the scheduled value's clauses that name it as well, A8 and A9 of
-  aot-compilation-change-request.md (:501, "**Stage:** the type that passes from placement to the schedule.").
+  aot-compilation-change-request.md (:501 for A8, "**Stage:** the type that passes from placement to the schedule.";
+  :520 for A9, "**Stage:** the scheduled value and its archive.").
 - "no stage named" holds the items whose clauses place them in a flow that is none of the above, each with the words
   that say so. They are not restated against [data-flow.md](data-flow.md): the operator's 2026-11-10 21:02 turn above
   asks for that, and it is outstanding for them.
