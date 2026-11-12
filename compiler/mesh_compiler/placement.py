@@ -28,7 +28,7 @@ SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
 MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
           ATEN.full_like.default, ATEN.where.self}
 STRIPED = "striped"
-VIEWS = {EXPAND, SLICE, VIEW, ATEN.alias.default, ATEN.permute.default, ATEN.select.int, ATEN.squeeze.dims,
+VIEWS = {EXPAND, RESHAPE, SLICE, VIEW, ATEN.alias.default, ATEN.permute.default, ATEN.select.int, ATEN.squeeze.dims,
          ATEN.unsqueeze.default}
 
 
@@ -435,6 +435,9 @@ def partitioned(graph, node, held, want, replaced):
         for v, row, join in zip(held[bool(window):], rows[bool(window):], joined[bool(window):])]
     columns[:0] = [regions] if window else []
     # Y. Xu et al., GSPMD, arXiv:2105.04663, sections 4.3 and 4.5; design/aot-compilation-change-request.md A4
+    if node.target is FLIP:
+        columns[0] = [plain(graph, shard, shard.meta["processor"]) if {d % len(out) for d in node.args[1]} & set(
+            shard.meta.get("order", {})) else shard for shard in columns[0]]
     if node.target is FLIP and along in [d % len(out) for d in node.args[1]]:
         columns[0] = ([columns[0][(out[along] - 1 - j) % len(processors)] for j in range(len(processors))]
                       if sizes == STRIPED else reshard(graph, (along, sizes, processors, columns[0]), along,
