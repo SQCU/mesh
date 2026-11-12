@@ -489,7 +489,7 @@ def windows(node):
                 return {}
         elif read.get("divisor_override") is None and not read.get("count_include_pad", True) and any(low):
             return {}
-        if read.get("ceil_mode", False):
+        if read.get("ceil_mode", False) and node.target not in MAXIMA:
             return {}
     dilation = spread(read.get("dilation", 1), count)
     stride = spread(read.get("stride") or kernel, count)

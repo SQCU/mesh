@@ -256,6 +256,11 @@ class Windows(nn.Module):
         return nn.functional.avg_pool2d(y, 2)
 
 
+class Ceiled(nn.Module):
+    def forward(self, x):
+        return nn.functional.max_pool2d(x.sin(), 3, stride=2, padding=1, ceil_mode=True)
+
+
 class Divided(nn.Module):
     def forward(self, x):
         return nn.functional.avg_pool2d(x.sin(), 3, stride=2, padding=1, count_include_pad=False, divisor_override=5)
@@ -525,6 +530,12 @@ CASES = [
     ("windows | pooling with a divisor, 3 shards", Divided, [(r(2, 3, 11, 6),)],
      {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2}, "collectives": {"permute": 1},
       "placement": lambda: lambda node: (2, tuple(THREE), None) if node.name == "x" else "p0"}),
+    ("windows | max pooling, ceil_mode, 3 shards", Ceiled, [(r(2, 3, 12, 6),)],
+     {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2},
+      "placement": lambda: lambda node: (2, tuple(THREE), (1, 2, 1)) if node.name == "x" else "p0"}),
+    ("windows | max pooling, ceil_mode, input on p0", Ceiled, [(r(2, 3, 12, 6),)],
+     {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2},
+      "placement": lambda: lambda node: (2, tuple(THREE), None) if "max_pool" in node.name else "p0"}),
     ("windows | rows and columns, 2 by 2", Windows, [(r(2, 3, 23, 21),)],
      {"processors": FOUR, "sharded": True, "windows": {"shards": 16, "masked": 12}, "collectives": {"permute": 14},
       "placement": lambda: lambda node: ((2, 3), (("p0", "p1"), ("p2", "p3")), (None, (1, 2)))
