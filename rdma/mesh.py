@@ -136,9 +136,10 @@ class Planned(C.Structure):
 INVARIANT, EXECUTION = 0, 1
 JOIN, PAGES = 0, 1
 FROM_PRODUCED, TO_PRODUCED, FROM_SOURCE_READ, TO_SOURCE_READ = 1, 2, 4, 8
-# mesh.h MESH_ABSENT and MESH_NAME (the node's one region)
+# mesh.h MESH_ABSENT, MESH_NAME (the node's one region) and MESH_PLATFORM_NS
 ABSENT = 2 ** 32 - 1
 NAME = b'/mesh0'
+PLATFORM_NS = 5000000000
 
 
 # mesh.h struct mesh_state, its words to `entries` (offsets 0 to 104, as the header asserts): the plan's state section
@@ -174,7 +175,7 @@ class State(C.Structure):
 # wait ends at MESH_PLATFORM_NS without progress ... The operator's bound is judged by time without progress"; "The
 # revisions of 14b9a757"): mesh.h struct mesh_publication, its fields before `targets`, and its size (64 bytes, the
 # header's assert), the stride of struct mesh_state `transfers` (mesh.h mesh_transfer_at), so a host reader finds a
-# received range's count word, copy c's at `count` + 8 c, whose rises are its progress.
+# received range's count word, copy c's at `count` + 8 c, whose rises are its progress (rdma/mesh_compile.py _arrived).
 # What must stay: the fields in the header's order and at its offsets
 # rdma-core libibverbs/man/ibv_post_send.3, NOTES: "The buffers used by a WR can only be safely reused after WR the
 # request is fully executed and a work completion has been retrieved from the corresponding completion queue (CQ)."
