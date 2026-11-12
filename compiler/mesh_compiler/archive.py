@@ -15,6 +15,8 @@ from torch.utils import _pytree as pytree
 from .ir import RECV, Exported, Plan, Scheduled, channel_of
 
 BLOCK = ("dimension", "block", "counts", "displs")
+# design/unequal-shards-change-request.md item 12
+SUBARRAY = ("sizes", "subsizes", "starts")
 
 
 def tuples(value):
@@ -60,6 +62,8 @@ def save(directory, scheduled):
         "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex()},
         "blocks": {channel_of(node): [node.meta[key] for key in BLOCK] for module in scheduled.modules.values()
                    for node in module.graph.nodes if node.target is RECV and "counts" in node.meta},
+        "subarrays": {channel_of(node): [node.meta[key] for key in SUBARRAY] for module in scheduled.modules.values()
+                      for node in module.graph.nodes if node.target is RECV and "sizes" in node.meta},
         "tokens": exported.tokens,
         "user_inputs": exported.user_inputs,
         "outputs": [[kind.name, key] for kind, key in exported.outputs],
@@ -103,6 +107,8 @@ def load(directory):
             if str(channel_of(node)) in about["blocks"]:
                 dimension, block, counts, displs = about["blocks"][str(channel_of(node))]
                 node.meta.update(zip(BLOCK, (dimension, *map(tuples, (block, counts, displs)))))
+            if str(channel_of(node)) in about["subarrays"]:
+                node.meta.update(zip(SUBARRAY, map(tuples, about["subarrays"][str(channel_of(node))])))
         for spec, target in zip(program.graph_signature.input_specs, targets, strict=True):
             if spec.kind == InputKind.CONSTANT_TENSOR:
                 state[target] = (spec.target, program.constants[spec.target])
