@@ -485,10 +485,13 @@ CASES = [
     ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
      {"processors": TWO, "sharded": True, "placement": ragged_rows}),
     ("windows | rows 1:2:1, halos exchanged", Windows, [(r(2, 3, 23, 9),)],
-     {"processors": THREE, "sharded": True,
+     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6},
       "placement": lambda: lambda node: (2, tuple(THREE), (1, 2, 1)) if node.name == "x" else "p0"}),
+    ("windows | rows 1:6:1, halos padded", Windows, [(r(2, 3, 23, 9),)],
+     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6, "padded": 2},
+      "placement": lambda: lambda node: (2, tuple(THREE), (1, 6, 1)) if node.name == "x" else "p0"}),
     ("windows | 2 shards, input on p0", Windows, [(r(2, 3, 23, 9),)],
-     {"processors": TWO, "sharded": True,
+     {"processors": TWO, "sharded": True, "windows": {"shards": 8, "masked": 4, "views": 2},
       "placement": lambda: lambda node: (2, SHARDS, None) if node.name == "convolution" else "p0"}),
     ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
      {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
@@ -530,7 +533,7 @@ FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 proc
                "conv | conv on mps, rest cpu", "megatron | 2 shards")
 METAL_SIGNED = ("mlp | all on mps", "conv | conv on mps, rest cpu", "megatron | 2 shards, cpu/mps")
 KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
-OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance", "copied")
+OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance", "copied", "windows")
 
 
 def errors(reference, got):
@@ -553,7 +556,7 @@ def call_nodes(graph):
 ATEN = torch.ops.aten
 CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scatter.default
 PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
-          ATEN.new_zeros.default, ATEN.new_full.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
+          ATEN.new_zeros.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
           ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
           ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.default}
 BLOCK = ("dimension", "block", "counts", "displs")
@@ -615,6 +618,22 @@ def check_views(scheduled, copied=0):
     assert found >= copied, f"{found} of {copied} views that fail torch's condition are of a contiguous copy"
 
 
+# design/problems-of-14b9a757-change-request.md item 4, steps 1 and 2; design/unequal-shards-change-request.md item 10
+def check_windows(scheduled, expected):
+    found = collections.Counter()
+    for module in scheduled.modules.values():
+        names = {n.name: n for n in module.graph.nodes}
+        for node in call_nodes(module.graph):
+            if "of" in node.meta and any(kind in str(node.target) for kind in ("convolution", "pool")):
+                held = node.args[0]
+                found["shards"] += 1
+                found["masked"] += held.target is ATEN.where.self
+                found["views"] += names[held.meta["view"][0]].op == "placeholder" if "view" in held.meta else (
+                    held.op == "placeholder")
+            found["padded"] += node.target is ir.SEND and node.args[0].target is ATEN.constant_pad_nd.default
+    assert +found == expected, f"windowed shards {dict(+found)}, not {expected}"
+
+
 def check_ir(scheduled, expect_on=None, sharded=False):
     exported = scheduled.exported.graph_module.graph
     assert not any("processor" in n.meta for n in exported.nodes), "the exported graph was altered"
@@ -669,7 +688,8 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         held = collections.defaultdict(set)
         for node in nodes:
             if node.meta.get("of") in original and isinstance(node.meta["val"], torch.Tensor):
-                held[node.meta["of"]].add(tuple(node.meta["val"].shape))
+                cut = [u for u in node.users if u.target is SLICE and tuple(u.args[2:]) == node.meta.get("cut")]
+                held[node.meta["of"]].add(tuple((cut[0] if cut else node).meta["val"].shape))
         striped = any(n.target is SLICE and len(n.args) > 4 for n in nodes)
         assert striped or all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
         assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
@@ -880,6 +900,8 @@ def run_case(name, with_inductor):
     (operators, copies), channels = (check_ir(program, options.get("expect_on"), options.get("sharded")),
                                      program.channels)
     check_views(program, options.get("copied", 0))
+    if "windows" in options:
+        check_windows(program, options["windows"])
     if name in SAVE:
         save_for_review(SAVE[name], program)
     results, dynamo, breaks = {}, "", 0

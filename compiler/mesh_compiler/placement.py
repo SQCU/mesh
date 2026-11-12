@@ -24,7 +24,7 @@ SLICE_SCATTER, ZEROS = ATEN.slice_scatter.default, ATEN.new_zeros.default
 BMM, FLIP, SOFTMAX = ATEN.bmm.default, ATEN.flip.default, ATEN._softmax.default
 ARANGE, LE, AND, NOT = ATEN.arange.start_step, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default
 PAD = ATEN.constant_pad_nd.default
-CONVOLUTION, FULL = ATEN.convolution.default, ATEN.new_full.default
+CONVOLUTION = ATEN.convolution.default
 MAXIMA = {ATEN.max_pool2d_with_indices.default, ATEN.max_pool3d_with_indices.default}
 AVERAGES = {ATEN.avg_pool1d.default, ATEN.avg_pool2d.default, ATEN.avg_pool3d.default}
 SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
@@ -100,20 +100,30 @@ def based(node, read):
 
 
 # design/unequal-shards-change-request.md items 1, 13 and 15
+class Sizes(tuple):
+    units = None
+
+
+def sized(sizes, units):
+    sizes = Sizes(sizes)
+    sizes.units = units
+    return sizes
+
+
 def counts(extent, units, shards):
     if units == STRIPED:
         return STRIPED
     if units is None:
         chunk = -(-extent // shards)
-        return tuple(max(0, min(chunk, extent - chunk * j)) for j in range(shards))
+        return Sizes(max(0, min(chunk, extent - chunk * j)) for j in range(shards))
     if len(units) == shards + 1:
-        return tuple(high - low for low, high in itertools.pairwise(units))
+        return Sizes(high - low for low, high in itertools.pairwise(units))
     exact = [extent * unit / sum(units) for unit in units]
     sizes = [round(size) for size in exact]
     while sum(sizes) != extent:
         step = 1 if sum(sizes) < extent else -1
         sizes[min(range(shards), key=lambda j: abs(sizes[j] + step - exact[j]))] += step
-    return tuple(sizes)
+    return sized(sizes, tuple(units))
 
 
 # design/unequal-shards-change-request.md items 4 and 12; Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.1
@@ -148,21 +158,28 @@ def constant(graph, target, arguments, like, processor, **kwargs):
     return node
 
 
+# Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.1
+def selected(graph, node, dimension, low, high, fill, processor, period=None):
+    extent = shape(node)[dimension]
+    index = constant(graph, ARANGE, (0, extent), node, processor, dtype=torch.int64)
+    if period:
+        index = call(graph, ATEN.remainder.Scalar, (index, period), processor)
+    inside = call(graph, LE, (index, high - 1), processor)
+    if low:
+        inside = call(graph, AND, (inside, call(graph, NOT, (call(graph, LE, (index, low - 1), processor),),
+                                                   processor)), processor)
+    inside = call(graph, VIEW, (inside, [extent if d == dimension else 1 for d in range(len(shape(node)))]), processor)
+    inside = call(graph, EXPAND, (inside, list(shape(node))), processor)
+    value = constant(graph, ATEN.scalar_tensor.default, (fill,), node, processor, dtype=node.meta["val"].dtype)
+    return call(graph, ATEN.where.self, (inside, node, value), processor)
+
+
 def masked(graph, node, dimension, sizes, j, processor):
     if not uneven(sizes) or sizes[j] == max(sizes):
         return node
     start, extent = sum(sizes[:j]) - bases(sizes)[j], shape(node)[dimension]
-    index = constant(graph, ARANGE, (0, extent), node, processor, dtype=torch.int64)
-    if extent > max(sizes):
-        index = call(graph, ATEN.remainder.Scalar, (index, max(sizes)), processor)
-    inside = call(graph, LE, (index, start + sizes[j] - 1), processor)
-    if start:
-        inside = call(graph, AND, (inside, call(graph, NOT, (call(graph, LE, (index, start - 1), processor),),
-                                                   processor)), processor)
-    inside = call(graph, VIEW, (inside, [extent if d == dimension else 1 for d in range(len(shape(node)))]), processor)
-    inside = call(graph, EXPAND, (inside, list(shape(node))), processor)
-    zero = constant(graph, ATEN.scalar_tensor.default, (0,), node, processor, dtype=node.meta["val"].dtype)
-    return call(graph, ATEN.where.self, (inside, node, zero), processor)
+    return selected(graph, node, dimension, start, start + sizes[j], 0, processor,
+                    max(sizes) if extent > max(sizes) else None)
 
 
 def folded(graph, value, at, repeats, periods, dimension, sizes, processors, exact):
@@ -339,7 +356,7 @@ def unpadded(node, at):
 
 
 # Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.3 and appendix A.2; design/unequal-shards-change-request.md item 10;
-# design/problems-of-14b9a757-change-request.md item 4
+# design/problems-of-14b9a757-change-request.md items 4 and 5
 def halos(graph, value, window, dimension, sizes, processors):
     (span, stride, low, fill), (held, extents, holders, nodes) = window, value
     size = shape(nodes[0])[dimension] if held is None else sum(extents)
@@ -347,9 +364,18 @@ def halos(graph, value, window, dimension, sizes, processors):
     def read(first, count):
         return first * stride - low, (first + count - 1) * stride - low + span
     reads = [read(first, max(sizes)) for first in bases(sizes)]
+    if held is None:
+        regions, kept = [], []
+        for processor, first, (low_, high) in zip(processors, bases(sizes), reads):
+            whole = 0 <= low_ and high <= size
+            start = low_ if whole else max(0, first - -(-low // stride)) * stride
+            regions.append(nodes[0] if (start, min(size, high)) == (0, size) else call(
+                graph, SLICE, (nodes[0], dimension, start, min(size, high)), holders[0] or processor))
+            kept.append(None if whole else first - start // stride)
+        return regions, kept
     real = [(max(0, min(size, first)), max(0, min(size, last if count else first))) for count, (first, last) in zip(
         sizes, map(read, itertools.accumulate(sizes[:-1], initial=0), sizes))]
-    starts = [0, size] if held is None else list(itertools.accumulate(extents, initial=0))
+    starts = list(itertools.accumulate(extents, initial=0))
     cuts = [[(max(low_, real[q][0], starts[p]), min(high, real[q][1], starts[p + 1]))
              for p in range(len(starts) - 1)] for q, (low_, high) in enumerate(reads)]
     shared = [[max(0, last - first) for first, last in row] for row in cuts]
@@ -357,32 +383,34 @@ def halos(graph, value, window, dimension, sizes, processors):
               for p, (first, last) in enumerate(row)] for q, row in enumerate(cuts)]
     regions = []
     for q, (processor, (low_, high)) in enumerate(zip(processors, reads)):
-        parts = []
+        parts, rank = [], len(shape(nodes[q]))
         for p, node in enumerate(nodes):
             first, extent = cuts[q][p][0] - starts[p], starts[p + 1] - starts[p]
             if not shared[q][p]:
                 continue
-            if held is None:
-                node = call(graph, SLICE, (node, dimension, first, first + shared[q][p]), holders[0] or processor)
-            elif p == q and shared[q][p] < extent:
+            if p == q and shared[q][p] < extent:
                 node = call(graph, SLICE, (node, dimension, first, first + shared[q][p]), processor)
             elif p != q:
-                width = min(extent, max(cover[r][r + p - q] for r in range(len(nodes)) if 0 <= r + p - q < len(nodes)))
+                width = max(cover[r][r + p - q] for r in range(len(nodes)) if 0 <= r + p - q < len(nodes))
                 if width < extent:
                     node = call(graph, SLICE, (node, dimension, *((extent - width, extent) if p < q else (0, width))),
                                 processors[p])
+                elif width > extent:
+                    node = call(graph, PAD, (node, [0, 0] * (rank - 1 - dimension) + [
+                        width - extent, 0][::1 if p < q else -1], 0), processors[p])
                 if shared[q][p] < width:
                     skip = width - cover[q][p] if p < q else first
                     node = call(graph, SLICE, (node, dimension, skip, skip + shared[q][p]), processor)
             parts.append(node)
-        local = nodes[q if held is not None else 0]
         for before, missing in ((True, min(high, real[q][0]) - low_), (False, high - max(real[q][1], low_))):
             if missing > 0:
-                filled = [missing if d == dimension else extent for d, extent in enumerate(shape(local))]
-                parts.insert(0 if before else len(parts), call(graph, *((ZEROS, (local, filled)) if fill == 0 else (
-                    FULL, (local, filled, fill))), processor))
-        regions.append(parts[0] if len(parts) == 1 else call(graph, CAT, (parts, dimension), processor))
-    return regions
+                parts.insert(0 if before else len(parts), call(graph, ZEROS, (nodes[q], [
+                    missing if d == dimension else extent for d, extent in enumerate(shape(nodes[q]))]), processor))
+        region = parts[0] if len(parts) == 1 else call(graph, CAT, (parts, dimension), processor)
+        if low_ < 0 or high > size:
+            region = selected(graph, region, dimension, max(0, -low_), min(high, size) - low_, fill, processor)
+        regions.append(region)
+    return regions, [None] * len(regions)
 
 
 # design/unequal-shards-change-request.md item 8
@@ -428,7 +456,8 @@ def viewed(value, whole, new):
     for at in reversed(range(len(new))):
         unit = math.prod(new[at + 1:])
         if all(edge % unit == 0 for edge in edges) and unit * new[at] % edges[-1] == 0:
-            return at, (dimension, tuple(stride * size // unit for size in sizes), processors, nodes)
+            return at, (dimension, sized((stride * size // unit for size in sizes), getattr(sizes, "units", None)),
+                        processors, nodes)
 
 
 def ranges(sizes, extent, shards):
@@ -517,7 +546,7 @@ def partitioned(graph, node, held, want, replaced):
             target = found.pop()
     window = target and RULES.get(node.target) is windowed and windows(node).get(target[0])
     if window:
-        units = None if target[1] == counts(sum(target[1]), None, len(target[2])) else target[1]
+        units = getattr(target[1], "units", None)
         target = target[0], counts(out[target[0]], units, len(target[2])), target[2]
     if target is None:
         processor = want if isinstance(want, str) else want[2][0]
@@ -533,7 +562,7 @@ def partitioned(graph, node, held, want, replaced):
             value = *value[:3], reshard(graph, plainly(graph, held[0]), *value[:3], True)
         elif value[0] is not None:
             value = *value[:3], [own(graph, n, along, value[1], k) for k, n in enumerate(value[3])]
-        regions = halos(graph, value, window, along, sizes, processors)
+        regions, kept = halos(graph, value, window, along, sizes, processors)
     shards, whole = [], along >= 0 and (sizes == STRIPED or sum(sizes) == out[along])
     queries = ranges(sizes, out[along], len(processors)) if whole else ()
     joined = [v[0] is not None and along not in row and row[v[0]] is not None and
@@ -589,7 +618,7 @@ def partitioned(graph, node, held, want, replaced):
                      for n, row in zip(local, rows)]
             arguments = iter(local)
         shard = graph.node_copy(node, lambda n: next(arguments))
-        if window:
+        if window and kept[j] is None:
             unpadded(shard, along - 2)
         if node.target in (EXPAND, VIEW):
             sized = list(shard.args[1])
@@ -602,6 +631,11 @@ def partitioned(graph, node, held, want, replaced):
             len(range(j, extent, len(processors))) if sizes == STRIPED else sizes[j],
             extent if sizes == STRIPED else sum(sizes)))
         shards.append(evaluated(shard, processor))
+        if window and kept[j] is not None:
+            shard.meta["cut"] = kept[j], kept[j] + max(sizes)
+            if shard.meta["cut"] != (0, shape(shard)[along]):
+                shards[-1] = call(graph, SLICE, (shard, along, *shard.meta["cut"]), processor)
+                shards[-1].meta["order"] = order
     replaced.append(node)
     if along >= 0:
         return along, sizes, processors, shards
