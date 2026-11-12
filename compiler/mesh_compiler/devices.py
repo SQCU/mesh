@@ -40,14 +40,14 @@ def on_devices(graph_module, processors, views):
             if sent != device:
                 with graph.inserting_before(node):
                     value = copied(graph, value, sent, node.meta["processor"])
-                    rewired.append(value)
+                    rewired += [value, node]
                 arrival.meta["val"] = value.meta["val"]
                 node.args = (value, channel)
             if there != sent:
                 with graph.inserting_after(arrival):
                     landed = copied(graph, arrival, there, arrival.meta["processor"])
                 arrival.replace_all_uses_with(landed, lambda user: user is not landed)
-                rewired.append(landed)
+                rewired += [landed, *landed.users]
     views(rewired)
     graph_module.recompile()
     return graph_module
