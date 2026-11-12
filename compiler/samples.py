@@ -720,7 +720,7 @@ def measure(make, module, calls, inputs_on=None):
     for args in calls:
         with torch.no_grad():
             expected = reference(*copy.deepcopy(args))
-        got = runner(*(a.to(inputs_on or a.device) for a in copy.deepcopy(args)))
+        got = runner(*(a.to(inputs_on) * 1 if inputs_on else a for a in copy.deepcopy(args)))
         state = state_of(runner)
         buffers = {key: value for key, value in reference.named_buffers() if key in state}
         worst = max(worst, errors((expected, buffers), (got, {key: state[key] for key in buffers})))

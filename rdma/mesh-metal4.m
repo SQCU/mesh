@@ -15,8 +15,8 @@ struct mesh_metal4_dispatch {
 @property id<MTL4CommandAllocator> allocator;
 @property id<MTL4CommandBuffer> commands;
 @property id<MTLResidencySet> held, viewed;
-@property id<MTLSharedEvent> event;
-@property uint64_t value;
+@property id<MTLSharedEvent> event, arrival;
+@property uint64_t value, arrived;
 @property(atomic) NSError *error;
 @end
 @implementation MeshMetal4Stream
@@ -114,8 +114,23 @@ void *mesh_metal4_stream(void *const *buffer, uint32_t buffers) {
     stream.held = [device newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
     stream.viewed = [device newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:nil];
     stream.event = [device newSharedEvent];
+    stream.arrival = [device newSharedEvent];
     add(stream.held, buffer, buffers);
     return (__bridge_retained void *)stream;
+}
+
+/* torch/csrc/api/include/torch/mps.h: commit, get_command_buffer, get_dispatch_queue */
+void mesh_metal4_after(void *of, void (*commit)(void), void *(*commands)(void), void *(*encoding)(void)) {
+    MeshMetal4Stream *stream = (__bridge MeshMetal4Stream *)of;
+    id<MTLSharedEvent> arrival = stream.arrival;
+    uint64_t arrived = stream.arrived + 1;
+    stream.arrived = arrived;
+    dispatch_sync((__bridge dispatch_queue_t)encoding(), ^{
+        commit();
+        [(__bridge id<MTLCommandBuffer>)commands() encodeSignalEvent:arrival value:arrived];
+        commit();
+    });
+    [queue waitForEvent:arrival value:arrived];
 }
 
 void *mesh_metal4_fence(void) {

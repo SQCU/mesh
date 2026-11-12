@@ -20,6 +20,7 @@ for name, result, arguments in (
         ('mesh_metal4_release', None, [P]),
         ('mesh_metal4_address', Q, [P]),
         ('mesh_metal4_contents', P, [P]),
+        ('mesh_metal4_after', None, [P, P, P, P]),
         ('mesh_metal4_fence', P, []),
         ('mesh_metal4_stream', P, [C.POINTER(P), U]),
         ('mesh_metal4_commit', None, [P, C.POINTER(Dispatch), U, C.POINTER(P), U, C.POINTER(P), U, P]),

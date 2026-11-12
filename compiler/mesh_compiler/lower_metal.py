@@ -29,6 +29,10 @@ PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/Met
               "using namespace mpp::tensor_ops;\n")
 REFERENCE = pathlib.Path(torch.__file__).parent / "include/c10/metal/special_math.h"
 PIPELINES, OWNED, HOST = {}, {}, torch.device("cpu")
+# torch/csrc/api/include/torch/mps.h: commit, get_command_buffer, get_dispatch_queue
+TORCH = [C.cast(getattr(C.CDLL(str(pathlib.Path(torch.__file__).parent / "lib/libtorch_cpu.dylib")), name),
+                C.c_void_p) for name in ("_ZN5torch3mps6commitEv", "_ZN5torch3mps18get_command_bufferEv",
+                                         "_ZN5torch3mps18get_dispatch_queueEv")]
 
 POINTWISE = {
     ATEN.add.Tensor: "({T}({0}) + {T}({1}))", ATEN.add.Scalar: "({T}({0}) + {T}({1}))",
@@ -576,7 +580,7 @@ class Lowering:
 
         def run(*arguments):
             owner = {s: arguments[position] for s, position in given}
-            handles, shifts, views = {}, {}, []
+            handles, shifts, views, ordered = {}, {}, [], []
             for s, st in made:
                 handles[s], shifts[s] = LIB.mesh_metal4_buffer(st.count * st.dtype.itemsize), 0
                 pages = (C.c_byte * (st.count * st.dtype.itemsize)).from_address(LIB.mesh_metal4_contents(handles[s]))
@@ -593,9 +597,8 @@ class Lowering:
                         span = -(-(pages.data_ptr() + pages.nbytes() - first) // mmap.PAGESIZE) * mmap.PAGESIZE
                         handles[s], shifts[s] = LIB.mesh_metal4_view(first, span), shift + pages.data_ptr() - first
                         views.append(handles[s])
-                    # torch/mps/__init__.py, synchronize; torch-source-lowering-change-request.md item 3
-                    if owner[s].device.type == "mps":
-                        torch.mps.synchronize()
+                    if owner[s].device.type == "mps" and not ordered:
+                        ordered.append(LIB.mesh_metal4_after(stream, *TORCH))
                 return handles[s]
 
             def tensor(view):
