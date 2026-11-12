@@ -1200,6 +1200,7 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
     mesh_graph_rows(resources, vertices, depth_head, resource, first, member);
   }
   int second = 0;
+  uint64_t entries = 2 * room;
   while (!result) {
     if (Highs_run(highs) == kHighsStatusError) { result = EDOM; break; }
     const HighsInt model = Highs_getModelStatus(highs);
@@ -1219,18 +1220,25 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
         if (length[j] > 0) key[count++] = (struct completion_key){column[j], j};
       }
       qsort(key, count, sizeof *key, completion_key_before);
-      double sum = 0, squares = 0, left = 0, most = 0, bound = 0;
-      size_t prefix = 0;
-      for (size_t k = 0; k < count; k++) {
+      double sum = 0, squares = 0, left = 0;
+      for (size_t k = 0; k < count && !result; k++) {
         const double d = length[key[k].vertex];
         sum += d; squares += d * d; left += d * key[k].at;
-        const double right = (sum * sum + squares) / 2, short_by = right - left;
-        if (short_by > tolerance * (1 + right) && short_by > most) { most = short_by; bound = right; prefix = k + 1; }
+        const double right = (sum * sum + squares) / 2;
+        if (!((right - left) / sum > tolerance)) continue;
+        if ((uint64_t)nonzeros + k + 1 > entries) {
+          const uint64_t more = 2 * ((uint64_t)nonzeros + k + 1);
+          HighsInt *wider = more < INT32_MAX ? realloc(index, more * sizeof *index) : NULL;
+          if (wider) index = wider;
+          double *longer = wider ? realloc(value, more * sizeof *value) : NULL;
+          if (!longer) { result = ENOMEM; break; }
+          value = longer; entries = more;
+        }
+        start[cuts] = nonzeros; lower[cuts] = right / sum; upper[cuts] = infinity; cuts++;
+        for (size_t q = 0; q <= k; q++) { index[nonzeros] = (HighsInt)key[q].vertex; value[nonzeros++] = length[key[q].vertex] / sum; }
       }
-      if (!prefix) continue;
-      start[cuts] = nonzeros; lower[cuts] = bound; upper[cuts] = infinity; cuts++;
-      for (size_t k = 0; k < prefix; k++) { index[nonzeros] = (HighsInt)key[k].vertex; value[nonzeros++] = length[key[k].vertex]; }
     }
+    if (result) break;
     if (!cuts && second) break;
     if (!cuts) {
       second = 1;
