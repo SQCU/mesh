@@ -509,6 +509,11 @@ LIB.mesh_graph_synchronization.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c
                                            C.POINTER(C.c_ubyte), C.POINTER(C.c_size_t)]
 
 
+# mesh-graph.h struct mesh_strided; torch 2.14.0 c10/core/TensorImpl.h, storage_offset_ and sizes_and_strides_
+def strided(offset, sizes, strides, element):
+    return offset * element, element, [(n, s * element) for n, s in zip(sizes, strides)]
+
+
 def dependences_supplied(vertices, views, supplied):
     viewed, held = (Viewed * max(len(views), 1))(), []
     for made, (key, offset, element, pairs, vertex, write) in zip(viewed, views):

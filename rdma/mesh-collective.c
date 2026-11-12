@@ -1900,7 +1900,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
   *planned=(struct mesh_planned){0};
   if(!group || !program || !count || !functions || !ncalls || !calls || (norders && (!orders || !causes)))return EINVAL;
   for(uint32_t j=0;j<ncalls;j++)if(calls[j]>=count)return EINVAL;
-  /* design/plan-to-bridge-change-request.md R5, "This is the one schedule of the data flow." */
+  /* design/plan-to-bridge-change-request.md R5, "Where it composes" */
   if(!context){
     int ordered=0;
     for(uint32_t f=0;!ordered && f<count;f++){

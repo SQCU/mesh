@@ -53,7 +53,7 @@ def accesses(functions):
 
     def access(record, element, vertex, write):
         name, offset, sizes, strides = record if min(record[3], default=0) >= 0 else whole(named[record[0]])
-        return (key[name], offset * element, element, [(n, s * element) for n, s in zip(sizes, strides)], vertex, write)
+        return (key[name], *mesh_graph.strided(offset, sizes, strides, element), vertex, write)
 
     found = []
     for vertex, node in enumerate(functions):
