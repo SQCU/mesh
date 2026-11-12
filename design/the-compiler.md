@@ -77,14 +77,16 @@ Three things are mesh's and are added to it:
      function (`mesh_graph_completion_times`, `rdma/mesh-graph.h`), are outstanding
      ([change-requests-index.md](change-requests-index.md)).
 2. Processors on several machines: items 1 and 2 above. The check's cases pass with their processors on two machines.
-   (Written: mesh 6d4f007b, 1a3cfe60. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
+   (Outstanding. Mesh 6d4f007b and 1a3cfe60 wrote it. At dcc51b67 the 22 cases that have two or more processors pass with two processes whose
    entries the check carries between two regions of the bridge's layout; the 33 is the count on one machine. The run under two bridges is
    `MESH_GROUP=<run> MESH_PROGRAM=<the two machines' places in the map, as "0,1"> python samples.py --machines <A> <B>`
    on each machine, and has not been made; `MESH_PROGRAM` is the `program` operand of `mesh_plan`, which
    `schedule.planned` reads since mesh 81c8e9da (2026-11-12).)
 3. Sharding: item 3 above. `examples/tp.py`, `cp.py`, `ep.py` and `pl.py` are compiled by `compile_module` and run by
-   `Program`. (Done: mesh 297c3cda, 8e78b145, 16681b92, 3d51955d, 0d70ec49. The four examples match eager execution on
-   two GPU processors, worst relative error 2.3e-06; 11 sharded cases of the check pass on every path.)
+   `Program`. (At mesh 297c3cda, 8e78b145, 16681b92, 3d51955d and 0d70ec49, 2026-11-11, the four examples matched eager execution on
+   two GPU processors, worst relative error 2.3e-06; 11 sharded cases of the check passed on every path. The
+   order is outstanding until the clauses [change-requests-index.md](change-requests-index.md) lists as outstanding
+   under unequal-shards-change-request.md hold.)
 4. `lower` for Metal: a function of `Scheduled` that returns one function per processor.
    - Core ML: `lower_coreml.lower` returns a function for each processor whose engine is `ane`. The processor's graph,
      in scheduled order, is cut at each `send`, `recv` and copy to another device, which the function calls as torch

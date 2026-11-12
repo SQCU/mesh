@@ -21,14 +21,16 @@ change request follows is [change-requests.md](change-requests.md).
   covered.
 - `not determined [date]`: the clause states a condition of machines, services or records that no file shows; the
   item is outstanding until a reading shows it holds.
+- A second reader then read each covered stamp for a sentence that does not hold, at mesh 6d379b7e; the entries it
+  moved say so, and its readings are `refute.json` beside the others.
 - [requirements-by-stage.md](requirements-by-stage.md) lists the same items under the stage that takes each, with
   each clause quoted.
-- Of 611 items: 282 covered, 314 outstanding, 10 not determined,
+- Of 611 items: 200 covered, 396 outstanding, 10 not determined,
   5 withdrawn. No request has every item covered. All eleven are outstanding.
 
 ## [compilation-composition-change-request.md](compilation-composition-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 81 items outstanding, 0 not determined, 11 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 82 items outstanding, 0 not determined, 10 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -476,6 +478,16 @@ Outstanding:
     f20efc91]. "The bridge binds physical transport as R7 specifies.": R7's requirement, "The code must keep every
     transport object and count inside the bridge", is outstanding in this index under plan-to-bridge (schedule.py
     reads the map's cable records in the compiling process).
+  - 6 / Replaces 2: signature printed from the resulting compilation: outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. "The signature is printed from the resulting compilation."
+    (design/compilation-composition-change-request.md:252): compiler/mesh_compiler/signature.py:100-101:
+    `records[processor] = lowered_run(function.record, on_mps) if hasattr(function, "record") else torch_run(function
+    if isinstance(function, torch.fx.GraphModule) else module)`. Only lower_metal's functions carry a record
+    (lower_metal.py:1037, :1064). A processor lowered by lower_coreml (its `run`, lower_coreml.py:266-288, has no
+    `record`) or by lower_inductor (lower_inductor.py:72) has its tasks, dependences and operations printed by
+    torch_run (signature.py:33-44) from `scheduled.modules[processor]`, the scheduled fx module before lowering
+    (driver.py:45-46 passes the unlowered `scheduled`), not from what that lowering produced. The chain runs this path
+    with lower_coreml at compiler/samples.py:1116.
 
 Covered:
 
@@ -484,7 +496,6 @@ Covered:
   - 4 / Write: runtime consumes programs and remaining inputs; self-timed calls: covered [2026-11-12, mesh 81c8e9da]
   - 5 / Replaces, site 3: strided-view traversal: covered [2026-11-08, mesh d44e3d0c]
   - 6 / Replaces 1: covered [2026-11-12, mesh ead08ba2]
-  - 6 / Replaces 2: signature printed from the resulting compilation: covered [2026-11-12, mesh 507a1ec7]
   - Correction: generated target source / Replaces: covered [2026-11-09, metal-microbench f08d3c7b]
   - Complete replacement / replaced-implementation table row 5: covered [2026-11-12, mesh 69d5aa4d]
   - 7 / Replaces: MetalLoopTest and its whole-queue waits: covered [2026-11-10, metal-microbench 1b6f3182]
@@ -503,7 +514,7 @@ Withdrawn:
 
 ## [aot-compilation-change-request.md](aot-compilation-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 39 items outstanding, 1 not determined, 70 covered, 2 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 59 items outstanding, 1 not determined, 50 covered, 2 withdrawn.
 
 Outstanding:
 
@@ -689,6 +700,144 @@ Outstanding:
   - The files and functions: metal-microbench metal_recording.m: "the recorder's capture of a delegate's commands
     (A1)": the capture is in metal-microbench metal_recording.m alone; nothing in the compile_module chain takes a
     delegate's commands (export.py:15-16).
+  - The stages each requirement belongs to (1-6): outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "There is
+    one schedule." (design/aot-compilation-change-request.md:95): compiler/mesh_compiler/driver.py:24 and :26 solve
+    mesh_plan twice in one compile_module (planned -> schedule.py:160, stored -> schedule.py:196, both through solved,
+    schedule.py:111-113), the second with other values (schedule.py:178-195). driver.py:25 orders each processor's
+    operations by the first solve's times (schedule.py:204-206), while the record the bridge loads is the second
+    solve's (schedule.py:118; bridge.py:25-28).
+  - A1 not a torch.compile backend: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "It is not a
+    `torch.compile` backend." (design/aot-compilation-change-request.md:129):
+    compiler/mesh_compiler/lower_inductor.py:72: `compiled[processor] = torch.compile(adapted, backend="inductor",
+    options=options)`. Each processor's scheduled module is handed to torch.compile, which captures and compiles it at
+    its first call inside Program (runtime.py:50, :72). The export stage itself is torch.export (export.py:16) and
+    registers no backend; the refutation rests on the lowering the chain calls. The same index lists lines 150-151
+    outstanding on this line of code.
+  - A2 algorithm (GSPMD's partitioning): outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "It consumes
+    sharding annotations on a few tensors, propagates them to every operator by compiler passes over a dataflow IR,
+    and inserts the collectives." (design/aot-compilation-change-request.md:174-175): "every operator":
+    compiler/mesh_compiler/placement.py:476-477 gives an operator with no entry in RULES (:372-386) the rule
+    `replicated`, and :491-496 then reshards its operands to one processor, where it runs unpartitioned. "inserts the
+    collectives": place inserts one mesh::send/mesh::recv pair for each reading processor (placement.py:674-680), and
+    a reduction over shards is ADD nodes on the keeping processor (placement.py:595-598). The same index lists A4's
+    AllReduce, AllGather and ReduceScatter outstanding for this.
+  - A2 produced by, consumed by: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Placement takes A1's graph
+    and the sharding specs and returns the partitioned graph with its collectives, which A4 turns into sends and
+    receives of pages." (design/aot-compilation-change-request.md:177-178); also "A6's schedule takes the result, in
+    A8's IR." (line 179): compiler/mesh_compiler/placement.py:674-680 returns the graph with send/recv pairs already
+    in it, one channel a reader, and placement.py:595-598 sums shards by ADD on the keeper. A4's AllReduce, AllGather
+    and ReduceScatter are outstanding in the same index. The A8 and A6 it cites are outstanding too: the chain passes
+    outstanding = 1 and no orders (schedule.py:110, :159), and the processors' order is not R5's
+    (schedule.py:203-210).
+  - A4 stage: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Placement inserts the collectives (A2).
+    `mesh_plan`, the schedule stage's function, routes them and lowers them to sends and receives of pages
+    (rdma/mesh-collective.c)." (design/aot-compilation-change-request.md:219-220):
+    compiler/mesh_compiler/placement.py:674-680: place adds send and recv nodes, as the clause's next sentence says
+    the reference program does, one channel for each reading processor. A reduction is ADD on the keeper
+    (placement.py:595-598), which mesh_plan never sees. mesh_plan is declared each channel between machines as a
+    demand of one leaf (schedule.py:152; rdma/mesh-collective.c:1681-1691). The same index lists A4's AllReduce,
+    AllGather and ReduceScatter outstanding.
+  - A4 data structure and algorithm: packed spanning trees, packing: outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. "**Packing.** Blink §3.2: the packing is a multiplicative-weight update for fractional packing.
+    `mesh_graph_pack`'s Garg and Könemann rounds are a multiplicative-weight method of the same kind."
+    (design/aot-compilation-change-request.md:230-231): mesh_graph_pack is defined at rdma/mesh-graph.c:374 and
+    declared at mesh-graph.h:50, and nothing calls it. The routes are made by mesh_graph_flow alone
+    (rdma/mesh-collective.c:1758). With the chain as producer every demand has one leaf (schedule.py:152;
+    mesh-collective.c:1681-1683), so each tree is a path from source to destination.
+  - A4 which nodes hold a function's static schedule: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Each
+    compiled function has its own static schedule (appendix item 6). Every node of the map is a node of the program,
+    since every run is launched on the whole collective, so every relay holds the static schedule (A7, sender(m))."
+    (design/aot-compilation-change-request.md:264-266): The program's nodes are whatever MESH_PROGRAM names
+    (compiler/mesh_compiler/schedule.py:158); the one launcher passes the literal "0,1" (compiler/samples.py:1296-1297
+    by the index's reading). mesh_plan does not make every map node a node of the program: it returns EINVAL where a
+    source, leaf or relay is outside `program` (rdma/mesh-collective.c:1794) or the node itself is (:1937). Both
+    requirements the sentence cites are outstanding in the same index: appendix item 6 (each Published first retires
+    what the client published, bridge.py:24) and A7 sender(m), the launcher's part.
+  - A6 produced by, consumed by (the lists): outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "The schedule
+    takes A8's IR." (design/aot-compilation-change-request.md:306): By citation only: the same index lists A8's data
+    structure outstanding. The struct mesh_function the chain gives mesh_plan carries the constant 1 for `outstanding`
+    and no orders, causes or chains (compiler/mesh_compiler/schedule.py:110, :159). The clause's other sentences hold:
+    the lists are written at rdma/mesh-collective.c:2051-2078 and loaded at bridge.py:25-28.
+  - A6 one schedule per function; the schedule takes A8's IR: outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. "There is one schedule." (design/aot-compilation-change-request.md:95) and "The schedule takes A8's IR."
+    (line 306): compiler/mesh_compiler/driver.py:24 and :26: mesh_plan is solved twice for one function
+    (schedule.py:160 and :196 through :111). The modules' order uses the first solve's times (driver.py:25;
+    schedule.py:204-206) and the bridge's lists come from the second (schedule.py:118). A8's IR is outstanding in the
+    same index (schedule.py:110, :159).
+  - A7 stage: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "It takes the scheduled value's name and nodes
+    and orders the calls of its functions." (design/aot-compilation-change-request.md:319): The scheduled value holds
+    no name: ir.Plan has `program` and no group (compiler/mesh_compiler/ir.py:54-67). The runtime makes the name
+    itself at compiler/mesh_compiler/bridge.py:105, `(int(os.environ["MESH_GROUP"]) << 32) + next(PUBLISHED)`, a count
+    of this process's Programs. The schedule was solved under another name, int(MESH_GROUP) (schedule.py:111). The
+    nodes are taken from the scheduled value (plan.program, bridge.py:26).
+  - A7 one sender for each program: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "So FIFO Order holds,
+    and with it A10's order constraints between the program's calls." (design/aot-compilation-change-request.md:402):
+    By citation: A10's order constraints are outstanding in the same index, and the chain has none.
+    compiler/mesh_compiler/schedule.py:110 passes None for orders, causes and chains, with one call of one function,
+    and :159 passes the constant 1. The one sender itself holds (rdma/mesh-collective.c:2011; mesh-records.c:1103,
+    :1124-1125).
+  - A7 views: the view identifier: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "So Local Monotonicity
+    holds at every member, a bridge started again among them." (design/aot-compilation-change-request.md:446-447):
+    rdma/mesh-records.c:683: `if(!named || mesh_view_compare(id,installed)<=0)return;`. mesh_view_compare
+    (rdma/mesh.h:97-100) orders by id, then sequencer, then boot, so a view whose identifier equals the bridge's
+    counter is installed where its sequencer's node number or boot is greater. The same index lists Local Monotonicity
+    outstanding on these lines.
+  - A8 carried as one IR from partitioning to serialization: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    "The data structure is the task graph ... carried as one IR from partitioning to serialization, as an operand of
+    its own." (design/aot-compilation-change-request.md:502-503) and "A2 partitions it. `mesh_plan` takes it for A4's
+    routing and lowering, A5's allocator and A6's ordering" (lines 510-511): A2 partitions a torch.fx graph
+    (compiler/mesh_compiler/placement.py:601-654). The task graph mesh_plan takes does not exist until the schedule
+    stage, where planned() builds it from that fx graph as tuples in ir.Plan (schedule.py:139-159), and stored()
+    builds it again with other values (schedule.py:178-195). The archive writes both forms side by side (archive.py:62
+    and :72-77). A5's allocator and A6's ordering, which the sentence cites, are outstanding in the same index
+    (rdma/mesh-collective.c:479-482, :658; schedule.py:203-210).
+  - A9 stage and types: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "The bridge and the GPU's program
+    take it." (design/aot-compilation-change-request.md:520-521), where "Here it is `struct mesh_algo`, the published
+    table" (lines 521-522): compiler/mesh_compiler/lower_metal.py:1441-1459: lower(scheduled) reads scheduled.devices,
+    modules, engines and carried, and neither scheduled.plan nor anything of struct mesh_algo; the file has no
+    reference to `.plan`. Only the bridge takes the record (bridge.py:25-28). The "(A5, A6)" the clause cites are
+    outstanding in the same index.
+  - A9 the algorithm the bridge runs it by: the self-timed strategy: outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. "The graph is A8's task graph, the program's whole graph (A1, A10), as a CUDA graph is the whole of its
+    captured work." (design/aot-compilation-change-request.md:557-558): compiler/mesh_compiler/schedule.py:108-110:
+    mesh_plan is given one function and one call (`function, 1, calls, 1, None, None, 0, None`), from one module a
+    compile_module (driver.py:14). No graph of the program's calls exists; A10 and A1's "every function" are
+    outstanding in the same index. The bridge's part holds: list order and a stop at the first unready dependency
+    (rdma/mesh-flow.c:1639-1650).
+  - A10 the graph operations are the graph module's (the functions): outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. "**The graph operations:** the order's transitive closure, the walk of commuting chains, and the width by
+    Fulkerson's matching in Hopcroft and Karp's phases." (design/aot-compilation-change-request.md:618-619): The
+    functions exist (rdma/mesh_graph.py:44 closure, :161 paths, :167 matching, :204 width). Their only callers as
+    A10's algorithms are in rdma/mesh_compile.py (:7771, :7783, :7819, :7823), which does not count. In the
+    compile_module chain, paths, matching and width have no caller; closure is called once, for the dependences of one
+    function (compiler/mesh_compiler/schedule.py:138), not for an order of calls.
+  - Appendix item 1 (unrolling): outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "A5's allocator takes u."
+    (design/aot-compilation-change-request.md:685): By citation: the allocator that takes u is not A5's, which the
+    same index lists outstanding. rdma/mesh-collective.c:658 calls mesh_graph_chains with the order plan_alone, which
+    returns 0 for every pair (:479-482), and items with a lifetime share pages by mesh_graph_fat_cover (:662-672).
+    Also, u is not only "the largest L": plan_unroll starts it at horizon x calls (:380) and raises it by a value's
+    declared lag before the lags are read (:384). No value is refused for its lag (:410).
+  - Appendix item 5: the set: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "the pages of asynchronous,
+    incomplete, noncontiguous consumers' operands ... are written as sets, not as a sequence"
+    (design/aot-compilation-change-request.md:908-909) and "rdma/mesh-collective.c writes each entry's `set` into its
+    `struct plan_entry`" (line 927): With the compile_module chain as producer no set is ever written.
+    compiler/mesh_compiler/devices.py:35 marks every arrival JOIN; PAGES (ir.py:34) is assigned nowhere;
+    schedule.py:152 declares that kind. rdma/mesh-collective.c:1695 then sets `d->set=0` for every demand, and :759
+    gives every entry set 0. The j + 1 numbering exists only on a branch the chain never reaches. The same index lists
+    "every program declares each consumer's kind" outstanding on devices.py:35.
+  - The files and functions: rdma/mesh_graph.py: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    "**rdma/mesh_graph.py:** the order's transitive closure, the walk of commuting chains, and the width by
+    Fulkerson's matching in Hopcroft and Karp's phases (A10)." (design/aot-compilation-change-request.md:1070-1071):
+    The functions are in the file (rdma/mesh_graph.py:44, :161, :167, :204), but as A10's they are called only from
+    rdma/mesh_compile.py (:7771-7823), which does not count. Nothing in compiler calls mesh_graph.paths, matching or
+    width, and every A10 item it cites is outstanding in the same index (schedule.py:110, :159).
+  - The files and functions: rdma/mesh-collective.c (fed by A2's collectives): outstanding [2026-11-12, mesh 6d379b7e;
+    a second reader]. "the demands and trees are fed by A2's collectives, in place of ranges declared by hand"
+    (design/aot-compilation-change-request.md:1075): The demands are fed by placement's send/recv channels, one
+    transfer for each channel between machines (compiler/mesh_compiler/placement.py:674-680; schedule.py:140-152),
+    each a demand of one leaf (rdma/mesh-collective.c:1681-1691). No AllReduce, AllGather or ReduceScatter reaches
+    mesh_plan (placement.py:595-598 sums on the keeper); the index lists those outstanding. The clause's second half,
+    one mesh_graph_flow call for every demand, holds at mesh-collective.c:1757-1759.
 
 Not determined:
 
@@ -699,32 +848,22 @@ Not determined:
 
 Covered:
 
-  - The stages each requirement belongs to (1-6): covered [2026-11-10, mesh ce2e8ac9]
   - A1 data structure and algorithm: covered [2026-11-12, mesh f8de5bbc]
-  - A1 not a torch.compile backend: covered [2026-11-12, mesh f8de5bbc]
   - A1 produced by, consumed by (the type): covered [2026-11-12, mesh f8de5bbc]
   - A2 data structure, part 1 (sharding specs): covered [2026-11-11, mesh 297c3cda]
   - A2 data structure, part 2 (mapping onto the map's nodes): covered [2026-11-12, mesh 81c8e9da]
-  - A2 algorithm (GSPMD's partitioning): covered [2026-11-11, mesh 297c3cda]
-  - A2 produced by, consumed by: covered [2026-11-12, mesh 28d7a032]
   - A2 the chooser is separate: covered [2026-11-10, mesh ce2e8ac9]
   - A3 data structure: covered [2026-11-12, mesh 81c8e9da]
   - A3 no algorithm computes them: covered [2026-11-12, mesh 81c8e9da]
   - A3 produced by, consumed by (router and scheduler): covered [2026-11-05, mesh f4838c9d]
   - A3 the chooser of the weights: covered [2026-11-10, mesh ce2e8ac9]
-  - A4 stage: covered [2026-11-12, mesh 28d7a032]
   - A4 data structure: the instruction DAG: covered [2026-11-06, mesh 5eeee1f9]
-  - A4 data structure and algorithm: packed spanning trees, packing: covered [2026-11-06, mesh fa089c56]
   - A4 algorithm: joint routing: covered [2026-11-05, mesh c6c9c77f]
   - A4 algorithm: CollectivePermute: covered [2026-11-12, mesh 81c8e9da]
   - A4 algorithm: AllToAll: covered [2026-11-12, mesh 81c8e9da]
   - A4 produced by, consumed by (mesh_plan's types): covered [2026-11-05, mesh c6c9c77f]
-  - A4 which nodes hold a function's static schedule: covered [2026-11-06, mesh fa089c56]
   - A4 a node to which the placement operand maps no device (mesh_plan's part): covered [2026-11-12, mesh 81c8e9da]
   - A4 a node to which the placement operand maps no device (the program's part): covered [2026-11-12, mesh 8a1b0ea7]
-  - A6 produced by, consumed by (the lists): covered [2026-11-05, mesh c6c9c77f]
-  - A6 one schedule per function; the schedule takes A8's IR: covered [2026-11-12, mesh 81c8e9da]
-  - A7 stage: covered [2026-11-12, mesh 81c8e9da]
   - A7 one order; total order multicast by a fixed sequencer (primitives, properties, steps of Fig. 5): covered
     [2026-11-05, mesh c38ee188]
   - A7 multicast to many groups: covered [2026-11-06, mesh a172596f]
@@ -732,21 +871,14 @@ Covered:
   - A7 the sequencer: covered [2026-11-05, mesh 7b3afe21]
   - A7 deliver(m); produced by, consumed by: covered [2026-11-05, mesh 7eb93c51]
   - A7 failures: covered [2026-11-06, mesh fa089c56]
-  - A7 one sender for each program: covered [2026-11-05, mesh c38ee188]
   - A7 views: a process: covered [2026-11-06, mesh 61435d4b]
-  - A7 views: the view identifier: covered [2026-11-05, mesh 84f569e2]
   - A7 views: Fig. 5 runs within each view: covered [2026-11-06, mesh 61435d4b]
   - A7 views: a change of view blocks and flushes: covered [2026-11-06, mesh 61435d4b]
   - A7 views: every member computes its static schedules on the view's map: covered [2026-11-06, mesh a172596f]
   - A7 a static schedule's destinations exist before its first message: covered [2026-11-05, mesh c38ee188]
-  - A8 carried as one IR from partitioning to serialization: covered [2026-11-12, mesh 81c8e9da]
-  - A9 stage and types: covered [2026-11-12, mesh 81c8e9da]
   - A9 here, per node: the lists: covered [2026-11-05, mesh c6c9c77f]
   - A9 here, per node: the bindings and the state section: covered [2026-11-09, mesh fdae772b]
-  - A9 the algorithm the bridge runs it by: the self-timed strategy: covered [2026-11-05, mesh 2b853ec7]
   - A9 every address is fixed at compile time: covered [2026-11-09, mesh fdae772b]
-  - A10 the graph operations are the graph module's (the functions): covered [2026-11-08, mesh 38ce722e]
-  - Appendix item 1 (unrolling): covered [2026-11-06, mesh fa089c56]
   - Appendix item 2: data structures and algorithms (the queue, its size, the merge): covered [2026-11-05, mesh
     930861b0]
   - Appendix item 2: what is ordered, and what is not; interleaving: covered [2026-11-05, mesh 930861b0]
@@ -762,14 +894,11 @@ Covered:
   - Appendix item 2, change: remove the coordination's Q3′: covered [2026-11-05, mesh 71e060ba]
   - Appendix item 3 (a slow node, "desynchronization": no handler): covered [2026-11-12, read at mesh 434b9955]
   - Appendix item 4 (no truncation at one end; no handler): covered [2026-11-09, mesh fdae772b]
-  - Appendix item 5: the set: covered [2026-11-06, mesh fa089c56]
   - Appendix item 5: one permutation of the whole set per execution: covered [2026-11-05, mesh c2a226b0]
   - Appendix item 5: a page's round rule reads a count that only rises: covered [2026-11-05, mesh 930861b0]
   - Appendix item 5: joins are sent in the schedule's order: covered [2026-11-04, mesh dd57daa6]
   - Appendix item 6, change: each call launches one execution: covered [2026-11-12, mesh 81c8e9da]
-  - The files and functions: rdma/mesh_graph.py: covered [2026-11-08, mesh 38ce722e]
   - The files and functions: rdma/mesh-graph.h, mesh-graph.c: covered [2026-11-05, mesh 15b4e9d2]
-  - The files and functions: rdma/mesh-collective.c (fed by A2's collectives): covered [2026-11-12, mesh 81c8e9da]
   - The files and functions: rdma/mesh-collective.c (routing, u, queue sizes, sets): covered [2026-11-03, mesh
     80e2e4d3]
   - The files and functions: rdma/mesh-bridge.h: covered [2026-11-06, mesh 61435d4b]
@@ -983,7 +1112,7 @@ Covered:
 
 ## [torch-source-lowering-change-request.md](torch-source-lowering-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 22 items outstanding, 5 not determined, 19 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 29 items outstanding, 5 not determined, 12 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1077,6 +1206,57 @@ Outstanding:
   - 6 / Write: no body repeated by tensor data: "No lowering here repeats a body a number of times that tensor data
     decides." The lowerings this sentence is about, item 6's, are not in compiler/mesh_compiler
     (lower_metal.py:306-319), so no code of the compile_module chain is what it describes.
+  - 1 / Write: the IR carries the kind: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "the IR carries
+    which of the two each consumer is (design/aot-compilation-change-request.md A8)."
+    (design/torch-source-lowering-change-request.md:173): compiler/mesh_compiler/devices.py:35 sets
+    `arrival.meta["consumer"] = JOIN` on every arrival whatever its consumer is; PAGES (ir.py:34) is assigned nowhere
+    in compiler/mesh_compiler, so the value says nothing about which of the two a consumer is. It is read once
+    (schedule.py:152) and only for channels carried between machines; archive.py:63-66, :106-111 save and restore the
+    block and subarray keys of a recv but not `consumer`. The cited A8 has a clause outstanding in the same reading
+    ("A8 data structure (the type mesh_plan takes)").
+  - 3 / Write: one schedule stage: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "This is the schedule
+    stage, and there is one schedule. It takes the placed graph and the weighting operand
+    (design/aot-compilation-change-request.md A3)." (design/torch-source-lowering-change-request.md:241-242):
+    compiler/mesh_compiler/driver.py:24 and :26 solve mesh_plan twice (schedule.py:160 `solved` in planned, :196
+    `solved` in stored, each mesh_plan + mesh_plan_save at :111-113). The order of driver.py:25 reads the first
+    solve's times (schedule.py:206); the record the archive and the bridge take is the second's (schedule.py:118,
+    archive.py:62, bridge.py:25-27). The cited A3 has a clause outstanding in the same reading ("The caller passes the
+    operand": no caller of compile_module passes `cost`; default unit_cost at driver.py:14).
+  - 3 / Write: commands written in that order: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Each
+    processor's commands are written in that order." (design/torch-source-lowering-change-request.md:250):
+    compiler/mesh_compiler/lower_metal.py:367 with :384-395: a product or fused value with one user is deferred, and
+    its dispatch is issued when the walk reaches that user (:413-415 reader -> :400-408 view -> :405 multiply / :407
+    store -> :417-424 dispatch). The command of a function at place k is then written after the commands of the
+    functions scheduled between it and its user. lower_inductor.py:72 hands each processor's module to torch.compile's
+    inductor, which writes the kernels in its own order.
+  - 3 / Write: Sriram's synchronization graph: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Only the
+    edges of a synchronization graph that preserves the inter-processor communication graph are written"
+    (design/torch-source-lowering-change-request.md:251-252): compiler/mesh_compiler/lower_metal.py:1014-1019: at the
+    end of each run the thread waits on every commit not yet waited (`range(len(segments)) if entry[0] is WAIT`),
+    whether or not an edge reaches the host from it (run at :1054-1055, rdma/mesh-metal4.m:208-212).
+    lower_metal.py:1076 with :1196-1197 also writes a queue wait on torch's command stream for an mps argument
+    (mesh-metal4.m:136-141), which is no edge of the relation computed at :999-1007.
+  - 3 / Write: same queue: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "same queue: a fence;"
+    (design/torch-source-lowering-change-request.md:257): rdma/mesh-metal4.m:35 and :42: one static MTL4CommandQueue
+    takes every stream's commits (:205). compiler/mesh_compiler/lower_metal.py:1443-1452 makes one Metal lowering,
+    with its own stream (:1144), for each processor on mps, and compiler/samples.py:431 and :484 place two processors
+    on mps. A dependence between two such processors has both ends on that one queue and is written as a send and recv
+    with the thread's wait on the commit's shared event (lower_metal.py:1015, rdma/mesh_graph.py:553-554,
+    mesh-metal4.m:212), not a fence. Fences are made only between two commits of one processor's stream
+    (mesh_graph.py:555-556, lower_metal.py:1008-1009).
+  - 3 / Write: independent pairs: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Independent pairs get no
+    ordering, and Metal then permits them to overlap." (design/torch-source-lowering-change-request.md:259):
+    rdma/mesh-metal4.m:175-176 encodes each waitForFence at the start of the later commit's encoder, before all its
+    dispatches, and :195 the updateFence after all of the earlier commit's dispatches, so one dependent pair orders
+    every dispatch of the two commits. :180-183 the intra-pass barrier orders every earlier dispatch of the encoder
+    before every later one. compiler/mesh_compiler/lower_metal.py:1015-1019 with :1054-1055 block the thread on a
+    commit's event before a send, so later commits with no dependence on it are not issued until it completes.
+  - 5 / Write: the cited functions are the CPU's: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Item 6
+    states what these operators are on the other processors."
+    (design/torch-source-lowering-change-request.md:312-313): The sentence cites item 6, every clause of which is
+    outstanding or not determined in the same reading. compiler/mesh_compiler has no lowering of svd, eigh, eig,
+    eigvals, pinv, lstsq or matrix_exp on any processor: the handlers of lower_metal.py:322-341 hold none, the native
+    drivers are solve and qr only (:1230-1231), and such a node is reported as missing (:354-356, :1457-1459).
 
 Not determined:
 
@@ -1096,28 +1276,21 @@ Not determined:
 Covered:
 
   - 1 / Replaces: covered [2026-11-09, mesh dd2062d2]
-  - 1 / Write: the IR carries the kind: covered [2026-11-12, mesh 81c8e9da]
   - 2 / Write: the exported graph: covered [2026-11-10, mesh ce2e8ac9]
   - 2 / Write: the export stage produces it: covered [2026-11-10, mesh ce2e8ac9]
   - 2 / Write: dynamic control flow is not compiled: covered [2026-11-10, mesh ce2e8ac9]
   - 2 / Write: a dimension known only at run time: covered [2026-11-10, mesh ce2e8ac9]
-  - 3 / Write: one schedule stage: covered [2026-11-12, mesh a86c7dc4]
   - 3 / Write: each function's processor: covered [2026-11-11, mesh 297c3cda]
   - 3 / Write: each task's length: covered [2026-11-12, mesh 81c8e9da]
   - 3 / Write: the order is published: covered [2026-11-12, mesh 81c8e9da]
-  - 3 / Write: commands written in that order: covered [2026-11-12, mesh a86c7dc4]
-  - 3 / Write: Sriram's synchronization graph: covered [2026-11-12, mesh 7d8092e1]
   - 3 / Write: same encoder: covered [2026-11-12, mesh 7d8092e1]
-  - 3 / Write: same queue: covered [2026-11-12, mesh 7d8092e1]
   - 3 / Write: another queue, another device or the CPU: covered [2026-11-12, mesh 7d8092e1]
-  - 3 / Write: independent pairs: covered [2026-11-12, mesh 7d8092e1]
   - 5 / Replaces: covered [2026-11-09, mesh 6904370b]
-  - 5 / Write: the cited functions are the CPU's: covered [2026-11-10, mesh ce2e8ac9]
   - 5 / Write: no body repeated by tensor data: covered [2026-11-12, mesh a86c7dc4]
 
 ## [synchronization-signature-change-request.md](synchronization-signature-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 6 items outstanding, 0 not determined, 14 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 14 items outstanding, 0 not determined, 6 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1156,27 +1329,88 @@ Outstanding:
     the same signature." The compile chain writes no operation on a kernel processor: lower_metal.py:917-925 emits
     only queue and host operations, signature.py:105-115 makes only the kinds found in those records plus host and
     bridge, and nothing in compiler/mesh_compiler reads a kernel's source for barriers, fences or atomics.
+  - 1 / It holds: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "**It holds**, for each of the command
+    queue's command stream, the thread and the bridge, and for each execution: the ordered list of synchronization
+    operations: submissions, queue signals and waits, encoder fence updates, fence waits and barriers, and the
+    thread's waits on a shared event;" (design/synchronization-signature-change-request.md:93-95):
+    rdma/mesh-metal4.m:136-141 (mesh_metal4_after, called from compiler/mesh_compiler/lower_metal.py:1196-1197) issues
+    two commits of torch's MPS command stream, an encodeSignalEvent:value: on torch's command buffer and a
+    dispatch_sync, then waitForEvent; the record holds only the queue_wait for it (lower_metal.py:1076), so that queue
+    signal and those submissions are in no list. compiler/mesh_compiler/signature.py:100-101 gives a processor whose
+    function has no `record` (an fx module or an inductor function, lower_inductor.py:72, also on an mps device)
+    torch_run's record (signature.py:33-44), which holds only host send/recv/copy operations and no lane for its
+    command queue (signature.py:105). compiler/mesh_compiler/bridge.py:45-47 waits on every transfer at each
+    execution's end (mesh_host_wait, rdma/mesh-collective.c:79) and signature.py has no operation for it.
+  - 1 / Consumed by: the monitor's D program: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "the monitor's
+    D program is generated from it (item 4)" (design/synchronization-signature-change-request.md:103-104): The
+    sentence cites item 4, whose clauses "the D program stops the process" and "the digest and the review record" are
+    outstanding in the same reading (reread.json). In code: the bridge's D program is fixed text taking only a group
+    number, not generated from the signature (bin/mesh-sync-monitor.py:176-182, written at :358-359); the generated
+    program is made only from the operations of class 'program' on one node (:88-97 sequences, :313-320), so the
+    signature's feedback, bridge, kernel and other-node operations are not in it (:70-80).
+  - 1 / Consumed by: SHA-256 in the artifact: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "its SHA-256
+    is part of the compiled artifact" (design/synchronization-signature-change-request.md:104):
+    compiler/mesh_compiler/archive.py:78-79 writes signature.record only `if scheduled.signature`; compile_module
+    returns the scheduled value with signature None (driver.py:28-29, ir.py:83), and only driver.compiled
+    (driver.py:44-48) sets it. Artifacts are saved from compile_module's value with no digest at
+    compiler/samples.py:729 and at :849 -> :826 (save_for_review, the emitted archive). No file under examples/
+    computes a signature or saves an archive. The per-processor .pt2 files and their scheduled.json (archive.py:52-77)
+    hold no digest.
+  - 3 / Write: the monitor is DTrace: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Its Objective-C
+    provider catches every Metal 4 call by selector, whatever class implements it. Its pid provider catches the
+    thread's semaphore waits and shared-event waits." (design/synchronization-signature-change-request.md:130-131):
+    bin/mesh-sync-monitor.py:18-38 probes eight named Metal 4 selectors only; MTL4CommandQueue's `-commit:count:`
+    (MTL4CommandQueue.h:234, macOS 26.4 SDK) is not probed (the pattern at :19 is `-commit?count?options?:`), nor
+    signalDrawable:/waitForDrawable:, so a submission by `commit:count:` is not caught. The shared-event wait is
+    caught by the Objective-C provider (:30 `objc$target::-waitUntilSignaledValue?timeoutMS?:`), not the pid provider.
+    The pid probe for semaphore waits (:42) fires only on a thread already bound to a compiled order and outside the
+    interpreter lock and any probed call (:170 `/self->bound && self->inapi == 0/`).
+  - 4 / Write: at the end: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "At the end, any count that
+    differs fails the run" (design/synchronization-signature-change-request.md:141): bin/mesh-sync-monitor.py:381,
+    :390-394 compare only the operations of classes 'program' and 'feedback' on the one node observed (:70-80, :313).
+    The bridge's raises are counted only with --bridge (:382-389), other nodes' operations and kernel records never;
+    with those left out the result is 'pass-scoped' (:406) and the run exits 0 (:418). compiler/samples.py:1123-1124
+    runs it without --bridge. Differing counts themselves are only printed (:395-399); the failure is the digest's.
+  - 4 / Write: every edge the image of a dependence, none redundant: outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. "every edge has to be the image of a data dependence between two of the command queue, the thread and the
+    bridge" and "So a wait with no dependence under it shows before anything runs."
+    (design/synchronization-signature-change-request.md:145-147): bin/mesh-sync-monitor.py:323-327 fails before
+    running only for edges in state 'false' and for redundant edges. An edge whose dependence has another delay is
+    'stronger', not the image (rdma/mesh-graph.c:2253), and passes. A wait with no signal at all is 'unmatched'
+    (mesh-graph.c:2226, :2243) and passes; it appears only inside the printed states dictionary (monitor :330-333).
+    The compile chain makes one itself: the queue_wait on torch's arrival (compiler/mesh_compiler/lower_metal.py:1076)
+    has no signal operation in the signature.
+  - 5 / Write: replay with the monitor: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Replay a captured
+    call graph through its compiled program with the monitor of items 3 and 4 attached."
+    (design/synchronization-signature-change-request.md:153): The sentence cites items 3 and 4. Item 4's "the D
+    program stops the process" and "the digest and the review record" are outstanding in the same reading, and item
+    3's "every Metal 4 call" and item 4's "any count" fail above. In code: compiler/samples.py:1109-1111 passes
+    --observe where `dtrace -w` is refused, which attaches no destructive action (bin/mesh-sync-monitor.py:119-122,
+    :403-405), and :1123-1124 attaches no bridge observation. The player re-lowers the loaded value
+    (samples.py:1085-1086) and runs it (:1089-1091).
+  - 5 / Write: a wait the signature does not have: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "A wait
+    the signature does not have stops the playback at the line that issues it. A playback that runs to completion has
+    run exactly the compiler's signature." (design/synchronization-signature-change-request.md:156-157):
+    bin/mesh-sync-monitor.py:170-172: an unlisted wait (dispatch_semaphore_wait, pthread_cond_wait,
+    os_sync_wait_on_address) stops the process only on a thread already bound to a compiled order and outside the
+    interpreter lock and probed calls; :172 with :319 drops both os_sync_wait_on_address probes whenever the record
+    holds a plan count, and compiler/mesh_compiler/bridge.py:45-47 issues exactly such a wait per transfer each
+    execution (rdma/mesh-collective.c:79) that signature.py has no operation for. Completion: :381, :390-394 compare
+    classes 'program' and 'feedback' on one node; bridge, other-node and kernel operations are unobserved, the result
+    is 'pass-scoped' (:406) and the exit status 0 (:418). With --observe the process is not stopped (:120).
 
 Covered:
 
   - 1 / The data structure: covered [2026-11-12, mesh 507a1ec7]
-  - 1 / It holds: covered [2026-11-12, mesh 507a1ec7]
   - 1 / Consumed by: printed: covered [2026-11-12, mesh 000c3787]
-  - 1 / Consumed by: the monitor's D program: covered [2026-11-12, mesh 000c3787]
-  - 1 / Consumed by: SHA-256 in the artifact: covered [2026-11-12, mesh 507a1ec7]
   - 2 / Matrix Market: covered [2026-11-08, mesh d44e3d0c]
   - 2 / DOT: covered [2026-11-08, mesh d44e3d0c]
   - 2 / Space-time diagram: covered [2026-11-08, mesh d44e3d0c]
-  - 3 / Write: the monitor is DTrace: covered [2026-11-08, mesh d44e3d0c]
   - 3 / Write: the program is not changed: covered [2026-11-08, mesh d44e3d0c]
-  - 4 / Write: at the end: covered [2026-11-08, mesh d44e3d0c]
-  - 4 / Write: every edge the image of a dependence, none redundant: covered [2026-11-09, mesh 4abf824c]
-  - 5 / Write: replay with the monitor: covered [2026-11-12, mesh 000c3787]
-  - 5 / Write: a wait the signature does not have: covered [2026-11-12, mesh 000c3787]
 
 ## [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 34 items outstanding, 1 not determined, 26 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 50 items outstanding, 1 not determined, 10 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1360,6 +1594,137 @@ Outstanding:
     (rdma/mesh-collective.c:1851-1852); mesh_retire retires the operand only where hdr `client` is the caller's
     (rdma/mesh-dataflow.c:20); and mesh_plan and mesh_plan_load wait for the operand published before to be released
     and return ETIMEDOUT otherwise (rdma/mesh-collective.c:1813-1822, 1986, 2390).
+  - R1 where it composes: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. line 1974: "Writes: the blocks, as
+    the entries of each cable's list (R5): `struct mesh_hop` `page`, `offset` and `bytes` (rdma/mesh.h).": mesh_plan
+    writes one list for the node, each entry naming a neighbouring node and a direction, not a cable:
+    rdma/mesh-collective.c:773-783 (.node=in / child[c]) and :2064. Which cable carries an entry is decided by the
+    bridge at the load: rdma/mesh-flow.c:837 picks the entries naming the peer, :856-866 deals them over the pair's
+    cables and queue pairs by mesh_graph_list_schedule. The sentence also cites R5, which the same index lists
+    outstanding (R5 data structure: the resources are pairs of nodes, rdma/mesh-collective.c:892-895 and
+    rdma/mesh-dataflow.c:203-208; R5 where it composes).
+  - R3 the task graph: E are pages, with weight c: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. lines
+    2143-2144: "They are given, not computed by this code: the weighting operand of
+    design/aot-compilation-change-request.md A3.": The sentence cites A3, whose "The caller passes the operand" the
+    index lists outstanding, and it is so at this head: no caller of compile_module passes `cost` (examples/tp.py:138,
+    :197; examples/engines.py:111; compiler/samples.py:338, :839, :1010, :1035), so every w and c is the compiler's
+    own default unit_cost, 1.0 (compiler/mesh_compiler/driver.py:14; compiler/mesh_compiler/schedule.py:26-27, :153).
+    Also, for line 2142 ("E are the data passed between tasks: here, pages"): plan_schedule adds edges that are no
+    page and gives them cost 0 itself (rdma/mesh-collective.c:919, :920-929).
+  - R3 where it composes: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. lines 2147-2148: "Takes: the
+    compilation's IR (aot-compilation A8), which is the captured graph with each task at its node by the placement
+    operand (aot-compilation A2), and the weighting operand (aot-compilation A3).": What mesh_plan takes from
+    compile_module is not the captured graph with each task: only the transfers between machines, four weights each
+    and events of dependence (compiler/mesh_compiler/schedule.py:127-129, :140-157; passed at :108-111), and
+    plan_schedule makes tasks only for a transfer's producer, own reader and consumer
+    (rdma/mesh-collective.c:836-849). The cited A8 ("the type mesh_plan takes") is outstanding in the same index
+    (schedule.py:110 passes None, None, 0, None and :158-159 the constant 1), as are A3's caller sentence and R5's
+    data structure, which line 2153 cites.
+  - R4 behaviour at run time, 3: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. lines 2189-2193: "In that
+    program the two kinds are rows, not labels ... each of the second kind's tasks \"has one edge, from its own page,
+    so its pages are independent flows\" (R5). So the order a cable sends in is computed from which pages a function
+    needs together and which it needs singly.": From the compile_module chain there is one kind only:
+    compiler/mesh_compiler/devices.py:35 sets arrival.meta["consumer"] = JOIN for every receive, schedule.py:152
+    passes it, and PAGES (ir.py:34) is assigned nowhere. So rdma/mesh-collective.c:843 always makes one consumer task
+    and :908 always targets task 0 of it; no page is "needed singly" in any program the chain solves. The sentence
+    also cites R5, outstanding in the same index, and R4 (requirement) is listed outstanding for this same fact.
+  - R4 nothing synchronizes outputs one page at a time: landings read by masks: outstanding [2026-11-12, mesh
+    6d379b7e; a second reader]. line 2239: "The receiving side reads landings by masks (C3), so a landing interrupts
+    no backend.": The cited C3 masks are the first pass that loads the receives' phases and predicates threads by
+    select (disjoint-pages C3.1 algorithms 1 to 3, outstanding in the same index).
+    compiler/mesh_compiler/lower_metal.py has no phase, mask or simd_ballot anywhere; its receive is a host call
+    (lower_metal.py:1056-1057) that blocks in Carried.get (compiler/mesh_compiler/bridge.py:79-82) on mesh_host_wait,
+    which sleeps on the range's count word until every page has landed (rdma/mesh-collective.c:73-82; :36-47). The
+    receiving side is a blocking host wait on the whole range, not a read by masks.
+  - R4 where it composes: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. lines 2250-2251: "Takes: each
+    consumer's kind, which the IR carries (aot-compilation A8): `struct mesh_declared` `kind`, `MESH_JOIN` or
+    `MESH_PAGES` (rdma/mesh-collective.h).": No consumer's kind is taken: compiler/mesh_compiler/devices.py:35 writes
+    the constant JOIN on every receive node whatever its consumer, and schedule.py:152 passes that; PAGES (ir.py:34)
+    is never assigned. The cited A8 data structure and appendix item 5 ("Every program declares each consumer's kind")
+    are outstanding in the same index, as are R3 (V and w) and R5, which line 2252 cites.
+  - R5 (requirement): outstanding [2026-11-12, mesh 6d379b7e; a second reader]. line 2266: "The code must order each
+    cable's sends by a static schedule of one execution's task graph, minimizing its makespan.": The program solved is
+    not one execution's task graph: its tasks are only each transfer's producer, own reader and consumer
+    (rdma/mesh-collective.c:836-849, :879-888), with weights for those alone (compiler/mesh_compiler/schedule.py:153);
+    every other operation of the execution enters only as a zero-cost precedence edge (schedule.py:83-86, :138,
+    :154-157; rdma/mesh-collective.c:920-929), so the C_max minimized (rdma/mesh-graph.c:1180, :1185-1189) leaves
+    their time out, and with no transfer between machines nothing is solved (schedule.py:127-129). The order is also
+    not per cable: a resource is a pair of nodes with its cables' bandwidths summed (rdma/mesh-collective.c:892-895,
+    :945; rdma/mesh-dataflow.c:203-208), and the list is per neighbouring node (rdma/mesh-collective.c:2064;
+    rdma/mesh-flow.c:837).
+  - R5 algorithm steps 3-5: priority, one global topological order, each cable's subsequence: outstanding [2026-11-12,
+    mesh 6d379b7e; a second reader]. lines 2324 and 2326: "Each instruction's priority is C̄_j, its completion time in
+    the program's optimal solution, the least first." and "One global topological order of the instructions is built":
+    Two orders are built, and the tasks run in the one that is not by C̄_j. mesh_plan builds an order of every
+    instruction by C̄ (rdma/mesh-collective.c:956-957) and keeps only the hops' places (:962-963). The functions'
+    order, the one each processor executes, is built separately in compiler/mesh_compiler/schedule.py:203-210:
+    priority is the longest-path cost (mesh_graph.longest, rdma/mesh_graph.py:116-119), with only the receive nodes
+    given the plan's times (schedule.py:204-206), through a second call of heap_order (:208). The index lists the same
+    fact outstanding under R5 where it composes.
+  - R5 a set's pages keep their places: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. lines 2333-2334: "A
+    set's pages (design/aot-compilation-change-request.md, appendix item 5) keep their places in that order. The set's
+    random permutation is drawn over those places.": From the compile_module chain no set exists and no permutation is
+    drawn: every transfer is JOIN (compiler/mesh_compiler/devices.py:35; schedule.py:152), so
+    rdma/mesh-collective.c:1695 clears d->set for every demand, :759 writes set 0 on every entry, and
+    rdma/mesh-flow.c:904 skips every pick. The code that keeps places and draws (rdma/mesh-flow.c:607-620, :649-658)
+    is not reached by any list the chain produces. The cited appendix item 5 has two entries outstanding in the same
+    index (the algorithm's key; every program declares each consumer's kind).
+  - R5 executions: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. line 2337: "execution t runs copy t mod
+    u, and every address is a constant of the static schedule (C3.3, R2).": Not every address: the Metal lowering
+    allocates a buffer for each result storage at every call (compiler/mesh_compiler/lower_metal.py:1177-1184, begin:
+    LIB.mesh_metal4_buffer, called from run at :1050) and maps argument storage by address at commit (:1187-1194). The
+    cited C3.3 compile-time bound and R2 (requirement, data structure, algorithm 1) are outstanding in the same index
+    for this. The copy rule itself is as stated (rdma/mesh-collective.c:70; compiler/mesh_compiler/bridge.py:53, :65,
+    :74, :82).
+  - R6 data structure and no run-time algorithm: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. lines
+    2387-2388: "The data structure is the transfers of the static schedule: the send and receive nodes that placement
+    adds to the graph, which R5 writes into each cable's lists.": Nothing is written into a cable's list at compile
+    time: mesh_plan writes one list whose entries name a neighbouring node and a direction
+    (rdma/mesh-collective.c:773-783, :2064), and which cable and queue pair carries each entry is computed by the
+    bridge when it loads the plan (rdma/mesh-flow.c:813-823, :837, :856-866). The sentence cites R5, outstanding in
+    the same index (data structure: pairs of nodes, not cables; where it composes). The transfers themselves are
+    compiled at every rank (compiler/mesh_compiler/placement.py:676-679; schedule.py:140-152).
+  - R6 where it composes: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. lines 2393-2395: "Produced by
+    placement, as `struct mesh_declared` with its `source` and `destination` (rdma/mesh-collective.h), and by the
+    schedule (R5), as `struct mesh_hop` with its `node` and `direction` (rdma/mesh.h).": Placement produces fx send
+    and receive nodes with a processor name (compiler/mesh_compiler/placement.py:676-679); struct mesh_declared and
+    its source and destination are produced in the schedule stage, from the machines map and the bridge's node list
+    (compiler/mesh_compiler/schedule.py:131-133, :140-142, :152; rdma/mesh.py:306-308). The sentence also cites R5,
+    outstanding in the same index. This refutation rests on those two grounds only; the bridge reading its own lists
+    holds (rdma/mesh-flow.c:802, :837).
+  - R8 pages released at retirement by deferred reclamation: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    lines 2433-2434: "A program's pages are released at its retirement by deferred reclamation (P. E. McKenney and J.
+    D. Slingwine, Read-copy update, PDCS 1998; K. Fraser, Practical lock-freedom, PhD thesis, Cambridge, 2004;
+    C3.4).": The sentence cites C3.4, whose (a), (b) and (c) are outstanding in the same index; (c) says "nothing
+    waits for the release", and both mesh_plan and mesh_plan_load wait for it with a deadline and return ETIMEDOUT
+    (rdma/mesh-collective.c:1813-1822, called at :1986 and :2390; the deadline from
+    compiler/mesh_compiler/bridge.py:25-28). Retirement in the chain is called only before the same client's next
+    publication (bridge.py:24; rdma/mesh-dataflow.c:17-21); compiler/mesh_compiler/runtime.py calls none when a
+    program ends. The deferred release itself is at rdma/mesh-dataflow.c:122-131.
+  - R8 function executions ordered by a fixed sequencer: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    lines 2435-2436: "Function executions are the one program's, ordered by a fixed sequencer:
+    design/aot-compilation-change-request.md A7 (P. Barham et al., Pathways, MLSys 2022, §4.4; Défago, Schiper and
+    Urbán, 2004).": The sentence is A7 by citation, and A7 has entries outstanding in the same index, one of which is
+    in this chain: after a view is installed mesh_transfers_start returns ESTALE (rdma/mesh-dataflow.c:252, :267) and
+    nothing computes the static schedule again, since Program loads the record once
+    (compiler/mesh_compiler/bridge.py:25-28). "The one program's" also meets code for more than one: the publication
+    stores the publisher's client word and mesh_retire tests it (rdma/mesh-collective.c:1851-1852;
+    rdma/mesh-dataflow.c:20), which the index lists outstanding under R8 Replaces: any rule for several programs. The
+    submission to the sequencer's queue is as stated (rdma/mesh-dataflow.c:237-268, from bridge.py:42).
+  - R8 where it composes: placement and weights are operands: outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. line 2438: "Placement and weights are operands, passed in by the program from whatever function chooses
+    them (aot-compilation A2, A3).": No program passes weights: every call of compile_module omits `cost`
+    (examples/tp.py:138, :197; examples/engines.py:111; compiler/samples.py:338, :839, :1010, :1035) and takes the
+    compiler's default unit_cost (compiler/mesh_compiler/driver.py:14; schedule.py:26-27). The cited A3 ("The caller
+    passes the operand") is outstanding in the same index, as are R3 and R5, which line 2439 cites. The placement
+    operand is passed and taken (driver.py:14, :19).
+  - R8 where it composes: the pages are part of the scheduled value: outstanding [2026-11-12, mesh 6d379b7e; a second
+    reader]. line 2440: "The pages are R2's rows, written when the static schedule is made and part of the scheduled
+    value.": The sentence is R2 by citation, and nearly every R2 entry is outstanding in the same index. In this chain
+    rows exist only for one machine's transferred and stored values: with no transfer between machines no plan and no
+    row is made (compiler/mesh_compiler/schedule.py:127-129, :166-167), and results, mutated state and other machines'
+    values get none (schedule.py:169, :185-193); every value is marked run and placed as consecutive blocks by
+    mesh_graph_greedy_by_size (schedule.py:149, :189, :191; rdma/mesh-collective.c:612, :687). What rows are made are
+    in Plan.record and archived (schedule.py:116-118; compiler/mesh_compiler/archive.py:62, :122).
 
 Not determined:
 
@@ -1368,37 +1733,20 @@ Not determined:
 
 Covered:
 
-  - R1 where it composes: covered [2026-11-12, mesh 81c8e9da]
   - R1 Replaces: the share record: covered [2026-11-06, mesh 31ee5d4a]
-  - R3 the task graph: E are pages, with weight c: covered [2026-11-12, mesh 81c8e9da]
-  - R3 where it composes: covered [2026-11-12, mesh 81c8e9da]
   - R4 behaviour at run time, 1: covered [2026-11-12, mesh 0704bf95]
-  - R4 behaviour at run time, 3: covered [2026-11-12, mesh 81c8e9da]
   - R4 behaviour at run time, 4: covered [2026-11-12, mesh 81c8e9da]
-  - R4 nothing synchronizes outputs one page at a time: landings read by masks: covered [2026-11-12, mesh 0704bf95]
-  - R4 where it composes: covered [2026-11-12, mesh 81c8e9da]
-  - R5 (requirement): covered [2026-11-12, mesh 81c8e9da]
   - R5 algorithm steps 1-2: cutting planes, HiGHS dual simplex: covered [2026-11-05, mesh f4838c9d]
-  - R5 algorithm steps 3-5: priority, one global topological order, each cable's subsequence: covered [2026-11-12,
-    mesh 81c8e9da]
-  - R5 a set's pages keep their places: covered [2026-11-05, mesh c2a226b0]
-  - R5 executions: covered [2026-11-12, mesh 81c8e9da]
   - R5 every rank computes the same schedule: covered [2026-11-12, mesh 81c8e9da]
   - R5 changes by file: rdma/mesh-graph.{h,c}: covered [2026-11-05, mesh f4838c9d]
   - R5 changes by file: rdma/Makefile builds HiGHS: covered [2026-11-05, mesh 841cba44]
   - R5 changes by file: mesh-collective.c and mesh-flow.c: covered [2026-11-06, mesh 5eeee1f9]
-  - R6 data structure and no run-time algorithm: covered [2026-11-12, mesh 81c8e9da]
-  - R6 where it composes: covered [2026-11-12, mesh 81c8e9da]
   - R7 where it composes: covered [2026-11-12, mesh 81c8e9da]
-  - R8 pages released at retirement by deferred reclamation: covered [2026-11-05, mesh 13c2d411]
-  - R8 function executions ordered by a fixed sequencer: covered [2026-11-05, mesh 7b3afe21]
-  - R8 where it composes: placement and weights are operands: covered [2026-11-12, mesh 81c8e9da]
-  - R8 where it composes: the pages are part of the scheduled value: covered [2026-11-12, mesh 28d7a032]
   - R8 Replaces: mesh_claim_take, the claim-head walk, fragmentation ENOMEM: covered [2026-11-05, mesh c6c9c77f]
 
 ## [disjoint-pages-change-request.md](disjoint-pages-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 41 items outstanding, 0 not determined, 33 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 46 items outstanding, 0 not determined, 28 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -1576,6 +1924,57 @@ Outstanding:
     serial moves (D.3.6).": plan_stale cancels where the schedule's view identifier is not the installed view's
     (rdma/mesh-flow.c:2552) and is called where a view is cleared or installed (rdma/mesh-records.c:141, :693); the
     move of map_serial (rdma/mesh-records.c:111) calls no cancellation.
+  - C3.2 (d) nothing laid out when created: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/disjoint-pages-change-request.md:841-842 "Nothing is laid out when it is created, and no program writes a
+    page to fault it in: the region is wired once (data-model §2).": compiler/mesh_compiler/lower_metal.py:1142-1143:
+    when the lowered function is made, each held storage gets its own buffer from LIB.mesh_metal4_buffer; :1180: at
+    every call each result gets a new one. rdma/mesh-metal4.m:85-88: mesh_metal4_buffer is [device
+    newBufferWithLength:options:]. These values are laid out by Metal where they are created, not in pages mesh_plan
+    placed; the placed address (bridge.py:51-53, runtime.py:25, :48, :71) has no reader. The index already records the
+    same allocations under C3.2 (b), C3.3 compile-time bound and A3 "Which function computes it".
+  - C3.3 algorithm 3 (copies, t mod u): outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/disjoint-pages-change-request.md:851 "One execution's graph is unrolled into u copies, and execution t runs
+    copy t mod u.": Only the values carried between machines run copy t mod u (compiler/mesh_compiler/bridge.py:65,
+    :74, :82; rdma/mesh-flow.c:518-521). The values compile_module gives the plan for the local functions
+    (compiler/mesh_compiler/schedule.py:188-191) get u copies (rdma/mesh-collective.c:196-197) that no execution runs:
+    Published.address (bridge.py:51-53) is stored as Program.storage (runtime.py:25) and ir.LOCAL.storage
+    (runtime.py:48, :71) and read nowhere in compiler/mesh_compiler. The lowered function binds one Metal buffer per
+    storage when it is made (lower_metal.py:1142-1143, :1162), the same address in every execution. With u = 1 the
+    difference is only that those values are outside the plan's pages; with u > 1 the sentence fails for them
+    outright.
+  - C4 mesh deleted: mesh_plan_erased: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/disjoint-pages-change-request.md:923-924 "rdma/mesh-call.h and rdma/mesh-dataflow.c: `mesh_plan_erased`,
+    and its seq_cst fence pair with the ports' code in rdma/mesh-flow.c.": The name is gone (comment only,
+    rdma/mesh-call.h:109), but what it named is in the code as plan_released. mesh_plan_erased (mesh ae0bc2f1
+    rdma/mesh-dataflow.c:447-465) was the plan call's wait, bounded by a deadline, until no port's `prepared` held the
+    previous plan, before rewriting its state. rdma/mesh-collective.c:1813-1822 waits until the bridge stores
+    `released` or the deadline passes; it is called at :1986 before mesh_plan rewrites the state at :1993, and at
+    :2390 before mesh_plan_load does at :2393 (from compiler/mesh_compiler/schedule.py:111 and bridge.py:25-28).
+    `released` is stored only once no port's `prepared` holds the plan (rdma/mesh-dataflow.c:110-116, :128-129),
+    behind the seq_cst fence at :127 paired with the ports' fence at rdma/mesh-flow.c:1946-1947. The index lists C3.4
+    (b) and (c) outstanding for this same wait.
+  - D.3.4 data structure: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/disjoint-pages-change-request.md:1409-1410 "Every command buffer this code makes is one: the decode, the
+    prefill, the preparation and fills, the profiling, the recorder's own copies and tools/native_bench.m.":
+    rdma/mesh-metal4.m:136-140 (mesh_metal4_after): on torch's dispatch queue it calls torch's commit, takes torch's
+    command buffer through get_command_buffer as an `id<MTLCommandBuffer>`, encodes its own signal into it
+    (encodeSignalEvent:arrival value:arrived, :138) and commits it; the MTL4 queue then waits on that event (:141).
+    compiler/mesh_compiler/lower_metal.py:1196-1197 calls it in each run of a lowered function that has an operand on
+    mps (the three torch symbols are bound at :78-81). So a classic MTLCommandBuffer carries a command of this code in
+    what the run executes, outside any delegate capture. The object is created by torch at this code's call; if
+    "makes" is read as "allocates itself", the sentence holds at rdma/mesh-metal4.m:121-122, :170-171 and :205.
+  - D.3.5: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. design/disjoint-pages-change-request.md:1428-1429
+    "The allocator already orders the adjacent node's next send into that page after this node's reads of the last one
+    (C3.3).": For a value whose read reaches no later write in the dependence graph, the allocator gives no order:
+    rdma/mesh-collective.c:410 sets its lag to 0 and it adds no copy (the note at :374-377 says its reuse is held at
+    run time). That is the case for a value carried one way through compile_module: rdma/mesh_graph.py:75-78 adds a
+    lag-1 edge only between events of one processor, and the plan's own edges (rdma/mesh-collective.c:280-294) are all
+    lag 0, so the destination's read (plan_consumed) has no path to the source's next write. What orders the next send
+    after the reads is a run-time gate: the bridge takes execution t on a lane only below the plan's `executions`
+    (rdma/mesh-flow.c:1354, for receives at :1499), which the node's own Program raises at each call
+    (compiler/mesh_compiler/bridge.py:41; rdma/mesh-dataflow.c:274-277). The clause's other sentences hold: a record
+    is posted again only once its range's count shows the last round landed (rdma/mesh-flow.c:1508); the lists are at
+    rdma/mesh-collective.c:2052-2077.
 
 Covered:
 
@@ -1586,10 +1985,8 @@ Covered:
   - A4 deleted (3): covered [2026-11-04, mesh 04b5e561]
   - A4 deleted (5): covered [2026-11-05, mesh c6c9c77f]
   - C3.1 waits deleted: covered [2026-11-12, mesh a86c7dc4]
-  - C3.2 (d) nothing laid out when created: covered [2026-11-04, mesh 967292bc]
   - C3.3 algorithm 1 (L): covered [2026-11-12, mesh 81c8e9da]
   - C3.3 algorithm 2 (u): covered [2026-11-12, mesh 81c8e9da]
-  - C3.3 algorithm 3 (copies, t mod u): covered [2026-11-12, mesh 0704bf95]
   - C3.4 "Written by, read by": covered [2026-11-12, mesh 81c8e9da]
   - C3.6 (3) local countdown: covered [2026-11-04, metal-microbench a159c59a]
   - C3.6 (4) link loss and poll bound: covered [2026-11-04, mesh 04b5e561]
@@ -1600,13 +1997,10 @@ Covered:
   - C3.7 algorithm 4: covered [2026-11-12, mesh 0704bf95]
   - C3.7 algorithm 5: covered [2026-11-04, mesh 04b5e561]
   - C4 mesh deleted: rdma/mesh-collective.c (executions, per-execution items): covered [2026-11-04, mesh e2dcc0cf]
-  - C4 mesh deleted: mesh_plan_erased: covered [2026-11-04, mesh baede218]
   - C4 mesh deleted: rdma/mesh.h areas and constants: covered [2026-11-04, mesh 533e55a8]
   - C4 metal-microbench deleted: metal_recording.m: covered [2026-11-09, metal-microbench f08d3c7b]
   - C4 metal-microbench deleted: tools/e2b_replay.m: covered [2026-11-04, metal-microbench 6fb94beb]
-  - D.3.4 data structure: covered [2026-11-12, mesh a86c7dc4]
   - D.3.4 completion: covered [2026-11-12, mesh a86c7dc4]
-  - D.3.5: covered [2026-11-12, mesh 81c8e9da]
   - D.4 mesh: rdma/mesh-flow.c deleted: covered [2026-11-04, mesh 1258766d]
   - D.4 mesh: coordination document: covered [2026-11-04, mesh 51523f66]
   - D.4 metal-microbench deleted (1): classic command queues and buffers: covered [2026-11-10, metal-microbench
@@ -1623,7 +2017,7 @@ Withdrawn:
 
 ## [page-queue-change-request.md](page-queue-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 19 items outstanding, 0 not determined, 19 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 26 items outstanding, 0 not determined, 12 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1715,20 +2109,74 @@ Outstanding:
     compiler/mesh_compiler/runtime.py:75 `self.finished.get()` and :50 `self.argument_queues[processor].get()` have no
     timeout (a processor's thread that raises on mesh_host_wait's error never puts to `finished`, runtime.py:50-52),
     and rdma/mesh-metal4.m:212 waits with `timeoutMS:UINT64_MAX`.
+  - The operator's statements: Collective size: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/page-queue-change-request.md:12-13: "all code now must operate on collectives of arbitrary > node count and
+    there won't be any compromises here.": The node count is capped at 32: rdma/mesh-dataflow.h:42 `#define
+    MESH_NODES_MOST 32`, and rdma/mesh-dataflow.c:189 `if(nodes>MESH_NODES_MOST)return E2BIG;` in mesh_view_copy,
+    which mesh_nodes_read (:218) calls for every plan (compiler/mesh_compiler/schedule.py:132;
+    rdma/mesh-collective.c:1935). A view of 33 nodes cannot be planned. Members are also bits of 64-bit words
+    (mesh-collective.c:1700 `d->leaves|=UINT64_C(1)<<t->destination`; schedule.py:158 `1 << int(node)`). No pair-only
+    code was found in the compile chain; the refutation is the literal bound against "arbitrary".
+  - The operator's statements: Relays: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/page-queue-change-request.md:18: "routing within tb5 linked collectives is supported": The route is solved
+    over the map, not within the collective. rdma/mesh-collective.c:1728-1731 builds the flow graph from every node
+    pair of the map with capacity, whether or not the node is in `program`; mesh_graph_flow (:1758;
+    rdma/mesh-graph.c:306-333) picks shortest trees over all n map nodes; then :1792-1794 returns EINVAL when any tree
+    passes a node outside `program` (`if(spanned&~program)`). `program` is used nowhere else in plan_function. For a
+    collective that is a proper subset of the map (MESH_PROGRAM, schedule.py:158; "0,1" at
+    compiler/samples.py:1284-1285), a relay through a non-member fails the plan instead of being routed through
+    members. Routing through member relays is written (plan_walk :771-783; relay page :2058).
+  - The operator's statements: Queue pairs and links belong to the bridge: outstanding [2026-11-12, mesh 6d379b7e; a
+    second reader]. design/page-queue-change-request.md:36-38: "whether 'queue pairs' or 'streams' or any attempt to
+    expose ortransduce the global object > representing the literal connection between two physical and
+    different-clock-domain literal computers are ever to be > exposed to collective or data processing code":
+    Collective code reads the cables' ports and queue-pair counts in the compiling process.
+    rdma/mesh-dataflow.c:134-153 mesh_cables, linked into libmesh.dylib (rdma/Makefile libmesh.dylib rule), matches
+    cables by `port`/`peer_port` (:142) and takes `.qps=e->qps<f->qps?e->qps:f->qps` (:144) from the map's struct
+    mesh_record copies (:215-218); it is reached from compiler/mesh_compiler/schedule.py:132 and bridge.py:99
+    (mesh_nodes_read -> mesh_capacity :206, :225) and from mesh_plan (rdma/mesh-collective.c:1935). The same fact is
+    why the index lists plan-to-bridge R7 outstanding. Also rdma/mesh-dataflow.c:111-113 reads the per-port link table
+    (mesh_links(m)[p].port.prepared) in library code.
+  - The operator's statements: Failing by error, not by hardware fault: outstanding [2026-11-12, mesh 6d379b7e; a
+    second reader]. design/page-queue-change-request.md:130-131: "some spinwaits are allowed, as a treat, if we know
+    they conclude in bounded time even if someone messes up their > complementary async event originators":
+    compiler/mesh_compiler/schedule.py:71-75, image(): `while True: before = header.view_map; C.memmove(...); if
+    mesh.LIB.mesh_view_whole(live.M, before): break`. A busy retry with no deadline: mesh_view_whole
+    (rdma/mesh.h:288-291) is false while view_map is odd, so a bridge that stops mid-install leaves compile_module
+    spinning forever. image() is on the compile chain (driver.py:24 planned -> schedule.py:130; driver.py:26 stored ->
+    :196). The C reader of the same word has a deadline (rdma/mesh-dataflow.c:177). `down_pair` has no declaration or
+    definition in either repository.
+  - Claude's proposal: The schedule that writes the page lists: the algorithm: outstanding [2026-11-12, mesh 6d379b7e;
+    a second reader]. design/page-queue-change-request.md:210-211: "every collective call and > pipeline hand-off,
+    over the map's Thunderbolt-5-connected nodes, for any node count.": Not for any node count:
+    rdma/mesh-dataflow.c:189 returns E2BIG above MESH_NODES_MOST (rdma/mesh-dataflow.h:42, 32), before mesh_plan
+    reaches plan_function (rdma/mesh-collective.c:1935, 1946); destinations are bits of a 64-bit word (:1700). The
+    rest was found as stated: one mesh_graph_flow over every demand (:1757-1758), run at compile time
+    (compiler/mesh_compiler/schedule.py:111 from driver.py:24).
+  - Claude's proposal: The schedule: It takes: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/page-queue-change-request.md:214-215: "It takes no cable, queue pair or link > identity.": mesh_plan reads
+    the map's cable records itself: rdma/mesh-collective.c:1935 mesh_nodes_read -> rdma/mesh-dataflow.c:215-218 copies
+    each node's struct mesh_record (its reach[]: port, peer_port, qps, bandwidth; rdma/mesh-map.h:80, 108-110) into
+    the planning process, and :142-144 mesh_cables identifies each cable by its two port indices and takes its
+    queue-pair count before :206 sums the bandwidths. The map gives it cables, not "each node pair's capacity"; the
+    reduction to pairs is done inside the schedule's own call. struct mesh_declared and mesh_plan's parameters carry
+    none (rdma/mesh-collective.h:37, 90).
+  - Claude's proposal: The changes, by file: The callers: tools/mesh/run_pair.py: outstanding [2026-11-12, mesh
+    6d379b7e; a second reader]. design/page-queue-change-request.md:259: "the driver starts no bridge, chooses no
+    link, and runs one rank on every node of the collective": The rank the driver runs is the E2B replay program,
+    outside the compile_module chain: metal-microbench tools/mesh/run_pair.py:290 `exec env ... .build/e2b_replay
+    {REGION} ...` (launch, :280-291). No program of compile_module/runtime.Program is launched by it, so "runs one
+    rank on every node" holds only through tools/e2b_replay.m, as the index already records for the sibling items
+    (e2b_replay.m, grid.py). The deleted names (`discover_link`, `links`, `start_bridge0`, `start_bridge1`,
+    `bridges_up`, `bridges_down`) are gone from both repositories, and :108-150 takes every member of the map.
 
 Covered:
 
-  - The operator's statements: Collective size: covered [2026-11-12, mesh 81c8e9da]
-  - The operator's statements: Relays: covered [2026-11-12, mesh 81c8e9da]
   - The operator's statements: Interleaving every transfer: covered [2026-11-12, mesh 81c8e9da]
-  - The operator's statements: Queue pairs and links belong to the bridge: covered [2026-11-12, mesh 81c8e9da]
-  - The operator's statements: Failing by error, not by hardware fault: covered [2026-11-03, mesh 615aa4e7]
   - Claude's proposal: The page lists: page, node, direction: covered [2026-11-12, mesh 81c8e9da]
   - Claude's proposal: The page lists: Produced by: covered [2026-11-12, mesh 81c8e9da]
   - Claude's proposal: The page lists: Replaces: covered [2026-11-03, mesh 4ac5cbdc]
-  - Claude's proposal: The schedule that writes the page lists: the algorithm: covered [2026-11-12, mesh 81c8e9da]
   - Claude's proposal: The schedule: blocking transfers first: covered [2026-11-12, mesh 81c8e9da]
-  - Claude's proposal: The schedule: It takes: covered [2026-11-12, mesh 81c8e9da]
   - Claude's proposal: The schedule: It writes: covered [2026-11-12, mesh 81c8e9da]
   - Claude's proposal: The assignment of pages to cables and queue pairs: the algorithm: covered [2026-11-03, mesh
     c193b11a]
@@ -1736,13 +2184,11 @@ Covered:
   - Claude's proposal: The changes, by file: The bridge: queue-pair count: covered [2026-11-03, mesh 615aa4e7]
   - Claude's proposal: The changes, by file: The collective: one function: covered [2026-11-12, mesh 81c8e9da]
   - Claude's proposal: The changes, by file: The collective: replaced calls: covered [2026-11-03, mesh 1444f409]
-  - Claude's proposal: The changes, by file: The callers: tools/mesh/run_pair.py: covered [2026-11-03,
-    metal-microbench dc454f50]
   - Claude's proposal: Order, bullet 2: covered [2026-11-03, mesh a37d5a74]
 
 ## [problems-of-14b9a757-change-request.md](problems-of-14b9a757-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 28 items outstanding, 0 not determined, 38 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 34 items outstanding, 0 not determined, 32 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -1841,6 +2287,64 @@ Outstanding:
   - 14, step 3: "Each live range is one lifetime interval" of G: every value compile_module writes has `run` 1
     (schedule.py:149, 189, 191); mesh-collective.c:507 leaves a `run` value out of the PLAN_LOCAL items, and
     mesh-collective.c:596-613 places its live ranges by mesh_graph_greedy_by_size, not as intervals of G.
+  - 7.3, step 2: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "The port's child process raises the
+    counter by each work completion it retrieves for that range's sends or forwards."
+    (design/problems-of-14b9a757-change-request.md:381-382): rdma/mesh-flow.c:1544-1549: sends_complete polls the
+    link's one send completion queue (`l->provider.sent`, shared by its MESH_LINK_LANES = 10 lanes) and, for a
+    completion whose lane is not in `served`, does `continue` before either prepared_send_counted call (1552, 1557).
+    lane_lost (mesh-flow.c:345-347) clears one lane's bit of `served` while the other lanes stay served, so port_pass
+    (2129-2130) keeps calling link_run and the lost lane's SEND completions are taken from the queue with no counter
+    raised. Nothing counts them later: the other callers of prepared_send_counted are sends_cancel (unposted records,
+    1572-1575) and lanes_flush (rdma/mesh-child.c:74), which counts only completions it polls itself.
+  - 7.3, step 4: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "When the port's child process finds a
+    persistent request cancelled, it first retrieves the completions of the sends it has posted. Each raises the
+    count, or the error count where it completed in error, as fi_cancel has a completed operation report its own
+    status." (design/problems-of-14b9a757-change-request.md:385-387): rdma/mesh-flow.c:2094-2099: on finding the
+    flow's view replaced, link_run calls sends_complete once, which takes only the completions already in the queue
+    (1543-1544, a poll that stops at the first short batch), then sends_cancel (2098) raises the error counts of the
+    unposted sends (step 5) while posted sends are still outstanding (2099: `f->posted!=f->sent+f->landed`,
+    plan_outstanding ends the link). Those sends' completions are retrieved after step 5, at the child's exit
+    (rdma/mesh-child.c:63-75), where each raises the error count whatever its status (mesh-child.c:74). In the same
+    sends_complete, a completion on a lane no longer in `served` raises neither count (mesh-flow.c:1549).
+  - 8, step 2: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "A value made from invariants by tensor views
+    alone is replicated too: a tensor view preserves its operand's dimensions, the sharding of a preserved dimension
+    is propagated from input to output, and propagation creates no new sharding pattern (GSPMD §3.5), so a replicated
+    operand's tensor view is replicated at every node." (design/problems-of-14b9a757-change-request.md:420-422):
+    compiler/mesh_compiler/placement.py:627-629 marks a node invariant only where its target is one of the nine
+    operators of VIEWS (placement.py:34-35: expand, reshape, slice, view, alias, permute, select, squeeze.dims,
+    unsqueeze). A tensor view by any other operator is left out: `aten.split_with_sizes` with its `operator.getitem`
+    results (what torch.split, the call the clause's Megatron source quotes, becomes) and `aten.diagonal`. Both are
+    core ATen views that run_decompositions (export.py:19) keeps; lower_metal.py:340 lowers split_with_sizes. Such a
+    view of a state tensor is not invariant, so placement.py:633-637 does not copy it onto its readers (it reaches a
+    placeholder), it stays on the one processor placement.py:495-496 gave it, and placement.py:660-680 writes a send
+    and a receive for a reader elsewhere. schedule.py:96-98 does treat these as views, by the schema's alias_info, so
+    the two stages disagree.
+  - 8, step 3: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "A collective whose operand is such a value
+    is a resharding from replicated, so it is the DynamicSlice of its result's sharding, at each node, with no
+    transfer." (design/problems-of-14b9a757-change-request.md:423-424): For a value made from a state tensor by a view
+    operator outside VIEWS (compiler/mesh_compiler/placement.py:34-35; `aten.split_with_sizes` with getitem,
+    `aten.diagonal`), the value is held on one processor (placement.py:495-496), reshard slices it at that holder
+    (placement.py:197-198, `holder or processor`), and those slices are not invariant because their input is not
+    (placement.py:627-629). They are therefore not copied onto the readers (633-646), and insert_send_recv writes a
+    SEND at the holder and a RECV at each other processor (placement.py:660-680). The transfer's source is bytes of
+    the state tensor.
+  - 8, step 4: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "Each distinct DynamicSlice a node's program
+    reads of an attribute, or of a value made from an attribute by tensor views alone, is its own never-freed value at
+    that node (7.1, step 5)." (design/problems-of-14b9a757-change-request.md:425-426):
+    compiler/mesh_compiler/schedule.py:91-98 and 174: the view chain stops only at a node placement marked invariant.
+    A slice of a value made from an attribute by a view operator outside placement's VIEWS (placement.py:34-35,
+    627-629; `aten.split_with_sizes` with getitem, `aten.diagonal`) is not marked, so `of` follows the schema's
+    alias_info through the slice and the view to the state placeholder. schedule.py:188-189 then writes one
+    MESH_INVARIANT value of the whole attribute's extent for (placeholder, processor); the slice has no value of its
+    own. Separately, schedule.py:166-167 (with 127-129) writes no value at all where no nonempty transfer crosses
+    machines.
+  - 11, step 5: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "**The program:** it learns of the
+    cancellation through the raised counts (7.3, steps 4 to 6)." (design/problems-of-14b9a757-change-request.md:501):
+    The sentence cites 7.3 step 4, which does not hold: rdma/mesh-flow.c:2096-2099 raises the unposted sends' error
+    counts before the posted sends' completions are retrieved, and mesh-flow.c:1549 takes a completion on a lane no
+    longer served without raising either count. For such a send the range's count plus error count never reaches the
+    execution's total, so the wait the program makes (compiler/mesh_compiler/bridge.py:47) returns 0 from
+    mesh_host_sent (rdma/mesh-collective.c:60) until mesh-collective.c:76 returns ETIMEDOUT, not ECANCELED.
 
 Covered:
 
@@ -1855,15 +2359,10 @@ Covered:
   - 7.1, step 5: covered [2026-11-12, mesh 28d7a032]
   - 7.2, Change: PLAN_SENT is deleted: covered [2026-11-06, mesh 6a8a8524]
   - 7.3, step 1: covered [2026-11-06, mesh 6a8a8524]
-  - 7.3, step 2: covered [2026-11-06, mesh 8624d557]
-  - 7.3, step 4: covered [2026-11-06, mesh 8624d557]
   - 7.3, step 5: covered [2026-11-06, mesh 8624d557]
   - 7.3, step 6: covered [2026-11-12, mesh 0704bf95]
   - 7.3, step 7: covered [2026-11-12, mesh 81c8e9da]
   - 8, step 1: covered [2026-11-11, mesh 297c3cda]
-  - 8, step 2: covered [2026-11-12, mesh f03cb9ca]
-  - 8, step 3: covered [2026-11-12, mesh f03cb9ca]
-  - 8, step 4: covered [2026-11-12, mesh 28d7a032]
   - 8, Change: LOADED and the execution UINT64_MAX − 1 are deleted: covered [2026-11-06, mesh 2155c2b8]
   - 9: covered [2026-11-06, mesh 5eeee1f9]
   - 10, Change: the representation: covered [2026-11-06, mesh 496ad4ef]
@@ -1871,7 +2370,6 @@ Covered:
   - 11, step 1: covered [2026-11-06, mesh 028b27d6]
   - 11, step 2: covered [2026-11-06, mesh 028b27d6]
   - 11, step 3: covered [2026-11-06, mesh 028b27d6]
-  - 11, step 5: covered [2026-11-12, mesh 0704bf95]
   - 12, step 1: covered [2026-11-06, mesh 61435d4b]
   - 12, step 2: covered [2026-11-06, mesh 61435d4b]
   - 13, step 1: covered [2026-11-03, mesh 53e3935c]
@@ -1885,7 +2383,7 @@ Covered:
 
 ## [unequal-shards-change-request.md](unequal-shards-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 8 items outstanding, 0 not determined, 38 covered, 1 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 17 items outstanding, 0 not determined, 29 covered, 1 withdrawn.
 
 Outstanding:
 
@@ -1930,15 +2428,83 @@ Outstanding:
     collective permute at the largest halo over the devices, and each device slices off what exceeds its own.":
     compiler/mesh_compiler/placement.py `halos` caps each send at the sender's own extent (`width = min(extent,
     ...)`), so a sender shorter than the largest halo sends what it holds.
+  - 1 - Stage: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "`place` consumes it with the dimension's
+    extent and writes the sizes, an integer array of one entry per device, which are the `counts` of items 2 and 3."
+    (design/unequal-shards-change-request.md:97-99): Cites item 2, whose Data structure and Stage the same index lists
+    outstanding. In code the counts on the nodes are not those sizes in two places:
+    compiler/mesh_compiler/placement.py:175-179, 202 (resharding along the held dimension: counts is a tuple of one
+    tuple per source device, the overlaps of old and new ranges, block is the pair (i, j)); placement.py:540-546
+    (shards joined for a product: counts is the extents of the blocks the reading processor takes). The sizes are
+    written at placement.py:614; they are the counts only on the path at :173, 209.
+  - 2 - Algorithm: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "An all-gather, a reduce-scatter, an
+    all-to-all, a gather and a scatter over a dimension sharded by item 1 each carry the two arrays. The block of
+    device j is sent at `counts[j]` elements and placed at `displs[j]`."
+    (design/unequal-shards-change-request.md:126-128): compiler/mesh_compiler/placement.py:175-179, 201-202: for an
+    exchange along the dimension the value is already sharded on (other sizes or other processors), `given` and
+    `displs` are tables of one tuple per source device, and the block is (i, j); the piece is cut at sum(given[i][:j])
+    with given[i][j] elements (:188-190), so counts[j] is a tuple, not a number of elements. placement.py:540-546: for
+    shards joined at a product, counts and displs have one entry per block the reader takes (index k), not per device
+    j. This is the fact the index itself records as the failure of item 2's Data structure.
+  - 3 - Data structure / Algorithm: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "the `counts` and
+    `displs` of item 2." and "every device of the collective is given the same arrays."
+    (design/unequal-shards-change-request.md:143-145): Cites item 2's arrays, which the same index lists outstanding
+    (Data structure, Stage). In code: compiler/mesh_compiler/placement.py:528, 540-546 forms the arrays inside the
+    loop over reading processors from the blocks `unmasked` picks for that reader (:417-435), so with a causal mask
+    over three contiguous shards the sends of one key block from p0 carry (e0, e1) for p1 and (e0, e1, e2) for p2;
+    devices of the same gather of keys hold different arrays. placement.py:175-179: on the held-dimension path what is
+    given is a table per source, not item 2's array.
+  - 3 - Stage: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "`place` writes the arrays once for a
+    collective; that collective's nodes on every device carry them." (design/unequal-shards-change-request.md:147):
+    compiler/mesh_compiler/placement.py:528-546: for operands joined at a product the arrays are written once per
+    reading processor (inside `for j, processor in enumerate(processors)`), each from that reader's own picked blocks
+    (`extents = tuple(shape(piece)[v[0]] for piece in pieces)`, :543), and differ between readers when the mask
+    removes blocks; the send nodes on one holder then carry different arrays for different readers (:683-685 copies
+    blocks[processor]). Also placement.py:203-207: for a replication to several processors `joined` and `placed` are
+    formed again for each reader inside the loop at :181 (equal values there).
+  - 8 - Algorithm (e): a block the mask inhibits entirely: outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    "A block of queries and keys that the mask inhibits entirely is not computed."
+    (design/unequal-shards-change-request.md:299-300): compiler/mesh_compiler/placement.py:423-429: `unmasked` returns
+    `every` (all key blocks for every processor's queries) unless the product has exactly one user, that user is
+    aten.add.Tensor, its other operand reaches no placeholder (:424-425), and every node from there to the next bmm is
+    in MASKED (:31-32). A mask that is a buffer or lifted constant of the module (a placeholder in the exported
+    graph), or one applied by where/masked_fill on the scores, or with a finite fill, is not read (the test is `==
+    -math.inf`, :435), and :540-547 then joins and computes every block, the wholly inhibited ones included.
+  - 12 - Data structure: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "A device's buffer of item 4 is the
+    full array and its shard of item 1 is a subarray of it: the buffer's size along the sharded dimension is at least
+    the number of elements the device owns, as a local array's leading dimension is at least LOCr."
+    (design/unequal-shards-change-request.md:374-376): Cites item 4's buffer, whose Data structure the same index
+    lists outstanding: compiler/mesh_compiler/placement.py:78-79, 169-170, 184-186 (a striped dimension has no padded
+    buffer). On the send, `sizes` is the shape of whatever the sent value was sliced from on the sender (:669-671),
+    which is item 4's buffer only when the sent value is own's slice of it (:86-90); a stepped slice ends the chain
+    (:669), so a stripe is sent with sizes equal to subsizes and starts 0. For shards of unequal sizes the buffer is
+    max(sizes) (:193-194, 93-98) and that part held.
+  - 12 - Algorithm (subarray sent): outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "a collective of item 2
+    is given, for each device, the sizes of the full array, the sizes of the subarray and where it starts, and sends
+    the subarray: `counts[j]` is the subarray's number of elements."
+    (design/unequal-shards-change-request.md:377-378): Cites item 2, outstanding in the same index.
+    compiler/mesh_compiler/placement.py:175-179, 188-190, 202: on the exchange along the held dimension counts[j] is a
+    tuple (one entry per destination), and the subarray sent has given[i][j] elements along the dimension;
+    placement.py:540-546: counts is indexed by the position k of the block among those the reader takes, not by device
+    j. The three arrays are written at :669-673, 681-682, and no padded value crosses processors that I found
+    (:153-156, 195-198, 525).
+  - 12 - Stage: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "`place` adds the collective's `send` and
+    `recv` nodes (item 2); for the subarray these carry the three arrays, each an array of integers with one entry per
+    dimension of the buffer." (design/unequal-shards-change-request.md:386-387): Refuted only by its citation: item
+    2's Stage ("`send` and `recv` nodes `place` adds ... with `counts` and `displs`, each an integer array of one
+    entry per device") is outstanding in the same index, compiler/mesh_compiler/placement.py:175-179, 202, 540-546.
+    The rest of the sentence I found in code: sizes, subsizes and starts, one entry per dimension, on both ends of
+    every channel, placement.py:669-673, 681-682.
+  - 15 - Stage: outstanding [2026-11-12, mesh 6d379b7e; a second reader]. "`place` writes these sizes where the
+    placement operand carries no tuple for a sharded dimension; they are the `counts` of items 2 and 3."
+    (design/unequal-shards-change-request.md:490-491): Cites items 2 and 3; item 2's Data structure and Stage are
+    outstanding in the same index. In code the sizes written at compiler/mesh_compiler/placement.py:64-66, 614 are the
+    counts on the nodes only on the path at :173, 209; at :175-179, 202 the counts are a table of overlaps per source
+    device, and at :540-546 the extents of the blocks a reader takes.
 
 Covered:
 
   - 1 - Data structure: covered [2026-11-11, mesh 297c3cda]
   - 1 - Algorithm: covered [2026-11-11, mesh 297c3cda]
-  - 1 - Stage: covered [2026-11-11, mesh d3eecd18]
-  - 2 - Algorithm: covered [2026-11-12, mesh 407cae75]
-  - 3 - Data structure / Algorithm: covered [2026-11-11, mesh d3eecd18]
-  - 3 - Stage: covered [2026-11-11, mesh d3eecd18]
   - 4 - Algorithm / Stage: covered [2026-11-12, mesh ed14734e]
   - 5 - Data structure: covered [2026-11-11, mesh 0d70ec49]
   - 5 - Algorithm: covered [2026-11-11, mesh 297c3cda]
@@ -1953,15 +2519,11 @@ Covered:
   - 8 - Algorithm (a): tokens permuted before the first embedding: covered [2026-11-12, mesh f8de5bbc]
   - 8 - Algorithm (c): position ids and target ids: covered [2026-11-12, mesh f8de5bbc]
   - 8 - Algorithm (d): the mask in original order: covered [2026-11-12, mesh 90843d93]
-  - 8 - Algorithm (e): a block the mask inhibits entirely: covered [2026-11-12, mesh 90843d93]
   - 8 - Stage: covered [2026-11-12, mesh 90843d93]
   - 9 - Stage: covered [2026-11-12, mesh 991742c8]
   - 10 - Data structure: covered [2026-11-12, mesh 3a30b7ec]
   - 11 - Data structure: covered [2026-11-12, mesh 53779b95]
   - 11 - Stage: covered [2026-11-12, mesh 53779b95]
-  - 12 - Data structure: covered [2026-11-12, mesh 5d6ec153]
-  - 12 - Algorithm (subarray sent): covered [2026-11-12, mesh 5d6ec153]
-  - 12 - Stage: covered [2026-11-12, mesh 5d6ec153]
   - 13 - Data structure: covered [2026-11-12, mesh 53779b95]
   - 13 - Algorithm: covered [2026-11-12, mesh 53779b95]
   - 13 - Stage: covered [2026-11-12, mesh 53779b95]
@@ -1970,7 +2532,6 @@ Covered:
   - 14 - Algorithm (Whale's Algorithm 1): covered [2026-11-12, mesh 991742c8]
   - 14 - Stage: covered [2026-11-12, mesh 991742c8]
   - 15 - Algorithm: covered [2026-11-11, mesh 297c3cda]
-  - 15 - Stage: covered [2026-11-11, mesh d3eecd18]
 
 Withdrawn:
 
@@ -1980,7 +2541,7 @@ Withdrawn:
 
 ## [integration-finishing-change-request.md](integration-finishing-change-request.md)
 
-Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 10 items outstanding, 3 not determined, 8 covered, 0 withdrawn.
+Outstanding [2026-11-12, mesh 434b9955, metal-microbench 0b692ed8]: 13 items outstanding, 3 not determined, 5 covered, 0 withdrawn.
 
 Outstanding:
 
@@ -2023,6 +2584,29 @@ Outstanding:
     `mesh_graph_heap_order` over those keys": one order over every machine's functions is sliced per processor.
   - 2 (Consumed by): outstanding [2026-11-12, mesh f20efc91; review of f20efc91]. "**Consumed by** the node's replay,
     which executes its commands in that list's order": the list of the entries above is not made.
+  - 3 (Replaces): outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/integration-finishing-change-request.md:55: "**Replaces:** the weighting operand of one `mesh.Weight` per
+    transfer.": Not gone from both repositories. metal-microbench tools/e2b_replay.m:625-627 declares the weighting
+    operand E2BWeighting, which writes one struct mesh_weight per declared transfer (:647-649
+    `for(i<count)weights[i]=(struct mesh_weight){.produced=1,.consumed=1,.read=1,.page=1}`; passed to mesh_plan at
+    :779). mesh rdma/mesh.py:299-309 `function(declared, weights, ...)` still takes one mesh.Weight per transfer
+    (`Weight(*weight) for weight in weights`), filled per transfer at compiler/mesh_compiler/schedule.py:153. The
+    earlier reading checked only the name `mesh.Weight` in metal-microbench.
+  - 4 (Replaces): outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/integration-finishing-change-request.md:59: "**Replaces:** the walk in metal-microbench metal_recording.m
+    `MetalMaskedPass`.": Only the name is gone. The walk (the masked first pass's vote and deferral, the later pass's
+    worklist-listed threadgroup test) is still in metal-microbench: metal_transport.mm:395 `Acquire` (header comment
+    :1-5 cites the same worklist sources; flags and list views at :139-153, compaction and later twin at :279-310),
+    called from metal_lower.mm:2181. It is not a function of mesh rdma/mesh-graph.{h,c}: `worklist` matches nothing
+    under mesh rdma/ or compiler/ (mesh_graph_worklist_source was removed by mesh dd2062d2).
+  - 7 (Produced by): outstanding [2026-11-12, mesh 6d379b7e; a second reader].
+    design/integration-finishing-change-request.md:77-78: "**Produced by** every commit of the replay: the handler
+    writes the feedback data Metal calls it with to its own commit's record.": The record is a segment's, not a
+    commit's: compiler/mesh_compiler/lower_metal.py:1154 makes one mesh_metal4_record per segment when the program is
+    bound, and :1207-1208 passes that same segment.record[0] to every execution's commit of the segment, so
+    rdma/mesh-metal4.m:199-203 overwrites error, start and end of one shared record (the index lists "that commit's
+    record" outstanding for this). Not every commit either: rdma/mesh-metal4.m:136-140 (mesh_metal4_after, reached
+    from lower_metal.py:1197) issues two torch MPS commits with no feedback handler and no record.
 
 Not determined:
 
@@ -2035,9 +2619,6 @@ Covered:
 
   - 3 (The data structure): covered [2026-11-12, mesh 81c8e9da]
   - 3 (Consumed by): covered [2026-11-12, mesh 81c8e9da]
-  - 3 (Replaces): covered [2026-11-08, mesh 01632014]
-  - 4 (Replaces): covered [2026-11-09, metal-microbench f08d3c7b]
   - 5: covered [2026-11-08, metal-microbench 5d5efc09]
   - 7 (The data structure: one MTL4CommitOptions a commit): covered [2026-11-12, mesh a86c7dc4]
-  - 7 (Produced by): covered [2026-11-12, mesh a86c7dc4]
   - 7 (Replaces, metal_recording.m MetalRunOf): covered [2026-11-08, metal-microbench 33be7703]
