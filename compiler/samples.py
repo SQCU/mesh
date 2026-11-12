@@ -1232,13 +1232,14 @@ def region(node, nodes):
 
 
 def carry(contexts):
-    mesh, wake = bridge.mesh, bridge.SYSTEM.os_sync_wake_by_address_all
+    mesh, wake = bridge.mesh, ctypes.CDLL("/usr/lib/libSystem.B.dylib").os_sync_wake_by_address_all
+    wake.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
     headers = [mesh.Header.from_address(context.M) for context in contexts]
     algos = [mesh.Algo.from_address(context.M + header.algo_off) for context, header in zip(contexts, headers)]
     for algo in algos:
         if algo.retired == algo.published != algo.released:
             algo.released = algo.published
-            wake(ctypes.addressof(algo) + mesh.Algo.released.offset, 8, bridge.SHARED)
+            wake(ctypes.addressof(algo) + mesh.Algo.released.offset, 8, 1)
     if not all(algo.published != algo.retired for algo in algos) or algos[0].group != algos[1].group:
         return
     word = lambda k, at: ctypes.c_uint64.from_address(contexts[k].M + at)
@@ -1269,8 +1270,10 @@ def carry(contexts):
                                    + sent.page * headers[0].pgsz + sent.offset, sent.bytes)
                     word(1 - source, landed.word).value ^= 1 << (landed.field + (turn & 1))
                 count.value += len(pairs)
-                wake(ctypes.addressof(count), 8, bridge.SHARED)
+                wake(ctypes.addressof(count), 8, 1)
+                assert pairs[0][0].pages == len(pairs), "a sent range's entries differ from its count"
                 completion.value += len(pairs)
+                wake(ctypes.addressof(completion), 8, 1)
 
 
 def check_between_machines(with_inductor):

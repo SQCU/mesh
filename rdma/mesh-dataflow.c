@@ -207,6 +207,9 @@ static uint64_t mesh_capacity(const struct mesh_record *a,const struct mesh_reco
   return sum;
 }
 
+/* mesh.h mesh_seqlock_whole */
+int mesh_view_whole(struct hdr *m,uint64_t before){ return mesh_seqlock_whole(&m->view_map,before); }
+
 /* design/aot-compilation-change-request.md A7 */
 int mesh_nodes_read(struct mesh_ctx *c,struct mesh_nodes *out){
   struct mesh_record r[MESH_NODES_MOST];

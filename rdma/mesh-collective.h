@@ -102,6 +102,8 @@ void mesh_planned_free(struct mesh_planned *);
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 uint64_t mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
+/* design/disjoint-pages-change-request.md C3.6; design/problems-of-14b9a757-change-request.md 7.3 */
+int mesh_host_wait(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction);
 /* design/torch-capture-change-request.md item 6 */
 void mesh_view_values(struct mesh_ctx *,const struct mesh_function *functions,uint32_t count,uint64_t *first,
                       uint64_t *offset,struct mesh_view *view);

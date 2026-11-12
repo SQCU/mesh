@@ -71,7 +71,7 @@ static void lanes_flush(struct port *port,uint64_t until){
        Reads the number of operations which have completed in error." */
     for(int i=0;i<n;i++)if(left[c?0:1] && moved>>link_lane(l,done[i].qp_num)&1){
       left[c?0:1]--;
-      if(c)atomic_fetch_add_explicit(((const struct prepared_send *)(uintptr_t)done[i].wr_id)->count+1,1,memory_order_release);
+      if(c)prepared_send_counted((const struct prepared_send *)(uintptr_t)done[i].wr_id,1,1);
     }
   }
   if(held[0]||held[1])mesh_say("bridge","link %u (%s): its child's flush took %llu of %llu SENDs and %llu of %llu receives",port->index,

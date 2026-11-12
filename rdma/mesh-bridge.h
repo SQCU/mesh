@@ -116,12 +116,19 @@ _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 struct flow;
 struct prepared_send {
   _Alignas(128) _Atomic uint64_t *word;
-  uint32_t field,padding;
+  uint32_t field,pages;
   struct ibv_sge span;
   struct ibv_send_wr request;
   struct flow *flow;
   _Atomic uint64_t *count;
 };
+/* design/problems-of-14b9a757-change-request.md 7.3, steps 1 to 5; libfabric man/fi_cntr.3.md, fi_cntr_wait */
+static inline void prepared_send_counted(const struct prepared_send *record,int error,uint64_t by){
+  const uint64_t counted=atomic_fetch_add_explicit(record->count+error,by,memory_order_release)+by+
+                         atomic_load_explicit(record->count+!error,memory_order_acquire);
+  if(counted/record->pages!=(counted-by)/record->pages)
+    os_sync_wake_by_address_all(record->count,sizeof *record->count,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
 _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_send)==128 &&
   offsetof(struct prepared_send,field)==8 && offsetof(struct prepared_send,span)==16 &&
   offsetof(struct prepared_send,request)==32 &&

@@ -22,6 +22,7 @@ class Program:
             from . import bridge
             machine, self.executions = bridge.channels(scheduled, self.channels)
             machines = {machine}
+        self.storage = self.executions[0].address if self.executions else None
         machine = machines.pop()
         inputs = {processor: names for processor, names in scheduled.inputs.items()
                   if scheduled.machines[processor] == machine}
@@ -44,7 +45,7 @@ class Program:
             Thread(target=self.run, args=(processor,), daemon=True).start()
 
     def run(self, processor):
-        ir.LOCAL.channels = self.channels
+        ir.LOCAL.channels, ir.LOCAL.storage = self.channels, self.storage
         while True:
             self.functions[processor](*self.argument_queues[processor].get())
             if self.joined:
@@ -67,7 +68,7 @@ class Program:
             arguments = self.arguments[processor]
             argument_queue.put(list(arguments) if processor in self.feedforward else arguments)
         if self.caller is not None:
-            ir.LOCAL.channels = self.channels
+            ir.LOCAL.channels, ir.LOCAL.storage = self.channels, self.storage
             results = self.functions[self.caller](*self.arguments[self.caller])
         if self.joined:
             for _ in self.argument_queues:

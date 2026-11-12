@@ -1,7 +1,6 @@
 # design/the-compiler.md; design/aot-compilation-change-request.md A4, A5, A7 and A9;
 # design/plan-to-bridge-change-request.md R2 and R8
 import ctypes as C
-import errno
 import itertools
 import os
 import pathlib
@@ -13,10 +12,6 @@ import torch
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
 
-SYSTEM = C.CDLL("/usr/lib/libSystem.B.dylib")
-SYSTEM.os_sync_wait_on_address.argtypes = [C.c_void_p, C.c_uint64, C.c_size_t, C.c_uint32]
-SYSTEM.os_sync_wake_by_address_all.argtypes = [C.c_void_p, C.c_size_t, C.c_uint32]
-SHARED = 1
 CONTEXT, PUBLISHED = mesh.Context(), itertools.count(1)
 
 
@@ -33,8 +28,7 @@ class Published:
             C.byref(made)))
         mesh.LIB.mesh_planned_free(C.byref(made))
         self.plan, self.execution = self.function[0].plan, 0
-        self.state = mesh.State.from_address(CONTEXT.M + self.plan)
-        self.sends = [transfer for transfer in range(len(plan.declared)) if self.publication(transfer).sends]
+        self.transfers = range(len(plan.declared))
         sections = [value.section for value in self.function[0].value[:len(plan.values)]]
         first, offset, view = ((mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(),
                                mesh.View())
@@ -42,52 +36,48 @@ class Published:
         self.copies = [[(view.address + offset[at], section.bytes) for at in range(first[value], first[value + 1])]
                        for value, section in enumerate(sections)]
 
-    # rdma/mesh.h mesh_transfer_at
-    def publication(self, transfer):
-        return mesh.Publication.from_address(CONTEXT.M + self.state.transfers + transfer * mesh.PUBLICATION_BYTES)
-
     # rdma/mesh-dataflow.h mesh_host_started, mesh_transfers_start
     def start(self):
         mesh.LIB.mesh_host_started(C.byref(CONTEXT), self.plan, 0, self.execution)
         mesh.check(mesh.LIB.mesh_transfers_start(C.byref(CONTEXT), self.plan, self.execution + 1))
 
-    # rdma/mesh-collective.h mesh_host_sent; design/disjoint-pages-change-request.md C3.3
+    # rdma/mesh-collective.h mesh_host_wait; design/problems-of-14b9a757-change-request.md 7.2 step 2 and 7.3 step 3
     def end(self):
-        for transfer in self.sends:
-            while not (sent := mesh.LIB.mesh_host_sent(C.byref(CONTEXT), self.plan, transfer, self.execution)):
-                pass
-            if sent == mesh.FAILED:
-                raise OSError(errno.ECANCELED, f"the bridge did not carry execution {self.execution} of a channel")
+        for transfer in self.transfers:
+            mesh.check(mesh.LIB.mesh_host_wait(C.byref(CONTEXT), self.plan, transfer, self.execution, mesh.SEND))
         self.execution += 1
+
+    # design/disjoint-pages-change-request.md C3.3
+    def address(self, value):
+        copies = self.copies[value]
+        return copies[self.execution % len(copies)][0]
 
 
 class Carried:
     def __init__(self, published, transfer, copies, dtype, shape, stride):
         self.plan, self.transfer, self.execution = published.plan, transfer, 0
-        entry = published.publication(transfer)
-        self.counts = [C.c_uint64.from_address(CONTEXT.M + entry.count + 8 * copy) for copy in range(len(copies))]
         self.flat = [torch.frombuffer((C.c_byte * size).from_address(address), dtype=dtype)
                      for address, size in copies]
         self.pages = [flat.as_strided(shape, stride) for flat in self.flat]
 
+    # design/plan-to-bridge-change-request.md R1
+    def out(self):
+        return self.pages[self.execution % len(self.pages)]
+
     # rdma/mesh-collective.h mesh_host_publish
-    def put(self, value):
-        flat = self.flat[self.execution % len(self.flat)]
-        flat.copy_(value.as_strided(flat.shape, (1,)))
+    def publish(self):
         mesh.LIB.mesh_host_publish(C.byref(CONTEXT), self.plan, self.transfer, self.execution)
         self.execution += 1
 
-    # rdma/mesh-collective.h mesh_host_arrived
+    # design/problems-of-14b9a757-change-request.md item 3, "Only a result torch allocates"
+    def put(self, value):
+        flat = self.flat[self.execution % len(self.flat)]
+        flat.copy_(value.as_strided(flat.shape, (1,)))
+        self.publish()
+
+    # rdma/mesh-collective.h mesh_host_wait
     def get(self):
-        count = self.counts[self.execution % len(self.counts)]
-        while True:
-            seen = count.value
-            arrived = mesh.LIB.mesh_host_arrived(C.byref(CONTEXT), self.plan, self.transfer, self.execution)
-            if arrived:
-                break
-            SYSTEM.os_sync_wait_on_address(C.addressof(count), seen, 8, SHARED)
-        if arrived == mesh.FAILED:
-            raise OSError(errno.ECANCELED, f"the bridge cancelled execution {self.execution} of a channel")
+        mesh.check(mesh.LIB.mesh_host_wait(C.byref(CONTEXT), self.plan, self.transfer, self.execution, mesh.RECEIVE))
         self.execution += 1
         return self.pages[(self.execution - 1) % len(self.pages)]
 

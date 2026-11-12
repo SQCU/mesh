@@ -61,7 +61,7 @@ def carried(module, machines):
     return found
 
 
-# rdma/mesh.h mesh_seqlock_whole
+# rdma/mesh-dataflow.h mesh_view_whole
 def image():
     live = mesh.Context()
     mesh.check(mesh.LIB.mesh_attach(C.byref(live), None))
@@ -71,7 +71,7 @@ def image():
     while True:
         before = header.view_map
         C.memmove(address, live.M, header.data_off)
-        if not before & 1 and header.view_map == before:
+        if mesh.LIB.mesh_view_whole(live.M, before):
             break
     C.memset(address + header.algo_off, 0, C.sizeof(mesh.Algo))
     made = mesh.Context(M=address, len=header.length, client=live.client, fd=-1, start=live.start)

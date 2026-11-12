@@ -255,6 +255,7 @@ for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
+        ('mesh_view_whole', C.c_int, [C.c_void_p, Q]),
         ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
                                 C.POINTER(U), Q, C.POINTER(Planned)]),
         ('mesh_plan_save', C.c_int, [CONTEXT, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
@@ -271,7 +272,8 @@ for name, result, arguments in (
         ('mesh_host_publish', None, [CONTEXT, Q, U, Q]),
         ('mesh_host_started', None, [CONTEXT, Q, U, Q]),
         ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q]),
-        ('mesh_host_sent', Q, [CONTEXT, Q, U, Q])):
+        ('mesh_host_sent', Q, [CONTEXT, Q, U, Q]),
+        ('mesh_host_wait', C.c_int, [CONTEXT, Q, U, Q, U])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 # mesh-collective.h mesh_strided_extents (design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3): a view's maximal

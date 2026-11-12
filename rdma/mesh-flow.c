@@ -1034,8 +1034,8 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
     if(record_of[d])record_of[d][k]=at;
     if(d==MESH_SEND){
       struct prepared_send *record=f->sends+at;
-      *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.span=span,.flow=f,
-        .count=region_word(hop->count)};
+      *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.pages=hop->pages,.span=span,
+        .flow=f,.count=region_word(hop->count)};
       record->request=(struct ibv_send_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND,
         .send_flags=IBV_SEND_SIGNALED};
     } else {
@@ -1549,12 +1549,12 @@ static inline int sends_complete(struct port *port,uint32_t served){
       if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
       const struct prepared_send *record=(const void *)(uintptr_t)done[i].wr_id;
       if(done[i].status){
-        atomic_fetch_add_explicit(record->count+1,1,memory_order_release);
+        prepared_send_counted(record,1,1);
         if(!failed)failed=(int64_t)done[i].status;
         continue;
       }
       gate_retire(l->gate+lane,frames_of(record->span.length));l->lane[lane].done++;record->flow->sent++;
-      atomic_fetch_add_explicit(record->count,1,memory_order_release);
+      prepared_send_counted(record,0,1);
     }
     if(failed){link_failed(port,failed);return 0;}
   }
@@ -1569,11 +1569,10 @@ static void sends_cancel(struct flow *f){
     const struct cursor at=f->cursor[MESH_SEND][q];
     const uint64_t *first=f->first[MESH_SEND]+q*width;
     if(at.execution>=executions)continue;
-    for(uint64_t r=at.at;r<at.end;r++)atomic_fetch_add_explicit(f->sends[r].count+1,1,memory_order_release);
+    for(uint64_t r=at.at;r<at.end;r++)prepared_send_counted(f->sends+r,1,1);
     for(uint32_t c=0;c<f->copies;c++){
       const uint64_t later=copy_executions(executions,f->copies,c)-copy_executions(at.execution+1,f->copies,c);
-      for(uint64_t r=first[c];later && r<first[c+1];r++)
-        atomic_fetch_add_explicit(f->sends[r].count+1,later,memory_order_release);
+      for(uint64_t r=first[c];later && r<first[c+1];r++)prepared_send_counted(f->sends+r,1,later);
     }
   }
 }

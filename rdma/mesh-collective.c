@@ -61,6 +61,27 @@ uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer
   return error?UINT64_MAX:1;
 }
 
+/* design/disjoint-pages-change-request.md C3.6; design/problems-of-14b9a757-change-request.md 7.3, steps 3 and 6;
+   libfabric man/fi_cntr.3.md, fi_cntr_wait; mesh-call.h mesh_transfers_start, 2026-11-06 */
+int mesh_host_wait(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction){
+  struct hdr *m=context->M;
+  const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
+  const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
+  const uint64_t copy=execution%state->copies;
+  if(direction==MESH_SEND && !entry->sends)return 0;
+  _Atomic uint64_t *word=(_Atomic uint64_t *)((char *)m+(direction==MESH_SEND?entry->completion+16*copy:entry->count+8*copy));
+  for(int expired=0;;){
+    const uint64_t seen=atomic_load_explicit(word,memory_order_acquire);
+    const uint64_t done=direction==MESH_SEND?mesh_host_sent(context,plan,transfer,execution):
+                                             mesh_host_arrived(context,plan,transfer,execution);
+    if(done)return done==UINT64_MAX?ECANCELED:0;
+    if(expired)return ETIMEDOUT;
+    expired=os_sync_wait_on_address_with_timeout(word,seen,sizeof *word,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+                                                 OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PLATFORM_NS)<0 && errno==ETIMEDOUT &&
+            atomic_load_explicit(word,memory_order_acquire)==seen;
+  }
+}
+
 #define MESH_PLAN_EPS 0.1
 
 struct plan_demand {
@@ -2052,7 +2073,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
           h.pages=d->received;
         }
       }
-      if(e->direction==MESH_SEND)h.count=plan_completion(p,d,c);
+      if(e->direction==MESH_SEND){h.count=plan_completion(p,d,c);h.pages=d->sends;}
       *hop++=h;
     }
   }
@@ -2146,7 +2167,7 @@ struct plan_saved {
   unsigned char inputs[32];
 };
 struct plan_saved_function { uint64_t page,bytes; uint32_t values,transfers; };
-#define PLAN_SAVED_MAGIC UINT64_C(0x324e414c5048534d)
+#define PLAN_SAVED_MAGIC UINT64_C(0x334e414c5048534d)
 static const size_t plan_addresses[]={offsetof(struct mesh_state,phases),offsetof(struct mesh_state,counts),
   offsetof(struct mesh_state,supplied),offsetof(struct mesh_state,status),offsetof(struct mesh_state,completions),
   offsetof(struct mesh_state,hops),offsetof(struct mesh_state,deliveries),offsetof(struct mesh_state,submits),

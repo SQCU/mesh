@@ -48,4 +48,6 @@ _Static_assert(offsetof(struct mesh_nodes,capacity)==144 && offsetof(struct mesh
   offsetof(struct mesh_nodes,boot)==8344 && sizeof(struct mesh_nodes)==8352,"mesh_nodes");
 /* design/aot-compilation-change-request.md A7 */
 int mesh_nodes_read(struct mesh_ctx *,struct mesh_nodes *);
+/* mesh.h mesh_seqlock_whole */
+int mesh_view_whole(struct hdr *,uint64_t before);
 #endif
