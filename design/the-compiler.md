@@ -21,12 +21,15 @@ save(directory, scheduled), load(directory) -> Scheduled
 
 Three things are mesh's and are added to it:
 
-1. **A processor is a device of a machine.** `processors` is `{name: (machine, torch device)}`.
+1. **A processor is a device of a machine.** `processors` is `{name: (machine, device)}`, the device a torch device or
+   an engine named below.
    - M. Abadi et al., TensorFlow, arXiv:1603.04467, section 3, "Devices": "Device names are composed of pieces that
      identify the device's type, the device's index within the worker," and "an identification of the job and task of
      the worker"; "Example device names are "/job:localhost/device:cpu:0" or "/job:worker/task:17/device:gpu:3"."
    - A device may name an engine that is not a torch device: `(machine, 'ane')` is the machine's Neural Engine, reached
-     through Core ML; "the device's type" is read as covering it. The values of such a processor that `export`,
+     through Core ML; "the device's type" is read as covering it. That reading is Claude's, made so that `examples/engines.py`, whose
+     engines are `mps,cpu,ane`, is compiled by this compiler; it is not Abadi et al.'s statement and not an operator
+     turn. The values of such a processor that `export`,
      `on_devices` and `schedule` handle are host tensors: `Scheduled.devices` holds the host for it and
      `Scheduled.engines` is `{processor: engine}`, which the archive saves and loads. The engine is where the
      processor's function runs.
