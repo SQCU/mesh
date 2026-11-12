@@ -467,7 +467,7 @@ class Lowering:
         wide = value.dtype == torch.float64
 
         def expression(bind, index, t):
-            return f"({literal(beta, wide)} * {added.read(bind, index[len(index) - len(added.shape):])} + " \
+            return f"({literal(beta, wide)} * {self.given(bind, added, index, wide)} + " \
                    f"{literal(alpha, wide)} * {t})"
         return Product(left, right, value.dtype, tuple(value.shape), expression)
 
@@ -1306,13 +1306,11 @@ class Native(Lowering):
     # design/compilation-composition-change-request.md, Performance obligation
     def updated(self, value, source, domain, key, given, added):
         kind, made, bind = self.types[value.dtype], self.fresh(value.dtype, value.shape), Bound()
-        first, every = unravel("e", value.shape, "s")
+        self.store(source, made)
         lines, names = unravel("q", domain, "c")
         out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
         x = self.given(bind, given, names, kind == "double")
-        self.dispatch(bind, [f"for (uint e = 0; e < {math.prod(value.shape)}; e++) {{", *first,
-                             f"{made.read(bind, every, True)} = {source.read(bind, every)};", "}",
-                             f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
+        self.dispatch(bind, [f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
                              f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
         return made
 
@@ -1374,7 +1372,6 @@ class Native(Lowering):
 
     # LAPACK, sgelqf and sorglq; G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., section 5.2;
     # torch 2.15 documentation, torch.linalg.qr
-    # A = Q R  <=>  A^T = R^T Q^T
     def qr(self, node):
         values, source = node.meta["val"], self.reader(node.args[0])
         letter = {torch.float32: "s", torch.float64: "d"}.get(values[0].dtype)
