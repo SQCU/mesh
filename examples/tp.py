@@ -140,7 +140,7 @@ def chosen(model, inputs, placement, args, heads):
              for path in args.times for p, functions in json.loads(pathlib.Path(path).read_text()).items()}
     if not args.times:
         times = taken(fixed, inputs)
-        print(json.dumps({'times': times}), flush=True)
+        print(json.dumps(times), flush=True)
 
     def comm(node):
         value = node.meta['val']
