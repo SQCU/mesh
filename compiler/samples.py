@@ -218,6 +218,16 @@ class Rows(nn.Module):
         return lengths * 2, values.sin()
 
 
+class Windows(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.same, self.strided = nn.Conv2d(3, 4, 3, padding=1), nn.Conv2d(4, 4, 5, stride=2, padding=2, dilation=2)
+
+    def forward(self, x):
+        y = nn.functional.max_pool2d(self.strided(self.same(x)).relu(), 3, stride=1, padding=1)
+        return nn.functional.avg_pool2d(y, 2)
+
+
 class Wide(nn.Module):
     def __init__(self):
         super().__init__()
@@ -439,6 +449,12 @@ CASES = [
       "placement": lambda: lambda node: (0, tuple(THREE), "striped") if node.name == "x" else "p0"}),
     ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
      {"processors": TWO, "sharded": True, "placement": ragged_rows}),
+    ("windows | rows 1:2:1, halos exchanged", Windows, [(r(2, 3, 23, 9),)],
+     {"processors": THREE, "sharded": True,
+      "placement": lambda: lambda node: (2, tuple(THREE), (1, 2, 1)) if node.name == "x" else "p0"}),
+    ("windows | 2 shards, input on p0", Windows, [(r(2, 3, 23, 9),)],
+     {"processors": TWO, "sharded": True,
+      "placement": lambda: lambda node: (2, SHARDS, None) if node.name == "convolution" else "p0"}),
     ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
      {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
     ("parallel layers | units 3:1, mps", pl.Inference, [(index(2, 8, 64),)],
@@ -502,7 +518,7 @@ def call_nodes(graph):
 ATEN = torch.ops.aten
 CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scatter.default
 PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
-          ATEN.new_zeros.default}
+          ATEN.new_zeros.default, ATEN.new_full.default}
 BLOCK = ("dimension", "block", "counts", "displs")
 
 

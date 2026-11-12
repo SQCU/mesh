@@ -22,6 +22,8 @@ ADD, ADDMM, CAT, MM, SLICE = (ATEN.add.Tensor, ATEN.addmm.default, ATEN.cat.defa
 EXPAND, RESHAPE, VIEW = ATEN.expand.default, ATEN.reshape.default, ATEN.view.default
 SLICE_SCATTER, ZEROS = ATEN.slice_scatter.default, ATEN.new_zeros.default
 BMM, FLIP, SOFTMAX = ATEN.bmm.default, ATEN.flip.default, ATEN._softmax.default
+CONVOLUTION, FULL = ATEN.convolution.default, ATEN.new_full.default
+MAXIMUM, AVERAGE = ATEN.max_pool2d_with_indices.default, ATEN.avg_pool2d.default
 SYMMETRIC = {SOFTMAX, ATEN.any.dim, ATEN.any.dims, ATEN.mean.dim}
 MASKED = {ADD, BMM, EXPAND, SOFTMAX, VIEW, ATEN.clone.default, ATEN.eq.Scalar, ATEN.logical_not.default, ATEN.any.dim,
           ATEN.full_like.default, ATEN.where.self}
@@ -184,6 +186,98 @@ def embedded(node, shapes, out):
     return [[None, len(out) - 1], list(range(len(out) - 1))]
 
 
+def given(node):
+    names = [argument.name for argument in node.target._schema.arguments]
+    return names, {**dict(zip(names, node.args)), **node.kwargs}
+
+
+def spread(value, count):
+    return list(value) * (count // len(value)) if isinstance(value, (list, tuple)) else [value] * count
+
+
+# Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.3 and appendix A.2
+def windows(node):
+    names, read = given(node)
+    count, dtype = len(shape(node)) - 2, node.all_input_nodes[0].meta["val"].dtype
+    low = spread(read.get("padding", 0), count)
+    if node.target is CONVOLUTION:
+        kernel, fill = shape(node.args[1])[2:], 0
+        if read["transposed"] or len(kernel) != count:
+            return {}
+    else:
+        kernel, fill = spread(read["kernel_size"], count), 0
+        if node.target is MAXIMUM:
+            fill = -math.inf if dtype.is_floating_point else torch.iinfo(dtype).min
+            if any(user.args[1] for user in node.users):
+                return {}
+        elif read.get("divisor_override") is not None or not read.get("count_include_pad", True) and any(low):
+            return {}
+        if read.get("ceil_mode", False):
+            return {}
+    dilation = spread(read.get("dilation", 1), count)
+    stride = spread(read.get("stride") or kernel, count)
+    return {2 + k: (dilation[k] * (kernel[k] - 1) + 1, stride[k], low[k], fill) for k in range(count)}
+
+
+def windowed(node, shapes, out):
+    found = windows(node)
+    row = [0, None if node.target is CONVOLUTION else 1, *(d if d in found else None for d in range(2, len(out)))]
+    return [row[:len(shapes[0])], *([None] * len(s) for s in shapes[1:])]
+
+
+def unpadded(node, at):
+    names, read = given(node)
+    read["padding"] = [0 if k == at else low for k, low in enumerate(spread(read.get("padding", 0), len(shape(node)) - 2))]
+    node.args = tuple(read.pop(name) for name in names[:len(node.args)])
+    node.kwargs = read
+
+
+# Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.3 and appendix A.2; design/unequal-shards-change-request.md item 10;
+# design/problems-of-14b9a757-change-request.md item 4
+def halos(graph, value, window, dimension, sizes, processors):
+    (span, stride, low, fill), (held, extents, holders, nodes) = window, value
+    size = shape(nodes[0])[dimension] if held is None else sum(extents)
+    firsts = list(itertools.accumulate(sizes, initial=0))
+    reads = [(first * stride - low, (first + count - 1) * stride - low + span) for first, count in zip(firsts, sizes)]
+    starts = [0, size] if held is None else list(itertools.accumulate(extents, initial=0))
+    cuts = [[(max(low_, 0, starts[p]), min(high, size, starts[p + 1])) for p in range(len(starts) - 1)]
+            for low_, high in reads]
+    shared = [[max(0, last - first) for first, last in row] for row in cuts]
+    cover = [[bool(shared[q][p]) * (starts[p + 1] - first if p < q else last - starts[p])
+              for p, (first, last) in enumerate(row)] for q, row in enumerate(cuts)]
+    regions = []
+    for q, (processor, (low_, high)) in enumerate(zip(processors, reads)):
+        if not sizes[q]:
+            regions.append(nodes[q if held is not None else 0])
+            continue
+        parts = []
+        for p, node in enumerate(nodes):
+            first, extent = max(low_, 0, starts[p]) - starts[p], starts[p + 1] - starts[p]
+            if not shared[q][p]:
+                continue
+            if held is None:
+                node = call(graph, SLICE, (node, dimension, first, first + shared[q][p]), holders[0] or processor)
+            elif p == q and shared[q][p] < extent:
+                node = call(graph, SLICE, (node, dimension, first, first + shared[q][p]), processor)
+            elif p != q:
+                width = min(extent, max(cover[r][r + p - q] for r in range(len(nodes)) if 0 <= r + p - q < len(nodes)))
+                if width < extent:
+                    node = call(graph, SLICE, (node, dimension, *((extent - width, extent) if p < q else (0, width))),
+                                processors[p])
+                if shared[q][p] < width:
+                    skip = width - cover[q][p] if p < q else first
+                    node = call(graph, SLICE, (node, dimension, skip, skip + shared[q][p]), processor)
+            parts.append(node)
+        own = nodes[q if held is not None else 0]
+        for before, missing in ((True, min(high, 0) - low_), (False, high - max(size, low_))):
+            if missing > 0:
+                padded = [missing if d == dimension else extent for d, extent in enumerate(shape(own))]
+                parts.insert(0 if before else len(parts), call(graph, *((ZEROS, (own, padded)) if fill == 0 else (
+                    FULL, (own, padded, fill))), processor))
+        regions.append(parts[0] if len(parts) == 1 else call(graph, CAT, (parts, dimension), processor))
+    return regions
+
+
 # design/aot-compilation-change-request.md A2 and A4
 def replicated(node, shapes, out):
     return [[None] * len(s) for s in shapes]
@@ -192,6 +286,7 @@ def replicated(node, shapes, out):
 RULES = {
     ATEN.alias.default: aligned, EXPAND: aligned, ATEN.full_like.default: aligned, ATEN._to_copy.default: aligned,
     operator.getitem: aligned, FLIP: aligned,
+    CONVOLUTION: windowed, MAXIMUM: windowed, AVERAGE: windowed,
     ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
     MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
     ATEN.bmm.default: lambda node, shapes, out: [[0, 1, -1], [0, -1, 2]],
@@ -293,12 +388,19 @@ def partitioned(graph, node, held, want, replaced):
             rows = aligned(node, shapes, out)
         else:
             rows = RULES.get(node.target, replicated)(node, shapes, out)
+        if RULES.get(node.target) is windowed and STRIPED in (
+                held[0][1], None if isinstance(want, str) else want[1]):
+            rows = replicated(node, shapes, out)
         found = {(row[v[0]], v[1], v[2]) for v, row in zip(held, rows) if v[0] is not None}
         summed = len(found) == 1 and (next(iter(found))[0] or 0) < 0
         if not summed and not isinstance(want, str) and any(want[0] in row for row in rows):
             target = want
         elif len(found) == 1 and next(iter(found))[0] is not None:
             target = found.pop()
+    window = target and RULES.get(node.target) is windowed and windows(node).get(target[0])
+    if window:
+        target = target[0], counts(out[target[0]], target[1], len(target[2])), target[2]
+        target = None if node.target is MAXIMUM and 0 in target[1] else target
     if target is None:
         processor = want if isinstance(want, str) else want[2][0]
         arguments = iter([reshard(graph, plainly(graph, v), None, None, (processor,))[0] for v in held])
@@ -306,13 +408,21 @@ def partitioned(graph, node, held, want, replaced):
         node.meta["processor"] = processor
         return None, None, (processor,), [node]
     along, sizes, processors = target
+    if window:
+        value = held[0]
+        if (value[0], value[2]) not in ((None, (None,)), (along, processors)):
+            inner = counts(shapes[0][along], sizes, len(processors))
+            value = along, inner, processors, reshard(graph, plainly(graph, value), along, inner, processors)
+        regions = halos(graph, value, window, along, sizes, processors)
     shards, whole = [], along >= 0 and (sizes == STRIPED or sum(sizes) == out[along])
     queries = ranges(sizes, out[along], len(processors)) if whole else ()
     joined = [v[0] is not None and along not in row and row[v[0]] is not None and
               (v[1] == STRIPED or sum(v[1]) == shapes[i][v[0]]) for i, (v, row) in enumerate(zip(held, rows))]
     columns = [None if join else reshard(graph, plainly(graph, v) if (v[0], v[1], v[2]) != (
         row.index(along) if along in row else None, sizes, processors) else v,
-        row.index(along) if along in row else None, sizes, processors) for v, row, join in zip(held, rows, joined)]
+        row.index(along) if along in row else None, sizes, processors)
+        for v, row, join in zip(held[bool(window):], rows[bool(window):], joined[bool(window):])]
+    columns[:0] = [regions] if window else []
     # Y. Xu et al., GSPMD, arXiv:2105.04663, sections 4.3 and 4.5; design/aot-compilation-change-request.md A4
     if node.target is FLIP and along in [d % len(out) for d in node.args[1]]:
         columns[0] = ([columns[0][(out[along] - 1 - j) % len(processors)] for j in range(len(processors))]
@@ -347,7 +457,12 @@ def partitioned(graph, node, held, want, replaced):
         order = {label: blocks for label, blocks in order.items() if label >= 0 and
                  [index for block in blocks for index in range(*block)] != list(range(out[label]))}
         arguments = iter(local)
-        shard = graph.node_copy(node, lambda n: next(arguments))
+        if window and not sizes[j]:
+            shard = graph.call_function(ZEROS, (local[0], [0 if d == along else e for d, e in enumerate(out)]))
+        else:
+            shard = graph.node_copy(node, lambda n: next(arguments))
+        if window and sizes[j]:
+            unpadded(shard, along - 2)
         if node.target in (EXPAND, VIEW):
             sized = list(shard.args[1])
             sized[along] = (len(range(*queries[j])) if sizes == STRIPED else out[along] * sizes[j] // sum(sizes))
