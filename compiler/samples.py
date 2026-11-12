@@ -277,6 +277,14 @@ def megatron_with(stated):
     return placement
 
 
+def solved_units():
+    fixed = compile_module(tp.Training().eval(), (torch.zeros(2, 8, 32),), TWO, tp.placement(SHARDS))
+    units = tp.units(fixed, SHARDS, lambda node: 3.0 if node.meta["processor"] == "p1" else 1.0,
+                     lambda part, stage: 0.0, [1.0, 1.0], tp.HEADS)
+    assert units.keys() == {"model_0", "model_1"} and all(a > b for a, b in units.values()), units
+    return units
+
+
 BMM = torch.ops.aten.bmm.default
 
 CASES = [
@@ -333,6 +341,8 @@ CASES = [
     ("megatron | units 1:3 and 3:1", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True,
       "placement": lambda: tp.placement(SHARDS, {"model_0": (1, 3), "model_1": (3, 1)})}),
+    ("megatron | units solved, p1 slow", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
+     {"processors": TWO, "sharded": True, "placement": lambda: tp.placement(SHARDS, solved_units())}),
     ("megatron | 2 shards, cpu/mps", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": on(0, {"p0": "cpu", "p1": "mps"}), "sharded": True, "needs_mps": True,
       "placement": lambda: tp.placement(SHARDS)}),

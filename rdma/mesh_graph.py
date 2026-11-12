@@ -153,6 +153,13 @@ def upward_rank(vertices, successors, cost):
     return forward(postorder(vertices, successors), successors, rank)
 
 
+# S. Zhang et al., HAP, EuroSys 2024, section 3.2; design/unequal-shards-change-request.md item 6
+def longest(vertices, predecessors, weight):
+    def length(v, lengths):
+        return max((at + weight(u, v) for u, at in zip(predecessors(v), lengths)), default=0)
+    return forward(postorder(vertices, predecessors), predecessors, length)
+
+
 # H. Topcuoglu, S. Hariri and M.-Y. Wu, IEEE TPDS 13(3), 2002, section 4.2
 def earliest_slot(busy, ready, width):
     free_from = 0.0

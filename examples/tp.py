@@ -4,13 +4,17 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
+import time
 
 import torch
 import torch.nn.functional as F
 
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
+from mesh_compiler import shares
 from mesh_compiler.driver import compile_module
+from mesh_compiler.placement import counts
 from mesh_compiler.runtime import Program
 
 
@@ -81,19 +85,63 @@ def placement(processors, units={}):
     return megatron(processors, ('wq', 'wk', 'wv', 'w1', 'w3'), ('wo', 'w2'), units)
 
 
+def segment(node):
+    for path, _ in node.meta.get('nn_module_stack', {}).values():
+        if re.fullmatch(r'\w+\.\d+', path):
+            return path.replace('.', '_')
+
+
+# design/unequal-shards-change-request.md items 1, 6 and 14
+def units(fixed, processors, time, comm, upper, heads):
+    solved = shares.shares(shares.stages(fixed, segment), processors, time, comm, upper)
+    return {part: counts(heads, ratios, len(processors)) for part, ratios in solved.items()}
+
+
+# design/unequal-shards-change-request.md item 7
+class Timed(torch.fx.Interpreter):
+    def __init__(self, module, device, times):
+        super().__init__(module)
+        self.device, self.times = device, times
+
+    def run_node(self, node):
+        started = time.perf_counter()
+        result = super().run_node(node)
+        if self.device.type == 'mps':
+            torch.mps.synchronize()
+        self.times[node] = time.perf_counter() - started
+        return result
+
+
+def chosen(model, inputs, placement, args, heads):
+    if not args.solve:
+        return args.units
+    processors = stated(args)
+    fixed, times = compile_module(model, inputs, processors, placement(tuple(processors))), {}
+    Program(fixed, {p: Timed(module, fixed.devices[p], times).run for p, module in fixed.modules.items()})(*inputs)
+    return units(fixed, tuple(processors), lambda node: times.get(node, 0.0), lambda part, index: args.comm,
+                 args.upper or [1.0] * len(processors), heads)
+
+
+def stated(args):
+    return {f'p{place}': (node, args.device) for place, node in enumerate(args.nodes)}
+
+
 def arguments(description):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument('--nodes', type=int, nargs='+', required=True)
     parser.add_argument('--device', default='mps')
     parser.add_argument('--units', type=json.loads, default={})
+    parser.add_argument('--solve', action='store_true')
+    parser.add_argument('--comm', type=float, default=0.0)
+    parser.add_argument('--upper', type=float, nargs='+')
     return parser.parse_args()
 
 
-def execute(model, inputs, placement, args):
-    processors = {f'p{place}': (node, args.device) for place, node in enumerate(args.nodes)}
+def execute(model, inputs, placement, args, **told):
+    processors = stated(args)
     scheduled = compile_module(model, inputs, processors, placement(tuple(processors)))
     result = Program(scheduled)(*inputs)
-    report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried)}
+    report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried), **told}
     if result is not None:
         with torch.no_grad():
             expected = model(*inputs)
@@ -109,7 +157,9 @@ def main():
     args = arguments('A transformer forward compiled with its weights split over processors by columns and rows.')
     torch.manual_seed(0)
     x = torch.randn(BATCH, SEQ, DIM) / DIM ** 0.5
-    return execute(Training().eval(), (x,), lambda processors: placement(processors, args.units), args)
+    model = Training().eval()
+    given = chosen(model, (x,), placement, args, HEADS)
+    return execute(model, (x,), lambda processors: placement(processors, given), args, units=given)
 
 
 if __name__ == '__main__':

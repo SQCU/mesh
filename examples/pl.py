@@ -5,7 +5,7 @@ import os
 import torch
 import torch.nn.functional as F
 
-from tp import arguments, execute, megatron
+from tp import arguments, chosen, execute, megatron
 
 
 DIM, HEADS, FF_MULT, LAYERS, BATCH, SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in
@@ -102,7 +102,9 @@ def main():
                      'feed-forward outputs computed from one normalized input, its weights split over processors.')
     torch.manual_seed(0)
     input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
-    return execute(Inference().eval(), (input_ids,), lambda processors: placement(processors, args.units), args)
+    model = Inference().eval()
+    given = chosen(model, (input_ids,), placement, args, HEADS)
+    return execute(model, (input_ids,), lambda processors: placement(processors, given), args, units=given)
 
 
 if __name__ == '__main__':
