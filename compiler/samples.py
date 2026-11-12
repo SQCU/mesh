@@ -343,8 +343,8 @@ def ragged_rows():
     return lambda node: stated.get(node.name, "p0")
 
 
-BMM = torch.ops.aten.bmm.default
 LM = (index(2, 6, 64), torch.arange(6).expand(2, 6), index(2, 6, 64))
+BMM = torch.ops.aten.bmm.default
 
 CASES = [
     ("mlp", MLP, [(r(5, 16),)], {}),
@@ -468,8 +468,6 @@ CASES = [
      {"processors": TWO, "sharded": True, "placement": lambda: cp.placement(SHARDS)}),
     ("sequence striped | 3 shards", tp.Attention, [(r(1, 8, 32) / 32 ** 0.5,)],
      {"processors": THREE, "sharded": True, "placement": lambda: cp.placement(tuple(THREE))}),
-    ("crossings | 3, each sharded again", lambda: crossing.Chain(crossing.Crossing()).half(),
-     [(r(2, 16).half(), r(2, 16).half())],
     ("megatron | 2 shards, backward", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "loss": 0, "placement": lambda: tp.placement(SHARDS)}),
     ("megatron | units 1:3 and 3:1, backward", tp.Training, [(r(2, 8, 32) / 32 ** 0.5,)],
@@ -479,6 +477,8 @@ CASES = [
      {"processors": TWO, "sharded": True, "loss": 0, "placement": lambda: cp.placement(SHARDS, sequence=6)}),
     ("causal lm striped | 3 shards, backward", lambda: cp.Causal(6), [LM],
      {"processors": THREE, "sharded": True, "loss": 0, "placement": lambda: cp.placement(tuple(THREE), sequence=6)}),
+    ("crossings | 3, each sharded again", lambda: crossing.Chain(crossing.Crossing()).half(),
+     [(r(2, 16).half(), r(2, 16).half())],
      {"processors": TWO, "sharded": True, "placement": lambda: crossing.placement(SHARDS)}),
     ("experts | 2 shards", lambda: ep.MoE(2), [(r(2, 6, 32) / 32 ** 0.5,)],
      {"processors": TWO, "sharded": True, "placement": lambda: ep.placement(SHARDS, ep.MoE(2).slots)}),
@@ -493,6 +493,7 @@ FRESH_CASES = ("mlp", "python for, 4 static trips", "gather/scatter/... | 2 proc
                "buffer mutation x3 | 2 processors",
                "solve | 3 processors round-robin", "mixture of experts | 3 processors",
                "conv | conv on mps, rest cpu", "megatron | 2 shards")
+METAL_SIGNED = ("mlp | all on mps", "conv | conv on mps, rest cpu", "megatron | 2 shards, cpu/mps")
 KEY_CASES = ("mlp", "mlp | 2 processors pipeline", "mixture of experts | 3 processors", "megatron | 2 shards")
 OPTION_FLAGS = ("rejected", "needs_mps", "expect_on", "sharded", "not_lowered", "inputs_on", "tolerance")
 
@@ -510,7 +511,6 @@ def errors(reference, got):
     return worst_abs, worst_rel
 
 
-METAL_SIGNED = ("mlp | all on mps", "conv | conv on mps, rest cpu", "megatron | 2 shards, cpu/mps")
 def call_nodes(graph):
     return [n for n in graph.nodes if n.op == "call_function"]
 
@@ -576,6 +576,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
                 where[node.name] = processor
             elif "constant" in node.meta:
                 assert "of" not in node.meta, "a constant's copy is also a shard"
+                replicated.add(node.meta["constant"])
                 if node.meta["constant"] not in original:
                     added.append(node)
             elif node.meta.get("of") in original:
@@ -588,7 +589,6 @@ def check_ir(scheduled, expect_on=None, sharded=False):
             if channel is not None:
                 side = sender if node.target is ir.SEND else reader
                 assert channel not in side, "a channel with two sends or two recvs"
-                replicated.add(node.meta["constant"])
                 side[channel] = processor
                 ends.setdefault(channel, {})[node.target] = node
             for key_, wanted in (expect_on or {}).items():
@@ -1010,23 +1010,6 @@ def check_shared_storage():
     print("  ok: the receiver's compiled code left the sender's storage intact")
 
 
-def check_digests_across_processes():
-    command = [sys.executable, str(HERE / "samples.py"), "--digests"]
-    runs = [json.loads(subprocess.run(command, capture_output=True, text=True, check=True).stdout)
-            for _ in range(2)]
-    here = {name: digests(build(name)[2].modules) for name in KEY_CASES}
-    assert runs[0] == runs[1] == here, "digests differ between processes"
-    for name, found in here.items():
-        print(f"  {name:34} " + " ".join(f"{p}:{d[:12]}" for p, d in found.items()))
-    print("  ok: identical in two fresh interpreter processes and in this one")
-
-
-def reload_case(directory, name):
-    _, factory, calls, _ = next(case for case in CASES if case[0] == name)
-    torch.manual_seed(0)
-    module = factory().eval()
-    scheduled = archive.load(directory)
-    worst = measure(lambda: Program(scheduled), module, calls)
 # design/synchronization-signature-change-request.md items 1, 2 and 4
 def check_signatures():
     for name in dict.fromkeys(KEY_CASES + FRESH_CASES):
@@ -1122,6 +1105,23 @@ def check_monitored_playback():
     print("  ok: the playback that ran to completion ran the compiler's signature; the added wait failed its run")
 
 
+def check_digests_across_processes():
+    command = [sys.executable, str(HERE / "samples.py"), "--digests"]
+    runs = [json.loads(subprocess.run(command, capture_output=True, text=True, check=True).stdout)
+            for _ in range(2)]
+    here = {name: digests(build(name)[2].modules) for name in KEY_CASES}
+    assert runs[0] == runs[1] == here, "digests differ between processes"
+    for name, found in here.items():
+        print(f"  {name:34} " + " ".join(f"{p}:{d[:12]}" for p, d in found.items()))
+    print("  ok: identical in two fresh interpreter processes and in this one")
+
+
+def reload_case(directory, name):
+    _, factory, calls, _ = next(case for case in CASES if case[0] == name)
+    torch.manual_seed(0)
+    module = factory().eval()
+    scheduled = archive.load(directory)
+    worst = measure(lambda: Program(scheduled), module, calls)
     saved = mesh_graph.from_record(archive.load_signature(directory))
     signed = [signature.signature(scheduled)["digest"], bytes(saved.digest).hex()]
     mesh_graph.free(saved)
@@ -1135,12 +1135,15 @@ def check_reload_in_fresh_process():
         program = build(name)[2]
         with tempfile.TemporaryDirectory() as directory:
             archive.save(directory, program)
+            signed = signature.signature(program)
+            archive.save_signature(directory, signed["record"])
             size = sum(f.stat().st_size for f in pathlib.Path(directory).iterdir())
             command = [sys.executable, str(HERE / "samples.py"), "--reload", directory, name]
             done = subprocess.run(command, capture_output=True, text=True, check=True)
         report = json.loads(done.stdout.strip().splitlines()[-1])
         assert report["rel"] <= TOLERANCE or report["abs"] <= TOLERANCE, report
         assert report["digests"] == digests(program.modules), "digest changed by reload"
+        assert report["signature"] == [signed["digest"]] * 2, "the signature's digest changed by reload"
         print(f"  {name:34} {len(program.modules)} archives {size:7d} bytes  rel err "
               f"{report['rel']:.1e}  digests equal")
     print("  ok: loaded and run in a fresh process, matches eager, digests equal the originals")
@@ -1152,15 +1155,12 @@ def between(machines, with_inductor):
     print("max relative error against eager where the results are, `ran` where they are not:")
     for name, _, _, options in CASES:
         if len(options.get("processors", ONE)) < 2 or options.get("rejected"):
-            signed = signature.signature(program)
-            archive.save_signature(directory, signed["record"])
             continue
         if options.get("needs_mps") and not MPS:
             print(f"{name:34} SKIP (no mps)")
             continue
         module, calls, scheduled = build(name, machines)
         check_ir(scheduled, options.get("expect_on"), options.get("sharded"))
-        assert report["signature"] == [signed["digest"]] * 2, "the signature's digest changed by reload"
         cells = []
         for path, make in variants(scheduled, with_inductor).items():
             if make is None:
@@ -1277,6 +1277,9 @@ def main():
     if "--digests" in sys.argv:
         print(json.dumps({name: digests(build(name)[2].modules) for name in KEY_CASES}))
         return
+    if "--playback" in sys.argv:
+        playback(*sys.argv[sys.argv.index("--playback") + 1:])
+        return
     if "--reload" in sys.argv:
         reload_case(*sys.argv[sys.argv.index("--reload") + 1:][:2])
         return
@@ -1303,9 +1306,6 @@ def main():
             print(f"{name:34} {'REJECTED' if rejected else 'ERROR'}: {type(error).__name__}: {detail}")
             continue
         cells = [cell(results[path], options.get("not_lowered"),
-    if "--playback" in sys.argv:
-        playback(*sys.argv[sys.argv.index("--playback") + 1:])
-        return
                       tolerance=options.get("tolerance", TOLERANCES.get(path, TOLERANCE)))
                  for path in PATHS]
         total_breaks += breaks
@@ -1329,6 +1329,10 @@ def main():
         print(f"  {count:5d}  {reason}")
     print("import separation (from the modules' syntax trees):")
     check_imports()
+    print("synchronization signatures of the scheduled programs (the last one's space-time diagram):")
+    check_signatures()
+    print("a saved program played back under bin/mesh-sync-monitor.py (DTrace, attached to the playing process):")
+    check_monitored_playback()
     print("digests of the scheduled GraphModules across processes:")
     check_digests_across_processes()
     if with_inductor:
@@ -1350,7 +1354,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    print("synchronization signatures of the scheduled programs (the last one's space-time diagram):")
-    check_signatures()
-    print("a saved program played back under bin/mesh-sync-monitor.py (DTrace, attached to the playing process):")
-    check_monitored_playback()
