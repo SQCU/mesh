@@ -6,7 +6,7 @@ import torch
 from .devices import ENGINES, HOST, on_devices
 from .export import export
 from .ir import Scheduled
-from .placement import place
+from .placement import place, views
 from .schedule import argument_buffers, carried, schedule, unit_cost
 from .signature import signature
 
@@ -20,6 +20,7 @@ def compile_module(module, args, processors, placement, cost=unit_cost, **export
     devices = {name: device for name, (_, device) in processors.items()}
     machines = {name: machine for name, (machine, _) in processors.items()}
     graph = on_devices(placed, processors)
+    views(graph.graph)
     between = carried(graph, machines)
     modules, plan = schedule(graph, cost, between, machines,
                              {key for kind, key in exported.outputs if key is not None})

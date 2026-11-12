@@ -86,16 +86,13 @@ def dependences(events, before):
     return [(events[a][0], events[b][0], lag, events[a][2][0] | events[b][2][1]) for a, b, lag in found]
 
 
-# torch/csrc/jit/frontend/function_schema_parser.cpp alias_info; design/problems-of-14b9a757-change-request.md items 3
-# and 8, step 4
+# compiler/mesh_compiler/placement.py views; design/problems-of-14b9a757-change-request.md items 3 and 6, and item 8,
+# step 4
 def viewed(sender, carried):
     def of(node):
         if node.target is RECV:
             return None if node.args[0] in carried else sender[node.args[0]].args[0]
-        made = producer(node)
-        returns = getattr(getattr(made.target, "_schema", None), "returns", ())
-        aliases = made.op == "call_function" and returns and returns[0].alias_info is not None
-        return made.args[0] if aliases and not node.meta.get("invariant") else None
+        return producer(node).args[0] if "view" in node.meta and "invariant" not in node.meta else None
     return of
 
 
@@ -130,7 +127,7 @@ def stored(values, places, module, local, before, of, channels, mutated):
     last = mesh_graph.ends(local, before, lambda f: () if f.meta.get("invariant") else [
         (root, (f if root.op == "placeholder" else root).meta["processor"]) for root in roots[f]] + [
         (f, f.meta["processor"])] * (f.target is RECV and f.args[0] in channels))
-    named = {(node.name, node.meta["processor"]): node for node in local}
+    named, slices = {(node.name, node.meta["processor"]): node for node in local}, set()
     for value, (processor, name) in enumerate(list(places)):
         node = named[name, processor]
         begin, end = index[producer(node)], len(local) - 1
@@ -142,7 +139,10 @@ def stored(values, places, module, local, before, of, channels, mutated):
         if ((processor, root.name) in places or root in results or not isinstance(value, torch.Tensor)
                 or not extent(value) or root.meta.get("state") in mutated):
             continue
-        if "state" in root.meta or root.meta.get("invariant"):
+        if "state" in root.meta or "invariant" in root.meta:
+            if root.meta.get("invariant", root.meta.get("state")) in slices:
+                continue
+            slices.add(root.meta.get("invariant", root.meta.get("state")))
             values.append((extent(value), mesh.INVARIANT, 0, 0, 0, 0, 0, 1))
         elif producer(root) in index:
             values.append((extent(value), mesh.EXECUTION, 0, 0, index[producer(root)], index[reader], 0, 1))
