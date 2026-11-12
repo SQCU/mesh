@@ -535,10 +535,10 @@ CASES = [
     ("ragged rows | separators, speeds 1:3", Rows, [(LENGTHS, r(31, 4))],
      {"processors": TWO, "sharded": True, "placement": ragged_rows}),
     ("windows | rows 1:2:1, halos exchanged", Windows, [(r(2, 3, 23, 9),)],
-     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6}, "received": 6,
+     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 8}, "received": 6,
       "placement": lambda: lambda node: (2, tuple(THREE), (1, 2, 1)) if node.name == "x" else "p0"}),
     ("windows | rows 1:6:1, halos padded", Windows, [(r(2, 3, 23, 9),)],
-     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 6, "padded": 2},
+     {"processors": THREE, "sharded": True, "windows": {"shards": 12, "masked": 7, "padded": 2},
       "placement": lambda: lambda node: (2, tuple(THREE), (1, 6, 1)) if node.name == "x" else "p0"}),
     ("windows | pooling with a divisor, 3 shards", Divided, [(r(2, 3, 11, 6),)],
      {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2}, "collectives": {"permute": 1},
@@ -556,14 +556,14 @@ CASES = [
      {"processors": THREE, "sharded": True, "windows": {"shards": 3, "masked": 2},
       "placement": lambda: lambda node: (2, tuple(THREE), None) if "max_pool" in node.name else "p0"}),
     ("windows | rows and columns, 2 by 2", Windows, [(r(2, 3, 23, 21),)],
-     {"processors": FOUR, "sharded": True, "windows": {"shards": 16, "masked": 12}, "collectives": {"permute": 14},
+     {"processors": FOUR, "sharded": True, "windows": {"shards": 16, "masked": 14}, "collectives": {"permute": 14},
       "placement": lambda: lambda node: ((2, 3), (("p0", "p1"), ("p2", "p3")), (None, (1, 2)))
       if node.name == "x" else "p0"}),
     ("windows | rows and columns, 1 by 2", Windows, [(r(2, 3, 23, 21),)],
      {"processors": TWO, "sharded": True, "windows": {"shards": 8, "masked": 6}, "collectives": {"permute": 7},
       "placement": lambda: lambda node: ((2, 3), (SHARDS,), (None, None)) if node.name == "x" else "p0"}),
     ("windows | 2 shards, input on p0", Windows, [(r(2, 3, 23, 9),)],
-     {"processors": TWO, "sharded": True, "windows": {"shards": 8, "masked": 4, "views": 2},
+     {"processors": TWO, "sharded": True, "windows": {"shards": 8, "masked": 5, "views": 2},
       "placement": lambda: lambda node: (2, SHARDS, None) if node.name == "convolution" else "p0"}),
     ("parallel layers | 2 shards", pl.Inference, [(index(2, 8, 64),)],
      {"processors": TWO, "sharded": True, "placement": lambda: pl.placement(SHARDS)}),
@@ -632,8 +632,9 @@ def call_nodes(graph):
 
 ATEN = torch.ops.aten
 CAT, SLICE, SLICE_SCATTER = ATEN.cat.default, ATEN.slice.Tensor, ATEN.slice_scatter.default
-PLACED = {ir.SEND, ir.RECV, TO_COPY, CAT, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.mm.default, ATEN.reshape.default,
-          ATEN.new_zeros.default, ATEN.constant_pad_nd.default, ATEN.arange.start_step,
+PLACED = {ir.SEND, ir.RECV, TO_COPY, SLICE, SLICE_SCATTER, ATEN.add.Tensor, ATEN.add.out, ATEN.mm.default,
+          ATEN.reshape.default, ATEN.new_zeros.default, ATEN.new_full.default, ATEN.copy_.default, ATEN.fill_.Scalar,
+          ATEN.arange.start_step,
           ATEN.remainder.Scalar, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default,
           ATEN.view.default, ATEN.expand.default, ATEN.scalar_tensor.default, ATEN.where.self, ATEN.clone.out,
           ATEN.empty.memory_format}
@@ -673,9 +674,10 @@ def check_block(sent, arrived):
         arrived, readers = readers[0], list(readers[0].users)
     places = []
     for reader in readers:
-        if reader.target is CAT and reader.args[1] == dimension and reader.meta["val"].shape[dimension] == sum(counts):
-            before = reader.args[0][:reader.args[0].index(arrived)]
-            places.append(sum(piece.meta["val"].shape[dimension] for piece in before))
+        window = reader.args[0] if reader.target is ATEN.copy_.default and reader.args[1] is arrived else None
+        if window is not None and window.args[1] == dimension and (
+                window.args[4] > 1 or window.args[0].meta["val"].shape[dimension] == sum(counts)):
+            places.append(window.args[2])
         elif reader.target is SLICE_SCATTER and reader.args[1] is arrived:
             places.append(reader.args[3])
     if not places:
@@ -711,7 +713,11 @@ def check_views(scheduled, copied=0, received=0):
                 buffer, offset, sizes, strides = node.meta[key]
                 whole, last = names[buffer].meta["val"], offset + sum((n - 1) * s for n, s in zip(sizes, strides))
                 assert (key == "to") == (node.target is ir.RECV), node.name
-                assert names[buffer] in (node.kwargs.get("out"), *node.users) and len(node.users) == 1, node.name
+                writer = next(iter(node.users)) if key == "to" else node
+                through = writer.kwargs["out"] if "out" in writer.kwargs else writer.args[0]
+                assert writer.meta["out"] == node.meta[key] and buffer in (
+                    through.name, through.meta.get("view", [0])[0]), node.name
+                assert names[buffer].target is ATEN.empty.memory_format, f"{node.name} writes {buffer}"
                 assert sizes == tuple(node.meta["val"].shape) and (not all(sizes) or last < whole.numel()), node.name
                 into += key == "to"
         records = [[n.meta.get(key) for key in ("view", "to", "out", "invariant")] for n in module.graph.nodes]
@@ -731,10 +737,12 @@ def check_windows(scheduled, expected):
             if "of" in node.meta and any(kind in str(node.target) for kind in ("convolution", "pool")):
                 held = node.args[0]
                 found["shards"] += 1
-                found["masked"] += held.target is ATEN.where.self
+                found["masked"] += any(n.target is ATEN.fill_.Scalar and n.meta["out"][0] == held.name
+                                       for n in names.values())
                 found["views"] += names[held.meta["view"][0]].op == "placeholder" if "view" in held.meta else (
                     held.op == "placeholder")
-            found["padded"] += node.target is ir.SEND and node.args[0].target is ATEN.constant_pad_nd.default
+            found["padded"] += node.target is ir.SEND and any(
+                n.target is ATEN.fill_.Scalar and n.meta["out"][0] == node.args[0].name for n in names.values())
     assert +found == expected, f"windowed shards {dict(+found)}, not {expected}"
 
 
@@ -824,14 +832,15 @@ def check_ir(scheduled, expect_on=None, sharded=False):
         assert all(len(shapes) == 1 for shapes in held.values()), "shards of one node differ in shape"
         assert not where.keys() & shards.keys(), "an exported node both whole and in shards"
         assert where.keys() | shards.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
-        assert {n.target for n in added} <= PLACED, "a node that neither export nor a collective produced"
+        assert {n.target for n in added} <= PLACED, f"no collective produced {set(n.target for n in added) - PLACED}"
         sent = [end[ir.SEND].args[0] for end in ends.values()]
         values = {(sender[c], (v.args[0] if copies(v) else v).name, reader[c]) for c, v in zip(ends, sent)}
         assert len(values) == scheduled.channels, "channels differ from (value, reading processor) pairs"
         for end in ends.values():
             check_block(end[ir.SEND], end[ir.RECV])
             read = mesh_graph.reach([end[ir.SEND]], lambda n: [ends[ir.channel_of(n)][ir.SEND]] if n.target is ir.RECV
-                                    else n.all_input_nodes)
+                                    else [m for m in n.graph.nodes if m.meta.get("out", [None])[0] == n.name]
+                                    if n.target is ATEN.empty.memory_format else n.all_input_nodes)
             assert any(n.op == "placeholder" for n in read), "a channel carries a value no input reaches"
     else:
         assert where.keys() == original.keys(), "an exported node is missing from the scheduled graphs"
@@ -856,7 +865,7 @@ def check_ir(scheduled, expect_on=None, sharded=False):
 
 
 def fx_pass(module):
-    module = CSEPass()(module).graph_module
+    module = CSEPass(banned_ops=[torch.ops.aten.empty])(module).graph_module
     module.graph.eliminate_dead_code()
     module.graph.lint()
     module.recompile()

@@ -112,8 +112,8 @@ def call(scheduled, machine):
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4, 6 and 8; design/review-warnings.md rule 5
 ATEN = torch.ops.aten
-CAT, PAD, RESHAPE, VIEW = ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.reshape.default, ATEN.view.default
-CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format
+RESHAPE, VIEW = ATEN.reshape.default, ATEN.view.default
+CLONE, COPY, EMPTY = ATEN.clone.out, ATEN.copy_.default, ATEN.empty.memory_format
 
 
 def shape(node):
@@ -141,7 +141,8 @@ def evaluated(node, processor):
                     "memory_format": torch.contiguous_format, "out": out}), processor)
             node.args = (copied, *node.args[1:])
             return evaluated(node, processor)
-        node.meta.update(processor=processor, val=node.target(*arguments[0], **arguments[1]))
+        with torch.set_grad_enabled(written(node) is None):
+            node.meta.update(processor=processor, val=node.target(*arguments[0], **arguments[1]))
     return node
 
 
@@ -197,20 +198,6 @@ def based(node, read):
     return base, first
 
 
-# design/problems-of-14b9a757-change-request.md item 1 step 1, item 2 and item 4 step 4; MPI 4.1, section 7.7
-def destined(node):
-    if node.target is CAT:
-        value = node.meta["val"]
-        along, at = (*node.args, 0)[1] % value.dim(), 0
-        for held in node.args[0]:
-            if node.args[0].count(held) == 1:
-                yield held, at * value.stride(along)
-            at += shape(held)[along]
-    elif node.target is PAD and (*node.args, 0)[2] == 0 and min(node.args[1]) >= 0:
-        value = node.meta["val"]
-        yield node.args[0], sum(low * value.stride(value.dim() - 1 - d) for d, low in enumerate(node.args[1][::2]))
-
-
 # design/problems-of-14b9a757-change-request.md items 1 to 4 and 6, and item 8, step 4
 def views(nodes):
     nodes = mesh_graph.walk(list(getattr(nodes, "nodes", nodes)), lambda n: [u for u in n.users if source(u) is n])
@@ -224,12 +211,8 @@ def views(nodes):
             node.meta["val"] = node.args[0].meta["val"][node.args[1]]
     mesh_graph.forward(mesh_graph.postorder(nodes, bases_of), bases_of, based)
     for node in dict.fromkeys(reader for n in nodes for reader in (n, *n.users)):
-        for held, offset in destined(node):
-            if (held.op == "call_function" and held.target is not operator.getitem and len(held.users) == 1
-                    and not {"view", "out"} & held.meta.keys()
-                    and isinstance(held.meta["val"], torch.Tensor)):
-                held.meta["to" if held.target is RECV else "out"] = (
-                    node.name, offset, shape(held), tuple(node.meta["val"].stride()))
+        if node.target is COPY and node.args[1].target is RECV and len(node.args[1].users) == 1:
+            node.args[1].meta["to"] = node.meta["out"]
 
 
 def constant(graph, target, arguments, like, processor, **kwargs):

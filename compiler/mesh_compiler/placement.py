@@ -10,7 +10,7 @@ import sys
 import torch
 from torch.fx.node import map_arg
 
-from .ir import PAGES, RECV, SEND, constant, evaluated, given, shape, view, views
+from .ir import COPY, EMPTY, PAGES, RECV, SEND, constant, evaluated, given, shape, source, view, views, written
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -22,7 +22,7 @@ EXPAND, RESHAPE, VIEW = ATEN.expand.default, ATEN.reshape.default, ATEN.view.def
 SLICE_SCATTER, ZEROS = ATEN.slice_scatter.default, ATEN.new_zeros.default
 BMM, FLIP, SOFTMAX = ATEN.bmm.default, ATEN.flip.default, ATEN._softmax.default
 ARANGE, LE, AND, NOT = ATEN.arange.start_step, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default
-PAD = ATEN.constant_pad_nd.default
+PAD, FILL, FULL = ATEN.constant_pad_nd.default, ATEN.fill_.Scalar, ATEN.new_full.default
 CONVOLUTION = ATEN.convolution.default
 MAXIMA = {ATEN.max_pool2d_with_indices.default, ATEN.max_pool3d_with_indices.default}
 AVERAGES = {ATEN.avg_pool1d.default, ATEN.avg_pool2d.default, ATEN.avg_pool3d.default}
@@ -436,14 +436,15 @@ def halos(graph, value, window, dimension, sizes, processors, name):
                     skip = width - cover[q][p] if p < q else first
                     node = call(graph, SLICE, (node, dimension, skip, skip + shared[q][p]), processor)
             parts.append(node)
-        for before, missing in ((True, min(high, real[q][0]) - low_), (False, high - max(real[q][1], low_))):
-            if missing > 0:
-                parts.insert(0 if before else len(parts), call(graph, ZEROS, (nodes[q], [
-                    missing if d == dimension else extent for d, extent in enumerate(shape(nodes[q]))]), processor))
-        region = parts[0] if len(parts) == 1 else call(graph, CAT, (parts, dimension), processor)
-        if low_ < 0 or high > size:
-            region = selected(graph, region, dimension, max(0, -low_), min(high, size) - low_, fill, processor)
-        regions.append(region)
+        for before, missing, past in ((True, min(high, real[q][0]) - low_, -low_),
+                                      (False, high - max(real[q][1], low_), high - size)):
+            past = max(0, min(missing, past)) if fill else 0
+            for outside, width in ((False, missing - past), (True, past)):
+                if width > 0:
+                    sizes = [width if d == dimension else extent for d, extent in enumerate(shape(nodes[q]))]
+                    parts.insert(0 if before else len(parts), call(
+                        graph, *((FULL, (nodes[q], sizes, fill)) if outside else (ZEROS, (nodes[q], sizes))), processor))
+        regions.append(parts[0] if len(parts) == 1 else call(graph, CAT, (parts, dimension), processor))
     return regions, kept
 
 
@@ -771,10 +772,87 @@ def partitioned(graph, node, held, want, replaced):
                for k, (keeper, held_) in enumerate(parts.items())]
 
 
+# ExecuTorch documentation, Concepts, Out variant
+def outward(target):
+    packet = getattr(target, "overloadpacket", None)
+    if packet is None:
+        return None
+    takes = [(a.name, str(a.type)) for a in target._schema.arguments]
+    found = [getattr(packet, name) for name in packet.overloads()]
+    return next((o for o in found if len(o._schema.returns) == 1 and o._schema.arguments[-1].name == "out" and [
+        (a.name, str(a.type)) for a in o._schema.arguments[:-1]] == takes), None)
+
+
+# design/problems-of-14b9a757-change-request.md items 1, 2, 4 and 5; MPI 4.1, sections 7.7 and 7.8
+def blocks(node):
+    extents = shape(node)
+    if node.target is CAT:
+        along = (*node.args, 0)[1] % len(extents)
+        edges = list(itertools.accumulate((shape(held)[along] for held in node.args[0]), initial=0))
+        return [(held, along, low, high, 1) for held, low, high in zip(node.args[0], edges, edges[1:])], [node]
+    if node.target is SLICE_SCATTER:
+        joined = mesh_graph.chain(node, lambda n: n.args[0] if n.target is SLICE_SCATTER and len(
+            n.args[0].users) == 1 else None)
+        found = [(n.args[1], n.args[2] % len(extents), *n.args[3:6]) for n in joined[:-1]]
+        whole = joined[-1].target is ZEROS and not any(user.target is SLICE_SCATTER for user in node.users) and len(
+            {block[1] for block in found}) == 1 and sum(len(range(*block[2:])) for block in found) == extents[found[0][1]]
+        return (found, joined) if whole else ([], [])
+    lows, fill = node.args[1][::2], (*node.args, 0)[2]
+    wide = [d for d in range(len(node.args[1]) // 2) if node.args[1][2 * d] or node.args[1][2 * d + 1]]
+    if len(wide) != 1 or min(node.args[1]) < 0:
+        return [], []
+    along, low = len(extents) - 1 - wide[0], lows[wide[0]]
+    high = low + shape(node.args[0])[along]
+    return [(fill, along, 0, low, 1), (node.args[0], along, low, high, 1), (fill, along, high, extents[along], 1)], [node]
+
+
+def buffered(graph, node):
+    (found, joined), processor, value = blocks(node), node.meta["processor"], node.meta["val"]
+    if not found:
+        return
+    position = {n: at for at, n in enumerate(graph.nodes)}
+    held = [block[0] for block in found]
+    once = {n for n in held if isinstance(n, torch.fx.Node) and n.op == "call_function" and held.count(n) == 1
+            and isinstance(n.meta["val"], torch.Tensor)}
+    fills = {n: n.args[2] if n.target is FULL else 0 for n in once
+             if n.target in (ZEROS, FULL) and set(n.users) <= set(joined)}
+    nested = {n: n for n in once if n.target is EMPTY}
+    nested.update((n, n.kwargs["out"]) for n in once if "out" in n.kwargs and n.kwargs["out"].target is EMPTY and list(
+        n.kwargs["out"].users) == [n])
+    direct = {n for n in once - fills.keys() - nested.keys() if n.target not in (RECV, operator.getitem) and view(
+        n) is None and written(n) is None and outward(n.target) is not None}
+    with graph.inserting_before(min((*direct, *nested.values(), node), key=position.__getitem__)):
+        buffer = constant(graph, EMPTY, (list(value.shape),), node, processor, dtype=value.dtype)
+    unread = [*joined, *fills]
+    for piece, along, low, high, step in found:
+        if not len(range(shape(node)[along])[low:high:step]):
+            continue
+        with graph.inserting_before(nested.get(piece, piece) if piece in direct or piece in nested else node):
+            window = call(graph, SLICE, (buffer, along, low, high, step), processor)
+            if piece in direct:
+                piece.target, piece.kwargs = outward(piece.target), {**piece.kwargs, "out": window}
+                evaluated(piece, processor)
+            elif piece in nested:
+                window.meta = {**nested[piece].meta, **window.meta}
+                nested[piece].replace_all_uses_with(window)
+                unread.append(nested[piece])
+                for writer in mesh_graph.walk([u for u in window.users if source(u) is window],
+                                              lambda n: [u for u in n.users if source(u) is n]):
+                    evaluated(writer, processor)
+            else:
+                call(graph, FILL if piece in fills or not isinstance(piece, torch.fx.Node) else COPY,
+                     (window, fills.get(piece, piece)), processor)
+    buffer.meta = {**node.meta, **buffer.meta}
+    node.replace_all_uses_with(buffer)
+    for gone in unread:
+        graph.erase_node(gone)
+
+
 def place(graph_module, placement):
     graph_module = copy.deepcopy(graph_module)
     graph = graph_module.graph
     nodes = list(graph.nodes)
+    exported = {n.name for n in nodes}
     placed = [n for n in nodes if n.op != "placeholder"]
     stated = {n: placement(n) for n in placed if n.target is not operator.getitem}
     stated.update((n, placement(n)) for n in nodes if n.op == "placeholder")
@@ -822,9 +900,16 @@ def place(graph_module, placement):
     channels = 0
     for node in placed:
         channels += insert_send_recv(graph, node, channels)
-    for node in graph.nodes:
+    for node in list(graph.nodes):
         node.meta.pop("blocks", None)
         node.meta.pop("collectives", None)
+        if node.target in (CAT, PAD, SLICE_SCATTER) and node.meta.get("of", node.meta.get(
+                "constant", node.name)) not in exported:
+            buffered(graph, node)
+    arrivals = {n.args[0]: n for n in graph.nodes if n.target is RECV}
+    for node in graph.nodes:
+        if node.target is SEND:
+            arrivals[node.args[1]].meta["val"] = node.args[0].meta["val"]
     views(graph)
     # design/problems-of-14b9a757-change-request.md item 8, step 4
     held, returned = {}, set(graph.output_node().all_input_nodes)
