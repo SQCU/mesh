@@ -25,7 +25,8 @@ def main():
                     sentences = max(sentences, record['sentences'])
                     commits.append(f"{sha[:10]} carried {record['carried']} not carried {record['not_carried']}")
     print(f'{measure}: {len(carried)} of {sentences} sentences carried by {len(commits)} commit(s)')
-    print('\n'.join(commits))
+    for line in commits:
+        print(line)
     print('never carried:', sorted(set(range(1, sentences + 1)) - carried))
     lines = git(REPOSITORIES[0], 'show', f'HEAD:{document}').splitlines()
     start = next((at for at, line in enumerate(lines) if re.match(rf'#{{1,6}}\s+{re.escape(name)}[.:\s]', line)), None)
