@@ -5,6 +5,7 @@ import torch
 from torch._ops import HigherOrderOperator
 from torch.export.experimental import _export_forward_backward
 from torch.export.graph_signature import InputKind, OutputKind
+from torch.multiprocessing.reductions import StorageWeakRef
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils import _pytree as pytree
 
@@ -16,13 +17,17 @@ WITH_EFFECTS = torch.ops.higher_order.with_effects
 # design/unequal-shards-change-request.md item 8; torch 2.15 torch/export/experimental/__init__.py
 def export(module, args, loss=None, **export_options):
     program = torch.export.export(module, args, **export_options)
+    graded = {n.name for n in program.graph.find_nodes(op="placeholder")
+              if isinstance(n.meta.get("val"), torch.Tensor) and n.meta["val"].requires_grad}
     if loss is not None:
         with sdpa_kernel(SDPBackend.MATH):
             program = _export_forward_backward(program, joint_loss_index=loss)
-    return read(program.run_decompositions())
+    return read(program.run_decompositions(), graded)
 
 
-def read(program):
+# torch 2.15 torch/export/exported_program.py _decompose_and_get_gm_with_new_signature_constants, joint outputs;
+# torch/_functorch/_aot_autograd/input_output_analysis.py create_graph_signature, gradients_to_user_inputs
+def read(program, graded=frozenset()):
     signature = program.graph_signature
     nodes = list(program.graph_module.graph.nodes)
     control = [n.target.name() for n in nodes
@@ -61,18 +66,14 @@ def read(program):
         if node.op == "placeholder" and node.name in state:
             node.meta["state"] = state[node.name][0]
 
-    outputs, gradients, out_spec = [], {}, program.call_spec.out_spec
-    for spec in signature.output_specs:
-        if spec.kind == OutputKind.GRADIENT_TO_PARAMETER:
-            gradients[spec.target] = 0
-        elif spec.kind not in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT, OutputKind.BUFFER_MUTATION,
-                               OutputKind.TOKEN):
-            raise NotImplementedError(f"output kind {spec.kind}")
-        returned = spec.kind in (OutputKind.LOSS_OUTPUT, OutputKind.GRADIENT_TO_PARAMETER)
-        outputs.append((OutputKind.USER_OUTPUT, None) if returned else (spec.kind, spec.target))
+    graded = iter([name for name in user_inputs if name in graded])
+    outputs = [(spec.kind, next(graded) if spec.kind == OutputKind.GRADIENT_TO_USER_INPUT else spec.target)
+               for spec in signature.output_specs]
+    out_spec = program.call_spec.out_spec
     if signature.backward_signature is not None:
         forward = pytree.tree_unflatten([0] * out_spec.num_leaves, out_spec)
-        out_spec = pytree.tree_structure((forward, gradients))
+        out_spec = pytree.tree_structure((forward, *({key: 0 for kind, key in outputs if kind == of} for of in (
+            OutputKind.GRADIENT_TO_PARAMETER, OutputKind.GRADIENT_TO_USER_INPUT))))
     return Exported(program.graph_module, state, tokens, user_inputs, outputs, out_spec)
 
 
@@ -117,8 +118,7 @@ class Captured(torch.fx.Interpreter):
 
     def captured(self, target, module, args, kwargs):
         leaves, structure = pytree.tree_flatten((args, kwargs))
-        key = target, str(structure), tuple((str(leaf.dtype), tuple(leaf.shape)) if isinstance(leaf, torch.Tensor)
-                                            else repr(leaf) for leaf in leaves)
+        key = target, structure, specialized(leaves)
         if key not in self.exported:
             with torch.enable_grad():
                 self.exported[key] = export(module, args, kwargs=kwargs, **self.options)
@@ -131,7 +131,7 @@ class Captured(torch.fx.Interpreter):
         result = super().call_module(target, args, kwargs)
         after = attributes(module)
         written = {key for kind, key in self.exported[self.calling.meta["function"]].outputs
-                   if kind == OutputKind.BUFFER_MUTATION}
+                   if kind in (OutputKind.BUFFER_MUTATION, OutputKind.PARAMETER_MUTATION)}
         rebound = [name for name in before if after.get(name) is not before[name] and name not in written]
         if rebound:
             raise NotImplementedError(f"{self.calling.name} rebinds {rebound[0]}, which torch.export captures as no "
@@ -152,6 +152,22 @@ def attributes(module):
     return {**dict(module.named_parameters()), **dict(module.named_buffers())}
 
 
+# torch 2.15 torch/_subclasses/meta_utils.py MetaConverter.meta_storage, its StorageWeakRef memo;
+# torch/_dynamo/guards.py TENSOR_MATCH and EQUALS_MATCH
+def specialized(leaves):
+    storages = {}
+
+    def operand(leaf):
+        if not isinstance(leaf, torch.Tensor):
+            return type(leaf), leaf
+        held = (storages.setdefault(StorageWeakRef(leaf.untyped_storage()), len(storages)),
+                leaf.untyped_storage().nbytes(), leaf.storage_offset(), leaf.stride()) if (
+            leaf.layout == torch.strided) else ()
+        return (type(leaf), leaf.layout, tuple(leaf.shape), *held, leaf.dtype, leaf.device, leaf.requires_grad,
+                leaf.is_conj(), leaf.is_neg())
+    return tuple(map(operand, leaves))
+
+
 def calls(program, args, functions, **export_options):
     graph = Calls(functions).trace(program)
     for node in graph.nodes:
@@ -169,7 +185,8 @@ def calls(program, args, functions, **export_options):
         leaf = module.get_submodule(node.target) if called else Function(node.target)
         state = dict(function.state.values())
         before, after = node.meta.pop("held", ({}, {}))
-        written = tuple(key for kind, key in function.outputs if kind == OutputKind.BUFFER_MUTATION)
+        written = tuple(key for kind, key in function.outputs
+                        if kind in (OutputKind.BUFFER_MUTATION, OutputKind.PARAMETER_MUTATION))
         paths = {key: f"{node.target}.{key}" if key in before else f"{node.name}_{key}" for key in state}
         module.add_submodule(f"{node.name}_stated", Stated(leaf, tuple(state), written))
         with module.graph.inserting_before(node):

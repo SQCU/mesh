@@ -13,8 +13,10 @@ import torch
 import torch.nn.functional as F
 
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
-from mesh_compiler import shares
-from mesh_compiler.driver import compile_module
+sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
+import mesh_graph
+from mesh_compiler import lower_coreml, lower_metal, shares
+from mesh_compiler.driver import compile_module, compiled
 from mesh_compiler.placement import counts
 from mesh_compiler.runtime import Program
 
@@ -194,9 +196,11 @@ class Eager(torch.nn.Module):
 def execute(model, inputs, placement, args, loss=None, **told):
     processors = stated(args)
     options = {} if loss is None else {'loss': loss}
-    scheduled = compile_module(model, inputs, processors, placement(tuple(processors)), **options)
-    result = Program(scheduled)(*inputs)
-    report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried), **told}
+    scheduled = compiled(compile_module(model, inputs, processors, placement(tuple(processors)), **options),
+                         (lower_metal.lower, lower_coreml.lower))
+    result = Program(scheduled, scheduled.functions)(*inputs)
+    report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried),
+              'signature': bytes(mesh_graph.from_record(scheduled.signature).digest).hex(), **told}
     if result is not None:
         with torch.no_grad():
             expected = (model if loss is None else Eager(model, loss))(*inputs)

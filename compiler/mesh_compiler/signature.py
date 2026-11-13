@@ -2,46 +2,14 @@
 import pathlib
 import sys
 
-import torch
-
-from .ir import RECV, SEND, call, channel_of
+from .ir import call
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
 
-TO_COPY = torch.ops.aten._to_copy.default
 KIND = {name: k for k, name in enumerate(mesh_graph.KINDS)}
 PRIMITIVE = {name: k for k, name in enumerate(mesh_graph.PRIMITIVES)}
-SENT, RECEIVED, COPIED = "send", "recv", "host_wait"
-
-
-def ends(scheduled):
-    found = {}
-    for processor, module in scheduled.modules.items():
-        for node in module.graph.nodes:
-            if channel_of(node) is not None:
-                found.setdefault(channel_of(node), {})[node.target] = processor
-    return found
-
-
-# compiler/mesh_compiler/devices.py copied
-def between(node):
-    return node.target is TO_COPY and node.meta.get("custom", {}).get("between", False)
-
-
-# S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, section 4.1
-def torch_run(module):
-    nodes = [n for n in module.graph.nodes if n.op == "call_function"]
-    at = {n: k for k, n in enumerate(nodes)}
-    kept = [channel_of(n) is not None or between(n) for n in nodes]
-    task = {v: t for t, v in enumerate(v for v, keep in enumerate(kept) if keep)}
-    edges = [(at[u], at[n]) for n in nodes for u in n.all_input_nodes if u in at]
-    operations = [(COPIED, t, None, 0, 0) if channel_of(nodes[v]) is None else
-                  (SENT if nodes[v].target is SEND else RECEIVED, t, channel_of(nodes[v]), 0, 0)
-                  for v, t in task.items()]
-    return {"tasks": [("host", (nodes[v].name,)) for v in task],
-            "dependences": [(task[a], task[b]) for a, b in mesh_graph.contract(kept, edges)],
-            "operations": [("host", *operation) for operation in operations]}
+SENT, RECEIVED = "send", "recv"
 
 
 # compiler/mesh_compiler/runtime.py Program; compiler/mesh_compiler/bridge.py Published
@@ -65,51 +33,43 @@ def handed(records, scheduled):
                 "dependences": [(a + 1, b + 1) for a, b in record["dependences"]],
                 "operations": first + [(kind, name, task if task is None else task + 1, *rest)
                                        for kind, name, task, *rest in record["operations"]] + after}
-        across += [((caller, "<arguments>"), (p, "<arguments>")) for p in others]
-        across += [((p, "<finished>"), (caller, "<finished>")) for p in joined]
+        across += [((caller, 0), (p, 0)) for p in others]
+        across += [((p, len(records[p]["tasks"]) + 1), (caller, len(records[caller]["tasks"]) + 1)) for p in joined]
     return made, across
 
 
-def operands(scheduled, functions=None, executions=1):
-    functions = functions or scheduled.modules
-    channels, machines = ends(scheduled), list(dict.fromkeys(scheduled.machines.values()))
+def operands(scheduled, executions=1):
+    machines = list(dict.fromkeys(scheduled.machines.values()))
     carried = {channel: place for place, channel in enumerate(scheduled.plan.channels if scheduled.plan else ())}
-    records, processors, lane, threads = {}, [], {}, dict.fromkeys(machines, 0)
-    for processor in (p for p in scheduled.devices if p in scheduled.modules):
-        module = scheduled.modules[processor]
-        function = functions.get(processor, module)
-        records[processor] = function.record if hasattr(function, "record") else torch_run(
-            function if isinstance(function, torch.fx.GraphModule) else module)
-    records, handoffs = handed(records, scheduled)
-    for processor in records:
+    records, handoffs = handed({p: function.record for p, function in scheduled.functions.items()}, scheduled)
+    first, places, objects, ends, count = {}, {}, {}, {}, 0
+    for processor, record in records.items():
+        first[processor], seen = count, {}
+        count += len(record["tasks"])
+        for index, (kind, _) in enumerate(record["tasks"]):
+            places[processor, index] = seen[kind] = seen.get(kind, -1) + 1
+        places[processor] = {kind: last + 1 for kind, last in seen.items()}
+        for _, primitive, task, key, _, _ in record["operations"]:
+            if primitive in (SENT, RECEIVED):
+                ends.setdefault(key, {})[primitive] = processor, first[processor] + task
+            if key is not None and not isinstance(key, int):
+                objects.setdefault((processor, key), mesh_graph.LOWERED + len(objects))
+    processors, lane, threads = [], {}, dict.fromkeys(machines, 0)
+    for processor, record in records.items():
         machine = scheduled.machines[processor]
-        kinds = {kind for kind, *_ in records[processor]["tasks"] + records[processor]["operations"]} | {"host"}
+        kinds = {kind for kind, *_ in record["tasks"] + record["operations"]} | {"host"}
         for kind in sorted(kinds, key=KIND.__getitem__):
             lane[processor, kind] = len(processors)
             processors.append(mesh_graph.Processor(KIND[kind], threads[machine] * mesh_graph.NODES
                                                    + machines.index(machine)))
         threads[machine] += 1
     for channel in carried:
-        machine = scheduled.machines[channels[channel][SEND]]
+        machine = scheduled.machines[ends[channel][SENT][0]]
         if ("bridge", machine) not in lane:
             lane["bridge", machine] = len(processors)
             processors.append(mesh_graph.Processor(KIND["bridge"], machines.index(machine)))
-    first, holder, objects, places = {}, {}, {}, {}
-    for processor, record in records.items():
-        first[processor], seen = sum(len(records[p]["tasks"]) for p in first), {}
-        for index, (kind, names) in enumerate(record["tasks"]):
-            holder.update(((processor, name), first[processor] + index) for name in names)
-            places[processor, index] = seen[kind] = seen.get(kind, -1) + 1
-        places[processor] = {kind: last + 1 for kind, last in seen.items()}
-        for _, _, _, key, _, _ in record["operations"]:
-            if key is not None and not isinstance(key, int):
-                objects.setdefault((processor, key), mesh_graph.LOWERED + len(objects))
-    count = sum(len(record["tasks"]) for record in records.values())
-    named = {(processor, node.target, channel_of(node)): node.name
-             for processor, module in scheduled.modules.items() for node in module.graph.nodes
-             if channel_of(node) is not None}
-    across = [(holder[end[SEND], named[end[SEND], SEND, channel]], holder[end[RECV], named[end[RECV], RECV, channel]])
-              for channel, end in sorted(channels.items())] + [(holder[a], holder[b]) for a, b in handoffs]
+    across = [(end[SENT][1], end[RECEIVED][1]) for _, end in sorted(ends.items())]
+    across += [(first[a] + i, first[b] + j) for (a, i), (b, j) in handoffs]
     across += [(first[processor] + a, first[processor] + b)
                for processor, record in records.items() for a, b in record["dependences"]]
     dependences = [mesh_graph.Dependence(a, b, 0)
@@ -141,5 +101,5 @@ def operands(scheduled, functions=None, executions=1):
     return processors, tasks, dependences, operations
 
 
-def signature(scheduled, functions=None, executions=1):
-    return mesh_graph.signature(*operands(scheduled, functions, executions))
+def signature(scheduled, executions=1):
+    return mesh_graph.signature(*operands(scheduled, executions))

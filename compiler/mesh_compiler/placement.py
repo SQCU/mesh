@@ -10,7 +10,7 @@ import sys
 import torch
 from torch.fx.node import map_arg
 
-from .ir import PAGES, RECV, SEND, constant, evaluated, given, shape, view, views
+from .ir import JOIN, PAGES, RECV, SEND, constant, evaluated, given, shape, view, views
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -820,9 +820,9 @@ def place(graph_module, placement):
             node.replace_all_uses_with(there, lambda user: user is not there and user.meta["processor"] == processor)
             copies[node, processor], copies[there] = there, node
     placed = [n for n in graph.nodes if n.op != "placeholder"]
-    channels = 0
+    transfers, instances = {}, {}
     for node in placed:
-        channels += insert_send_recv(graph, node, channels)
+        transfers.update(insert_send_recv(graph, node, len(transfers), instances))
     for node in graph.nodes:
         node.meta.pop("blocks", None)
         node.meta.pop("collectives", None)
@@ -834,27 +834,25 @@ def place(graph_module, placement):
             if {"invariant", "state"} & read.meta.keys() and read not in returned and all(shape(read)):
                 held.setdefault(node.meta["processor"], {})[read.meta.get("invariant", (read.meta.get("state"),))] = None
     graph_module.meta["invariant"] = {processor: tuple(slices) for processor, slices in held.items()}
+    graph_module.meta["transfers"] = transfers
     graph_module.recompile()
-    return graph_module, placed[-1].meta["processor"], channels
+    return graph_module, placed[-1].meta["processor"], len(transfers)
 
 
-def insert_send_recv(graph, node, first):
+# M. Abadi et al., TensorFlow, arXiv:1603.04467, section 3.2.2; design/unequal-shards-change-request.md items 2, 3
+# and 12: the transfer's geometry is the sent value's ir.views record, written after this by views(graph)
+def insert_send_recv(graph, node, first, instances):
     here = node.meta["processor"]
     away = {}
     for user in node.users:
         if user.meta["processor"] != here:
             away.setdefault(user.meta["processor"], []).append(user)
     if not away:
-        return 0
+        return {}
     value = node.meta.get("val")
     if not isinstance(value, torch.Tensor):
         raise ValueError(f"{node.name} is read on another processor; only tensors cross processors")
-    # design/unequal-shards-change-request.md item 12; MPI 4.1, section 6.1.3
-    cuts = mesh_graph.chain(node, lambda n: n.args[0] if n.target is SLICE and (*n.args, 1)[4] == 1 and n.args[
-        0].meta.get("processor", here) == here else None)
-    subarray = (shape(cuts[-1]), tuple(value.shape), tuple(
-        sum(range(shape(cut.args[0])[d])[cut.args[2]:cut.args[3]].start for cut in cuts[:-1]
-            if cut.args[1] % value.dim() == d) for d in range(value.dim())))
+    made = {}
     for channel, (processor, users) in enumerate(away.items(), first):
         with graph.inserting_after(node):
             sent = graph.call_function(SEND, (node, channel))
@@ -863,15 +861,13 @@ def insert_send_recv(graph, node, first):
             arrived = graph.call_function(RECV, (channel,))
             arrived.meta.update(processor=processor, val=value)
         # design/aot-compilation-change-request.md A4 and appendix item 5; design/plan-to-bridge-change-request.md R4
-        collective = node.meta.get("collectives", {}).get(processor, ("broadcast", node.name))
-        if collective[0] == "reduce":
-            arrived.meta["consumer"] = PAGES
+        kind, exchange = node.meta.get("collectives", {}).get(processor, ("broadcast", node))
+        collective = kind, instances.setdefault((kind, exchange), len(instances))
+        arrived.meta["consumer"] = PAGES if kind == "reduce" else JOIN
         for end in (sent, arrived):
-            end.meta.update(zip(("sizes", "subsizes", "starts"), subarray), collective=collective)
-        if processor in node.meta.get("blocks", ()):
-            for end in (sent, arrived):
-                end.meta.update(zip(("dimension", "block", "counts", "displs", "strides"),
-                                    node.meta["blocks"][processor]))
+            end.meta.update(zip(("dimension", "block", "counts", "displs", "strides"),
+                                node.meta.get("blocks", {}).get(processor, ())), collective=collective)
         for user in users:
             user.replace_input_with(node, arrived)
-    return len(away)
+        made[channel] = sent, arrived
+    return made

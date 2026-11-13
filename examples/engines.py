@@ -13,8 +13,10 @@ import torch
 import torch.nn.functional as F
 
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
+sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
+import mesh_graph
 from mesh_compiler import lower_coreml, lower_metal
-from mesh_compiler.driver import compile_module, lowered
+from mesh_compiler.driver import compile_module, compiled
 from mesh_compiler.runtime import Program
 
 
@@ -108,18 +110,19 @@ def execute(model, inputs, engines, args):
     parts = [f'part{place}' for place in range(len(engines))]
     processors.update((part, (args.nodes[place % len(args.nodes)], engine))
                       for place, (part, engine) in enumerate(zip(parts, engines)))
-    scheduled = compile_module(model, inputs, processors, placement('projection', parts))
-    functions = lowered(scheduled, (lower_metal.lower, lower_coreml.lower))
-    program = Program(scheduled, functions)
+    scheduled = compiled(compile_module(model, inputs, processors, placement('projection', parts)),
+                         (lower_metal.lower, lower_coreml.lower))
+    program = Program(scheduled, scheduled.functions)
     started = time.perf_counter()
     result = program(*inputs)
     report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried),
               'processors': {name: [machine, engine] for name, (machine, engine) in processors.items()},
               'seconds': time.perf_counter() - started,
+              'signature': bytes(mesh_graph.from_record(scheduled.signature).digest).hex(),
               'core ml': {name: dict(collections.Counter(
                   f'{operation} on {preferred}' for plan in function.plan()
                   for operation, _, preferred, _ in plan if operation != 'const'))
-                  for name, function in functions.items() if scheduled.engines.get(name)}}
+                  for name, function in scheduled.functions.items() if scheduled.engines.get(name)}}
     if result is not None:
         with torch.no_grad():
             expected = model(*inputs)

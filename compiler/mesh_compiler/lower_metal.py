@@ -158,17 +158,26 @@ PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memo
 SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"}}
 
 
-@dataclass
+# MLIR Linalg, a structured operation's shaped operands and indexing maps; MLIR One-Shot Bufferization,
+# BufferizableOpInterface's memory reads and writes; design/compilation-composition-change-request.md, "Correction:
+# generated target source is the final emission"
+@dataclass(frozen=True)
 class View:
     storage: int
     dtype: torch.dtype
     shape: tuple
     stride: tuple
     offset: int
+    nodes = ()
+    uses = frozenset()
 
-    def read(self, bind, index, write=False):
+    @property
+    def accesses(self):
+        return ((self, False),)
+
+    def read(self, bind, index):
         terms = [f"{i} * {s}" for i, s, n in zip(index, self.stride, self.shape) if n > 1 and s]
-        return f"{bind(self, write)}[{' + '.join([str(self.offset)] * bool(self.offset) + terms) or '0'}]"
+        return f"{bind(self)}[{' + '.join([str(self.offset)] * bool(self.offset) + terms) or '0'}]"
 
 
 @dataclass
@@ -176,12 +185,12 @@ class Fused:
     dtype: torch.dtype
     shape: tuple
     expression: object
-    nodes: tuple = ()
-    uses: frozenset = frozenset()
+    accesses: tuple
+    nodes: tuple
+    uses: frozenset
     free: bool = False
 
     def read(self, bind, index):
-        bind.note(self)
         return self.expression(bind, ["0" if n == 1 else i for i, n in zip(index, self.shape)], None)
 
 
@@ -192,9 +201,13 @@ class Product:
     dtype: torch.dtype
     shape: tuple
     expression: object
+    accesses: tuple
+    nodes: tuple
+    uses: frozenset
     plain: bool = False
-    nodes: tuple = ()
-    uses: frozenset = frozenset()
+
+
+FORMS = (View, Fused, Product)
 
 
 @dataclass
@@ -235,20 +248,18 @@ class Dependence:
     causes: list
 
 
+def storages(accesses):
+    return tuple(dict.fromkeys(view.storage for view, _ in accesses))
+
+
 class Bound(list):
-    def __init__(self):
-        super().__init__()
-        self.accesses, self.nodes, self.uses = [], [], set()
+    def __init__(self, accesses, nodes, uses):
+        super().__init__(storages(accesses))
+        self.accesses, self.nodes, self.uses = list(accesses), nodes, uses
+        self.slots = {storage: k for k, storage in enumerate(self)}
 
-    def note(self, form):
-        self.nodes += form.nodes
-        self.uses |= form.uses
-
-    def __call__(self, view, write=False):
-        self.accesses.append((view, write))
-        if view.storage not in self:
-            self.append(view.storage)
-        return f"b{self.index(view.storage)}"
+    def __call__(self, view):
+        return f"b{self.slots[view.storage]}"
 
 
 class NotLowered(NotImplementedError):
@@ -353,10 +364,10 @@ class Lowering:
                     ATEN.split_with_sizes.default: self.split, ATEN.avg_pool2d.default: self.average_pool,
                     ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers(),
                     ATEN.empty.memory_format: self.empty, ATEN.copy_.default: self.copied,
-                    ATEN.fill_.Scalar: self.fill}
+                    ATEN.fill_.Scalar: self.copied}
         self.inward = {over: target for target in list(handlers) for over in outward(target)}
         handlers.update(dict.fromkeys(self.inward, self.out))
-        self.destination, self.handlers = None, handlers
+        self.destination, self.handlers, self.using = None, handlers, set()
         position, self.unread, self.named = 0, {}, {}
         for node in module.graph.nodes:
             self.named[node.name] = node
@@ -366,7 +377,7 @@ class Lowering:
                 self.forms[node] = self.strided(value.dtype, value.shape, value.stride(), ARGUMENT, position)
                 position += 1
             elif node.op == "output" and not self.missing:
-                self.issuing = node
+                self.issuing, self.using = node, set()
                 self.results = tuple(self.escape(r) if isinstance(r, torch.fx.Node) else r for r in node.args[0])
                 self.flush()
                 self.ordered(self.host(node, [(r, False) for r in self.results if isinstance(r, View)]))
@@ -380,11 +391,6 @@ class Lowering:
                 self.issuing, self.using = node, set()
                 self.fit(node)
                 form = handlers[node.target](node)
-                if isinstance(form, (Fused, Product)):
-                    reads = [self.forms[read] for read in node.all_input_nodes]
-                    form.nodes = (*dict.fromkeys(name for read in reads for name in getattr(read, "nodes", ())),
-                                  node.name)
-                    form.uses = frozenset(self.using).union(*(getattr(read, "uses", ()) for read in reads))
                 for read in node.all_input_nodes:
                     self.unread.pop(read, None)
                 self.forms[node] = form if self.deferred(node, form) else self.settled(form, node)
@@ -403,18 +409,16 @@ class Lowering:
 
     # design/problems-of-14b9a757-change-request.md items 1, 2 and 5; torch 2.15 documentation, torch.Tensor.copy_
     # and torch.Tensor.fill_
-    def written(self, node, form):
+    def written(self, node, given):
         target = self.placed(node.meta["out"])
         self.settle(target)
+        form = self.reader(given) if isinstance(given, torch.fx.Node) else given
         kind, wide = self.types[target.dtype], target.dtype == torch.float64
         self.store(Fused(target.dtype, target.shape, lambda bind, index, t:
-                         f"{kind}({self.given(bind, form, index, wide)})"), target)
+                         f"{kind}({self.given(bind, form, index, wide)})", *self.composed([form])), target)
         return target
 
     def copied(self, node):
-        return self.written(node, self.reader(node.args[1]))
-
-    def fill(self, node):
         return self.written(node, node.args[1])
 
     def out(self, node):
@@ -458,19 +462,23 @@ class Lowering:
             form.free or users[0].target in ONCE
             or isinstance(made, torch.Tensor) and made.numel() <= math.prod(form.shape))
 
-    def reads(self, form):
-        bind, index = Bound(), ["0"] * len(form.shape)
-        if isinstance(form, Product):
-            bind(form.left), bind(form.right), form.expression(bind, index, "t")
-        else:
-            form.read(bind, index)
-        return bind
+    # MLIR mlir/lib/Dialect/Linalg/Transforms/ElementwiseOpFusion.cpp, the fused operation's operands are the
+    # producer's and the consumer's; design/problems-of-14b9a757-change-request.md items 3 and 6
+    def composed(self, operands, writes=()):
+        forms = [o for o in operands if isinstance(o, FORMS)]
+        return ((*dict.fromkeys(access for form in forms for access in form.accesses),
+                 *((view, True) for view in writes if isinstance(view, View))),
+                tuple(dict.fromkeys((*(name for form in forms for name in form.nodes), self.issuing.name))),
+                frozenset(self.using).union(*(form.uses for form in forms)))
+
+    def binding(self, reads, writes=()):
+        return Bound(*self.composed(reads, writes))
 
     def fit(self, node):
         made = node.meta.get("val")
         count = sum(isinstance(v, torch.Tensor) for v in (made if isinstance(made, (tuple, list)) else [made]))
-        reads = {read: len(self.reads(self.forms[read])) for read in node.all_input_nodes
-                 if isinstance(self.forms.get(read), (View, Fused, Product))}
+        reads = {read: len(storages(self.forms[read].accesses)) for read in node.all_input_nodes
+                 if isinstance(self.forms.get(read), FORMS)}
         count += sum(reads.values())
         for read in sorted(reads, key=reads.get, reverse=True):
             if count <= self.buffers:
@@ -482,8 +490,8 @@ class Lowering:
     # rdma/mesh-graph.h mesh_graph_dependences_views
     def settle(self, target):
         held = list(self.unread)
-        accesses = [(vertex, view, False) for vertex, node in enumerate(held)
-                    for view, _ in self.reads(self.unread[node]).accesses] + [(len(held), target, True)]
+        accesses = [(vertex, view, write) for vertex, node in enumerate(held)
+                    for view, write in self.unread[node].accesses] + [(len(held), target, True)]
         for vertex, _ in mesh_graph.dependences_views(len(held) + 1, self.viewed_by(accesses))[0]:
             self.forms[held[vertex]] = self.view(self.unread.pop(held[vertex]))
 
@@ -534,30 +542,28 @@ class Lowering:
     def dispatch(self, bound, lines, grid, group=None, groups=False, head=""):
         if not math.prod(grid):
             return
-        nodes = tuple(dict.fromkeys((*bound.nodes, self.issuing.name)))
         made, group = self.kernel(bound, lines, tuple(grid), group, head)
-        self.pending.append(Step(len(self.vertices), nodes, made, list(bound), bound.accesses, tuple(grid), group,
-                                 groups))
-        self.vertices.append(nodes)
+        self.pending.append(Step(len(self.vertices), bound.nodes, made, list(bound), bound.accesses, tuple(grid),
+                                 group, groups))
+        self.vertices.append(bound.nodes)
 
     def copying(self, bind, form, target, linear):
         lines, names = unravel(linear, form.shape, "i")
-        return lines + [f"{target.read(bind, names, True)} = {form.read(bind, names)};"]
+        return lines + [f"{target.read(bind, names)} = {form.read(bind, names)};"]
 
     def store(self, form, target):
-        bind = Bound()
+        bind = self.binding([form], [target])
         self.dispatch(bind, self.copying(bind, form, target, "p.x"), (math.prod(form.shape), 1, 1))
 
     def multiply(self, form, target):
-        bind, kind = Bound(), self.types[form.dtype]
-        bind.note(form)
+        bind, kind = self.binding([form], [target]), self.types[form.dtype]
         natural = form.left.shape[:-1] + form.right.shape[-1:]
         lines, names = unravel("p.x", natural, "i")
         left, right = (operand.read(bind, at) for operand, at in (
             (form.left, names[:-1] + ["k"]), (form.right, names[:-2] + ["k", names[-1]])))
         lines += [f"{self.accumulated(form.dtype)} a = 0;",
                   f"for (uint k = 0; k < {form.left.shape[-1]}; k++) a += {left} * {right};", f"{kind} t = {kind}(a);",
-                  f"{target.read(bind, names, True)} = {form.expression(bind, reshaped(names, natural, form.shape), 't')};"]
+                  f"{target.read(bind, names)} = {form.expression(bind, reshaped(names, natural, form.shape), 't')};"]
         self.dispatch(bind, lines, (math.prod(natural), 1, 1))
 
     def accumulated(self, dtype):
@@ -568,20 +574,22 @@ class Lowering:
         (m, n), (sm, sn) = view.shape[-2:], view.stride[-2:]
         if (n == 1 or sn == 1) and (m == 1 or sm >= n) or (m == 1 or sm == 1) and (n == 1 or sn >= m):
             return view
-        return self.view(Fused(view.dtype, view.shape, lambda bind, index, t: view.read(bind, index)))
+        return self.view(Fused(view.dtype, view.shape, lambda bind, index, t: view.read(bind, index),
+                               *self.composed([view])))
 
     def product(self, node):
         value = node.meta["val"]
         left, right = (self.matrix(a) for a in node.args[-2:])
         if self.target(node) is not ATEN.addmm.default:
-            return Product(left, right, value.dtype, tuple(value.shape), lambda bind, index, t: t, True)
+            return Product(left, right, value.dtype, tuple(value.shape), lambda bind, index, t: t,
+                           *self.composed((left, right)), True)
         added, beta, alpha = self.reader(node.args[0]), node.kwargs.get("beta", 1), node.kwargs.get("alpha", 1)
         wide = value.dtype == torch.float64
 
         def expression(bind, index, t):
             return f"({literal(beta, wide)} * {self.given(bind, added, index, wide)} + " \
                    f"{literal(alpha, wide)} * {t})"
-        return Product(left, right, value.dtype, tuple(value.shape), expression)
+        return Product(left, right, value.dtype, tuple(value.shape), expression, *self.composed((left, right, added)))
 
     def pointwise(self, node, template=None, given=None):
         value = node.meta["val"]
@@ -597,8 +605,8 @@ class Lowering:
             return template.format(*(
                 o.expression(bind, index, t) if o is base else
                 self.given(bind, o, index, wide) for o in operands), T=kind)
-        return Product(base.left, base.right, value.dtype, shape, expression) if base else \
-            Fused(value.dtype, shape, expression)
+        return Product(base.left, base.right, value.dtype, shape, expression, *self.composed(operands)) if base else \
+            Fused(value.dtype, shape, expression, *self.composed(operands))
 
     def gelu(self, node):
         self.using |= {"erf", "gelu"} if node.kwargs.get("approximate", "none") == "none" else {"gelu_tanh"}
@@ -613,7 +621,8 @@ class Lowering:
     def filled(self, node):
         value, given = node.meta["val"], node.args[-1] if FILLED[self.target(node)] else 0
         return Fused(value.dtype, tuple(value.shape),
-                     lambda bind, index, t: f"{self.types[value.dtype]}({literal(given)})", free=True)
+                     lambda bind, index, t: f"{self.types[value.dtype]}({literal(given)})", *self.composed(()),
+                     free=True)
 
     def inverted(self, node):
         return self.pointwise(node, "(!bool({0}))" if node.meta["val"].dtype == torch.bool else "{T}(~{T}({0}))")
@@ -641,13 +650,15 @@ class Lowering:
             found = source.read(bind, [f"mesh_within({at}, {n})" for at, n in moved])
             return f"(({inside}) ? {kind}({found}) : {kind}({literal(given)}))"
         return Fused(value.dtype, tuple(value.shape), expression if all(source.shape) else
-                     lambda bind, index, t: f"{kind}({literal(given)})")
+                     lambda bind, index, t: f"{kind}({literal(given)})",
+                     *self.composed([source] * bool(all(source.shape))))
 
     def flip(self, node):
         value, source = node.meta["val"], self.reader(node.args[0])
         over = {d % len(source.shape) for d in node.args[1]}
         return Fused(value.dtype, tuple(value.shape), lambda bind, index, t: source.read(bind, [
-            f"({n - 1} - {i})" if d in over else i for d, (i, n) in enumerate(zip(index, source.shape))]))
+            f"({n - 1} - {i})" if d in over else i for d, (i, n) in enumerate(zip(index, source.shape))]),
+            *self.composed([source]))
 
     def slice_scatter(self, node):
         value, source, given = node.meta["val"], self.reader(node.args[0]), self.reader(node.args[1])
@@ -663,7 +674,8 @@ class Lowering:
             return f"(({i} >= {start} && {i} < {end} && ({i} - {start}) % {step} == 0) ? " \
                    f"{kind}({given.read(bind, index[:dim] + [at] + index[dim + 1:])}) : " \
                    f"{kind}({source.read(bind, index)}))"
-        return Fused(value.dtype, tuple(value.shape), expression) if all(given.shape) else source
+        return Fused(value.dtype, tuple(value.shape), expression, *self.composed((source, given))) if all(
+            given.shape) else source
 
     def split(self, node):
         source, dim = self.stored(node.args[0]), (node.args[2] if len(node.args) > 2 else 0)
@@ -685,7 +697,9 @@ class Lowering:
         kind, lead = self.types[dtype], sums.shape[:dim] + sums.shape[dim + 1:]
         along = lambda names, k: names[:dim] + [k] + names[dim:]
         for reach in [1 << level for level in range((count - 1).bit_length())] if tree else [0]:
-            after, bind = self.fresh(dtype, sums.shape), Bound()
+            after = self.fresh(dtype, sums.shape)
+            ended = self.fresh(torch.bool, flags.shape) if reach and flags else None
+            bind = self.binding((sums, flags), (after, ended))
             lines, names = unravel(f"(p.x / {count})" if reach else "p.x", lead, "r")
             here = along(names, f"(p.x % {count})" if reach else "k")
             flag = flags.read(bind, here) if flags else "false"
@@ -693,15 +707,14 @@ class Lowering:
                 far = along(names, f"(max(p.x % {count}, {reach}u) - {reach})")
                 lines += [f"bool f = {flag}, joined = !f && p.x % {count} >= {reach};",
                           f"{kind} v = {sums.read(bind, here)};",
-                          f"{after.read(bind, here, True)} = joined ? {kind}({sums.read(bind, far)} + v) : v;"]
+                          f"{after.read(bind, here)} = joined ? {kind}({sums.read(bind, far)} + v) : v;"]
                 if flags:
-                    ended = self.fresh(torch.bool, flags.shape)
-                    lines += [f"{ended.read(bind, here, True)} = f || (joined && {flags.read(bind, far)});"]
+                    lines += [f"{ended.read(bind, here)} = f || (joined && {flags.read(bind, far)});"]
                     flags = ended
             else:
                 lines += [f"{kind} a = 0;", f"for (uint k = 0; k < {count}; k++) {{",
                           f"    a = ({flag} ? {kind}(0) : a) + {kind}({sums.read(bind, here)});",
-                          f"    {after.read(bind, here, True)} = a;", "}"]
+                          f"    {after.read(bind, here)} = a;", "}"]
             self.dispatch(bind, lines, (math.prod(lead) * (count if reach else 1), 1, 1))
             sums = after
         return sums, flags
@@ -727,16 +740,20 @@ class Lowering:
         return {}
 
     # ISO/IEC 14882:2020 [dcl.array]; Apple, Metal Shading Language Specification 4.1, section 2.6
-    def scratch(self, bind, lines, name, dtype, batch, count):
-        if count * dtype.itemsize > LOCAL:
-            return f"({bind(self.fresh(dtype, (batch, count)), True)} + p.x * {count})"
+    def scratch(self, dtype, batch, count):
+        return self.fresh(dtype, (batch, count)) if count * dtype.itemsize > LOCAL else None
+
+    def scratched(self, bind, lines, name, held, dtype, count):
+        if held:
+            return f"({bind(held)} + p.x * {count})"
         lines.append(f"{self.types[dtype]} {name}[{max(count, 1)}];")
         return name
 
     def range(self, node):
         value, (start, _, step) = node.meta["val"], (*node.args, 1)[:3]
         return Fused(value.dtype, tuple(value.shape), lambda bind, index, t:
-                     f"{self.types[value.dtype]}({literal(start)} + {index[0]} * {literal(step)})", free=True)
+                     f"{self.types[value.dtype]}({literal(start)} + {index[0]} * {literal(step)})", *self.composed(()),
+                     free=True)
 
     def remainder(self, node):
         name = "fremainder" if node.meta["val"].dtype.is_floating_point else "remainder"
@@ -748,9 +765,9 @@ class Lowering:
     def take(self, node, source, dims):
         value = node.meta["val"]
         self.using.add("wrap")
-
         return Fused(value.dtype, tuple(value.shape),
-                     lambda bind, index, t: source.read(bind, self.found(bind, index, source.shape, dims)))
+                     lambda bind, index, t: source.read(bind, self.found(bind, index, source.shape, dims)),
+                     *self.composed([source, *(chosen for chosen, _ in dims)]))
 
     def found(self, bind, index, shape, dims):
         return [index[places] if chosen is None else "mesh_wrap(long(%s), %d)" % (
@@ -795,7 +812,7 @@ class Lowering:
         self.using.add("wrap")
         return self.updated(value, source, domain, lambda bind, names, steps: " + ".join(
             f"long({at}) * {step}" for at, step in zip(self.found(bind, names, source.shape, dims), steps)),
-            self.reader(node.args[2]), len(node.args) > 3 and node.args[3])
+            [chosen for chosen, _ in dims], self.reader(node.args[2]), len(node.args) > 3 and node.args[3])
 
     # K. E. Batcher, Sorting networks and their applications, AFIPS Spring Joint Computer Conference, 1968
     def bitonic(self, fields, rows, padded, before):
@@ -803,7 +820,7 @@ class Lowering:
         while stage <= padded:
             step = stage // 2
             while step:
-                bind = Bound()
+                bind = self.binding(fields, fields)
                 lines = [f"uint row = p.x / {padded // 2}, q = p.x % {padded // 2};",
                          f"uint i = ((q & ~{step - 1}u) << 1) | (q & {step - 1}u);",
                          f"uint j = i ^ {stage - 1 if step == stage // 2 else step}u;"]
@@ -811,7 +828,7 @@ class Lowering:
                     lines += [f"{self.types[field.dtype]} x{k} = {field.read(bind, ['row', 'i'])}, "
                               f"y{k} = {field.read(bind, ['row', 'j'])};"]
                 lines += [f"if (!({before('x', 'y')})) {{"]
-                lines += [f"    {field.read(bind, ['row', 'i'], True)} = y{k}; {field.read(bind, ['row', 'j'], True)} "
+                lines += [f"    {field.read(bind, ['row', 'i'])} = y{k}; {field.read(bind, ['row', 'j'])} "
                           f"= x{k};" for k, field in enumerate(fields)] + ["}"]
                 self.dispatch(bind, lines, (rows * padded // 2, 1, 1))
                 step //= 2
@@ -823,11 +840,11 @@ class Lowering:
         lead, padded = source.shape[:dim] + source.shape[dim + 1:], 1 << max(count - 1, 0).bit_length()
         rows = math.prod(lead)
         values, places = self.fresh(source.dtype, (rows, padded)), self.fresh(torch.int64, (rows, padded))
-        bind = Bound()
+        bind = self.binding([source], (values, places))
         lines, names = unravel(f"(p.x / {padded})", lead, "r")
         at = names[:dim] + [f"min(p.x % {padded}, {max(count - 1, 0)}u)"] + names[dim:]
-        lines += [f"{values.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'], True)} = {source.read(bind, at)};",
-                  f"{places.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'], True)} = p.x % {padded};"]
+        lines += [f"{values.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'])} = {source.read(bind, at)};",
+                  f"{places.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'])} = p.x % {padded};"]
         self.dispatch(bind, lines, (rows * padded, 1, 1))
         self.bitonic([values, places], rows, padded, lambda a, b: ahead(
             a, b, count, source.dtype.is_floating_point, descending))
@@ -863,9 +880,9 @@ class Lowering:
         return self.updated(value, source, chosen.shape, lambda bind, names, steps: " + ".join(
             f"long({chosen.read(bind, names) if d == dim else name}) * {step}"
             for d, (name, step) in enumerate(zip(names, steps))),
-            self.reader(given) if isinstance(given, torch.fx.Node) else given, SCATTERED[self.target(node)])
+            [chosen], self.reader(given) if isinstance(given, torch.fx.Node) else given, SCATTERED[self.target(node)])
 
-    def updated(self, value, source, domain, key, given, added):
+    def updated(self, value, source, domain, key, keyed, given, added):
         kind = self.types[value.dtype]
         made, count = self.fresh(value.dtype, value.shape), math.prod(domain)
         self.store(source, made)
@@ -873,25 +890,25 @@ class Lowering:
             return made
         padded = 1 << (count - 1).bit_length()
         keys, places = (self.fresh(torch.int64, (1, padded)) for _ in range(2))
-        bind = Bound()
+        bind = self.binding(keyed, (keys, places))
         lines, names = unravel(f"min(p.x, {count - 1}u)", domain, "c")
         target = key(bind, names, made.stride)
-        lines += [f"{keys.read(bind, ['0', 'p.x'], True)} = {target};",
-                  f"{places.read(bind, ['0', 'p.x'], True)} = p.x;"]
+        lines += [f"{keys.read(bind, ['0', 'p.x'])} = {target};",
+                  f"{places.read(bind, ['0', 'p.x'])} = p.x;"]
         self.dispatch(bind, lines, (padded, 1, 1))
         self.bitonic([keys, places], 1, padded, lambda a, b: ahead(a, b, count, False))
         sums, flags = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,))
-        bind = Bound()
+        bind = self.binding((places, given, keys), (sums, flags))
         lines, names = unravel(f"uint({places.read(bind, ['0', 'p.x'])})", domain, "c")
         x = self.given(bind, given, names, kind == "double")
-        lines += [f"{sums.read(bind, ['p.x'], True)} = {kind}({x});",
-                  f"{flags.read(bind, ['p.x'], True)} = p.x == 0 || "
+        lines += [f"{sums.read(bind, ['p.x'])} = {kind}({x});",
+                  f"{flags.read(bind, ['p.x'])} = p.x == 0 || "
                   f"{keys.read(bind, ['0', 'p.x'])} != {keys.read(bind, ['0', 'max(p.x, 1u) - 1'])};"]
         self.dispatch(bind, lines, (count, 1, 1))
         sums, flags = self.scan(sums, flags, 0, count, value.dtype, True) if added else (sums, flags)
-        bind = Bound()
+        bind = self.binding((keys, sums), (made,))
         key = keys.read(bind, ["0", "p.x"])
-        out = f"{bind(made, True)}[{key}]"
+        out = f"{bind(made)}[{key}]"
         self.dispatch(bind, [
             f"if (p.x == {count - 1} || {keys.read(bind, ['0', f'min(p.x + 1, {count - 1}u)'])} != {key})",
             f"    {out} = {f'{out} + ' * bool(added)}{sums.read(bind, ['p.x'])};"], (count, 1, 1))
@@ -909,11 +926,12 @@ class Lowering:
             at = index[1:2]
             scaled = f"(({source.read(bind, index)} - {mean.read(bind, at)}) / " \
                      f"sqrt({kind}({variance.read(bind, at)} + {kind}({literal(float(epsilon), wide)}))))"
-            scaled += f" * {weight.read(bind, at)}" * (weight is not None)
-            return f"{kind}({scaled}{f' + {bias.read(bind, at)}' * (bias is not None)})"
-        made = Fused(value.dtype, tuple(value.shape), expression)
-        made.nodes = (node.name,)
-        empty = [Fused(v.dtype, tuple(v.shape), lambda bind, index, t: "0") for v in node.meta["val"][1:]]
+            scaled += f" * {weight.read(bind, at)}" if weight is not None else ""
+            return f"{kind}({scaled}{f' + {bias.read(bind, at)}' if bias is not None else ''})"
+        made = Fused(value.dtype, tuple(value.shape), expression,
+                     *self.composed((source, weight, bias, mean, variance)))
+        empty = [Fused(v.dtype, tuple(v.shape), lambda bind, index, t: "0", *self.composed(()))
+                 for v in node.meta["val"][1:]]
         return [self.view(made), *empty]
 
     # torch 2.15 aten/src/ATen/native/DilatedMaxPool2d.cpp, max_pool2d_with_indices_single_out_frame
@@ -923,7 +941,7 @@ class Lowering:
         source, values = self.stored(source), node.meta["val"]
         used = {u.args[1] for u in node.users}
         made = [self.fresh(v.dtype, v.shape) if place in used else None for place, v in enumerate(values)]
-        bind, kind = Bound(), self.types[values[0].dtype]
+        bind, kind = self.binding([source], made), self.types[values[0].dtype]
         lines, names = unravel("p.x", values[0].shape, "o")
         high, wide = source.shape[-2:]
         taken = source.read(bind, names[:-2] + ["uint(y)", "uint(x)"])
@@ -934,7 +952,7 @@ class Lowering:
                   f"    if (y < 0 || y >= {high} || x < 0 || x >= {wide}) continue;",
                   f"    {kind} c = {taken};",
                   f"    if (at < 0 || c > m || isnan(c)) {{ m = c; at = y * {wide} + x; }}", "}"]
-        lines += [f"{view.read(bind, names, True)} = {found};" for view, found in zip(made, ("m", "at")) if view]
+        lines += [f"{view.read(bind, names)} = {found};" for view, found in zip(made, ("m", "at")) if view]
         self.dispatch(bind, lines, (math.prod(values[0].shape), 1, 1))
         return made
 
@@ -944,7 +962,8 @@ class Lowering:
         kernel, stride, padding, ceil, padded, divisor = (
             *node.args[1:], *([], node.kwargs.get("padding", [0, 0]), False, True, None)[len(node.args) - 2:])
         stride, kind = stride or kernel, self.accumulated(value.dtype)
-        made, bind = self.result(value), Bound()
+        made = self.result(value)
+        bind = self.binding([source], [made])
         lines, names = unravel("p.x", value.shape, "o")
         high, wide = source.shape[-2:]
         lines += [f"int y0 = int({names[-2]} * {stride[0]}) - {padding[0]}, x0 = int({names[-1]} * {stride[1]}) - "
@@ -955,7 +974,7 @@ class Lowering:
                   f"y0 = max(y0, 0); x0 = max(x0, 0); y1 = min(y1, {high}); x1 = min(x1, {wide});",
                   f"{kind} a = 0;", "for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++)",
                   f"    a += {kind}({source.read(bind, names[:-2] + ['uint(y)', 'uint(x)'])});",
-                  f"{made.read(bind, names, True)} = a / {kind}("
+                  f"{made.read(bind, names)} = a / {kind}("
                   f"{divisor or ('all' if padded else '((y1 - y0) * (x1 - x0))')});"]
         self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
         return made
@@ -964,11 +983,13 @@ class Lowering:
         form, shape = self.forms[node.args[0]], tuple(node.meta["val"].shape)
         if isinstance(form, Product) and node.target in RESHAPES:
             return Product(form.left, form.right, form.dtype, shape, lambda bind, index, t:
-                           form.expression(bind, reshaped(index, shape, form.shape), t), form.plain)
+                           form.expression(bind, reshaped(index, shape, form.shape), t), *self.composed([form]),
+                           form.plain)
         if isinstance(form, Fused) and (node.target in RESHAPES or node.target is ATEN.expand.default
                                         and shape == form.shape):
             return Fused(form.dtype, shape,
-                         lambda bind, index, t: form.read(bind, reshaped(index, shape, form.shape)))
+                         lambda bind, index, t: form.read(bind, reshaped(index, shape, form.shape)),
+                         *self.composed([form]))
         view = self.view(form)
         count = self.storages[view.storage].count
         for attempt in range(2):
@@ -981,7 +1002,8 @@ class Lowering:
             if made is not None and made._base is pages:
                 return View(view.storage, view.dtype, tuple(made.shape), tuple(made.stride()),
                             made.storage_offset())
-            view = self.view(Fused(view.dtype, view.shape, lambda bind, index, t, held=view: held.read(bind, index)))
+            view = self.view(Fused(view.dtype, view.shape, lambda bind, index, t, held=view: held.read(bind, index),
+                                   *self.composed([view])))
             count = self.storages[view.storage].count
         raise NotLowered(f"{node.target}: not a view of its operand")
 
@@ -1010,16 +1032,16 @@ class Lowering:
                 made, end = read if made is None else f"({index[dim]} < {end} ? {read} : {made})", start
             return made
         return Fused(value.dtype, tuple(value.shape), expression if forms and all(value.shape) else
-                     lambda bind, index, t: f"{kind}(0)")
+                     lambda bind, index, t: f"{kind}(0)", *self.composed(forms * bool(all(value.shape))))
 
     def softmax(self, node):
         source = self.stored(node.args[0])
         dim = node.args[1] % len(source.shape)
         made = self.fresh(node.meta["val"].dtype, source.shape)
-        bind = Bound()
+        bind = self.binding([source], [made])
         lines, names = unravel("p.x", source.shape[:dim] + source.shape[dim + 1:], "r")
         index = names[:dim] + ["k"] + names[dim:]
-        out, x = made.read(bind, index, True), source.read(bind, index)
+        out, x = made.read(bind, index), source.read(bind, index)
         loop = f"for (uint k = 0; k < {source.shape[dim]}; k++)"
         wide = self.accumulated(source.dtype)
         last = f"{wide}({x}) - m - log(s)" if self.target(node) is ATEN._log_softmax.default else f"exp({wide}({x}) - m) / s"
@@ -1036,13 +1058,13 @@ class Lowering:
                                                       over or range(len(source.shape))))
         kept = [d for d in range(len(source.shape)) if d not in over]
         made, kind = self.result(value), self.types[value.dtype]
-        bind = Bound()
+        bind = self.binding([source], [made])
         count = math.prod(source.shape[d] for d in over)
         lines, outer = unravel("p.x", [source.shape[d] for d in kept], "r")
         within, inner = unravel("j", [source.shape[d] for d in over], "q")
         index = dict(zip(kept + over, outer + inner))
         out = made.read(bind, outer if len(value.shape) == len(kept) else
-                        [index[d] if d in kept else "0" for d in range(len(source.shape))], True)
+                        [index[d] if d in kept else "0" for d in range(len(source.shape))])
         x = f"{kind}({source.read(bind, [index[d] for d in range(len(source.shape))])})"
         lines += [f"uint j = 0; {' '.join(within)}", f"{kind} a = {first.format(x=x)};",
                   f"for (j = {int(first == '{x}')}; j < {count}; j++) {{ "
@@ -1058,16 +1080,16 @@ class Lowering:
         lead, count = source.shape[:len(source.shape) - len(inner)], math.prod(inner)
         used = {u.args[1] for u in node.users}
         made = [self.fresh(v.dtype, v.shape) if place in used else None for place, v in enumerate(values)]
-        bind = Bound()
-        outs = [m and bind(m, True) for m in made]
+        bind = self.binding((source, weight, bias), made)
+        outs = [m and bind(m) for m in made]
         lines, names = unravel("p.x", lead, "r")
         within, inside = unravel("j", inner, "q")
         x = source.read(bind, names + inside)
         loop = f"for (uint j = 0; j < {count}; j++) {{ {' '.join(within)}"
         wide = self.accumulated(source.dtype)
         scaled = f"({wide}({x}) - m) * r"
-        scaled += f" * {weight.read(bind, inside)}" * (weight is not None)
-        scaled += f" + {bias.read(bind, inside)}" * (bias is not None)
+        scaled += f" * {weight.read(bind, inside)}" if weight is not None else ""
+        scaled += f" + {bias.read(bind, inside)}" if bias is not None else ""
         lines += [f"{wide} m = 0, v = 0;", f"{loop} m += {wide}({x}); }}", f"m /= {count};",
                   f"{loop} {wide} d = {wide}({x}) - m; v += d * d; }}",
                   f"{wide} r = rsqrt(v / {count} + {wide}({literal(float(epsilon), wide == 'double')}));"]
@@ -1085,9 +1107,9 @@ class Lowering:
         source, weight = self.stored(source), self.stored(weight)
         bias = bias if bias is None else self.reader(bias)
         made = self.result(value)
-        bind = Bound()
+        bind = self.binding((source, weight, bias), [made])
         lines, (n, o, y, x) = unravel("p.x", value.shape, "o")
-        out = made.read(bind, [n, o, y, x], True)
+        out = made.read(bind, [n, o, y, x])
         _, per, high, wide = weight.shape
         taken = source.read(bind, [n, f"({o} / {value.shape[1] // groups} * {per} + c)", "uint(y)", "uint(x)"])
         kind = self.accumulated(value.dtype)
@@ -1264,11 +1286,10 @@ class Metal(Lowering):
     def multiply(self, form, target):
         if form.dtype not in (torch.float32, torch.float16):
             return super().multiply(form, target)
-        bind = Bound()
-        bind.note(form)
+        bind = self.binding([form], [target])
         rows, columns = form.left.shape[-2], form.right.shape[-1]
         batch = form.left.shape[0] if len(form.left.shape) == 3 else 1
-        out = f"({bind(target, True)} + {target.offset})"
+        out = f"({bind(target)} + {target.offset})"
         lines, flags, slices = [], [], []
         for name, operand, tile in (("A", form.left, "0, g.y * {T}"), ("B", form.right, "g.x * {T}, 0")):
             (m, n), (sm, sn) = operand.shape[-2:], operand.stride[-2:]
@@ -1320,9 +1341,9 @@ class Metal(Lowering):
         k = 1 if vector else right.shape[-1]
         made = [self.fresh(values[0].dtype, values[0].shape) if vector else self.matrices(values[0]),
                 self.matrices(values[1]), *(self.fresh(v.dtype, v.shape) for v in values[2:])]
-        bind = Bound()
+        bind = self.binding((left, right), made)
         lines, names = unravel("p.x", lead, "r")
-        x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
+        x, a, pivots, info = (f"({bind(v)} + p.x * {step})" for v, step in (
             (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
         A, X = (lambda i, j, v=v, steps=steps: f"{v}[({i}) * {steps[0]} + ({j}) * {steps[1]}]"
                 for v, steps in ((a, made[1].stride[-2:]), (x, (1, 0) if vector else made[0].stride[-2:])))
@@ -1358,11 +1379,11 @@ class Metal(Lowering):
         if values[0].dtype != torch.float32 or len(node.args) > 1 or node.kwargs or m < n:
             self.missing.append(f"{node.target} of {values[0].dtype}, with a mode or of a wide matrix")
             return None
-        made = [self.fresh(v.dtype, v.shape) for v in values]
-        bind = Bound()
+        made, held = [self.fresh(v.dtype, v.shape) for v in values], self.scratch(values[0].dtype, math.prod(lead), n)
+        bind = self.binding([source], (*made, held))
         lines, names = unravel("p.x", lead, "r")
-        q, r = (f"({bind(v, True)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
-        tau = self.scratch(bind, lines, "tau", values[0].dtype, math.prod(lead), n)
+        q, r = (f"({bind(v)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
+        tau = self.scratched(bind, lines, "tau", held, values[0].dtype, n)
         reflect = [f"    for (uint c = j + 1; c < {n}; c++) {{", f"        float w = {q}[j * {n} + c];",
                    f"        for (uint i = j + 1; i < {m}; i++) w += {q}[i * {n} + j] * {q}[i * {n} + c];",
                    f"        {q}[j * {n} + c] -= {tau}[j] * w;",
@@ -1512,15 +1533,15 @@ class Native(Lowering):
 
     # torch 2.15 documentation, torch.Tensor.scatter_ and torch.Tensor.index_put_;
     # design/compilation-composition-change-request.md, Performance obligation
-    def updated(self, value, source, domain, key, given, added):
-        kind, made, bind = self.types[value.dtype], self.fresh(value.dtype, value.shape), Bound()
-        count, first = math.prod(value.shape), []
-        if self.chunk(count) == count:
-            first = [f"for (uint e = 0; e < {count}; e++) {{", *self.copying(bind, source, made, "e"), "}"]
-        else:
+    def updated(self, value, source, domain, key, keyed, given, added):
+        kind, made, count = self.types[value.dtype], self.fresh(value.dtype, value.shape), math.prod(value.shape)
+        whole = self.chunk(count) == count
+        if not whole:
             self.store(source, made)
+        bind = self.binding(((source,) * whole + (*keyed, given)), (made,))
+        first = [f"for (uint e = 0; e < {count}; e++) {{", *self.copying(bind, source, made, "e"), "}"] if whole else []
         lines, names = unravel("q", domain, "c")
-        out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
+        out = f"{bind(made)}[{key(bind, names, made.stride)}]"
         x = self.given(bind, given, names, kind == "double")
         self.dispatch(bind, [*first, f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
                              f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
@@ -1534,12 +1555,12 @@ class Native(Lowering):
         count, lead = source.shape[dim], source.shape[:dim] + source.shape[dim + 1:]
         rows, kind = math.prod(lead), self.types[source.dtype]
         values, places = self.fresh(source.dtype, (rows, count)), self.fresh(torch.int64, (rows, count))
-        bind = Bound()
+        bind = self.binding([source], (values, places))
         lines, names = unravel("p.x", lead, "r")
         at = lambda k: source.read(bind, names[:dim] + [f"uint({k})"] + names[dim:])
         first, second = ("b", "a") if descending else ("a", "b")
         order = precedes(f"x{first}", f"x{second}", source.dtype.is_floating_point)
-        v, w = (f"({bind(made, True)} + p.x * {count})" for made in (values, places))
+        v, w = (f"({bind(made)} + p.x * {count})" for made in (values, places))
         lines += [f"for (long k = 0; k < {count}; k++) {w}[k] = k;",
                   f"std::stable_sort({w}, {w} + {count}, [&](long a, long b) {{ {kind} xa = {at('a')}, xb = {at('b')}; "
                   f"return {order}; }});",
@@ -1564,19 +1585,21 @@ class Native(Lowering):
         k, batch = 1 if vector else right.shape[-1], math.prod(lead)
         made = [self.fresh(values[0].dtype, values[0].shape) if vector else self.matrices(values[0]),
                 self.matrices(values[1]), *(self.fresh(v.dtype, v.shape) for v in values[2:])]
-        bind = Bound()
-        lines, names = unravel("p.x", lead, "r")
-        x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
-            (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
         columns = [n == 1 or view.stride[-2] == 1 for view in made[:2]]
-        b = x if vector or columns[0] else self.scratch(bind, lines, "b", values[0].dtype, batch, n * k)
+        apart = not (vector or columns[0])
+        held = self.scratch(values[0].dtype, batch, n * k) if apart else None
+        bind = self.binding((left, right), (*made, held))
+        lines, names = unravel("p.x", lead, "r")
+        x, a, pivots, info = (f"({bind(v)} + p.x * {step})" for v, step in (
+            (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
+        b = self.scratched(bind, lines, "b", held, values[0].dtype, n * k) if apart else x
         self.columns(bind, lines, left, a, n, n, names)
         self.columns(bind, lines, right, b, n, k, names)
         lines += [f"int n = {n}, k = {k};", f"{letter}gesv_(&n, &k, {a}, &n, {pivots}, {b}, &n, {info});"]
         lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < i; j++) "
                   f"std::swap({a}[i * {n} + j], {a}[j * {n} + i]);"] * (not columns[1])
         lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
-                  f"{x}[i * {k} + j] = {b}[j * {n} + i];"] * (b is not x)
+                  f"{x}[i * {k} + j] = {b}[j * {n} + i];"] * apart
         self.dispatch(bind, lines, (batch, 1, 1))
         return made
 
@@ -1591,11 +1614,12 @@ class Native(Lowering):
             return None
         batch, room = math.prod(lead), 64 * n
         made = [self.fresh(v.dtype, v.shape) for v in values]
-        bind = Bound()
+        held = [self.scratch(values[0].dtype, batch, count) for count in (n, room)]
+        bind = self.binding([source], (*made, *held))
         lines, names = unravel("p.x", lead, "r")
-        q, r = (f"({bind(v, True)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
-        tau = self.scratch(bind, lines, "tau", values[0].dtype, batch, n)
-        w = self.scratch(bind, lines, "w", values[0].dtype, batch, room)
+        q, r = (f"({bind(v)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
+        tau, w = (self.scratched(bind, lines, name, scratch, values[0].dtype, count)
+                  for name, scratch, count in (("tau", held[0], n), ("w", held[1], room)))
         lines += [f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
                   f"{q}[i * {n} + j] = {source.read(bind, names + ['i', 'j'])};",
                   f"int m = {m}, n = {n}, room = {room}, info;",
@@ -1624,11 +1648,10 @@ class Native(Lowering):
     def multiply(self, form, target):
         if form.dtype not in (torch.float32, torch.float64):
             return super().multiply(form, target)
-        bind, kind = Bound(), self.types[form.dtype]
-        bind.note(form)
+        bind, kind = self.binding([form], [target]), self.types[form.dtype]
         rows, inner, columns = form.left.shape[-2], form.left.shape[-1], form.right.shape[-1]
         batched = len(form.left.shape) == 3
-        out, given = f"{bind(target, True)} + {target.offset} + p.x * {rows * columns}", []
+        out, given = f"{bind(target)} + {target.offset} + p.x * {rows * columns}", []
         for operand in (form.left, form.right):
             (m, n), (sm, sn) = operand.shape[-2:], operand.stride[-2:]
             turned = not (n == 1 or sn == 1)

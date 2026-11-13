@@ -82,6 +82,18 @@ class Plan:
     sections: list
 
 
+# rdma/mesh-dataflow.h mesh_view_whole, mesh_nodes_read; rdma/mesh-collective.h mesh_plan;
+# compiler/mesh_compiler/schedule.py planned, solved
+@dataclass
+class Planning:
+    image: object
+    context: object
+    nodes: tuple
+    here: int
+    group: int
+    program: int
+
+
 @dataclass
 class Scheduled:
     exported: Exported
@@ -98,6 +110,7 @@ class Scheduled:
     signature: bytes = None
     stored: dict = None
     invariant: dict = None
+    functions: dict = None
 
 
 # design/synchronization-signature-change-request.md item 1; compiler/mesh_compiler/runtime.py Program;

@@ -3,7 +3,7 @@ import copy
 
 import torch
 
-from .ir import HOST, JOIN, RECV, SEND, views
+from .ir import HOST, views
 
 TO_COPY = torch.ops.aten._to_copy.default
 ENGINES = ("ane",)
@@ -17,37 +17,38 @@ def copied(graph, value, device, processor):
     return node
 
 
-# compiler/mesh_compiler/ir.py views
+# compiler/mesh_compiler/ir.py views; compiler/mesh_compiler/placement.py place, transfers; torch 2.15
+# torch/fx/graph_module.py GraphModule.__deepcopy__ and torch/fx/graph.py Graph.__deepcopy__, val_map=memo
 def on_devices(graph_module, processors):
-    graph_module = copy.deepcopy(graph_module)
-    graph = graph_module.graph
-    nodes = [n for n in graph.nodes if n.op != "placeholder"]
-    receiver = {n.args[0]: n for n in nodes if n.target is RECV}
-    rewired = list(receiver.values())
-    for node in nodes:
-        machine, device = processors[node.meta["processor"]]
+    original = graph_module.meta["transfers"]
+    memo = {id(original): original}
+    graph_module = copy.deepcopy(graph_module, memo)
+    transfers = {channel: (memo[sender], memo[arrival]) for channel, (sender, arrival) in original.items()}
+    graph, graph_module.meta["transfers"] = graph_module.graph, transfers
+    rewired = [arrival for _, arrival in transfers.values()]
+    for node in [n for n in graph.nodes if n.op != "placeholder"]:
+        _, device = processors[node.meta["processor"]]
         if "device" in node.kwargs:
             node.kwargs = {**node.kwargs, "device": device}
         if node.target is torch.ops.aten.to.device:
             node.args = (node.args[0], device, *node.args[2:])
             rewired.append(node)
-        if node.target is SEND:
-            value, channel = node.args
-            arrival = receiver[channel]
-            arrival.meta.setdefault("consumer", JOIN)
-            away, there = processors[arrival.meta["processor"]]
-            sent = there if away == machine else HOST
-            if sent != device:
-                with graph.inserting_before(node):
-                    value = copied(graph, value, sent, node.meta["processor"])
-                    rewired += [value, node]
-                arrival.meta["val"] = value.meta["val"]
-                node.args = (value, channel)
-            if there != sent:
-                with graph.inserting_after(arrival):
-                    landed = copied(graph, arrival, there, arrival.meta["processor"])
-                arrival.replace_all_uses_with(landed, lambda user: user is not landed)
-                rewired += [landed, *landed.users]
+    for channel, (sender, arrival) in transfers.items():
+        value = sender.args[0]
+        machine, device = processors[sender.meta["processor"]]
+        away, there = processors[arrival.meta["processor"]]
+        sent = there if away == machine else HOST
+        if sent != device:
+            with graph.inserting_before(sender):
+                value = copied(graph, value, sent, sender.meta["processor"])
+                rewired += [value, sender]
+            arrival.meta["val"] = value.meta["val"]
+            sender.args = (value, *sender.args[1:])
+        if there != sent:
+            with graph.inserting_after(arrival):
+                landed = copied(graph, arrival, there, arrival.meta["processor"])
+            arrival.replace_all_uses_with(landed, lambda user: user is not landed)
+            rewired += [landed, *landed.users]
     views(rewired)
     graph_module.recompile()
     return graph_module

@@ -2,6 +2,7 @@
 # design/plan-to-bridge-change-request.md R2 and R8
 import ctypes as C
 import itertools
+import mmap
 import os
 import pathlib
 import sys
@@ -9,10 +10,34 @@ import time
 
 import torch
 
+from .ir import Planning
+
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
 
 CONTEXT, PUBLISHED = mesh.Context(), itertools.count(1)
+
+
+# rdma/mesh-dataflow.h mesh_view_whole, mesh_nodes_read; design/aot-compilation-change-request.md A7;
+# compiler/mesh_compiler/ir.py Planning
+def planning():
+    live = mesh.Context()
+    mesh.check(mesh.LIB.mesh_attach(C.byref(live), None))
+    header = mesh.Header.from_address(live.M)
+    private = mmap.mmap(-1, header.length)
+    address = C.addressof(C.c_char.from_buffer(private))
+    while True:
+        before = header.view_map
+        C.memmove(address, live.M, header.data_off)
+        if mesh.LIB.mesh_view_whole(live.M, before):
+            break
+    C.memset(address + header.algo_off, 0, C.sizeof(mesh.Algo))
+    made = mesh.Context(M=address, len=header.length, client=live.client, fd=-1, start=live.start)
+    mesh.check(mesh.LIB.mesh_detach(C.byref(live)))
+    nodes = mesh.Nodes()
+    mesh.check(mesh.LIB.mesh_nodes_read(C.byref(made), C.byref(nodes)))
+    return Planning(private, made, tuple(nodes.node[:nodes.count]), nodes.self, int(os.environ["MESH_GROUP"]),
+                    sum(1 << int(node) for node in os.environ["MESH_PROGRAM"].split(",")))
 
 
 # rdma/mesh-collective.h mesh_plan_load; rdma/mesh-dataflow.h mesh_retire
