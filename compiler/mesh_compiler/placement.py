@@ -383,6 +383,45 @@ def unpadded(node, at):
     node.kwargs = read
 
 
+# Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.5 and appendix A.2; design/problems-of-14b9a757-change-request.md
+# item 4 step 1
+def region(graph, node, window, dimension, sizes, j, processor):
+    (span, stride, low, fill, edged), size, first = window, shape(node)[dimension], bases(sizes)[j]
+    low_, high = first * stride - low, (first + max(sizes) - 1) * stride - low + span
+    whole = 0 <= low_ and high <= size
+    start = low_ if whole else max(0, first - -(-low // stride)) * stride
+    return (node if (start, min(size, high)) == (0, size) else call(
+        graph, SLICE, (node, dimension, start, min(size, high)), processor), None if whole else first - start // stride)
+
+
+def gridded(graph, node, held, want, replaced):
+    (dims, sizes, grid), found, out = want, windows(node), shape(node)
+    if not all(d in found for d in dims) or STRIPED in sizes:
+        return None
+    shards = []
+    for processor, at in zip(flat(grid), itertools.product(*(range(n) for n in spans(grid, len(dims))))):
+        made, kept = held[0][3][0], {}
+        for d, size, j in zip(dims, sizes, at):
+            made, kept[d] = region(graph, made, found[d], d, size, j, held[0][2][0] or processor)
+        arguments = iter([made, *(v[3][0] for v in held[1:])])
+        shard = graph.node_copy(node, lambda n: next(arguments))
+        for d in dims:
+            if kept[d] is None:
+                unpadded(shard, d - 2)
+        shard.meta.update(of=node.name, order={}, pairs=0, units=(
+            math.prod(max(size) if uneven(size) else size[j] for size, j in zip(sizes, at)),
+            math.prod(out[d] for d in dims)))
+        shard = evaluated(shard, processor)
+        for d, size in zip(dims, sizes):
+            if kept[d] is not None and (kept[d], kept[d] + max(size)) != (0, shape(shard)[d]):
+                shard.meta["cut"] = kept[d], kept[d] + max(size)
+                shard = call(graph, SLICE, (shard, d, *shard.meta["cut"]), processor)
+                shard.meta["order"] = {}
+        shards.append(shard)
+    replaced.append(node)
+    return dims, sizes, grid, shards
+
+
 # Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.3 and appendix A.2; design/unequal-shards-change-request.md item 10;
 # design/problems-of-14b9a757-change-request.md items 4 and 5
 def halos(graph, value, window, dimension, sizes, processors, name):
@@ -393,14 +432,8 @@ def halos(graph, value, window, dimension, sizes, processors, name):
         return first * stride - low, (first + count - 1) * stride - low + span
     reads = [read(first, max(sizes)) for first in bases(sizes)]
     if held is None:
-        regions, kept = [], []
-        for processor, first, (low_, high) in zip(processors, bases(sizes), reads):
-            whole = 0 <= low_ and high <= size
-            start = low_ if whole else max(0, first - -(-low // stride)) * stride
-            regions.append(nodes[0] if (start, min(size, high)) == (0, size) else call(
-                graph, SLICE, (nodes[0], dimension, start, min(size, high)), holders[0] or processor))
-            kept.append(None if whole else first - start // stride)
-        return regions, kept
+        return tuple(zip(*(region(graph, nodes[0], window, dimension, sizes, j, holders[0] or processor)
+                           for j, processor in enumerate(processors))))
     real = [(max(0, min(size, first)), max(0, min(size, last if count else first))) for count, (first, last) in zip(
         sizes, map(read, itertools.accumulate(sizes[:-1], initial=0), sizes))]
     kept = [None if not edged or 0 <= low_ and high <= size else first - max(0, first - -(-low // stride))
@@ -613,6 +646,11 @@ def partitioned(graph, node, held, want, replaced):
         if made is not None:
             return made
     if not isinstance(want, str) and several(want):
+        if (node.op == "call_function" and RULES.get(node.target) is windowed and isinstance(
+                node.meta["val"], torch.Tensor) and all(v[0] is None and len(v[3]) == 1 for v in held)):
+            made = gridded(graph, node, held, want, replaced)
+            if made is not None:
+                return made
         want = flat(want[2])[0]
     one = want if isinstance(want, str) else want[2][0]
     held = [(None, None, (one,), reshard(graph, v, None, None, (one,))) if several(v) else v for v in held]
@@ -687,6 +725,10 @@ def partitioned(graph, node, held, want, replaced):
             stripe.meta.setdefault("blocks", {})[processors[j]] = along, (source, j), *arrayed(
                 ranges(sizes, out[along], len(processors)))
         columns[0] = [padded(graph, n, along, sizes, j, processors[j], True) for j, n in enumerate(stripes)]
+    elif turned and target is not want:
+        turned = reshard(graph, (along, sizes, processors, columns[0]), along, sizes, processors[::-1], True)[::-1]
+        sizes = sized(sizes[::-1], (sizes.units or tuple(sizes))[::-1])
+        columns[0] = [padded(graph, n, along, sizes, j, processors[j], True) for j, n in enumerate(turned)]
     elif turned:
         columns[0] = [padded(graph, n, along, sizes, j, processors[j], True) for j, n in enumerate(reshard(
             graph, (along, sizes, processors, columns[0]), along, sizes[::-1], processors[::-1], True)[::-1])]
@@ -729,12 +771,12 @@ def partitioned(graph, node, held, want, replaced):
         if window and kept[j] is None:
             unpadded(shard, along - 2)
         if node.target in (EXPAND, VIEW):
-            sized = list(shard.args[1])
-            sized[along] = (most(sizes) if sizes == STRIPED else
+            extended = list(shard.args[1])
+            extended[along] = (most(sizes) if sizes == STRIPED else
                             out[along] * (max(sizes) if uneven(sizes) else sizes[j]) // sum(sizes))
             for label, blocks in order.items():
-                sized[label] = sum(len(range(*block)) for block in blocks)
-            shard.args = (shard.args[0], sized)
+                extended[label] = sum(len(range(*block)) for block in blocks)
+            shard.args = (shard.args[0], extended)
         shard.meta.update(of=node.name, order=order, pairs=pairs, units=(
             len(range(j, extent, len(processors))) if sizes == STRIPED else max(sizes) if uneven(sizes) else sizes[j],
             extent if sizes == STRIPED else sum(sizes)))
