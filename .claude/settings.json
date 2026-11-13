@@ -6,22 +6,6 @@
         "hooks": [
           {
             "type": "command",
-            "if": "Bash(git *commit*)",
-            "timeout": 180,
-            "statusMessage": "C9 review of the commit",
-            "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-c9-review.py"
-          },
-          {
-            "type": "command",
-            "if": "Bash(git *commit*)",
-            "timeout": 900,
-            "statusMessage": "Comment review of the commit",
-            "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-comment-review.py"
-          },
-          {
-            "type": "command",
             "timeout": 30,
             "statusMessage": "Warnings from the records of new commits",
             "async": true,

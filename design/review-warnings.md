@@ -248,3 +248,26 @@ turns says so.
     (`--ref warnings`) and tells the session.
   - Which questions are asked is Claude's choice from the operator's turns quoted in rules 7 to 13.
 
+### 15. Who was given what, and what an item has had
+
+- **Source:** the operator, 2026-11-12:
+
+> how in particular does this model keep subagents responsible for naming the scope of work they're attacking and citing it? what mechanisms are missing or overloaded?
+
+> "I have not built these." what are you being told to write?
+
+> why do these still exist in this form then?
+
+- **Rule:**
+  - bin/mesh-brief-gate.py records each launch it allows, with the file and item given and the Claude process that
+    asked, as a note (`git notes --ref briefs`).
+  - bin/mesh-post-commit.py records the Claude process a commit was made under, the items that process's agents were
+    launched on, and any item the commit names that none of them was launched on.
+  - bin/mesh-told.py tells a commit's warnings to the process that made it, or to any session once that process is
+    gone.
+  - bin/mesh-item-tally.py prints, for one item, which of its sentences the commits naming it have carried.
+  - The graph-module and comment hooks (bin/mesh-c9-review.py, bin/mesh-comment-review.py) are deleted; their
+    questions are the `source` record of bin/mesh-post-commit.py, asked of every commit.
+  - The process is the unit, not the agent: the agents of one Claude process are not told apart. That limit is
+    Claude's to state; nothing read here gives an agent its own identity.
+

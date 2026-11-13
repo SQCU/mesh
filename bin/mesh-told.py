@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 REPOSITORIES = ('/Users/mdot/dox/mesh', '/Users/mdot/metal-microbench')
+PROCESS = os.path.basename(os.environ.get('CLAUDE_CODE_MESSAGING_SOCKET', '')).split('.')[0] or None
 WARNING = 'Warning: Claudes are doing decadent and deceptive things as usual.'
 
 
@@ -34,6 +35,15 @@ def warnings(record):
             found.append('changes program source and names no change request item')
         if record['hook']:
             found.append('changes a review hook, its questions, a gate or the hook settings')
+        if record.get('names_item_not_launched_on'):
+            found.append('names an item no agent of this process was launched on: '
+                         + ', '.join(record['names_item_not_launched_on']))
+    elif measure == 'source':
+        for name, key in (('a graph algorithm outside the graph module', 'graph_algorithm_outside_module'),
+                          ('a second producer of a value one module produces', 'second_producer'),
+                          ('a source comment that is more than a citation', 'comment_not_a_citation')):
+            if record[key]:
+                found.append(f"has {name}: {'; '.join(record['at'][:4])}")
     elif measure.startswith('new file '):
         if record.get('prose') and record.get('guide') is None:
             found.append(f'{WARNING} {measure} names no style guide')
@@ -60,6 +70,9 @@ def main():
         for sha in git(repo, 'log', '-40', '--format=%H').split():
             measured = git(repo, 'notes', '--ref', 'measurements', 'show', sha)
             if not measured or git(repo, 'notes', '--ref', 'warnings', 'show', sha):
+                continue
+            first = json.loads(measured.splitlines()[0])
+            if first.get('process') not in (None, PROCESS) and os.path.exists(f"/tmp/cc-socks/{first['process']}.sock"):
                 continue
             found = [w for line in measured.splitlines() if line.strip() for w in warnings(json.loads(line))]
             subprocess.run(['git', '-C', repo, 'notes', '--ref', 'warnings', 'add', '-m',

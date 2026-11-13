@@ -19,6 +19,7 @@ LIMIT = 300000
 HAIKU = ['claude', '-p', '--model', 'claude-haiku-5-5', '--tools', '', '--setting-sources', 'user',
          '--no-session-persistence', '--strict-mcp-config']
 SONNET = [part if part != 'claude-haiku-5-5' else 'sonnet' for part in HAIKU]
+PROCESS = os.path.basename(os.environ.get('CLAUDE_CODE_MESSAGING_SOCKET', '')).split('.')[0] or None
 ENVIRONMENT = {name: value for name, value in os.environ.items() if not name.startswith('GIT_')}
 COMMIT = """You are given one git commit on stdin: its message, then its diff. Measure only whether each thing is
 present in what the commit ADDS (its message, and the diff lines that begin with '+') or, where a question says so,
@@ -57,6 +58,25 @@ REQUIREMENT-REMOVED:
 SOURCE:
 HOOK:"""
 BITS = ('ASSERTION', 'TEST', 'FACT', 'REQUIREMENT', 'REQUIREMENT-REMOVED', 'SOURCE', 'HOOK')
+SOURCE = """You are given one git commit's diff on stdin, each changed function whole. Measure only whether each
+thing is present in the lines the commit adds or changes, in any file of any name. Do not advise.
+
+GRAPH: a function the commit adds or changes carries a graph algorithm (shortest paths, traversals and worklists,
+reachability, topological orders, spanning trees, flows, cuts, packings, union-find, components, cycle checks, path
+enumeration, walks over parent or next-hop tables, tree heights) anywhere but in the graph module (mesh-graph.h,
+mesh-graph.c, mesh_graph.py). Code that only calls that module or builds its inputs is not this.
+SECOND-PRODUCER: a function the commit adds or changes computes again a value one module already produces: where a
+value's bytes lie in a region, the fields of a record a shared header declares, which functions must run before
+which, or a record of synchronization edges. Code that calls the producer, or only mirrors a record's layout to pass
+operands, is not this.
+COMMENT: an added comment or docstring in source code contains anything besides citations of documents (a document
+path and section, a bibliographic reference, an API header and line, a specification's URL).
+
+Answer with exactly these lines, each ending in YES or NO, then for each YES one or more lines
+AT: <path>:<line> <function or first words>, and nothing else:
+GRAPH:
+SECOND-PRODUCER:
+COMMENT:"""
 NEW = """You are given one new file on stdin. Answer two questions from the file's text alone.
 
 PROSE: is the file a document written for people to read (prose, a specification, a note, a guide), as opposed to
@@ -172,7 +192,38 @@ def commit(repo, sha):
                   names_item=[f'{document}, item {name}' for document, name in named],
                   truncated=len(shown) > LIMIT)
     record['source_without_item'] = record['source'] and not named
+    record['process'] = PROCESS
+    given = given_items(repo, PROCESS) if PROCESS else []
+    record['launched_on'] = given
+    record['names_item_not_launched_on'] = [name for name in record['names_item']
+                                            if PROCESS and not any(name.split(', item ')[0] in g and
+                                                                   g.endswith('item ' + name.split(', item ')[1]) for g in given)]
     return record, named
+
+
+def source(repo, sha):
+    shown = git(repo, 'show', '-W', '--no-color', '--format=', sha)
+    answer = asked(HAIKU, SOURCE, shown[:LIMIT])
+    bits = dict(re.findall(r'^(GRAPH|SECOND-PRODUCER|COMMENT): (YES|NO)\s*$', answer, re.M))
+    if len(bits) != 3:
+        raise RuntimeError(f'the reader answered {sorted(bits)} of 3 questions')
+    return {'graph_algorithm_outside_module': bits['GRAPH'] == 'YES', 'second_producer': bits['SECOND-PRODUCER'] == 'YES',
+            'comment_not_a_citation': bits['COMMENT'] == 'YES',
+            'at': re.findall(r'^AT: (.+?)\s*$', answer, re.M)[:20], 'truncated': len(shown) > LIMIT}
+
+
+def given_items(repo, process):
+    listed = git(MESH, 'notes', '--ref', 'briefs', 'list').split('\n')
+    found = set()
+    for line in filter(None, listed):
+        for entry in git(MESH, 'notes', '--ref', 'briefs', 'show', line.split()[1]).splitlines():
+            try:
+                record = json.loads(entry)
+            except ValueError:
+                continue
+            if record.get('process') == process:
+                found.update(record.get('given', []))
+    return sorted(found)
 
 
 def new_file(repo, sha, path):
@@ -252,6 +303,7 @@ def main():
         named.extend(found)
         return record
     noted(repo, sha, 'commit', whole)
+    noted(repo, sha, 'source', lambda: source(repo, sha))
     raw = git(repo, 'diff-tree', '--root', '--no-commit-id', '-r', '--diff-filter=A', '--name-only', '-z', sha)
     for path in filter(None, raw.split('\0')):
         noted(repo, sha, f'new file {path}', lambda path=path: new_file(repo, sha, path))

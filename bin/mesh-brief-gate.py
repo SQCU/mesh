@@ -17,6 +17,10 @@ def given(payload):
     return '\n'.join(part if isinstance(part, str) else json.dumps(part) for part in parts if part)
 
 
+def given_lines(payload):
+    return [line.strip() for line in given(payload).splitlines() if line.strip()]
+
+
 def committed(path):
     folder = os.path.dirname(path)
     inside = subprocess.run(['git', '-C', folder, 'ls-files', '--error-unmatch', path], capture_output=True)
@@ -53,6 +57,13 @@ def main():
         return 0
     why = refusal(payload)
     if why is None:
+        held = payload.get('tool_input') or {}
+        given = [f"{m.group(1)}{m.group(2) or ''}" for m in map(DIRECTION.fullmatch, given_lines(payload)) if m]
+        line = json.dumps({'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+                           'session': payload.get('session_id'), 'agent': payload.get('agent_id'),
+                           'process': os.path.basename(os.environ.get('CLAUDE_CODE_MESSAGING_SOCKET', '')).split('.')[0] or None,
+                           'tool': payload.get('tool_name'), 'given': given or [held.get('scriptPath')]})
+        subprocess.run(['git', '-C', MESH, 'notes', '--ref', 'briefs', 'append', '-m', line, 'HEAD'], capture_output=True)
         return 0
     reason = f"{payload.get('tool_name')} refused (design/review-warnings.md rule 10): {why}"
     line = json.dumps({'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
