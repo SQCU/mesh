@@ -13,6 +13,36 @@ their actual data flow, give corrective assignments, review execution evidence, 
 The current assignment continues the operator turns in [the-compiler.md](the-compiler.md) and the
 [change-request naming standard](change-requests.md). It does not add requirements to their scope.
 
+## Correction to the first assignments
+
+The operator, after root reported that an existing lowerer consumed CPU graphs before the proposed replacement:
+
+> "because the existing lowerer consumed CPU graphs first." why is there an existing lowerer? how does this comport with the requirement that the structure of the written code comport more with the scheduler-lowerer demo repository than with mesh or metal microbench?
+
+Then:
+
+> clamp down on the lying claudes: give them narrower work assignments and no freedom to 'innovate' by reusing garbage detritus code
+
+The first briefs made repairing inherited bodies a work unit. Codex supplied that scope; it does not establish
+worker intent. That scope is withdrawn. The table below remains an inventory of responsibilities and initial
+editing locations, not authorization to preserve their implementation structure.
+
+Replacement assignments specify one concrete producer, the exact operand/result needed by its consumer, the
+reference source that supplies the implementation, and the inherited body displaced. Codex settles that contract
+before assigning it. Claude implements that bounded connection. It may identify a missing operand or source
+fact for correction; it may not select an inherited body as an alternative design or add a compatibility path.
+
+Read legacy source to identify callers, existing feature obligations and removal targets. It is not a source
+template. In particular, renovating `lower_metal.Native`, wrapping the provider's inherited traversal, or
+reordering a list of lowerers that claim residual graphs does not satisfy a replacement assignment. Target
+selection belongs to the compiler's explicit operands. A target receives its assigned body and finishes it.
+Runtime and signature consumers take the completed result; they do not reconstruct the caller's program.
+
+The individual corrective assignments replace conflicting first-round directions. Source checkpoints preserve
+the work for review; a committed intermediate patch is not structural acceptance. Local compiler/API checks
+are evidence, not a permission gate. Coordinate genuinely shared build outputs and hardware sessions without
+inventing a prohibition on ordinary local checks.
+
 ## Sources and their roles
 
 | Source | Role in this assignment |
