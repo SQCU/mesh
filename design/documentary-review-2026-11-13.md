@@ -246,12 +246,17 @@ removing an unsupported restriction does not supply an algorithm or an execution
 
 ### Literal terminology and type discipline
 
-The operator corrected this review's account of idiomaticity and then specified the means of compliance. Both
-complete turns are in [the change-request standard](change-requests.md). Variable names, function names and other
-relevant names are lifted exactly from specific sources or literature. This is the requested type discipline;
-it does not commission type systems, Pydantic models or other encodings of logical or formal types. Implementing
-agents do not require a justification of the choice. Describing the constraint only as avoiding familiar
-implementation habits understated it.
+The operator corrected this review's account of idiomaticity and specified the means of compliance. The complete
+turns are in [the change-request standard](change-requests.md). Variable names, function names and other relevant
+names use the words of specific sources or literature, allowing ordinary grammatical variation such as conjugation
+and pluralization. Invented alternate metaphors are excluded. This is the requested type discipline; it does not
+commission type systems, Pydantic models or other encodings of logical or formal types. Implementing agents do not
+require a justification of the choice. Describing the constraint only as avoiding familiar implementation habits
+understated it; reading it as a prohibition on grammatical variation also exceeds it.
+
+Existing code with the right function under a wrong name remains assigned work. The operator specifies a
+`#revise this; idiomatic vocabulary` note in one commit and a renaming commit afterward. A vocabulary finding
+does not authorize an agent to reject the work order.
 
 `61a3e15e` incorrectly grouped missing-type observations with unsupported restrictions. Those observations are
 restored in capture, disjoint-pages, page-queue, plan-to-bridge, problems-of-14b9a757 and unequal-shards, alongside

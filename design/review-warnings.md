@@ -75,6 +75,9 @@ The turns, quoted from the transcript, then each rule with its source.
     arbitrary claude-on-claude theory of mind problems as an external oracle"; turn 2).
   - The host reads the record to send further instructions to the agents it launched, or to launch agents to revise
     the code (turn 3).
+  - For vocabulary findings, follow the operator's clarification in [the change-request standard](change-requests.md):
+    ordinary grammatical variation is allowed; a wrong name with the right function is noted and renamed in
+    successive commits while the assigned work continues. It is not grounds to reject a work order.
 
 ### 7. A commit adds no assertion and no test
 

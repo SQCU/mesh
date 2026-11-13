@@ -13,9 +13,19 @@ The operator, continuing the same instruction:
 
 > we also aren't requiring type systems or pydantic or other attempts to encode logical or formal typings in code by any means; the specific kind of type discipline the user emphatically and selectively asks for continues to be using variable names and function names (and so on) which are lifted exactly from specific sources or specific literature; why this choice was made does not need to be justifeid to any implementing agent as it is never their position to supervene the user on simple constraints like these
 
-Use variable names, function names and other algorithm and data-structure names lifted exactly from the specified
-sources. This naming requirement does not request a type system, Pydantic models or other formal typing machinery.
-Implementing agents follow the constraint without requiring a justification of the operator's choice.
+The operator, clarifying grammatical variation and how to revise existing names:
+
+> "Implementers must follow it without substituting preferred terminology," somewhat clearly we need to prevent this from becoming a nonsense excuse for agents; conjugating, pluralizing, etc. the literal dictionary words literally used in cited implementations, cited papers, etc. is clearly comaptible with the agenda here; inventing alternate metaphorical language is not compatible with the agenda here. idiomaticity requirements are not a funny strategy agents may use to supervene work orders; if they're told to work with something that has a wrong-name but right-function, a `#revise this; idiomatic vocabulary` note in one commit and a second renaming commit is the appropriate response, not an 'agent-level rejection filter wrt work tickets'
+
+Use the words from the specified sources in variable names, function names and other algorithm and data-structure
+names. Ordinary grammatical variation, including conjugation and pluralization, is compatible with this
+requirement; invented alternate metaphors are not. This naming requirement does not request a type system,
+Pydantic models or other formal typing machinery. Implementing agents follow the constraint without requiring a
+justification of the operator's choice.
+
+When assigned code has the right function under a wrong name, continue the assigned work, record
+`#revise this; idiomatic vocabulary` in one commit, and follow with a renaming commit. A naming defect is work to
+revise, never a reason to reject the work order.
 
 For a request composing other requests in externally cited roles, see the
 [example and reusable form](compilation-composition-change-request.md#reusable-form).
