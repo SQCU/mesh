@@ -36,20 +36,19 @@
 
 - **The algorithm** is list scheduling in the order of the linear program's completion times (Hall, Schulz, Shmoys and
   Wein; design/list-scheduling-sources-2026-11-08.md, LS).
-- **It takes** a key for each of a node's replayed commands, and the commands' dependences. A command that reads a
-  received range has that range's published completion time as its key (`struct mesh_state` `times`). Every other
-  command has its dependence level as its key; no cited source states that key.
+- **It takes** each command's completion time from the linear program and the commands' dependences, as
+  [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md), R5, specifies for every instruction.
 - **It writes** the node's list of commands: `mesh_graph_heap_order` over those keys. In mesh rdma/mesh-graph.h that
   function takes the keys as `const double *priority` and the dependences as `const uint32_t *from` and `const
   uint32_t *to`, and writes `uint32_t *place`.
-- **Consumed by** the node's replay, which executes its commands in that list's order: Lee and Ha's self-timed order,
+- **Produced by** R5's compilation scheduler. **Consumed by** the node's replay, which executes its commands in
+  that list's order: Lee and Ha's self-timed order,
   as design/torch-source-lowering-change-request.md item 3 quotes it.
 
 ### 3. A weight on each task
 
 - **The data structure** is the weighting operand, as design/aot-compilation-change-request.md A3 gives it: "a weight
-  w on each task and a weight c on each edge", and the cables' capacities, from the map. The task weights are the
-  lengths of `mesh_plan`'s tasks; no cited source states that.
+  w on each task and a weight c on each edge", and the cables' capacities, from the map.
 - **Produced by** the caller of the compilation. **Consumed by** the compilation's router and its scheduler, which
   compute no weight (A3).
 - **Replaces:** the weighting operand of one `mesh.Weight` per transfer.

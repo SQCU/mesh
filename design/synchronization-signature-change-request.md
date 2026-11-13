@@ -153,8 +153,7 @@ Each takes the signature of item 1 and prints it.
   - Replay a captured call graph through its compiled program with the monitor of items 3 and 4 attached.
   - For a program whose static schedule has no wait, the signature holds only the method's own operations. In the 252
     tok/s replay (metal-microbench 864a0ae4), that was one submission per run.
-  - A wait the signature does not have stops the playback at the line that issues it. A playback that runs to
-    completion has run exactly the compiler's signature.
+  - A wait the signature does not have stops the playback at the line that issues it.
 
 ### 6. Synchronization inside kernels
 

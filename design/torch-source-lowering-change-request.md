@@ -301,17 +301,13 @@ what "them" names)
   - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
   - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.
   - `torch.linalg.matrix_exp` has no such function in LAPACK. Item 6 writes it.
-  - Every operator whose method, on the processor the placement names, needs an iteration depth that tensor data
-    decides gets, from the operator lowering, one plain message that names the operator and says that an iteration
-    depth that depends on data is not compiled (the operator, above: "as long as we emit boring ah ah errors which
-    tell the user in boring ah ah terms that data dependent iteration depth isn't compilable with meshlib"). Off the
-    CPU that includes `eigh`, what is composed from it, and the polar decomposition's Halley continuation, while item
-    6 states no fixed depth for them.
+  - For a program outside item 2's static graph scope, the lowering gives a plain message explaining the
+    data-dependent iteration (the operator, above: "as long as we emit boring ah ah errors which tell the user in
+    boring ah ah terms that data dependent iteration depth isn't compilable with meshlib").
   - The functions cited above are the CPU's. Placement is an operand (the operator, quoted in
     design/aot-compilation-change-request.md A2: "we simply need to consume operands which choose these placements,
     letting us define and implement an optimizing chooser function *later*"). Item 6 states what these operators are
     on the other processors.
-  - No lowering written by mesh repeats a body a number of times that tensor data decides.
 
 ### 6. The same operators as matrix multiplications and QR factorizations, placed on every processor
 
@@ -395,11 +391,12 @@ The operator:
     max_iterations:`; `max_iterations` is an operand whose default is JAX's 10. Each of those steps is a QR
     factorization where `c > CHOLESKY_CUTOFF`, or a Cholesky factorization and two triangular solves otherwise, with
     matrix multiplications. Their number is known at compilation. Whether the iteration converged is a value returned
-    with the result. No quoted source says how many to compile of the steps `_qdwh` runs after its computed
-    coefficients are used up: "If l has converged but u still has not, continue with Halley's method (coef = None)
-    until convergence", under `lax.while_loop(cond_fun, body_fun, (k, u, is_not_converged))` with `return
-    jnp.logical_and(is_not_converged, k < max_iterations)`. After them the refinement `u = 1.5 * u - 0.5 * u @
-    (u.T.conj() @ u)` and the Hermitian factor `h = u.T.conj() @ x`, `h = (h + h.T.conj()) / 2` follow as `_qdwh`
+    with the result. The Halley continuation after those steps is bounded by the same `max_iterations`: its
+    counter starts at the number of computed coefficients and increments once per step. Its condition is
+    `jnp.logical_and(is_not_converged, k < max_iterations)`. Thus the remaining bound is known at compilation;
+    the actual convergence count is not. This bound does not guarantee convergence. After them the refinement
+    `u = 1.5 * u - 0.5 * u @ (u.T.conj() @ u)` and the Hermitian factor `h = u.T.conj() @ x`,
+    `h = (h + h.T.conj()) / 2` follow as `_qdwh`
     states them.
   - The algorithm for `eigh` is QDWH-eig (Nakatsukasa and Higham, §3.1), in which a polar decomposition splits the
     matrix into two blocks that share its eigenspaces below and above a split point, and the same is done to each
@@ -411,11 +408,10 @@ The operator:
     compositions PyTorch states (item 5), of that `svd` or `eigh`.
   - The algorithm for `matrix_exp` is scaling and squaring as `_calc_P_Q`, `_squaring` and `expm` state it. The count
     `n_squarings` is a value computed from the L1 norm. There are `max_squarings` steps, an operand whose default is
-    JAX's 16; step `i` gives the square where `i < n_squarings` and its input otherwise. Each `lax.cond` and
-    `lax.switch` of the source is a selection among computed values, as JAX states of `cond` under `vmap`, and not a
-    branch. Where `n_squarings > max_squarings` the result is NaN, as `_nan` states, and the node reports a runtime
+    JAX's 16; step `i` gives the square where `i < n_squarings` and its input otherwise. The cited `cond`-to-`select`
+    rewrite applies under `vmap` over predicates; it is not a rule for every `cond` or `switch`.
+    Where `n_squarings > max_squarings` the result is NaN, as `_nan` states, and the node reports a runtime
     error (the operator, above: "a runtime error and some NaNs").
   - Where the placement operand names the CPU for the whole operator, the operator is item 5's node.
-  - No lowering here repeats a body a number of times that tensor data decides.
   - No quoted source states `eig` and `eigvals` of a matrix that is not Hermitian on the GPU or the Neural Engine.
   - No quoted source says which of these operations the Neural Engine executes, or at what precision.

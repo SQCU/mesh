@@ -317,16 +317,14 @@ its function and type names are given beside each stage.
 > more citationally in the change request documentation s.t. any competing interpretations are completely ablated...
 
 - **Stage:** the runtime. It takes the scheduled value's name and nodes and orders the calls of its functions.
-- **What the code must do.** Order the function executions of the program on the island in one order, the same at
-  every node, and keep the program's own order of its calls within it.
-  - A run is one program on the whole collective. "Across all programs running on the island" is Pathways' setting,
-    many clients' programs, and no requirement here asks for it.
+- **What the code must do.** Order function executions on the island in one order, the same at every node, and keep
+  each program's own order of its calls within it.
+  - The operator:
     > why do you think you need special rules about 'numbers of programs at once'? literature. citations. canonical
     > algorithms and datastructures. ignore and brush away idiomatic explanation, specification, etc.
     The operator's turn on attaching: "is attaching conceptually real or do programs do nothing but what the allocator
     lets them, with the shapes and coarse bin packing requierments of allocation known aot?"
-    (design/plan-to-bridge-change-request.md, the turns). The scheduler below orders the one program's function
-    executions, as it is written. Its one sender keeps FIFO Order (below).
+    (design/plan-to-bridge-change-request.md, the turns).
 - **Why there is one order.** Pathways (P. Barham et al., Pathways: asynchronous distributed dataflow for ML, MLSys
   2022):
   - §2: "the system will deadlock if communicating computations are not enqueued in a consistent order".

@@ -2432,16 +2432,14 @@ consumes it.
   handle is looked up at run time.
 - **A program's pages are released at its retirement by deferred reclamation** (P. E. McKenney and J. D. Slingwine,
   Read-copy update, PDCS 1998; K. Fraser, Practical lock-freedom, PhD thesis, Cambridge, 2004; C3.4).
-- **Function executions are the one program's,** ordered by a fixed sequencer: design/aot-compilation-change-request.md
+- **Function executions** are ordered by a fixed sequencer: design/aot-compilation-change-request.md
   A7 (P. Barham et al., Pathways, MLSys 2022, §4.4; Défago, Schiper and Urbán, 2004).
 - **Where it composes.**
   - Placement and weights are operands, passed in by the program from whatever function chooses them (aot-compilation
     A2, A3). Placement takes the placement operand, and the schedule takes the weighting operand (R3, R5).
   - The pages are R2's rows, written when the static schedule is made and part of the scheduled value.
   - rdma/mesh-dataflow.c: attaching only maps the region.
-- **No source states that several programs run at once.** The phrase appears only in Claude's text: this request's R8
-  table, the disjoint-pages request's C3 item 4, D.3 item 1 and D.5, and deliverables.md's "T7. Multi-tenant fabric by
-  lease". The operator's one turn on it rejects run-time allocation: "is attaching conceptually real or do programs do
+- **The operator on allocation:** "is attaching conceptually real or do programs do
   nothing but what the allocator lets them, with the shapes and coarse bin packing requierments of allocation known aot?
   do you think we're supporting dynamic runtime allocations or dynamic runtime page->page access patterns outside of the
   types and reuirements presented so far?" (the turns, above).
@@ -2450,5 +2448,4 @@ consumes it.
     Knuth vol. 1 §2.5). That is run-time dynamic storage allocation, which the disjoint-pages request's A2 names as the
     strategy its allocator replaces;
   - the walk of every claim head in `mesh_transfers_start` to test its handle (`mesh_plan_head`);
-  - `ENOMEM` from fragmentation, the claim's record holding one `count<<32|first` word a run;
-  - any rule for several programs.
+  - `ENOMEM` from fragmentation, the claim's record holding one `count<<32|first` word a run.
