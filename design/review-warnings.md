@@ -225,3 +225,26 @@ turns says so.
   the file adheres. The bits are appended to metal-microbench `output_data/new-file-style-guides.jsonl`, and the
   operator's warning is given where the file names no guide, names one that is not there, or does not adhere.
 
+### 14. One record for each commit
+
+- **Source:** the operator, 2026-11-12:
+
+> why is a post commit hook not always writing an output wrt a specific commit? who put an iterator into any of these?
+
+> post commit hooks souldn't be string typed like this. preventing claims and pseudodocumentation and tests from appearing is unconditional.
+
+- **Rule:** this replaces the scripts of rules 7, 8, 9, 11, 12 and 13; rule 10's gate stays.
+  - git's own post-commit hook runs bin/mesh-post-commit.py once for the commit just made, in either repository. It
+    keeps no marker and reads no list of commits.
+  - It writes its records as git notes on that commit (`git notes --ref measurements show <commit>`): one for the
+    commit, one for each file the commit adds, one for each change request item the message names. A measurement
+    that fails is a record that says so; nothing is tried again.
+  - The commit's record is Claude Haiku's answers about the whole commit, message and diff, whatever the files are
+    called: an assertion, a test, a claim of fact, a claim of requirement, a requirement removed, a change to
+    program source, a change to a hook. The script adds which files gain a claim and no block-quoted turn, whether a
+    block-quoted line is removed, which passages presented as the user's words no typed turn contains, and whether
+    program source changes with no change request item named.
+  - bin/mesh-told.py, a separate script with no model, reads those records, writes each commit's warnings as a note
+    (`--ref warnings`) and tells the session.
+  - Which questions are asked is Claude's choice from the operator's turns quoted in rules 7 to 13.
+

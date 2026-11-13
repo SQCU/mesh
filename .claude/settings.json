@@ -22,52 +22,10 @@
           },
           {
             "type": "command",
-            "timeout": 900,
-            "statusMessage": "Measurement of what new commits remove from design documents",
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-commentary-review.py",
-            "async": true
-          },
-          {
-            "type": "command",
-            "timeout": 900,
-            "statusMessage": "Measurement of commits that name a change request item",
+            "timeout": 30,
+            "statusMessage": "Warnings from the records of new commits",
             "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-change-request-review.py"
-          },
-          {
-            "type": "command",
-            "timeout": 900,
-            "statusMessage": "Measurement of the style guide each new file names",
-            "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-style-guide-review.py"
-          },
-          {
-            "type": "command",
-            "timeout": 900,
-            "statusMessage": "Assertion and test measurement of new commits",
-            "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-assert-review.py"
-          },
-          {
-            "type": "command",
-            "timeout": 900,
-            "statusMessage": "Measurement of the claims new commits add to documents",
-            "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-claims-review.py"
-          },
-          {
-            "type": "command",
-            "timeout": 60,
-            "statusMessage": "Warnings for documents' claims with no quoted user turn",
-            "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-claims-warning.py"
-          },
-          {
-            "type": "command",
-            "timeout": 900,
-            "statusMessage": "Parity of block-quoted turns with typed turns",
-            "async": true,
-            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-quote-parity.py"
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-told.py"
           }
         ]
       }
