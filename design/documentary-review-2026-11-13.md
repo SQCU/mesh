@@ -246,16 +246,19 @@ removing an unsupported restriction does not supply an algorithm or an execution
 
 ### Literal terminology and type discipline
 
-The operator corrected this review's account of idiomaticity. The complete turn is now in
-[the change-request standard](change-requests.md). The instruction concerns the propagation of algorithms and
-data structures under the literal terminology of their sources, including their identities through IRs,
-serialization and deserialization. Describing this only as avoiding familiar implementation habits understated it.
+The operator corrected this review's account of idiomaticity and then specified the means of compliance. Both
+complete turns are in [the change-request standard](change-requests.md). Variable names, function names and other
+relevant names are lifted exactly from specific sources or literature. This is the requested type discipline;
+it does not commission type systems, Pydantic models or other encodings of logical or formal types. Implementing
+agents do not require a justification of the choice. Describing the constraint only as avoiding familiar
+implementation habits understated it.
 
 `61a3e15e` incorrectly grouped missing-type observations with unsupported restrictions. Those observations are
 restored in capture, disjoint-pages, page-queue, plan-to-bridge, problems-of-14b9a757 and unequal-shards, alongside
 the clarified producer/consumer assignments. Source-lowering's qualification about unidentified CPU routines is
-also restored. A missing source binding is not resolved by deleting the sentence that records it. The present
-review does not claim to have supplied the missing representation bindings.
+also restored. These observations do not commission new types or formal typing machinery. The outstanding naming
+work is to identify the specific source and use its names; deleting an observation does not establish that this
+has been done. The present review does not claim to have completed that naming work.
 
 ## Verification and limits
 
