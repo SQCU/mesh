@@ -432,8 +432,7 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
   - "random graph algorithms in random places" (a Dijkstra inside the collective solver, breadth-first walks inside the
     link-map and fabric checks, a path enumerator inside Python routing) ≺ "one header" of graph algorithms "for
     consumers of weights upon graphs or samples upon graphs" (10-30). Each commit to mesh or metal-microbench is read
-    for this by Claude Haiku, given the commit's changed functions whole (bin/mesh-c9-review.py, the `C9 review of the
-    commit` hook in each repository's .claude/settings.json), not by a parser.
+    for this by Claude Haiku, given the commit's changed functions whole (bin/mesh-post-commit.py), not by a parser.
   - a second producer of a value one module already produces ≺ that module called with the consumer's operands
     (2026-11-12: "singular, centralized, shared, compilation and scheduling related headers, operands, intermediates,
     and outputs replacing incoherent and irreconciliable inlinings of many different algorithms in many different

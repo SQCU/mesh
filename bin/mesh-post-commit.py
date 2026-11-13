@@ -20,6 +20,7 @@ HAIKU = ['claude', '-p', '--model', 'claude-haiku-5-5', '--tools', '', '--settin
          '--no-session-persistence', '--strict-mcp-config']
 SONNET = [part if part != 'claude-haiku-5-5' else 'sonnet' for part in HAIKU]
 PROCESS = os.path.basename(os.environ.get('CLAUDE_CODE_MESSAGING_SOCKET', '')).split('.')[0] or None
+MARK = os.path.expanduser(f'~/.cache/mesh-agent/{PROCESS}')
 ENVIRONMENT = {name: value for name, value in os.environ.items() if not name.startswith('GIT_')}
 COMMIT = """You are given one git commit on stdin: its message, then its diff. Measure only whether each thing is
 present in what the commit ADDS (its message, and the diff lines that begin with '+') or, where a question says so,
@@ -33,13 +34,15 @@ output, or script whose purpose is to run code and compare what it produces with
 FACT: an added line states, in the writer's own words and not inside a quotation, a claim of fact about the
 repository: what some code or file is, does, holds, has or lacks; what a commit did; what is finished, covered,
 outstanding, passing or failing; a count or a measurement. This includes prose in documents, comments and
-docstrings. The commit's own message describing its own change is not counted.
+docstrings. Not counted: the commit's own message describing its own change, and text that is a program's data
+(a string a program prints, sends or asks a model).
 REQUIREMENT: an added line states, in the writer's own words and not inside a quotation, a claim of requirement:
 what must, shall, should, has to, needs to or is to be done, written, kept, deleted or satisfied; a rule; an order of
-work; a condition; a definition of when something is done.
+work; a condition; a definition of when something is done. Text that is a program's data is not counted.
 REQUIREMENT-REMOVED: a removed line states a requirement that no added line states in the same words.
-SOURCE: the commit changes what a program does when it runs: source code of the software the repository builds.
-Changes only to documents, to review hooks and their settings, or to data are not this.
+SOURCE: the commit changes source code of the software the repository builds and ships. Scripts that review,
+measure or gate commits and tool calls, their settings, documents and data are not that software; a commit that
+changes only those is NO.
 HOOK: the commit changes a review hook, the questions a hook asks, a gate on tool calls, or the settings that say
 which hooks run.
 
@@ -193,6 +196,7 @@ def commit(repo, sha):
                   truncated=len(shown) > LIMIT)
     record['source_without_item'] = record['source'] and not named
     record['process'] = PROCESS
+    record['agent'] = open(MARK).read().strip() if PROCESS and os.path.exists(MARK) else None
     given = given_items(repo, PROCESS) if PROCESS else []
     record['launched_on'] = given
     record['names_item_not_launched_on'] = [name for name in record['names_item']

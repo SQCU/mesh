@@ -28,6 +28,12 @@ def committed(path):
     return os.path.isfile(path) and inside.returncode == 0 and clean.returncode == 0
 
 
+def linked(path):
+    index = os.path.join(MESH, 'design', 'change-requests-index.md')
+    names = re.findall(r'\]\(([^)\s]+\.md)\)', open(index).read())
+    return path in {os.path.join(MESH, 'design', name) for name in names}
+
+
 def refusal(payload):
     tool, held = payload.get('tool_name'), payload.get('tool_input') or {}
     if tool == 'Workflow':
@@ -40,9 +46,10 @@ def refusal(payload):
     if not lines:
         return None if tool == 'SendMessage' else 'the call has no text'
     matches = [DIRECTION.fullmatch(line) for line in lines]
-    inlined = [line for line, match in zip(lines, matches) if not (match and committed(match.group(1)))]
+    inlined = [line for line, match in zip(lines, matches)
+               if not (match and committed(match.group(1)) and linked(match.group(1)))]
     if inlined:
-        return (f"{len(inlined)} line(s) are not a direction to read a committed, unmodified file. A brief is lines of "
+        return (f"{len(inlined)} line(s) are not a direction to read a committed, unmodified document that design/change-requests-index.md links. A brief is lines of "
                 f"the form 'Read /absolute/path and act on it.', with ', item N', ', section N' or ', lines N-M' "
                 f"allowed after the path, and nothing else. First such line: {inlined[0][:160]!r}")
     named = os.path.basename(matches[0].group(1))

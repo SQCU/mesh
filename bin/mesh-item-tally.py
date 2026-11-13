@@ -1,5 +1,6 @@
 """design/review-warnings.md#15-who-was-given-what-and-what-an-item-has-had"""
 import json
+import re
 import subprocess
 import sys
 
@@ -26,6 +27,15 @@ def main():
     print(f'{measure}: {len(carried)} of {sentences} sentences carried by {len(commits)} commit(s)')
     print('\n'.join(commits))
     print('never carried:', sorted(set(range(1, sentences + 1)) - carried))
+    lines = git(REPOSITORIES[0], 'show', f'HEAD:{document}').splitlines()
+    start = next((at for at, line in enumerate(lines) if re.match(rf'#{{1,6}}\s+{re.escape(name)}[.:\s]', line)), None)
+    if start is not None:
+        depth = len(lines[start]) - len(lines[start].lstrip('#'))
+        end = next((at for at in range(start + 1, len(lines)) if re.match(rf'#{{1,{depth}}}\s', lines[at])), len(lines))
+        for named in sorted(set(re.findall(r'`([A-Za-z_][\w.:/-]*)`', ' '.join(lines[start:end])))):
+            held = [f'{repo}: {n}' for repo in REPOSITORIES
+                    for n in [len(git(repo, 'grep', '-l', '-F', named.split('/')[-1], '--', ':!*.md').split())] if n]
+            print(f'`{named}` is in ' + ('; '.join(f'{h} file(s)' for h in held) or 'no source file'))
     return 0
 
 

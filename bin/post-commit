@@ -1,0 +1,4 @@
+#!/bin/sh
+repo=$(git rev-parse --show-toplevel)
+sha=$(git rev-parse HEAD)
+( env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE nohup /opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-post-commit.py "$repo" "$sha" >/dev/null 2>&1 & )

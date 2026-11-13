@@ -1,10 +1,6 @@
 # Review warnings
 
-The reviewers' style guide. It governs the warnings that the post-commit review hooks (both repositories'
-.claude/settings.json) and the reviews bin/mesh_review.py runs hand back, to the session that committed or to the host
-that ran the review: how a reviewer writes a warning, and how the session or host reads it. Its form is its own: the
-turns, quoted verbatim from the transcript, then each rule with its source. A rule that is Claude's reading of the
-turns says so.
+The turns, quoted from the transcript, then each rule with its source.
 
 ## The turns
 
@@ -62,22 +58,7 @@ turns says so.
     without waiting for it to finish." "After the background process exits, Claude Code delivers the
     `additionalContext` and `systemMessage` fields from the hook's JSON response to Claude on the next conversation
     turn".
-- **Rule:** each post-commit review hook sets `"async": true`. The commit returns at once, and the session's work
-  continues while the review runs. When the review ends, its warnings reach the session on its next turn, with status
-  0, and are appended to the review record (metal-microbench output_data/change-request-reviews.jsonl). Nothing is
-  blocked, reverted or deleted because of a warning.
-
-### 2. A warning quotes the sentence its place departs from
-
-- **Source:**
-  - turn 1: "do form feedback which may require changes in most situations where they appear".
-  - turn 3: change requests "are a bespoke documentary standard to catch attempts to add false new requirements or
-    false new constraints which are otherwise immeasurable".
-- **Rule:** each warning names its place (the path and line), quotes the sentence of the governing document the place
-  departs from, with that document's path, and names the change that would make the place adhere to that sentence.
-  What a reviewer finds that no governing sentence states, such as code it takes to be unused, is not a warning: it may
-  be written in the review's summary, and asks for no change. The three-part form is Claude's reading of turn 1, and
-  the exclusion is Claude's reading of turn 3; no quoted turn states either.
+- **Rule:** nothing is blocked, reverted or deleted because of a warning.
 
 ### 3. How the receiving session reads a warning
 
@@ -95,43 +76,6 @@ turns says so.
   - The host reads the record to send further instructions to the agents it launched, or to launch agents to revise
     the code (turn 3).
 
-### 4. A clause binds whenever it was written
-
-- **Source:**
-  - turn 5: "they are not optional 'would be nice to haves'"; turn 8.
-  - design/data-flow.md, the operator, 2026-11-10 21:02: "a definite data flow be written exactly as documentation and
-    used to recondition and restate all outstanding requirements".
-  - The review of mesh 6d4f007b (metal-microbench output_data/change-request-reviews.jsonl) read that
-    compiler/mesh_compiler/bridge.py wrote again what `plan_layout` and `plan_publish` write, and set it aside: "A9's
-    assignment of the lists to `mesh_plan` is one of the pre-example requirements the memorandum says must be restated
-    against data-flow.md, so I don't count it as binding here."
-- **Rule:**
-  - A reviewer reads a commit against the clauses of the change requests that govern what the commit changes, in the
-    requests themselves. A clause is not set aside because its request was written before design/data-flow.md.
-  - Where a reviewer does set a clause aside, for any reason, the clause and the reason are written as a warning, not
-    in the summary. This is Claude's reading of turns 5 and 8.
-
-### 5. One producer of each value
-
-- **Source:**
-  - turn 6.
-  - design/rubrics.md, C9: "Ranks higher: the form with fewer copies of each primitive, offered for others to call
-    rather than spliced into their code."
-  - design/commentary-review.md, the operator: "removing duplicate lowerings from the codebase is one of the first
-    basic prerequisites for compiler optimizations to be applied and not regressed later."
-- **Rule:** a commit that computes, outside the stage or shared module that produces it, a value that stage or module
-  already produces gets a warning that quotes turn 6 and names the one producer. Such values are a page or hop list, a
-  storage placement or lifetime, a dependence relation, an order, a synchronization signature, and the contents of a
-  record a shared header declares. The C9 hook (bin/mesh-c9-review.py) reads every commit for this as well. The list
-  of values is Claude's reading of turn 6.
-
-### 6. A statement that work is done is read clause by clause
-
-- **Source:** turn 7: "before anyone got the impression the workload was 'done'".
-- **Rule:** where a commit, or a document it changes, says an order, an item or a request is done, covered or
-  implemented, the reviewer reads each clause of that item, in its request, against the code at that commit, and writes a warning for each clause that does not hold there. Agreement of results with a reference run
-  does not show that a clause holds. This is Claude's reading of turn 7.
-
 ### 7. A commit adds no assertion and no test
 
 - **Source:** the operator, 2026-11-12: "delete all assertions too then, then write a commit time hook that catches
@@ -139,11 +83,6 @@ turns says so.
   measure the *presence* or *absence* of those properties, without respect to any requirements or claims amde by any
   claude. a separate distinct function in the post commit hook must then log all such commits as 'noncompliant' and
   'outstanding' to impose thos property on all further work."
-- **Rule:** bin/mesh-assert-review.py runs after every Bash call of a session in either repository. For each commit
-  made since it last ran, `measured` asks Claude Haiku two yes/no questions about the lines the commit adds: whether
-  an assertion is present, and whether a test is present. It is given the diff alone. `logged` appends each commit
-  with either present to metal-microbench `output_data/assert-test-commits.jsonl` as `noncompliant` and
-  `outstanding`, and the session is told.
 
 ### 8. A document's claims are measured
 
@@ -151,22 +90,11 @@ turns says so.
 
 > write another commit hook to, yet again, produce yet another append-only log for whether a document is inlining claims of fact or claims of requirement & whether there is any citation to a block quoted verbatim user turn. these are three different bits, and also are haiku-judgeable from a commit diff alone. a separate, distinct, script, as with the previous stage, must report an appended warning for every commit which is taking such an action, as factual claims without source, like unit tests or asserts, are strongly confirmatory proof that agents are going 'feral' and 'totally ignoring the scope of proper sanctioned work in the repository as usual'.
 
-- **Rule:** bin/mesh-claims-review.py gives Claude Haiku the lines each new commit adds to documents and appends
-  three bits for each document to metal-microbench `output_data/document-claims-commits.jsonl`: a claim of fact, a
-  claim of requirement, a block-quoted user turn. bin/mesh-claims-warning.py, a separate script, appends a warning to
-  `output_data/document-claims-warnings.jsonl` for each such commit that adds a claim and quotes no user turn, and
-  tells the session.
-
 ### 9. A quoted turn is found where it was typed
 
 - **Source:** the operator, 2026-11-12:
 
 > now was this something the user said to do or is htis yet another thing that requires post commit hooks to act as syntax checkers or parity checkers to ensure that change requests aren't forged by subagents or briefly unattended agents...?
-
-- **Rule:** bin/mesh-quote-parity.py takes each Markdown block quote a new commit adds to a document and looks for it,
-  whitespace aside, in the turns typed into the two repositories' sessions and into Codex. It appends the commit to
-  metal-microbench `output_data/quote-parity-commits.jsonl` with the passages no typed turn contains, and tells the
-  session of each. No model reads anything.
 
 ### 10. A brief is a direction to read a file
 
@@ -177,8 +105,7 @@ turns says so.
 - **Rule:** bin/mesh-brief-gate.py runs before each Agent, SendMessage and Workflow call of a session in either
   repository. Where the call's text holds a line that is not `Read /absolute/path and act on it.`, with `, item N`,
   `, section N` or `, lines N-M` allowed after the path, the call is
-  refused before any agent starts, and a warning is appended to metal-microbench
-  `output_data/agent-brief-warnings.jsonl`. No model reads anything. The form of the permitted line is Claude's
+  refused before any agent starts, and the refusal is written as a note (`git notes --ref brief-refusals`). No model reads anything. The form of the permitted line is Claude's
   reading of the turn and of the operator's turn of 2026-11-08: "why are you 'descirbing' anything in 'briefs' instead
   of literally saying 'there is a change request document. read it and act on the topic.'"
 
@@ -188,42 +115,17 @@ turns says so.
 
 > rewrite the review hook to have those seven properties or whatever idk
 
-- **Rule:** bin/mesh-change-request-review.py replaces the review of every commit that rules 1 to 6 describe. The
-  seven properties are Claude's, stated to the operator in the turn before this one.
-  1. It reads a commit only where the commit message has a line `Change-Request: <document>, item <N>` and the
-     document is one design/change-requests-index.md links. Any other commit it leaves alone.
-  2. Its reader is given that item's text and the commit's diff, and has no tools.
-  3. Its questions are the constant `PROMPT` of the script.
-  4. It answers, for each sentence of the item, carried, not carried or not addressed, and one bit for whether the
-     diff adds what the item does not state. A sentence it quotes that is not in the item is counted as such.
-  5. Each run starts with nothing from an earlier run.
-  6. It appends to metal-microbench `output_data/change-request-measurements.jsonl` and blocks nothing.
-  7. What it tells the session is those counts. The item is the instruction; the measurement is not.
-
 ### 12. The measurement of a change to a design document
 
 - **Source:** the operator, 2026-11-12:
 
 > apply the same approach to each or whatever
 
-- **Rule:** bin/mesh-commentary-review.py replaces the commentary review. For each document under design/ that a new
-  commit changes or deletes, Claude Haiku is given that document's diff alone and answers whether a removed line
-  states a requirement that no added line states in the same words. The script itself finds whether a removed line
-  is a block quote that no added line repeats. Both bits are appended to metal-microbench
-  `output_data/design-document-changes.jsonl`, and the session is told where either is set. The two questions are
-  Claude's choice of what to measure.
-
 ### 13. The measurement of a new file's style guide
 
 - **Source:** the same turn, and the operator, 2026-11-09:
 
 > add a new post-commit hook for catching claudes adding non-executable files to the repo which have no style guide or cite a style guide but do not adhere to it, which must produce a post-commit warning that claudes are doing decadent and deceptive things as usual. existing nonexecutable files are grandfathered for now because i do'nt want to have a cutesy dialogue about this.
-
-- **Rule:** bin/mesh-style-guide-review.py replaces the style review. For each non-executable file a new commit adds,
-  Claude Haiku is given the file alone and answers which document it names as its guide, or none. Where that
-  document is in the repository, Claude Sonnet is given the guide and the file, with no tools, and answers whether
-  the file adheres. The bits are appended to metal-microbench `output_data/new-file-style-guides.jsonl`, and the
-  operator's warning is given where the file names no guide, names one that is not there, or does not adhere.
 
 ### 14. One record for each commit
 
@@ -268,6 +170,20 @@ turns says so.
   - bin/mesh-item-tally.py prints, for one item, which of its sentences the commits naming it have carried.
   - The graph-module and comment hooks (bin/mesh-c9-review.py, bin/mesh-comment-review.py) are deleted; their
     questions are the `source` record of bin/mesh-post-commit.py, asked of every commit.
-  - The process is the unit, not the agent: the agents of one Claude process are not told apart. That limit is
-    Claude's to state; nothing read here gives an agent its own identity.
 
+### 16. What an agent leaves and says
+
+- **Source:** the operator, 2026-11-12:
+
+> it is in the spirit of this exercise to identify what you didn't do, then fix this immediately, wrt this module, instead of going into ever finer grained detail of 'why why why why'.
+
+- **Rule:**
+  - bin/mesh-stop.py runs when a session or an agent stops. It writes a note (`git notes --ref stops`) with the
+    tracked files left uncommitted in each repository and, for an agent, Claude Haiku's three answers about its last
+    message: says part of its work was not done, asks its reader for something, states what holds without naming a
+    commit.
+  - bin/mesh-agent-mark.py writes which agent is running a Bash call; a commit's record carries it.
+  - bin/mesh-brief-gate.py allows a brief only to a document design/change-requests-index.md links.
+  - bin/mesh-item-tally.py searches the source of both repositories for each name an item writes in code marks.
+  - bin/post-commit is the file git's post-commit hook in each repository links to.
+  - What is measured is Claude's choice.

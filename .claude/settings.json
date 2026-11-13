@@ -24,6 +24,38 @@
             "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-brief-gate.py"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-agent-mark.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 150,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-stop.py"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 150,
+            "command": "/opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-stop.py"
+          }
+        ]
       }
     ]
   }
