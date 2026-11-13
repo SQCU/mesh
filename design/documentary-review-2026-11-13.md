@@ -18,7 +18,8 @@ commits, the operator turns they quote, and selected primary sources. The scope 
 requests, the November 9–10 memoranda, `data-flow.md`, `the-compiler.md`, the change-request format, and the two
 November 13 review memoranda. The long embedded transcripts and agent reports were used as attributed records;
 not every report or external quotation was independently verified. This was a documentary review, with no compiler
-or runtime execution. The existing change to `compiler/mesh_compiler/placement.py` was outside this work.
+or runtime execution. The existing change to `compiler/mesh_compiler/placement.py` was outside the initial review;
+the later section on the interrupted placement patch records its subsequent review and removal.
 
 The operator then requested a contextual review of these findings:
 
@@ -265,6 +266,42 @@ also restored. These observations do not commission new types or formal typing m
 work is to identify the specific source and use its names; deleting an observation does not establish that this
 has been done. The present review does not claim to have completed that naming work.
 
+## The interrupted placement patch
+
+The operator's subsequent instruction to review and discard misassigned work, and the short statement of the
+library's scope, are quoted in [the compiler work order](the-compiler.md).
+
+The uncommitted `compiler/mesh_compiler/placement.py` patch came from the Claude agent assigned "Placement and
+export: round seven" in session `55974018-f56d-4c8b-8973-6fc61b49140c`. Its record is
+`~/.claude-personal/projects/-Users-mdot-metal-microbench/55974018-f56d-4c8b-8973-6fc61b49140c/subagents/agent-a76ce7f0730761034.jsonl`.
+Assignment message `c718b916-772c-41ba-ac68-d46ea6771af3`, November 12 at 15:56:22 UTC, instructed the agent to add
+window-sharding and flip cases to the existing placement implementation. It specified files the agent could edit
+and said: "Do NOT start: LiteRT/delegate export, unequal-shards item 12's all-gather method choice, item 7's
+cross-machine times, item 8(b) (these wait on the operator)." These are the supervisor's directions, not quotations
+of the operator.
+
+Tool calls in messages `5d255940-0372-456f-a7b3-eb7ce6131ca8` at 16:08:38 and
+`71cdd124-e082-44c2-bdf8-362bfd2c062f` at 16:12:58 wrote the flip branch and the `region`/`gridded` changes. The patch
+had 54 added and 12 removed lines. `gridded` added another loop that copies operator nodes and constructs shard
+metadata, alongside the existing corresponding construction in `meshed`. It did not complete the scheduling,
+lowering or native-execution connections described by the composition request. This is a source review; it does
+not establish numerical behavior of the patch.
+
+The coordinator stopped this agent at 16:14:09. The patch remained uncommitted through the present review.
+The operator clarified that the contemporaneous halt/revert instruction concerned the terminal damage caused by
+agents killing processes. It is not evidence that the placement patch had been ordered reverted then.
+
+This evidence does not show that the placement worker lied about its immediate assignment: its changes followed
+that assignment. The supervisor assigned incremental changes to the old implementation. Their mismatch with the
+current replacement assignment, together with the operator's present authorization to discard such work, is the
+basis for removing the patch. Treating its author's ownership as a reason to preserve it was an error in the
+Codex readiness review.
+
+The patch was recorded only for history in `6f0d2880`, then removed by `84d92713`. The resulting placement file has
+blob `aa54a1f8c256429e59e5f6089df92ae1caa870cd`, identical to the committed file before that recording. No other
+implementation commit was reverted. This disposes of the interrupted patch; it does not certify the older
+placement implementation or retain it as the design for the replacement.
+
 ## Verification and limits
 
 For `71de11eb` and `60636aac`, the edits were checked against the passages and sources described in the first review;
@@ -274,7 +311,8 @@ execution-cost meaning of task weights. These are documentary checks, not eviden
 
 `61a3e15e` touched twelve existing documents. The terminology correction changes nine documents, including the
 change-request standard. All pre-existing blockquoted lines remain, local Markdown link targets resolve, and
-`git diff --check` passes. The compiler source was not changed by this review.
+`git diff --check` passes. Those documentary passes did not change compiler source. The later placement removal
+is recorded separately above and was checked against the original committed blob without executing the patch.
 
 The November 13 compiler-boundary and hook memoranda already identify their inspected revisions and limits; they
 were not promoted to requirements. Some requests still describe old concrete interfaces, and some source mappings
