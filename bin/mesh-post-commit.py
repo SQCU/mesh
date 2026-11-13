@@ -122,7 +122,7 @@ def asked(reader, prompt, given):
     read = subprocess.run([*reader, '--system-prompt', prompt, 'Answer.'], input=given, capture_output=True, text=True,
                           cwd=tempfile.gettempdir(), timeout=600, env=ENVIRONMENT)
     if read.returncode:
-        raise RuntimeError(f'the reader exited {read.returncode}: {read.stderr.strip()[:200]}')
+        raise RuntimeError(f'the reader exited {read.returncode}: {(read.stderr.strip() or read.stdout.strip())[:200]}')
     return read.stdout
 
 
@@ -149,7 +149,7 @@ def typed():
     return turns
 
 
-def commit(repo, sha):
+def commit(repo, sha, named):
     shown = git(repo, 'show', '--no-color', '--format=%B', sha)
     answer = asked(HAIKU, COMMIT, shown[:LIMIT])
     bits = dict(re.findall(r'^(' + '|'.join(BITS) + r'): (YES|NO)\s*$', answer, re.M))
@@ -159,7 +159,6 @@ def commit(repo, sha):
     added = {line[1:].strip() for line in shown.splitlines() if line.startswith('+') and not line.startswith('+++')}
     said = [squeezed(passage) for passage in re.findall(r'^SAID: "(.*)"\s*$', answer, re.M)]
     turns = typed() if said else []
-    named = NAMED.findall(git(repo, 'show', '-s', '--format=%B', sha))
     quoting, path = set(), None
     for line in shown.splitlines():
         if line.startswith('+++ '):
@@ -178,7 +177,7 @@ def commit(repo, sha):
     record['process'] = PROCESS
     given = given_items(repo, PROCESS) if PROCESS else []
     record['launched_on'] = given
-    return record, named
+    return record
 
 
 def source(repo, sha):
@@ -285,10 +284,7 @@ def main():
     named = NAMED.findall(git(repo, 'show', '-s', '--format=%B', sha))
     mesh_revision = git(MESH, 'rev-parse', 'HEAD')
 
-    def whole():
-        record, _ = commit(repo, sha)
-        return record
-    noted(repo, sha, 'commit', whole)
+    noted(repo, sha, 'commit', lambda: commit(repo, sha, named))
     noted(repo, sha, 'source', lambda: source(repo, sha))
     raw = git(repo, 'diff-tree', '--root', '--no-commit-id', '-r', '--diff-filter=A', '--name-only', '-z', sha)
     for path in filter(None, raw.split('\0')):

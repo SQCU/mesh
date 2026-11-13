@@ -2,6 +2,7 @@
 import json
 import hashlib
 import os
+import re
 import subprocess
 import sys
 from mesh_notes import append
@@ -89,8 +90,15 @@ def main():
             first = json.loads(measured.splitlines()[0])
             if first.get('process') not in (None, PROCESS) and os.path.exists(f"/tmp/cc-socks/{first['process']}.sock"):
                 continue
-            found = [w for line in measured.splitlines() if line.strip() for w in warnings(json.loads(line))]
-            append(repo, 'warnings', f'Measurements-SHA256: {digest}\n' + ('\n'.join(found) or 'none'), sha)
+            previous = re.findall(r'Measurements-SHA256: ([0-9a-f]{64})\nMeasurements-Characters: (\d+)', delivered)
+            start = 0
+            if previous:
+                prior, length = previous[-1]
+                if hashlib.sha256(measured[:int(length)].encode()).hexdigest() == prior:
+                    start = int(length)
+            found = [w for line in measured[start:].splitlines() if line.strip() for w in warnings(json.loads(line))]
+            append(repo, 'warnings', f'Measurements-SHA256: {digest}\nMeasurements-Characters: {len(measured)}\n'
+                   + ('\n'.join(found) or 'none'), sha)
             messages += [f'{sha[:10]} in {repo}: {w}' for w in found]
     if messages:
         message = '\n'.join(messages) + '\n(design/review-warnings.md rule 14; git notes --ref measurements show <commit>)'

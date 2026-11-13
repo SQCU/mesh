@@ -105,7 +105,7 @@ The inspected implementation had further limitations and errors:
 - **Later measurements could go unreported.** The warning reporter skipped a commit forever once any warning note
   existed, although separate measurement records were appended later. It also examined only the latest 40 commits
   and assumed every historical record had the newest fields. The revision reads measurement-note entries, records
-  the digest of what it reported, and appends feedback when that input changes. Older records are read without
+  the digest and length of what it reported, and appends feedback for newly appended records. Older records are read without
   inventing missing fields or translating them into current coverage.
 - **Concurrent note writes were unchecked.** The scripts ignored Git write failures while appending to shared note
   refs. Their writes now share one small append operation that serializes writes per repository/ref and checks Git's
@@ -130,6 +130,32 @@ The implementation summaries formerly embedded below rules 10 and 14 to 16 of `r
 Their quoted user instructions remain. This memorandum supplies a dated account of the changes, not a substitute
 set of standing orders for future implementing agents.
 
-At the time of writing, Python syntax compilation and `git diff --check` had been run. Live hook-path results are to
-be recorded against the resulting commits rather than inferred from this memorandum. No compiler, distributed
-runtime or ML performance claim was evaluated by this audit.
+## Execution record
+
+Python syntax compilation, settings JSON parsing and `git diff --check` completed before the implementation commits:
+mesh `8b38d404` and metal-microbench `1db3c620`. Their actual Git post-commit invocations produced measurement notes:
+four for mesh's commit and newly added files, and two for metal-microbench's settings commit. Invoking
+`mesh-told.py` on those real records returned feedback and appended warning notes, including records using older
+schemas. The model invocations in those first runs failed, and the records said they were not measured.
+
+The initial diagnostic discarded stdout when the model command exited unsuccessfully. Capturing that diagnostic on
+an explicit second invocation against `8b38d404` identified an expired OAuth session in the default Claude profile.
+The operator had identified the personal launcher in an earlier turn:
+
+> i forget can you launch claude agents with the currnet claude code harness and the current codex harness? teh shell script for claudes for this context is `claude-personal` for reference. if you can, try feeding two change request documents to claudes and monitor their behavior
+
+The inspected shell alias resolved to `claude-profile personal`. The wrapper selected `~/.claude-personal` and also
+appended standing prompt files. The Git launcher was revised to inherit an explicit `CLAUDE_CONFIG_DIR`, or use the
+personal profile when none was supplied. It does not invoke the wrapper's additional prompts: the reviewer retains
+the fixed criterion requested in the seven-property assignment. Failed reader diagnostics now include stdout when
+stderr is empty.
+
+An explicit invocation against `8b38d404` using the personal profile completed all four requested measurements at
+21:29 UTC. The commit reader flagged claims and requirements in the changed prompts. The source reader flagged
+the repeated extraction of request trailers; the follow-up revision passes the already extracted value to the
+commit reader. The guide comparison retrieved the cited Google page, recorded its content digest, and returned
+`ADHERES: NO`. That fixed yes/no instrument supplied no explanation; this record does not claim a passing style
+judgment. Running the feedback command again exposed those later records despite its earlier warning note.
+
+No live Agent/Task/Workflow launch or Stop/SubagentStop session was commissioned for this audit. No compiler,
+distributed runtime or ML performance claim was evaluated.
