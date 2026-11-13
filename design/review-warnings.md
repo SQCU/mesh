@@ -102,6 +102,18 @@ The turns, quoted from the transcript, then each rule with its source.
 
 > is there any mechanism e.g. a system prompt to induce subagnets to immediately fail and log to a file as a warning if they are given 'agent briefs' or any inlined instructions or contents *at all* besides directions to read files using file read tools
 
+The operator, 2026-11-13:
+
+> review the claude canon to see whether this is a superfluous requirement or an extrapolated and incorrect property that does not itself come from a cited source, e.g. a user transcript turn, a textbook, a blogpost, whatever. if this is an attempt by claudes to add overconstriants, it has to be removed without replacement, no matter what 'breaks' from the absence of the excess constraint.
+
+Provenance review, 2026-11-13: `e646c57470edad1817862e7a81743d3a18c1a024` introduced the gate with the
+2026-11-12 file-reading instruction above. `14c4736a660953a494b2f3b4b1601aa513d1690b` added index membership
+to the gate and rule 16, citing that rule's instruction to finish omitted work. Neither quoted instruction requires
+index membership. The transcript records that instruction in user turn `118b042c-4931-4fd3-894f-0d148126a795`
+and Claude's announcement of the additional restriction in assistant turn `5ab8d99a-4980-493a-9933-8df0767fe26d`, in session
+`55974018-f56d-4c8b-8973-6fc61b49140c`. This audit classified the restriction as an extrapolation and removed it
+without replacement, following the 2026-11-13 instruction.
+
 - **Rule:** bin/mesh-brief-gate.py runs before each Agent, SendMessage and Workflow call of a session in either
   repository. Where the call's text holds a line that is not `Read /absolute/path and act on it.`, with `, item N`,
   `, section N` or `, lines N-M` allowed after the path, the call is
@@ -183,7 +195,6 @@ The turns, quoted from the transcript, then each rule with its source.
     message: says part of its work was not done, asks its reader for something, states what holds without naming a
     commit.
   - bin/mesh-agent-mark.py writes which agent is running a Bash call; a commit's record carries it.
-  - bin/mesh-brief-gate.py allows a brief only to a document design/change-requests-index.md links.
   - bin/mesh-item-tally.py searches the source of both repositories for each name an item writes in code marks.
   - bin/post-commit is the file git's post-commit hook in each repository links to.
   - What is measured is Claude's choice.
