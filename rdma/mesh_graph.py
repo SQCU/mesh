@@ -518,6 +518,25 @@ def extent(sizes, strides):
     return (1 + sum((n - 1) * s for n, s in zip(sizes, strides))) * all(sizes)
 
 
+# MPI 4.1 section 5.1.2, MPI_TYPE_VECTOR; output_data/compiler-workgroup-20261113/compiler/placement.replacement.md:
+# x = lo_a + p j, (p/g) j = (lo_b - lo_a)/g (mod q/g), g = gcd(p, q), period = lcm(p, q); a[left[k]] = common[k] =
+# b[right[k]]; Python 3.12 pow(x, -1, m)
+def intersection(a, b):
+    if not a or not b:
+        return range(0), range(0), range(0)
+    p, q = abs(a.step), abs(b.step)
+    (low_a, high_a), (low_b, high_b) = sorted((a[0], a[-1])), sorted((b[0], b[-1]))
+    low, high, g, d = max(low_a, low_b), min(high_a, high_b), math.gcd(p, q), low_b - low_a
+    if low > high or d % g:
+        return range(0), range(0), range(0)
+    base, period = low_a + p * (d // g * pow(p // g, -1, q // g) % (q // g)), p // g * q
+    first = base - (base - low) // period * period
+    count = max(0, 1 + (high - first) // period)
+    return range(first, first + count * period, period), *(
+        range((first - r.start) // r.step, (first - r.start) // r.step + count * (period // r.step), period // r.step)
+        for r in (a, b))
+
+
 def dependences_supplied(vertices, views, supplied):
     viewed, held = (Viewed * max(len(views), 1))(), []
     for made, (key, offset, element, pairs, vertex, write) in zip(viewed, views):

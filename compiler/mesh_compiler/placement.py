@@ -227,7 +227,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     if held == dimension is not None:
         extent = sum(shape(n)[held] for n in nodes)
         have, take = ranges(extents, extent, len(nodes)), ranges(sizes, extent, len(processors))
-        met, given = overlaps(have, take)
+        met = [[mesh_graph.intersection(range(*kept), range(*wanted)) for wanted in take] for kept in have]
         arrays, devices = tuple(zip(arrayed(have), arrayed(take))), processors
         if have == take:
             devices = tuple(dict.fromkeys((*holders, *processors)))
@@ -236,25 +236,23 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
     if held == dimension is not None and STRIPED in (extents, sizes):
         arrived, exchange = [], None
         for j, processor in enumerate(processors):
-            pieces, wanted = [], range(*take[j])
-            for i, (holder, node, kept) in enumerate(zip(holders, nodes, have)):
-                common = met[i][j]
+            pieces = []
+            for i, (holder, node) in enumerate(zip(holders, nodes)):
+                common, left, right = met[i][j]
                 if common:
-                    first, last = (range(*kept).index(e) for e in (common[0], common[-1]))
-                    piece = call(graph, SLICE, (node, held, first, last + 1, max(1, (last - first) // max(
-                        1, len(common) - 1))), holder or processor)
+                    piece = call(graph, SLICE, (node, held, left.start, left.stop, left.step), holder or processor)
                     exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
                     piece.meta.setdefault("collectives", {})[processor] = kind, exchange
                     piece.meta.setdefault("blocks", {})[processor] = held, (i, devices.index(processor)), *arrays
-                    pieces.append((wanted.index(common[0]), wanted.index(common[-1]), len(common), piece))
-            value = pieces[0][3] if pieces else call(graph, ZEROS, (nodes[0], [
+                    pieces.append((right, piece))
+            value = pieces[0][1] if pieces else call(graph, ZEROS, (nodes[0], [
                 0 if d == held else n for d, n in enumerate(shape(nodes[0]))]), processor)
             if len(pieces) > 1:
-                value = call(graph, ZEROS, (value, [len(wanted) if d == held else n for d, n in enumerate(
+                value = call(graph, ZEROS, (value, [len(range(*take[j])) if d == held else n for d, n in enumerate(
                     shape(value))]), processor)
-                for first, last, count, piece in pieces:
-                    value = call(graph, SLICE_SCATTER, (value, piece, held, first, last + 1, max(
-                        1, (last - first) // max(1, count - 1))), processor)
+                for right, piece in pieces:
+                    value = call(graph, SLICE_SCATTER, (value, piece, held, right.start, right.stop, right.step),
+                                 processor)
             arrived.append(padded(graph, value, dimension, sizes, j, processor) if wide else value)
         return arrived
     if sizes == STRIPED:
@@ -267,11 +265,11 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         pieces, sources = [], []
         for i, (holder, node) in enumerate(zip(holders, nodes)):
             if held == dimension is not None:
-                low = sum(given[i][:j])
-                if not given[i][j] and any(row[j] for row in given):
+                common, left, _ = met[i][j]
+                if not common and any(row[j][0] for row in met):
                     continue
-                if (low, low + given[i][j]) != (0, shape(node)[dimension]):
-                    node = call(graph, SLICE, (node, dimension, low, low + given[i][j]), holder or processor)
+                if (left.start, left.stop) != (0, shape(node)[dimension]):
+                    node = call(graph, SLICE, (node, dimension, left.start, left.stop), holder or processor)
             elif dimension is not None:
                 node = cut(graph, node, dimension, sizes, j, len(processors), holder or processor,
                            wide and held is None and holder in (None, processor))
@@ -296,11 +294,6 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
         if wide and shape(arrived[-1])[dimension] < most(sizes):
             arrived[-1] = padded(graph, arrived[-1], dimension, sizes, j, processor)
     return arrived
-
-
-def overlaps(have, take):
-    met = [[sorted(set(range(*kept)) & set(range(*wanted))) for wanted in take] for kept in have]
-    return met, [[len(common) for common in row] for row in met]
 
 
 # MPI 4.1, sections 7.5 to 7.8, and section 5.1.2, MPI_TYPE_VECTOR
