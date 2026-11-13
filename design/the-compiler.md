@@ -6,12 +6,20 @@ The operator, 2026-11-10:
 
 > are we done doing cognitive restructuring wrt the conflict between 'working examples of outcomes' (laudatory, unportable, unextensible) and 'specifications' (transcendent, greenfielded if necessary, ever-more-extensible)? i still see a very basic need for the very basic and very literal compiler-which-does-the-meshproject's-equivalent-to-the-compact-counterfactual-lowerer to be described as a litearl and immediate task which can be worked on immediately without qualification and complex subtle nuance..
 
+The operator, 2026-11-13, on the scope of the integration work:
+
+> alright. lets do a more holistic review. are there any serious documentary or practical gaps in the repository scopes which would stop us even from a moment from claudeminding a bunch of subagents to do narrowly focused work on the already-designed already-cited compiler integration work (which means retopologying a weird and strange data flow (which means not reusing code or idiom from any of the related existing code!!)) very clearly circumscribed by the chagne request documentation and related memoranda?
+
 ## The task
 
 Write mesh's compiler at `compiler/` with the same data flow and assignment of stage responsibilities as the
 reference program quoted in [data-flow.md](data-flow.md). That document quotes the operator's assignment:
 
 > remmber that our goal here is to articulate what the data flow will be for the mesh modules that have the same role in their own data flow as this counterfactual example code.
+
+Implement the requests' cited algorithms and data structures in that flow. The existing mesh and metal-microbench
+implementation bodies and their idiom are the code to replace. The [change-request standard](change-requests.md)
+states the source vocabulary and how to revise naming defects while continuing the assigned work.
 
 The reference's interfaces are:
 
