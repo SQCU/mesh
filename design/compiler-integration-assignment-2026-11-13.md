@@ -8,6 +8,13 @@ the connections below. Do not delegate further or write a self-acceptance review
 execution evidence for Codex to judge. Do not commit concurrently with other workers; report named paths ready
 for the supervisor to commit. Source edits are authorized now.
 
+The supervisor communicates through
+`/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/integration-inbox.md`.
+Read it before each edit batch and before reporting completion. Write concrete interface needs, progress and
+changed paths to `integration-status.md` in that directory. The other workers are external sessions managed by
+Codex; use these files rather than searching for a Claude team. Continue source implementation while Codex
+coordinates adjacent files.
+
 ## First connection: compiled operations to the signature and caller
 
 - **Applies to:** compilation-composition-change-request.md item 6 and the "Executable artifact" handoff;

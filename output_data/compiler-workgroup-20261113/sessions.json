@@ -1,0 +1,70 @@
+{
+  "assignment_commit": "f96f4339",
+  "sessions": [
+    {
+      "session": "59368744-da56-491a-871a-1be809c0cc93",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/integration.jsonl",
+        "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/integration-2.jsonl"
+      ]
+    },
+    {
+      "session": "047e12be-cd27-4637-a3bb-7d46f6e8216b",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/executor/archive.jsonl"
+      ]
+    },
+    {
+      "session": "e48f4bc7-7cef-4afd-ae50-fc1b4618fa73",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/executor/native.jsonl"
+      ]
+    },
+    {
+      "session": "dc4b988b-a100-4e17-8c80-ff3f90ac97e3",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/compiler/schedule.stream.jsonl"
+      ]
+    },
+    {
+      "session": "979477c2-7dfd-4d9d-a56e-5f086b3c7471",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/compiler/placement.stream.jsonl"
+      ]
+    },
+    {
+      "session": "64ddaf6e-3a70-4b6a-9d0b-50691a84c6cd",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261113/compiler/numerical.stream.jsonl"
+      ]
+    },
+    {
+      "session": "41f48493-701e-43d0-b855-aa88142fabd5",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261113/frontends/litert/session-1.jsonl"
+      ]
+    },
+    {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "model": "claude-opus-5-5",
+      "harness": "2.1.321",
+      "logs": [
+        "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261113/frontends/torch/session-1.jsonl"
+      ]
+    }
+  ]
+}
