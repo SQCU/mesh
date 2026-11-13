@@ -354,8 +354,8 @@ The operator, 2026-11-10:
 
 ## Requirements
 
-The functions the requirements are stated against are those of the reference program ~/schedule-emit, composed by
-`schedule_emit/driver.py` `compile_module`, each from a value to a value:
+The reference program ~/schedule-emit demonstrates the stage responsibilities used below. Its
+`schedule_emit/driver.py` `compile_module` composes functions from values to values:
 - `export.export` writes an `ir.Exported`;
 - `placement.place` takes its graph and the placement operand, and writes the graph with a `send` and a `recv` node
   for each value read on another processor;
@@ -531,15 +531,15 @@ The functions the requirements are stated against are those of the reference pro
       indices, with its length;
     - the task list (Graham 1966) of the dispatches that execute worklists.
   - **The algorithms** are:
-    - the index space analysis of Lee (2015, §3.2.2), which classes a kernel as contiguous or discontiguous;
+    - the index space analysis of Lee (2015, §3.2.2), applied to the compiler's indexing maps;
     - stream compaction by a scan and a scatter (Harris, Sengupta and Owens 2007; Blelloch 1990);
     - the ordering of jobs by non-decreasing completion time C̄j (Hall, Schulz, Shmoys and Wein 1997).
-  - **It takes** a recorded dispatch, `struct MetalRecordedDispatch` (metal-microbench metal_recording.m:10 at
-    59b3a3d4), whose fields are a pipeline, buffers, offsets and a grid; the `source` of the recorded
-    `newLibraryWithSource:options:error:` call; the presence bits; and the transfers' completion times, which
-    `mesh_plan`'s linear program computes. **It writes** the mask, the worklist, the worklist's length in the
-    indirect buffer of the dispatch that executes it, and the task list. The item names no type for the presence
-    bits' word, the completion times, the mask, the worklist or the task list.
+  - **It takes** the compiler's dispatch operands (pipeline, buffers, offsets and grid), typed kernel operations,
+    bindings, indexing maps and memory effects; the presence bits; and R5's scheduling results for computation and
+    transfers. These are the kernel, value and program-relation operands of
+    [compilation-composition](compilation-composition-change-request.md#complete-replacement-all-in-one-commit-workgroup).
+    **It writes** the mask, the worklist, the worklist's length in the indirect buffer of the dispatch that executes
+    it, and the task list, consumed by the lowered dispatches.
   - **Source:**
     - Dawn (79794682), src/dawn/native/metal/ShaderModuleMTL.mm:553–556: `library = AcquireNSPRef([mtlDevice
       newLibraryWithSource:mslSource.Get() options:compileOptions.Get() error:&error]);` MTLDevice.h:786:
@@ -597,13 +597,11 @@ The functions the requirements are stated against are those of the reference pro
       §1.1, p. 1564: "We are given a linear ordering L: (T_k1, ···, T_km) of T called a task list (or priority
       list)."
   - **Write:**
-    - A recorded kernel's source is the `source` of the recorded `newLibraryWithSource:options:error:` call (item 1
-      records every call). The index function of each of its loads and stores is computed from that source by
-      use-def chains; a kernel whose index functions are affine, a · (W0 · w0 + l0), is a contiguous kernel, and any
-      other is discontiguous (Lee §3.2.2).
-    - The pages a threadgroup of a contiguous kernel reads are the partitions its index functions' values over its
-      threads fall in ("Partitions are contiguous in memory"). A threadgroup of a discontiguous kernel reads every
-      partition, as Lee transfers "the entire input" for one.
+    - The compiler supplies each kernel's typed operations, indexing maps and use-def relations to the index-space
+      analysis (Lee §3.2.2), as compilation-composition's "Correction: generated target source is the final emission"
+      requires. Generated shader source is not an operand of that analysis.
+    - The kernel's indexing maps and access relations supply the pages each threadgroup reads
+      (compilation-composition, "Values and effects").
     - Each recorded dispatch that reads a received operand is first executed predicated by the mask (Russell; RISC-V
       V). Each threadgroup tests the presence bits of the pages it reads (I-structures' "presence bits"), and no
       other. A threadgroup any of whose presence bits shows its page absent returns before any store and writes 1 to
@@ -615,11 +613,10 @@ The functions the requirements are stated against are those of the reference pro
       implementation (Nasre, Burtscher and Pingali).
     - A second dispatch of the kernel executes the worklist's threadgroups, its threadgroup count read from an
       indirect buffer (MTL4ComputeCommandEncoder.h:90–112). Each of its threadgroups tests its presence bits again.
-    - The dispatches that execute worklists are a task list (Graham) in the order of non-decreasing completion times
-      of the transfers they read, the times `mesh_plan`'s linear program computes, "where ties are broken by
-      choosing an order that is consistent with the precedence relation" (Hall et al.).
-    - No source quoted here says how a dispatch that executes a worklist is ordered against the recorded calls that
-      read what it writes.
+    - The dispatches that execute worklists and the calls that consume their results participate in R5's same
+      instruction graph and schedule. Integration-finishing item 2 supplies the completion time for every
+      instruction; Hall et al.'s ordering preserves precedence. Compilation-composition item 6 carries the remapped
+      dependencies through command transformation and into ordering and emission.
 
 ### 4. The completion of execution t's requests
 
@@ -704,7 +701,8 @@ The functions the requirements are stated against are those of the reference pro
   `contiguous_input` or `contiguous_output`, the record's interval being that location's lifetime. **It
   writes** each record's offset and `total_size`. The interval is over the u executions of the unrolled steady
   state, which is the static schedule's (Lam 1988), so the records are a function of `schedule.schedule`'s result.
-  The item names no function that writes the offsets and none that reads them, and no type for an offset.
+  Compile-time storage allocation writes the offsets into the scheduled value; lowering and runtime binding
+  consume them, as compilation-composition items 3 and 4 require.
 - **Replaces:** rdma/mesh-dataflow.c `mesh_view_compose` (:187–208 at mesh f55c541c), which reserves an address range
   and remaps operands' page-table rows over it with `mach_vm_remap`.
 - **Source:**
@@ -764,7 +762,8 @@ The functions the requirements are stated against are those of the reference pro
 - **The algorithm** is the lifetime computation of ExecuTorch's exir/memory_planning.py and TensorFlow Lite's
   arena_planner.cc: a buffer's interval runs from its first write to its last read, an input's starts at the first
   position, and a result's ends at the last.
-- **It writes** one interval for each buffer. The item names no type for it and no function that reads it.
+- **It writes** one interval for each buffer, consumed by compile-time storage allocation (item 6 and
+  disjoint-pages A3).
 - **Replaces:** rdma/mesh_compile.py `program()`, which gives a call's inputs and its results the capture's whole range
   of levels, [0, levels − 1] (aca4f783).
 - **Source:**

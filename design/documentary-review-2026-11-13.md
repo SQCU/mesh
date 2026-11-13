@@ -91,7 +91,8 @@ The [interface review](interface-boundaries-2026-11-09.md) treated a cited line 
 performed several stages as a responsibility inversion. Its preserved reports include calls composing stages and
 device compilation operands classified as runtime products. The revision identifies these as limitations of that
 review prompt. A source location does not establish the interpretation, and calling stage functions does not by
-itself duplicate their algorithms. The historical classifications remain attributed to their readers.
+itself duplicate their algorithms. The individual historical reports remain attributed to their readers; the
+aggregate direction verdict and its nine-of-ten total have been removed.
 
 The [function-body reports](subproblem-function-bodies-2026-11-09.md) and
 [ragged-computation inventory](ragged-computation-sources-2026-11-09.md) now state the limits of their source readings.
@@ -193,12 +194,67 @@ Several exchanges show an agent's proposed remedy becoming a broader rule than t
 targets remain concrete: complete the replacement, preserve the required data flow, reuse solved methods, finish
 the producer/consumer interfaces, and support the assigned program and processor scope.
 
+## Applying the contextual review
+
+The operator, 2026-11-13:
+
+> wow very interesting malicious noncompliance on the part of the claudes. lets walk back through each of these issues, revise the documentation covered, remove expanded-precision or expanded-semantics reactions snuck into documentation and specification files, etc.
+
+The revisions remove copies of the restrictions as well as their original operative clauses:
+
+- The implementation-order memorandum no longer repeats the supplier-call-or-refusal rule for numerical
+  operators. It cites source-lowering items 5 and 6 together. Its replacement scope follows the named compiler
+  responsibilities, without prescribing a three-operation public interface from the reference's function count.
+- The compilation coordination document no longer prohibits several programs or derives a single-writer register
+  from that prohibition. The compile-time allocation assignment remains.
+- Capture, disjoint-pages, page-queue, plan-to-bridge, problems-of-14b9a757 and unequal-shards no longer treat the
+  absence of a repository-specific type or function name in their sources as an additional unmet requirement.
+  The algorithms remain cited. Capture's offsets and lifetimes identify their allocation and lowering consumers;
+  worklist execution uses the existing common instruction schedule and remapped dependencies.
+- The ragged-computation bibliography's additional change-request-writing checklist is removed. Its resulting
+  assignment is the unequal-shards request. Source-reading qualifications remain attached to the bibliography.
+- Source-lowering no longer requires matching the unidentified CPU routine called by another framework. Its
+  unresolved non-Hermitian and target-lowering methods remain implementation obligations within the requested
+  processor scope.
+
+### The capture interface and the purpose of the requests
+
+The operator asked what the requests were, who wrote them, and what grounded their requirements. The capture
+request was introduced by `1d4c2ebe` on November 6, with a Claude Opus 5.5 coauthor trailer. The composition request
+was introduced by this Codex session in `f0f96962` on November 8, following the operator's request to compose the
+other requests in cited roles. The Codex session record is
+`~/.codex/sessions/2026/11/08/rollout-2026-11-08T16-12-16-01a1bda6-0636-7763-a445-3776131aa8be.jsonl`;
+the commit-producing tool calls are at 2026-11-09 01:53:20 UTC and, for `2936d23f`, 07:45:55 UTC.
+Git's shared author identity alone does not distinguish these agents.
+
+The purpose is stated in the operator's November 8 turn preserved in [review-warnings](review-warnings.md), turn 3:
+the work orders express "do x with y" and catch added false requirements or constraints. The
+[change-request format](change-requests.md) requires the originating turns, named methods and source bindings.
+Composition's opening turns explicitly commission composition of existing requests in cited roles. These
+instructions authorize situated implementations of the methods; they do not require papers to use mesh's names.
+A citation's role matters: an existing implementation can identify what is to be replaced without prescribing it.
+
+The shader-source interface appeared in `d62f205d` on November 7. The operator's typed-lowering correction was
+recorded in `2936d23f` on November 8. Claude's capture rewrite `57d9f06e` on November 10 retained shader source as
+an analysis input; `e5791525` then added missing-type observations. Thus the problem was not resolved merely by
+having the correction elsewhere in the canon. Capture item 3 now takes the compiler's typed operations, bindings,
+indexing maps and effects, as that correction requires. Its scheduling uses the existing program graph, including
+the consumers of worklist results. The claim that a discontiguous kernel reads every partition is also removed:
+the quoted source's decision to transfer an entire input did not establish that access fact for mesh's kernels.
+
+This correction follows the operator's instruction and its compiler references, not a rule that the newest document
+wins. It does not certify the compiler's implementation. The methods still missing from a request remain missing;
+removing an unsupported restriction does not supply an algorithm or an execution result.
+
 ## Verification and limits
 
 For `71de11eb` and `60636aac`, the edits were checked against the passages and sources described in the first review;
 a comparison found no removed blockquoted lines, and `git diff --check` was clean. The second review corrects the
 interpretations and provenance identified above. It expands one user excerpt to its full turn and restores the
 execution-cost meaning of task weights. These are documentary checks, not evidence of compiler behavior or completion.
+
+The subsequent revisions touch twelve existing documents. All pre-existing blockquoted lines remain, local
+Markdown link targets resolve, and `git diff --check` passes. The compiler source was not changed by this review.
 
 The November 13 compiler-boundary and hook memoranda already identify their inspected revisions and limits; they
 were not promoted to requirements. Some requests still describe old concrete interfaces, and some source mappings

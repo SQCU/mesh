@@ -3090,19 +3090,14 @@ points 1, 2 and 4, and are superseded with them.
 2. **The meta device at a node with no section (AOT A4).**
    - Wrong against: point 1. It rested on eager code between calls and on Dynamo tracing again at that node.
    - The code must: at such a node, start its plans' executions and relay, and compute nothing. `_absent` goes.
-3. **"Every program on the island" (AOT A7).**
-   - Wrong against: the operator's turns, which give no several-program requirement. Pathways' multi-client island is
-     Pathways' setting.
-   - The code must: no change. The scheduler orders the one program's executions.
 4. **Each plan builds its own part of the IPC graph (AOT appendix item 2).**
    - Wrong against: point 1.
    - The code must: build the program's whole IPC graph at compile time, every function together, with each queue's
      room (5) in it. `plan_rooms`' part graph goes.
-5. **A claim per plan, placed by run-time first fit, and several programs at once (AOT appendix items 2 and 6; PB R8;
+5. **A claim per plan, placed by run-time first fit (AOT appendix items 2 and 6; PB R8;
    DP A2, C3 item 4, D.3 item 1).**
    - Wrong against: the operator's turn 394 ("allocation known aot … do you think we're supporting dynamic runtime
-     allocations"), and DP A2's own classification of first fit as the run-time strategy to replace. "Several programs"
-     has no source but Claude's text.
+     allocations"), and DP A2's own classification of first fit as the run-time strategy to replace.
    - The code must: place the whole program's values in one offline allocation at compile time. These go:
      - `mesh_claim_take`'s first fit and the claim's head record;
      - `mesh_plan_head`'s walk of every claim head in `mesh_transfers_start` and `mesh_plan_retire`, a run-time check;
@@ -3523,9 +3518,7 @@ and what the code must do. Where a finding needs a method, the method is cited.
 - B2. The program record's `owner` test (mesh-collective.c 1964) returns EBUSY on almost every replan after ESTALE,
   because the bridge releases the record a turn later. It is also a load then a later store, so two planners pass it.
   The replan must wait for the release, bounded by MESH_PLATFORM_NS, as RCU's writer waits out a grace period
-  (`synchronize_rcu`), with ETIMEDOUT past it. The record has one writer by construction, the program's process, since
-  a run is one program on the whole collective (A7, corrected), so it needs no exchange and no lock: a single-writer
-  register (L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986).
+  (`synchronize_rcu`), with ETIMEDOUT past it.
 - B3. `_retire`'s device synchronization (mesh_compile.py 2268) is an unbounded device wait, and it runs on every
   replan. The record's release must follow torch's work in an MPSEvent notification, as torch_mesh's allocator.mm did
   its release (fba41159's event form, item 7). It is then bounded by the notification wait already there.

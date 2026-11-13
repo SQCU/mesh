@@ -77,9 +77,9 @@ A later item consumes what an earlier item produces. The order below describes t
   drains (`MetalLoopTest`, `MetalDrain`), trip-count observation, and the scoped regions of
   compilation-composition-change-request.md "Nested communication regions: producer and consumer handoff", struck
   on 2026-11-09 ("Withdrawn, 2026-11-09" in that request).
-- **With it:** torch-source-lowering-change-request.md item 5 (2026-11-09), for the operators whose lowerings repeated
-  a body while a predicate on tensor data held: each is one call of a supplier's function, or is refused with a plain
-  message.
+- **With it:** torch-source-lowering-change-request.md items 5 and 6, for numerical operators whose implementations
+  iterate. Those operator lowerings remain required within the static program scope, across the processors named
+  by the placement operand.
 - **Reference:** `schedule_emit/export.py`, 62 lines.
 - **Estimate:** 60–120 lines. It removes scope, so every later item is smaller once it is done.
 
@@ -183,12 +183,13 @@ A later item consumes what an earlier item produces. The order below describes t
   "A function that needs its operand whole starts when every page of that operand is present, and not before. It
   waits for nothing else."; "Each task starts when its own page is present. It does not wait for another page of the
   same operand."; "The bridge receives that order and nothing about either kind."
-- **Replaces:** `metal_recording.m` from `MetalReplayRun` to the end of the file: about 2,480 lines and 91
-  definitions. Its public interface, 30 functions in `metal_recording.h`, falls to load, bind and call.
+- **Replaces:** the runtime interpretation and repeated decisions named in the clauses above. The inspected
+  `metal_recording.m` from `MetalReplayRun` to the end of the file contained about 2,480 lines and 91 definitions.
 - **Reference:** `schedule_emit/runtime.py`, 75 lines. It examines no graph.
 - **Estimate:** 150–300 lines.
-- **Undecided:** whether the capture half of `metal_recording.m` (about its first 2,090
-  lines) remains once the provider publishes the program. No clause read for this memorandum names it.
+- **Capture:** compilation-composition-change-request.md, "Complete replacement, all in one commit workgroup",
+  names the provider interface and source transformations to replace. Torch-capture item 1 supplies the capture
+  and replay requirement. Preserve that coverage through the replacement's typed compiler interface.
 
 ### 8. One archive format, owned by one module in both directions; loading solves nothing
 
@@ -228,8 +229,6 @@ A later item consumes what an earlier item produces. The order below describes t
   runtime action per vertex." The scheduled program is compared with the exported one for what that sentence
   requires: every required observation and ordering is kept, and each function, send, receive, copy or wait the
   scheduled program has beyond the exported one is one a clause or the solver justifies.
-- **Also:** plan-to-bridge-change-request.md R4, "Behaviour at run time": "No quoted source says
-  how a run is shown to have done 1 to 3". The record of a run that shows them is outstanding and belongs here.
 - **Also:** `examples/pl.py`, design/parallel-layers-example.md: a language model whose blocks add
   attention and feed-forward outputs computed from one normalized input, as a program a run is made of.
 - **Estimate:** about 100 lines for the structural comparison; none for measurement.

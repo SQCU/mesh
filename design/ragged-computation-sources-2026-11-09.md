@@ -154,13 +154,5 @@ These are the dated inventory's source comparisons and reports of what its reade
     differing length within one tensor (1.3) appear in commit messages (mesh 444d4fd9, be5d8920, 967ed4ac) and in
     no requirement document that was found.
 
-## 4. What a change request made from this still needs
-
-- The operator's turns, quoted, as its body.
-- For every **[H]** and **[S]** entry it uses, the source opened and its own words quoted with the section; for
-  every **[M]** entry, the source found first.
-- The reusable form of `compilation-composition-change-request.md` ("Applies to", "Source", "Roles and
-  representations", "Replaces", "Write").
-- Where no source says what to write, a statement that none does. Two such places are visible already: no source
-  listed here says how a ragged tensor (1.3) is sharded across ranks, and none says how the masking of 2.8 composes
-  with a collective of unequal blocks (2.5).
+The resulting assignment is [unequal-shards-change-request.md](unequal-shards-change-request.md), including
+its requirements for ragged values, placement, masking and collectives.

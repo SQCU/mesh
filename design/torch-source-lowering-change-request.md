@@ -294,9 +294,6 @@ what "them" names)
     Nothing in the graph branches or repeats on tensor data.
   - This is an operator lowering. It produces that node in the exported graph; placement and the schedule (item 3)
     consume it as they do any other node.
-  - For `lstsq` the quoted page names the routine: `gelsd` and `gelss`. For `svd`, `eigh`, `eig` and `eigvals` no
-    quoted source names the LAPACK routine PyTorch or JAX calls on a CPU; the header lines above show only which
-    drivers Accelerate declares.
   - The routine's `INFO` is a value the node returns; a positive `INFO` is reported.
   - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
   - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.
@@ -413,5 +410,6 @@ The operator:
     Where `n_squarings > max_squarings` the result is NaN, as `_nan` states, and the node reports a runtime
     error (the operator, above: "a runtime error and some NaNs").
   - Where the placement operand names the CPU for the whole operator, the operator is item 5's node.
-  - No quoted source states `eig` and `eigvals` of a matrix that is not Hermitian on the GPU or the Neural Engine.
-  - No quoted source says which of these operations the Neural Engine executes, or at what precision.
+  - The cited QDWH-eig algorithm covers Hermitian eigendecomposition. The lowering of non-Hermitian `eig` and
+    `eigvals`, and target lowering with the required numerical precision, remain part of the full processor scope
+    requested above. This item does not yet supply those methods.

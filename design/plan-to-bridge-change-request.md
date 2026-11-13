@@ -2113,8 +2113,7 @@ consumes it.
     code a value is a `struct mesh_value`, in the `value` array of each `struct mesh_function` that `mesh_plan` takes
     (rdma/mesh-collective.h).
   - Writes: u; for each value and copy, its page-table rows; for each operand seen as one run, the map from its
-    consecutive virtual pages to its pages. Each is a constant of the static schedule. This item's sources name no type
-    for the rows as written or for a run's map.
+    consecutive virtual pages to its pages. Each is a constant of the static schedule.
   - Produced when the static schedule is made: `mesh_plan` (rdma/mesh-collective.c) calls `mesh_graph_lags` and
     `mesh_graph_chains` (rdma/mesh-graph.h). The rows are part of the scheduled value.
   - Consumed by R5's lists, whose entries name each page by its row (R1), and by the GPU, which translates each run
@@ -2195,8 +2194,6 @@ consumes it.
   - No quoted source applies coflow scheduling with precedence to this network. R5 cites Chen for the program and says
     of its theorem: "No theorem cited here covers that case", the case of cables and devices in place of Chen's
     switches.
-  - No quoted source says how a run is shown to have done 1 to 3: which record of a run gives, for each function, when
-    each page of its operand became present and when the function started, and each cable's sequence of sends.
 - **The data structure is the task graph's edges (R3).**
   - The synchronous, complete, contiguous consumer is one task with an edge from every page of its operand.
   - The asynchronous, incomplete, noncontiguous consumer is one task per page, each with an edge from its own page, and

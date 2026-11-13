@@ -54,26 +54,23 @@ consistently distinguish composition from duplication, or a compilation operand 
 - `metal_recording.{h,m}`, `rdma/mesh_compile.py`, `tools/e2b_replay.m` and the mesh C modules were not in this run.
   The implementation-order memorandum already records what was established about the first three.
 
-## The readers' reported classifications
+## The readers' source inventory
 
 These are historical review outputs, including the limitations above, not findings independently established for
 the current implementation.
 
-| group | lines | visible functions | roles found | direction |
-|---|---:|---:|---|---|
-| metal_ir | 4,669 | 92 | graph construction, send and receive declarations, schedule, lower entry, emission, archive, runtime binding and cost, supplying numeric functions | does not match |
-| metal_transform | 1,452 | 1 | fusion and grouping into kernels, rewriting of regions, cost evaluation, host call entries | does not match |
-| metal_lower | 2,859 | 49 | lower, mapping of each operation, running a compiled function while lowering, emission, linking, archive, binding on a device | does not match |
-| metal_native | 1,233 | 2 | reading the machine's facts, schedule choices for matrix multiply, cost, lower | does not match |
-| metal_clone and metal_transport | 925 | 8 | copying IR between modules (used by lower, transform and the numeric library); send and receive structure at lower and emission | mixed |
-| metal_neural | 1,503 | 6 | lower, a storage decision, compile with a read-back of the device plan, archive, runtime bind and call | does not match |
-| metal_program.h and metal_submission.h | 365 | 24 | runtime, declarations of lower and archive, reading identity and call sites back from the compiled binary | does not match |
-| provider: litert_mesh and litert.patch | 5,477 | 2 | conversion of a model to a graph, lower, binding values to tensor addresses, storage decisions, supplying numeric functions | does not match |
-| provider/dawn.patch | 20,081 | 49 | lower (printing), a runtime calling sequence inside the printer, supplying 64-bit numeric functions, shared types and validation | does not match |
-| metal_binary64.wgsl and operator_shaders.metal | 1,971 | 139 | supplies numeric functions; no stage role | matches |
-
-Nine of the ten groups have a direction that does not match, or matches only in part. The tenth, the two authored
-shader sources, has no stage role: it supplies numeric functions.
+| group | lines | visible functions | roles reported |
+|---|---:|---:|---|
+| metal_ir | 4,669 | 92 | graph construction, send and receive declarations, schedule, lower entry, emission, archive, runtime binding and cost, supplying numeric functions |
+| metal_transform | 1,452 | 1 | fusion and grouping into kernels, rewriting of regions, cost evaluation, host call entries |
+| metal_lower | 2,859 | 49 | lower, mapping of each operation, running a compiled function while lowering, emission, linking, archive, binding on a device |
+| metal_native | 1,233 | 2 | reading the machine's facts, schedule choices for matrix multiply, cost, lower |
+| metal_clone and metal_transport | 925 | 8 | copying IR between modules (used by lower, transform and the numeric library); send and receive structure at lower and emission |
+| metal_neural | 1,503 | 6 | lower, a storage decision, compile with a read-back of the device plan, archive, runtime bind and call |
+| metal_program.h and metal_submission.h | 365 | 24 | runtime, declarations of lower and archive, reading identity and call sites back from the compiled binary |
+| provider: litert_mesh and litert.patch | 5,477 | 2 | conversion of a model to a graph, lower, binding values to tensor addresses, storage decisions, supplying numeric functions |
+| provider/dawn.patch | 20,081 | 49 | lower (printing), a runtime calling sequence inside the printer, supplying 64-bit numeric functions, shared types and validation |
+| metal_binary64.wgsl and operator_shaders.metal | 1,971 | 139 | supplies numeric functions; no stage role |
 
 ## metal_ir
 

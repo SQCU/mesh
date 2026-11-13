@@ -37,7 +37,7 @@ The operator, 2026-11-10:
 
 ## The stages
 
-Each requirement composes into the stages of the reference program `~/schedule-emit` at f41c64a
+Each requirement composes into the stage responsibilities demonstrated by `~/schedule-emit` at f41c64a
 (`schedule_emit/driver.py`, `compile_module`), each a function from a value to a value:
 
 - `export(module, args)` writes an `Exported` (`schedule_emit/ir.py`), whose `graph_module` is a
@@ -55,9 +55,9 @@ A sharding is part of the placement operand. Items 1, 5, 8, 13 and 15 state what
 dimension. Items 6, 7 and 14 produce it before `place` runs. Items 2, 3, 4, 9, 10 and 12 state nodes that `place` adds
 to the graph. Item 11 states the form of a value.
 
-A Stage line below says which of these functions produces a value and which consumes it. HAP §3.2's stages, in items
-6 and 12, are another thing: the parts a program's execution is divided into. No quoted source of an item names one
-of these functions. Where an item's quotations state where its step sits in the program, its Stage line follows
+A Stage line below assigns the producer and consumer responsibilities using these functions as references.
+HAP §3.2's stages, in items 6 and 12, are another thing: the parts a program's execution is divided into.
+Where an item's quotations state where its step sits in the program, its Stage line follows
 them: item 6's HAP §5 passage ("for a fixed distributed program Q") and item 8's Striped Attention passages ("before
 the model's first embedding layer", "no extra per-layer communication required").
 
@@ -384,8 +384,8 @@ and `displs`, each an integer array of length the group size; MPI's `array_of_si
   a fixed distributed program Q", so the choice is not a result of that program. No quoted source states the choice
   for another collective of item 2, or between a padded buffer and a subarray.
 - **Stage:** `place` adds the collective's `send` and `recv` nodes (item 2); for the subarray these carry the three
-  arrays, each an array of integers with one entry per dimension of the buffer. No quoted source states which
-  function chooses the method, or the type of the value that records the choice.
+  arrays, each an array of integers with one entry per dimension of the buffer. The method chosen with the sharding
+  ratios is an operand of this collective lowering, as the choice above requires.
 
 ### 13. Which device holds which rows of a tensor whose rows differ in length
 

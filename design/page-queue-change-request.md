@@ -191,7 +191,7 @@ This section is Claude's, not the operator's.
 
 - **The data structure** is a list of entries held in each node's region: the zero-copy queue of the operator's
   statement under "The page queue". An entry is one transfer of one page between this node and an adjacent node:
-  `{ page, node, direction, word, position }`. The document's cited code and sources name no type for these fields.
+  `{ page, node, direction, word, position }`.
   - `page`: a page of this node's region: the page sent, or the page a receive lands in.
   - `node`: the adjacent node, by its index in the map: the node a send goes to, or the node a receive comes from.
   - `direction`: send or receive.
