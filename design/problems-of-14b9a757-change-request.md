@@ -92,6 +92,9 @@ The types the cited code names for the values that pass between these functions:
 - the persistent request's state is `struct mesh_state` (rdma/mesh.h), which holds its `serial`;
 - a membership view's record is `struct mesh_group_view` (rdma/mesh-records.c).
 
+No cited code or source names a type for an interval's colors in the memory schedule, or for the structure the load
+reads in item 11.
+
 What `mesh_plan` writes, each part with the name of its source:
 - **Persistent requests:** one for each compiled function at each node, started once per execution. MPI
   4.1 §3.9: "binding the list of communication arguments to a persistent communication request once and then
@@ -321,7 +324,7 @@ which an independent flow's pages are drawn (Fisher–Yates over Threefry); and 
   4. **Sharing:** two blocks may share pages exactly where ExecuTorch's test finds their lifetimes disjoint.
   5. **Never freed:** a value whose data is kept across executions (a copy of lag k ≥ 1, and an invariant) is never
      freed, as ExecuTorch's mutable buffers are not. Only these have no lifetime.
-- **Composition:** lifetime analysis over the scheduled nodes writes the pairs (steps 1–3 above).
+- **Composition:** `update_tensor_lifetime` over the scheduled nodes writes the pairs (steps 1–3 above).
   `mesh_plan` reads them as the `begin` and the `end` of each `struct mesh_value`, as the intervals of item 14, and
   writes the memory plan and the memory schedule from them.
 - **Source:**

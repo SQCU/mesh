@@ -2113,7 +2113,8 @@ consumes it.
     code a value is a `struct mesh_value`, in the `value` array of each `struct mesh_function` that `mesh_plan` takes
     (rdma/mesh-collective.h).
   - Writes: u; for each value and copy, its page-table rows; for each operand seen as one run, the map from its
-    consecutive virtual pages to its pages. Each is a constant of the static schedule.
+    consecutive virtual pages to its pages. Each is a constant of the static schedule. This item's sources name no type
+    for the rows as written or for a run's map.
   - Produced when the static schedule is made: `mesh_plan` (rdma/mesh-collective.c) calls `mesh_graph_lags` and
     `mesh_graph_chains` (rdma/mesh-graph.h). The rows are part of the scheduled value.
   - Consumed by R5's lists, whose entries name each page by its row (R1), and by the GPU, which translates each run

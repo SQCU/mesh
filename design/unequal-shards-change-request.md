@@ -386,6 +386,7 @@ and `displs`, each an integer array of length the group size; MPI's `array_of_si
 - **Stage:** `place` adds the collective's `send` and `recv` nodes (item 2); for the subarray these carry the three
   arrays, each an array of integers with one entry per dimension of the buffer. The method chosen with the sharding
   ratios is an operand of this collective lowering, as the choice above requires.
+  No quoted source states the type of the value that records the choice.
 
 ### 13. Which device holds which rows of a tensor whose rows differ in length
 

@@ -207,15 +207,13 @@ The revisions remove copies of the restrictions as well as their original operat
   responsibilities, without prescribing a three-operation public interface from the reference's function count.
 - The compilation coordination document no longer prohibits several programs or derives a single-writer register
   from that prohibition. The compile-time allocation assignment remains.
-- Capture, disjoint-pages, page-queue, plan-to-bridge, problems-of-14b9a757 and unequal-shards no longer treat the
-  absence of a repository-specific type or function name in their sources as an additional unmet requirement.
-  The algorithms remain cited. Capture's offsets and lifetimes identify their allocation and lowering consumers;
-  worklist execution uses the existing common instruction schedule and remapped dependencies.
+- Capture's offsets and lifetimes identify their allocation and lowering consumers; worklist execution uses the
+  existing common instruction schedule and remapped dependencies. Missing-type observations were initially
+  removed in `61a3e15e`; the operator's clarification below corrects that part of the review.
 - The ragged-computation bibliography's additional change-request-writing checklist is removed. Its resulting
   assignment is the unequal-shards request. Source-reading qualifications remain attached to the bibliography.
-- Source-lowering no longer requires matching the unidentified CPU routine called by another framework. Its
-  unresolved non-Hermitian and target-lowering methods remain implementation obligations within the requested
-  processor scope.
+- Source-lowering's unresolved non-Hermitian and target-lowering methods remain implementation obligations within
+  the requested processor scope. Its qualification about which LAPACK routines the cited sources identify remains.
 
 ### The capture interface and the purpose of the requests
 
@@ -231,8 +229,8 @@ The purpose is stated in the operator's November 8 turn preserved in [review-war
 the work orders express "do x with y" and catch added false requirements or constraints. The
 [change-request format](change-requests.md) requires the originating turns, named methods and source bindings.
 Composition's opening turns explicitly commission composition of existing requests in cited roles. These
-instructions authorize situated implementations of the methods; they do not require papers to use mesh's names.
-A citation's role matters: an existing implementation can identify what is to be replaced without prescribing it.
+instructions authorize situated implementations of the cited methods. A citation's role matters: an existing
+implementation can identify what is to be replaced without prescribing it.
 
 The shader-source interface appeared in `d62f205d` on November 7. The operator's typed-lowering correction was
 recorded in `2936d23f` on November 8. Claude's capture rewrite `57d9f06e` on November 10 retained shader source as
@@ -246,6 +244,19 @@ This correction follows the operator's instruction and its compiler references, 
 wins. It does not certify the compiler's implementation. The methods still missing from a request remain missing;
 removing an unsupported restriction does not supply an algorithm or an execution result.
 
+### Literal terminology and type discipline
+
+The operator corrected this review's account of idiomaticity. The complete turn is now in
+[the change-request standard](change-requests.md). The instruction concerns the propagation of algorithms and
+data structures under the literal terminology of their sources, including their identities through IRs,
+serialization and deserialization. Describing this only as avoiding familiar implementation habits understated it.
+
+`61a3e15e` incorrectly grouped missing-type observations with unsupported restrictions. Those observations are
+restored in capture, disjoint-pages, page-queue, plan-to-bridge, problems-of-14b9a757 and unequal-shards, alongside
+the clarified producer/consumer assignments. Source-lowering's qualification about unidentified CPU routines is
+also restored. A missing source binding is not resolved by deleting the sentence that records it. The present
+review does not claim to have supplied the missing representation bindings.
+
 ## Verification and limits
 
 For `71de11eb` and `60636aac`, the edits were checked against the passages and sources described in the first review;
@@ -253,8 +264,9 @@ a comparison found no removed blockquoted lines, and `git diff --check` was clea
 interpretations and provenance identified above. It expands one user excerpt to its full turn and restores the
 execution-cost meaning of task weights. These are documentary checks, not evidence of compiler behavior or completion.
 
-The subsequent revisions touch twelve existing documents. All pre-existing blockquoted lines remain, local
-Markdown link targets resolve, and `git diff --check` passes. The compiler source was not changed by this review.
+`61a3e15e` touched twelve existing documents. The terminology correction changes nine documents, including the
+change-request standard. All pre-existing blockquoted lines remain, local Markdown link targets resolve, and
+`git diff --check` passes. The compiler source was not changed by this review.
 
 The November 13 compiler-boundary and hook memoranda already identify their inspected revisions and limits; they
 were not promoted to requirements. Some requests still describe old concrete interfaces, and some source mappings

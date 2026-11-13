@@ -294,6 +294,9 @@ what "them" names)
     Nothing in the graph branches or repeats on tensor data.
   - This is an operator lowering. It produces that node in the exported graph; placement and the schedule (item 3)
     consume it as they do any other node.
+  - For `lstsq` the quoted page names the routine: `gelsd` and `gelss`. For `svd`, `eigh`, `eig` and `eigvals` no
+    quoted source names the LAPACK routine PyTorch or JAX calls on a CPU; the header lines above show only which
+    drivers Accelerate declares.
   - The routine's `INFO` is a value the node returns; a positive `INFO` is reported.
   - `torch.linalg.pinv` is the composition PyTorch states, of the node for `svd` or for `eigh`.
   - `_lstsq_metadata` takes the four drivers PyTorch names, with the output shapes PyTorch gives each.

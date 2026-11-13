@@ -399,7 +399,7 @@ the scheduled value, and lowering, the runtime and the archive each take it.
   mesh_function` array to `mesh_plan`, commits the command buffers and reads the `struct mesh_planned` and the `struct
   mesh_status`.
 - **Lowering.** The kernels `metal_recording.m` records (`mesh_read_N`) read the pages the `struct mesh_page_entry` rows
-  name and the state section's phases.
+  name and the state section's phases. No source this document cites names the type of the recorded kernels' bindings.
 
 ## Appendix A: the allocator
 
@@ -873,7 +873,7 @@ functions that read it.
 - **Written by, read by.** `tools/prepare_e2b.py` writes the dependences into the manifest. `e2b_replay` passes them to
   `mesh_plan` in place of `NULL, 0` (e2b_replay.m:578–579). A3's allocator reads them as its order. The run's pages then
   don't grow with its executions. Each dependence is a `struct mesh_dependence` `{from, to, lag, kinds}`
-  (`rdma/mesh-collective.h`).
+  (`rdma/mesh-collective.h`). No source this document cites names the manifest's type.
 
 **C3.6 The races and the unbounded waits.** Each is removed by the item named. None has a data structure or an algorithm
 of its own.

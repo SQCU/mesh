@@ -540,6 +540,7 @@ The reference program ~/schedule-emit demonstrates the stage responsibilities us
     [compilation-composition](compilation-composition-change-request.md#complete-replacement-all-in-one-commit-workgroup).
     **It writes** the mask, the worklist, the worklist's length in the indirect buffer of the dispatch that executes
     it, and the task list, consumed by the lowered dispatches.
+    The item names no type for the presence bits' word, the completion times, the mask, the worklist or the task list.
   - **Source:**
     - Dawn (79794682), src/dawn/native/metal/ShaderModuleMTL.mm:553–556: `library = AcquireNSPRef([mtlDevice
       newLibraryWithSource:mslSource.Get() options:compileOptions.Get() error:&error]);` MTLDevice.h:786:
@@ -703,6 +704,7 @@ The reference program ~/schedule-emit demonstrates the stage responsibilities us
   state, which is the static schedule's (Lam 1988), so the records are a function of `schedule.schedule`'s result.
   Compile-time storage allocation writes the offsets into the scheduled value; lowering and runtime binding
   consume them, as compilation-composition items 3 and 4 require.
+  The item names no type for an offset.
 - **Replaces:** rdma/mesh-dataflow.c `mesh_view_compose` (:187–208 at mesh f55c541c), which reserves an address range
   and remaps operands' page-table rows over it with `mach_vm_remap`.
 - **Source:**
@@ -763,7 +765,7 @@ The reference program ~/schedule-emit demonstrates the stage responsibilities us
   arena_planner.cc: a buffer's interval runs from its first write to its last read, an input's starts at the first
   position, and a result's ends at the last.
 - **It writes** one interval for each buffer, consumed by compile-time storage allocation (item 6 and
-  disjoint-pages A3).
+  disjoint-pages A3). The item names no type for the interval.
 - **Replaces:** rdma/mesh_compile.py `program()`, which gives a call's inputs and its results the capture's whole range
   of levels, [0, levels − 1] (aca4f783).
 - **Source:**
