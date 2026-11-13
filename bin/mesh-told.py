@@ -43,7 +43,7 @@ def warnings(record):
                           ('a second producer of a value one module produces', 'second_producer'),
                           ('a source comment that is more than a citation', 'comment_not_a_citation')):
             if record[key]:
-                found.append(f"has {name}: {'; '.join(record['at'][:4])}")
+                found.append(f"has {name}: {'; '.join(record['places'][:4])}")
     elif measure.startswith('new file '):
         if record.get('prose') and record.get('guide') is None:
             found.append(f'{WARNING} {measure} names no style guide')

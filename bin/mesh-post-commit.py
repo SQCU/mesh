@@ -213,7 +213,7 @@ def source(repo, sha):
         raise RuntimeError(f'the reader answered {sorted(bits)} of 3 questions')
     return {'graph_algorithm_outside_module': bits['GRAPH'] == 'YES', 'second_producer': bits['SECOND-PRODUCER'] == 'YES',
             'comment_not_a_citation': bits['COMMENT'] == 'YES',
-            'at': re.findall(r'^AT: (.+?)\s*$', answer, re.M)[:20], 'truncated': len(shown) > LIMIT}
+            'places': re.findall(r'^AT: (.+?)\s*$', answer, re.M)[:20], 'truncated': len(shown) > LIMIT}
 
 
 def given_items(repo, process):
