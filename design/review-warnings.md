@@ -114,12 +114,9 @@ and Claude's announcement of the additional restriction in assistant turn `5ab8d
 `55974018-f56d-4c8b-8973-6fc61b49140c`. This audit classified the restriction as an extrapolation and removed it
 without replacement, following the 2026-11-13 instruction.
 
-- **Rule:** bin/mesh-brief-gate.py runs before each Agent, SendMessage and Workflow call of a session in either
-  repository. Where the call's text holds a line that is not `Read /absolute/path and act on it.`, with `, item N`,
-  `, section N` or `, lines N-M` allowed after the path, the call is
-  refused before any agent starts, and the refusal is written as a note (`git notes --ref brief-refusals`). No model reads anything. The form of the permitted line is Claude's
-  reading of the turn and of the operator's turn of 2026-11-08: "why are you 'descirbing' anything in 'briefs' instead
-  of literally saying 'there is a change request document. read it and act on the topic.'"
+The earlier gate description also quoted the operator's turn of 2026-11-08:
+
+> why are you 'descirbing' anything in 'briefs' instead of literally saying 'there is a change request document. read it and act on the topic.'
 
 ### 11. The change request measurement
 
@@ -147,21 +144,6 @@ without replacement, following the 2026-11-13 instruction.
 
 > post commit hooks souldn't be string typed like this. preventing claims and pseudodocumentation and tests from appearing is unconditional.
 
-- **Rule:** this replaces the scripts of rules 7, 8, 9, 11, 12 and 13; rule 10's gate stays.
-  - git's own post-commit hook runs bin/mesh-post-commit.py once for the commit just made, in either repository. It
-    keeps no marker and reads no list of commits.
-  - It writes its records as git notes on that commit (`git notes --ref measurements show <commit>`): one for the
-    commit, one for each file the commit adds, one for each change request item the message names. A measurement
-    that fails is a record that says so; nothing is tried again.
-  - The commit's record is Claude Haiku's answers about the whole commit, message and diff, whatever the files are
-    called: an assertion, a test, a claim of fact, a claim of requirement, a requirement removed, a change to
-    program source, a change to a hook. The script adds which files gain a claim and no block-quoted turn, whether a
-    block-quoted line is removed, which passages presented as the user's words no typed turn contains, and whether
-    program source changes with no change request item named.
-  - bin/mesh-told.py, a separate script with no model, reads those records, writes each commit's warnings as a note
-    (`--ref warnings`) and tells the session.
-  - Which questions are asked is Claude's choice from the operator's turns quoted in rules 7 to 13.
-
 ### 15. Who was given what, and what an item has had
 
 - **Source:** the operator, 2026-11-12:
@@ -172,29 +154,15 @@ without replacement, following the 2026-11-13 instruction.
 
 > why do these still exist in this form then?
 
-- **Rule:**
-  - bin/mesh-brief-gate.py records each launch it allows, with the file and item given and the Claude process that
-    asked, as a note (`git notes --ref briefs`).
-  - bin/mesh-post-commit.py records the Claude process a commit was made under, the items that process's agents were
-    launched on, and any item the commit names that none of them was launched on.
-  - bin/mesh-told.py tells a commit's warnings to the process that made it, or to any session once that process is
-    gone.
-  - bin/mesh-item-tally.py prints, for one item, which of its sentences the commits naming it have carried.
-  - The graph-module and comment hooks (bin/mesh-c9-review.py, bin/mesh-comment-review.py) are deleted; their
-    questions are the `source` record of bin/mesh-post-commit.py, asked of every commit.
-
 ### 16. What an agent leaves and says
 
 - **Source:** the operator, 2026-11-12:
 
 > it is in the spirit of this exercise to identify what you didn't do, then fix this immediately, wrt this module, instead of going into ever finer grained detail of 'why why why why'.
 
-- **Rule:**
-  - bin/mesh-stop.py runs when a session or an agent stops. It writes a note (`git notes --ref stops`) with the
-    tracked files left uncommitted in each repository and, for an agent, Claude Haiku's three answers about its last
-    message: says part of its work was not done, asks its reader for something, states what holds without naming a
-    commit.
-  - bin/mesh-agent-mark.py writes which agent is running a Bash call; a commit's record carries it.
-  - bin/mesh-item-tally.py searches the source of both repositories for each name an item writes in code marks.
-  - bin/post-commit is the file git's post-commit hook in each repository links to.
-  - What is measured is Claude's choice.
+## Dated audits
+
+The [2026-11-13 meta-review](review-hooks-audit-2026-11-13.md) records the inspected hook revisions,
+transcript provenance, corrections and validation limits. It is a historical review, not authority for requirements
+or evidence of later execution. The implementation descriptions formerly below rules 10 and 14 to 16 were removed
+in that review; their quoted operator instructions remain above.

@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from mesh_notes import append
 
 REPOSITORIES = ('/Users/mdot/dox/mesh', '/Users/mdot/metal-microbench')
 PROCESS = os.path.basename(os.environ.get('CLAUDE_CODE_MESSAGING_SOCKET', '')).split('.')[0] or None
@@ -16,7 +17,8 @@ present. Do not consider whether it is justified.
 
 UNDONE: the message says part of what the agent was given was not done, not started, left, deferred or stopped.
 ASKS: the message asks or tells its reader to do something, or says what it needs from someone else.
-CLAIMS: the message states what code does or what holds without naming the commit that shows it.
+CLAIMS: the message claims what code does, what holds or what is complete. Naming a commit does not establish
+the claim. Measure its presence, not its truth. This message alone supplies no independent execution evidence.
 
 Answer with exactly three lines, each ending in YES or NO, and nothing else:
 UNDONE:
@@ -65,14 +67,13 @@ def main():
             record['report'] = {'measured': False, 'reason': 'no last message found'}
     except Exception as error:
         record['report'] = {'measured': False, 'reason': f'{type(error).__name__}: {error}'[:200]}
-    subprocess.run(['git', '-C', REPOSITORIES[0], 'notes', '--ref', 'stops', 'append', '-m', json.dumps(record), 'HEAD'],
-                   capture_output=True)
+    append(REPOSITORIES[0], 'stops', json.dumps(record), 'HEAD')
     found = [f"{len(paths)} tracked file(s) uncommitted in {repo}: {', '.join(paths[:6])}"
              for repo, paths in record['uncommitted'].items() if paths]
     report = record.get('report') or {}
     found += [text for key, text in (('undone', 'its last message says part of its work was not done'),
                                      ('asks', 'its last message asks its reader for something'),
-                                     ('claims', 'its last message states what holds without naming a commit'))
+                                     ('claims', 'its last message makes claims about code; this presence measure does not verify them'))
               if report.get(key)]
     if found and record['event'] == 'SubagentStop':
         print(json.dumps({'systemMessage': 'An agent stopped (design/review-warnings.md rule 16): ' + '; '.join(found)}))

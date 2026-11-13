@@ -1,18 +1,18 @@
 """design/review-warnings.md#14-one-record-for-each-commit"""
 import datetime
 import glob
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import urllib.request
+from mesh_notes import append
 
 MESH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INDEX = 'design/change-requests-index.md'
 NOTES = 'measurements'
-TURNS = os.path.expanduser('~/.cache/mesh-typed-turns.txt')
-READ = TURNS + '.read.json'
 TRANSCRIPTS = [os.path.expanduser('~/.claude-personal/projects/*/*.jsonl'), os.path.expanduser('~/.codex/history.jsonl')]
 NAMED = re.compile(r'^Change-Request: (\S+), item ([A-Z]{0,2}\.?\d+(?:\.\d+)*)\s*$', re.M)
 LIMIT = 300000
@@ -20,7 +20,6 @@ HAIKU = ['claude', '-p', '--model', 'claude-haiku-5-5', '--tools', '', '--settin
          '--no-session-persistence', '--strict-mcp-config']
 SONNET = [part if part != 'claude-haiku-5-5' else 'sonnet' for part in HAIKU]
 PROCESS = os.path.basename(os.environ.get('CLAUDE_CODE_MESSAGING_SOCKET', '')).split('.')[0] or None
-MARK = os.path.expanduser(f'~/.cache/mesh-agent/{PROCESS}')
 ENVIRONMENT = {name: value for name, value in os.environ.items() if not name.startswith('GIT_')}
 COMMIT = """You are given one git commit on stdin: its message, then its diff. Measure only whether each thing is
 present in what the commit ADDS (its message, and the diff lines that begin with '+') or, where a question says so,
@@ -34,12 +33,13 @@ output, or script whose purpose is to run code and compare what it produces with
 FACT: an added line states, in the writer's own words and not inside a quotation, a claim of fact about the
 repository: what some code or file is, does, holds, has or lacks; what a commit did; what is finished, covered,
 outstanding, passing or failing; a count or a measurement. This includes prose in documents, comments and
-docstrings. Not counted: the commit's own message describing its own change, and text that is a program's data
-(a string a program prints, sends or asks a model).
+docstrings, and claims in prompts given to reviewers or implementers. Not counted: the commit's own message
+describing its own change, or an ordinary runtime message that states no fact about the repository.
 REQUIREMENT: an added line states, in the writer's own words and not inside a quotation, a claim of requirement:
 what must, shall, should, has to, needs to or is to be done, written, kept, deleted or satisfied; a rule; an order of
-work; a condition; a definition of when something is done. Text that is a program's data is not counted.
-REQUIREMENT-REMOVED: a removed line states a requirement that no added line states in the same words.
+work; a condition; a definition of when something is done. Include prompts directing reviewers or implementers.
+REQUIREMENT-REMOVED: a removed line states a requirement that no added line states in the same words. Measure
+that textual change, not whether the requirement has been withdrawn or whether its removal is justified.
 SOURCE: the commit changes source code of the software the repository builds and ships. Scripts that review,
 measure or gate commits and tool calls, their settings, documents and data are not that software; a commit that
 changes only those is NO.
@@ -72,8 +72,9 @@ SECOND-PRODUCER: a function the commit adds or changes computes again a value on
 value's bytes lie in a region, the fields of a record a shared header declares, which functions must run before
 which, or a record of synchronization edges. Code that calls the producer, or only mirrors a record's layout to pass
 operands, is not this.
-COMMENT: an added comment or docstring in source code contains anything besides citations of documents (a document
-path and section, a bibliographic reference, an API header and line, a specification's URL).
+COMMENT: an added comment or docstring in source code contains natural-language explanation or requirements
+besides citations of documents (a document path and section, a bibliographic reference, an API header and line,
+a specification's URL). Formal proofs/algebra, machine directives, runtime text and model prompts are not commentary.
 
 Answer with exactly these lines, each ending in YES or NO, then for each YES one or more lines
 AT: <path>:<line> <function or first words>, and nothing else:
@@ -95,17 +96,19 @@ and need nothing else. Measure only; do not advise.
 
 Answer with exactly one line and nothing else:
 ADHERES: YES or ADHERES: NO"""
-ITEM = """You are given one item of a change request, then one git commit's diff. You have nothing else and need
-nothing else. Measure; do not advise, explain or recommend.
+ITEM = """You are given a named item, its complete change request document, then one git commit's diff.
+Measure the named item only; do not advise, explain or recommend. Preserve the item's qualifications and citation
+roles. The document's claims about code are not execution evidence, and this review does not establish that its
+requirements are authentic. You have no execution results or external references beyond the supplied text.
 
-You are given the item's sentences numbered. For each number give one line:
-<number>: YES (the diff does what the sentence says)
-<number>: NO (the diff changes the place the sentence is about and does not do what it says)
-<number>: NOT ADDRESSED (the diff does not touch what the sentence is about, or the sentence states nothing to write)
+For each clause of the named item that states something to write, change or remove, quote the clause exactly:
+CLAUSE: "<clause>" | CARRIED: YES (the diff carries out the clause, as far as the supplied source shows)
+or CARRIED: NO (the diff changes the place the clause is about and does not carry it out)
+or CARRIED: NOT ADDRESSED (the diff does not address it, or the supplied material cannot establish it)
 
 Then one line:
 ADDED: YES (the diff adds behaviour, a rule, a check, a guard, a wait, a copy or an interface that no sentence of the
-item states) or ADDED: NO
+item states) or ADDED: NO. This measures presence, not whether that addition is justified or forbidden.
 
 Nothing else."""
 
@@ -127,46 +130,23 @@ def squeezed(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
-def strings(value):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for inner in value.values():
-            yield from strings(inner)
-    elif isinstance(value, list):
-        for inner in value:
-            yield from strings(inner)
-
-
 def typed():
-    os.makedirs(os.path.dirname(TURNS), exist_ok=True)
-    read = json.load(open(READ)) if os.path.exists(READ) else {}
-    with open(TURNS, 'a') as out:
-        for path in sorted(p for pattern in TRANSCRIPTS for p in glob.glob(pattern)):
-            start = read.get(path, 0)
-            if os.path.getsize(path) <= start:
-                continue
-            codex = path.endswith('history.jsonl')
-            with open(path, 'rb') as f:
-                f.seek(start)
-                for raw in f:
-                    if not raw.endswith(b'\n'):
-                        break
-                    start += len(raw)
-                    if not codex and b'"kind":"human"' not in raw:
-                        continue
-                    try:
-                        record = json.loads(raw)
-                    except ValueError:
-                        continue
-                    held = [record.get('text')] if codex else [record.get('message'), record.get('attachment')]
-                    for text in strings(held):
-                        out.write(squeezed(text) + '\n')
-            read[path] = start
-    with open(READ + '.new', 'w') as f:
-        json.dump(read, f)
-    os.replace(READ + '.new', READ)
-    return open(TURNS).read()
+    turns = []
+    for path in sorted(p for pattern in TRANSCRIPTS for p in glob.glob(pattern)):
+        codex = path.endswith('history.jsonl')
+        with open(path) as stream:
+            for raw in stream:
+                try:
+                    record = json.loads(raw)
+                except ValueError:
+                    continue
+                if not codex and (record.get('type') != 'user' or record.get('origin', {}).get('kind') != 'human'):
+                    continue
+                content = record.get('text', '') if codex else record.get('message', {}).get('content', '')
+                text = content if isinstance(content, str) else '\n'.join(
+                    block.get('text', '') for block in content if block.get('type') == 'text')
+                turns.append(squeezed(text))
+    return turns
 
 
 def commit(repo, sha):
@@ -178,8 +158,7 @@ def commit(repo, sha):
     removed = [line[1:].strip() for line in shown.splitlines() if line.startswith('-') and not line.startswith('---')]
     added = {line[1:].strip() for line in shown.splitlines() if line.startswith('+') and not line.startswith('+++')}
     said = [squeezed(passage) for passage in re.findall(r'^SAID: "(.*)"\s*$', answer, re.M)]
-    turns = typed() if said else ''
-    pieces = [squeezed(piece) for passage in said for piece in re.split(r'\[\.\.\.\]|\.\.\.|…', passage)]
+    turns = typed() if said else []
     named = NAMED.findall(git(repo, 'show', '-s', '--format=%B', sha))
     quoting, path = set(), None
     for line in shown.splitlines():
@@ -191,17 +170,14 @@ def commit(repo, sha):
     record = {name.lower().replace('-', '_'): value == 'YES' for name, value in bits.items()}
     record.update(claims_without_quote=[name for name in claiming if name not in quoting],
                   quoted_line_removed=any(line.startswith('>') and line not in added for line in removed),
-                  said=len(said), not_typed=[piece for piece in pieces if len(piece) >= 12 and piece not in turns],
+                  said=len(said), not_typed=[passage for passage in said if not any(passage in turn for turn in turns)],
+                  transcript_sources=TRANSCRIPTS,
                   names_item=[f'{document}, item {name}' for document, name in named],
                   truncated=len(shown) > LIMIT)
     record['source_without_item'] = record['source'] and not named
     record['process'] = PROCESS
-    record['agent'] = open(MARK).read().strip() if PROCESS and os.path.exists(MARK) else None
     given = given_items(repo, PROCESS) if PROCESS else []
     record['launched_on'] = given
-    record['names_item_not_launched_on'] = [name for name in record['names_item']
-                                            if PROCESS and not any(name.split(', item ')[0] in g and
-                                                                   g.endswith('item ' + name.split(', item ')[1]) for g in given)]
     return record, named
 
 
@@ -241,49 +217,56 @@ def new_file(repo, sha, path):
     cited = re.search(r'^GUIDE: (.+?)\s*$', answer, re.M)
     if not prose or not cited:
         raise RuntimeError('the reader did not answer PROSE and GUIDE')
-    record = {'prose': prose.group(1) == 'YES', 'guide': None if cited.group(1) == 'NONE' else cited.group(1)}
+    record = {'prose': prose.group(1) == 'YES', 'guide': None if cited.group(1) == 'NONE' else cited.group(1),
+              'truncated': len(text) > LIMIT}
     if not record['prose'] or record['guide'] is None:
         return record
     name = record['guide'].split('#')[0]
-    places = ((repo, sha, os.path.normpath(os.path.join(os.path.dirname(path), name))), (repo, sha, name),
-              (MESH, 'HEAD', name))
-    guide = next((git(root, 'show', f'{revision}:{at}') for root, revision, at in places
-                  if git(root, 'cat-file', '-t', f'{revision}:{at}') == 'blob'), None)
+    if name.startswith(('http://', 'https://')):
+        try:
+            with urllib.request.urlopen(name, timeout=30) as response:
+                guide = response.read().decode(response.headers.get_content_charset() or 'utf-8')
+                record['guide_source'] = response.url
+        except Exception as error:
+            return {**record, 'guide_found': False, 'reason': f'{type(error).__name__}: {error}'[:300]}
+    else:
+        places = ((repo, sha, os.path.normpath(os.path.join(os.path.dirname(path), name))), (repo, sha, name),
+                  (MESH, git(MESH, 'rev-parse', 'HEAD'), name))
+        located = next(((root, revision, at) for root, revision, at in places
+                        if git(root, 'cat-file', '-t', f'{revision}:{at}') == 'blob'), None)
+        guide = git(located[0], 'show', f'{located[1]}:{located[2]}') if located else None
+        record['guide_source'] = located
     record['guide_found'] = guide is not None
     if guide is not None:
+        record['guide_sha256'] = hashlib.sha256(guide.encode()).hexdigest()
+        given = f'THE GUIDE:\n{guide}\n\nTHE NEW FILE ({path}):\n{text}'
+        record['truncated'] = len(given) > LIMIT
         answer = re.search(r'^ADHERES: (YES|NO)\s*$',
-                           asked(SONNET, ADHERES, f'THE GUIDE:\n{guide}\n\nTHE NEW FILE ({path}):\n{text}'[:LIMIT]), re.M)
+                           asked(SONNET, ADHERES, given[:LIMIT]), re.M)
         if not answer:
             raise RuntimeError('the reader did not answer ADHERES')
         record['adheres'] = answer.group(1) == 'YES'
     return record
 
 
-def item(repo, sha, document, name):
-    index = git(MESH, 'show', f'HEAD:{INDEX}')
-    if document not in {'design/' + linked for linked in re.findall(r'\]\(([^)\s]+\.md)\)', index)}:
-        return {'linked': False}
-    revision = sha if git(repo, 'cat-file', '-t', f'{sha}:{document}') == 'blob' else None
-    lines = git(repo if revision else MESH, 'show', f'{revision or "HEAD"}:{document}').splitlines()
-    found = next(((at, len(heading.group(1))) for at, line in enumerate(lines)
-                  for heading in [re.match(rf'(#{{1,6}})\s+{re.escape(name)}[.:\s]', line)] if heading), None)
-    if found is None:
-        return {'linked': True, 'item_found': False}
-    at, depth = found
-    end = next((later for later in range(at + 1, len(lines)) if re.match(rf'#{{1,{depth}}}\s', lines[later])), len(lines))
-    sentences = [s for s in re.split(r'(?<=[.:;?!"”])\s+', squeezed(' '.join(lines[at + 1:end]))) if len(s) > 20]
+def item(repo, sha, document, name, mesh_revision):
+    root, revision = ((repo, sha) if git(repo, 'cat-file', '-t', f'{sha}:{document}') == 'blob'
+                      else (MESH, mesh_revision))
+    blob = git(root, 'rev-parse', '--verify', f'{revision}:{document}')
+    if not blob:
+        return {'document_found': False, 'document_revision': revision}
+    text = git(root, 'show', blob)
     diff = git(repo, 'show', '--no-color', '--format=', sha)
-    given = (f'THE ITEM ({document}, item {name}):\n' + '\n'.join(f'{n}. {s}' for n, s in enumerate(sentences, 1)) +
-             f'\n\nTHE COMMIT:\n{diff[:LIMIT]}')
-    answer = asked(SONNET, ITEM, given)
-    states = dict(re.findall(r'^(\d+): (YES|NO|NOT ADDRESSED)\s*$', answer, re.M))
+    given = f'THE NAMED ITEM: {document}, item {name}\nTHE DOCUMENT:\n{text}\n\nTHE COMMIT:\n{diff}'
+    answer = asked(SONNET, ITEM, given[:LIMIT])
     added = re.search(r'^ADDED: (YES|NO)', answer, re.M)
-    if not added or len(states) != len(sentences):
-        raise RuntimeError(f'the reader answered {len(states)} of {len(sentences)} sentences')
-    return {'linked': True, 'item_found': True, 'sentences': len(sentences),
-            'carried': [int(n) for n, s in states.items() if s == 'YES'],
-            'not_carried': [int(n) for n, s in states.items() if s == 'NO'],
-            'added': added.group(1) == 'YES', 'truncated': len(diff) > LIMIT}
+    if not added:
+        raise RuntimeError('the reader did not answer ADDED')
+    clauses = [{'clause': clause, 'carried': state, 'in_document': squeezed(clause) in squeezed(text)}
+               for clause, state in re.findall(r'^CLAUSE: "(.*)" \| CARRIED: (YES|NO|NOT ADDRESSED)\s*$', answer, re.M)]
+    return {'document_found': True, 'document_repository': root, 'document_revision': revision,
+            'document_blob': blob, 'clauses': clauses, 'response': answer,
+            'added': added.group(1) == 'YES', 'truncated': len(given) > LIMIT}
 
 
 def noted(repo, sha, measure, made):
@@ -293,18 +276,17 @@ def noted(repo, sha, measure, made):
         record = {'measured': False, 'reason': f'{type(error).__name__}: {error}'[:300]}
     line = json.dumps({'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
                        'measure': measure, **record})
-    subprocess.run(['git', '-C', repo, 'notes', '--ref', NOTES, 'append', '-m', line, sha], capture_output=True,
-                   env=ENVIRONMENT)
+    append(repo, NOTES, line, sha)
     return record
 
 
 def main():
     repo, sha = sys.argv[1], sys.argv[2]
-    named = []
+    named = NAMED.findall(git(repo, 'show', '-s', '--format=%B', sha))
+    mesh_revision = git(MESH, 'rev-parse', 'HEAD')
 
     def whole():
-        record, found = commit(repo, sha)
-        named.extend(found)
+        record, _ = commit(repo, sha)
         return record
     noted(repo, sha, 'commit', whole)
     noted(repo, sha, 'source', lambda: source(repo, sha))
@@ -312,7 +294,8 @@ def main():
     for path in filter(None, raw.split('\0')):
         noted(repo, sha, f'new file {path}', lambda path=path: new_file(repo, sha, path))
     for document, name in named:
-        noted(repo, sha, f'{document}, item {name}', lambda document=document, name=name: item(repo, sha, document, name))
+        noted(repo, sha, f'{document}, item {name}',
+              lambda document=document, name=name: item(repo, sha, document, name, mesh_revision))
     return 0
 
 

@@ -1,4 +1,10 @@
-#!/bin/sh
-repo=$(git rev-parse --show-toplevel)
-sha=$(git rev-parse HEAD)
-( env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE nohup /opt/homebrew/bin/python3 /Users/mdot/dox/mesh/bin/mesh-post-commit.py "$repo" "$sha" >/dev/null 2>&1 & )
+#!/opt/homebrew/bin/python3
+import os
+import subprocess
+import sys
+
+repo = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()
+sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+subprocess.Popen([sys.executable, '/Users/mdot/dox/mesh/bin/mesh-post-commit.py', repo, sha],
+                 env={name: value for name, value in os.environ.items() if not name.startswith('GIT_')},
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
