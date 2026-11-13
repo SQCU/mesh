@@ -2,7 +2,7 @@
 
 This repo makes a set of Macs work as one machine. Each Mac runs a bridge that sends data over Thunderbolt cables by
 RDMA. On top of the bridges is a library with the NCCL calls, bindings for torch and NumPy, and a few example programs.
-This index lists each document that tells how the system works now, with a short note on each. The repo also holds
+This index lists design and review documents, with a short note on each. The repo also holds
 other projects, such as a game bot, and old dated records; they are not listed here.
 
 ## Start here
@@ -20,9 +20,8 @@ other projects, such as a game bot, and old dated records; they are not listed h
 - [design/change-requests.md](design/change-requests.md): what a change request is and how one is written. A change
   request says what code to write, and for each part it names the paper, book or program that says just how to write it.
 - [design/change-requests-index.md](design/change-requests-index.md): links to every change request.
-- [design/commentary-review.md](design/commentary-review.md): the commentary written after each commit on the design
-  documents it changes. It notes quotations, statements, code locations and requirements in each repository's
-  .git/review-commentary/, and it never blocks, delays or redirects the work.
+- [design/commentary-review.md](design/commentary-review.md): the requested commentary on changes to design
+  documents, including quotations, statements, code locations and requirements.
 
 ## The bridge and transport
 

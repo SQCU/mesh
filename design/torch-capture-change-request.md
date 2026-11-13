@@ -371,7 +371,6 @@ The functions the requirements are stated against are those of the reference pro
   (RenderDoc), and the contents at the capture's start of each buffer those calls read before writing.
 - **The algorithm** is the capture and replay of API calls (apitrace; GFXReconstruct; RenderDoc): at capture each
   call is appended to the capture, and the replay issues the capture's calls in their order.
-- This item is placed only in a flow in which the program is executed and recorded before its static schedule exists.
 - **Replaces,** in metal-microbench metal_recording.m:
   - the calls refused during a capture: compute-encoder calls not recorded (:3125–3131), blit-encoder calls other than
     `copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:` and `fillBuffer:range:value:` (:3153–3157), and
@@ -541,8 +540,6 @@ The functions the requirements are stated against are those of the reference pro
     `mesh_plan`'s linear program computes. **It writes** the mask, the worklist, the worklist's length in the
     indirect buffer of the dispatch that executes it, and the task list. The item names no type for the presence
     bits' word, the completion times, the mask, the worklist or the task list.
-  - Its input is the recorded dispatch, so in the LiteRT scope this item is placed only in a flow in which the
-    program is executed and recorded before its static schedule exists.
   - **Source:**
     - Dawn (79794682), src/dawn/native/metal/ShaderModuleMTL.mm:553–556: `library = AcquireNSPRef([mtlDevice
       newLibraryWithSource:mslSource.Get() options:compileOptions.Get() error:&error]);` MTLDevice.h:786:
@@ -768,8 +765,6 @@ The functions the requirements are stated against are those of the reference pro
   arena_planner.cc: a buffer's interval runs from its first write to its last read, an input's starts at the first
   position, and a result's ends at the last.
 - **It writes** one interval for each buffer. The item names no type for it and no function that reads it.
-- The positions are those of the capture's commands, so this item is placed only in a flow in which the program is
-  executed and recorded before its static schedule exists.
 - **Replaces:** rdma/mesh_compile.py `program()`, which gives a call's inputs and its results the capture's whole range
   of levels, [0, levels − 1] (aca4f783).
 - **Source:**
@@ -831,8 +826,6 @@ The functions the requirements are stated against are those of the reference pro
 
 ### 9. Every node replays
 
-- This item is placed only in a flow in which each node's program is executed and recorded before its static schedule
-  exists.
 - **Replaces:** mesh fcf5d18a: a node where a declared transfer names one of its values calls torch from Python at every
   execution, while the other nodes replay.
 - **Source:** NCCL User Guide 2.32.3: "Collective operations have to be called for each rank (hence CUDA device),

@@ -8,8 +8,12 @@ The operator, 2026-11-10:
 
 ## The task
 
-Write mesh's compiler. It is the program quoted in [data-flow.md](data-flow.md), written in mesh at `compiler/`: the same
-modules, the same functions with the same arguments and results, and the same two types, `Exported` and `Scheduled`.
+Write mesh's compiler at `compiler/`. Use the reference program quoted in [data-flow.md](data-flow.md) for the
+composition of its stages. That document quotes the operator's assignment:
+
+> remmber that our goal here is to articulate what the data flow will be for the mesh modules that have the same role in their own data flow as this counterfactual example code.
+
+The reference's interfaces are:
 
 ```
 compile_module(module, args, processors, placement, cost) -> Scheduled
@@ -29,10 +33,7 @@ Three things are mesh's and are added to it:
    - A device may name an engine that is not a torch device: `(machine, 'ane')` is the machine's Neural Engine, reached
      through Core ML; "the device's type" is read as covering it. That reading is Claude's, made so that `examples/engines.py`, whose
      engines are `mps,cpu,ane`, is compiled by this compiler; it is not Abadi et al.'s statement and not an operator
-     turn. The values of such a processor that `export`,
-     `on_devices` and `schedule` handle are host tensors: `Scheduled.devices` holds the host for it and
-     `Scheduled.engines` is `{processor: engine}`, which the archive saves and loads. The engine is where the
-     processor's function runs.
+     turn.
 2. **A channel between two machines is carried by the bridge.** Where a `send` and its `recv` are on processors of
    different machines, `send` writes the tensor's pages to the bridge and `recv` returns a tensor over the pages
    received.
@@ -53,9 +54,7 @@ Three things are mesh's and are added to it:
 
 ## The work
 
-Claude writes the modules and functions named above, in `compiler/mesh_compiler/`.
+Claude implements this compilation flow in `compiler/mesh_compiler/`.
 
 The steps, their order and what each one replaces are the eleven items of
-[implementation-order-2026-11-09.md](implementation-order-2026-11-09.md). One item is assigned at a time, alone, and
-the item's text is the whole assignment. An item is closed as that memorandum states: "An item is closed when what it
-replaces is deleted, checked by searching the source for the named functions, not by a status paragraph."
+[implementation-order-2026-11-09.md](implementation-order-2026-11-09.md).

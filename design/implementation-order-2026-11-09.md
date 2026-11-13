@@ -57,13 +57,12 @@ The operator, the same day, of no item having closed:
 
 ## The reference program
 
-`~/schedule-emit` is a separate repository with no code from mesh or metal-microbench. It schedules a torch program's
-functions across processors as an extension of `torch.export`, in 724 lines and 31 functions.
+The reference for this memorandum was `~/schedule-emit` at 881a347, a separate repository. The source inventory
+reported 724 lines and 31 functions. Those counts describe that revision, not its execution or coverage.
 
 ## The requirements, in order
 
-A later item consumes what an earlier item produces. An item is closed when what it replaces is deleted, checked by
-searching the source for the named functions, not by a status paragraph.
+A later item consumes what an earlier item produces. The order below describes those data dependencies.
 
 ### 1. The scope is static capture; control flow that depends on data, and shapes known only at run time, are rejected once, at export
 
@@ -238,16 +237,11 @@ searching the source for the named functions, not by a status paragraph.
 ## Why this order
 
 - Item 1 removes scope, so it is first.
-- Items 2–5 are the compile side. They close before item 7, because a runtime can stop deriving a fact only when
-  that fact arrives as data.
+- Items 2–5 supply the compile-time results that item 7's runtime consumes.
 - Item 6 precedes item 7, because the runtime calls what lowering returned.
 - Items 8–11 consume the scheduled program. Of 165 commits in the two repositories on 2026-11-09, about 28 went to
   signature observation and 12 to save and load, built around the runtime that item 7 replaces, and about 10 to
   scheduling and native execution.
-
-Until item 7 is closed, these are not edited beyond what items 1–6 force: `bin/mesh-sync-monitor.py` and signature
-records, the artifact save and load formats, the sections of metal-microbench `docs/provider.md` that describe
-runtime behaviour, `tools/e2b_replay.m` and `tools/native_bench.m`.
 
 Summed, the estimates are about 1,800 to 3,300 lines written or revised, and at least 4,500 removed by items 4, 7
 and 9.

@@ -33,7 +33,10 @@ The example was first committed on 2026-11-09 at 12:53 -0800 (schedule-emit e650
 
 Written after it: unequal-shards (11-09 18:56) and torch-source-lowering items 5 and 6 (11-09 19:37 and 21:02).
 
-## What the example establishes, and what the earlier requests assume
+## The source comparison made on 2026-11-10
+
+This table compares source text and earlier request wording. It does not establish executed coverage or discharge
+the requirements named in those requests.
 
 | The example (data-flow.md) | The earlier requests |
 |---|---|
@@ -44,4 +47,5 @@ Written after it: unequal-shards (11-09 18:56) and torch-source-lowering items 5
 
 ## What follows
 
-Each requirement of the ten requests above is restated against data-flow.md: the stage function it belongs to, the type that function takes and the type it returns. A requirement that exists only where a program is recorded and replayed, or where a schedule is made apart from the program and handed over, has no stage in that data flow and is not restated.
+Restate each requirement of the ten requests above against data-flow.md: the stage function it belongs to, the type
+that function takes and the type it returns.

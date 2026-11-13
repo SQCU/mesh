@@ -1,4 +1,4 @@
-# Memorandum: the subproblems this work needs, and where each is already written
+# Memorandum: candidate implementations found for the subproblems on 2026-11-09
 
 2026-11-09. Written by Claude at the operator's request, from the session
 `.claude-personal/projects/-Users-mdot-metal-microbench/55974018-f56d-4c8b-8973-6fc61b49140c.jsonl`. It accompanies
@@ -6,6 +6,8 @@
 [interface-boundaries-2026-11-09.md](interface-boundaries-2026-11-09.md).
 
 Code was read at mesh 7df87fe4 and at the metal-microbench working tree on 7483572e.
+Locations and uses of "HEAD" and "now" below belong to that dated inventory. The inventory did not establish
+which implementations meet their requirements through the sanctioned end-to-end calling paths.
 
 ## The turns
 
@@ -19,14 +21,12 @@ The operator, 2026-11-09, in order:
 
 ## Part 1. The report of the previous turn
 
-What is said here of Apple's and LiteRT's interfaces is from memory or from quotations in the change requests; no
-header was checked for it.
+The original report mixed cited transformations with claims from memory about Apple's and LiteRT's interfaces;
+no header was checked. The unsupported supplier-only and processor restrictions were removed on 2026-11-13.
 
-### Functions from IR to IR, without writing numeric functions
+### Functions from IR to IR
 
-The operator is right. Between an exported graph and appropriate use of what a supplier of numeric functions offers
-(Metal Performance Shaders and Primitives, Accelerate, Core ML, LiteRT's delegate) there is real work, and none of
-it is writing a numeric function. Each part has a name in the literature these requests already cite:
+The report identified these transformations between an exported graph and numeric functions:
 
 1. **Selecting, for each operator, what the supplier offers.** Instruction selection at the level of tensor
    operators: MLIR's dialect conversion (compilation-composition-change-request.md, S2).
@@ -40,57 +40,26 @@ it is writing a numeric function. Each part has a name in the literature these r
    (S8).
 5. **Folding static operands into the program.** Partial evaluation (S6).
 
-These rearrange, group and select. The arithmetic stays with the supplier. The turn quoted by
-torch-source-lowering-change-request.md item 1 says as much: "prohibiting the use of any 'torch metal kernels' rather
+The turn quoted by torch-source-lowering-change-request.md item 1 permits source from either place:
+"prohibiting the use of any 'torch metal kernels' rather
 than a lowering through source, any source, it can be reference soruce, it can be our source, i don't care".
-
-Why this became reimplementing numerics, as far as the evidence shows:
-
-- **The level of the IR.** The work of 2026-11-09 did these transformations on Tint, an IR of shader instructions.
-  To state a torch operator at that level one writes its loops and arithmetic, which is writing the numeric
-  function. Done on tensor operators, the same transformations leave the bodies with the supplier.
-- **A title.** Item 1's title, "No torch kernel; every function from source", was read as "mesh writes every
-  function", against the turn it quotes.
-- **Coverage without a supplier.** Operators the GPU lacks (64-bit floats, matrix factorizations) were written for
-  the GPU. Placement is an operand; they could have been placed on the CPU, where Accelerate supplies them.
-
-One limit: fusing a prologue or an epilogue inside a supplier's function needs the supplier to expose a place for
-it. torch-source-lowering-change-request.md item 1 quotes one, from Apple's MPPTensorOpsMatMul2d.h: "User can apply
-post processing in-register where GEMM output is computed using cooperative_tensor." Where a supplier has none, the
-composition is two adjacent launches, or another supplier for that operator.
 
 ### One function sharded across ANE, CPU and four MPS nodes
 
-In the order of stages this needs no special case. Sharding decides which slice each processor computes; placement
-names the processor; a send and a receive carry each shard's result as a tensor of declared shape and type; the
-function that combines them does not know who produced each. The reference program (`~/schedule-emit`) ran one
-scheduled program split across CPU and MPS; a third kind of processor is one more lowerer.
-
-What it needs, all at the level of the graph:
-
-- **Which operators each processor's supplier offers, as data.** A shard can be placed on a processor only if its
-  supplier offers the operator at the value's type. That is a table read at placement.
-- **Agreement of types where a value crosses.** The Neural Engine computes in 16-bit floats (from memory). Either the
-  function's declared type is 16-bit throughout or a conversion is a node of that shard. Results differ in rounding
-  between suppliers; whether that is acceptable is a numerical requirement on the program.
-- **Cost per processor as an operand.** Shards need not be equal. HEFT is defined for processors of different speeds.
-- **A copy as a node** where a supplier cannot write into the pages the transport sends.
-
-Core ML chooses the device itself, so "placed on ANE" is a request. In the order of stages the processor is "Core ML
-with a given compute-unit setting"; whether the Neural Engine ran is evidence gathered afterwards and not a value
-any stage takes.
+The operator's question above is the scope of this inventory. This memorandum did not measure such a program or
+establish the capabilities, precision or execution path of those processors.
 
 ## Part 2. The manifest
 
 How this was made: for each subproblem, the function names were found by searching the source, and the first commit
-containing each name by `git log -S`. "Written" means a function of that purpose exists; Claude did not read the
-bodies, run them, or establish their correctness or coverage. Where a function sits in the data flow is taken from
+containing each name by `git log -S`. These are candidate locations: this search did not read the bodies, run them,
+or establish their purpose, correctness or coverage. Where a function sits in the data flow is taken from
 [interface-boundaries-2026-11-09.md](interface-boundaries-2026-11-09.md). In the fourteen days before this
 memorandum the two repositories had 1,869 commits (mesh) and 642 (metal-microbench).
 
 ### The five functions from IR to IR
 
-| subproblem | already written in | first commit | where it sits now | where the order of stages puts it |
+| subproblem | candidate locations | first commit | reported location at the dated revision | proposed stage |
 |---|---|---|---|---|
 | 1. selecting what the supplier offers | `rdma/mesh_compile.py`: `_contract`, `_reduced`, `_selected`, `_lowered`, `_decomposed`; `provider/litert_mesh.cc`: the lowering of LiteRT nodes; `metal_neural.mm`: `LowerNeural` | 11-07 (`_contract`), 11-09 (the rest) | in three modules, each also emitting the bodies of numeric functions | one function on tensor operators, before scheduling |
 | 2. composing operators into one function per launch | `metal_transform.mm`: `Fuse`, `Inline`, `Epilogue`, `Groups`, `Profitable`; `rdma/mesh_compile.py`: `_epilogue` | 11-09 | on Tint instructions; `metal_transform.mm` calls `Map`, `Bindings` and `TransportBindings`, which the lowering and transport files define | on tensor operators, before scheduling; the supplier's compiler makes one launch of the composed function |
@@ -98,11 +67,9 @@ memorandum the two repositories had 1,869 commits (mesh) and 642 (metal-microben
 | 4. view and layout analysis | `rdma/mesh_compile.py`: `_view`, `_view_rule`, `_aliases`, `_layout`, `_strided`, `_contiguous`; `metal_ir.mm`: `Contiguous`; `provider/litert_mesh.cc`: `Bind`'s strides | 11-06 (`_aliases`), 11-09 (`_view_rule`) | in the frontend, the compiler core and the provider | once, on the graph, before scheduling |
 | 5. folding static operands | `rdma/mesh_compile.py`: `_specialize`, `_fold`, `_constant_origins`, `_constant_storage`; `metal_transform.mm`: `Constants`, `Fold`, `Prune`, `Simplify`, `ZeroPoints`; `metal_lower.mm`: `PrepareConstants` | 11-08 (`_specialize`), 11-09 (the rest) | in the frontend and on Tint instructions; `PrepareConstants` compiles a function and calls it while lowering | once, on tensor operators, before scheduling |
 
-All five are written, each in two or three places.
-
 ### The stages of the implementation order
 
-| subproblem | already written in | first commit | where it sits now |
+| subproblem | candidate locations | first commit | reported location at the dated revision |
 |---|---|---|---|
 | sharding a tensor across a collective, with sends and receives | `rdma/mesh_compile.py`: `partition`, `_partition`, `_reshard` (GSPMD is cited there) | 11-04 | the frontend |
 | a placement operand, uneven splits included | `tools/mesh/placements/even-5.json`, `attn-7-1-mlp-ledger-bal.json` | 11-08 (`even-5.json`) | data, as required |
@@ -123,15 +90,9 @@ All five are written, each in two or three places.
 
 ### The count
 
-Of the five functions from IR to IR, five have functions of that purpose, with the limits Part 3 states. Of the
-seven stage subproblems, seven are written. Two operands were not found. What is missing is therefore not the methods: it is that each is written in more than one
-module, at the level of shader instructions where it should be at the level of tensor operators, and in modules
-whose direction of data flow does not match the order of stages.
-
-By the operator's turn recorded in interface-boundaries-2026-11-09.md, a function whose data flows the wrong way is
-replaced by its type and need not be read. This manifest therefore does not say which of these bodies to keep. It
-says that every method the replacement needs has already been chosen and cited in these repositories, so the
-replacement invents nothing.
+The tables list candidates for five IR transformations and seven stage subproblems. Two operands were not found
+by that search. These counts do not establish that the problems are solved, that the methods are complete, or
+which bodies to keep. Part 3 records the later readers' findings and limits.
 
 Corrected after Part 3's reading: an earlier form of this table listed `mesh_graph_compose` and
 `mesh_graph_contract` under composing operators. They compose synchronization signatures and contract dependence
@@ -146,8 +107,8 @@ The operator, 2026-11-09, quoting the limit stated above:
 Eleven readers (Claude Haiku), one per subproblem, read the bodies of 209 functions. What each function does, takes,
 returns, cites and refuses is in
 [subproblem-function-bodies-2026-11-09.md](subproblem-function-bodies-2026-11-09.md), with what Claude checked and
-which of the readers' statements are unreliable. Reading a body shows what it does and what it refuses; it does not
-show that it is correct. Nothing was run.
+which of the readers' statements are unreliable. Reading a body supplies source observations; it does not
+establish reachability, executed behavior or correctness. Nothing was run.
 
 | subproblem | functions read | whole body read | cite a source in the code | cases refused | same thing computed in more than one place | parts with no function |
 |---|---:|---:|---:|---:|---:|---:|
@@ -353,8 +314,7 @@ at 90677543 and are absent at HEAD.
 
 ### What this means for the manifest
 
-- A subproblem is "already solved" if any commit holds a function or a table for it, not only HEAD. The two rows
-  Part 2 called not found, and the six items Part 4 listed as named by the specification and not found, are each
+- The two rows Part 2 called not found, and the six items Part 4 listed as named by the specification and not found, are each
   either in history as shown above or still not found (the price of collectives at the largest share; a collective
   with a size per rank).
 - Being in history decides nothing about direction of data flow. The same test applies to a function in history as

@@ -20,7 +20,7 @@ state: what the group takes and from where; what it returns and to whom; which r
 below; and whether its direction matches that order, with a file and line for every place it does not. Each was told
 to answer "unknown" rather than guess, and to make no judgment of quality and no proposal.
 
-The order of stages they compared against, each a function from one value to one value, a later one consuming what
+The order of stages supplied to those readers, each a function from one value to one value, a later one consuming what
 an earlier one returns and never the reverse:
 
 1. export: a torch module or a model file -> a graph of functions with a call signature
@@ -35,9 +35,11 @@ an earlier one returns and never the reverse:
 
 Supplying numeric functions, or changing an external compiler, is a separate role and not a stage of this order.
 
-A group's direction does not match where it (a) takes something a later stage produces, (b) produces something it
-should receive from an earlier stage or a supplier, (c) reads back emitted output (source text, compiled binaries,
-debug information) to recover a fact, or (d) performs several stage roles at once.
+The readers were asked to flag (a) taking something a later stage produces, (b) producing something that should
+arrive from an earlier stage or a supplier, (c) reading back emitted output to recover a fact, and (d) performing
+several stage roles at once. These were the review prompt's categories. Category (d) does not establish a defect:
+a driver can compose stage functions without duplicating their responsibilities. The reports below did not
+consistently distinguish composition from duplication, or a compilation operand from a runtime product.
 
 ## What this is and is not
 
@@ -47,11 +49,15 @@ debug information) to recover a fact, or (d) performs several stage roles at onc
   files (in `metal_ir.mm`, `metal_lower.mm`, `metal_native.mm`, `metal_neural.mm`, `metal_transform.mm`,
   `metal_recording.m`, `metal_submission.h`, `provider/litert_mesh.cc` and `provider/dawn.patch`); each showed what
   the reader said it showed. The rest are unchecked.
-- A cited line is a fact; which of (a)–(d) it is an instance of is the reader's reading.
+- A location identifies text that can be inspected. The report's interpretation and its account of executed
+  behavior are not established by that citation.
 - `metal_recording.{h,m}`, `rdma/mesh_compile.py`, `tools/e2b_replay.m` and the mesh C modules were not in this run.
   The implementation-order memorandum already records what was established about the first three.
 
-## Summary
+## The readers' reported classifications
+
+These are historical review outputs, including the limitations above, not findings independently established for
+the current implementation.
 
 | group | lines | visible functions | roles found | direction |
 |---|---:|---:|---|---|

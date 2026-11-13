@@ -32,7 +32,8 @@ run.
   4 of `_aliases` and 1 of `_view` in `rdma/mesh_compile.py`, where a reader reported none. Treat every "none found"
   under **callers** as unchecked.
 - "Part of the body" and "declaration only" mean what they say: that function's refusals may be incomplete.
-- Reading a body shows what it does, not that it is correct. No statement here is a statement of correctness.
+- Reading a body supplies a source observation. It does not establish reachability, executed behavior or
+  correctness. Nothing here records an end-to-end run.
 
 ## Selecting what a supplier of numeric functions offers
 

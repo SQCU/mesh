@@ -4,6 +4,9 @@
 `.claude-personal/projects/-Users-mdot-metal-microbench/55974018-f56d-4c8b-8973-6fc61b49140c.jsonl`. It accompanies
 [already-solved-subproblems-2026-11-09.md](already-solved-subproblems-2026-11-09.md), Parts 4 and 5.
 
+Repository locations and uses of "HEAD" below belong to that dated inventory. They do not report the current tree
+or establish behavior through an end-to-end run.
+
 This is a list from which change requests could be written. It is not a change request: a change request's body is
 the operator's turns, and each of its requirements quotes the source's own words
 ([change-requests.md](change-requests.md)).
@@ -24,8 +27,8 @@ Each entry below carries one of these marks.
 - **[Q]** Quoted verbatim from the source in another document of this directory, named with the entry.
 - **[R]** Read against the source in this session, by the agent that wrote `~/schedule-emit`; the sections it read
   are named.
-- **[S]** Confirmed today from the publisher's or project's own page, through a search summary. The words in
-  quotation marks are as the summary gave them.
+- **[S]** Reported by a search summary of the publisher's or project's page. The words in quotation marks are as
+  the summary gave them; the source itself was not checked by that step.
 - **[M]** From Claude's memory. Not a citation until someone reads it.
 
 ## 1. Data structures
@@ -124,7 +127,7 @@ Each names the requirement of `design/heterogeneity.md` §3 it answers.
 
 ## 3. Where the requirement documents are incomplete or disagree with themselves or with the code
 
-Each is a fact found by reading; none is a judgment of what should be done.
+These are the dated inventory's source comparisons and reports of what its readers did not find.
 
 1. **Named files that do not exist at HEAD.** `design/heterogeneity.md` names metal-microbench
    `configs/links/pair-ring.txt` (removed by 8375cb22, 11-03), `tools/torch_parallel/parts.py` and `pair.py` (no

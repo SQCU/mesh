@@ -262,7 +262,7 @@ This section is Claude's, not the operator's.
 
 ### Order
 
-- The replacement above is finished until it covers everything the `--link` form and the old calls did. Then the
+- The replacement above is not finished until it covers everything the `--link` form and the old calls did. Then the
   `--link` form (`-I`, `--link`, `oob`, `dial`, `listener_up`, the per-session exchange) and the replaced calls are
   removed.
 - One configuration runs in a runtime. No call site handles both forms.
