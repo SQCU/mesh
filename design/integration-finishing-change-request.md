@@ -49,6 +49,7 @@
 
 - **The data structure** is the weighting operand, as design/aot-compilation-change-request.md A3 gives it: "a weight
   w on each task and a weight c on each edge", and the cables' capacities, from the map.
+  Each task's supplied weight is its execution-cost input to the scheduler (A3, "what each task and transfer costs").
 - **Produced by** the caller of the compilation. **Consumed by** the compilation's router and its scheduler, which
   compute no weight (A3).
 - **Replaces:** the weighting operand of one `mesh.Weight` per transfer.

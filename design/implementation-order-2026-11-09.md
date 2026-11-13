@@ -8,7 +8,7 @@ Code was read at mesh 7df87fe4 and metal-microbench 7483572e; the reference prog
 
 The operator, 2026-11-09, in order:
 
-> what of the requirements presented in the change request documents et al  entail subsuming and replacing all features and responsibilities of particular modules, what are the modules in mesh and microbench which need to reach total closure in what order to mitigate/prevent these procrastinatory deluges of edits to obsolete dependent code?
+> "The rest widened operator coverage and built observation machinery around an executor that was already slated for replacement." an unfortunate decadence that seems to hang over much of these proejcts... if we review... yet again... what of the requirements presented in the change request documents et al  entail subsuming and replacing all features and responsibilities of particular modules, what are the modules in mesh and microbench which need to reach total closure in what order to mitigate/prevent these procrastinatory deluges of edits to obsolete dependent code?
 
 > do our external reuqirements for meshlib allow arbitrary control flow inside of programs or do they require exactly the opposite? Review this. we shall not ocnsider arbitrary python to be part of arbitrary torch; programmers who want to run arbitrary data dependent control flow between sections of linear algebra are to learn to write that sort of code on their own time and outside of our mandate and the library features we provide, which are specifically for torch like tensor apis w/ scheduling, transport, and function fusion as needed to support lowest attainable overhead scheduling and transport.
 

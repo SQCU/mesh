@@ -8,8 +8,8 @@ The operator, 2026-11-10:
 
 ## The task
 
-Write mesh's compiler at `compiler/`. Use the reference program quoted in [data-flow.md](data-flow.md) for the
-composition of its stages. That document quotes the operator's assignment:
+Write mesh's compiler at `compiler/` with the same data flow and assignment of stage responsibilities as the
+reference program quoted in [data-flow.md](data-flow.md). That document quotes the operator's assignment:
 
 > remmber that our goal here is to articulate what the data flow will be for the mesh modules that have the same role in their own data flow as this counterfactual example code.
 
