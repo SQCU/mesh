@@ -7375,34 +7375,43 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
 
 
 # design/torch-capture-change-request.md, "Source for item 2's execution-time estimates (2026-11-09)";
-# metal_recording.h MetalRecorderActors; design/algorithm-sources.md#the-plans-results-for-native-preparation
+# metal_recording.h MetalRecorderActors, struct MetalActors; design/algorithm-sources.md#the-plans-results-for-native-preparation
+class _Actors(C.Structure):
+    _fields_ = [('parts', mesh.U), ('host', C.POINTER(C.c_double)), ('work', C.POINTER(C.c_double)),
+                ('edges', C.c_size_t), ('edge', C.POINTER(mesh_graph.Dependence))]
+
+
 def _actors(programs, irs):
     machines, lib, made = _machines(), programs['lib'], {}
+    lib.MetalRecorderActors.restype = C.c_int
+    lib.MetalRecorderActors.argtypes = [C.c_void_p, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine),
+                                        C.POINTER(_Actors)]
+    lib.MetalRecorderActorsFree.restype = None
+    lib.MetalRecorderActorsFree.argtypes = [C.POINTER(_Actors)]
     for row in programs['rows']:
         k = row['k']
         if row['builder'] is None or k in made:
             continue
-        parts, count = mesh.U(), C.c_size_t()
         gpu, cpu = (C.byref(machines[GPU]), C.byref(machines[CPU])) if machines else (None, None)
-        lib.MetalRecorderActors.restype = C.c_int
-        lib.MetalRecorderActors.argtypes = [C.c_void_p, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine),
-                                            C.POINTER(C.c_double), C.POINTER(C.c_double), mesh.U, C.POINTER(mesh.U),
-                                            C.POINTER(mesh_graph.Dependence), C.c_size_t, C.POINTER(C.c_size_t)]
-        status = lib.MetalRecorderActors(row['builder'].p, gpu, cpu, None, None, 0, C.byref(parts), None, 0, C.byref(count))
-        if status not in (0, errno.ERANGE, errno.ENODATA):
-            mesh.check(status)
-        host, work = (C.c_double * max(parts.value, 1))(), (C.c_double * max(parts.value, 1))()
-        edges = (mesh_graph.Dependence * max(count.value, 1))()
-        status = lib.MetalRecorderActors(row['builder'].p, gpu, cpu, host, work, parts.value, C.byref(parts), edges,
-                                        count.value, C.byref(count))
+        actors = _Actors()
+        status = lib.MetalRecorderActors(row['builder'].p, gpu, cpu, C.byref(actors))
         if status not in (0, errno.ENODATA):
             mesh.check(status)
+        parts, count = actors.parts, actors.edges
+        host, work = (C.c_double * max(parts, 1))(), (C.c_double * max(parts, 1))()
+        edges = (mesh_graph.Dependence * max(count, 1))()
+        if parts:
+            C.memmove(host, actors.host, parts * C.sizeof(C.c_double))
+            C.memmove(work, actors.work, parts * C.sizeof(C.c_double))
+        if count:
+            C.memmove(edges, actors.edge, count * C.sizeof(mesh_graph.Dependence))
+        lib.MetalRecorderActorsFree(C.byref(actors))
         written, complete = sum(irs[k].values[v].section.bytes for v, _ in irs[k].inputs.values()), status == 0
-        if parts.value and written and machines:
+        if parts and written and machines:
             spent, measured = mesh_graph.actor_time(machines[CPU], mesh_graph.Actor(0.0, 1, 1, written, 0, 0, None))
             complete &= measured
             host[0] += spent
-        made[k] = host, work, edges, parts.value, count.value, complete
+        made[k] = host, work, edges, parts, count, complete
     return made
 
 # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; design/plan-to-bridge-change-request.md R2;
