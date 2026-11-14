@@ -390,6 +390,7 @@ def _recorder():
                                                room]),
                 ('MetalProgramLoad', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), P, text, room]),
                 ('MetalProgramPhases', None, [P, C.POINTER(Q), C.POINTER(Q)]),
+                ('MetalProgramIssued', Q, [P]),
                 ('MetalProgramSignatureNode', C.c_int, [P, U, C.c_size_t, C.POINTER(Q),
                                                         C.POINTER(mesh_graph.Signature), text, room]),
                 ('MetalProgramSignatureBind', C.c_int, [P, U, C.POINTER(mesh_graph.Signature), text, room]),

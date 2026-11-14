@@ -1233,7 +1233,13 @@ class Bound:
             shape, stride)
 
     # the one invocation through `run`: metal_recording.h MetalProgramRunArguments (the native program's entry) or
-    # MetalProgramRunObserved (its observation entry), with the same operands, results, lifetimes and end
+    # MetalProgramRunObserved (its observation entry), with the same operands, results, lifetimes and end. The
+    # executions it consumed are metal_recording.h MetalProgramIssued's count once it returns, whatever its status:
+    # metal_program.m MetalProgramExecute counts each entered execution, a failed one cancelled and `ended` signalled at
+    # that count, and MetalStepOrigin's failure before entry consumes none. That count is the next invocation's first;
+    # this one's operands stay held until `ended` reaches it. A failed run's error is made at its return, from its
+    # message and MetalProgramCheckFailure's record (both written within the run, metal_program.h NativeChecked, and
+    # reset only by the next run's entry), and raised after that end
     def invoked(self, run, given):
         M, _, (lib, _), _ = self.libs
         error, execution, operands = C.create_string_buffer(ROOM), self.executions, self.target.operands
@@ -1251,12 +1257,15 @@ class Bound:
                                                          for a, operand in enumerate(operands)])
             status = run(self.program, self.owner.context, execution, 1, self.ended, M.START, M.STARTED, table,
                          len(operands), error, ROOM)
+            issued = lib.MetalProgramIssued(self.program)
+            failed = status and M._execution_error({"lib": lib, "program": self.program}, status,
+                                                   f"execution {execution} of the program: {error.value.decode()}")
+            self.executions = issued
+            if issued > execution:
+                M._wait(lambda: ended() >= issued, ended, f"execution {execution} of the program: no end for "
+                                                          "MESH_PLATFORM_NS")
             if status:
-                raise M._execution_error({"lib": lib, "program": self.program}, status,
-                                         f"execution {execution} of the program: {error.value.decode()}")
-            self.executions = execution + 1
-            M._wait(lambda: ended() > execution, ended, f"execution {execution} of the program: no end for "
-                                                        "MESH_PLATFORM_NS")
+                raise failed
         finally:
             for _, buffer in borrowed.values():
                 M.PUT(buffer, M.SELECTOR[b"release"])
