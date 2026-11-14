@@ -1,0 +1,321 @@
+{
+  "error": "[Errno 22] construction: ANE operation 20: constant value 44 of a kind Core ML has no tensor for",
+  "program": 41082234880,
+  "calls": [
+    0
+  ],
+  "values": 75,
+  "operations": 27,
+  "aliases": [
+    {
+      "value": 42,
+      "role": 1,
+      "scalar": 9,
+      "storage": 42,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 23,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 16,
+      "data": 41058597216,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295,
+      "payload_prefix_hex": "00000000000000000100000000000000",
+      "scalar_name": "i64",
+      "shape": [
+        2
+      ],
+      "view_offset": 0,
+      "layout": [
+        {
+          "dim": 0,
+          "padding": 0,
+          "coefficient": 1,
+          "divisor": 1,
+          "modulus": 0
+        }
+      ]
+    },
+    {
+      "value": 43,
+      "role": 2,
+      "scalar": 9,
+      "storage": 42,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 23,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295,
+      "payload_prefix_hex": null,
+      "scalar_name": "i64",
+      "shape": [
+        2
+      ],
+      "view_offset": 0,
+      "layout": [
+        {
+          "dim": 0,
+          "padding": 0,
+          "coefficient": 1,
+          "divisor": 1,
+          "modulus": 0
+        }
+      ]
+    },
+    {
+      "value": 44,
+      "role": 2,
+      "scalar": 9,
+      "storage": 42,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 25,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295,
+      "payload_prefix_hex": null,
+      "scalar_name": "i64",
+      "shape": [
+        1,
+        2
+      ],
+      "view_offset": 0,
+      "layout": [
+        {
+          "dim": 0,
+          "padding": 0,
+          "coefficient": 2,
+          "divisor": 1,
+          "modulus": 0
+        },
+        {
+          "dim": 1,
+          "padding": 0,
+          "coefficient": 1,
+          "divisor": 1,
+          "modulus": 0
+        }
+      ]
+    }
+  ],
+  "source": [
+    {
+      "node": "arange",
+      "target": "aten.arange.start_step",
+      "arguments": "(0, 2)",
+      "source_meta": {
+        "dtype": "torch.int64",
+        "shape": [
+          2
+        ],
+        "stride": [
+          1
+        ],
+        "offset": 0
+      },
+      "record": "_Generic",
+      "record_node": 23,
+      "emitted": [
+        {
+          "operation": 17,
+          "identity": 23,
+          "place": 2,
+          "erased": 1,
+          "kind": 0,
+          "padding": 0
+        }
+      ],
+      "operands": [
+        {
+          "role": "outputs",
+          "ordinal": 0,
+          "root": 42,
+          "dtype": "torch.int64",
+          "shape": [
+            2
+          ],
+          "stride": [
+            1
+          ],
+          "offset": 0
+        }
+      ]
+    },
+    {
+      "node": "sub",
+      "target": "aten.sub.Tensor",
+      "arguments": "(unsqueeze, unsqueeze_1)",
+      "source_meta": {
+        "dtype": "torch.int64",
+        "shape": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          1
+        ],
+        "offset": 0
+      },
+      "record": "_Generic",
+      "record_node": 25,
+      "emitted": [
+        {
+          "operation": 18,
+          "identity": 25,
+          "place": 2,
+          "erased": 1,
+          "kind": 0,
+          "padding": 0
+        }
+      ],
+      "operands": [
+        {
+          "role": "inputs",
+          "ordinal": 0,
+          "root": 42,
+          "dtype": "torch.int64",
+          "shape": [
+            1,
+            2
+          ],
+          "stride": [
+            2,
+            1
+          ],
+          "offset": 0
+        }
+      ]
+    },
+    {
+      "node": "full",
+      "target": "aten.full.default",
+      "arguments": "([2, 2], True)",
+      "source_meta": {
+        "dtype": "torch.bool",
+        "shape": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          1
+        ],
+        "offset": 0
+      },
+      "record": "_Generic",
+      "record_node": 27,
+      "emitted": [
+        {
+          "operation": 20,
+          "identity": 27,
+          "place": 2,
+          "erased": 0,
+          "kind": 0,
+          "padding": 0
+        }
+      ],
+      "operands": [
+        {
+          "role": "outputs",
+          "ordinal": 0,
+          "root": 50,
+          "dtype": "torch.bool",
+          "shape": [
+            2,
+            2
+          ],
+          "stride": [
+            2,
+            1
+          ],
+          "offset": 0
+        }
+      ]
+    }
+  ],
+  "focus": {
+    "value": 44,
+    "root": 42,
+    "operation": 20,
+    "before_construction": {
+      "role": 2,
+      "scalar": 9,
+      "storage": 42,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 25,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+    }
+  },
+  "body_keys": [
+    {
+      "function": 0,
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+      "program": 41082234880
+    },
+    {
+      "function": 1,
+      "key": "('qdwh_eigh_step', 'p', (2, 2), 'torch.float32', 10)",
+      "program": 41082237440
+    },
+    {
+      "function": 2,
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'suffix', '_linalg_eigh')",
+      "program": 41119418880
+    }
+  ]
+}
