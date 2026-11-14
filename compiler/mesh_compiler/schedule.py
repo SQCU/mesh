@@ -9,7 +9,7 @@ import torch
 
 from torch.fx.node import map_arg
 
-from .ir import HOST, RECV, Plan, channel_of
+from .ir import HOST, RECV, Plan, channel_of, views
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -230,8 +230,8 @@ def planned(module, transfers, carried, machines, mutated, cost, functions, befo
 # design/torch-source-lowering-change-request.md item 3; design/aot-compilation-change-request.md A6;
 # design/integration-finishing-change-request.md item 2; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
 # Res. 22(3), 1997, section 2; M. Cowan et al., MSCCLang, ASPLOS 2023, section 5.2, step 3; compiler/mesh_compiler/ir.py
-# Planning
-def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), planning=None):
+# Planning; design/compilation-composition-change-request.md items 2, 3, 6 and 7; rdma/mesh-graph.h mesh_graph_contract
+def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), planning=None, groups=None):
     transfers = module.meta["transfers"]
     nodes, functions, preds = dependence(module, transfers)
     functions = [node for node in mesh_graph.postorder(functions, preds)]
@@ -246,9 +246,15 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
                    planning) if carried else None
     order = plan.order if plan else ordered(tasks, edges, len(lane))
     listed = sorted(functions, key=lambda node: order[task[node]])
-    pairs = [(functions[earlier], functions[later]) for earlier, later in edges]
-    return {processor: assemble(processor, [node for node in listed if node.meta["processor"] == processor], nodes,
-                                pairs, transfers) for processor in processors}, plan
+    side = {processor: (groups or {}).get(processor, processor) for processor in processors}
+    local = {end for ends in transfers.values() if len({side[end.meta["processor"]] for end in ends}) == 1
+             for end in ends}
+    pairs = [(functions[earlier], functions[later]) for earlier, later in
+             (mesh_graph.contract([node not in local for node in functions], edges) if local else edges)]
+    identity = {node: (k, resource) for k, (node, (_, resource)) in enumerate(zip(functions, tasks))}
+    members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
+    return {group: assemble(group, held, [node for node in listed if node.meta["processor"] in held], nodes, pairs,
+                            transfers, local, identity) for group, held in members.items()}, plan
 
 
 # rdma/mesh-collective.h mesh_plan; design/plan-to-bridge-change-request.md R5
@@ -259,35 +265,46 @@ def ordered(tasks, edges, resources):
     return list(function[0].order[:len(tasks)])
 
 
-def assemble(processor, order, nodes, pairs, transfers):
-    graph, copied = torch.fx.Graph(), {}
+# design/compilation-composition-change-request.md items 2, 3 and 6; M. Abadi et al., TensorFlow, arXiv:1603.04467,
+# section 3.2.2: a Send/Receive pair stands only for an edge between devices; compiler/mesh_compiler/ir.py views
+def assemble(group, members, order, nodes, pairs, transfers, local, identity):
+    graph, copied, tasks = torch.fx.Graph(), {}, {}
     for node in nodes:
-        if node.op == "placeholder" and any(u.meta["processor"] == processor for u in node.users):
+        if node.op == "placeholder" and any(u.meta["processor"] in members for u in node.users):
             copied[node] = graph.node_copy(node)
     for node in order:
-        copied[node] = graph.node_copy(node, copied.__getitem__)
-        parts = [u for u in node.users if u.target is operator.getitem]
-        for part in sorted(parts, key=lambda u: u.args[1]):
-            copied[part] = graph.node_copy(part, copied.__getitem__)
+        if node in local:
+            copied[node] = copied[transfers[channel_of(node)][0].args[0]]
+        else:
+            copied[node] = graph.node_copy(node, copied.__getitem__)
+            tasks[copied[node]] = identity[node]
+            for part in sorted((u for u in node.users if u.target is operator.getitem), key=lambda u: u.args[1]):
+                copied[part] = graph.node_copy(part, copied.__getitem__)
+                tasks[copied[part]] = identity[node]
     output = nodes[-1]
-    here = output.meta["processor"] == processor
+    here = output.meta["processor"] in members
     results = map_arg(output.args[0], copied.__getitem__) if here else ()
-    graph.output(results).meta["processor"] = processor
+    graph.output(results).meta["processor"] = group
+    views([copied[user] for node in order if node in local and node.target is RECV for user in node.users
+           if user in copied and user not in local])
     module = torch.fx.GraphModule(torch.nn.Module(), graph)
-    module.meta["dependences"] = [(copied[earlier], copied[later]) for earlier, later in pairs
-                                  if earlier.meta["processor"] == later.meta["processor"] == processor]
-    module.meta["received_strides"] = {channel: tuple(sent.args[0].meta["val"].stride())
-                                       for channel, (sent, arrival) in transfers.items() if arrival in copied}
+    module.meta.update(members=members, tasks=tasks, dependences=[
+        (copied[earlier], copied[later]) for earlier, later in pairs
+        if earlier.meta["processor"] in members and later.meta["processor"] in members], received_strides={
+        channel: tuple(sent.args[0].meta["val"].stride()) for channel, (sent, arrival) in transfers.items()
+        if arrival in copied and arrival not in local})
     return module
 
 
 # compiler/mesh_compiler/ir.py Scheduled; compiler/mesh_compiler/placement.py place, transfers
-def argument_buffers(modules, output_processor, held, transfers):
+def argument_buffers(modules, output_processor, held, transfers, groups=None):
     inputs = {processor: [n.target for n in module.graph.nodes if n.op == "placeholder"]
               for processor, module in modules.items()}
     stored = {processor: [str(held.get(name, HOST)) for name in names] for processor, names in inputs.items()}
     at = {processor: index for index, processor in enumerate(modules)}
     edges = [(at[output_processor], at[processor]) for processor in modules if processor != output_processor]
-    edges += [(at[sent.meta["processor"]], at[arrival.meta["processor"]]) for sent, arrival in transfers.values()]
+    ends = [[(groups or {}).get(end.meta["processor"], end.meta["processor"]) for end in pair]
+            for pair in transfers.values()]
+    edges += [(at[sender], at[receiver]) for sender, receiver in ends if sender != receiver]
     component = mesh_graph.components(len(at), edges)
     return inputs, sorted(p for p in modules if component[at[p]] != component[at[output_processor]]), stored
