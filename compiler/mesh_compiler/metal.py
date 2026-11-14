@@ -424,7 +424,8 @@ def _compiler():
                 ('metal_ir_builtin_named', U, [C.c_char_p]),
                 ('metal_ir_scatter', None, [P, U, U, U, C.POINTER(U), U, U]),
                 ('metal_ir_yield', None, [P, U, U, C.POINTER(U)]),
-                ('metal_ir_lower', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_construct', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_lower', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_specialize', P, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_machine', None, [P, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine)])):
