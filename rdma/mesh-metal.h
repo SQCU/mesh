@@ -44,10 +44,9 @@ int mesh_metal_status(struct mesh_ctx *,uint64_t plan,int cause,uint64_t *first)
 /* design/torch-capture-change-request.md item 3; MPI 4.1 §4.2.1 MPI_PRECV_INIT, §4.2.2 MPI_PARRIVED: one received range
    the dispatch reads. `input` its transport words, `generation` the producer execution e its consumer's execution e_b
    reads, e = (e_b / every) producer + ordinal ({1, 1, 0} the dispatch's own call), `page` the operand's bytes a
-   partition, `partitions` their count, field[f] the partition transport field f lands: field (word - phases) / 8 x
-   32 + field / 2 of each RECEIVE hop (mesh.h struct mesh_hop) whose count word is the range's names the copy-0 row
-   of the value's section whose block (block x pgsz bytes, mesh-call.h mesh_section_address) holds the hop's landed
-   byte data_off + page x pgsz + offset, a field no hop names 0 (EINVAL where a hop lands in no copy-0 row); `at`
+   partition, `partitions` their count, field[f] the partition transport field f lands: the transfer's planned RECEIVE
+   row (mesh-collective.h struct mesh_planned_transfer) whose phase field is f names the partition its logical start
+   is in (start / (block x pgsz)), a field no row names 0 (EINVAL for a row's field past the range's pages); `at`
    partition 0's byte in the storage its
    consumers' footprints are measured from (metal_ir.h: the storage root of the received value), `transfer` the
    declared transfer of planned call `owner`'s plan whose landing it is (metal_ir.h METAL_IR_ARRIVED) */
@@ -60,7 +59,7 @@ struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_gener
    where owner is call, else {every of call, every of owner, ordinal of owner} (mesh-collective.h struct
    mesh_planned_call, from the same calls), input zero and field NULL. Prepared: the declared range's plan words and
    `field` (room for `room`; ERANGE with range->input set where its pages exceed it) from `planned`, the value placed
-   at `section` */
+   at `section`; ENODATA where `planned` holds no planned rows (mesh_plan_load of an archive saved without them) */
 int mesh_metal_range_declare(struct mesh_ctx *,const uint32_t *calls,uint32_t ncalls,uint32_t call,uint32_t owner,
                              uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range);
 int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
@@ -106,15 +105,14 @@ int mesh_metal_release_prepare(struct mesh_ctx *,struct mesh_metal_transport *,c
    planned call `call`'s transfer `transfer` sends from this node (its sent ranges and the received ranges it forwards):
    no writer of its copy for execution e runs before execution e - copies's sends ended (`sent`); `extent` the bytes
    those sends read of a copy, the same of every copy (MPI 4.1 §3.7.3: a send reads its source from its release until
-   its completion): one struct mesh_graph_access a SEND hop whose count word is the transfer's copy-0 completion word,
-   row q of the value's section (the copy-0 row whose block holds the hop) at q x block, `key`, `vertex` and `write`
-   0; sent.sends 0: none (EINVAL where a hop reads no copy-0 row) */
+   its completion): the transfer's planned SEND rows (mesh-collective.h struct mesh_planned_transfer), each one send's
+   logical bytes of the value, `key`, `vertex` and `write` 0, borrowed from `planned` until mesh_planned_free;
+   sent.sends 0: none */
 struct mesh_metal_sending { struct mesh_metal_sent sent; const struct mesh_graph_access *extent; size_t extents;
                             uint32_t transfer,padding; };
-/* `extent` room for `room` (ERANGE with sending->extents the number needed); the value placed at `section` */
+/* ENODATA where `planned` holds no planned rows (mesh_plan_load of an archive saved without them) */
 int mesh_metal_sending_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
-                               uint32_t call,uint32_t transfer,struct mesh_section section,struct mesh_graph_access *extent,
-                               size_t room,struct mesh_metal_sending *sending);
+                               uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending);
 _Static_assert(sizeof(struct mesh_metal_range)==88 &&
   offsetof(struct mesh_metal_range,generation)==40 && offsetof(struct mesh_metal_range,page)==56 &&
   offsetof(struct mesh_metal_range,at)==72 && offsetof(struct mesh_metal_range,transfer)==80 &&

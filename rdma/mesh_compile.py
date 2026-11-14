@@ -1973,8 +1973,8 @@ def _transport():
                                                        C.POINTER(mesh.U), mesh.U, C.POINTER(Range)]),
                 ('mesh_metal_release_prepare', C.c_int, [mesh.CONTEXT, transport, planned, mesh.U,
                                                          C.POINTER(Release)]),
-                ('mesh_metal_sending_prepare', C.c_int, [mesh.CONTEXT, transport, planned, mesh.U, mesh.U, mesh.Section,
-                                                         C.POINTER(mesh_graph.Access), C.c_size_t, C.POINTER(Sending)]),
+                ('mesh_metal_sending_prepare', C.c_int, [mesh.CONTEXT, transport, planned, mesh.U, mesh.U,
+                                                         C.POINTER(Sending)]),
                 ('mesh_metal_status_prepare', C.c_int, [mesh.CONTEXT, transport, mesh.Q, C.POINTER(mesh.Q)]),
                 ('mesh_metal_machines', C.c_int, [C.c_char_p, C.POINTER(mesh_graph.Machine),
                                                   C.POINTER(mesh_graph.Machine)])):
@@ -7475,15 +7475,9 @@ def _finalized(programs, context, irs, planned, values, owned):
                                                             C.byref(release)))
             compiler.metal_ir_value_sent(p, value, C.byref(release))
         for i in row['receives'] + row['sends']:
-            v, sending = irs[k].declared[i].value, Sending()
-            section = values[k][v].section
-            status = transport.mesh_metal_sending_prepare(C.byref(context), C.byref(made), C.byref(planned), at, i,
-                                                          section, None, 0, C.byref(sending))
-            if status == errno.ERANGE:
-                extent = (mesh_graph.Access * sending.extents)()
-                status = transport.mesh_metal_sending_prepare(C.byref(context), C.byref(made), C.byref(planned), at,
-                                                              i, section, extent, sending.extents, C.byref(sending))
-            mesh.check(status)
+            sending = Sending()
+            mesh.check(transport.mesh_metal_sending_prepare(C.byref(context), C.byref(made), C.byref(planned), at, i,
+                                                            C.byref(sending)))
             if sending.sent.sends:
                 compiler.metal_ir_value_sending(p, row['marks']['sending'][i], C.byref(sending))
         word = mesh.Q()

@@ -1892,7 +1892,64 @@ static int plan_publish(struct mesh_ctx *context,uint64_t group,const struct mes
 void mesh_planned_free(struct mesh_planned *planned){
   if(planned->signature)mesh_graph_signature_free(planned->signature);
   free(planned->call);free(planned->order);free(planned->signature);free(planned->cause);
+  free(planned->first);free(planned->transfer);free(planned->extent);
   *planned=(struct mesh_planned){0};
+}
+
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/plan-to-bridge-change-request.md R2 and
+   R5: each function's entries (plan_walk, in plan_schedule's order) by demand (mesh_graph_rows), its RECEIVE entries
+   then its SEND entries, each the logical bytes its hops carry: the value's (p->at) where the demand is this node's,
+   else the demand's (p->cut) */
+static uint32_t plan_entry_demand(const void *context,size_t k){
+  return ((const struct plan_entry *)context)[k].demand;
+}
+/* room for n + 1 records of `width` bytes: 1 where that overflows */
+static int plan_room(size_t n,size_t width,size_t *bytes){
+  return __builtin_add_overflow(n,(size_t)1,bytes) || __builtin_mul_overflow(*bytes,width,bytes);
+}
+static int plan_extents(const struct plan *plans,uint32_t count,struct mesh_planned *planned){
+  size_t transfers=0,extents=0,at=0,base=0,room[3];
+  int status=0;
+  for(uint32_t f=0;!status && f<count;f++)
+    if(__builtin_add_overflow(transfers,(size_t)plans[f].transfers,&transfers) ||
+       __builtin_add_overflow(extents,(size_t)plans[f].entries,&extents))status=ENOMEM;
+  if(status || plan_room(count,sizeof *planned->first,room) || plan_room(transfers,sizeof *planned->transfer,room+1) ||
+     plan_room(extents,sizeof *planned->extent,room+2))return ENOMEM;
+  planned->functions=count;planned->extents=extents;
+  planned->first=malloc(room[0]);planned->transfer=malloc(room[1]);planned->extent=malloc(room[2]);
+  if(!planned->first || !planned->transfer || !planned->extent)return ENOMEM;
+  for(uint32_t f=0;!status && f<count;f++){
+    const struct plan *p=plans+f;
+    size_t rows,orders,*row=NULL,*order=NULL,*sending=NULL;
+    if(plan_room(p->demands,sizeof *row,&rows) || plan_room((size_t)p->entries,sizeof *order,&orders) ||
+       !(row=malloc(rows)) || !(order=malloc(orders)) || !(sending=malloc(rows)))status=ENOMEM;
+    else{
+      mesh_graph_rows(p->demands,(size_t)p->entries,plan_entry_demand,p->entry,row,order);
+      for(uint32_t i=0;i<p->demands;i++){
+        size_t received=base+row[i],sent=received;
+        for(size_t q=row[i];q<row[i+1];q++)sent+=p->entry[order[q]].direction==MESH_RECEIVE;
+        sending[i]=sent;
+        for(size_t q=row[i];q<row[i+1];q++){
+          const struct plan_entry *e=p->entry+order[q];
+          const struct plan_demand *d=p->demand+i;
+          const uint64_t *cut=p->cut+d->cut+e->instruction;
+          const uint64_t start=d->mine==MESH_ABSENT?cut[0]:p->at[d->at+e->instruction];
+          const int receive=e->direction==MESH_RECEIVE;
+          planned->extent[receive?received++:sent++]=(struct mesh_graph_access){.start=start,
+            .end=start+cut[1]-cut[0],.vertex=receive?e->field:0};
+        }
+      }
+      planned->first[f]=at;
+      for(uint32_t t=0;t<p->transfers;t++){
+        const uint32_t i=p->of[t];
+        planned->transfer[at++]=(struct mesh_planned_transfer){base+row[i],sending[i],base+row[i+1]};
+      }
+      base+=(size_t)p->entries;
+    }
+    free(row);free(order);free(sending);
+  }
+  if(!status)planned->first[count]=at;
+  return status;
 }
 
 /* design/aot-compilation-change-request.md A7 to A10, appendix item 6;
@@ -2120,6 +2177,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
       *hop++=h;
     }
   }
+  if((status=plan_extents(plans,count,planned)))goto done;
   const uint32_t table=plan_page(&placed,m->block,placed.table,0);
   uint64_t *word=(uint64_t *)(void *)mesh_at(m,table);
   for(uint32_t f=0;f<count;f++)word[f]=plans[f].base;
@@ -2221,6 +2279,10 @@ struct plan_saved {
 };
 struct plan_saved_function { uint64_t page,bytes; uint32_t values,transfers; };
 #define PLAN_SAVED_MAGIC UINT64_C(0x334e414c5048534d)
+/* the optional section after the signature: struct mesh_planned's first (functions + 1), transfer (first[functions])
+   and extent (extents) */
+struct plan_saved_extents { uint64_t tag,extents; };
+#define PLAN_SAVED_EXTENTS UINT64_C(0x31544e545848534d)
 static const size_t plan_addresses[]={offsetof(struct mesh_state,phases),offsetof(struct mesh_state,counts),
   offsetof(struct mesh_state,supplied),offsetof(struct mesh_state,status),offsetof(struct mesh_state,completions),
   offsetof(struct mesh_state,hops),offsetof(struct mesh_state,deliveries),offsetof(struct mesh_state,submits),
@@ -2291,7 +2353,8 @@ int mesh_plan_save(struct mesh_ctx *context,uint64_t program,const struct mesh_f
   int status=plan_inputs(context,program,functions,count,calls,ncalls,orders,causes,norders,chains,&nodes,head.inputs);
   if(status)return status;
   struct mesh_algo *algo=mesh_algo(m);
-  if(algo->plans!=count || algo->nodes!=nodes.count || planned->calls!=ncalls)return ESTALE;
+  if(algo->plans!=count || algo->nodes!=nodes.count || planned->calls!=ncalls ||
+     (planned->first && planned->functions!=count))return ESTALE;
   const uint32_t *adjacency=(const void *)((const char *)m+algo->adjacent);
   head.table=(algo->table-m->data_off)/m->pgsz;
   head.table_bytes=(uint64_t)count*sizeof(uint64_t)+((uint64_t)nodes.count+1+adjacency[nodes.count])*sizeof(uint32_t);
@@ -2334,12 +2397,48 @@ int mesh_plan_save(struct mesh_ctx *context,uint64_t program,const struct mesh_f
   if(!signature)out.status=ENOMEM;
   if(!out.status){size_t made=0;out.status=mesh_graph_archive(planned->signature,signature,(size_t)head.signature,&made);}
   plan_archive_bytes(&out,signature,(size_t)head.signature);free(signature);
+  if(planned->first){
+    struct plan_saved_extents extents={PLAN_SAVED_EXTENTS,planned->extents};
+    plan_archive_bytes(&out,&extents,sizeof extents);
+    plan_archive_bytes(&out,planned->first,((size_t)count+1)*sizeof *planned->first);
+    plan_archive_bytes(&out,planned->transfer,planned->first[count]*sizeof *planned->transfer);
+    plan_archive_bytes(&out,planned->extent,planned->extents*sizeof *planned->extent);
+  }
   if(out.status){free(out.bytes);return out.status;}
   head.bytes=out.size;memcpy(out.bytes,&head,sizeof head);
   *bytes=out.bytes;*length=out.size;return 0;
 }
 static int plan_saved_span(uint64_t offset,uint64_t count,uint64_t width,uint64_t length){
   return offset<=length && count<=(length-offset)/width;
+}
+/* mesh_plan_save's optional section: each function's span of first its actual transfers, each slice in the extents */
+static int plan_extents_load(struct plan_archive *input,const struct mesh_function *functions,uint32_t count,
+                             struct mesh_planned *planned){
+  struct plan_saved_extents saved={0};
+  plan_archive_bytes(input,&saved,sizeof saved);
+  if(input->status || saved.tag!=PLAN_SAVED_EXTENTS ||
+     !plan_saved_span(input->at,(uint64_t)count+1,sizeof *planned->first,input->size))return EINVAL;
+  planned->functions=count;
+  if(!(planned->first=malloc(((size_t)count+1)*sizeof *planned->first)))return ENOMEM;
+  plan_archive_bytes(input,planned->first,((size_t)count+1)*sizeof *planned->first);
+  if(input->status || planned->first[0])return EINVAL;
+  for(uint32_t f=0;f<count;f++)
+    if(planned->first[f+1]<planned->first[f] || planned->first[f+1]-planned->first[f]!=functions[f].count)return EINVAL;
+  const size_t transfers=planned->first[count];
+  if(!plan_saved_span(input->at,transfers,sizeof *planned->transfer,input->size) ||
+     !plan_saved_span(input->at+transfers*sizeof *planned->transfer,saved.extents,sizeof *planned->extent,input->size))
+    return EINVAL;
+  planned->extents=(size_t)saved.extents;
+  planned->transfer=malloc((transfers+1)*sizeof *planned->transfer);
+  planned->extent=malloc((planned->extents+1)*sizeof *planned->extent);
+  if(!planned->transfer || !planned->extent)return ENOMEM;
+  plan_archive_bytes(input,planned->transfer,transfers*sizeof *planned->transfer);
+  plan_archive_bytes(input,planned->extent,planned->extents*sizeof *planned->extent);
+  for(size_t t=0;!input->status && t<transfers;t++){
+    const struct mesh_planned_transfer x=planned->transfer[t];
+    if(x.received>x.sending || x.sending>x.end || x.end>planned->extents)return EINVAL;
+  }
+  return input->status;
 }
 int mesh_plan_load(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
   const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
@@ -2418,6 +2517,7 @@ int mesh_plan_load(struct mesh_ctx *context,uint64_t group,uint64_t program,stru
   signature=malloc((size_t)head.signature);
   if(!signature){status=ENOMEM;goto done;}
   plan_archive_bytes(&input,signature,(size_t)head.signature);
+  if(!input.status && input.at<input.size && (status=plan_extents_load(&input,functions,count,planned)))goto done;
   if(input.status || input.at!=input.size){status=EINVAL;goto done;}
   if((status=mesh_graph_archive_read(signature,(size_t)head.signature,planned->signature)))goto done;
   if((uint64_t)nodes.count+1+adjacency[nodes.count]!=adjacency_bytes/sizeof *adjacency){status=EINVAL;goto done;}

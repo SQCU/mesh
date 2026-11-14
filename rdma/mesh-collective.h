@@ -82,18 +82,30 @@ _Static_assert(sizeof(struct mesh_function)==160 && offsetof(struct mesh_functio
    design/algorithm-sources.md#the-plans-results-for-native-preparation */
 struct mesh_graph_signature;
 struct mesh_graph_dependence;
+struct mesh_graph_access;
 enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_SUBMIT, MESH_PLANNED_OUTSTANDING,
        MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER, MESH_PLANNED_PART };
 struct mesh_planned_cause { uint32_t kind,pair; };
 struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,parts,waits,padding; };
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/plan-to-bridge-change-request.md R1, R2
+   and R5; MPI 4.1 §3.7.3 and §6.1.3: original transfer t of function f's planned rows, extent[received, sending) its
+   RECEIVE rows and [sending, end) its SEND rows, each mesh_graph_access one planned entry's logical bytes [start, end)
+   of its demand's value (vertex: a RECEIVE row's phase field, a SEND row's 0), in the entries' scheduled order; the
+   transfers of one demand share its rows, every copy the same */
+struct mesh_planned_transfer { size_t received,sending,end; };
 struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
-                      struct mesh_planned_cause *cause; uint64_t horizon; };
+                      struct mesh_planned_cause *cause; uint64_t horizon;
+                      uint32_t functions; size_t extents,*first; struct mesh_planned_transfer *transfer;
+                      struct mesh_graph_access *extent; };
 _Static_assert(sizeof(struct mesh_planned_call)==40 && offsetof(struct mesh_planned_call,function)==16 &&
                offsetof(struct mesh_planned_call,waits)==32 &&
-               sizeof(struct mesh_planned)==56 && offsetof(struct mesh_planned,calls)==24 &&
+               sizeof(struct mesh_planned)==96 && offsetof(struct mesh_planned,calls)==24 &&
                offsetof(struct mesh_planned,orders)==32 && offsetof(struct mesh_planned,cause)==40 &&
-               offsetof(struct mesh_planned,horizon)==48 &&
+               offsetof(struct mesh_planned,horizon)==48 && offsetof(struct mesh_planned,functions)==56 &&
+               offsetof(struct mesh_planned,extents)==64 && offsetof(struct mesh_planned,first)==72 &&
+               offsetof(struct mesh_planned,transfer)==80 && offsetof(struct mesh_planned,extent)==88 &&
+               sizeof(struct mesh_planned_transfer)==24 &&
                sizeof(struct mesh_planned_cause)==8,"mesh_planned: rdma/mesh.py Planned");
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,

@@ -67,68 +67,29 @@ static void receive_words(struct mesh_ctx *context,struct mesh_metal_transport *
     .time=((const double *)(const void *)((const char *)context->M+words->times))[transfer]};
 }
 
-/* design/torch-capture-change-request.md item 3; mesh.h struct mesh_hop, mesh_hops; mesh-call.h mesh_section_address */
-static int row_order(const void *a,const void *b){
-  const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;
-  return (x>y)-(x<y);
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7; mesh-collective.h struct mesh_planned_transfer:
+   planned call `call`'s transfer `transfer`'s rows, ENODATA where the plan holds none (loaded from an archive saved
+   without them) */
+static int planned_rows(const struct mesh_planned *planned,uint32_t call,uint32_t transfer,
+  struct mesh_planned_transfer *rows){
+  if(!planned->first)return ENODATA;
+  const uint32_t f=planned->call[call].function;
+  if(transfer>=planned->first[f+1]-planned->first[f])return EINVAL;
+  *rows=planned->transfer[planned->first[f]+transfer];
+  return 0;
 }
-/* copy 0's rows of `section`, {region offset, q} pairs ordered by offset */
-static uint64_t *rows_sorted(struct mesh_ctx *context,struct mesh_section section){
-  uint64_t *rows=malloc(2*sizeof *rows*(section.stride?section.stride:1));
-  for(uint32_t q=0;rows && q<section.stride;q++)
-    rows[2*q]=(uint64_t)((char *)mesh_section_address(context,section,q)-(char *)context->M),rows[2*q+1]=q;
-  if(rows)qsort(rows,section.stride,2*sizeof *rows,row_order);
-  return rows;
-}
-/* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3: the plan's hops of `direction` whose
-   count word is `word`, each one struct mesh_graph_access of its bytes in the copy-0 rows of `section`, row q at q x
-   block (mesh-metal.h struct mesh_metal_sending `extent`), `vertex` its transport field where `phases` is the range's
-   phase fields (else 0); ERANGE with *made the number needed past `room`, EINVAL for a hop in no copy-0 row */
-static int hop_extents(struct mesh_ctx *context,uint64_t plan,uint32_t direction,uint64_t word,uint64_t phases,
-  struct mesh_section section,struct mesh_graph_access *extents,size_t room,size_t *made){
-  struct hdr *m=context->M;
-  const struct mesh_state *words=mesh_state_at(context->M,plan);
-  const struct mesh_hop *hops=mesh_hops(m,words);
-  const uint64_t block=(uint64_t)m->block*m->pgsz;
-  uint64_t *rows=rows_sorted(context,section);
-  if(!rows)return ENOMEM;
-  size_t found=0;
-  int status=0;
-  for(uint64_t e=0;e<words->entries && !status;e++){
-    const struct mesh_hop *hop=hops+e;
-    if(hop->direction!=direction || hop->count!=word)continue;
-    const uint64_t landed=m->data_off+(uint64_t)hop->page*m->pgsz+hop->offset,key=landed-(landed-m->data_off)%block;
-    const uint64_t *row=bsearch(&key,rows,section.stride,2*sizeof *rows,row_order);
-    if(!row){status=EINVAL;break;}
-    const uint64_t start=row[1]*block+landed-key;
-    const uint32_t field=phases?(uint32_t)((hop->word-phases)/sizeof(uint64_t)*32+hop->field/2):0;
-    if(found<room)extents[found]=(struct mesh_graph_access){.start=start,.end=start+hop->bytes,.vertex=field};
-    found++;
-  }
-  free(rows);
-  *made=found;
-  return status?status:found>room?ERANGE:0;
-}
-/* design/torch-capture-change-request.md item 3; MPI 4.1 §4.2.2 MPI_PARRIVED: each RECEIVE hop's field names its row */
-static int receive_fields(struct mesh_ctx *context,struct mesh_metal_transport *transport,uint64_t plan,
-  const struct mesh_metal_input *input,struct mesh_section section,uint32_t *fields){
+/* design/torch-capture-change-request.md item 3; MPI 4.1 §4.2.2 MPI_PARRIVED: each RECEIVE row's phase field names the
+   block its logical bytes start in, a field no row names 0 */
+static int receive_fields(struct mesh_ctx *context,const struct mesh_planned *planned,struct mesh_planned_transfer rows,
+  const struct mesh_metal_input *input,uint32_t *fields){
   const uint64_t block=(uint64_t)((struct hdr *)context->M)->block*((struct hdr *)context->M)->pgsz;
-  size_t made=input->pages,room=0;
-  struct mesh_graph_access *extents=NULL;
-  int status=ERANGE;
-  while(status==ERANGE){
-    free(extents);
-    room=made;
-    if(!(extents=malloc((room+1)*sizeof *extents)))return ENOMEM;
-    status=hop_extents(context,plan,MESH_RECEIVE,transport->offset+input->count,transport->offset+input->phases,section,
-                       extents,room,&made);
-  }
   memset(fields,0,(size_t)input->pages*sizeof *fields);
-  for(size_t k=0;!status && k<made;k++)
-    if(extents[k].vertex<input->pages)fields[extents[k].vertex]=(uint32_t)(extents[k].start/block);
-    else status=EINVAL;
-  free(extents);
-  return status;
+  for(size_t k=rows.received;k<rows.sending;k++){
+    const struct mesh_graph_access *row=planned->extent+k;
+    if(row->vertex>=input->pages)return EINVAL;
+    fields[row->vertex]=(uint32_t)(row->start/block);
+  }
+  return 0;
 }
 
 /* J. Lee, Ph.D. dissertation, University of Michigan, 2015, §3.2.2: threadgroup g's footprint, its terms evaluated at
@@ -242,10 +203,13 @@ int mesh_metal_range_prepare(struct mesh_ctx *context,struct mesh_metal_transpor
   const struct mesh_planned *planned,struct mesh_section section,uint32_t *field,uint32_t room,
   struct mesh_metal_range *range){
   if(range->owner>=planned->calls || range->partitions!=section.stride)return EINVAL;
+  struct mesh_planned_transfer rows;
+  const int status=planned_rows(planned,range->owner,range->transfer,&rows);
+  if(status)return status;
   const uint64_t plan=planned->call[range->owner].plan;
   range->field=field;
   receive_words(context,transport,plan,range->transfer,&range->input);
-  return range->input.pages>room?ERANGE:receive_fields(context,transport,plan,&range->input,section,field);
+  return range->input.pages>room?ERANGE:receive_fields(context,planned,rows,&range->input,field);
 }
 int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_planned *planned,uint32_t call,struct mesh_metal_release *release){
@@ -256,16 +220,19 @@ int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transp
   return mesh_metal_status_prepare(context,transport,plan,&release->status);
 }
 int mesh_metal_sending_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  const struct mesh_planned *planned,uint32_t call,uint32_t transfer,struct mesh_section section,
-  struct mesh_graph_access *extent,size_t room,struct mesh_metal_sending *sending){
+  const struct mesh_planned *planned,uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending){
   (void)transport;
   if(call>=planned->calls)return EINVAL;
+  struct mesh_planned_transfer rows;
+  const int status=planned_rows(planned,call,transfer,&rows);
+  if(status)return status;
   const uint64_t plan=planned->call[call].plan;
   const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
   *sending=(struct mesh_metal_sending){.sent={.counter=(char *)context->M+entry->completion,.sends=entry->sends,
-                                              .copies=words->copies},.extent=extent,.transfer=transfer};
-  return entry->sends?hop_extents(context,plan,MESH_SEND,entry->completion,0,section,extent,room,&sending->extents):0;
+                                              .copies=words->copies},.extent=planned->extent+rows.sending,
+                                       .extents=rows.end-rows.sending,.transfer=transfer};
+  return 0;
 }
 int mesh_metal_status(struct mesh_ctx *context,uint64_t plan,int cause,uint64_t *first){
   if(first)*first=UINT64_MAX;

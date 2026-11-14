@@ -132,10 +132,17 @@ class PlannedCause(C.Structure):
     _fields_ = [('kind', U), ('pair', U)]
 
 
+# mesh-collective.h struct mesh_planned_transfer
+class PlannedTransfer(C.Structure):
+    _fields_ = [('received', Z), ('sending', Z), ('end', Z)]
+
+
 class Planned(C.Structure):
     _fields_ = [('call', C.POINTER(PlannedCall)), ('signature', C.POINTER(mesh_graph.Signature)),
                 ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('padding', U), ('orders', Z),
-                ('cause', C.POINTER(PlannedCause)), ('horizon', Q)]
+                ('cause', C.POINTER(PlannedCause)), ('horizon', Q), ('functions', U), ('extents', Z),
+                ('first', C.POINTER(Z)), ('transfer', C.POINTER(PlannedTransfer)),
+                ('extent', C.POINTER(mesh_graph.Access))]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
