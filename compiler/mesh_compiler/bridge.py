@@ -40,12 +40,12 @@ def planning():
                     sum(1 << int(node) for node in os.environ["MESH_PROGRAM"].split(",")))
 
 
-# rdma/mesh-collective.h mesh_plan_load; rdma/mesh-dataflow.h mesh_retire, mesh_view_values;
-# design/disjoint-pages-change-request.md C3.3; design/plan-to-bridge-change-request.md R1;
-# design/problems-of-14b9a757-change-request.md item 3; compiler/mesh_compiler/schedule.py carried, planned declared;
-# design/compilation-composition-change-request.md item 7; torch 2.14 frombuffer, Tensor.view(dtype), as_strided
+# rdma/mesh-collective.h mesh_plan_load; rdma/mesh-dataflow.h mesh_retire, mesh_view_values, struct mesh_view;
+# rdma/mesh-collective.c plan_block, plan_items, plan_saved_page; design/disjoint-pages-change-request.md C3.3;
+# design/compilation-composition-change-request.md item 7; compiler/mesh_compiler/ir.py Plan arena_bytes, offsets;
+# torch 2.14 frombuffer
 class Published:
-    def __init__(self, plan, carried, group, here):
+    def __init__(self, plan, group):
         self.source, self.context = plan, C.addressof(CONTEXT)
         self.function, self.held = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences,
                                                  plan.outstanding, plan.tasks, plan.before, plan.senders,
@@ -62,23 +62,8 @@ class Published:
         first, offset, view = ((mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(),
                                mesh.View())
         mesh.LIB.mesh_view_values(C.byref(CONTEXT), self.function, 1, first, offset, C.byref(view))
-        self.copies = [[(view.address + offset[at], section.bytes) for at in range(first[value], first[value + 1])]
-                       for value, section in enumerate(sections)]
-        self.roots = {(value, copy): torch.frombuffer((C.c_byte * size).from_address(address), dtype=torch.uint8)
-                      for value in dict.fromkeys(declared[4] for declared in plan.declared) if value != mesh.ABSENT
-                      for copy, (address, size) in enumerate(self.copies[value])}
-        layouts = {channel: (dtype, shape) for channel, _, _, dtype, shape, _ in carried}
-        self.views, self.distinct = {}, {}
-        for transfer, (channel, (source, *_, value, sent, landed)) in enumerate(zip(plan.channels, plan.declared)):
-            if value == mesh.ABSENT:
-                continue
-            dtype, shape = layouts[channel]
-            start, element, pairs = sent if source == here else landed
-            strides = [stride // element for _, stride in pairs]
-            flat = [self.roots[value, copy].view(dtype) for copy in range(len(self.copies[value]))]
-            self.views[transfer] = tuple(pages.as_strided(shape, strides, start // element) for pages in flat)
-            self.distinct[transfer] = tuple(pages.as_strided([size for size, _ in pairs], strides, start // element)
-                                            for pages in flat)
+        self.arena = torch.frombuffer((C.c_byte * view.bytes).from_address(view.address), dtype=torch.uint8) if (
+            view.bytes) else torch.empty(0, dtype=torch.uint8)
 
 
 # design/compilation-composition-change-request.md item 7; rdma/mesh-dataflow.h mesh_attach, mesh_nodes_read;
@@ -92,6 +77,5 @@ def prepare(scheduled, entry=None):
     mesh.check(mesh.LIB.mesh_nodes_read(C.byref(CONTEXT), C.byref(found)))
     (key,) = [group for group in scheduled.functions if scheduled.machines[group] == found.node[found.self]] if (
         entry is None) else (entry,)
-    published = Published(scheduled.plan, scheduled.carried, (int(os.environ["MESH_GROUP"]) << 32) + next(PUBLISHED),
-                          found.self)
+    published = Published(scheduled.plan, (int(os.environ["MESH_GROUP"]) << 32) + next(PUBLISHED))
     return key, scheduled.functions[key].bind(published)
