@@ -1,0 +1,5 @@
+mps torch.float32: module p0: 312 copied expanded nodes from 2 originals
+  constructed: originals 2, emitted ops 396, unique True, ops with a task 396, distinct tasks 222
+cpu torch.float64: module p0: 430 copied expanded nodes from 2 originals
+  constructed: originals 2, emitted ops 506, unique True, ops with a task 506, distinct tasks 332
+Shell cwd was reset to /Users/mdot/dox/mesh

@@ -274,13 +274,15 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
     sequence = tuple(identity[node] for node in listed)
     return {group: assemble(group, held, [node for node in listed if node.meta["processor"] in held], nodes, pairs,
-                            transfers, local, identity, writers, sequence, source)
+                            transfers, local, identity, writers, sequence, source, module.meta["decomposed"])
             for group, held in members.items()}, declared
 
 
 # design/compilation-composition-change-request.md items 2, 3 and 6; M. Abadi et al., TensorFlow, arXiv:1603.04467,
-# section 3.2.2: a Send/Receive pair stands only for an edge between devices; compiler/mesh_compiler/ir.py views
-def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source):
+# section 3.2.2: a Send/Receive pair stands only for an edge between devices; compiler/mesh_compiler/ir.py views;
+# compiler/mesh_compiler/decompose.py decompose: `decomposed` each expanded node's original source node, the copy of
+# each of them here its module's meta["decomposed"] key
+def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source, decomposed):
     graph, copied, tasks = torch.fx.Graph(), {}, {}
     for node in nodes:
         if node.op == "placeholder" and any(u.meta["processor"] in members for u in node.users):
@@ -310,7 +312,8 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         if arrival in copied and arrival not in local}, order=sequence, transfers={
         channel: (copied.get(sent), copied.get(arrival)) for channel, (sent, arrival) in transfers.items()
         if arrival not in local}, relation=source, copied=dict(copied), output=output.meta["processor"], vertices=tuple(
-        None if node in local else copied.get(node) for node in source.functions))
+        None if node in local else copied.get(node) for node in source.functions),
+        decomposed={copied[node]: original for node, original in decomposed.items() if node in copied})
     return module
 
 
