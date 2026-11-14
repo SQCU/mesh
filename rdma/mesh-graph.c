@@ -238,6 +238,49 @@ int mesh_graph_boundaries(const struct mesh_graph_relation *relation, const uint
   return 0;
 }
 
+/* GSPMD §3.5, "Merging compatible shardings": the projection of mesh_graph_sharding through `map` into vertex w,
+   seen[x] == stamp marking mesh axis x in the result; 1 where it updated a slot */
+static int sharding_merge(const struct mesh_graph_sharding *s, uint32_t w, const size_t *map, uint32_t *candidate,
+                          size_t *seen, size_t stamp) {
+  const size_t base = s->first[w], dims = s->first[w + 1] - base;
+  int updated = 0;
+  if (s->frozen[w]) return 0;
+  for (size_t i = 0; i < dims; i++) candidate[i] = map[i] == SIZE_MAX ? UINT32_MAX : s->state[map[i]];
+  for (size_t i = 0; i < dims; i++) {
+    const uint32_t x = s->state[base + i], c = candidate[i], m = c == UINT32_MAX ? x : c;
+    if (x != UINT32_MAX && c != UINT32_MAX && x != c) return 0;
+    if (m != UINT32_MAX && seen[s->axis[m]] == stamp) return 0;
+    if (m != UINT32_MAX) seen[s->axis[m]] = stamp;
+    updated |= x == UINT32_MAX && c != UINT32_MAX;
+  }
+  for (size_t i = 0; updated && i < dims; i++) if (candidate[i] != UINT32_MAX) s->state[base + i] = candidate[i];
+  return updated;
+}
+
+int mesh_graph_sharding(const struct mesh_graph_sharding *s) {
+  size_t most = 0, axes = 0, stamp = 0;
+  for (uint32_t v = 0; v < s->vertices; v++) if (s->first[v + 1] - s->first[v] > most) most = s->first[v + 1] - s->first[v];
+  for (uint32_t a = 0; a < s->atoms; a++) if ((size_t)s->axis[a] + 1 > axes) axes = (size_t)s->axis[a] + 1;
+  uint32_t *candidate = malloc((most + 1) * sizeof *candidate);
+  size_t *seen = calloc(axes + 1, sizeof *seen);
+  const int status = candidate && seen ? 0 : ENOMEM;
+  for (uint32_t l = 0; !status && l < s->levels; l++)
+    for (int updated = 1; updated;) {
+      updated = 0;
+      for (int backward = 0; backward < 2; backward++)
+        for (uint32_t i = 0; i < s->vertices; i++) {
+          const uint32_t v = s->order[backward ? s->vertices - 1 - i : i];
+          for (size_t e = s->edge_first[v]; e < s->edge_first[v + 1]; e++)
+            if (s->edge[e].level <= l)
+              updated |= backward ? sharding_merge(s, s->edge[e].operand, s->map + s->edge[e].backward, candidate, seen,
+                                                   ++stamp)
+                                  : sharding_merge(s, v, s->map + s->edge[e].forward, candidate, seen, ++stamp);
+        }
+    }
+  free(candidate); free(seen);
+  return status;
+}
+
 /* the breadth-first search of mesh_graph_breadth over both directions of each edge, row v's entries in edge order and
    side order, as the edges were scanned; parent[from] is from */
 uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
@@ -467,6 +510,17 @@ void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *co
   for (size_t k = 0; k < items; k++) order[first[key(context, k)]++] = k;
   for (uint32_t v = keys; v > 0; v--) first[v] = first[v - 1];
   first[0] = 0;
+}
+
+int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, const size_t *position,
+                         size_t *first, size_t *last) {
+  for (uint32_t v = 0; v < values; v++) first[v] = last[v] = SIZE_MAX;
+  for (size_t k = 0; k < uses; k++) {
+    uint32_t v = value[k];
+    if (first[v] == SIZE_MAX || first[v] > position[k]) first[v] = position[k];
+    if (last[v] == SIZE_MAX || position[k] > last[v]) last[v] = position[k];
+  }
+  return 0;
 }
 
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
@@ -1657,6 +1711,19 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
   free(first); free(into_first); free(order); free(into); free(level); free(queue); free(at); free(path);
   free(indegree); free(ordinal); free(head); free(tail); free(out); free(in); free(place); free(taken); free(flow);
   return result;
+}
+/* mesh-graph.h mesh_graph_closure_chains: the closure and the members its items name */
+struct closure_members { const struct mesh_graph_closure *closed; const uint32_t *member; };
+static int closure_before(const void *context, uint32_t a, uint32_t b) {
+  const struct closure_members *c = context;
+  const uint32_t x = c->member[a], y = c->member[b];
+  return (int)(c->closed->reached[(size_t)y * c->closed->words + x / 64] >> (x % 64) & 1);
+}
+int mesh_graph_closure_chains(const struct mesh_graph_closure *closed, uint32_t items, const uint32_t *member,
+                              const uint64_t *count, uint64_t *chain, uint64_t *chains) {
+  for (uint32_t k = 0; k < items; k++) if (member[k] >= closed->vertices) return EINVAL;
+  const struct closure_members c = {closed, member};
+  return mesh_graph_chains(items, count, closure_before, &c, chain, chains);
 }
 
 /* C. Mukerji, M.Sc. thesis, McGill University, 1994, §3.1 */

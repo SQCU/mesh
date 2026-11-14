@@ -53,7 +53,8 @@ Collective = collections.namedtuple('Collective', 'kind node dims dim position c
 # keeps when it submits"; M. C. Rinard and P. C. Diniz, ACM TOPLAS 19(6), 1997, section 2; mesh-collective.h mesh_plan:
 # each function's outstanding calls, `norders` pairs (a, b) of call indexes in `orders`, and `chains[j]` the first call
 # of call j's commuting chain
-Calls = collections.namedtuple('Calls', 'outstanding orders causes norders chains')
+# `owner` the solved native results _analyse made them from, retained as made (None where loaded from an archive)
+Calls = collections.namedtuple('Calls', 'outstanding orders causes norders chains owner', defaults=(None,))
 
 
 # design/unequal-shards-change-request.md item 1; pytorch/pytorch#169320, RaggedShard `local_units`: a sharded
@@ -108,6 +109,7 @@ class IR:
         self.masks = {}
         self.striped = set()
         self.initial, self.constant_values = None, set()
+        self.value_lifetimes, self.owner_lifetimes = None, None
 
     def emit(self, item):
         self.program.append(item)
@@ -329,15 +331,6 @@ def _mesh(placement, count):
         raise ValueError('the placement operand: devices %s onto map indices %s of the map\'s %d nodes; each device '
                          '0 .. D - 1 once, each onto its own index (A2)' % (sorted(coords), nodes, count))
     return tuple(shape), coords, nodes
-
-
-# GSPMD section 3.5, "Merging compatible shardings"
-def _merge(a, b):
-    merged = tuple(x if y < 0 else y for x, y in zip(a, b))
-    used = [int(m) for m in merged if m >= 0]
-    if any(0 <= x != y >= 0 for x, y in zip(a, b)) or len(used) != len(set(used)):
-        return None
-    return merged
 
 
 # GSPMD section 3.5, "Preserved dimensions in operators"
@@ -687,26 +680,32 @@ def _merged(pad, padding, slicing):
     return slicing._replace(operands=padding.operands, windows=tuple(windows), merged=pad, configure=configure)
 
 
-# design/joint-compilation.md §3, row 1
+# design/joint-compilation.md §3, row 1; GSPMD section 3.5; mesh-graph.h mesh_graph_sharding: vertex v is nodes[v],
+# ir.order on entry, its slots its dims_mapping, atom a the distinct assigned entry atoms[a] on mesh dimension
+# int(atoms[a]), a rule's edges its propagate operands at its level, each map the _carry of the source's slots;
+# ir.propagated the nodes, the atoms and the solved state
 def _complete(ir, operators, annotated):
-    def refine(node, candidate):
-        merged = _merge(ir.sharding[node], candidate)
-        if node in annotated or merged is None or merged == ir.sharding[node]:
-            return False
-        ir.sharding[node] = merged
-        return True
-
-    def forward(node, k):
-        rule = operators[node]
-        return refine(node, _carry(ir.sharding[rule.operands[k]], rule.labels[k], rule.out))
-
-    def backward(node, k):
-        rule = operators[node]
-        return refine(rule.operands[k], _carry(ir.sharding[node], rule.out, rule.labels[k]))
-    for level in (0, 1):
-        mesh_graph.propagate(ir.order, lambda node: operators[node].propagate if operators.get(node) is not None
-                             and operators[node].level is not None and operators[node].level <= level else (),
-                             forward, backward)
+    nodes = tuple(ir.order)
+    rows, at = [ir.sharding.get(node) or () for node in nodes], {node: v for v, node in enumerate(nodes)}
+    first = list(itertools.accumulate(map(len, rows), initial=0))
+    atoms = tuple(dict.fromkeys(m for row in rows for m in row if m >= 0))
+    atom, edges, maps, edge_first = {m: a for a, m in enumerate(atoms)}, [], [], [0]
+    for v, node in enumerate(nodes):
+        rule = operators.get(node)
+        for k in rule.propagate if rule is not None and rule.level is not None else ():
+            u = at[rule.operands[k]]
+            edges.append((u, rule.level, len(maps), len(maps) + len(rule.out)))
+            maps += _carry(range(first[u], first[u + 1]), rule.labels[k], rule.out)
+            maps += _carry(range(first[v], first[v + 1]), rule.out, rule.labels[k])
+        edge_first.append(len(edges))
+    solved = mesh_graph.sharding(range(len(rows)), [int(m) for m in atoms], first, edge_first,
+                                 [mesh_graph.SIZE if s < 0 else s for s in maps], [node in annotated for node in nodes],
+                                 edges, [mesh_graph.NONE if m < 0 else atom[m] for row in rows for m in row], 2)
+    ir.propagated = nodes, atoms, solved
+    for v, node in enumerate(nodes):
+        if rows[v]:
+            ir.sharding[node] = tuple(m if a == mesh_graph.NONE else atoms[a]
+                                      for m, a in zip(rows[v], solved.state[first[v]:first[v + 1]]))
 
 
 # GSPMD section 4.5; MPICH allgather_intra_ring.c and alltoall_intra_pairwise.c, MPIR_Localcopy;
@@ -1666,7 +1665,8 @@ def lower(ir):
                 raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
             LOWERINGS[collective.kind](ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
             ir.declares[collective] = range(first, len(ir.declared))
-    firsts = mesh_graph.ends(range(len(ir.program))[::-1], lambda g: ir.program[g][1])
+    ir.value_lifetimes = mesh_graph.Lifetimes((key, g) for g, item in enumerate(ir.program) for key in item[1])
+    firsts = ir.value_lifetimes.first
     for kind, _, key, collective in ir.program:
         if kind == 'collective' and key in firsts:
             ir.waits.setdefault(firsts[key], []).append(collective)
@@ -1725,9 +1725,10 @@ def _place(ir):
     places.update({key: _own(ir, key) for key in ir.added if key not in places})
     waits = {g: [ir.at[i] for c in collectives for i in ir.declares[c] if i in ir.at]
              for g, collectives in ir.waits.items()}
-    last = mesh_graph.ends(range(len(ir.program)),
-                           lambda g: [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())]
-                           + waits.get(g, []))
+    ir.owner_lifetimes = mesh_graph.Lifetimes(
+        (owner, g) for g in range(len(ir.program))
+        for owner in [owner for k in ir.program[g][1] for owner in ir.over.get(k, ())] + waits.get(g, []))
+    last = ir.owner_lifetimes.last
     wired, begins = set(ir.at.values()), {}
     landed = {ir.at[i] for _, receives in ir.roles.values() for i, _ in receives}
     for key, place in places.items():
@@ -7906,23 +7907,25 @@ def _analyse(gm, of, compiled, sources, every):
     head = [least[c] for c in label]
     # A10, "Its bound": "The traced block is finite, so each function has finitely many calls in it", the most of them
     # outstanding at once "the number of its calls in the block, or fewer where Bernstein's conditions order them": the
-    # width (Dilworth and Fulkerson, mesh_graph.width) of a function's calls in the block under A10's pairs and each
-    # chain's successive calls, that order's transitive closure by mesh_graph.closure. No clause extends this bound
-    # across blocks; the block executions in flight and a host-written value's locations are item 2's Bff(e)
-    # (design/torch-capture-change-request.md item 2 and its 2026-11-09 source), which mesh_plan derives from each
-    # Function's t(v) (_actors), planned.horizon
+    # width (Dilworth and Fulkerson, mesh_graph.closure_chains) of a function's calls in the block under A10's pairs and
+    # each chain's successive calls, that order's transitive closure by mesh_graph.closure, read in place. No clause
+    # extends this bound across blocks; the block executions in flight and a host-written value's locations are item 2's
+    # Bff(e) (design/torch-capture-change-request.md item 2 and its 2026-11-09 source), which mesh_plan derives from
+    # each Function's t(v) (_actors), planned.horizon
     before = {j: {a for a, b in pairs if b == j} for j in range(len(calls))}
     for a, b in mesh_graph.successive(len(calls), head):
         before[b].add(a)
     after = mesh_graph.closure(range(len(calls)), lambda j: before[j])
-    outstanding = {}
+    outstanding, widths = {}, {}
     for f in every:
-        mine = [j for j in range(len(calls)) if callee[calls[j]] == f]
-        outstanding[f] = mesh_graph.width(mine, lambda a: [x for x in mine if a in after[x]])
+        widths[f] = mesh_graph.closure_chains(after, [j for j in range(len(calls)) if callee[calls[j]] == f])
+        outstanding[f] = widths[f][0]
+    # the solved native results, retained as made: the chain Views (the follower Graph and its one search), both
+    # closures and each function's chain count and native chains (its View retaining its members and counts)
     return Calls(outstanding, (mesh.U * max(2 * len(pairs), 1))(*[j for pair in pairs for j in pair]),
                  (mesh.U * max(len(pairs), 1))(*[mesh.ORDER_CONFLICT if pair in conflicts else mesh.ORDER_FLOW
                                                  for pair in pairs]), len(pairs),
-                 (mesh.U * max(len(calls), 1))(*head))
+                 (mesh.U * max(len(calls), 1))(*head), (chains, ordered, after, widths))
 
 
 # design/aot-compilation-change-request.md A10; P. Barham et al., MLSys 2022, section 4.2; torch v2.14.0

@@ -97,6 +97,26 @@ int mesh_graph_longest(const struct mesh_graph_relation *relation, int incoming,
    edges; returns 0 */
 int mesh_graph_boundaries(const struct mesh_graph_relation *relation, const uint32_t *class_of,
                           const unsigned char *excluded, unsigned char *source, unsigned char *sink);
+/* GSPMD, Y. Xu et al., arXiv 2105.04663, §3.5; G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 23(1), 1976;
+   design/joint-compilation.md §3, row 1: vertex v's dims_mapping is state[first[v] .. first[v + 1]), each slot an atom
+   a < atoms on mesh axis axis[a] or UINT32_MAX; edge e, edge_first[v] <= e < edge_first[v + 1], projects operand
+   u = edge[e].operand into v by slots map[edge[e].forward + i], i < first[v + 1] - first[v], and v into u by slots
+   map[edge[e].backward + j], j < first[u + 1] - first[u], each entry a state slot or SIZE_MAX; for l = 0 .. levels - 1,
+   over the edges with level <= l, until a round updates nothing, a round being each forward projection of
+   v = order[0], ..., order[vertices - 1], then each backward projection of v = order[vertices - 1], ..., order[0], a
+   vertex's edges in index order both ways; a projection into w, frozen[w] zero, of candidate c (c[i] the atom at its
+   slot, SIZE_MAX UINT32_MAX) writes c's atoms into w's UINT32_MAX slots unless an atom of w differs from c's atom at
+   its slot or a mesh axis occurs twice in the result; returns ENOMEM or 0 */
+struct mesh_graph_projection { uint32_t operand, level; size_t forward, backward; };
+struct mesh_graph_sharding {
+  uint32_t vertices, atoms, levels, padding;
+  const uint32_t *order, *axis;
+  const size_t *first, *edge_first, *map;
+  const unsigned char *frozen;
+  const struct mesh_graph_projection *edge;
+  uint32_t *state;
+};
+int mesh_graph_sharding(const struct mesh_graph_sharding *sharding);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
@@ -107,6 +127,11 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
                           void (*visit)(void *consumer, uint32_t at, uint32_t step), void *consumer);
 void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *context, size_t k), const void *context,
                      size_t *first, size_t *order);
+/* ExecuTorch exir/memory_planning.py update_tensor_lifetime: "A tensor's lifetime are represented by the index of the
+   first and last node referring that tensor in its inputs/outputs." Use k is value value[k] at position[k]; first[v]
+   and last[v] the least and greatest position of value v's uses */
+int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, const size_t *position,
+                         size_t *first, size_t *last);
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
                                int (*equal)(const void *context, uint32_t k), const void *context);
 void mesh_graph_keyed_add(uint32_t *head, uint32_t *next, uint32_t key, uint32_t k);
@@ -152,6 +177,12 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
 /* design/joint-compilation.md §3, row 7 */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
+/* design/aot-compilation-change-request.md A10, "Its bound": mesh_graph_chains over items 0 .. items, item k the
+   closure's vertex member[k] counted count[k], a before b where bit member[a] of reached[member[b]] is set (a path of
+   the closure's rows leads from member[b] to member[a]: over rows to each vertex's predecessors, member[a] precedes
+   member[b]); its chain and chains as mesh_graph_chains'. EINVAL for a member at or past the closure's vertices */
+int mesh_graph_closure_chains(const struct mesh_graph_closure *closed, uint32_t items, const uint32_t *member,
+                              const uint64_t *count, uint64_t *chain, uint64_t *chains);
 /* design/joint-compilation.md §3, row 7 */
 int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *start, const uint64_t *end,
                          const uint64_t *need, uint64_t *color, uint64_t *colors);

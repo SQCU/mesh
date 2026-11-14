@@ -287,15 +287,29 @@ def closure(order, neighbours):
     return graph.ancestors(ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count)))
 
 
-# G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976; GSPMD, Xu et al., arXiv 2105.04663, section 3.5
-def propagate(order, neighbours, forward, backward):
-    changed = True
-    while changed:
-        changed = False
-        for visit, vertices in ((forward, order), (backward, order[::-1])):
-            for v in vertices:
-                for e in neighbours(v):
-                    changed |= visit(v, e)
+# G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976; GSPMD, Xu et al., arXiv 2105.04663, section 3.5;
+# design/joint-compilation.md §3, row 1; mesh-graph.h struct mesh_graph_projection, struct mesh_graph_sharding and
+# mesh_graph_sharding (resolved on use): `state` solved in place, the descriptor retaining its operand arrays
+class Projection(C.Structure):
+    _fields_ = [('operand', C.c_uint32), ('level', C.c_uint32), ('forward', C.c_size_t), ('backward', C.c_size_t)]
+
+
+class Sharding(C.Structure):
+    _fields_ = [('vertices', C.c_uint32), ('atoms', C.c_uint32), ('levels', C.c_uint32), ('padding', C.c_uint32),
+                ('order', C.POINTER(C.c_uint32)), ('axis', C.POINTER(C.c_uint32)), ('first', C.POINTER(C.c_size_t)),
+                ('edge_first', C.POINTER(C.c_size_t)), ('map', C.POINTER(C.c_size_t)),
+                ('frozen', C.POINTER(C.c_ubyte)), ('edge', C.POINTER(Projection)), ('state', C.POINTER(C.c_uint32))]
+
+
+def sharding(order, axis, first, edge_first, maps, frozen, edges, state, levels):
+    call = LIB.mesh_graph_sharding
+    call.restype, call.argtypes = C.c_int, [C.POINTER(Sharding)]
+    arrays = [_array(kind, items)[0] for kind, items in ((C.c_uint32, order), (C.c_uint32, axis), (C.c_size_t, first),
+                                                           (C.c_size_t, edge_first), (C.c_size_t, maps),
+                                                           (C.c_ubyte, frozen), (Projection, edges), (C.c_uint32, state))]
+    made = Sharding(len(order), len(axis), levels, 0, *arrays)
+    _check(call(C.byref(made)))
+    return made
 
 
 # G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976
@@ -310,34 +324,75 @@ def postorder(universe, roots, neighbours):
     return Graph.adjacency(universe, neighbours).postorder(roots)
 
 
-# L. Lamport, CACM 21(7), 1978; design/disjoint-pages-change-request.md A3 item 2
-def ends(order, reached, uses):
-    readers = {}
-    for v in order:
-        for u in uses(v):
-            readers.setdefault(u, []).append(v)
-    return {u: next(x for x in reversed(order) if not all(r in reached[x] for r in found))
-            for u, found in readers.items()}
+# one end of each key's lifetime, read through the key's value ID from its native result array
+class Endpoint(collections.abc.Mapping):
+    def __init__(self, lifetimes, array):
+        self.lifetimes, self.array = lifetimes, array
+
+    def __getitem__(self, key):
+        return self.array[self.lifetimes.at[key]]
+
+    def __iter__(self):
+        return iter(self.lifetimes.at)
+
+    def __len__(self):
+        return len(self.lifetimes.at)
 
 
-# F. Harary, Graph Theory, 1969; design/aot-compilation-change-request.md A10
+# ExecuTorch exir/memory_planning.py update_tensor_lifetime; mesh-graph.h mesh_graph_lifetimes: over use events (key,
+# position), `at` each used key's value ID in first-use order, the native use arrays and the first and last position
+# of each key's uses, read through `first` and `last`
+class Lifetimes:
+    def __init__(self, uses):
+        self.at, value, position = {}, [], []
+        for key, g in uses:
+            value.append(self.at.setdefault(key, len(self.at)))
+            position.append(g)
+        n, count = len(self.at), len(value)
+        self.value, self.position = (C.c_uint32 * max(count, 1))(*value), (C.c_size_t * max(count, 1))(*position)
+        self.firsts, self.lasts = (C.c_size_t * max(n, 1))(), (C.c_size_t * max(n, 1))()
+        call = LIB.mesh_graph_lifetimes
+        call.restype, call.argtypes = C.c_int, [C.c_uint32, C.c_size_t, _U, _Z, _Z, _Z]
+        _check(call(n, count, self.value, self.position, self.firsts, self.lasts))
+
+    @property
+    def first(self):
+        return Endpoint(self, self.firsts)
+
+    @property
+    def last(self):
+        return Endpoint(self, self.lasts)
+
+
+# F. Harary, Graph Theory, 1969; design/aot-compilation-change-request.md A10: the paths of a relation whose vertices
+# have one successor and one predecessor at most (disjoint chains), each from a vertex with a successor and no
+# predecessor, in the vertices' order; one depth-first search (mesh_graph_search) from those roots over the one retained
+# graph, each path the borrowed preorder slice [place[root], end[root]) of its root's subtree, its vertices' objects:
+# a View over the roots owning that search (no roots: an empty View, the search still retained)
 def paths(vertices, neighbours):
     graph = Graph.adjacency(vertices, neighbours)
     into, out = graph.data.in_first, graph.data.row_first
-    return [graph.walk([v]) for k, v in enumerate(graph.vertices) if into[k + 1] == into[k] and out[k + 1] > out[k]]
+    roots = [k for k in range(len(graph.vertices)) if into[k + 1] == into[k] and out[k + 1] > out[k]]
+    owned = graph.search([graph.vertices[k] for k in roots])
+    found = owned.made.contents
+    return View(owned, roots, range(len(roots)),
+                lambda k: ordered(owned, found.preorder, range(found.place[k], found.end[k])))
 
 
-# design/joint-compilation.md §3, row 2; mesh-graph.h mesh_graph_chains (R. P. Dilworth, 1950; D. R. Fulkerson, 1956):
-# the fewest chains covering the vertices under the relation, each vertex counted once
-def width(vertices, neighbours):
-    graph = Graph.adjacency(vertices, neighbours)
-    data = graph.data
-    before = BEFORE(lambda context, a, b: any(data.edge[data.row_edge[k]].sink == b
-                                              for k in range(data.row_first[a], data.row_first[a + 1])))
-    counts = (C.c_uint64 * max(len(graph.vertices), 1))(*[1] * len(graph.vertices))
-    chain, chains = (C.c_uint64 * max(len(graph.vertices), 1))(), C.c_uint64()
-    _check(LIB.mesh_graph_chains(len(graph.vertices), counts, before, None, chain, C.byref(chains)))
-    return chains.value
+# design/aot-compilation-change-request.md A10, "Its bound"; mesh-graph.h mesh_graph_closure_chains (resolved on use;
+# R. P. Dilworth, 1950; D. R. Fulkerson, 1956): the fewest chains covering `members`, vertices of the closure `closed`
+# (a closure of rows as `closure` returns it, each vertex's set its predecessors), each counted once, a before b where a
+# is in b's set: their count, and a View of each member's chain retaining the closure
+def closure_chains(closed, members):
+    call = LIB.mesh_graph_closure_chains
+    call.restype, call.argtypes = C.c_int, [C.POINTER(Closed), C.c_uint32, _U, C.POINTER(C.c_uint64),
+                                            C.POINTER(C.c_uint64), C.POINTER(C.c_uint64)]
+    owned = closed.owned
+    member, items = _array(C.c_uint32, [owned.graph.at[m] for m in members])
+    counts = (C.c_uint64 * max(items, 1))(*[1] * items)
+    chain, chains = (C.c_uint64 * max(items, 1))(), C.c_uint64()
+    _check(call(owned.made, items, member, counts, chain, C.byref(chains)))
+    return chains.value, View((owned, member, counts, chains), chain, range(items), int)
 
 
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
@@ -350,11 +405,10 @@ NODES, PLAN_COUNT, PLAN_SUBMISSION, LOWERED = 64, 0x80000000, 0xC0000000, 0x4000
 STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed')
 
 # mesh-graph.h mesh_graph_search, mesh_graph_breadth, mesh_graph_search_free, mesh_graph_relation_head,
-# mesh_graph_closure, mesh_graph_closure_free and mesh_graph_chains; MESH_GRAPH_GIVEN and SIZE_MAX
+# mesh_graph_closure and mesh_graph_closure_free; MESH_GRAPH_GIVEN and SIZE_MAX
 GIVEN, SIZE = 3, 2 ** 64 - 1
 _U, _Z = C.POINTER(C.c_uint32), C.POINTER(C.c_size_t)
 LIB.mesh_graph_search.restype = LIB.mesh_graph_breadth.restype = LIB.mesh_graph_closure.restype = C.c_int
-LIB.mesh_graph_chains.restype = C.c_int
 LIB.mesh_graph_search.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U, C.c_int,
                                   C.POINTER(C.POINTER(Searched))]
 LIB.mesh_graph_breadth.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U,
@@ -368,9 +422,6 @@ LIB.mesh_graph_boundaries.argtypes = [C.c_void_p, _U, C.POINTER(C.c_ubyte), C.PO
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
 LIB.mesh_graph_search_free.argtypes = [C.POINTER(Searched)]
 LIB.mesh_graph_closure_free.argtypes = [C.POINTER(Closed)]
-BEFORE = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_uint32, C.c_uint32)
-LIB.mesh_graph_chains.argtypes = [C.c_uint32, C.POINTER(C.c_uint64), BEFORE, C.c_void_p, C.POINTER(C.c_uint64),
-                                  C.POINTER(C.c_uint64)]
 RELATION_HEAD = C.cast(LIB.mesh_graph_relation_head, C.c_void_p)
 
 
