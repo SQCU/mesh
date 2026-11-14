@@ -6,6 +6,9 @@
 #include <string.h>
 
 static void released(void *owner) { ++*(unsigned *)owner; }
+static int within(const void *p, const void *bytes, size_t length) {
+    return (uintptr_t)p >= (uintptr_t)bytes && (uintptr_t)p - (uintptr_t)bytes < length;
+}
 
 int main(void) {
     unsigned payload = 0, realized = 0, original = 0, replacement = 0, rejected = 0;
@@ -53,11 +56,46 @@ int main(void) {
     assert(restored.occurrences == 2 && restored.answers == 2);
     mesh_graph_signature_free(&restored);
     free(record);
+    assert(mesh_graph_archive(&joined, NULL, 0, &bytes) == ERANGE);
+    void *archive = malloc(bytes), *snapshot = malloc(bytes);
+    assert(archive && snapshot && !mesh_graph_archive(&joined, archive, bytes, &bytes));
+    memcpy(snapshot, archive, bytes);
+    unsigned archived = 0;
+    assert(mesh_graph_archive_read(archive, bytes - 1, released, &archived, &restored) == EINVAL && !archived);
+    assert(!mesh_graph_archive_read(archive, bytes, released, &archived, &restored));
+    assert(restored.answers == joined.answers && !memcmp(restored.digest, joined.digest, sizeof joined.digest));
+    assert(!memcmp(restored.states, joined.states, sizeof joined.states));
+    const void *views[] = {restored.processor, restored.task, restored.operation, restored.dependence,
+        restored.edge, restored.position, restored.count, restored.least, restored.previous, restored.waited,
+        restored.first, restored.order, restored.unknown, restored.alias, restored.answer,
+        restored.occurrence, restored.site, restored.published};
+    for (size_t k = 0; k < sizeof views / sizeof *views; k++) assert(within(views[k], archive, bytes));
+    struct mesh_graph_signature retained = {0};
+    assert(!mesh_graph_compose(&restored, &restored, &retained));
+    assert(!mesh_graph_signature_program(&restored, 0, NULL));
+    assert(!mesh_graph_signature_scopes(&restored, scopes, 1, &occurrence, 1, &site, 1, &published, NULL, NULL));
+    assert(!memcmp(archive, snapshot, bytes));
+    mesh_graph_signature_free(&restored);
+    assert(!archived);
+    mesh_graph_signature_free(&retained);
+    assert(archived == 1);
+    free(snapshot); free(archive);
+    struct mesh_graph_signature plain = {0};
+    assert(!mesh_graph_signature(1, &processor, 1, &task, 0, NULL, 1, &read, &plain));
+    assert(mesh_graph_archive(&plain, NULL, 0, &bytes) == ERANGE);
+    archive = malloc(bytes);
+    assert(archive && !mesh_graph_archive(&plain, archive, bytes, &bytes));
+    mesh_graph_signature_free(&plain);
+    assert(!mesh_graph_archive_read(archive, bytes, released, &archived, &restored) && archived == 1);
+    assert(within(restored.operation, archive, bytes));
+    mesh_graph_signature_free(&restored);
+    assert(archived == 2);
+    free(archive);
     mesh_graph_signature_free(&a);
     mesh_graph_scopes_free(scopes);
     assert(!payload && !realized && !original);
     mesh_graph_signature_free(&joined);
     assert(payload == 1 && realized == 1 && original == 1 && replacement == 1 && !rejected);
-    puts("scope ownership, composition and saved source references: PASS");
+    puts("scope ownership, full saved views, composition and source references: PASS");
     return 0;
 }

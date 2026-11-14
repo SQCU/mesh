@@ -563,7 +563,8 @@ class Signature(C.Structure):
                 ('proof', C.POINTER(Proof)), ('scopes', C.c_void_p), ('realized', C.c_void_p),
                 ('occurrences', C.c_size_t), ('sites', C.c_size_t), ('publications', C.c_size_t),
                 ('answers', C.c_size_t), ('occurrence', C.POINTER(Occurrence)), ('site', C.POINTER(Site)),
-                ('published', C.POINTER(C.c_uint64)), ('answer', C.POINTER(Answered)), ('projected', C.POINTER(Site))]
+                ('published', C.POINTER(C.c_uint64)), ('answer', C.POINTER(Answered)), ('projected', C.POINTER(Site)),
+                ('archived', C.c_void_p)]
     # the Python buffers whose bytes a scoped signature's views borrow (from_record, from_archive; a composed
     # signature's its operands'), kept as long as it is; None: it borrows none
     borrowed = None
@@ -748,7 +749,8 @@ def record(made):
 
 
 # the caller's immutable bytes viewed in place (other input made bytes once, as its normalization) through a ctypes
-# pointer into them: a scoped signature's views borrow them, so the returned signature keeps both
+# pointer into them: an archive's restored signature (every array) and a record's scopes borrow them, so the returned
+# signature keeps both
 def _immutable(data):
     data = data if isinstance(data, bytes) else bytes(data)
     return data, C.c_char_p(data)

@@ -3015,13 +3015,40 @@ static int signature_enforces(const struct mesh_graph_operation *operation, cons
 }
 
 static void realized_free(struct mesh_graph_realized *);
+/* mesh-graph.h struct mesh_graph_archived: a restored archive's bytes [bytes, bytes + length) and their adopted owner,
+   reference counted as the scopes are (its signature's reference, and its restored scopes' while they are held) */
+struct mesh_graph_archived { size_t references; void (*release)(void *); void *owner; const char *bytes; size_t length; };
+static void archived_free(struct mesh_graph_archived *x) {
+  if (__atomic_fetch_sub(&x->references, 1, __ATOMIC_ACQ_REL) != 1) return;
+  if (x->release) x->release(x->owner);
+  free(x);
+}
+static void archived_released(void *x) { archived_free(x); }
+/* whether `p` is one of the signature's views of its archive (mesh_graph_archive_read: every view, an empty one at the
+   archive's start, lies within its bytes), never written or freed */
+static int signature_viewed(const struct mesh_graph_signature *s, const void *p) {
+  if (!s->archived || !p) return 0;
+  const uintptr_t at = (uintptr_t)p, base = (uintptr_t)s->archived->bytes;
+  return at >= base && at - base < s->archived->length;
+}
+static void signature_release(const struct mesh_graph_signature *s, void *p) { if (!signature_viewed(s, p)) free(p); }
+/* the signature's own copy of its pairs where they are its archive's view, before any of them is changed */
+static int signature_edges_own(struct mesh_graph_signature *s) {
+  if (!signature_viewed(s, s->edge)) return 0;
+  struct mesh_graph_synchronized *e = malloc((s->synchronized + 1) * sizeof *e);
+  if (!e) return ENOMEM;
+  if (s->synchronized) memcpy(e, s->edge, s->synchronized * sizeof *e);
+  s->edge = e;
+  return 0;
+}
 void mesh_graph_signature_free(struct mesh_graph_signature *s) {
-  free(s->processor); free(s->task); free(s->operation); free(s->dependence); free(s->edge); free(s->position);
-  free(s->count); free(s->least); free(s->previous); free(s->waited); free(s->first); free(s->order); free(s->unknown);
-  free(s->alias);free(s->event);free(s->span);free(s->repeated);free(s->proof);
-  free(s->answer);free(s->projected);
+  void *const array[] = {s->processor, s->task, s->operation, s->dependence, s->edge, s->position, s->count, s->least,
+                         s->previous, s->waited, s->first, s->order, s->unknown, s->alias, s->event, s->span,
+                         s->repeated, s->proof, s->answer, s->projected};
+  for (size_t k = 0; k < sizeof array / sizeof *array; k++) signature_release(s, array[k]);
   if(s->realized)realized_free(s->realized);
   if(s->scopes)mesh_graph_scopes_free(s->scopes);
+  if(s->archived)archived_free(s->archived);
   memset(s, 0, sizeof *s);
 }
 
@@ -3049,7 +3076,7 @@ int mesh_graph_signature_program(struct mesh_graph_signature *s,size_t events,co
   struct mesh_graph_event *e=malloc((events+1)*sizeof *e);
   if(!e)return ENOMEM;
   if(events)memcpy(e,event,events*sizeof *e);
-  free(s->event);
+  signature_release(s,s->event);
   s->events=events;s->event=e;
   return signature_digest(s);
 }
@@ -3061,7 +3088,7 @@ int mesh_graph_signature_spans(struct mesh_graph_signature *s,size_t spans,const
   struct mesh_graph_span *p=malloc((spans+1)*sizeof *p);
   if(!p)return ENOMEM;
   if(spans)memcpy(p,span,spans*sizeof *p);
-  free(s->span);s->span=p;s->spans=spans;
+  signature_release(s,s->span);s->span=p;s->spans=spans;
   return signature_digest(s);
 }
 /* design/synchronization-signature-change-request.md items 1, 4 and 6: completion scopes (mesh-graph.h struct
@@ -3224,7 +3251,7 @@ static int signature_answered(const struct mesh_graph_signature *s, struct signa
 static int signature_answers(struct mesh_graph_signature *s) {
   struct signature_attached x = signature_attachment(s);
   const int result = signature_answered(s, &x);
-  if (!result) { free(s->answer); signature_attach_set(s, &x); }
+  if (!result) { signature_release(s, s->answer); signature_attach_set(s, &x); }
   return result;
 }
 /* attachment x, its scopes and holder one reference each the caller holds for it and its projected sites the caller's,
@@ -3234,11 +3261,18 @@ static int signature_answers(struct mesh_graph_signature *s) {
 static int signature_attach(struct mesh_graph_signature *s, struct signature_attached x) {
   int result = signature_answered(s, &x);
   if (result) return result;
+  /* an archive's pairs are its view: the states change in the signature's own copy */
+  struct mesh_graph_synchronized *const viewed = signature_viewed(s, s->edge) ? s->edge : NULL;
+  if ((result = signature_edges_own(s))) { free(x.answer); return result; }
   const struct signature_attached prior = signature_attachment(s);
   signature_attach_set(s, &x);
   result = signature_digest(s);
-  if (result) { signature_attach_set(s, &prior); free(x.answer); return result; }
-  free(prior.answer); free(prior.projected);
+  if (result) {
+    signature_attach_set(s, &prior); free(x.answer);
+    if (viewed) { free(s->edge); s->edge = viewed; }
+    return result;
+  }
+  signature_release(s, prior.answer); signature_release(s, prior.projected);
   if (prior.realized) realized_free(prior.realized);
   if (prior.scopes) mesh_graph_scopes_free(prior.scopes);
   return 0;
@@ -3639,9 +3673,11 @@ int mesh_graph_resynchronized(struct mesh_graph_signature *s, const double *time
     if (__builtin_add_overflow(added_delay[i], offset[added_from[i]], &total_delay)) continue;
     proof[proofs++] = (struct mesh_graph_proof){added_from[i], added_to[i], total_delay, i, ok[i]};
   }
+  /* an archive's pairs are its view: signature_proved changes the signature's own copy */
+  if (!result) result = signature_edges_own(s);
   if (!result) {
     qsort(proof, proofs, sizeof *proof, proof_before);
-    free(s->proof);
+    signature_release(s, s->proof);
     s->proof = proof; s->proofs = proofs; proof = NULL;
     result = signature_proved(s);
   }
@@ -3754,6 +3790,11 @@ static int program_scoped_read(struct mesh_graph_signature *s,const struct progr
   if(!result)result=mesh_graph_scopes_create((size_t)rows,row,NULL,NULL,&scopes);
   if(result){free(row);return result;}
   scopes->own=row;
+  /* an archive's scopes keep its bytes, of which they are views, while any signature holds them */
+  if(s->archived){
+    __atomic_fetch_add(&s->archived->references,1,__ATOMIC_RELAXED);
+    scopes->release=archived_released;scopes->owner=s->archived;
+  }
   const struct mesh_graph_occurrence *occurrence=(const void *)(at+used);
   const struct mesh_graph_site *site=(const void *)((const char *)occurrence+body->occurrences*sizeof *occurrence);
   const uint64_t *published=(const void *)((const char *)site+body->sites*sizeof *site);
@@ -3797,24 +3838,39 @@ int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t
   }
   return 0;
 }
-static int record_restore(const void *record, struct mesh_graph_signature *s, int derive) {
+/* a record's array at `at`, `size` bytes: with `archived` its view (an empty one at the archive's start, so that every
+   view lies within the archive's bytes), else the record's copy in a new array of `room` bytes */
+static void *record_array(const void *record, size_t at, size_t size, size_t room,
+                          const struct mesh_graph_archived *archived) {
+  if (archived) return (void *)(size ? (const char *)record + at : archived->bytes);
+  void *made = malloc(room);
+  if (made && size) memcpy(made, (const char *)record + at, size);
+  return made;
+}
+/* a record's signature: with `archived` (mesh_graph_archive_read) every array a view of the archive holding the
+   record, its digest the record's, nothing derived; without (mesh_graph_record_read, the tool's conversion) the primary
+   and program arrays copied and the rest derived, the scoped section's views of the record */
+static int record_restore(const void *record, struct mesh_graph_signature *s, struct mesh_graph_archived *archived) {
   const struct mesh_graph_record *head = record;
   memset(s, 0, sizeof *s);
+  s->archived = archived;
   s->processors = head->processors; s->tasks = head->tasks; s->operations = head->operations;
   s->dependences = head->dependences; s->synchronized = head->synchronized;
-  s->processor = malloc(((size_t)s->processors + 1) * sizeof *s->processor);
-  s->task = malloc(((size_t)s->tasks + 1) * sizeof *s->task);
-  s->dependence = malloc((s->dependences + 1) * sizeof *s->dependence);
-  s->operation = malloc((s->operations + 1) * sizeof *s->operation);
-  s->edge = malloc((s->synchronized + 1) * sizeof *s->edge);
-  s->least = malloc((s->dependences + 1) * sizeof *s->least);
-  s->alias = malloc((s->operations + 1) * sizeof *s->alias);
-  int result = s->processor && s->task && s->dependence && s->operation && s->edge && s->least && s->alias ? 0 : ENOMEM;
   struct record_part part[7];
   const size_t primary=record_parts(s,part);
-  if (!result && primary > head->bytes) result = EINVAL;
+  int result = primary > head->bytes ? EINVAL : 0;
+  const size_t room[7] = {((size_t)s->processors + 1) * sizeof *s->processor, ((size_t)s->tasks + 1) * sizeof *s->task,
+                          (s->dependences + 1) * sizeof *s->dependence, (s->operations + 1) * sizeof *s->operation,
+                          (s->synchronized + 1) * sizeof *s->edge, (s->dependences + 1) * sizeof *s->least,
+                          (s->operations + 1) * sizeof *s->alias};
+  void *array[7] = {0};
   size_t at = sizeof *head;
-  for (int k = 0; !result && k < 7; k++) { memcpy(part[k].data, (const char *)record + at, part[k].size); at = record_align(at + part[k].size); }
+  for (int k = 0; !result && k < 7; k++) {
+    if (!(array[k] = record_array(record, at, part[k].size, room[k], archived))) result = ENOMEM;
+    at = record_align(at + part[k].size);
+  }
+  s->processor = array[0]; s->task = array[1]; s->dependence = array[2]; s->operation = array[3]; s->edge = array[4];
+  s->least = array[5]; s->alias = array[6];
   if(!result && primary<head->bytes){
     struct program_record body={0};
     if(head->bytes-primary<sizeof body.magic)result=EINVAL;
@@ -3825,44 +3881,48 @@ static int record_restore(const void *record, struct mesh_graph_signature *s, in
                     body.magic!=GRAPH_PROGRAM_SCOPED) || head->bytes-primary<size))result=EINVAL;
     if(!result){
       memcpy(&body,(const char *)record+primary,size);at=primary+size;
-      const size_t room=(size_t)head->bytes-at;
-      if(body.events>room/sizeof *s->event || body.spans>room/sizeof *s->span ||
-         body.repeats>room/sizeof *s->repeated || body.proofs>room/sizeof *s->proof)result=EINVAL;
+      const size_t space=(size_t)head->bytes-at;
+      if(body.events>space/sizeof *s->event || body.spans>space/sizeof *s->span ||
+         body.repeats>space/sizeof *s->repeated || body.proofs>space/sizeof *s->proof)result=EINVAL;
       if(!result){
         s->events=(size_t)body.events;s->spans=(size_t)body.spans;
         s->repeats=(size_t)body.repeats;s->proofs=(size_t)body.proofs;
-        s->event=malloc((s->events+1)*sizeof *s->event);
-        s->span=s->spans?malloc(s->spans*sizeof *s->span):NULL;
-        s->repeated=malloc((s->repeats+1)*sizeof *s->repeated);
-        s->proof=malloc((s->proofs+1)*sizeof *s->proof);
         struct record_part program[4];
         const size_t metadata=program_parts(s,program),payload=metadata?metadata-program_head(s):0;
-        if(!s->event || (s->spans && !s->span) || !s->repeated || !s->proof)result=ENOMEM;
-        else if(body.magic!=GRAPH_PROGRAM_SCOPED && payload!=room)result=EINVAL;
-        else if(payload>room)result=EINVAL;
-        else for(int k=0;k<4;k++){
-          if(program[k].size)memcpy(program[k].data,(const char *)record+at,program[k].size);at+=program[k].size;
+        if(body.magic!=GRAPH_PROGRAM_SCOPED && payload!=space)result=EINVAL;
+        else if(payload>space)result=EINVAL;
+        const size_t made[4]={(s->events+1)*sizeof *s->event,s->spans*sizeof *s->span,
+                              (s->repeats+1)*sizeof *s->repeated,(s->proofs+1)*sizeof *s->proof};
+        void *section[4]={0};
+        /* no spans: no span array */
+        for(int k=0;!result && k<4;k++){
+          if(k==1 && !s->spans)continue;
+          if(!(section[k]=record_array(record,at,program[k].size,made[k],archived)))result=ENOMEM;
+          at+=program[k].size;
         }
+        s->event=section[0];s->span=section[1];s->repeated=section[2];s->proof=section[3];
         if(!result && body.magic==GRAPH_PROGRAM_SCOPED)
           result=program_scoped_read(s,&body,(const char *)record+at,(size_t)head->bytes-at);
       }
     }
   }
-  if (!result && derive) result = signature_derive(s);
-  if (!result && derive && s->scopes && !(result = signature_answers(s))) result = signature_digest(s);
-  if (!result && !derive) memcpy(s->digest, head->digest, sizeof s->digest);
+  if (!result && !archived) result = signature_derive(s);
+  if (!result && !archived && s->scopes && !(result = signature_answers(s))) result = signature_digest(s);
+  if (!result && archived) memcpy(s->digest, head->digest, sizeof s->digest);
   if (result) mesh_graph_signature_free(s);
   return result;
 }
-int mesh_graph_record_read(const void *record, struct mesh_graph_signature *s) { return record_restore(record, s, 1); }
+int mesh_graph_record_read(const void *record, struct mesh_graph_signature *s) { return record_restore(record, s, NULL); }
 
-/* design/aot-compilation-change-request.md A1; the signature and its already-derived indices. */
+/* design/aot-compilation-change-request.md A1; the solved signature in full: its record, then its derived indices and
+   its answered reads (`answers` of them), each array 8-byte sized, so each starts 8-aligned where the archive is;
+   SIGNATURE_ARCHIVE "MESHGRA2", the answered reads' version */
 struct signature_archive {
-  uint64_t magic, bytes, record, uncovered, redundant, unwaited, states[MESH_GRAPH_STATES];
+  uint64_t magic, bytes, record, uncovered, redundant, unwaited, answers, states[MESH_GRAPH_STATES];
   uint32_t primitives, padding;
 };
-#define SIGNATURE_ARCHIVE UINT64_C(0x314152474853454d)
-static size_t archive_parts(const struct mesh_graph_signature *s, struct record_part part[7]) {
+#define SIGNATURE_ARCHIVE UINT64_C(0x324152474853454d)
+static size_t archive_parts(const struct mesh_graph_signature *s, struct record_part part[8]) {
   const size_t n = s->operations, cells = (size_t)s->processors * MESH_GRAPH_PRIMITIVES;
   part[0] = (struct record_part){s->position, n * sizeof *s->position};
   part[1] = (struct record_part){s->previous, n * sizeof *s->previous};
@@ -3871,57 +3931,56 @@ static size_t archive_parts(const struct mesh_graph_signature *s, struct record_
   part[4] = (struct record_part){s->order, n * sizeof *s->order};
   part[5] = (struct record_part){s->count, cells * sizeof *s->count};
   part[6] = (struct record_part){s->unknown, cells * sizeof *s->unknown};
+  part[7] = (struct record_part){s->answer, s->answers * sizeof *s->answer};
   size_t bytes = 0;
-  for (int k = 0; k < 7; k++) bytes += part[k].size;
+  for (int k = 0; k < 8; k++) bytes += part[k].size;
   return bytes;
 }
 int mesh_graph_archive(const struct mesh_graph_signature *s, void *bytes, size_t room, size_t *made) {
-  struct record_part part[7];
+  struct record_part part[8];
   const size_t primary = record_size(s), derived = archive_parts(s, part);
   *made = sizeof(struct signature_archive) + primary + derived;
   if (room < *made) return ERANGE;
   struct signature_archive head = {.magic = SIGNATURE_ARCHIVE, .bytes = *made, .record = primary,
-    .uncovered = s->uncovered, .redundant = s->redundant, .unwaited = s->unwaited, .primitives = MESH_GRAPH_PRIMITIVES};
+    .uncovered = s->uncovered, .redundant = s->redundant, .unwaited = s->unwaited, .answers = s->answers,
+    .primitives = MESH_GRAPH_PRIMITIVES};
   for (uint32_t k = 0; k < MESH_GRAPH_STATES; k++) head.states[k] = s->states[k];
   memcpy(bytes, &head, sizeof head);
   size_t written = 0;
   int status = mesh_graph_record(s, (char *)bytes + sizeof head, primary, &written);
   if (status) return status;
   size_t at = sizeof head + primary;
-  for (int k = 0; k < 7; k++) { if (part[k].size) memcpy((char *)bytes + at, part[k].data, part[k].size); at += part[k].size; }
+  for (int k = 0; k < 8; k++) { if (part[k].size) memcpy((char *)bytes + at, part[k].data, part[k].size); at += part[k].size; }
   return 0;
 }
 int mesh_graph_archive_read(const void *bytes, size_t length, void (*release_owner)(void *), void *owner,
                             struct mesh_graph_signature *s) {
   memset(s, 0, sizeof *s);
   struct signature_archive head;
-  if (length < sizeof head) return EINVAL;
+  if (length < sizeof head || (uintptr_t)bytes % 8) return EINVAL;
   memcpy(&head, bytes, sizeof head);
   if (head.magic != SIGNATURE_ARCHIVE || head.primitives != MESH_GRAPH_PRIMITIVES || head.bytes != length ||
-      head.record > length - sizeof head || head.record < sizeof(struct mesh_graph_record)) return EINVAL;
+      head.record > length - sizeof head || head.record < sizeof(struct mesh_graph_record) ||
+      head.answers > length / sizeof *s->answer) return EINVAL;
   const struct mesh_graph_record *record = (const void *)((const char *)bytes + sizeof head);
   if (record->bytes != head.record) return EINVAL;
-  int status = record_restore(record, s, 0);
+  /* every array a view of `bytes`, held by `archived`; its owner adopted only once the whole result is restored */
+  struct mesh_graph_archived *archived = malloc(sizeof *archived);
+  if (!archived) return ENOMEM;
+  *archived = (struct mesh_graph_archived){.references = 1, .bytes = bytes, .length = length};
+  int status = record_restore(record, s, archived);
   if (status) return status;
-  struct record_part part[7];
+  s->answers = (size_t)head.answers;
+  struct record_part part[8];
   if (archive_parts(s, part) != length - sizeof head - head.record) { mesh_graph_signature_free(s); return EINVAL; }
-  void *owned[7] = {0};
+  void *view[8];
   size_t at = sizeof head + head.record;
-  for (int k = 0; k < 7; k++) {
-    owned[k] = malloc(part[k].size + 1);
-    if (!owned[k]) { status = ENOMEM; break; }
-    if (part[k].size) memcpy(owned[k], (const char *)bytes + at, part[k].size);
-    at += part[k].size;
-  }
-  if (status) { for (int k = 0; k < 7; k++) free(owned[k]); mesh_graph_signature_free(s); return status; }
-  s->position = owned[0]; s->previous = owned[1]; s->waited = owned[2]; s->first = owned[3]; s->order = owned[4];
-  s->count = owned[5]; s->unknown = owned[6];
+  for (int k = 0; k < 8; k++) { view[k] = (void *)((const char *)bytes + (part[k].size ? at : 0)); at += part[k].size; }
+  s->position = view[0]; s->previous = view[1]; s->waited = view[2]; s->first = view[3]; s->order = view[4];
+  s->count = view[5]; s->unknown = view[6]; s->answer = view[7];
   s->uncovered = head.uncovered; s->redundant = head.redundant; s->unwaited = head.unwaited;
   for (uint32_t k = 0; k < MESH_GRAPH_STATES; k++) s->states[k] = head.states[k];
-  if (s->scopes && (status = signature_answers(s))) { mesh_graph_signature_free(s); return status; }
-  /* adopted: by the scopes, whose views of `bytes` a scoped signature holds; released at once otherwise */
-  if (s->scopes) { s->scopes->release = release_owner; s->scopes->owner = owner; }
-  else if (release_owner) release_owner(owner);
+  archived->release = release_owner; archived->owner = owner;
   return 0;
 }
 

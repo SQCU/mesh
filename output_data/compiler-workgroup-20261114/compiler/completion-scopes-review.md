@@ -12,8 +12,6 @@ The joint graph checkpoint also contains frontend-owned changes: one existing sh
 
 Private strict syntax checks passed for `mesh-graph.c`, `mesh-collective.c`, `mesh-dataflow.c` and `mesh-call.c`; Python compilation and `git diff --check` passed. Commands/results are in `compiler/schedule-18.jsonl`, with current source status in `compiler/schedule.status.md`. The preceding complete native includer checks are in `compiler/schedule-17.jsonl`.
 
-Open at this checkpoint: a standalone saved writer's `later` index still needs its original native row/readiness source association. The agreed next operand is the original row, actual signature node and structural row identity; a loaded native source binding will retain the original Program. Cross-node event matching will use that explicit source node. The next source turn implements this paired handoff. No shared build or runtime observation has been made for the new signature ABI (408 bytes, seven states).
-
 ## Saved source handoff
 
 The follow-up implements that source association. Each row retains `ScopeSource {row, node, identity}` (40 bytes), and the descriptor is 64 bytes. The record preserves this reference and views it on restore; native pointers are never serialized. Event matching now includes the actual signature node. A standalone record has explicit unresolved source references until its original artifact is supplied.
@@ -22,4 +20,12 @@ The follow-up implements that source association. Each row retains `ScopeSource 
 
 Native checkpoint `79732a3f` supplies and resolves those records from the actual loaded `NativeCall` Programs, using their retained structural row identities. It preserves existing bindings from other nodes. Python checkpoint `a01d9019` connects the saved signature to the prepared `Bound` and its report. The identity covers source declaration/readiness correspondence; it is not a numerical binary identity. No full native artifact or readiness table is duplicated into the graph record.
 
-The schedule-19 strict C/header checks, Python compilation and layout checks passed (`compiler/schedule-19.jsonl`). Shared build and runtime verification remain pending at this source checkpoint. Ordinary local numerical clients have no release scopes, so they cannot establish native transported writer/site coverage; any graph ownership check is limited to its public ownership/record contract.
+The schedule-19 strict C/header checks, Python compilation and layout checks passed (`compiler/schedule-19.jsonl`). The matching v36 build, owner contract check and existing local CPU/archive observations subsequently passed; exact inputs and limits are in `joint-v36-review.md`. Ordinary local numerical clients have no release scopes, so they cannot establish native transported writer/site coverage.
+
+## Complete saved signature
+
+The actual Target now saves the full signature archive and prepares it with `from_archive` (`73895200`). The full archive stores the solved answers alongside primary and derived arrays, counts, states and digest. Restore borrows every array from the original bytes and performs no derivation, answer matching or digest computation. `MESHGRA2` identifies this framing; an older archive is rejected rather than re-solved. The explicit record-conversion tool remains a separate operation.
+
+Signature416 appends one private archive owner. It adopts bytes only on success, with or without scopes; composed scopes retain the same owner. Mutation copies only the changed array, and freeing a signature never frees its borrowed arrays. Native IR archive v36 framing is unchanged. Private strict checks passed for all four libmesh units and C/Objective-C/Objective-C++ header includers (`schedule-20.jsonl`).
+
+The expanded `scope-ownership.c` passed against the matching rebuilt libmesh: primary/derived/answered pointers lie within the original archive; composition keeps it alive; mutation leaves those bytes unchanged; both scoped and unscoped owners release once; rejected loading does not adopt. This focused lifetime check addresses failures numerical metrics cannot detect. Native dependent build and actual client results are recorded separately after their completion; no transported runtime claim is made.

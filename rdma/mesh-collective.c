@@ -3176,8 +3176,9 @@ int mesh_plan_save(struct mesh_ctx *context,uint64_t program,const struct mesh_f
   head.bytes=out.size;memcpy(out.bytes,&head,sizeof head);
   *bytes=out.bytes;*length=out.size;return 0;
 }
-/* the archived signature viewed in place (8-aligned, plan_signature_put) and read under the loaded bytes' owner: a
-   scoped signature's views of it keep one reference of `bytes` (plan_bytes_release with its last holder) */
+/* the archived signature viewed in place (8-aligned, plan_signature_put) and read under the loaded bytes' owner: the
+   restored signature (every array a view of it, mesh_graph_archive_read) and its scopes keep one reference of `bytes`
+   (plan_bytes_release with their last holder), adopted on success */
 static int plan_signature_get(struct plan_archive *input,uint64_t length,struct plan_bytes *bytes,
                               struct mesh_graph_signature *signature){
   const void *archived=plan_archive_view(input,length,1);

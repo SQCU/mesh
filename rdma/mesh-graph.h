@@ -596,7 +596,8 @@ struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dep
                               size_t occurrences, sites, publications, answers;
                               const struct mesh_graph_occurrence *occurrence; const struct mesh_graph_site *site;
                               const uint64_t *published; struct mesh_graph_answered *answer;
-                              struct mesh_graph_site *projected; };
+                              struct mesh_graph_site *projected; struct mesh_graph_archived *archived; };
+_Static_assert(sizeof(struct mesh_graph_signature) == 416, "rdma/mesh_graph.py Signature");
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
@@ -642,13 +643,22 @@ _Static_assert(sizeof(struct mesh_graph_record) == 72, "mesh_graph_record");
 int mesh_graph_record(const struct mesh_graph_signature *signature, void *record, size_t room, size_t *made);
 int mesh_graph_record_read(const void *record, struct mesh_graph_signature *signature);
 int mesh_graph_archive(const struct mesh_graph_signature *, void *bytes, size_t room, size_t *made);
-/* mesh_graph_archive_read: a scoped signature's scopes and realized arrays are views of `bytes` (8-byte aligned), its
-   `owner` adopted on success by them (release_owner(owner) once the last signature holding them is freed; NULL: the
-   caller keeps `bytes` alive); a signature without scopes borrows nothing and releases `owner` at once. On failure the
-   caller keeps it. mesh_graph_record_read borrows the same views of its record, which the caller keeps alive. Each
-   row's mesh_graph_scope_source is kept with it and viewed the same way (no pointer is saved): restored scopes are
-   unbound, their rows' sources explicit references (artifact row, node, structural identity) and no resolved native
-   Program until the native resolver binds the owning artifact's (mesh_graph_scopes_bind) */
+/* mesh_graph_archive: the solved signature in full (its record, then its derived arrays and its answered reads: struct
+   mesh_graph_answered, their count in the archive's header, with its counts and states). mesh_graph_archive_read: that
+   result exactly as solved, nothing derived, paired, answered or digested again: every array of the signature, primary,
+   derived, answered, its program's and its scopes' (each row's mesh_graph_scope_source with it; no pointer is saved),
+   a view of `bytes` (8-byte aligned, EINVAL otherwise), its counts, states and digest the archive's. `archived` holds
+   them: `owner` adopted on success, scoped or not (release_owner(owner) once the signature and every signature holding
+   its scopes or realized arrays are freed; NULL: the caller keeps `bytes` alive); on failure the caller keeps it. A
+   signature's views are never written or freed: a mutation (mesh_graph_signature_scopes, _spans, _program,
+   mesh_graph_resynchronized) makes its own copy of only the array it changes, and mesh_graph_signature_free frees only
+   arrays outside `bytes`. Restored scopes are unbound, their rows' sources explicit references (artifact row, node,
+   structural identity) and no resolved native Program until the native resolver binds the owning artifact's
+   (mesh_graph_scopes_bind). EINVAL for an archive of another version (its magic: no older archive is re-solved).
+   mesh_graph_record_read, the tool's conversion from a record, is apart: it copies the record's primary arrays and
+   derives the rest as mesh_graph_signature does (pairs, counts, answers, digest), its scopes' views borrowed of the
+   record, which the caller keeps alive */
+struct mesh_graph_archived;
 int mesh_graph_archive_read(const void *bytes, size_t length, void (*release_owner)(void *), void *owner,
                             struct mesh_graph_signature *);
 /* design/synchronization-signature-change-request.md item 1; L. Lamport, CACM 21(7), 1978: one program's signature from
