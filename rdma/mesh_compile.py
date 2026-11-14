@@ -7492,11 +7492,17 @@ def _actors(programs, irs):
         made[k] = host, work, edges, parts, count, complete
     return made
 
+# metal_ir.h METAL_IR_DATA, METAL_IR_TRANSPORT, METAL_IR_STEP: metal_ir_value_info `word` of the step value
+METAL_IR_STEP = 2
+
+
 # M. Lam, PLDI 1988, p. 322; ExecuTorch exir/memory_planning.py:348–354; design/plan-to-bridge-change-request.md R2;
 # metal-microbench metal_ir.h metal_ir_storages: each row's compiled program's storage records (a value's bytes and its
 # first and last positions of the compiled order), a plan value's interval the union of its calls' (every call an
 # execution of the one plan), and the program values the lowering realized beyond the plan's (bytes > 0, no plan
-# identity) new values of the row's function (CONSTANT and STATE invariant, its zeroed mark its state)
+# identity) new values of the row's function (CONSTANT and STATE invariant, its zeroed mark its state); each row's step
+# value (`word` METAL_IR_STEP) where its program has one, read in the same pass (metal_ir_step_value would construct
+# one after lowering)
 def _lifetimes(programs, irs):
     own = [[] for _ in irs]
     spanned = {}
@@ -7507,9 +7513,12 @@ def _lifetimes(programs, irs):
         k, p = row['k'], row['builder'].p
         made = C.POINTER(Storage)()
         count = compiler.metal_ir_storages(p, C.byref(made))
-        row['own'] = {}
+        row['own'], row['step'] = {}, None
         for vi in range(count):
-            value = made[vi]
+            value, info = made[vi], ValueInfo()
+            compiler.metal_ir_value_info(p, vi, C.byref(info))
+            if info.word == METAL_IR_STEP:
+                row['step'] = vi
             owner = row['builder'].planned.get(vi)
             if owner is not None:
                 f, v = owner[:2]
@@ -7518,8 +7527,6 @@ def _lifetimes(programs, irs):
                     spanned[f, v] = irs[f].values[v].begin, irs[f].values[v].end = \
                         min(s for s, _ in spans), max(e for _, e in spans)
             elif value.bytes:
-                info = ValueInfo()
-                compiler.metal_ir_value_info(p, vi, C.byref(info))
                 row['own'][vi] = len(irs[k].values) + len(own[k])
                 own[k].append(mesh.Value(section=mesh.Section(bytes=value.bytes),
                                          kind=mesh.INVARIANT if info.role in (CONSTANT, STATE) else mesh.EXECUTION,
@@ -8408,7 +8415,7 @@ def program(block, *example_inputs):
         # generations and count targets are
         steps = {}
         for k in dict.fromkeys(row['k'] for row in programs['rows'] if row['builder'] is not None
-                                and programs['compiler'].metal_ir_step_value(row['builder'].p) != NONE
+                                and row['step'] is not None
                                 and programs['compiler'].metal_ir_step_state(row['builder'].p) == NONE):
             steps[k] = len(irs[k].values) + len(own[k])
             own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION, lag=1, run=1))

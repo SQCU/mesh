@@ -84,20 +84,23 @@ def checked(status, error, what):
         raise OSError(status, f"{what}: {error.value.decode()}")
 
 
-# metal-microbench metal_ir.h metal_ir_storages, metal_ir_value_info, metal_ir_step_value and metal_ir_step_state;
-# rdma/mesh_compile.py _lifetimes and its step value: the lowered program's actual Storages as plan values, one per
-# ValueID (run 1 a root its own storage holds: neither an explicit root nor one with data nor the step), and its step
-# word (8 bytes, executions, lag 1) where the host writes it; the quantum the largest placed alignment
+# metal-microbench metal_ir.h metal_ir_storages, metal_ir_value_info and metal_ir_step_state; rdma/mesh_compile.py
+# _lifetimes and its step value: the lowered program's actual Storages as plan values, one per ValueID (run 1 a root its
+# own storage holds: neither an explicit root nor one with data nor the step), and its step word (8 bytes, executions,
+# lag 1) where it has a step value (`word` METAL_IR_STEP, found in the same pass: metal_ir_step_value would construct
+# one after lowering) and the host writes it; the quantum the largest placed alignment
 def storages(program, explicit, libs):
     M, compiler, _, _ = libs
     storage = C.POINTER(M.Storage)()
     count = compiler.metal_ir_storages(program, C.byref(storage))
-    step = compiler.metal_ir_step_value(program)
-    stepped = step != M.NONE and compiler.metal_ir_step_state(program) == M.NONE
-    values, quantum = (mesh.Value * (count + stepped))(), 1
-    for v in range(count):
-        info, stored = M.ValueInfo(), storage[v]
+    infos = [M.ValueInfo() for _ in range(count)]
+    for v, info in enumerate(infos):
         compiler.metal_ir_value_info(program, v, C.byref(info))
+    step = next((v for v, info in enumerate(infos) if info.word == M.METAL_IR_STEP), None)
+    stepped = step is not None and compiler.metal_ir_step_state(program) == M.NONE
+    values, quantum = (mesh.Value * (count + stepped))(), 1
+    for v, info in enumerate(infos):
+        stored = storage[v]
         run = bool(stored.bytes and info.storage == v and v not in explicit and v != step and not info.data)
         values[v] = mesh.Value(section=mesh.Section(bytes=stored.bytes), state=info.zeroed, begin=stored.begin,
                                end=stored.end, run=int(run),
