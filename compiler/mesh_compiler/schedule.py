@@ -308,7 +308,7 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     sequence = tuple(identity[node] for node in listed)
     return {group: assemble(group, held, [node for node in listed if node.meta["processor"] in held], nodes, pairs,
                             transfers, local, identity, writers, sequence, source, module.meta["decomposed"],
-                            module.meta.get("input_parts", {}))
+                            module.meta.get("input_parts", {}), module)
             for group, held in members.items()}, declared
 
 
@@ -323,14 +323,21 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
 # included; compiler/mesh_compiler/placement.py place `input_parts`: each
 # placeholder this machine copied, by its position among the original placeholders, its partitions on this
 # machine's processors as (processor, original placeholder, original partition Node, its landing geometry), resolved
-# by `copied`
+# by `copied`; torch 2.14.0 torch/fx/graph_module.py GraphModule.__init__ (an nn.Module root: each get_attr target
+# copied from it, the same object): each get_attr Node a retained operation or the output here reads, copied with its
+# target, bound from `owner`, the function's own GraphModule (its compile-time attributes, borrowed, not rebuilt)
 def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source, decomposed,
-             parts):
+             parts, owner):
     graph, copied, tasks = torch.fx.Graph(), {}, {}
     addressed = {record[0] for node in order for record in wrote(node)}
+    output = nodes[-1]
+    here = output.meta["processor"] in members
+    held = {*order, *((output,) if here else ())}
     for node in nodes:
         if node.op == "placeholder" and (any(u.meta["processor"] in members for u in node.users)
                                          or node.name in addressed):
+            copied[node] = graph.node_copy(node)
+        elif node.op == "get_attr" and not held.isdisjoint(node.users):
             copied[node] = graph.node_copy(node)
     for node in order:
         if node in local and landing(node):
@@ -346,13 +353,11 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
             for part in sorted((u for u in node.users if u.target is operator.getitem), key=lambda u: u.args[1]):
                 copied[part] = graph.node_copy(part, copied.__getitem__)
                 tasks[copied[part]] = identity[node]
-    output = nodes[-1]
-    here = output.meta["processor"] in members
     results = map_arg(output.args[0], copied.__getitem__) if here else ()
     graph.output(results).meta.update(processor=group, destination=output.meta.get("destination", {}) if here else {})
     views([copied[user] for node in order if node in local and node.target is RECV for user in node.users
            if user in copied and user not in local])
-    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    module = torch.fx.GraphModule(owner, graph)
     module.meta.update(members=members, tasks=tasks, dependences=[
         (copied[earlier], copied[later]) for earlier, later in pairs
         if earlier.meta["processor"] in members and later.meta["processor"] in members], writers=[

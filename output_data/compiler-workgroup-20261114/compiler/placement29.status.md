@@ -1,0 +1,11 @@
+# placement29: canonical branch attributes through assembly (SAME979; schedule.py only; uncommitted; HOLD)
+- **FX source:** torch 2.14.0 `torch/fx/graph_module.py:552` `GraphModule.__init__`. With an `nn.Module` root (a plain GraphModule is not `_CodeOnlyModule`) it runs `_copy_attr(root, self, node.target)` only for the graph's `get_attr`/`call_module` nodes, assigning the same object.
+- **`assemble`:** gains a trailing `owner` parameter. Its sole caller, `schedule()` (`:309-311`), passes `module`, the decomposed function's own GraphModule.
+  - It copies each `get_attr` Node in graph order with `node_copy`, keeping its target and name, where the node's users meet this machine's retained `order`, or the output where it is here.
+  - It then builds `torch.fx.GraphModule(owner, graph)` instead of `torch.nn.Module()`.
+- **Unchanged:** call order, tasks, dependences, writers, SourceRelation, transfers, placeholders, and input/result correspondence. `output`/`here` are computed once, earlier.
+- **Fields retained for 047:**
+  - the body module's `get_attr` nodes keep their exact `.target`;
+  - `getattr(body_module, target)` is the same branch GraphModule object the function module holds, borrowed: several machines share it, with no mirror or rebuild;
+  - `module.meta["copied"][original get_attr] → body get_attr`.
+- **Checks:** `ast.parse`, pyflakes and `git diff --check` pass; +11/−6; no new line over 120. sha256 `3342efff15cab4b8b370f710ebc88424dae4ea12642b7974c3268d625188c06b`. No import, build, target or staging; held for 047's paired encoder.
