@@ -1,0 +1,5225 @@
+{
+ "rows": 9,
+ "interface": [
+  {
+   "row": 0,
+   "call": 0,
+   "function": 0,
+   "instance": 0,
+   "placeholders": [
+    [
+     0,
+     0,
+     1,
+     0
+    ]
+   ],
+   "results": [
+    [
+     1,
+     2,
+     3,
+     0
+    ],
+    [
+     2,
+     4,
+     5,
+     0
+    ],
+    [
+     3,
+     6,
+     7,
+     0
+    ],
+    [
+     4,
+     8,
+     9,
+     0
+    ],
+    [
+     5,
+     10,
+     11,
+     0
+    ],
+    [
+     6,
+     12,
+     13,
+     0
+    ]
+   ],
+   "inputs": [
+    [
+     "a",
+     "user_input",
+     0,
+     0,
+     1
+    ]
+   ],
+   "joined": [
+    [
+     2,
+     1,
+     0,
+     1
+    ],
+    [
+     4,
+     2,
+     0,
+     1
+    ],
+    [
+     6,
+     3,
+     0,
+     1
+    ],
+    [
+     8,
+     4,
+     0,
+     1
+    ],
+    [
+     10,
+     5,
+     0,
+     1
+    ],
+    [
+     12,
+     6,
+     0,
+     1
+    ]
+   ],
+   "values_map": false
+  },
+  {
+   "row": 1,
+   "call": 1,
+   "function": 1,
+   "instance": 1,
+   "placeholders": [
+    [
+     0,
+     0,
+     1,
+     0
+    ],
+    [
+     1,
+     2,
+     3,
+     0
+    ],
+    [
+     2,
+     4,
+     5,
+     0
+    ],
+    [
+     3,
+     6,
+     7,
+     0
+    ],
+    [
+     4,
+     8,
+     9,
+     0
+    ],
+    [
+     5,
+     10,
+     11,
+     0
+    ]
+   ],
+   "results": [
+    [
+     7,
+     12,
+     13,
+     0
+    ],
+    [
+     8,
+     14,
+     15,
+     0
+    ],
+    [
+     9,
+     16,
+     17,
+     0
+    ],
+    [
+     10,
+     18,
+     19,
+     0
+    ]
+   ],
+   "inputs": [
+    [
+     "blocks",
+     "user_input",
+     0,
+     0,
+     1
+    ],
+    [
+     "vectors",
+     "user_input",
+     0,
+     2,
+     3
+    ],
+    [
+     "agenda",
+     "user_input",
+     0,
+     4,
+     5
+    ],
+    [
+     "top",
+     "user_input",
+     0,
+     6,
+     7
+    ],
+    [
+     "norm",
+     "user_input",
+     0,
+     8,
+     9
+    ],
+    [
+     "site",
+     "user_input",
+     0,
+     10,
+     11
+    ]
+   ],
+   "joined": [
+    [
+     0,
+     1,
+     0,
+     1
+    ],
+    [
+     2,
+     2,
+     0,
+     1
+    ],
+    [
+     4,
+     3,
+     0,
+     1
+    ],
+    [
+     6,
+     4,
+     0,
+     1
+    ],
+    [
+     8,
+     5,
+     0,
+     1
+    ],
+    [
+     10,
+     6,
+     0,
+     1
+    ],
+    [
+     12,
+     7,
+     0,
+     1
+    ],
+    [
+     14,
+     8,
+     0,
+     1
+    ],
+    [
+     16,
+     9,
+     0,
+     1
+    ],
+    [
+     18,
+     10,
+     0,
+     1
+    ]
+   ],
+   "values_map": false
+  }
+ ],
+ "kernels": [
+  {
+   "row": 0,
+   "kernel": 0,
+   "reason": "prefix row 0 kernel 0",
+   "path": "eigh-source-row0-kernel0.txt",
+   "bytes": 18262,
+   "sha256": "8caefdb6b54a5357eb1316db8600af4a826ac68e4487c214eb3067a42b887349"
+  },
+  {
+   "row": 1,
+   "kernel": 0,
+   "reason": "first Step row 1 kernel 0",
+   "path": "eigh-source-row1-kernel0.txt",
+   "bytes": 38772,
+   "sha256": "3630edad611c24e25a22bdca61edbb893ca4aec8cbccba7bbbb44d332a3f7cdb"
+  }
+ ],
+ "dispatches": [
+  {
+   "row": 0,
+   "kind": 0,
+   "kernel": 0,
+   "binding": 0,
+   "bindings": 8,
+   "effect": 0,
+   "effects": 12,
+   "source": 0,
+   "sources": 28,
+   "allocation": 0,
+   "allocations": 1,
+   "arguments": 4294967295,
+   "later": 4294967295,
+   "flags": 0,
+   "fill": 0,
+   "groups": [
+    1,
+    1,
+    1
+   ],
+   "threads": [
+    32,
+    1,
+    1
+   ],
+   "index": 0,
+   "sources_ops": [
+    {
+     "op": 0,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 1,
+     "identity": 1,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 2,
+     "identity": 2,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 3,
+     "identity": 3,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 4,
+     "identity": 4,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 6,
+     "identity": 6,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 8,
+     "identity": 9,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 12,
+     "identity": 14,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 13,
+     "identity": 15,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 16,
+     "identity": 20,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 17,
+     "identity": 22,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 18,
+     "identity": 24,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 21,
+     "identity": 28,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 24,
+     "identity": 31,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 26,
+     "identity": 33,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 5,
+     "identity": 5,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 7,
+     "identity": 8,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 9,
+     "identity": 10,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 10,
+     "identity": 11,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 11,
+     "identity": 13,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 14,
+     "identity": 17,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 15,
+     "identity": 18,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 19,
+     "identity": 26,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 20,
+     "identity": 27,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 22,
+     "identity": 29,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 23,
+     "identity": 30,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 25,
+     "identity": 32,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    },
+    {
+     "op": 27,
+     "identity": 34,
+     "place": 0,
+     "erased": 1,
+     "kind": 0
+    }
+   ],
+   "bindings_records": [
+    {
+     "slot": 0,
+     "value": 12,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 12,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 12,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       6936
+      ]
+     }
+    },
+    {
+     "slot": 1,
+     "value": 8,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 8,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 8,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       400
+      ]
+     }
+    },
+    {
+     "slot": 2,
+     "value": 6,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 6,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 40,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       10
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 6,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 40,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       128
+      ]
+     }
+    },
+    {
+     "slot": 3,
+     "value": 4,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 4,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 4,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       3584
+      ]
+     }
+    },
+    {
+     "slot": 4,
+     "value": 0,
+     "access": 1,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 0,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 0,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": false,
+      "copies": 1,
+      "offsets": null
+     }
+    },
+    {
+     "slot": 5,
+     "value": 2,
+     "access": 3,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 2,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 2,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       64
+      ]
+     }
+    },
+    {
+     "slot": 6,
+     "value": 57,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 57,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 31,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 57,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 31,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       0
+      ]
+     }
+    },
+    {
+     "slot": 7,
+     "value": 10,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 10,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 10,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       6928
+      ]
+     }
+    }
+   ],
+   "effects_records": [
+    {
+     "key": 12,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 8,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 6,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      5,
+      8,
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 4,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 0,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 0,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 2,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 2,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 57,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 57,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 57,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 10,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    }
+   ]
+  },
+  {
+   "row": 1,
+   "kind": 0,
+   "kernel": 0,
+   "binding": 0,
+   "bindings": 22,
+   "effect": 0,
+   "effects": 76,
+   "source": 0,
+   "sources": 21,
+   "allocation": 0,
+   "allocations": 1,
+   "arguments": 4294967295,
+   "later": 4294967295,
+   "flags": 0,
+   "fill": 0,
+   "groups": [
+    1,
+    1,
+    1
+   ],
+   "threads": [
+    32,
+    1,
+    1
+   ],
+   "index": 0,
+   "sources_ops": [
+    {
+     "op": 0,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 1,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 2,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 3,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 4,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 5,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 6,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 7,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 8,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 9,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 10,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 11,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 12,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 13,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 14,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 15,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 16,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 17,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 18,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 19,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    },
+    {
+     "op": 20,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0
+    }
+   ],
+   "bindings_records": [
+    {
+     "slot": 0,
+     "value": 0,
+     "access": 1,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 0,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 0,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       64
+      ]
+     }
+    },
+    {
+     "slot": 1,
+     "value": 12,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 12,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 12,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       3648
+      ]
+     }
+    },
+    {
+     "slot": 2,
+     "value": 2,
+     "access": 1,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 2,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 2,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       3584
+      ]
+     }
+    },
+    {
+     "slot": 3,
+     "value": 14,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 14,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 13,
+      "storage": 14,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       3712
+      ]
+     }
+    },
+    {
+     "slot": 4,
+     "value": 4,
+     "access": 1,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 0,
+      "scalar": 7,
+      "storage": 4,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 40,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       10
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 0,
+      "scalar": 7,
+      "storage": 4,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 40,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       128
+      ]
+     }
+    },
+    {
+     "slot": 5,
+     "value": 16,
+     "access": 2,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 16,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 40,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       10
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 3,
+      "scalar": 7,
+      "storage": 16,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 40,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       3840
+      ]
+     }
+    },
+    {
+     "slot": 6,
+     "value": 6,
+     "access": 1,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 0,
+      "scalar": 7,
+      "storage": 6,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 0,
+      "scalar": 7,
+      "storage": 6,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       400
+      ]
+     }
+    },
+    {
+     "slot": 7,
+     "value": 22,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 22,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 22,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       6440
+      ]
+     }
+    },
+    {
+     "slot": 8,
+     "value": 26,
+     "access": 2,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 26,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 26,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       6448
+      ]
+     }
+    },
+    {
+     "slot": 9,
+     "value": 28,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 28,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 28,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       512
+      ]
+     }
+    },
+    {
+     "slot": 10,
+     "value": 30,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 30,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 30,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       6456
+      ]
+     }
+    },
+    {
+     "slot": 11,
+     "value": 8,
+     "access": 1,
+     "table": 1,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 8,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 0,
+      "scalar": 13,
+      "storage": 8,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       6928
+      ]
+     }
+    },
+    {
+     "slot": 12,
+     "value": 34,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 34,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 34,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       6464
+      ]
+     }
+    },
+    {
+     "slot": 13,
+     "value": 39,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 39,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       4
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 39,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       0
+      ]
+     }
+    },
+    {
+     "slot": 14,
+     "value": 45,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 45,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       4
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 45,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       32
+      ]
+     }
+    },
+    {
+     "slot": 15,
+     "value": 46,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 46,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       4
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 46,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       48
+      ]
+     }
+    },
+    {
+     "slot": 16,
+     "value": 41,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 41,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       4
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 41,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       16
+      ]
+     }
+    },
+    {
+     "slot": 17,
+     "value": 43,
+     "access": 2,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 43,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       4
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 7,
+      "storage": 43,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       4936
+      ]
+     }
+    },
+    {
+     "slot": 18,
+     "value": 55,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 55,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       16
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 55,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 64,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       256
+      ]
+     }
+    },
+    {
+     "slot": 19,
+     "value": 57,
+     "access": 3,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 57,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       4
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 57,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       3776
+      ]
+     }
+    },
+    {
+     "slot": 20,
+     "value": 59,
+     "access": 2,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 59,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       4
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 59,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 16,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       384
+      ]
+     }
+    },
+    {
+     "slot": 21,
+     "value": 61,
+     "access": 2,
+     "table": 0,
+     "offset": 0,
+     "bytes": 0,
+     "value_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 61,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "value_geometry": {
+      "shape": [
+       1
+      ],
+      "offset": 0,
+      "terms": [
+       [
+        0,
+        1,
+        1,
+        0
+       ]
+      ]
+     },
+     "root_info": {
+      "role": 2,
+      "scalar": 13,
+      "storage": 61,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 0,
+      "bytes": 4,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295
+     },
+     "root_placement": {
+      "status": 0,
+      "arena": true,
+      "copies": 1,
+      "offsets": [
+       416
+      ]
+     }
+    }
+   ],
+   "effects_records": [
+    {
+     "key": 0,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 12,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 2,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 14,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 4,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      5,
+      8,
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 16,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      5,
+      8,
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 6,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 4,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      5,
+      8,
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 22,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 26,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 0,
+     "offset": 0,
+     "element": 4,
+     "dims": 3,
+     "pairs": [
+      4,
+      16,
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 28,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 22,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 28,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 30,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 30,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 8,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 28,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      20
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 12,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      16
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 22,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 28,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      20
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 39,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 39,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 45,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 46,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 45,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 46,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 45,
+     "offset": 8,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 46,
+     "offset": 8,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 45,
+     "offset": 8,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 46,
+     "offset": 8,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 45,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 46,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 45,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 46,
+     "offset": 4,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      2,
+      8
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 45,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 46,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 41,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 43,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 39,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 41,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 28,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 55,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 55,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 57,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 55,
+     "offset": 0,
+     "element": 4,
+     "dims": 2,
+     "pairs": [
+      4,
+      16,
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 59,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 57,
+     "offset": 0,
+     "element": 4,
+     "dims": 1,
+     "pairs": [
+      4,
+      4
+     ],
+     "vertex": 0,
+     "write": 0
+    },
+    {
+     "key": 61,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 1
+    },
+    {
+     "key": 34,
+     "offset": 0,
+     "element": 4,
+     "dims": 0,
+     "pairs": [],
+     "vertex": 0,
+     "write": 0
+    }
+   ]
+  }
+ ],
+ "step_leaves": [
+  {
+   "index": 0,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 0,
+   "first": 0,
+   "end": 1,
+   "outputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [],
+   "extents": [
+    null,
+    null
+   ],
+   "operations": [
+    {
+     "op": 0,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 1,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 1,
+   "first": 1,
+   "end": 2,
+   "outputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [],
+   "extents": [
+    null,
+    null
+   ],
+   "operations": [
+    {
+     "op": 1,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 2,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 2,
+   "first": 2,
+   "end": 3,
+   "outputs": [
+    [
+     [
+      5,
+      2
+     ],
+     "torch.int32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      5,
+      2
+     ],
+     "torch.int32"
+    ]
+   ],
+   "symbols": [],
+   "extents": [
+    null,
+    null
+   ],
+   "operations": [
+    {
+     "op": 2,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 3,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 3,
+   "first": 3,
+   "end": 4,
+   "outputs": [
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ],
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ],
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ],
+    [
+     [
+      5,
+      2
+     ],
+     "torch.int32"
+    ]
+   ],
+   "symbols": [],
+   "extents": [
+    null
+   ],
+   "operations": [
+    {
+     "op": 3,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 4,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 4,
+   "first": 4,
+   "end": 5,
+   "outputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [
+    [
+     [
+      1
+     ],
+     "torch.int32",
+     4
+    ],
+    [
+     [
+      1
+     ],
+     "torch.int32",
+     3
+    ]
+   ],
+   "extents": [
+    0,
+    0
+   ],
+   "operations": [
+    {
+     "op": 4,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 5,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 5,
+   "first": 5,
+   "end": 6,
+   "outputs": [
+    [
+     [
+      1
+     ],
+     "torch.float32"
+    ],
+    [
+     [
+      1
+     ],
+     "torch.float32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [
+    [
+     [
+      1
+     ],
+     "torch.int32",
+     4
+    ]
+   ],
+   "extents": [
+    0,
+    0
+   ],
+   "operations": [
+    {
+     "op": 5,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 6,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 6,
+   "first": 6,
+   "end": 7,
+   "outputs": [
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ],
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ],
+    [
+     [
+      1
+     ],
+     "torch.float32"
+    ],
+    [
+     [
+      1
+     ],
+     "torch.float32"
+    ],
+    [
+     [
+      1
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [],
+   "extents": [
+    null
+   ],
+   "operations": [
+    {
+     "op": 6,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 7,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 7,
+   "first": 7,
+   "end": 8,
+   "outputs": [
+    [
+     [
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [
+    [
+     [
+      1
+     ],
+     "torch.int32",
+     4
+    ],
+    [
+     [
+      1
+     ],
+     "torch.int32",
+     3
+    ]
+   ],
+   "extents": [
+    0
+   ],
+   "operations": [
+    {
+     "op": 7,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 8,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 8,
+   "first": 8,
+   "end": 9,
+   "outputs": [
+    [
+     [
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      4,
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [
+    [
+     [
+      1
+     ],
+     "torch.int32",
+     4
+    ]
+   ],
+   "extents": [
+    0
+   ],
+   "operations": [
+    {
+     "op": 8,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 9,
+   "record": "_Sort",
+   "node": 0,
+   "place": 0,
+   "operation": 9,
+   "first": 9,
+   "end": 15,
+   "outputs": [],
+   "inputs": [],
+   "symbols": [],
+   "extents": [],
+   "operations": [
+    {
+     "op": 9,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    },
+    {
+     "op": 10,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    },
+    {
+     "op": 11,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    },
+    {
+     "op": 12,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    },
+    {
+     "op": 13,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    },
+    {
+     "op": 14,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 10,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 15,
+   "first": 15,
+   "end": 16,
+   "outputs": [
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [
+    [
+     [
+      1
+     ],
+     "torch.int32",
+     4
+    ]
+   ],
+   "extents": [
+    0
+   ],
+   "operations": [
+    {
+     "op": 15,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "index": 11,
+   "record": "_Generic",
+   "node": 0,
+   "place": 0,
+   "operation": 16,
+   "first": 16,
+   "end": 17,
+   "outputs": [
+    [
+     [
+      1
+     ],
+     "torch.float32"
+    ]
+   ],
+   "inputs": [
+    [
+     [
+      1
+     ],
+     "torch.int32"
+    ],
+    [
+     [
+      4
+     ],
+     "torch.float32"
+    ]
+   ],
+   "symbols": [],
+   "extents": [
+    null
+   ],
+   "operations": [
+    {
+     "op": 16,
+     "identity": 0,
+     "place": 0,
+     "erased": 0,
+     "kind": 0,
+     "dispatches": [
+      [
+       0,
+       0
+      ]
+     ]
+    }
+   ]
+  }
+ ],
+ "step_leaf_count": 2496,
+ "symbol_consumer_leaf": 4,
+ "pop_leaf": 3,
+ "step_numerics": [
+  {
+   "dispatch": 0,
+   "kernel": 0,
+   "first": 0,
+   "last": 21,
+   "later": 0
+  },
+  {
+   "dispatch": 1,
+   "kernel": 1,
+   "first": 0,
+   "last": 46,
+   "later": 0
+  },
+  {
+   "dispatch": 2,
+   "kernel": 2,
+   "first": 0,
+   "last": 54,
+   "later": 0
+  },
+  {
+   "dispatch": 3,
+   "kernel": 3,
+   "first": 0,
+   "last": 51,
+   "later": 0
+  },
+  {
+   "dispatch": 4,
+   "kernel": 4,
+   "first": 0,
+   "last": 50,
+   "later": 0
+  },
+  {
+   "dispatch": 5,
+   "kernel": 5,
+   "first": 0,
+   "last": 49,
+   "later": 0
+  },
+  {
+   "dispatch": 6,
+   "kernel": 6,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 7,
+   "kernel": 7,
+   "first": 0,
+   "last": 61,
+   "later": 0
+  },
+  {
+   "dispatch": 8,
+   "kernel": 8,
+   "first": 0,
+   "last": 45,
+   "later": 0
+  },
+  {
+   "dispatch": 9,
+   "kernel": 9,
+   "first": 0,
+   "last": 57,
+   "later": 0
+  },
+  {
+   "dispatch": 10,
+   "kernel": 10,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 11,
+   "kernel": 11,
+   "first": 0,
+   "last": 58,
+   "later": 0
+  },
+  {
+   "dispatch": 12,
+   "kernel": 12,
+   "first": 0,
+   "last": 23,
+   "later": 0
+  },
+  {
+   "dispatch": 13,
+   "kernel": 13,
+   "first": 0,
+   "last": 58,
+   "later": 0
+  },
+  {
+   "dispatch": 14,
+   "kernel": 14,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 15,
+   "kernel": 15,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 16,
+   "kernel": 16,
+   "first": 0,
+   "last": 55,
+   "later": 0
+  },
+  {
+   "dispatch": 17,
+   "kernel": 17,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 18,
+   "kernel": 18,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 19,
+   "kernel": 19,
+   "first": 0,
+   "last": 62,
+   "later": 0
+  },
+  {
+   "dispatch": 20,
+   "kernel": 20,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 21,
+   "kernel": 21,
+   "first": 0,
+   "last": 56,
+   "later": 0
+  },
+  {
+   "dispatch": 22,
+   "kernel": 22,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 23,
+   "kernel": 23,
+   "first": 0,
+   "last": 58,
+   "later": 0
+  },
+  {
+   "dispatch": 24,
+   "kernel": 24,
+   "first": 0,
+   "last": 13,
+   "later": 0
+  },
+  {
+   "dispatch": 25,
+   "kernel": 25,
+   "first": 0,
+   "last": 37,
+   "later": 0
+  },
+  {
+   "dispatch": 26,
+   "kernel": 26,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 27,
+   "kernel": 27,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 28,
+   "kernel": 28,
+   "first": 0,
+   "last": 27,
+   "later": 0
+  },
+  {
+   "dispatch": 29,
+   "kernel": 29,
+   "first": 0,
+   "last": 0,
+   "later": 0
+  },
+  {
+   "dispatch": 30,
+   "kernel": 30,
+   "first": 0,
+   "last": 48,
+   "later": 0
+  },
+  {
+   "dispatch": 31,
+   "kernel": 31,
+   "first": 0,
+   "last": 51,
+   "later": 0
+  },
+  {
+   "dispatch": 32,
+   "kernel": 32,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 33,
+   "kernel": 33,
+   "first": 0,
+   "last": 4,
+   "later": 0
+  },
+  {
+   "dispatch": 34,
+   "kernel": 34,
+   "first": 0,
+   "last": 1,
+   "later": 0
+  },
+  {
+   "dispatch": 35,
+   "kernel": 35,
+   "first": 0,
+   "last": 0,
+   "later": 0
+  },
+  {
+   "dispatch": 36,
+   "kernel": 36,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 37,
+   "kernel": 37,
+   "first": 0,
+   "last": 56,
+   "later": 0
+  },
+  {
+   "dispatch": 38,
+   "kernel": 38,
+   "first": 0,
+   "last": 51,
+   "later": 0
+  },
+  {
+   "dispatch": 39,
+   "kernel": 39,
+   "first": 0,
+   "last": 50,
+   "later": 0
+  },
+  {
+   "dispatch": 40,
+   "kernel": 40,
+   "first": 0,
+   "last": 49,
+   "later": 0
+  },
+  {
+   "dispatch": 41,
+   "kernel": 41,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 42,
+   "kernel": 42,
+   "first": 0,
+   "last": 61,
+   "later": 0
+  },
+  {
+   "dispatch": 43,
+   "kernel": 43,
+   "first": 0,
+   "last": 45,
+   "later": 0
+  },
+  {
+   "dispatch": 44,
+   "kernel": 44,
+   "first": 0,
+   "last": 57,
+   "later": 0
+  },
+  {
+   "dispatch": 45,
+   "kernel": 45,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 46,
+   "kernel": 46,
+   "first": 0,
+   "last": 58,
+   "later": 0
+  },
+  {
+   "dispatch": 47,
+   "kernel": 47,
+   "first": 0,
+   "last": 16,
+   "later": 0
+  },
+  {
+   "dispatch": 48,
+   "kernel": 48,
+   "first": 0,
+   "last": 47,
+   "later": 0
+  },
+  {
+   "dispatch": 49,
+   "kernel": 49,
+   "first": 0,
+   "last": 50,
+   "later": 0
+  },
+  {
+   "dispatch": 50,
+   "kernel": 50,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 51,
+   "kernel": 51,
+   "first": 0,
+   "last": 40,
+   "later": 0
+  },
+  {
+   "dispatch": 52,
+   "kernel": 52,
+   "first": 0,
+   "last": 58,
+   "later": 0
+  },
+  {
+   "dispatch": 53,
+   "kernel": 53,
+   "first": 0,
+   "last": 48,
+   "later": 0
+  },
+  {
+   "dispatch": 54,
+   "kernel": 54,
+   "first": 0,
+   "last": 4,
+   "later": 0
+  },
+  {
+   "dispatch": 55,
+   "kernel": 55,
+   "first": 0,
+   "last": 0,
+   "later": 0
+  },
+  {
+   "dispatch": 56,
+   "kernel": 56,
+   "first": 0,
+   "last": 48,
+   "later": 0
+  },
+  {
+   "dispatch": 57,
+   "kernel": 57,
+   "first": 0,
+   "last": 51,
+   "later": 0
+  },
+  {
+   "dispatch": 58,
+   "kernel": 58,
+   "first": 0,
+   "last": 44,
+   "later": 0
+  },
+  {
+   "dispatch": 59,
+   "kernel": 59,
+   "first": 0,
+   "last": 4,
+   "later": 0
+  },
+  {
+   "dispatch": 60,
+   "kernel": 60,
+   "first": 0,
+   "last": 1,
+   "later": 0
+  },
+  {
+   "dispatch": 61,
+   "kernel": 61,
+   "first": 0,
+   "last": 7,
+   "later": 0
+  }
+ ]
+}

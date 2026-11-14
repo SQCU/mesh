@@ -1,0 +1,470 @@
+#include <metal_stdlib>
+using namespace metal;
+
+template<typename T, size_t N>
+struct tint_array {
+  const constant T& operator[](size_t i) const constant { return elements[i]; }
+  device T& operator[](size_t i) device { return elements[i]; }
+  const device T& operator[](size_t i) const device { return elements[i]; }
+  thread T& operator[](size_t i) thread { return elements[i]; }
+  const thread T& operator[](size_t i) const thread { return elements[i]; }
+  threadgroup T& operator[](size_t i) threadgroup { return elements[i]; }
+  const threadgroup T& operator[](size_t i) const threadgroup { return elements[i]; }
+  T elements[N];
+};
+
+struct tint_module_vars_struct {
+  threadgroup tint_array<long, 1>* tint_symbol_8;
+  threadgroup tint_array<long, 1>* tint_symbol_9;
+  threadgroup tint_array<bool, 2>* tint_symbol_10;
+  threadgroup tint_array<long, 5>* tint_symbol_11;
+  threadgroup tint_array<uint, 4>* tint_symbol_12;
+  threadgroup tint_array<uint, 4>* tint_symbol_13;
+  threadgroup tint_array<long, 4>* tint_symbol_14;
+  threadgroup tint_array<long, 4>* tint_symbol_15;
+  device tint_array<float, 1>* tint_symbol_16;
+};
+
+struct tint_arg_buffer_struct_1 {
+  device tint_array<int, 1>* tint_symbol_1 [[id(0)]];
+  device tint_array<int, 1>* tint_symbol_2 [[id(1)]];
+  device tint_array<int, 1>* tint_symbol_3 [[id(2)]];
+  device tint_array<float, 1>* tint_symbol_4 [[id(3)]];
+  const device tint_array<float, 1>* tint_symbol_5 [[id(4)]];
+  device tint_array<float, 1>* tint_symbol_6 [[id(5)]];
+  device tint_array<float, 1>* tint_symbol_7 [[id(7)]];
+};
+
+struct tint_symbol_25 {
+  tint_array<long, 1> tint_symbol_17;
+  tint_array<long, 1> tint_symbol_18;
+  tint_array<bool, 2> tint_symbol_19;
+  tint_array<long, 5> tint_symbol_20;
+  tint_array<uint, 4> tint_symbol_21;
+  tint_array<uint, 4> tint_symbol_22;
+  tint_array<long, 4> tint_symbol_23;
+  tint_array<long, 4> tint_symbol_24;
+};
+
+void mesh_member_14(uint3 v, uint3 v_1, uint v_2, uint v_3, uint v_4, uint v_5, uint v_6, uint v_7, uint v_8, uint v_9, uint v_10, device tint_array<float, 1>* const v_11, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_12 = 0u;
+    v_12 = v.x;
+    while(true) {
+      uint const v_13 = v_12;
+      if ((v_13 >= 1u)) {
+        break;
+      }
+      float v_14 = 0.0f;
+      v_14 = 0.0f;
+      {
+        uint v_15 = 0u;
+        v_15 = 0u;
+        while(true) {
+          uint const v_16 = v_15;
+          if ((v_16 >= 16u)) {
+            break;
+          }
+          uint const v_17 = (v_16 % 4u);
+          uint const v_18 = (v_16 / 4u);
+          v_14 = (v_14 + ((*tint_module_vars.tint_symbol_16)[((0u + ((0u + v_18) * 4u)) + (0u + v_17))] * (*tint_module_vars.tint_symbol_16)[((0u + ((0u + v_18) * 4u)) + (0u + v_17))]));
+          {
+            v_15 = (v_16 + 1u);
+          }
+        }
+      }
+      (*v_11)[0u] = sqrt(v_14);
+      {
+        v_12 = (v_13 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_13(uint3 v_19, uint3 v_20, uint v_21, uint v_22, uint v_23, uint v_24, uint v_25, uint v_26, uint v_27, uint v_28, uint v_29, device tint_array<float, 1>* const v_30, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_31 = 0u;
+    v_31 = v_19.x;
+    while(true) {
+      uint const v_32 = v_31;
+      if ((v_32 >= 16u)) {
+        break;
+      }
+      uint const v_33 = (((v_20.x % 1u) * 4u) + (v_32 % 4u));
+      uint const v_34 = ((v_20.x * 4u) + (v_32 / 4u));
+      uint const v_35 = uint((v_33 >= 4u));
+      if (bool((v_35 | uint((v_34 >= 4u))))) {
+      } else {
+        float v_36 = 0.0f;
+        v_36 = 0.0f;
+        v_36 = abs((*v_30)[((0u + ((0u + v_34) * 4u)) + (0u + v_33))]);
+        (*tint_module_vars.tint_symbol_16)[((0u + ((0u + v_34) * 4u)) + (0u + v_33))] = v_36;
+      }
+      {
+        v_31 = (v_32 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_12(uint3 v_37, uint3 v_38, uint v_39, uint v_40, uint v_41, uint v_42, uint v_43, uint v_44, uint v_45, uint v_46, uint v_47, const device tint_array<float, 1>* const v_48, device tint_array<float, 1>* const v_49, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_50 = 0u;
+    v_50 = v_37.x;
+    while(true) {
+      uint const v_51 = v_50;
+      if ((v_51 >= 16u)) {
+        break;
+      }
+      uint const v_52 = (((v_38.x % 1u) * 4u) + (v_51 % 4u));
+      uint const v_53 = ((v_38.x * 4u) + (v_51 / 4u));
+      uint const v_54 = uint((v_52 >= 4u));
+      if (bool((v_54 | uint((v_53 >= 4u))))) {
+      } else {
+        bool v_55 = false;
+        v_55 = false;
+        v_55 = true;
+        float const v_56 = (*v_48)[((0u + ((0u + v_53) * 4u)) + (0u + v_52))];
+        float const v_57 = (*v_48)[((0u + (0u + v_53)) + ((0u + v_52) * 4u))];
+        bool const v_58 = (select(0u, 1u, v_55) != 0u);
+        int const v_59 = int((select(0u, 1u, (as_type<long>(ulong(as_type<long>((as_type<ulong>((*tint_module_vars.tint_symbol_15)[(((0u + (0u * 4u)) + (0u + v_52)) - v_47)]) - as_type<ulong>((*tint_module_vars.tint_symbol_14)[(((0u + (0u + v_53)) + 0u) - v_46)]))))) <= 0l)) != 0u));
+        bool const v_60 = (int(v_58) != 0);
+        uint const v_61 = uint((v_59 != 0));
+        (*v_49)[((0u + ((0u + v_53) * 4u)) + (0u + v_52))] = select(v_57, v_56, (float((select(0u, 1u, bool((v_61 & uint(v_60)))) != 0u)) != 0.0f));
+      }
+      {
+        v_50 = (v_51 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_11(uint3 v_62, uint3 v_63, uint v_64, uint v_65, uint v_66, uint v_67, uint v_68, uint v_69, uint v_70, uint v_71, uint v_72, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_73 = 0u;
+    v_73 = v_62.x;
+    while(true) {
+      uint const v_74 = v_73;
+      if ((v_74 >= 4u)) {
+        break;
+      }
+      uint const v_75 = ((v_63.x * 4u) + v_74);
+      if ((v_75 >= 4u)) {
+      } else {
+        long v_76 = 0l;
+        v_76 = 0l;
+        v_76 = long(int(v_75));
+        (*tint_module_vars.tint_symbol_15)[((0u + (0u + v_75)) - v_72)] = as_type<long>(ulong(v_76));
+      }
+      {
+        v_73 = (v_74 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_10(uint3 v_77, uint3 v_78, uint v_79, uint v_80, uint v_81, uint v_82, uint v_83, uint v_84, uint v_85, uint v_86, uint v_87, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_88 = 0u;
+    v_88 = v_77.x;
+    while(true) {
+      uint const v_89 = v_88;
+      if ((v_89 >= 4u)) {
+        break;
+      }
+      uint const v_90 = ((v_78.x * 4u) + v_89);
+      if ((v_90 >= 4u)) {
+      } else {
+        long v_91 = 0l;
+        v_91 = 0l;
+        v_91 = long(int(v_90));
+        (*tint_module_vars.tint_symbol_14)[((0u + (0u + v_90)) - v_86)] = as_type<long>(ulong(v_91));
+      }
+      {
+        v_88 = (v_89 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_9(uint3 v_92, uint3 v_93, uint v_94, uint v_95, uint v_96, uint v_97, uint v_98, uint v_99, uint v_100, uint v_101, uint v_102, device tint_array<float, 1>* const v_103, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_104 = 0u;
+    v_104 = v_92.x;
+    while(true) {
+      uint const v_105 = v_104;
+      if ((v_105 >= 16u)) {
+        break;
+      }
+      uint const v_106 = (((v_93.x % 1u) * 4u) + (v_105 % 4u));
+      uint const v_107 = ((v_93.x * 4u) + (v_105 / 4u));
+      uint const v_108 = uint((v_106 >= 4u));
+      if (bool((v_108 | uint((v_107 >= 4u))))) {
+      } else {
+        float v_109 = 0.0f;
+        v_109 = 0.0f;
+        uint const v_110 = (*tint_module_vars.tint_symbol_12)[((0u + (0u + v_106)) - v_99)];
+        int const v_111 = int((*tint_module_vars.tint_symbol_13)[(((0u + (0u + v_107)) + 0u) - v_100)]);
+        v_109 = float((select(0u, 1u, (v_111 == int(v_110))) != 0u));
+        (*v_103)[((0u + ((0u + v_107) * 4u)) + (0u + v_106))] = v_109;
+      }
+      {
+        v_104 = (v_105 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_8(uint3 v_112, uint3 v_113, uint v_114, uint v_115, uint v_116, uint v_117, uint v_118, uint v_119, uint v_120, uint v_121, uint v_122, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_123 = 0u;
+    v_123 = v_112.x;
+    while(true) {
+      uint const v_124 = v_123;
+      if ((v_124 >= 4u)) {
+        break;
+      }
+      uint const v_125 = ((v_113.x * 4u) + v_124);
+      if ((v_125 >= 4u)) {
+      } else {
+        uint v_126 = 0u;
+        v_126 = 0u;
+        v_126 = uint(int(v_125));
+        (*tint_module_vars.tint_symbol_13)[((0u + (0u + v_125)) - v_120)] = (v_126 & 255u);
+      }
+      {
+        v_123 = (v_124 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_7(uint3 v_127, uint3 v_128, uint v_129, uint v_130, uint v_131, uint v_132, uint v_133, uint v_134, uint v_135, uint v_136, uint v_137, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_138 = 0u;
+    v_138 = v_127.x;
+    while(true) {
+      uint const v_139 = v_138;
+      if ((v_139 >= 4u)) {
+        break;
+      }
+      uint const v_140 = ((v_128.x * 4u) + v_139);
+      if ((v_140 >= 4u)) {
+      } else {
+        uint v_141 = 0u;
+        v_141 = 0u;
+        v_141 = uint(int(v_140));
+        (*tint_module_vars.tint_symbol_12)[((0u + (0u + v_140)) - v_134)] = (v_141 & 255u);
+      }
+      {
+        v_138 = (v_139 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_6(uint3 v_142, uint3 v_143, uint v_144, uint v_145, uint v_146, uint v_147, uint v_148, uint v_149, uint v_150, uint v_151, uint v_152, device tint_array<int, 1>* const v_153, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_154 = 0u;
+    v_154 = v_142.x;
+    while(true) {
+      uint const v_155 = v_154;
+      if ((v_155 >= 10u)) {
+        break;
+      }
+      uint const v_156 = (((v_143.x % 1u) * 2u) + (v_155 % 2u));
+      uint const v_157 = ((v_143.x * 5u) + (v_155 / 2u));
+      uint const v_158 = uint((v_156 >= 2u));
+      if (bool((v_158 | uint((v_157 >= 5u))))) {
+      } else {
+        bool v_159 = false;
+        v_159 = false;
+        bool const v_160 = (*tint_module_vars.tint_symbol_10)[((0u + (0u + v_156)) - v_147)];
+        int const v_161 = int((select(0u, 1u, ((*tint_module_vars.tint_symbol_11)[(((0u + (0u + v_157)) + 0u) - v_148)] == 1l)) != 0u));
+        v_159 = ((v_161 & int(v_160)) != 0);
+        long const v_162 = (*tint_module_vars.tint_symbol_8)[(0u - v_145)];
+        long const v_163 = (*tint_module_vars.tint_symbol_9)[(0u - v_146)];
+        (*v_153)[((0u + ((0u + v_157) * 2u)) + (0u + v_156))] = int(as_type<long>(ulong(select(v_163, v_162, (long((select(0u, 1u, v_159) != 0u)) != 0l)))));
+      }
+      {
+        v_154 = (v_155 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_5(uint3 v_164, uint3 v_165, uint v_166, uint v_167, uint v_168, uint v_169, uint v_170, uint v_171, uint v_172, uint v_173, uint v_174, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_175 = 0u;
+    v_175 = v_164.x;
+    while(true) {
+      uint const v_176 = v_175;
+      if ((v_176 >= 5u)) {
+        break;
+      }
+      uint const v_177 = ((v_165.x * 5u) + v_176);
+      if ((v_177 >= 5u)) {
+      } else {
+        long v_178 = 0l;
+        v_178 = 0l;
+        v_178 = long(int(v_177));
+        (*tint_module_vars.tint_symbol_11)[((0u + (0u + v_177)) - v_170)] = as_type<long>(ulong(v_178));
+      }
+      {
+        v_175 = (v_176 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_4(uint3 v_179, uint3 v_180, uint v_181, uint v_182, uint v_183, uint v_184, uint v_185, uint v_186, uint v_187, uint v_188, uint v_189, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_190 = 0u;
+    v_190 = v_179.x;
+    while(true) {
+      uint const v_191 = v_190;
+      if ((v_191 >= 2u)) {
+        break;
+      }
+      uint const v_192 = ((v_180.x * 2u) + v_191);
+      if ((v_192 >= 2u)) {
+      } else {
+        long v_193 = 0l;
+        v_193 = 0l;
+        v_193 = long(int(v_192));
+        (*tint_module_vars.tint_symbol_10)[((0u + (0u + v_192)) - v_184)] = (select(0u, 1u, (as_type<long>(ulong(v_193)) == 1l)) != 0u);
+      }
+      {
+        v_190 = (v_191 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_3(uint3 v_194, uint3 v_195, uint v_196, uint v_197, uint v_198, uint v_199, uint v_200, uint v_201, uint v_202, uint v_203, uint v_204, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_205 = 0u;
+    v_205 = v_194.x;
+    while(true) {
+      uint const v_206 = v_205;
+      if ((v_206 >= 1u)) {
+        break;
+      }
+      long v_207 = 0l;
+      v_207 = 0l;
+      v_207 = 0l;
+      (*tint_module_vars.tint_symbol_9)[(0u - v_198)] = as_type<long>(ulong(v_207));
+      {
+        v_205 = (v_206 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_2(uint3 v_208, uint3 v_209, uint v_210, uint v_211, uint v_212, uint v_213, uint v_214, uint v_215, uint v_216, uint v_217, uint v_218, tint_module_vars_struct tint_module_vars) {
+  {
+    uint v_219 = 0u;
+    v_219 = v_208.x;
+    while(true) {
+      uint const v_220 = v_219;
+      if ((v_220 >= 1u)) {
+        break;
+      }
+      long v_221 = 0l;
+      v_221 = 0l;
+      v_221 = 4l;
+      (*tint_module_vars.tint_symbol_8)[(0u - v_211)] = as_type<long>(ulong(v_221));
+      {
+        v_219 = (v_220 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_1(uint3 v_222, uint3 v_223, uint v_224, uint v_225, uint v_226, uint v_227, uint v_228, uint v_229, uint v_230, uint v_231, uint v_232, device tint_array<int, 1>* const v_233) {
+  {
+    uint v_234 = 0u;
+    v_234 = v_222.x;
+    while(true) {
+      uint const v_235 = v_234;
+      if ((v_235 >= 1u)) {
+        break;
+      }
+      uint const v_236 = (v_223.x + v_235);
+      if ((v_236 >= 1u)) {
+      } else {
+        int v_237 = 0;
+        v_237 = 0;
+        v_237 = 1;
+        (*v_233)[(0u + (0u + v_236))] = v_237;
+      }
+      {
+        v_234 = (v_235 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_member_0(uint3 v_238, uint3 v_239, uint v_240, uint v_241, uint v_242, uint v_243, uint v_244, uint v_245, uint v_246, uint v_247, uint v_248, device tint_array<int, 1>* const v_249) {
+  {
+    uint v_250 = 0u;
+    v_250 = v_238.x;
+    while(true) {
+      uint const v_251 = v_250;
+      if ((v_251 >= 1u)) {
+        break;
+      }
+      uint const v_252 = (v_239.x + v_251);
+      if ((v_252 >= 1u)) {
+      } else {
+        int v_253 = 0;
+        v_253 = 0;
+        v_253 = 1;
+        (*v_249)[(0u + (0u + v_252))] = v_253;
+      }
+      {
+        v_250 = (v_251 + 32u);
+      }
+    }
+  }
+}
+
+void mesh_kernel_body(uint3 v_254, uint3 v_255, uint v_256, device tint_array<int, 1>* const v_257, device tint_array<int, 1>* const v_258, device tint_array<int, 1>* const v_259, device tint_array<float, 1>* const v_260, const device tint_array<float, 1>* const v_261, device tint_array<float, 1>* const v_262, device tint_array<float, 1>* const v_263, tint_module_vars_struct tint_module_vars) {
+  uint const v_264 = (0u + ((v_255.x % 1u) * 2u));
+  uint const v_265 = (0u + ((v_255.x % 1u) * 5u));
+  uint const v_266 = (0u + ((v_255.x % 1u) * 4u));
+  uint const v_267 = (0u + ((v_255.x % 1u) * 4u));
+  uint const v_268 = (0u + ((v_255.x % 1u) * 4u));
+  uint const v_269 = (0u + ((v_255.x % 1u) * 4u));
+  (mesh_member_0(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, v_257));
+  (mesh_member_1(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, v_258));
+  (mesh_member_2(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (mesh_member_3(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (mesh_member_4(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (mesh_member_5(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (threadgroup_barrier(mem_flags::mem_threadgroup));
+  (mesh_member_6(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, v_259, tint_module_vars));
+  (mesh_member_7(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (mesh_member_8(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (threadgroup_barrier(mem_flags::mem_threadgroup));
+  (mesh_member_9(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, v_260, tint_module_vars));
+  (mesh_member_10(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (mesh_member_11(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, tint_module_vars));
+  (threadgroup_barrier(mem_flags::mem_threadgroup));
+  (mesh_member_12(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, v_261, v_262, tint_module_vars));
+  (threadgroup_barrier(mem_flags::mem_device));
+  (mesh_member_13(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, v_262, tint_module_vars));
+  (threadgroup_barrier(mem_flags::mem_device));
+  (mesh_member_14(v_254, v_255, v_256, 0u, 0u, v_264, v_265, v_266, v_267, v_268, v_269, v_263, tint_module_vars));
+}
+
+void mesh_kernel_inner(uint3 v_270, uint3 v_271, uint v_272, device tint_array<int, 1>* const v_273, device tint_array<int, 1>* const v_274, device tint_array<int, 1>* const v_275, device tint_array<float, 1>* const v_276, const device tint_array<float, 1>* const v_277, device tint_array<float, 1>* const v_278, device tint_array<float, 1>* const v_279, tint_module_vars_struct tint_module_vars) {
+  (mesh_kernel_body(v_270, v_271, v_272, v_273, v_274, v_275, v_276, v_277, v_278, v_279, tint_module_vars));
+}
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void mesh_kernel(uint3 v_280 [[thread_position_in_threadgroup]], uint3 v_281 [[threadgroup_position_in_grid]], uint v_282 [[thread_index_in_simdgroup]], const constant tint_arg_buffer_struct_1* tint_arg_buffer_1 [[buffer(0)]], threadgroup tint_symbol_25* v_283 [[threadgroup(0)]], device tint_array<float, 1>* v_284 [[buffer(6)]]) {
+  tint_module_vars_struct const tint_module_vars = tint_module_vars_struct{.tint_symbol_8=(&(*v_283).tint_symbol_17), .tint_symbol_9=(&(*v_283).tint_symbol_18), .tint_symbol_10=(&(*v_283).tint_symbol_19), .tint_symbol_11=(&(*v_283).tint_symbol_20), .tint_symbol_12=(&(*v_283).tint_symbol_21), .tint_symbol_13=(&(*v_283).tint_symbol_22), .tint_symbol_14=(&(*v_283).tint_symbol_23), .tint_symbol_15=(&(*v_283).tint_symbol_24), .tint_symbol_16=v_284};
+  tint_arg_buffer_struct_1 const v_285 = (*tint_arg_buffer_1);
+  (mesh_kernel_inner(v_280, v_281, v_282, v_285.tint_symbol_1, v_285.tint_symbol_2, v_285.tint_symbol_3, v_285.tint_symbol_4, v_285.tint_symbol_5, v_285.tint_symbol_6, v_285.tint_symbol_7, tint_module_vars));
+}
