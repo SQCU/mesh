@@ -66,7 +66,7 @@ def read(program):
         if spec.kind == OutputKind.GRADIENT_TO_PARAMETER:
             gradients[spec.target] = 0
         elif spec.kind not in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT, OutputKind.BUFFER_MUTATION,
-                               OutputKind.TOKEN):
+                               OutputKind.USER_INPUT_MUTATION, OutputKind.TOKEN):
             raise NotImplementedError(f"output kind {spec.kind}")
         returned = spec.kind in (OutputKind.LOSS_OUTPUT, OutputKind.GRADIENT_TO_PARAMETER)
         outputs.append((OutputKind.USER_OUTPUT, None) if returned else (spec.kind, spec.target))

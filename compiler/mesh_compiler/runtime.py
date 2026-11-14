@@ -31,13 +31,14 @@ class Arguments:
         for name, tensor in self.live.items():
             self.bind(name, tensor.detach())
         flat, _ = pytree.tree_flatten((args, kwargs))
-        for name, value in zip(self.exported.user_inputs, flat, strict=True):
+        self.given = dict(zip(self.exported.user_inputs, flat, strict=True))
+        for name, value in self.given.items():
             self.bind(name, value)
         return self.arguments
 
 
-# torch 2.15 torch/export/graph_signature.py OutputKind USER_OUTPUT, BUFFER_MUTATION; torch/utils/_pytree.py
-# tree_unflatten; compiler/mesh_compiler/bridge.py prepare
+# torch 2.15 torch/export/graph_signature.py OutputKind USER_OUTPUT, BUFFER_MUTATION, USER_INPUT_MUTATION;
+# torch/utils/_pytree.py tree_unflatten; compiler/mesh_compiler/bridge.py prepare
 class Program(Arguments):
     def __init__(self, scheduled, entry=None):
         entry, self.function = bridge.prepare(scheduled, entry)
@@ -54,4 +55,6 @@ class Program(Arguments):
                 user.append(value)
             elif kind == OutputKind.BUFFER_MUTATION:
                 self.exported.state[self.key_of[key]][1].detach().copy_(value)
+            elif kind == OutputKind.USER_INPUT_MUTATION:
+                self.given[key].detach().copy_(value)
         return pytree.tree_unflatten(user, self.exported.out_spec)

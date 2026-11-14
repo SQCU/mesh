@@ -1,0 +1,7 @@
+# Captured input mutation handoff
+
+Source review: fixed-graph Torch `USER_INPUT_MUTATION` now retains the original `OutputSpec.target` in Exported.outputs. Runtime retains the original caller tensors/views from its existing flatten operation and writes the corresponding result back to that original object, independent of device-staged arguments. Generic archive `(kind.name,target)` already preserves the operand; no new serializer or identity inference was needed.
+
+SAME Opus5.5 placement session979477c2 ran the existing compile_module→compiled→Program→save/load route in one scratch check (`/tmp/user-input-mutation-diag/diag.py`). Module: `x.add_(y)`, buffer count increment, matrix product. Caller x is `base[1:4]`. Two calls and loaded archive execution had max absolute output and caller-view error0; surrounding rows unchanged, underlying storage identity unchanged; state count continued2→3. This covers float32, one CPU/machine, no Plan. Source syntax and named diff checks pass. Full worker details: user-input-mutation.status.md.
+
+This closes the source tag→original caller/reference-AOT observation connection. It does not claim final native writeback: the new whole-machine typed target must consume the same output kind/target and compile the store into supplied input/state storage, after which runtime copies are displaced. Frontend/executor own that paired consumer. Fixed source domain unchanged; no cond/while region architecture. Existing multi-call Captured tracking still only handles buffer writes and is a separate concrete connecting obligation.
