@@ -1,8 +1,8 @@
 # Native function and external backing handoffs
 
-Executor source review, 2026-11-13. Same Claude sessions: native `e48f4bc7` (resumes31–33), archive `047e12be`
-(resumes26–28), each explicitly reported `claude-opus-5-5`. Codex reviewed the connected source. Runtime evidence
-below remains pending the matching Function/load build.
+Executor source review, 2026-11-13; matching consumer observations, 2026-11-14. Same Claude sessions: native
+`e48f4bc7` (resumes31–33), archive `047e12be` (resumes26–28), each explicitly reported `claude-opus-5-5`. Codex
+reviewed the connected source and ran the bounded observations below.
 
 The fixed GPU consumer is metal `0a506f6c`. `MetalNativeICB` reads the replay's retained argument records/storage
 and emits existing `NativeExternalArgument` sites before the unchanged ICB spans. Each site retains the original
@@ -37,3 +37,37 @@ The new Function168, Planned104 and Local144/load callback ABI must be built tog
 compiler-owned C tool changes. Existing CPU/outer archive checks will be rerun because the native archive owner
 changed, followed by the existing local Engines GPU client for the newly connected binding path. No live transport,
 general alias/mutation, ANE or performance result is claimed by this source checkpoint.
+
+## Matching build and actual callers
+
+The canonical build passed at mesh `246228d2` and metal `5889e933`; the Python placement caller checkpoint is
+`d2c63c08`. The frozen build inventory is `compiler/function-relation-build-source.json`, with build and actual ABI
+logs `compiler/function-relation-{libmesh-build,native-build,native-abi}.log`. Actual sizes were Function168,
+Planned104, Local144, Search56, RelationData160, Actors48 and Storage24. Native archive version was 33.
+
+The existing `examples/engines.py` ran with `OP=ffn ROWS=2 K=32 N=48 LAYERS=1 --nodes 0`, first
+`ENGINES=cpu --device cpu`, then `ENGINES=mps --device mps`, using its normal CPU-created input and state. Both
+exited 0, reported output `[2,32]` and normalized maximum error **0.0**. CPU preparation had one native entry;
+GPU preparation had one retained command, 43 values and 11,984 bytes. Neither introduced host/fence/transport
+waits. GPU execution preserved CPU output storage; no manual tensor moves were used.
+
+For each target, the same existing Engines model was compiled and saved through the production outer archive,
+the original Scheduled was deleted and collected, and `archive.load → Program` was invoked on two distinct CPU
+input allocations (`x` and `x + 0.125`). Both targets reported errors **0.0** and **6.902263703523204e-05** against
+the original model. Engines reports this metric without a fixed tolerance. Both archives preserved signature bytes,
+loaded an actual Function relation, returned distinct fresh result storages, and left the first result exactly
+unchanged after the second call. The GPU check's two inputs and two outputs all remained CPU tensors. Archive
+sizes were 194,786 bytes (CPU) and 160,402 bytes (GPU). Native load reported restored positions without a relation
+solve. All four processes exited 0 with empty stderr.
+
+Logs are `typed-{cpu,mps}-{ffn,archive}-function.{json,stderr}`, and the two actual archive directories are
+`typed-{cpu,mps}-archive-function/`. No evaluator was added. These observations cover the compiled fixed binding
+and ordinary completion/lifetime paths; they do not measure cancellation, general alias/mutation, RNG, mixed
+targets, ANE, network transport or performance. The blit endpoint connection is source-reviewed, not isolated by
+this one-command FFN. No further GPU repeat is justified without a relevant implementation change.
+
+| Library | SHA-256 |
+| --- | --- |
+| `.build/libmetal_ir.dylib` | `3187c2ef796607cec89de1e7ad12f0b72aa92131fdf6287cfc1ef21126f3b9fa` |
+| `.build/libmetal_recording.dylib` | `0a0cf3c852fc1db8cb1176b00788164ee1a3cb32a13efc256613ea31976eae4e` |
+| `rdma/libmesh.dylib` | `28ac159aa369011dd5fe941422a31938f660cd12bb7af2cf62aac679dca283ad` |
