@@ -95,6 +95,33 @@ Record concrete remaining work rather than introducing fallback execution or a s
 
 ## Supervision and evidence
 
+### Local compositional review
+
+The operator corrected the comparison boundary during the check-in:
+
+> rather than this lets ask whether the modules which were worked on have been migrated locally wrt their inputs and outputs to match the sort of structure the work requests impose, and that is demonstrated by schedule-emit
+
+Then:
+
+> if every single function, header, or module worked on by this swathe of subagents locally matches the right data flow, and we have evntually refactored every function/module which is required for the overall codebase's role, we know by construction we have actually finished that refactoring scope without bothering to check the entire thing 'end to end' (this is a proof strategy used in real formal methods; what is it?)
+
+The review strategy is compositional verification: establish the changed unit's input assumptions, assigned
+transformation and output guarantees, then establish that the connected consumer's assumptions are met.
+[Hoare, 1969, section 3.3, Rule of Composition](https://www.cs.cmu.edu/~crary/819-f09/Hoare69.pdf) supplies the
+sequential composition principle; [Abadi and Lamport, Composing Specifications, 1993](https://lamport.azurewebsites.net/pubs/abadi-composing.pdf)
+supplies the component-specification perspective. These are cited roles for the review method, not requirements
+to add formal type machinery, runtime assertions, or a proof assistant.
+
+Assess the functions, headers and modules actually changed. Untouched backends or runtime responsibilities
+remain uncompleted units; their existence does not invalidate a completed local migration. A missing operand
+at the changed boundary is a concrete local obligation. An unchanged numerical implementation may remain the
+right producer; its size or age does not establish a boundary defect.
+
+When all required units and their connecting contracts satisfy the specified data flow, the structural refactoring
+claim follows by composition. An end-to-end execution is not an additional proof obligation for that structural
+claim. Numerical and performance measurements answer their own stated questions. Do not substitute a whole-repo
+similarity verdict for this local accounting, or infer global completion before the required units are covered.
+
 The supervising Codex agent checks a changed connection against the runnable reference by answering:
 
 1. What value is produced, and which actual consumer uses each needed field? Trace identities, access/effect,
