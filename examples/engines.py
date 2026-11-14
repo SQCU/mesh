@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # design/the-compiler.md, order 5 and "Core ML"
 import argparse
-import collections
 import json
 import os
 import pathlib
@@ -113,14 +112,13 @@ def execute(model, inputs, engines, args):
     program = Program(scheduled)
     started = time.perf_counter()
     result = program(*inputs)
-    report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried),
+    report = {'channels': [{'function': k, 'channels': scheduled.channels[body.key]}
+                           for k, body in enumerate(program.function.target.bodies)],
+              'between machines': sum(len(transfers) for transfers in scheduled.carried.values()),
               'processors': {name: [machine, engine] for name, (machine, engine) in processors.items()},
               'seconds': time.perf_counter() - started,
               'signature': bytes(mesh_graph.from_record(scheduled.signature).digest).hex(),
-              'core ml': {name: dict(collections.Counter(
-                  f'{operation} on {preferred}' for plan in function.plan()
-                  for operation, _, preferred, _ in plan if operation != 'const'))
-                  for name, function in scheduled.functions.items() if scheduled.engines.get(name)}}
+              'core ml': program.function.placements()}
     if result is not None:
         with torch.no_grad():
             expected = model(*inputs)

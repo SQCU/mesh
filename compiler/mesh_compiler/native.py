@@ -738,7 +738,7 @@ class Target:
                 generators[k] = buffer
             count = mesh.U()
             uses = lib.MetalProgramExternals(native, C.byref(count))
-        return Bound(self, owner, native, ended, generators, fixed, owned, libs, (uses, count.value))
+        return Bound(self, owner, native, ended, generators, fixed, owned, libs, (uses, count.value), tuple(programs))
 
     # The typed recipe: explicit records for the bodies (by function ordinal: a captured function's key, which may be a
     # callable, is compilation-only), rows, operands, inter-call roots, constants and outer outputs (no tuple-keyed
@@ -807,13 +807,34 @@ def leaf_restored(saved):
 # program writes directly), runs one execution of every row, waits for its end, and returns its outputs as views of
 # those backings or of a CONSTANT root's own handle (`fixed`, {(row, root): its tensor}). `uses` the program's
 # borrowed MetalProgramExternals view (pointer, count), kept with the program that owns it; `gpu` the ordinals of the
-# operands it uses on the GPU, read once; `argued` {(row, root): operand ordinal}
+# operands it uses on the GPU, read once; `argued` {(row, root): operand ordinal}; `programs` each row's loaded program
+# (Target.prepare's, None for a row without one), owned with `owned`
 class Bound:
-    def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses):
+    def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses, programs):
         self.target, self.owner, self.program, self.ended, self.generator = target, owner, program, ended, generator
         self.fixed, self.owned, self.libs, self.executions, self.uses = fixed, owned, libs, 0, uses
+        self.programs = programs
         self.argued = {at: a for a, operand in enumerate(target.operands) for at in operand.occurrences}
         self.gpu = frozenset(use.argument for use in uses[0][:uses[1]] if use.uses & METAL_EXTERNAL_GPU)
+
+    # metal-microbench metal_ir.h metal_ir_dispatches and metal_ir_kernel_devices (Core ML MLComputePlan): each loaded
+    # row's NEURAL kernels once, by kernel: its row, call, body's function ordinal and {Neural Engine, CPU, GPU}
+    # operation counts
+    def placements(self):
+        M, compiler = self.libs[0], self.libs[1]
+        made = []
+        for r, (row, program) in enumerate(zip(self.target.rows, self.programs, strict=True)):
+            if program is None:
+                continue
+            dispatch = C.POINTER(M.Dispatch)()
+            count = compiler.metal_ir_dispatches(program, C.byref(dispatch))
+            for kernel in dict.fromkeys(dispatch[d].kernel for d in range(count)
+                                        if dispatch[d].kind == M.METAL_IR_NEURAL):
+                devices = (mesh.U * 3)()
+                compiler.metal_ir_kernel_devices(program, kernel, devices)
+                made.append({"row": r, "call": row.call, "function": row.function, "kernel": kernel,
+                             "devices": dict(zip(("neural engine", "cpu", "gpu"), devices))})
+        return made
 
     # metal_recording.h struct MetalArgument; MTLDevice.h newBufferWithBytesNoCopy:length:options:deallocator: (an
     # existing address span, page aligned) through compiler/mesh_compiler/metal.py _placed_buffer: root byte 0 of the

@@ -34,6 +34,8 @@ SOURCE_VALUE, SOURCE_LITERAL, SOURCE_SENT, SOURCE_RECEIVED, SOURCE_EXTERNAL = ra
 METAL_UNIT_GPU, METAL_UNIT_HOST = 0, 1
 # metal_ir.h METAL_IR_WORK_ITERATION .. METAL_IR_WORK_TUNED: a retained Work term's kind (struct metal_ir_work_term)
 WORK_ITERATION, WORK_POINT, WORK_COMBINE, WORK_MERGE, WORK_FRAGMENT, WORK_TUNED = range(6)
+# metal_ir.h METAL_IR_NEURAL: a dispatch's kind (struct metal_ir_dispatch `kind`), a Core ML program
+METAL_IR_NEURAL = 8
 
 
 # objc/message.h objc_msgSend; MTLResource.h -device; NSObject -retain and -release
@@ -290,6 +292,13 @@ class WorkTerm(C.Structure):
                 ('factors', mesh.U), ('origin', mesh.U), ('origins', mesh.U), ('padding', mesh.U)]
 
 
+# metal_ir.h struct metal_ir_dispatch (metal_ir_dispatches): one dispatch of a program, its kind and kernel; 80 bytes
+class Dispatch(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('kind', 'kernel', 'binding', 'bindings', 'effect', 'effects', 'source',
+                                            'sources', 'allocation', 'allocations', 'arguments', 'later', 'flags',
+                                            'fill')] + [('groups', mesh.U * 3), ('threads', mesh.U * 3)]
+
+
 # dlfcn.h dladdr; metal-microbench metal_recording.h: the recorder (libmetal_recording) and the checkout it was built
 # in, whose .build holds libmetal_ir and libmesh_metal
 RECORDER = []
@@ -452,6 +461,8 @@ def _compiler():
                                                   C.POINTER(C.POINTER(WorkExtent)), C.POINTER(C.POINTER(WorkAxis)),
                                                   C.POINTER(C.POINTER(U))]),
                 ('metal_ir_value_axis', C.c_int, [P, U, U, Q, Q]),
+                ('metal_ir_dispatches', U, [P, C.POINTER(C.POINTER(Dispatch))]),
+                ('metal_ir_kernel_devices', None, [P, U, U * 3]),
                 ('metal_ir_lower', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_specialize', P, [P, C.c_char_p, C.c_size_t]),
