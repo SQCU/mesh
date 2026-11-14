@@ -34,4 +34,21 @@ unrelated existing host record checked API ownership only, not real plan/host co
 
 These are source review and build/ABI checks, not a machine-checked preservation proof or live transport evidence.
 The real `mesh_plan` path is compiled; no bridge or E2B numerical execution is claimed for this unit. Canonical
-shared rebuild and fresh ABI results are appended below when complete.
+shared rebuild and fresh ABI results follow.
+
+## Installed checkpoint
+
+Source checkpoint: `61531cca`. Canonical command from metal-microbench:
+`make .build/e2b_replay .build/native_bench`, process session `95133`, exit 0.
+It rebuilt libmesh, mesh Metal bindings, libmetal_ir, recorder, provider, E2B and native-bench. The log is
+`planner-span-build.log` beside this note. Python imports were held only until the installed graph ABI matched;
+Metal/E2B use remained held until their builds completed.
+
+Fresh canonical Python loaded `/Users/mdot/dox/mesh/rdma/libmesh.dylib`. Signature/repeated/proof sizes were
+312/48/24 bytes. The constructed record loaded with its five rows and one proof, retained identical archive bytes
+at span 4, and emitted 25 operations with three transformed pairs at span 6. An old finite canonical record loaded
+unchanged and reported missing operands only on expansion. See
+[planner-span-installed-abi.log](planner-span-installed-abi.log). Fresh `mesh` and `mesh_graph` import also passed.
+
+These installed checks preserve the same source-review and constructed-record scope above. They do not constitute
+a live `mesh_plan`/bridge/E2B run or a performance measurement.
