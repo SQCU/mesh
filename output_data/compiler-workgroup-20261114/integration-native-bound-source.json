@@ -9,6 +9,7 @@
   "delta": -4,
   "supervisor_ast": "PASS",
   "supervisor_pyflakes": "PASS",
-  "runtime": "Least observation active; error recovery pending",
-  "finished_source_ns": 1794691653218010000
+  "runtime": "Least success and original same-Program error/recovery PASS; see integration-native-bound-runtime.md",
+  "finished_source_ns": 1794691653218010000,
+  "source_unit_seconds": 228.673068459
 }

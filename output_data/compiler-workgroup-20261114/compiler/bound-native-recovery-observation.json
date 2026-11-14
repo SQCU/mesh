@@ -1,0 +1,9 @@
+{
+  "started_ns": 1794691734229128000,
+  "source_checkpoint": "d3002abb",
+  "command_source": "compiler/real-eigen-domain-command.md",
+  "change_to_command": "Only evidence filenames renamed to preserve prior observations",
+  "pid": 59997,
+  "exit": 0,
+  "ended_ns": 1794691736617730000
+}
