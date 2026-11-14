@@ -1,0 +1,170 @@
+{
+  "error": "[Errno 22] construction: ANE kernel 0: storage 14 of a kind Core ML has no tensor for",
+  "program": 31185313280,
+  "calls": [
+    0
+  ],
+  "values": 69,
+  "operations": 28,
+  "aliases": [
+    {
+      "value": 14,
+      "role": 2,
+      "scalar": 9,
+      "storage": 14,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 2,
+      "bytes": 8,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295,
+      "scalar_name": "i64",
+      "shape": [
+        1
+      ],
+      "view_offset": 0,
+      "layout": [
+        {
+          "dim": 0,
+          "padding": 0,
+          "coefficient": 1,
+          "divisor": 1,
+          "modulus": 0
+        }
+      ]
+    },
+    {
+      "value": 15,
+      "role": 2,
+      "scalar": 9,
+      "storage": 14,
+      "function": 4294967295,
+      "index": 4294967295,
+      "word": 0,
+      "of": 4294967295,
+      "range": 0,
+      "received": 0,
+      "sent": 0,
+      "zeroed": 0,
+      "sendings": 0,
+      "identity": 2,
+      "bytes": 8,
+      "offset": 0,
+      "at": 0,
+      "data_bytes": 0,
+      "data": null,
+      "buffer": null,
+      "page_bytes": 0,
+      "pages": 0,
+      "source": 4294967295,
+      "scalar_name": "i64",
+      "shape": [],
+      "view_offset": 0,
+      "layout": []
+    }
+  ],
+  "source": [
+    {
+      "node": "scalar_tensor_1",
+      "target": "aten.scalar_tensor.default",
+      "arguments": "(2,)",
+      "source_meta": {
+        "dtype": "torch.int64",
+        "shape": [],
+        "stride": [],
+        "offset": 0
+      },
+      "record": "_Generic",
+      "record_node": 2,
+      "emitted": [
+        {
+          "operation": 2,
+          "identity": 2,
+          "place": 2,
+          "erased": 0,
+          "kind": 0,
+          "padding": 0
+        }
+      ],
+      "operands": [
+        {
+          "role": "outputs",
+          "ordinal": 0,
+          "dtype": "torch.int64",
+          "shape": [],
+          "stride": [],
+          "offset": 0
+        }
+      ]
+    },
+    {
+      "node": "where_1",
+      "target": "aten.where.self",
+      "arguments": "(bitwise_and, scalar_tensor_1, scalar_tensor)",
+      "source_meta": {
+        "dtype": "torch.int64",
+        "shape": [
+          3,
+          2
+        ],
+        "stride": [
+          2,
+          1
+        ],
+        "offset": 0
+      },
+      "record": "_Generic",
+      "record_node": 10,
+      "emitted": [
+        {
+          "operation": 9,
+          "identity": 10,
+          "place": 2,
+          "erased": 1,
+          "kind": 0,
+          "padding": 0
+        }
+      ],
+      "operands": [
+        {
+          "role": "inputs",
+          "ordinal": 1,
+          "dtype": "torch.int64",
+          "shape": [],
+          "stride": [],
+          "offset": 0
+        }
+      ]
+    }
+  ],
+  "body_keys": [
+    {
+      "function": 0,
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+      "program": 31185313280
+    },
+    {
+      "function": 1,
+      "key": "('qdwh_eigh_step', 'p', (2, 2), 'torch.float32', 10)",
+      "program": 31185315840
+    },
+    {
+      "function": 2,
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'suffix', '_linalg_eigh')",
+      "program": 31185318400
+    }
+  ]
+}

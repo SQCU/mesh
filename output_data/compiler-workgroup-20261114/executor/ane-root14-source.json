@@ -1,0 +1,16 @@
+{
+  "metal_commit": "7f7ed4362bbd865e64e7e4361854c605cc8f4699",
+  "mesh_commit": "a9618bd38200a91f8e1d3ceb084705bcb6aa866f",
+  "process_exit": 0,
+  "numeric_invocation": false,
+  "production_changes": false,
+  "sha256": {
+    "output_data/compiler-workgroup-20261114/executor/ane-root14-diagnostic.py": "84ec1d61b247c6db29066c8671dc386ab872903336ce32297f026799b708004f",
+    "output_data/compiler-workgroup-20261114/executor/ane-root14.json": "f6655adeb8a04b593149afb4c3ea07852ba0a14992e0ec41389705c88907515c",
+    "output_data/compiler-workgroup-20261114/executor/ane-root14.stdout": "286ff8ad9802ee1c43327c9c227d26c734f52c981223cc03e588f999023187b4",
+    "output_data/compiler-workgroup-20261114/executor/ane-root14.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/Users/mdot/metal-microbench/metal_neural.mm": "d649ff3f42305f5810221a0c2adaa6315775d28979019c79417a157d1724e085",
+    "compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+    "compiler/mesh_compiler/operations.py": "c6dcd96d0276586fc4f089934e5f40f4b2c783e9bdad27e1856892a60b1f9821"
+  }
+}
