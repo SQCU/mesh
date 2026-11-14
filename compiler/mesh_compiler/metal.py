@@ -1,7 +1,7 @@
 # design/compilation-composition-change-request.md items 1, 3, 6 and 7; design/aot-compilation-change-request.md A8 and
 # A9: the live native owner. The C ABI's types and library bindings (metal-microbench metal_ir.h, metal_recording.h;
-# rdma/mesh-metal.h), the Objective-C/Metal resource primitives, borrowed buffers, archive byte ownership, the run's
-# waits, and the typed C encoder of construction's records (_Builder), whose numerical records and tables are
+# rdma/mesh-metal.h), the Objective-C/Metal resource primitives, borrowed buffers, archive byte ownership and the typed
+# C encoder of construction's records (_Builder), whose numerical records and tables are
 # compiler/mesh_compiler/operations.py's
 import collections
 import ctypes as C
@@ -10,7 +10,6 @@ import errno
 import os
 import pathlib
 import sys
-import time
 
 import torch
 
@@ -538,18 +537,6 @@ def _compiler():
 # mesh-call.h mesh_transfers_start and mesh-dataflow.h mesh_host_started, the program's `start` and `started`
 START = C.cast(mesh.LIB.mesh_transfers_start, C.c_void_p)
 STARTED = C.cast(mesh.LIB.mesh_host_started, C.c_void_p)
-
-
-# mesh-collective.h mesh_host_arrived; mesh.h MESH_PLATFORM_NS: wait for `ready`, the bound restarting at each change of
-# `progress`
-def _wait(ready, progress, what):
-    seen, since = progress(), time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    while not ready():
-        now, value = time.clock_gettime_ns(time.CLOCK_MONOTONIC), progress()
-        if value != seen:
-            seen, since = value, now
-        elif now - since > mesh.PLATFORM_NS:
-            raise OSError(errno.ETIMEDOUT, what)
 
 
 # metal_recording.h MetalProgramCheckFailure: a run's failed check as the error its operation raises in torch

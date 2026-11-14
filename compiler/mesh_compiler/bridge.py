@@ -80,7 +80,7 @@ class Published:
         mapping.loaded.append(made)
         self.offset, view = (mesh.Q * max(made.offsets, 1))(), mesh.View()
         mesh.LIB.mesh_view_program(C.byref(mapping.context), C.byref(made), self.offset, C.byref(view))
-        self.base, self.execution = C.addressof(self.offset), 0
+        self.base = C.addressof(self.offset)
         self.solution = published_program(made, (mapping, self.offset), self.offset, source)
         self.function, self.planned = made.function, made.planned
         backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None

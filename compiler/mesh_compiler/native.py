@@ -372,6 +372,10 @@ class Target:
         for v in range(self.counts[f]):
             if value[v].run:
                 yield (v, *owner.span(first, v), value[v].shares)
+        for v, function, index in self.rows[r].marks["placed"]:
+            held = owner.function[function].value[index]
+            if not held.run:
+                yield (v, *owner.span(joint.function_value_first[function], index), held.shares)
         for root, s, delta, every in self.joined[r]:
             offsets, count = owner.span(joint.root_first, s)
             shares = joint.roots[s].shares
@@ -442,10 +446,6 @@ class Target:
             checked(emitted(program, error, ROOM), error, "emission" if finalize else "relocation")
             ready = made(lib.MetalRecorderPrepare(recorder, program, error, ROOM), error, "preparation")
             owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
-            for value, function, index in marks["placed"]:
-                compiler.metal_ir_value_placed(program, value, buffer,
-                                               *owner.span(owner.solution.function_value_first[function], index), 0,
-                                               owner.function[function].value[index].shares)
             for value, offsets, count, shares in self.placements(owner, r):
                 compiler.metal_ir_value_placed(program, value, buffer, offsets, count, 0, shares)
             step = self.stepped(owner, r)
