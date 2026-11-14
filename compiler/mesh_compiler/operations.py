@@ -1927,7 +1927,8 @@ def _linalg_reflector(column, tau, beta, ops):
     if column.shape[-1] > 1:
         tail = _temporary(batch, real)
         ops += _reduced(A.amax.default, {'self': magnitudes[..., 1:], 'dim': [-1], 'keepdim': False}, [tail])
-        ops += _elementwise('eq', inactive, tail, 0)
+        # XNORM = 0: the tail's largest modulus (nonnegative), or a clipped empty tail's -inf amax identity
+        ops += _elementwise('le', inactive, tail, 0)
     else:
         ops += _fill(inactive, True)
     if column.is_complex():
@@ -3707,6 +3708,83 @@ def _zgebal(h, scale, perm, ilo, ihi, ops, held=()):
     # 276-279 and 415-416: ILO = IHI = 1 where the rows' search returned, else K and L; unassigned after the exit
     ops += _scalars([ilo, ihi], [k, l, done, halted, ilo, ihi], lambda r, v: [(r('select', I32, nonzero(r, v[3]), v[
         4 + d], r('select', I32, nonzero(r, v[2]), r.const(1, I32), v[d])), I32) for d in (0, 1)])
+
+
+# Reference-LAPACK ZLARF1F (v(1) = 1, held explicitly in v): H = I - tau v v^H applied to `block` in place, from the
+# left (H, or H^H where `adjoint`: conj(tau)) or from the right (block H). v is (length, 1) and tau one-element;
+# `rows` and `cols` are the block's actual extents by loop position (tensor, bound), so that two loops of equal static
+# bound keep their own ranges
+def _reflected(block, v, tau, rows, cols, ops, left=True, adjoint=False):
+    m, k = block.shape
+    t, vector = _class(block.real), v[:, 0]
+
+    def scalar(r, x):
+        return _conjugate(r, t, x) if adjoint else x
+    if left:
+        dot = _temporary((k,), block.dtype)
+        _emit(ops, _record((k, m), [(dot, (0,))], [(vector, (1,)), (block, (1, 0))], lambda r, x: [(_times(
+            r, t, _conjugate(r, t, x[0]), x[1]), t)], [PARALLEL, REDUCTION], [SUM]), loops=(cols, rows))
+        _emit(ops, _record((m, k), [(block, (0, 1))], [(block, (0, 1)), (vector, (0,)), (dot, (1,)), (tau, (None,))],
+                           lambda r, x: [(_plus(r, t, x[0], _times(r, t, x[1], _times(r, t, x[2], scalar(r, x[3]))),
+                                                'sub'), t)]), loops=(rows, cols))
+        return
+    dot = _temporary((m,), block.dtype)
+    _emit(ops, _record((m, k), [(dot, (0,))], [(block, (0, 1)), (vector, (1,))], lambda r, x: [(_times(
+        r, t, x[0], x[1]), t)], [PARALLEL, REDUCTION], [SUM]), loops=(rows, cols))
+    _emit(ops, _record((m, k), [(block, (0, 1))], [(block, (0, 1)), (dot, (0,)), (vector, (1,)), (tau, (None,))],
+                       lambda r, x: [(_plus(r, t, x[0], _times(r, t, _times(r, t, x[1], scalar(r, x[3])), _conjugate(
+                           r, t, x[2])), 'sub'), t)]), loops=(rows, cols))
+
+
+# Reference-LAPACK SRC/zgehrd.f 249-254 and 295-299 (TAU outside ILO..IHI-1 zero; the unblocked code from I = ILO) and
+# zgehd2.f 190-207 on one complex square member h in place, then (z given) zunghr.f 198-232 with zung2r's reflector
+# sequence into z. For each static column I = 1..n-1, active where ILO <= I <= IHI-1 (else every extent 0):
+# ZLARFG(IHI-I, A(I+1,I), A(I+2,I)) by _linalg_reflector clipped to the reflector's IHI-I entries and its tail; H(I)
+# from the right to A(1:IHI, I+1:IHI), then H(I)^H from the left to A(I+1:IHI, I+1:N); beta into A(I+1,I) and
+# v(2:) into A(I+2:IHI,I). Q = H(ILO) ... H(IHI-1) from the identity, each H(I) (reverse order) to rows and columns
+# I+1..IHI. Returns TAU (its first n - 1 entries); ILO and IHI one-element int32, the source's 1-based values
+def _zgehd2(h, z, ilo, ihi, ops):
+    n, dtype, real = h.shape[-1], h.dtype, h.real.dtype
+    t = _class(h.real)
+    tau = _temporary((max(n - 1, 0),), dtype)
+    if z is not None and n:
+        ops += _linalg_identity(z)
+    if n < 2:
+        return tau
+    length, tail, height, width = (_temporary((n - 1,), torch.int32) for _ in range(4))
+
+    def spans(r, v):
+        low, high = v
+        column, zero, one = r('add', I32, r.index(0), r.const(1, I32)), r.const(0, I32), r.const(1, I32)
+        active = r('and', BOOL, r('le', BOOL, low, column), r('lt', BOOL, column, high))
+        size = r('sub', I32, high, column)
+        return [(r('select', I32, active, x, zero), I32) for x in (
+            size, r('sub', I32, size, one), high, r('sub', I32, r.const(n, I32), column))]
+    ops += _record((n - 1,), [(x, (0,)) for x in (length, tail, height, width)], [(ilo, (None,)), (ihi, (None,))],
+                   spans)
+    for i in range(n - 1):
+        extent, below = _at(length, i, n - i - 1), _at(tail, i, n - i - 1)
+        made, reflected, beta = [], _temporary((1,), dtype), _temporary((1,), real)
+        v = _linalg_reflector(h[i + 1:, i], reflected[0], beta[0], made)
+        _emit(ops, made, sizes={n - i - 1: extent, n - i - 2: below})
+        _reflected(h[:, i + 1:], v, reflected, _at(height, i, n), extent, ops, left=False)
+        _reflected(h[i + 1:, i + 1:], v, reflected, extent, _at(width, i, n - i - 1), ops, adjoint=True)
+        ops += _scalars([tau[i:i + 1]], [reflected, length[i:i + 1]], lambda r, x: [(_chosen(
+            r, t, r('gt', BOOL, x[1], r.const(0, I32)), x[0], (r.const(0, t), r.const(0, t))), t)])
+        ops += _scalars([h[i + 1:i + 2, i]], [h[i + 1:i + 2, i], beta, length[i:i + 1]], lambda r, x: [(_chosen(
+            r, t, r('gt', BOOL, x[2], r.const(0, I32)), x[1], x[0]), t)])
+        if i + 2 < n:
+            _emit(ops, _bounded_copy(h[i + 2:, i], v[1:, 0]), loops=(below,))
+    if z is None:
+        return tau
+    for i in reversed(range(n - 1)):
+        extent, below = _at(length, i, n - i - 1), _at(tail, i, n - i - 1)
+        v = _temporary((n - i - 1, 1), dtype)
+        ops += _fill(v[0, 0], 1)
+        if i + 2 < n:
+            _emit(ops, _bounded_copy(v[1:, 0], h[i + 2:, i]), loops=(below,))
+        _reflected(z[i + 1:, i + 1:], v, tau[i:i + 1], extent, extent, ops)
+    return tau
 
 
 # an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
