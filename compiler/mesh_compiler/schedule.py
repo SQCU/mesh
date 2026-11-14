@@ -109,10 +109,24 @@ def carried(transfers, machines):
     return found
 
 
-# design/disjoint-pages-change-request.md C3.3 and C3.5; rdma/mesh-collective.h struct mesh_dependence
+# design/disjoint-pages-change-request.md C3.3 and C3.5; rdma/mesh-collective.h struct mesh_dependence; L. Lamport,
+# CACM 21(7), 1978; M. Lam, PLDI 1988, section 2.3; rdma/mesh-graph.h mesh_graph_relation_synchronization,
+# mesh_graph_boundaries: event a before event b where they differ, share their place and every node of a precedes every
+# node of b; the relation's non-redundant edges at delay 0, and within each thread each last event before each first at
+# delay 1
 def dependences(events, before):
-    found = mesh_graph.precedence([nodes for _, _, _, nodes in events], [place for _, place, _, _ in events],
-                                  [nodes[0].meta["processor"] for _, _, _, nodes in events], before)
+    place = [at for _, at, _, _ in events]
+    graph = mesh_graph.Graph.adjacency(range(len(events)), lambda a: [
+        b for b in range(len(events)) if a != b and place[a] == place[b]
+        and all(x in before[y] for x in events[a][3] for y in events[b][3])])
+    redundant = graph.relation.redundant()
+    thread = [nodes[0].meta["processor"] for _, _, _, nodes in events]
+    dense = {one: k for k, one in enumerate(dict.fromkeys(thread))}
+    first, last = graph.boundaries([dense[one] for one in thread], redundant)
+    found = [(a, b, 0) for e, (a, b) in enumerate(graph.edges()) if not redundant[e]]
+    for one in dense:
+        held = [a for a in range(len(events)) if thread[a] == one]
+        found += [(a, b, 1) for a in held if last[a] for b in held if first[b]]
     return [(events[a][0], events[b][0], lag, events[a][2][0] | events[b][2][1]) for a, b, lag in found]
 
 

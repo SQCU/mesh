@@ -191,6 +191,15 @@ class Graph:
         _check(LIB.mesh_graph_longest(self.relation.pointer, int(incoming), *self._order(order), weights, length))
         return View((self, order, weights), length, range(self.data.vertices), float)
 
+    # mesh_graph_boundaries over this relation's edges not in `excluded` (the View of its own redundant mask) within one
+    # class of `class_of` (dense IDs by vertex): Views of the caller-owned source and sink flags, by vertex
+    def boundaries(self, class_of, excluded):
+        classes = _array(C.c_uint32, class_of)[0]
+        source, sink = ((C.c_ubyte * max(self.data.vertices, 1))() for _ in range(2))
+        _check(LIB.mesh_graph_boundaries(self.relation.pointer, classes, excluded.items, source, sink))
+        owner = (self, classes, excluded)
+        return View(owner, source, range(self.data.vertices), bool), View(owner, sink, range(self.data.vertices), bool)
+
     # the native start and step of an order View covering every vertex once; its length guards the native read
     def _order(self, order):
         if len(order) != self.data.vertices:
@@ -249,42 +258,6 @@ def closure(order, neighbours):
     graph = Graph.adjacency(order, neighbours)
     owned = graph.search(graph.vertices)
     return graph.ancestors(ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count)))
-
-
-# A. V. Aho, M. R. Garey and J. D. Ullman, The transitive reduction of a directed graph, SIAM J. Comput. 1(2), 1972;
-# mesh-graph.h mesh_graph_synchronization: an edge another path covers is redundant
-def reduction(order, neighbours):
-    at = {v: k for k, v in enumerate(dict.fromkeys(order))}
-    edges = [(u, v) for v in at for u in dict.fromkeys(neighbours(v))]
-    tails, count = _array(C.c_uint32, [at[u] for u, _ in edges])
-    heads, _ = _array(C.c_uint32, [at[v] for _, v in edges])
-    redundant, kept = (C.c_ubyte * max(count, 1))(), C.c_size_t()
-    _check(LIB.mesh_graph_synchronization(len(at), count, tails, heads, redundant, C.byref(kept)))
-    found = {v: [] for v in at}
-    for (u, v), covered in zip(edges, redundant):
-        found[v] += [u] * (not covered)
-    return found
-
-
-# F. Harary, Graph Theory, 1969
-def extremes(vertices, neighbours):
-    entered = {u for v in vertices for u in neighbours(v)}
-    return [v for v in vertices if v not in entered], [v for v in vertices if not neighbours(v)]
-
-
-# L. Lamport, CACM 21(7), 1978; M. Lam, PLDI 1988, section 2.3; design/disjoint-pages-change-request.md C3.3 and C3.5
-def precedence(events, place, thread, reached):
-    def precedes(a, b):
-        return a != b and place[a] == place[b] and all(x in reached[y] for x in events[a] for y in events[b])
-
-    after = {a: [b for b in range(len(events)) if precedes(a, b)] for a in range(len(events))}
-    covering = reduction(postorder(list(after), list(after), after.__getitem__), after.__getitem__)
-    found = [(a, b, 0) for a in covering for b in covering[a]]
-    for one in dict.fromkeys(thread):
-        held = [a for a in covering if thread[a] == one]
-        firsts, lasts = extremes(held, lambda a: [b for b in covering[a] if b in held])
-        found += [(a, b, 1) for a in lasts for b in firsts]
-    return found
 
 
 # G. A. Kildall, POPL 1973; J. B. Kam and J. D. Ullman, J. ACM 1976; GSPMD, Xu et al., arXiv 2105.04663, section 3.5
@@ -393,6 +366,8 @@ LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C
                                    C.POINTER(C.POINTER(Closed))]
 LIB.mesh_graph_longest.restype = C.c_int
 LIB.mesh_graph_longest.argtypes = [C.c_void_p, C.c_int, _U, C.c_ssize_t, C.POINTER(C.c_double), C.POINTER(C.c_double)]
+LIB.mesh_graph_boundaries.restype = C.c_int
+LIB.mesh_graph_boundaries.argtypes = [C.c_void_p, _U, C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte), C.POINTER(C.c_ubyte)]
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
 LIB.mesh_graph_search_free.argtypes = [C.POINTER(Searched)]
 LIB.mesh_graph_closure_free.argtypes = [C.POINTER(Closed)]
@@ -722,12 +697,6 @@ class Conflict(C.Structure):
 
 
 HAZARDS = ('read after write', 'write after read', 'write after write', 'given')
-LIB.mesh_graph_dependences_views.restype = LIB.mesh_graph_synchronization.restype = C.c_int
-LIB.mesh_graph_dependences_views.argtypes = [
-    C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
-    C.POINTER(C.POINTER(Conflict)), C.POINTER(C.c_size_t)]
-LIB.mesh_graph_synchronization.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
-                                           C.POINTER(C.c_ubyte), C.POINTER(C.c_size_t)]
 
 
 # mesh-graph.h struct mesh_strided; torch 2.14.0 c10/core/TensorImpl.h, storage_offset_ and sizes_and_strides_

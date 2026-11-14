@@ -53,3 +53,13 @@ pending the coordinated native ABI release; no distributed stochastic or perform
 Remaining live generic ownership includes placement replication/view-chain queries, rdma fixed-point sharding and
 schedule transfer-event precedence. Domain transfer application over an already produced order is distinct from a
 second traversal algorithm. No dead helper was ported merely to preserve its old API.
+
+Transfer-event continuation (SAME Torch28–29): schedule retains one event relation while consuming its native redundant
+mask and class-local source/sink flags. Event edge construction uses the existing source closure; the generic reduction
+and endpoint algorithms stay in mesh-graph.c. The caller projects those endpoints into the existing transfer IDs, delays
+and endpoint-role flags only after their graph consumers complete. Delay-1 isolated self edges remain; cross-thread edges
+are excluded only from each thread's boundary query, as before. Old Python precedence/reduction/extremes and their unused
+direct ctypes registrations are deleted. Source graph arrays are not copied into a second reduction/DFS input. Pair
+enumeration becomes canonical edge order; the declared pair/lag/role set is preserved by source review. Current whole
+mesh-graph.c strict C syntax plus the two Python AST/diff checks pass. Matching actual boundaries/longest API and caller
+observations remain pending the coordinator's library release.
