@@ -26,10 +26,6 @@ def unit_cost(task):
     return 1.0
 
 
-def producer(node):
-    return mesh_graph.chain(node, lambda n: n.args[0] if n.target is operator.getitem else None)[-1]
-
-
 # compiler/mesh_compiler/ir.py based, views
 def based(node):
     record = node.meta.get("view") or node.meta.get("out")
@@ -70,24 +66,28 @@ def accesses(functions):
 # design/compilation-composition-change-request.md items 6, 6.4 and 7; rdma/mesh-graph.h mesh_graph_relation_create:
 # the source's one relation, its memory witnesses (rdma/mesh_graph.py dependences_supplied over the accesses' views)
 # and, as GIVEN causes of the same solve, each SSA input and each declared channel; `accesses` each view's producing
-# source view, `supplied` each GIVEN cause's (kind, source, sink, operand)
+# source view, `supplied` each GIVEN cause's (kind, source, sink, operand); `producers` each original node's producing
+# source operation (a tuple getitem's its parent's, every other node itself)
 @dataclasses.dataclass(eq=False)
 class SourceRelation:
     relation: object
     functions: list
     supplied: list
     accesses: list
+    producers: dict
 
 
 # design/problems-of-14b9a757-change-request.md items 1, 2 and 6; A. J. Bernstein, IEEE Trans. Electronic Computers
 # EC-15(5), 1966; compiler/mesh_compiler/placement.py place, transfers
 def dependence(module, transfers):
     nodes = list(module.graph.nodes)
-    functions = [n for n in nodes if n.op == "call_function" and producer(n) is n]
+    producers = mesh_graph.forward(nodes, lambda n: [n.args[0]] if n.target is operator.getitem else [],
+                                   lambda n, parent: parent[0] if parent else n)
+    functions = [n for n in nodes if n.op == "call_function" and producers[n] is n]
     vertex, supplied = {node: k for k, node in enumerate(functions)}, []
     views, sources = accesses(functions)
     for node in functions:
-        supplied += [("value", producer(u), node, u) for u in dict.fromkeys(node.all_input_nodes)
+        supplied += [("value", producers[u], node, u) for u in dict.fromkeys(node.all_input_nodes)
                      if u.op == "call_function"]
         if node.target is RECV:
             supplied.append(("channel", transfers[channel_of(node)][0], node, channel_of(node)))
@@ -95,7 +95,7 @@ def dependence(module, transfers):
                                                [(vertex[source], vertex[sink]) for _, source, sink, _ in supplied])
     writers = [(functions[earlier], functions[later]) for e, (earlier, later) in enumerate(relation.edges())
                if any(mesh_graph.HAZARDS[relation.conflict(k).kind] == mesh_graph.HAZARDS[0] for k in relation.members(e))]
-    return nodes, functions, writers, SourceRelation(relation, functions, supplied, sources)
+    return nodes, functions, writers, SourceRelation(relation, functions, supplied, sources, producers)
 
 
 # compiler/mesh_compiler/placement.py place, transfers
@@ -190,7 +190,8 @@ class Declarations:
 # design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5;
 # design/integration-finishing-change-request.md item 3; compiler/mesh_compiler/ir.py Planning;
 # compiler/mesh_compiler/placement.py place, transfers
-def declarations(module, transfers, carried, machines, cost, functions, before, tasks, edges, planning, writers=()):
+def declarations(module, transfers, carried, machines, cost, functions, before, tasks, edges, planning, writers,
+                 relation):
     nodes = planning.nodes if planning is not None else ()
     at, task = {node: k for k, node in enumerate(nodes)}, {node: k for k, node in enumerate(functions)}
     here = planning.here if planning is not None else None
@@ -204,7 +205,7 @@ def declarations(module, transfers, carried, machines, cost, functions, before, 
         source, destination = at[machines[sender]], at[machines[receiver]]
         start = sent.args[0].meta.get("view") or sent.args[0].meta.get("out") or whole(sent.args[0])
         finish, version = arrival.meta.get("to") or whole(arrival), tuple(sorted(versions.get(sent, ())))
-        written, value = producer(sent.args[0]), mesh.ABSENT
+        written, value = relation.producers[sent.args[0]], mesh.ABSENT
         if here in (source, destination):
             writer = (sender, start[0], version) if source == here else (receiver, finish[0], ())
             if writer not in places:
@@ -245,7 +246,7 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     before = graph.ancestors(functions[::-1], successors=True)
     carried = [transfer for transfer in carried if all(transfer[4])]
     declared = declarations(module, transfers, carried, machines, cost, functions, before, tasks, edges, planning,
-                            writers)
+                            writers, source)
     listed = functions
     side = {processor: (groups or {}).get(processor, processor) for processor in processors}
     local = {end for ends in transfers.values() if len({side[end.meta["processor"]] for end in ends}) == 1

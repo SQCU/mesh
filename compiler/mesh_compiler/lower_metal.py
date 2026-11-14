@@ -6,6 +6,7 @@
 import collections
 import ctypes as C
 import dataclasses
+import itertools
 import pathlib
 import sys
 import weakref
@@ -33,6 +34,24 @@ KINDS = {InputKind.USER_INPUT: ("user_input", M.INPUT), InputKind.PARAMETER: ("p
 AUTHORITY = (M.STATE, M.INPUT, M.CONSTANT)
 # design/the-compiler.md, "A processor is a device of a machine"; metal-microbench metal_ir.h METAL_IR_GPU .. ANE
 PLACES = {"cpu": M.CPU, "mps": M.GPU, "ane": M.ANE}
+# metal-microbench metal_ir.h METAL_IR_SOURCE_VALUE .. METAL_IR_SOURCE_EXTERNAL, struct metal_ir_source_operand;
+# design/compilation-composition-change-request.md items 6, 6.4 and 7
+SOURCE_VALUE, SOURCE_LITERAL, SOURCE_SENT, SOURCE_RECEIVED, SOURCE_EXTERNAL = range(5)
+ABSENT = 2 ** 32 - 1
+
+
+class SourceOperand(C.Structure):
+    _fields_ = [("kind", C.c_uint32), ("value", C.c_uint32)]
+
+
+# a GIVEN cause's typed operand: a value's (root, view) its view's ValueID, a literal already in the typed body, a
+# channel port Root its SENT/RECEIVED logical ValueID, None external
+def operand(given):
+    if given is None:
+        return SourceOperand(SOURCE_EXTERNAL, ABSENT)
+    if isinstance(given, Root):
+        return SourceOperand(SOURCE_SENT if given.kind == "sent" else SOURCE_RECEIVED, given.value)
+    return SourceOperand(SOURCE_LITERAL, ABSENT) if given[0] == "literal" else SourceOperand(SOURCE_VALUE, given[1])
 
 
 @dataclasses.dataclass(eq=False)
@@ -58,6 +77,7 @@ class ConstructedMachine:
     supplied: tuple
     writers: tuple
     identity: int = 0
+    binding: tuple = ()
 
     def __post_init__(self):
         self.freed = weakref.finalize(self, self.compiler.metal_ir_program_free, self.program)
@@ -93,7 +113,7 @@ def placeholders(nodes, kinds, sources):
 # retained global task order, `targets` {original processor: (selected kind "cpu" | "mps" | "ane", torch.device)} the
 # driver's selection, `wires` channel -> (declared transfer, logical wire value, its logical bytes, declared sent view,
 # declared landed view), `output_roles` one (OutputKind, placeholder name or None) per output leaf
-# (Scheduled.exported.outputs); compiler/mesh_compiler/lower_inductor.py copies, body typed: a view (offset, element,
+# (Scheduled.exported.outputs); compiler/mesh_compiler/lower_inductor.py Copies, copies: a view (offset, element,
 # (size, byte stride) pairs) of the wire value's logical bytes; J. K. Salmon et al., SC 2011, §3.1: `generator` the
 # machine's mesh_compile.Generator; compiler/mesh_compiler/schedule.py SourceRelation, assemble `vertices`: the source
 # relation's correspondence here, each vertex's emitted operation IDs, each access view's (typed root, typed view) and
@@ -265,6 +285,24 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         given = tuple(typed(operand) if kind == "value" else sent.get(operand) or received.get(operand) or typed(sink)
                       for kind, _, sink, operand in source.supplied)
         writers = tuple((tasks[a], tasks[b]) for a, b in module.meta["writers"])
+        # metal-microbench metal_ir.h metal_ir_source_relation: the original relation, each original vertex's operation
+        # IDs (operation_first[V + 1], operations), each original view's typed ValueID, each GIVEN cause's operand; the
+        # arrays borrowed for this ConstructedMachine's lifetime (NULL release and owner)
+        flat = [op for ops in vertices for op in ops]
+        binding = ((C.c_size_t * (len(vertices) + 1))(*itertools.accumulate(map(len, vertices), initial=0)),
+                   (C.c_uint32 * max(len(flat), 1))(*flat),
+                   (C.c_uint32 * max(len(accesses), 1))(*[ABSENT if access is None or access[0] == "literal"
+                                                          else access[1] for access in accesses]),
+                   (SourceOperand * max(len(given), 1))(*map(operand, given)))
+        setter, error = compiler.metal_ir_source_relation, C.create_string_buffer(4096)
+        setter.restype = C.c_int
+        setter.argtypes = [C.c_void_p, C.c_void_p, C.POINTER(C.c_size_t), C.POINTER(C.c_uint32),
+                           C.POINTER(C.c_uint32), C.c_size_t, C.POINTER(SourceOperand), C.c_void_p, C.c_void_p,
+                           C.c_char_p, C.c_size_t]
+        status = setter(builder.p, source.relation.pointer, *binding[:3], len(given), binding[3], None, None, error,
+                        len(error))
+        if status:
+            raise OSError(status, "the source relation: %s" % error.value.decode())
     except BaseException:
         compiler.metal_ir_program_free(builder.p)
         raise
@@ -272,4 +310,4 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                               sent, ends, {task: tuple(ops) for task, ops in operations.items()}, tuple(advanced),
                               made, {k: tuple(ops) for k, ops in writes.items()},
                               {k: tuple(ops) for k, ops in stores.items()}, source, vertices, accesses, given, writers,
-                              builder.base)
+                              builder.base, binding)

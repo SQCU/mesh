@@ -61,6 +61,13 @@ def read(program):
         if node.op == "placeholder" and node.name in state:
             node.meta["state"] = state[node.name][0]
 
+    # torch 2.14.0 torchgen/model.py Tag nondeterministic_seeded (OpOverload.tags); J. K. Salmon et al., SC 2011, §3.1:
+    # each seeded source operation's draw site, numbered in source graph order from 1 before placement
+    seeded = [node for node in nodes if node.op == "call_function"
+              and torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())]
+    for site, node in enumerate(seeded, 1):
+        node.meta["site"] = site
+
     outputs, gradients, out_spec = [], {}, program.call_spec.out_spec
     for spec in signature.output_specs:
         if spec.kind == OutputKind.GRADIENT_TO_PARAMETER:

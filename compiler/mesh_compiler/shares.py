@@ -10,7 +10,8 @@ import mesh_graph
 
 
 # S. Zhang et al., HAP, EuroSys 2024, sections 3.2 and 5.2; compiler/mesh_compiler/schedule.py assemble, source
-# node.meta["processor"] retained through grouping
+# node.meta["processor"] retained through grouping; rdma/mesh-graph.h mesh_graph_longest: a group's level the most
+# receives on a path of its prerequisites
 def stages(scheduled, segment):
     nodes = {n: n.meta["processor"] for module in scheduled.modules.values() for n in module.graph.nodes
              if n.op == "call_function"}
@@ -20,14 +21,16 @@ def stages(scheduled, segment):
     for node in nodes:
         read = [sender[channel_of(node)]] if node.target is RECV else [u for u in node.all_input_nodes if u in nodes]
         before.setdefault(group[node], set()).update(group[u] for u in read if group[u] != group[node])
-    level = mesh_graph.longest(list(before), lambda g: sorted(before[g], key=str),
-                               lambda a, b: getattr(b, "target", None) is RECV)
+    graph = mesh_graph.Graph.adjacency(list(before), lambda g: sorted(before[g], key=str))
+    level = graph.longest(graph.postorder(graph.vertices),
+                          [float(getattr(g, "target", None) is RECV) for g, _ in graph.edges()])
     received, found = {}, {}
     for node, processor in nodes.items():
         if node.target is RECV:
-            received.setdefault(level[node], []).append(node)
+            received.setdefault(level[graph.at[node]], []).append(node)
         elif node.target is not SEND and segment(node) is not None:
-            found.setdefault(segment(node), {}).setdefault(level[group[node]], {}).setdefault(processor, []).append(node)
+            found.setdefault(segment(node), {}).setdefault(level[graph.at[group[node]]], {}).setdefault(
+                processor, []).append(node)
     return {part: [(received.get(at, []), held) for at, held in sorted(levels.items())]
             for part, levels in found.items()}
 

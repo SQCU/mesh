@@ -19,7 +19,37 @@ API observation remain pending at this entry.
 
 Matching graph9388eb3e gate: fresh actual RelationData152/source relation_views query DIRECTED, source causes,
 closure over nonnumeric original vertex order, and reusable views after caller Graph reference deletion all pass.
-Executor's existing CPU FFN then passes the whole typed machine/native local-plan/save/restore client, error0.0,
+Executor's existing CPU FFN then passes typed machine/local planning and native artifact reload in Target.prepare,
+error0.0,
 output[2,32],55values,one native entry. Its earlier failure was post-lower STEP value creation, corrected by the
-actual existing compiler word query. This is CPU client evidence; source-cause completeness, GPU, transport and
+actual existing compiler word query. No outer archive.save/load filesystem roundtrip was exercised. This is CPU client evidence; source-cause completeness, GPU, transport and
 performance remain separate obligations.
+
+2026-11-14 UTC continuation: SAME Torch turns22–27 and LiteRT16, explicit/reported Opus5.5. Source setter now consumes
+the original retained relation, original vertex-to-operation CSR, original access-to-logical-ValueID mapping and GIVEN
+operand roles before lowering. ConstructedMachine retains the borrowed arrays and original owner. Native cause
+consumption/final-fact reuse is a paired compiler/root unit still under review; no endpoint-only fallback is used.
+Tuple-getitem producer identity is projected once in source order and retained on SourceRelation for all three consumers.
+
+Weighted longest-path computation moved from the Python helper to mesh_graph_longest over the same relation, original
+edge weights and borrowed traversal order; shares.stages reads its native output view. Descriptor alignment now includes
+Witness16, Origin24 and RelationData160. C strict syntax and Python AST/diff checks pass; matching shared rebuild and
+fresh actual longest/source-setter checks are pending, so these are source-readiness statements.
+
+The production driver and archive use the typed native Target and its emitted signature. Tracked caller inspection plus
+executor ownership review found no use of the former AOT emitter/Target/restore or Python signature reconstruction.
+Those bodies and their only bare-pair contract/quotient/unrolled wrappers are deleted; the canonical C algorithms remain.
+Copies/copies stays the live source grouping owner. Its overlap solve and copied overlap table had only the deleted AOT
+consumer and are removed; actual typed copy operations supply the native compiler's memory effects.
+
+Seeded source operations now receive stable site IDs from the original export order before placement. Local carries that
+ID explicitly into ordinary random, RReLU, randperm and attention draw owners. Generator's execution advance and existing
+element/shard indexing are unchanged. A legal graph order change therefore does not assign a different source draw site.
+Installed Torch2.14.0 directly reports nondeterministic_seeded=True and pointwise=False for rand, randn, native_dropout,
+randperm, rrelu_with_noise_functional, scaled_dot_product_attention and prims.normal. The earlier worker note that
+prims.normal lacked the tag was incorrect. No exception list was added. Actual RNG construction/numerical evidence is
+pending the coordinated native ABI release; no distributed stochastic or performance claim is made.
+
+Remaining live generic ownership includes placement replication/view-chain queries, rdma fixed-point sharding and
+schedule transfer-event precedence. Domain transfer application over an already produced order is distinct from a
+second traversal algorithm. No dead helper was ported merely to preserve its old API.

@@ -178,14 +178,25 @@ class Graph:
     # step: v's set the vertices whose rows lead to v (rows of predecessors: v's own closure row; `successors`: the
     # transposed column)
     def ancestors(self, order, successors=False):
-        if len(order) != self.data.vertices:
-            raise ValueError("a closure's order covers every vertex once")
-        start = C.cast(C.addressof(order.items.contents) + order.span.start * C.sizeof(C.c_uint32),
-                       C.POINTER(C.c_uint32))
         made = C.POINTER(Closed)()
-        _check(LIB.mesh_graph_closure(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context, start,
-                                      order.span.step, C.byref(made)))
+        _check(LIB.mesh_graph_closure(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context,
+                                      *self._order(order), C.byref(made)))
         return Closures(Owned(made, LIB.mesh_graph_closure_free, self), successors)
+
+    # mesh_graph_longest over the prerequisite rows (`incoming`: in_first/in_edge, else row_first/row_edge) processed in
+    # `order` (as ancestors'), `weight[e]` for the relation's own edge e: a View of the caller-owned lengths, by vertex
+    def longest(self, order, weight, incoming=False):
+        weights = (C.c_double * max(self.data.edges, 1))(*weight)
+        length = (C.c_double * max(self.data.vertices, 1))()
+        _check(LIB.mesh_graph_longest(self.relation.pointer, int(incoming), *self._order(order), weights, length))
+        return View((self, order, weights), length, range(self.data.vertices), float)
+
+    # the native start and step of an order View covering every vertex once; its length guards the native read
+    def _order(self, order):
+        if len(order) != self.data.vertices:
+            raise ValueError("an order covers every vertex once")
+        return C.cast(C.addressof(order.items.contents) + order.span.start * C.sizeof(C.c_uint32),
+                      C.POINTER(C.c_uint32)), order.span.step
 
     # the distinct edges in place, (from, to) objects
     def edges(self):
@@ -299,12 +310,6 @@ def postorder(universe, roots, neighbours):
     return Graph.adjacency(universe, neighbours).postorder(roots)
 
 
-# S. Zhang et al., HAP, EuroSys 2024, section 3.2; design/unequal-shards-change-request.md item 6
-def longest(vertices, predecessors, weight):
-    def length(v, lengths):
-        return max((at + weight(u, v) for u, at in zip(predecessors(v), lengths)), default=0)
-    return forward(postorder(vertices, vertices, predecessors), predecessors, length)
-
 
 # A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008, section 4, LR-PROBE;
 # design/unequal-shards-change-request.md item 13
@@ -386,6 +391,8 @@ LIB.mesh_graph_breadth.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_u
                                    C.POINTER(C.POINTER(Searched))]
 LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C.c_ssize_t,
                                    C.POINTER(C.POINTER(Closed))]
+LIB.mesh_graph_longest.restype = C.c_int
+LIB.mesh_graph_longest.argtypes = [C.c_void_p, C.c_int, _U, C.c_ssize_t, C.POINTER(C.c_double), C.POINTER(C.c_double)]
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
 LIB.mesh_graph_search_free.argtypes = [C.POINTER(Searched)]
 LIB.mesh_graph_closure_free.argtypes = [C.POINTER(Closed)]
@@ -696,37 +703,9 @@ def signature_span(made, executions):
     return spanned
 
 
-# design/compilation-composition-change-request.md item 6.2; mesh-graph.h mesh_graph_contract, mesh_graph_quotient
-LIB.mesh_graph_contract.restype = LIB.mesh_graph_quotient.restype = C.c_int
-LIB.mesh_graph_contract.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_ubyte),
-                                    C.POINTER(C.POINTER(Dependence)), C.POINTER(C.c_size_t)]
-LIB.mesh_graph_quotient.argtypes = [C.c_uint32, C.POINTER(C.c_uint32), C.c_size_t, C.POINTER(C.c_uint32),
-                                    C.POINTER(C.c_uint32), C.POINTER(C.POINTER(Dependence)), C.POINTER(C.c_size_t)]
-# ISO/IEC 9899:2018 7.22.3.3: the release of a relation the library allocated
+# ISO/IEC 9899:2018 7.22.3.3: the release of a conflict vector the library allocated
 LIB.free.restype = None
 LIB.free.argtypes = [C.c_void_p]
-
-
-def _relation(call):
-    made, count = C.POINTER(Dependence)(), C.c_size_t()
-    _check(call(C.byref(made), C.byref(count)))
-    try:
-        return [(e.source, e.sink) for e in made[:count.value]]
-    finally:
-        LIB.free(made)
-
-
-def contract(kept, edges):
-    edge, count = _array(Dependence, [Dependence(a, b, 0) for a, b in edges])
-    marks = (C.c_ubyte * max(len(kept), 1))(*kept)
-    return _relation(lambda made, size: LIB.mesh_graph_contract(len(kept), count, edge, marks, made, size))
-
-
-def quotient(class_of, edges):
-    tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
-    classes = (C.c_uint32 * max(len(class_of), 1))(*class_of)
-    return _relation(lambda made, size: LIB.mesh_graph_quotient(len(class_of), classes, tails[1], tails[0], heads[0],
-                                                                made, size))
 
 
 # mesh-graph.h struct mesh_graph_view (its struct mesh_strided in place) and struct mesh_graph_conflict,
@@ -779,6 +758,15 @@ def intersection(a, b):
         for r in (a, b))
 
 
+# mesh-graph.h struct mesh_graph_witness (16 bytes) and struct mesh_graph_origin (24 bytes)
+class Witness(C.Structure):
+    _fields_ = [('record', C.c_size_t), ('reverse', C.c_uint32), ('known', C.c_uint32)]
+
+
+class Origin(C.Structure):
+    _fields_ = [('relation', C.c_void_p), ('witness', Witness)]
+
+
 # mesh-graph.h struct mesh_graph_relation_data, mesh_graph_relation_create, mesh_graph_relation_data and
 # mesh_graph_relation_free; design/compilation-composition-change-request.md items 6, 6.4 and 7
 class RelationData(C.Structure):
@@ -788,7 +776,8 @@ class RelationData(C.Structure):
                 ('row_first', C.POINTER(C.c_size_t)), ('row_edge', C.POINTER(C.c_size_t)),
                 ('in_first', C.POINTER(C.c_size_t)), ('in_edge', C.POINTER(C.c_size_t)),
                 ('parent', C.c_void_p), ('source_first', C.POINTER(C.c_size_t)), ('source', C.POINTER(C.c_size_t)),
-                ('class_of', C.POINTER(C.c_uint32)), ('kept', C.POINTER(C.c_ubyte)), ('query', C.c_uint32)]
+                ('class_of', C.POINTER(C.c_uint32)), ('kept', C.POINTER(C.c_ubyte)), ('query', C.c_uint32),
+                ('origin', C.POINTER(Origin))]
 
 
 LIB.mesh_graph_relation_create.restype = C.c_int
@@ -888,19 +877,6 @@ def orderings(edges, commit):
             barred.add(b)
             last[commit[b]] = b
     return barred, fences, waits
-
-
-# M. Lam, PLDI 1988, section 2.3; mesh-graph.h mesh_graph_contract_unrolled
-LIB.mesh_graph_contract_unrolled.restype = C.c_int
-LIB.mesh_graph_contract_unrolled.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_ubyte),
-                                             C.c_uint32, C.POINTER(C.POINTER(Dependence)), C.POINTER(C.c_size_t)]
-
-
-def unrolled(vertices, edges, copies):
-    edge, count = _array(Dependence, [Dependence(a, b, delay) for a, b, delay in edges])
-    kept = (C.c_ubyte * max(vertices, 1))(*[1] * vertices)
-    return _relation(lambda made, size: LIB.mesh_graph_contract_unrolled(vertices, count, edge, kept, copies, made,
-                                                                         size))
 
 
 # design/torch-source-lowering-change-request.md item 3

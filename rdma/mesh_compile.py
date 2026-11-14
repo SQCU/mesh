@@ -75,7 +75,7 @@ class Shard(int):
 
 
 # GSPMD section 4.1, "Static operator configurations"
-Local = collections.namedtuple('Local', 'op target args kwargs annotation', defaults=(None,))
+Local = collections.namedtuple('Local', 'op target args kwargs annotation site', defaults=(None, None))
 AttentionOrigin = collections.namedtuple('AttentionOrigin', 'key page cuts shape offsets stripes',
                                          defaults=(0, 0, (), (), (), ()))
 # GSPMD sections 3.2, 3.5, 4 and 4.6
@@ -1160,10 +1160,12 @@ def _call(local, args, kwargs):
 
 
 # torch 2.14.0 torch/fx/node.py Node; torch/_refs/__init__.py _to_copy: an FX call's operator, operands and keywords,
-# its copy's placement the program's (design/compilation-composition-change-request.md item 6)
+# its copy's placement the program's (design/compilation-composition-change-request.md item 6), and its source draw
+# site (compiler/mesh_compiler/export.py read `site`)
 def _local_call(node):
     return Local(node.op, node.target, node.args, {k: v for k, v in node.kwargs.items() if k != 'device'}
-                 if getattr(node.target, 'overloadpacket', None) is A._to_copy else node.kwargs)
+                 if getattr(node.target, 'overloadpacket', None) is A._to_copy else node.kwargs,
+                 site=node.meta.get('site'))
 
 
 # design/aot-compilation-change-request.md, appendix item 7; ExecuTorch, "Concepts"; PyTorch, "Meta device"; torch
@@ -6000,7 +6002,8 @@ def _heads(x, group, kv):
     return x.as_strided(shape, stride, x.storage_offset())
 
 
-def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=AttentionOrigin(), generator=None):
+def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=AttentionOrigin(), generator=None,
+               site=None):
     length, size, other, value = q.shape[-2], q.shape[-1], k.shape[-2], v.shape[-1]
     t = _compute(q.dtype, k.dtype, v.dtype, torch.float32)
     qs, ks, vs = _heads(q, group, False), _heads(k, group, True), _heads(v, group, True)
@@ -6016,7 +6019,7 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=Att
     score_storage = _temporary([*shape, min(rows, other)], STORED[t])
     m, s, bm, bs, alpha = [_temporary(shape, STORED[t]) for _ in range(5)]
     acc = _temporary([*shape, value], STORED[t])
-    drawn = generator.site() if dropout else None
+    drawn = generator.site(site) if dropout else None
     ops = []
     for j, (lo, hi) in enumerate(blocks):
         count = hi - lo
@@ -6096,10 +6099,10 @@ def _attending(given):
             mask.expand(*lead, q.shape[-2], k.shape[-2]) if mask is not None else None), given['is_causal'], scale, group
 
 
-def _attended(target, given, outs, origin=AttentionOrigin(), generator=None):
+def _attended(target, given, outs, origin=AttentionOrigin(), generator=None, site=None):
     _typed(target, [given['query'], given['key'], given['value'], given['attn_mask']], outs)
     operands, causal, scale, group = _attending(given)
-    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), origin, generator)
+    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), origin, generator, site)
 
 
 # J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw, Parallel random numbers: as easy as 1, 2, 3, SC 2011, §3.1 and
@@ -6114,15 +6117,16 @@ def seeded(seed):
     return torch.tensor([w - (1 << 32) if w >= 1 << 31 else w for w in words], dtype=torch.int32)
 
 
-# a constructed program's generator: its caller's STATE words, each draw site of the construction numbered from 1, and
-# their advance once an execution after the program's draws
+# a constructed program's generator: its caller's STATE words, each draw site its source identity (compiler/
+# mesh_compiler/export.py read `site`) where supplied, else numbered in construction order from 1, `sites` the count of
+# the construction's draws, and their advance once an execution after the program's draws
 class Generator:
     def __init__(self, state):
         self.state, self.sites = state, 0
 
-    def site(self):
+    def site(self, identity=None):
         self.sites += 1
-        return self.state, self.sites
+        return self.state, self.sites if identity is None else identity
 
     def stepped(self):
         return [_stepped(self.state)] if self.sites else []
@@ -6175,7 +6179,7 @@ NORMAL = (A.randn, A.randn_like, torch.ops.prims.normal)
 DRAWS = (A.rand, A.rand_like, *NORMAL, A.randint, A.randint_like, A.bernoulli, A.uniform, A.native_dropout)
 
 
-def _random(target, given, outs, generator):
+def _random(target, given, outs, generator, site=None):
     packet, out, scale = target.overloadpacket, outs[0], 1
     if out.is_complex() and packet in (A.rand, A.rand_like, *NORMAL, A.uniform):
         out, scale = torch.view_as_real(out), math.sqrt(0.5) if packet in NORMAL else 1
@@ -6188,13 +6192,13 @@ def _random(target, given, outs, generator):
         if train is False:
             r.done(_store(r, v, F32, out), r.const(True, BOOL))
         else:
-            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, generator.site())[0]), r.const(1 - p, F32))
+            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, generator.site(site))[0]), r.const(1 - p, F32))
             scaled = r('mul', F32, v, r.const(1 / (1 - p) if p < 1 else 0, F32))
             r.done(_store(r, r('select', F32, keep, scaled, r.const(0, F32)), F32, out), keep)
         return [_Generic(out.shape, inputs, [(out, _same(out.dim())), (outs[1], _same(out.dim()))], r)]
     if packet is A.bernoulli and given.get('p') is None:
         inputs.append((given['self'], _same(out.dim())))
-    words = _draws(r, out, inputs, generator.site())
+    words = _draws(r, out, inputs, generator.site(site))
     u = _uniform(r, words[0])
     if packet in NORMAL:
         first = r('add', F32, u, r.const(2.0 ** -24, F32))
@@ -6224,7 +6228,7 @@ def _random(target, given, outs, generator):
 # activations in convolutional network, arXiv:1505.00853, 2015): training, an element x <= 0 its slope a Philox draw
 # a ~ U(lower, upper), out = a x and noise = a, other elements x and 1; evaluation, the slope (lower + upper) / 2, the
 # noise passed through (torch 2.14.0 aten rrelu_with_noise_functional)
-def _rrelu(target, given, outs, generator):
+def _rrelu(target, given, outs, generator, site=None):
     x, noise, lower, upper = given['self'], given['noise'], float(given['lower']), float(given['upper'])
     (out, kept), same = outs, _same(outs[0].dim())
     _typed(target, [x, noise], outs)
@@ -6235,7 +6239,7 @@ def _rrelu(target, given, outs, generator):
         made = r('select', t, r('ge', BOOL, v, r.const(0, t)), v, r('mul', t, v, r.const((lower + upper) / 2, t)))
         r.done(_store(r, made, t, out))
         return [_Generic(out.shape, inputs, [(out, same)], r)] + _copy(kept, noise)
-    drawn = _convert(r, _uniform(r, _draws(r, out, inputs, generator.site())[0]), F32, t)
+    drawn = _convert(r, _uniform(r, _draws(r, out, inputs, generator.site(site))[0]), F32, t)
     slope = r('add', t, r.const(lower, t), r('mul', t, drawn, r.const(upper - lower, t)))
     low = r('le', BOOL, v, r.const(0, t))
     r.done(_store(r, r('select', t, low, r('mul', t, v, slope), v), t, out),
@@ -6289,10 +6293,10 @@ def _masked(target, given, outs):
 
 
 # PyTorch 2.14 documentation, torch.randperm: the ranks of n uniform draws, a uniformly random permutation
-def _permuted(target, given, outs, generator):
+def _permuted(target, given, outs, generator, site=None):
     (out,) = outs
     keys = _temporary([given['n']])
-    ops = _random(A.rand.default, {'size': [given['n']]}, [keys], generator)
+    ops = _random(A.rand.default, {'size': [given['n']]}, [keys], generator, site)
     return ops + _ranked(A.sort.default, {'self': keys, 'dim': 0, 'descending': False}, [_temporary([given['n']]), out])
 
 
@@ -6506,10 +6510,10 @@ def _lowering(local, page, generator=None):
     if packet is A.scaled_dot_product_attention:
         origin = local.annotation if isinstance(local.annotation, AttentionOrigin) else AttentionOrigin(0, page)
         return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kwargs), outs, origin,
-                                                    generator)
+                                                    generator, local.site)
     if packet in DRAWN:
         return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs,
-                                                          generator)
+                                                          generator, local.site)
     if local.target is striped:
         return lambda args, kwargs, outs: _striped(outs[0], *args)
     if packet in (A._linalg_det, A._linalg_slogdet):
