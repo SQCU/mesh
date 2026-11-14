@@ -1,0 +1,4292 @@
+{
+ "rows": [
+  {
+   "row": 0,
+   "call": 0,
+   "source_function": 0,
+   "instance": 0,
+   "planned": 0,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 0,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 1,
+    "waits": 0
+   },
+   "counts": 64,
+   "steps": false,
+   "values": 64,
+   "storages": 64,
+   "composite": false
+  },
+  {
+   "row": 1,
+   "call": 1,
+   "source_function": 1,
+   "instance": 1,
+   "planned": 1,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 1,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 5,
+    "waits": 0
+   },
+   "counts": 4524,
+   "steps": false,
+   "values": 4524,
+   "storages": 4524,
+   "composite": false
+  },
+  {
+   "row": 2,
+   "call": 2,
+   "source_function": 1,
+   "instance": 2,
+   "planned": 2,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 2,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 5,
+    "waits": 0
+   },
+   "counts": 4524,
+   "steps": false,
+   "values": 4524,
+   "storages": 4524,
+   "composite": false
+  },
+  {
+   "row": 3,
+   "call": 3,
+   "source_function": 1,
+   "instance": 3,
+   "planned": 3,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 3,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 5,
+    "waits": 0
+   },
+   "counts": 4524,
+   "steps": false,
+   "values": 4524,
+   "storages": 4524,
+   "composite": false
+  },
+  {
+   "row": 4,
+   "call": 4,
+   "source_function": 1,
+   "instance": 4,
+   "planned": 4,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 4,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 5,
+    "waits": 0
+   },
+   "counts": 4524,
+   "steps": false,
+   "values": 4524,
+   "storages": 4524,
+   "composite": false
+  },
+  {
+   "row": 5,
+   "call": 5,
+   "source_function": 1,
+   "instance": 5,
+   "planned": 5,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 5,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 5,
+    "waits": 0
+   },
+   "counts": 4524,
+   "steps": false,
+   "values": 4524,
+   "storages": 4524,
+   "composite": false
+  },
+  {
+   "row": 6,
+   "call": 6,
+   "source_function": 1,
+   "instance": 6,
+   "planned": 6,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 6,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 5,
+    "waits": 0
+   },
+   "counts": 4524,
+   "steps": false,
+   "values": 4524,
+   "storages": 4524,
+   "composite": false
+  },
+  {
+   "row": 7,
+   "call": 7,
+   "source_function": 1,
+   "instance": 7,
+   "planned": 7,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 7,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 5,
+    "waits": 0
+   },
+   "counts": 4524,
+   "steps": false,
+   "values": 4524,
+   "storages": 4524,
+   "composite": false
+  },
+  {
+   "row": 8,
+   "call": 8,
+   "source_function": 2,
+   "instance": 8,
+   "planned": 8,
+   "ordinal": 0,
+   "every": 1,
+   "execution_at_block0": 0,
+   "planned_call": {
+    "plan": 0,
+    "lead": 0,
+    "function": 8,
+    "ordinal": 0,
+    "every": 1,
+    "parts": 1,
+    "waits": 0
+   },
+   "counts": 16,
+   "steps": false,
+   "values": 16,
+   "storages": 16,
+   "composite": false
+  }
+ ],
+ "arena": {
+  "buffer": 4344737920,
+  "length": 6944,
+  "bytes": 6944
+ },
+ "positions": [
+  {
+   "row": 0,
+   "side": "output",
+   "position": 0,
+   "slot": 1,
+   "original_root": 2,
+   "original_view": 3,
+   "byte_offset": 0,
+   "root": 2,
+   "view": 3,
+   "metadata": {
+    "shape": [
+     4,
+     4
+    ],
+    "stride": [
+     4,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.float32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     2,
+     1,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 1,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      64
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "0",
+     "2",
+     "1",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     64
+    ]
+   }
+  },
+  {
+   "row": 0,
+   "side": "output",
+   "position": 1,
+   "slot": 2,
+   "original_root": 4,
+   "original_view": 5,
+   "byte_offset": 0,
+   "root": 4,
+   "view": 5,
+   "metadata": {
+    "shape": [
+     4,
+     4
+    ],
+    "stride": [
+     4,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.float32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 4,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 4,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     4,
+     2,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 2,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3584
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "0",
+     "4",
+     "2",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3584
+    ]
+   }
+  },
+  {
+   "row": 0,
+   "side": "output",
+   "position": 2,
+   "slot": 3,
+   "original_root": 6,
+   "original_view": 7,
+   "byte_offset": 0,
+   "root": 6,
+   "view": 7,
+   "metadata": {
+    "shape": [
+     5,
+     2
+    ],
+    "stride": [
+     2,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.int32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 6,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 6,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     5,
+     2
+    ],
+    "terms": [
+     [
+      0,
+      2,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 40,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 40,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     6,
+     3,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 3,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 40,
+     "offsets": [
+      128
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "0",
+     "6",
+     "3",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     128
+    ]
+   }
+  },
+  {
+   "row": 0,
+   "side": "output",
+   "position": 3,
+   "slot": 4,
+   "original_root": 8,
+   "original_view": 9,
+   "byte_offset": 0,
+   "root": 8,
+   "view": 9,
+   "metadata": {
+    "shape": [
+     1
+    ],
+    "stride": [
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.int32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 8,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 8,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     8,
+     4,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 4,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 4,
+     "offsets": [
+      400
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "0",
+     "8",
+     "4",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     400
+    ]
+   }
+  },
+  {
+   "row": 0,
+   "side": "output",
+   "position": 4,
+   "slot": 5,
+   "original_root": 10,
+   "original_view": 11,
+   "byte_offset": 0,
+   "root": 10,
+   "view": 11,
+   "metadata": {
+    "shape": [
+     1
+    ],
+    "stride": [
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.float32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 10,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 10,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     10,
+     5,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 5,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 0,
+     "bytes": 4,
+     "offsets": [
+      6928
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "0",
+     "10",
+     "5",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 0,
+    "offsets": [
+     6928
+    ]
+   }
+  },
+  {
+   "row": 0,
+   "side": "output",
+   "position": 5,
+   "slot": 6,
+   "original_root": 12,
+   "original_view": 13,
+   "byte_offset": 0,
+   "root": 12,
+   "view": 13,
+   "metadata": {
+    "shape": [
+     1
+    ],
+    "stride": [
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.int32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 12,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 12,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     12,
+     6,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 6,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 0,
+     "bytes": 4,
+     "offsets": [
+      6936
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "0",
+     "12",
+     "6",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 0,
+    "offsets": [
+     6936
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "input",
+   "position": 0,
+   "slot": 0,
+   "original_root": 0,
+   "original_view": 1,
+   "byte_offset": 0,
+   "root": 0,
+   "view": 1,
+   "metadata": null,
+   "input_root": [
+    "blocks",
+    "user_input",
+    0,
+    0,
+    1
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 0,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 0,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     0,
+     1,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 1,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      64
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "0",
+     "1",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     64
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "input",
+   "position": 1,
+   "slot": 1,
+   "original_root": 2,
+   "original_view": 3,
+   "byte_offset": 0,
+   "root": 2,
+   "view": 3,
+   "metadata": null,
+   "input_root": [
+    "vectors",
+    "user_input",
+    0,
+    2,
+    3
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     2,
+     2,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 2,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3584
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "2",
+     "2",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3584
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "input",
+   "position": 2,
+   "slot": 2,
+   "original_root": 4,
+   "original_view": 5,
+   "byte_offset": 0,
+   "root": 4,
+   "view": 5,
+   "metadata": null,
+   "input_root": [
+    "agenda",
+    "user_input",
+    0,
+    4,
+    5
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 4,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 4,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     5,
+     2
+    ],
+    "terms": [
+     [
+      0,
+      2,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 40,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 40,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     4,
+     3,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 3,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 40,
+     "offsets": [
+      128
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "4",
+     "3",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     128
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "input",
+   "position": 3,
+   "slot": 3,
+   "original_root": 6,
+   "original_view": 7,
+   "byte_offset": 0,
+   "root": 6,
+   "view": 7,
+   "metadata": null,
+   "input_root": [
+    "top",
+    "user_input",
+    0,
+    6,
+    7
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 6,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 6,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     6,
+     4,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 4,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 4,
+     "offsets": [
+      400
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "6",
+     "4",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     400
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "input",
+   "position": 4,
+   "slot": 4,
+   "original_root": 8,
+   "original_view": 9,
+   "byte_offset": 0,
+   "root": 8,
+   "view": 9,
+   "metadata": null,
+   "input_root": [
+    "norm",
+    "user_input",
+    0,
+    8,
+    9
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 8,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 8,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     8,
+     5,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 5,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 0,
+     "bytes": 4,
+     "offsets": [
+      6928
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "8",
+     "5",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 0,
+    "offsets": [
+     6928
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "input",
+   "position": 5,
+   "slot": 5,
+   "original_root": 10,
+   "original_view": 11,
+   "byte_offset": 0,
+   "root": 10,
+   "view": 11,
+   "metadata": null,
+   "input_root": [
+    "site",
+    "user_input",
+    0,
+    10,
+    11
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 10,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 10,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 60,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     10,
+     6,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 6,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 0,
+     "bytes": 4,
+     "offsets": [
+      6936
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "10",
+     "6",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 0,
+    "offsets": [
+     6936
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "output",
+   "position": 0,
+   "slot": 7,
+   "original_root": 12,
+   "original_view": 13,
+   "byte_offset": 0,
+   "root": 12,
+   "view": 13,
+   "metadata": {
+    "shape": [
+     4,
+     4
+    ],
+    "stride": [
+     4,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.float32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 12,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 12,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     12,
+     7,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 7,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3648
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "12",
+     "7",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3648
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "output",
+   "position": 1,
+   "slot": 8,
+   "original_root": 14,
+   "original_view": 15,
+   "byte_offset": 0,
+   "root": 14,
+   "view": 15,
+   "metadata": {
+    "shape": [
+     4,
+     4
+    ],
+    "stride": [
+     4,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.float32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 14,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 14,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     14,
+     8,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 8,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3712
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "14",
+     "8",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3712
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "output",
+   "position": 2,
+   "slot": 9,
+   "original_root": 16,
+   "original_view": 17,
+   "byte_offset": 0,
+   "root": 16,
+   "view": 17,
+   "metadata": {
+    "shape": [
+     5,
+     2
+    ],
+    "stride": [
+     2,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.int32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 16,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 16,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     5,
+     2
+    ],
+    "terms": [
+     [
+      0,
+      2,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 40,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 40,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     16,
+     9,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 9,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 40,
+     "offsets": [
+      3840
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "16",
+     "9",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3840
+    ]
+   }
+  },
+  {
+   "row": 1,
+   "side": "output",
+   "position": 3,
+   "slot": 10,
+   "original_root": 18,
+   "original_view": 19,
+   "byte_offset": 0,
+   "root": 18,
+   "view": 19,
+   "metadata": {
+    "shape": [
+     1
+    ],
+    "stride": [
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.int32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 18,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 18,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 61,
+    "end": 61,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     18,
+     10,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 10,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 4,
+     "offsets": [
+      6552
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "1",
+     "18",
+     "10",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     6552
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "input",
+   "position": 0,
+   "slot": 0,
+   "original_root": 0,
+   "original_view": 1,
+   "byte_offset": 0,
+   "root": 0,
+   "view": 1,
+   "metadata": null,
+   "input_root": [
+    "blocks",
+    "user_input",
+    0,
+    0,
+    1
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 0,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 0,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     0,
+     27,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 27,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3584
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "0",
+     "27",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3584
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "input",
+   "position": 1,
+   "slot": 1,
+   "original_root": 2,
+   "original_view": 3,
+   "byte_offset": 0,
+   "root": 2,
+   "view": 3,
+   "metadata": null,
+   "input_root": [
+    "vectors",
+    "user_input",
+    0,
+    2,
+    3
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     2,
+     28,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 28,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3776
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "2",
+     "28",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3776
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "input",
+   "position": 2,
+   "slot": 2,
+   "original_root": 4,
+   "original_view": 5,
+   "byte_offset": 0,
+   "root": 4,
+   "view": 5,
+   "metadata": null,
+   "input_root": [
+    "agenda",
+    "user_input",
+    0,
+    4,
+    5
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 4,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 4,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     5,
+     2
+    ],
+    "terms": [
+     [
+      0,
+      2,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 40,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 40,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     4,
+     29,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 29,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 40,
+     "offsets": [
+      3880
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "4",
+     "29",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3880
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "input",
+   "position": 3,
+   "slot": 3,
+   "original_root": 6,
+   "original_view": 7,
+   "byte_offset": 0,
+   "root": 6,
+   "view": 7,
+   "metadata": null,
+   "input_root": [
+    "top",
+    "user_input",
+    0,
+    6,
+    7
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 6,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 6,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     6,
+     30,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 30,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 4,
+     "offsets": [
+      6552
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "6",
+     "30",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     6552
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "input",
+   "position": 4,
+   "slot": 4,
+   "original_root": 8,
+   "original_view": 9,
+   "byte_offset": 0,
+   "root": 8,
+   "view": 9,
+   "metadata": null,
+   "input_root": [
+    "norm",
+    "user_input",
+    0,
+    8,
+    9
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 8,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 8,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     8,
+     5,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 5,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 0,
+     "bytes": 4,
+     "offsets": [
+      6928
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "8",
+     "5",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 0,
+    "offsets": [
+     6928
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "input",
+   "position": 5,
+   "slot": 5,
+   "original_root": 10,
+   "original_view": 11,
+   "byte_offset": 0,
+   "root": 10,
+   "view": 11,
+   "metadata": null,
+   "input_root": [
+    "site",
+    "user_input",
+    0,
+    10,
+    11
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 10,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 7,
+    "storage": 10,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 60,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     10,
+     6,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 6,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 0,
+     "bytes": 4,
+     "offsets": [
+      6936
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "10",
+     "6",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 0,
+    "offsets": [
+     6936
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "output",
+   "position": 0,
+   "slot": 7,
+   "original_root": 12,
+   "original_view": 13,
+   "byte_offset": 0,
+   "root": 12,
+   "view": 13,
+   "metadata": {
+    "shape": [
+     4,
+     4
+    ],
+    "stride": [
+     4,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.float32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 12,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 12,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     12,
+     31,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 31,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3648
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "12",
+     "31",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3648
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "output",
+   "position": 1,
+   "slot": 8,
+   "original_root": 14,
+   "original_view": 15,
+   "byte_offset": 0,
+   "root": 14,
+   "view": 15,
+   "metadata": {
+    "shape": [
+     4,
+     4
+    ],
+    "stride": [
+     4,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.float32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 14,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 13,
+    "storage": 14,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     14,
+     32,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 32,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3712
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "14",
+     "32",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3712
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "output",
+   "position": 2,
+   "slot": 9,
+   "original_root": 16,
+   "original_view": 17,
+   "byte_offset": 0,
+   "root": 16,
+   "view": 17,
+   "metadata": {
+    "shape": [
+     5,
+     2
+    ],
+    "stride": [
+     2,
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.int32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 16,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 16,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 40,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     5,
+     2
+    ],
+    "terms": [
+     [
+      0,
+      2,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 40,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 61,
+    "shares": 0,
+    "bytes": 40,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     16,
+     33,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 33,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 40,
+     "offsets": [
+      3840
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "16",
+     "33",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3840
+    ]
+   }
+  },
+  {
+   "row": 7,
+   "side": "output",
+   "position": 3,
+   "slot": 10,
+   "original_root": 18,
+   "original_view": 19,
+   "byte_offset": 0,
+   "root": 18,
+   "view": 19,
+   "metadata": {
+    "shape": [
+     1
+    ],
+    "stride": [
+     1
+    ],
+    "offset": 0,
+    "dtype": "torch.int32"
+   },
+   "root_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 18,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 3,
+    "scalar": 7,
+    "storage": 18,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 4,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     1
+    ],
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 4,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 61,
+    "end": 61,
+    "shares": 0,
+    "bytes": 4,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     18,
+     34,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 34,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 4,
+     "offsets": [
+      6456
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "7",
+     "18",
+     "34",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     6456
+    ]
+   }
+  },
+  {
+   "row": 8,
+   "side": "input",
+   "position": 0,
+   "slot": 0,
+   "original_root": 0,
+   "original_view": 1,
+   "byte_offset": 0,
+   "root": 0,
+   "view": 1,
+   "metadata": null,
+   "input_root": [
+    "blocks",
+    "user_input",
+    0,
+    0,
+    1
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 0,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 0,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     0,
+     31,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 31,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3648
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "8",
+     "0",
+     "31",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3648
+    ]
+   }
+  },
+  {
+   "row": 8,
+   "side": "input",
+   "position": 1,
+   "slot": 1,
+   "original_root": 2,
+   "original_view": 3,
+   "byte_offset": 0,
+   "root": 2,
+   "view": 3,
+   "metadata": null,
+   "input_root": [
+    "vectors",
+    "user_input",
+    0,
+    2,
+    3
+   ],
+   "root_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_info": {
+    "role": 0,
+    "scalar": 13,
+    "storage": 2,
+    "function": 4294967295,
+    "index": 4294967295,
+    "word": 0,
+    "of": 4294967295,
+    "range": 0,
+    "received": 0,
+    "sent": 0,
+    "zeroed": 0,
+    "sendings": 0,
+    "identity": 0,
+    "bytes": 64,
+    "offset": 0,
+    "at": 0,
+    "data_bytes": 0,
+    "data": null,
+    "buffer": null,
+    "page_bytes": 0,
+    "pages": 0,
+    "source": 4294967295
+   },
+   "view_geometry": {
+    "shape": [
+     4,
+     4
+    ],
+    "terms": [
+     [
+      0,
+      4,
+      1,
+      0
+     ],
+     [
+      1,
+      1,
+      1,
+      0
+     ]
+    ],
+    "offset": 0
+   },
+   "storage": 64,
+   "function_value": {
+    "run": 0,
+    "kind": 1,
+    "state": 0,
+    "begin": 0,
+    "end": 0,
+    "shares": 0,
+    "bytes": 64,
+    "count": 1,
+    "offsets": []
+   },
+   "joined": [
+    [
+     2,
+     32,
+     0,
+     1
+    ]
+   ],
+   "joint_roots": [
+    {
+     "s": 32,
+     "run": 1,
+     "kind": 1,
+     "state": 0,
+     "begin": 0,
+     "end": 0,
+     "shares": 1,
+     "bytes": 64,
+     "offsets": [
+      3712
+     ]
+    }
+   ],
+   "solved_bindings": [
+    [
+     "8",
+     "2",
+     "32",
+     "0"
+    ]
+   ],
+   "operands": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     3712
+    ]
+   }
+  }
+ ],
+ "initializers": [],
+ "prefix_agenda_top": [
+  {
+   "position": 2,
+   "root": 6,
+   "own_initializers": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     128
+    ]
+   },
+   "extent": 40,
+   "copies": [
+    {
+     "copy": 0,
+     "offset": 128,
+     "final": {
+      "bytes": 40,
+      "head": "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "2c34ce1df23b838c5abf2a7f6437cca3d3067ed509ff25f11df6b11b582b51eb"
+     },
+     "overlapping": []
+    }
+   ]
+  },
+  {
+   "position": 3,
+   "root": 8,
+   "own_initializers": [],
+   "placement": {
+    "status": 0,
+    "buffer": 4344737920,
+    "arena": true,
+    "frames": null,
+    "copies": 1,
+    "ahead": 0,
+    "shares": 1,
+    "offsets": [
+     400
+    ]
+   },
+   "extent": 4,
+   "copies": [
+    {
+     "copy": 0,
+     "offset": 400,
+     "final": {
+      "bytes": 4,
+      "head": "00000000",
+      "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+     },
+     "overlapping": []
+    }
+   ]
+  }
+ ],
+ "double_placements": []
+}
