@@ -1,0 +1,92 @@
+{
+  "original": [
+    [
+      "aten.linalg_pinv.atol_rtol_tensor",
+      1
+    ]
+  ],
+  "functions": [
+    {
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (3, 3), (3, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+      "inputs": 1,
+      "outputs": 9,
+      "decomposed": 41,
+      "device_decomposed": 41,
+      "origins": [
+        [
+          "aten.linalg_pinv.atol_rtol_tensor",
+          1
+        ]
+      ],
+      "sites": [],
+      "tolerances": [
+        [
+          "aten.full.default",
+          "torch.float32",
+          "([], 0.0)"
+        ],
+        [
+          "aten.full.default",
+          "torch.float32",
+          "([], 3.5762786865234375e-07)"
+        ],
+        [
+          "aten.full.default",
+          "torch.bool",
+          "([3, 3], True)"
+        ],
+        [
+          "aten.full.default",
+          "torch.int32",
+          "([1], 1)"
+        ],
+        [
+          "aten.full.default",
+          "torch.int32",
+          "([1], 1)"
+        ]
+      ]
+    },
+    {
+      "key": "('qdwh_eigh_step', 'p', (3, 3), 'torch.float32', 10)",
+      "inputs": 6,
+      "outputs": 4,
+      "decomposed": 0,
+      "device_decomposed": 0,
+      "origins": [],
+      "sites": [
+        [
+          "mesh.qdwh_eigh_step.default",
+          1
+        ]
+      ],
+      "tolerances": []
+    },
+    {
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (3, 3), (3, 1), 0, 0),)), 'suffix', '_linalg_eigh')",
+      "inputs": 5,
+      "outputs": 1,
+      "decomposed": 18,
+      "device_decomposed": 18,
+      "origins": [
+        [
+          "aten.linalg_pinv.atol_rtol_tensor",
+          1
+        ]
+      ],
+      "sites": [],
+      "tolerances": []
+    }
+  ],
+  "calls": [
+    "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (3, 3), (3, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+    "('qdwh_eigh_step', 'p', (3, 3), 'torch.float32', 10)",
+    "('qdwh_eigh_step', 'p', (3, 3), 'torch.float32', 10)",
+    "('qdwh_eigh_step', 'p', (3, 3), 'torch.float32', 10)",
+    "('qdwh_eigh_step', 'p', (3, 3), 'torch.float32', 10)",
+    "('qdwh_eigh_step', 'p', (3, 3), 'torch.float32', 10)",
+    "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (3, 3), (3, 1), 0, 0),)), 'suffix', '_linalg_eigh')"
+  ],
+  "outer_outputs": "((getitem,),)",
+  "roles": "[(<OutputKind.USER_OUTPUT: 1>, None)]"
+}

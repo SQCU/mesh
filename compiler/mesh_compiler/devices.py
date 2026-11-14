@@ -21,13 +21,18 @@ def copied(graph, value, device, processor):
 # torch/fx/graph_module.py GraphModule.__deepcopy__ and torch/fx/graph.py Graph.__deepcopy__, val_map=memo
 def on_devices(graph_module, processors):
     original, parts = graph_module.meta["transfers"], graph_module.meta["input_parts"]
-    memo = {id(original): original, id(parts): parts}
+    decomposed = graph_module.meta.get("decomposed", {})
+    memo = {id(original): original, id(parts): parts, id(decomposed): decomposed}
     graph_module = copy.deepcopy(graph_module, memo)
     transfers = {channel: (memo[sender], memo[arrival]) for channel, (sender, arrival) in original.items()}
     graph, graph_module.meta["transfers"] = graph_module.graph, transfers
     graph_module.meta["input_parts"] = {memo[node]: tuple((processor, memo[part], geometry)
                                                           for processor, part, geometry in pieces)
                                         for node, pieces in parts.items()}
+    # compiler/mesh_compiler/decompose.py _expanded `decomposed`: each generated node the copy's, its original source
+    # node itself (not in this graph, not copied)
+    if "decomposed" in graph_module.meta:
+        graph_module.meta["decomposed"] = {memo[node]: source for node, source in decomposed.items()}
     # compiler/mesh_compiler/placement.py `work_axes`: its values are the copy's (torch.fx Graph.node_copy copies meta
     # shallowly)
     for node in graph.nodes:

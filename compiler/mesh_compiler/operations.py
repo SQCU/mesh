@@ -2110,48 +2110,39 @@ def _eigen(target, given, outs):
     return ops
 
 
-# PyTorch 2.15 documentation, torch.linalg.pinv
-def _pseudoinverse(target, given, outs, default_tolerance_dtype=torch.float64):
-    a, (out,), ops = given['self'], outs, []
+# design/torch-source-lowering-change-request.md items 5 and 6; PyTorch v2.14.0 aten/src/ATen/native/LinearAlgebra.cpp,
+# get_atol_rtol and linalg_pinv (each overload: atol and rtol tensors or floats, or rcond the relative tolerance with atol
+# zero): an empty input's result the empty (n x m); a tolerance a tensor as given, a float or the default one of the
+# selected device's tolerance dtype (`tolerance_dtype`: float32 on MPS, float64 else); the default rtol
+# eps max(m, n), zero where an atol > 0 is given; tol = max(atol, rtol max |S|) per matrix (each tolerance's last
+# dimension added); the reciprocal of each value above tol, zero else, in the input's dtype; Hermitian through
+# linalg_eigh (|eigenvalues| the singular values, U diag(S+) U^H), else linalg_svd (Vh^H diag(S+) U^H). The one pinv
+# formulation, expanded before the eigh outline (compiler/mesh_compiler/decompose.py outline)
+def _pseudoinverse(self, atol=None, rtol=None, hermitian=False, rcond=None, tolerance_dtype=torch.float64):
+    a, (m, n) = self, self.shape[-2:]
     if not a.numel():
-        return _copy(out, a.transpose(-2, -1))
-    batch, (m, n), k = a.shape[:-2], a.shape[-2:], min(a.shape[-2:])
-    values = _temporary((*batch, k), a.real.dtype)
-    if given['hermitian']:
-        vectors = _temporary(a.shape, a.dtype)
-        ops += _eigen_hermitian(A._linalg_eigh.default, {'A': a, 'UPLO': 'L', 'compute_v': True}, [values, vectors])
-        left, right = vectors, _linalg_transpose(vectors, ops, True, True)
-    else:
-        u, vh = _temporary((*batch, m, k), a.dtype), _temporary((*batch, k, n), a.dtype)
-        ops += _singular(A._linalg_svd.default, {'A': a, 'full_matrices': False, 'compute_uv': True}, [u, values, vh])
-        left, right = _linalg_transpose(vh, ops, True, True), _linalg_transpose(u, ops, True, True)
-    absolute, maximum = _temporary(values.shape, values.dtype), _temporary(batch, values.dtype)
-    ops += _elementwise('abs', absolute, values)
-    ops += _reduced(A.amax.default, {'self': absolute, 'dim': [-1], 'keepdim': False}, [maximum])
-    batch = out.shape[:-2]
-    atol, rtol = given.get('atol'), given.get('rtol', given.get('rcond'))
-    tolerance_dtype = values.dtype
-    for value in (atol, rtol):
-        tolerance_dtype = torch.promote_types(tolerance_dtype, value.dtype if isinstance(value, torch.Tensor)
-                                               else default_tolerance_dtype)
-    atol = 0 if atol is None else atol
+        return a.new_zeros((*a.shape[:-2], n, m))
+    if rcond is not None:
+        atol, rtol = 0.0, rcond
+
+    def held(value):
+        return value if isinstance(value, torch.Tensor) else torch.full((), value, dtype=tolerance_dtype,
+                                                                         device=a.device)
+    given, atol = atol is not None, held(0.0 if atol is None else atol)
     if rtol is None:
-        default = max(m, n) * torch.finfo(a.real.dtype).eps
-        positive = _temporary(batch, torch.bool)
-        rtol = _temporary(batch, tolerance_dtype)
-        ops += _elementwise('gt', positive, atol, 0)
-        ops += _elementwise('where', rtol, positive, 0, default)
-    tolerance = _temporary(batch, tolerance_dtype)
-    ops += _elementwise('mul', tolerance, maximum, rtol)
-    ops += _elementwise('maximum', tolerance, tolerance, atol)
-    keep, reciprocal = _temporary((*batch, k), torch.bool), _temporary((*batch, k), values.dtype)
-    ops += _elementwise('gt', keep, absolute, tolerance.unsqueeze(-1))
-    ops += _elementwise('where', reciprocal, keep, values, 1)
-    ops += _elementwise('reciprocal', reciprocal, reciprocal)
-    ops += _elementwise('where', reciprocal, keep, reciprocal, 0)
-    scaled = _temporary((*batch, *left.shape[-2:]), left.dtype)
-    ops += _elementwise('mul', scaled, left, reciprocal.unsqueeze(-2))
-    return ops + _product(A.matmul.default, {'self': scaled, 'other': right}, [out])
+        rtol = held(torch.finfo(a.real.dtype).eps * max(m, n))
+        rtol = torch.where(atol > 0, held(0.0), rtol) if given else rtol
+    rtol = held(rtol)
+    if hermitian:
+        values, vectors = torch.linalg.eigh(a)
+        magnitude = values.abs()
+        tolerance = torch.maximum(atol.unsqueeze(-1), rtol.unsqueeze(-1) * magnitude.amax(-1, keepdim=True))
+        inverse = torch.where(magnitude > tolerance, values.reciprocal(), 0).to(a.dtype)
+        return torch.matmul(vectors * inverse.unsqueeze(-2), vectors.mH)
+    u, values, vh = torch.linalg.svd(a, full_matrices=False)
+    tolerance = torch.maximum(atol.unsqueeze(-1), rtol.unsqueeze(-1) * values.narrow(-1, 0, 1))
+    inverse = torch.where(values > tolerance, values.reciprocal(), 0).to(a.dtype)
+    return torch.matmul(vh.mH * inverse.unsqueeze(-2), u.mH)
 
 
 def _orthogonal(target, given, outs):
@@ -5057,7 +5048,7 @@ SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWI
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
            A._linalg_det: _determinant, A._linalg_slogdet: _determinant,
-           A.linalg_lu: _unpacked_lu, A.linalg_pinv: _pseudoinverse, A.linalg_lstsq: _least_squares,
+           A.linalg_lu: _unpacked_lu, A.linalg_lstsq: _least_squares,
            A._linalg_svd: _singular, A._linalg_eigh: _eigen_hermitian,
            **dict.fromkeys((A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals), _eigen),
            A._linalg_check_errors: _checked,
@@ -5154,11 +5145,6 @@ def _lowering(local, page, generator=None):
         transpose = metadata.is_contiguous() and not metadata.is_complex()
         return lambda args, kwargs, outs: _determinant(local.target, _operands(local.target, args, kwargs), outs,
                                                        transpose)
-    if packet is A.linalg_pinv:
-        metadata = _given(local, _names(local))['self'].meta['val']
-        dtype = torch.float32 if metadata.device.type in ('mps', 'metal') else torch.float64
-        return lambda args, kwargs, outs: _pseudoinverse(local.target, _operands(local.target, args, kwargs), outs,
-                                                        dtype)
     if local.target in SYMBOLIC:
         return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)
     if packet in LINEAR:

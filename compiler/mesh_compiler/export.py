@@ -20,8 +20,9 @@ from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, writt
 WITH_EFFECTS = torch.ops.higher_order.with_effects
 COPY = torch.ops.aten.copy.default
 # pub13 section 5.1 case (i): an eigh outlined on a non-CPU engine (compiler/mesh_compiler/decompose.py outline) draws
-# its Haar restarts at its own source site, carried to its QDWH steps as data (operations.QDWH_EIGH_STEP `site`)
-DRAWING = (torch.ops.aten._linalg_eigh.default,)
+# its Haar restarts at its own source site, carried to its QDWH steps as data (operations.QDWH_EIGH_STEP `site`); a
+# pinv (each overload) is a draw source too, its expanded eigh keeping its declared site
+DRAWING = (torch.ops.aten._linalg_eigh, torch.ops.aten.linalg_pinv)
 
 
 # design/unequal-shards-change-request.md item 8; torch 2.14.0 torch/export/experimental/__init__.py
@@ -312,7 +313,7 @@ def capture(module, args, functions, options, root):
     for function in interpreter.exported.values():
         for node in function.graph_module.graph.nodes:
             if node.op == "call_function" and (torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())
-                                               or node.target in DRAWING):
+                                               or getattr(node.target, "overloadpacket", None) in DRAWING):
                 node.meta["site"] = next(sites)
     exported = Exported(module, state, tokens, [node.name for node in inputs],
                         [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds)

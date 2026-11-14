@@ -15,7 +15,8 @@ from torch.utils import _pytree as pytree
 from .devices import on_devices
 from .ir import RETURNED, Exported, shape, views
 from .ir import given as ir_given
-from .operations import QDWH_EIGH_STEP, _matrix_exponential, _qdwh_eigh_result, _qdwh_eigh_state
+from .operations import (QDWH_EIGH_STEP, _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_result,
+                         _qdwh_eigh_state)
 from .placement import insert_send_recv
 from .schedule import carried
 
@@ -68,28 +69,30 @@ def _whole(node, processor):
              if isinstance(value, torch.Tensor) else None),)
 
 
-# `targets` each processor's (engine, device) (compiler/mesh_compiler/driver.py), the engine of a node's own processor
-# (node.meta["processor"]) its selection. Each operator below expands into its source formulation of the node's own
-# operands, where `cpu`, also on a CPU-placed node: item 5 keeps an operator with a LAPACK driver as one node on the
-# CPU, and matrix_exp has none (item 5: "Item 6 writes it"), so it expands on every processor (item 6: scaling and
-# squaring, `max_squarings` the operand, JAX's 16). `max_iterations` is item 6's QDWH bound, JAX's 10, for the spectral
-# formulations, none of which this expands yet: an svd, eigh, eig, eigvals, pinv or lstsq node is kept as placed.
-# Each expanded node's nodes take its processor and source metadata, and a made tensor (a `device` keyword) that
-# processor's device, as compiler/mesh_compiler/devices.py on_devices gives every placed node;
-# graph_module.meta["decomposed"] maps each of them to the original node it replaces, whose uses (the graph's outputs
-# among them) take the formulation's result; the nodes whose uses or operands changed (the original's operands, its
-# expanded nodes and its uses) are given to ir.views, which makes their view and destination metadata again
+# `targets` each processor's (engine, device) (compiler/mesh_compiler/driver.py). matrix_exp has no LAPACK driver
+# (item 5: "Item 6 writes it"), so it expands on every processor (item 6: scaling and squaring, `max_squarings` the
+# operand, JAX's 16); a spectral node (svd, eigh, eig, eigvals, lstsq) is kept as placed, pinv expanded already before
+# the eigh outline (outline); `max_iterations` unused here (outline's QDWH bound)
 def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
-    formulations = {A.linalg_matrix_exp.default: (functools.partial(_matrix_exponential, max_squarings=max_squarings),
-                                                  True)}
+    formulation = functools.partial(_matrix_exponential, max_squarings=max_squarings)
+    return _expanded(graph_module, targets, {A.linalg_matrix_exp.default: lambda node: formulation})
+
+
+# each node of a `formulations` target expanded into its source formulation (formulations[target](node)) of the node's
+# own operands and arguments, traced by make_fx over the operands' fake values. Each expanded node's nodes take its
+# processor and source metadata (its draw site among it), and a made tensor (a `device` keyword) that processor's
+# device, as compiler/mesh_compiler/devices.py on_devices gives every placed node; graph_module.meta["decomposed"]
+# maps each of them to the original source node it replaces (an expanded node itself generated, its own original: the
+# map's keys the graph's nodes, its values the source's), whose uses (the graph's outputs among them), work axes and
+# input parts take the formulation's result; the nodes whose uses or operands changed (the original's operands, its
+# expanded nodes and its uses) are given to ir.views, which makes their view and destination metadata again
+def _expanded(graph_module, targets, formulations):
     table = dict(torch.export.default_decompositions().items())
     graph = graph_module.graph
     sources = graph_module.meta.setdefault("decomposed", {})
     changed = []
     for node in [n for n in graph.nodes if n.op == "call_function" and n.target in formulations]:
-        formulation, cpu = formulations[node.target]
-        if not cpu and targets[node.meta["processor"]][0] == "cpu":
-            continue
+        formulation = formulations[node.target](node)
         flat, spec = pytree.tree_flatten((node.args, node.kwargs))
         held = [k for k, item in enumerate(flat) if isinstance(item, torch.fx.Node)]
 
@@ -108,11 +111,12 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
         made = [copied[n] for n in traced.graph.nodes if n.op not in ("placeholder", "output")]
         kept = {key: value for key, value in node.meta.items() if key not in TRACED + VIEWED + AXES}
         device = targets[node.meta["processor"]][1]
+        origin = sources.pop(node, node)
         for generated in made:
             generated.meta.update(kept)
             if "device" in generated.kwargs:
                 generated.kwargs = {**generated.kwargs, "device": device}
-            sources[generated] = node
+            sources[generated] = origin
         users = list(node.users)
         _axes_onto(node, result, {})
         for user in users:
@@ -138,10 +142,23 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
 # original output keeps its role and target, made by the part computing its value; a value one part makes and a later
 # reads crosses as a call output and input, on the eigh's processor; each part's placed graph keeps its nodes'
 # processors and its own transfers (renumbered), and is put on its devices (devices.on_devices) as the driver's staged
-# loop does. `staged` the driver's staged records by function key, `processors` and `machines` its maps
+# loop does. `staged` the driver's staged records by function key, `processors` and `machines` its maps. First each
+# function's pinv nodes (every overload, on every processor) expand into operations._pseudoinverse, its tolerance dtype
+# the selected device's (float32 on MPS, float64 else), and the function's placed graph is staged again, so a
+# Hermitian pinv's eigh is outlined below (a CPU one keeps its LAPACK driver)
 def outline(captured, staged, targets, processors, machines, *, max_iterations=10):
     from .export import substitute
     staged, pending = dict(staged), list(captured.functions)
+
+    def pseudoinverse(node):
+        dtype = torch.float32 if targets[node.meta["processor"]][1].type in ("mps", "metal") else torch.float64
+        return lambda *args, **kwargs: _pseudoinverse(**_operands(node.target, args, kwargs), tolerance_dtype=dtype)
+    for key in pending:
+        placed = staged[key][0]
+        if any(n.op == "call_function" and n.target in PINV for n in placed.graph.nodes):
+            _expanded(placed, targets, dict.fromkeys(PINV, pseudoinverse))
+            placed.meta["invariant"] = _invariant(placed)
+            staged[key] = _staged(placed, processors, machines)
     while pending:
         key = pending.pop(0)
         placed = staged[key][0]
@@ -161,6 +178,7 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
 
 
 EIGH, COPY = A._linalg_eigh.default, A.copy.default
+PINV = tuple(getattr(A.linalg_pinv, overload) for overload in A.linalg_pinv.overloads())
 # the Step's inputs: the state, the input's norm and its source draw site (operations.QDWH_EIGH_STEP); the prefix's
 # first outputs, each Step call the previous call's state and the prefix's norm and site
 STEP_INPUTS = ("blocks", "vectors", "agenda", "top", "norm", "site")
@@ -190,9 +208,9 @@ def _fresh(value):
         return torch.empty_strided(value.shape, value.stride(), dtype=value.dtype, device=value.device)
 
 
-# torch 2.14.0 torch/fx/experimental/proxy_tensor.py make_fx over the operands' fake values, copied in before `at`,
-# its nodes the processor's and the source node's metadata
-def _formulated(graph, formula, operands, source, processor, mapping):
+# torch 2.14.0 torch/fx/experimental/proxy_tensor.py make_fx over the operands' fake values, copied in at the graph's
+# end, its nodes the processor's and the source node's metadata, each in `decomposed` the source's original (`origin`)
+def _formulated(graph, formula, operands, source, processor, mapping, decomposed, origin):
     table = dict(torch.export.default_decompositions().items())
     values = [operand.meta["val"] for operand in operands]
     with detect_fake_mode(values):
@@ -202,6 +220,7 @@ def _formulated(graph, formula, operands, source, processor, mapping):
     kept = {key: value for key, value in source.meta.items() if key not in TRACED + VIEWED + AXES}
     for made in [copied[n] for n in traced.graph.nodes if n.op not in ("placeholder", "output")]:
         made.meta.update(kept, processor=processor)
+        decomposed[made] = origin
     _axes_onto(source, result, mapping, within=False)
     return result
 
@@ -221,11 +240,13 @@ def _invariant(graph_module):
 # one part's placed graph: its placeholders, the copies of `nodes` (graph order) and the formulations' nodes, its
 # outputs on `processor` (a value elsewhere sent there, placement.insert_send_recv) with each original output's role
 # kept and its `destination` (a mutation's value another part's input first copied in, as export.read does); a value
-# crossing from another part stated on its producer's processor, where its users are (their transfers are the parts')
+# crossing from another part stated on its producer's processor, where its users are (their transfers are the parts');
+# `sources` the placed graph's generated → original map, its copied nodes' images this part's `decomposed`
 class _Part:
-    def __init__(self, original, nodes, transfers, parts):
+    def __init__(self, original, nodes, transfers, parts, sources):
         self.graph, self.env, self.original, self.inputs, self.outputs = torch.fx.Graph(), {}, original, [], []
         self.nodes, self.transfers, self.parts, self.originals = nodes, transfers, parts, {}
+        self.sources, self.decomposed = sources, {}
 
     def placeholder(self, node, source):
         made = self.graph.placeholder(node.name)
@@ -247,6 +268,7 @@ class _Part:
             self.env[node] = self.graph.node_copy(node, lambda n: self.env[n])
         for node in self.nodes:
             _axes_moved(self.env[node], self.env, within=False)
+        self.decomposed.update((self.env[node], self.sources[node]) for node in self.nodes if node in self.sources)
 
     def output(self, values, roles, destination, processor):
         made = self.graph.output(tuple(values))
@@ -276,7 +298,8 @@ class _Part:
                          else {made: _whole(made, made.meta["stated"])})
         graph_module = torch.fx.GraphModule(torch.nn.Module(), graph)
         views(graph)
-        graph_module.meta.update(transfers=transfers, invariant=_invariant(graph_module), input_parts=parts)
+        graph_module.meta.update(transfers=transfers, invariant=_invariant(graph_module), input_parts=parts,
+                                 decomposed=self.decomposed)
         graph_module.recompile()
         return graph_module
 
@@ -320,11 +343,15 @@ def _outlined(key, exported, placed, eigh, max_iterations):
     n = blocks_value.shape[-1]
     in_late = lambda v: isinstance(v, torch.fx.Node) and (v in reached or v in getitems)
     parts = placed.meta["input_parts"]
+    # the placed graph's generated → original map (decompose._expanded: an expanded pinv's eigh among its keys); the
+    # eigh's original source node, each prefix and suffix formulation node's
+    sources = placed.meta.get("decomposed", {})
+    origin = sources.get(eigh, eigh)
     late_used = {p for node in late for p in node.all_input_nodes if p.op == "placeholder"}
     late_used |= {named[destination[k]] for k, v in enumerate(values) if in_late(v) and k in destination}
 
     # the prefix
-    prefix = _Part(exported, early, transfers, parts)
+    prefix = _Part(exported, early, transfers, parts, sources)
     used = {p for node in early + [eigh] for p in node.all_input_nodes if p.op == "placeholder"}
     used |= {v for k, v in enumerate(values) if isinstance(v, torch.fx.Node) and v.op == "placeholder"
              and not in_late(v)}
@@ -334,8 +361,7 @@ def _outlined(key, exported, placed, eigh, max_iterations):
             prefix.placeholder(p, ("call", position[p]))
     prefix.copy()
     state = _formulated(prefix.graph, functools.partial(_qdwh_eigh_state, upper=upper, site=eigh.meta["site"]),
-                        [prefix.env[a]], eigh,
-                        processor, {a: prefix.env[a]})
+                        [prefix.env[a]], eigh, processor, {a: prefix.env[a]}, prefix.decomposed, origin)
     crossing = list(dict.fromkeys(p for node in late for p in node.all_input_nodes
                                   if p.op != "placeholder" and not in_late(p)))
     # each partition of an original placeholder the suffix takes crosses too, so its input parts are its own inputs
@@ -387,7 +413,7 @@ def _outlined(key, exported, placed, eigh, max_iterations):
     # the suffix
     calls = 2 * n - 1
     last = calls
-    suffix = _Part(exported, late, transfers, parts)
+    suffix = _Part(exported, late, transfers, parts, sources)
     for p in placeholders:
         if p in late_used:
             suffix.placeholder(p, ("call", position[p]))
@@ -397,7 +423,7 @@ def _outlined(key, exported, placed, eigh, max_iterations):
         suffix.crossing(node, node.name, node.meta["val"], node.meta["processor"], ("part", 0, held[node]))
     empty = None if compute_v else tuple(eigh.meta["val"][1].shape)
     ordered = _formulated(suffix.graph, functools.partial(_qdwh_eigh_result, empty=empty), ends, eigh, processor,
-                          {a: ends[0]})
+                          {a: ends[0]}, suffix.decomposed, origin)
     for g in getitems:
         suffix.env[g] = ordered[g.args[1]]
     suffix.copy()

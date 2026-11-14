@@ -1,0 +1,60 @@
+{
+  "client": "pinv-native-command.md",
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "result": {
+    "stage": "result",
+    "relative_error": 3.142794387651038e-08,
+    "axa_residual": 1.3835380835611513e-08,
+    "xax_residual": 5.534152405335489e-09,
+    "symmetry_residual": 1.0536712127723508e-07,
+    "finite": true,
+    "result": [
+      [
+        0.03999999165534973,
+        0.07999999821186066,
+        0.0
+      ],
+      [
+        0.07999999076128006,
+        0.1600000113248825,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        -0.5
+      ]
+    ],
+    "reference": [
+      [
+        0.04,
+        0.08,
+        0.0
+      ],
+      [
+        0.08,
+        0.16,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        -0.5
+      ]
+    ]
+  },
+  "native_reload": "27 native rows restored; no relation solved",
+  "changed_source_during_run": [],
+  "logs": {
+    "pinv-native-1.stdout": {
+      "bytes": 59349,
+      "sha256": "1a0311f68e7cadb3f8dc83c318d55b54fc9455b452e6239f9736b14a35c5f530"
+    },
+    "pinv-native-1.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "scope": "One real rank-deficient indefinite Hermitian 3\u00d73 MPS pinv case; no complex/SVD/nonHermitian/ANE/performance claim"
+}
