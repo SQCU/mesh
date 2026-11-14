@@ -290,11 +290,11 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             op = builder.generic(g)
             made = list(range(before, compiler.metal_ir_operations(builder.p))) or [op]
             # `associate`'s: an operand's on the record's own operation, one with no operand on each created
-            for operand, dimension, task, full in axes.get(index, ()):
-                for at in made if operand == NONE else (op,):
-                    status = compiler.metal_ir_operation_axis(builder.p, at, operand, dimension, task, full)
+            for operand_index, dimension, task, full in axes.get(index, ()):
+                for at in made if operand_index == NONE else (op,):
+                    status = compiler.metal_ir_operation_axis(builder.p, at, operand_index, dimension, task, full)
                     if status:
-                        raise OSError(status, "the work axis of operation %d operand %d" % (at, operand))
+                        raise OSError(status, "the work axis of operation %d operand %d" % (at, operand_index))
             if owner is None:
                 advanced += made
                 continue
