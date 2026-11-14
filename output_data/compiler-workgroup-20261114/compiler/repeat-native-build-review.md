@@ -1,0 +1,11 @@
+# Matched numerical repeat build
+
+Native source checkpoint `e7dc2383` (after typed-repeat checkpoint `8d339949`), source producer `1f60d029`, and encoder `6a444b84` build together. The original malformed legacy files remain unchanged and excluded by the existing live source ownership.
+
+Canonical command: `make -j4 .build/libmetal_ir.dylib .build/libmesh_metal.dylib .build/libmetal_recording.dylib .build/native_bench .build/e2b_replay`, in metal-microbench. It completed with exit0; `repeat-native-build.log` is the local full log. Graph source/library is unchanged from the Signature416 release.
+
+A fresh process imported the actual current Python/native owners and resolved all four repeat functions. Layouts: RepeatRegion40, Signature416, Function168, Planned152, Local376, ValueInfo120. `repeat-native-abi.json` records the probe. `repeat-native-source.json` records both repository heads and source hashes; no recorded source changed during the build. `repeat-native-binaries.json` records the resulting native/tool/provider binaries and unchanged libmesh.
+
+The existing CPU/outer-archive pair passed on these binaries (executor `0292275a`): error0, reload errors0/6.902263703523204e-05, signature equal, unchanged first result and distinct backings. The first real 4×4 MPS attempt reached the joint native planner, then failed preparing the second function after replaying the first. It never invoked numerical code. `eigh-native-attempt1.json` records the exact failure; the actual recorder consumer correction is in progress. The prior actual source-stage outline result is `eigh-outline.json`.
+
+Remaining coverage is explicit: no spectral accuracy result yet, no transported-repeat invocation, ANE rejects the new runtime-symbol operand maps, and unknown repeat multiplicity has no complete execution-cost consumer. Non-Hermitian and SVD/pinv/lstsq composition work is unfinished. Generated RNG state shared across independent same-source calls still needs its actual inter-call effect correspondence reviewed; the immediate agenda chain has explicit state-flow ordering.
