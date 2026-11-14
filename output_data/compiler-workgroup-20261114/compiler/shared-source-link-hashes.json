@@ -1,0 +1,10 @@
+{
+  "/Users/mdot/metal-microbench/metal_ir.mm": "e9e5bae211b0c0d3894392001645dc3dd4707cb6a47c1704f7fd3e6c5636a4c5",
+  "/Users/mdot/metal-microbench/metal_ir.h": "d140ec9bef7287723c579ea6b389bf8c154d20b30981f1bc8d4b6efe70551aa4",
+  "/Users/mdot/metal-microbench/metal_recording.h": "a0736034e85fae6f84a6de856d9dd410037b0ed85c85917566463188c7d0d661",
+  "/Users/mdot/metal-microbench/metal_capture.m": "1e3ac59d2ea1d9849aa33ef223efc47bdba54e3b8d38277e53a162eeaf4b0cda",
+  "/Users/mdot/metal-microbench/metal_program.m": "d2d35b09025963157c36013ed61be50a61d94a50af08ed248d822ef4ccaffe0e",
+  "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "a91d2f80a9b400d9aa5c7a91f0ee86a8112f3ecfa20767df92ef52722994fb00",
+  "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "be1a351559d4347cf1c600c954fb2ed602fd294cdff6121234cef8bd129ba65e",
+  "/Users/mdot/metal-microbench/.build/provider/libmesh_provider.dylib": "a4e21bf7f1ff7c1b0b6a5bcc8e995f7553e3c9991e8e994c3a49c430d75c8e80"
+}

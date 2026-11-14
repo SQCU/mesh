@@ -4355,6 +4355,359 @@ def _zlahqr(h, z, w, ilo, ihi, info, ops, held=()):
     ops.append(_Repeat(passes, more, carried))
 
 
+# Reference-LAPACK SRC/dlahqr.f 252-616 on one real upper Hessenberg member h in place: WANTT = WANTZ = (z given),
+# ILOZ = ILO and IHIZ = IHI (dgeev/dhseqr). wr and wi (real, n) receive WR/WI(ILO..IHI); ilo, ihi and info are
+# one-element int32 (INFO = 0, or I where the source fails); `held` holds the caller's temporaries the iteration
+# carries. One _Repeat pass is one DO 140 iteration: labels 20 and 150 are flattened (on deflation of one eigenvalue,
+# WR(I) = H(I,I), or of a pair, DLANV2 with its rotations of H and Z; then KDEFL = 0, I = L - 1, L = ILO, ITS = 0), so
+# ITS runs 0..ITMAX for each I. The K and M searches take the first hit from the top as the largest. Each double-shift
+# step K = M..I-1 is a static position with its actual extents, NR = min(3, I-K+1)
+def _dlahqr(h, z, wr, wi, ilo, ihi, info, ops, held=()):
+    n, t, real = h.shape[-1], _class(h), h.dtype
+    limits, want = torch.finfo(real), z is not None
+    safmin, ulp = limits.tiny, limits.eps
+    ops += _fill(info, 0)
+    if not n:
+        return
+    (i, lo, its, kdefl, more, span, base, i1, i2, i1z, kfound, go, cut, mspan, mfound, m, pair, erow, ecol, ezz, p1,
+     p2, p3) = (_temporary((1,), torch.int32) for _ in range(23))
+    rt1r, rt1i, rt2r, rt2i, v1, v2, v3, na, nb, nc, nd, cs, sn, beta, t1, t2, t3 = \
+        (_temporary((1,), real) for _ in range(17))
+    sites = max(n - 1, 1)
+    fresh, rlen, rtail, ewrite, eclear, l3, l2, r3, r2, z3, z2 = (_temporary((sites,), torch.int32) for _ in range(11))
+    carried = (*held, h, *([z] if want else []), wr, wi, ilo, ihi, info, i, lo, its, kdefl, more, span, base, i1, i2,
+               i1z, kfound, go, cut, mspan, mfound, m, pair, erow, ecol, ezz, p1, p2, p3, rt1r, rt1i, rt2r, rt2i, v1,
+               v2, v3, na, nb, nc, nd, cs, sn, beta, t1, t2, t3, fresh, rlen, rtail, ewrite, eclear, l3, l2, r3, r2,
+               z3, z2)
+
+    def c(r, value):
+        return r.const(value, t)
+
+    def k(r, value):
+        return r.const(value, I32)
+
+    def flag(r, x):
+        return _convert(r, x, BOOL, I32)
+
+    def larger(r, a, b, kind):
+        return r('select', kind, r('ge', BOOL, a, b), a, b)
+
+    def smaller(r, a, b, kind):
+        return r('select', kind, r('le', BOOL, a, b), a, b)
+
+    def at(r, slot, row, column):
+        return r('extract', t, _bounded(r, row, n)[1], _bounded(r, column, n)[1], integer=slot)
+
+    def less(r, x, value):
+        return r('sub', I32, x, k(r, value))
+
+    def absolute(r, x):
+        return r('abs', t, x)
+
+    # 252 and 265-305, the state at label 20 (I = IHI, L = ILO, ITS = 0, KDEFL = 0; I1 = 1, I2 = N where WANTT): the
+    # trash, H(J+2,J) for J = ILO..IHI-2 (H(IHI,IHI-2) the last) and H(J+3,J) for J = ILO..IHI-3, zero
+    def started(r, v):
+        low, high = v
+        zero, one = k(r, 0), k(r, 1)
+        return [(less(r, low, 1), I32), (high, I32), (low, I32), (zero, I32), (zero, I32),
+                (flag(r, r('ge', BOOL, high, low)), I32), (r('sub', I32, high, low), I32), (one, I32), (k(r, n), I32),
+                (zero, I32)] + [(larger(r, less(r, r('sub', I32, high, low), d), zero, I32), I32) for d in (1, 2)]
+    ops += _scalars([base, i, lo, its, kdefl, more, span, i1, i2, i1z, erow, ecol], [ilo, ihi], started)
+    for band, extent in ((2, erow), (3, ecol)):
+        if n > band:
+            trash = h[...]
+            _emit(ops, _record((n - band,), [(trash, ({0: 1, None: band}, 0))], [], lambda r, v: [(c(r, 0), t)]),
+                  loops=((extent, n - band),), offsets=[(trash, {0: (base, n - 1), 1: (base, n - 1)})])
+
+    # 319-344: the K search over L+1..I (`span` = I - L entries): |H(K,K-1)| <= SMLNUM (SAFMIN NH / ULP), or Ahues and
+    # Tisseur's test where |H(K,K-1)| <= ULP TST (TST zero: |H(K-1,K-2)| where K-2 >= ILO, |H(K+1,K)| where K+1 <= IHI)
+    def smallest(r, low, high):
+        nh = r('add', I32, r('sub', I32, high, low), k(r, 1))
+        return r('mul', t, c(r, safmin), r('div', t, r('cast', t, nh), c(r, ulp)))
+
+    def deflated(r, v):
+        low, first, last, slot = v
+        kk = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
+        sub, dkm, dk = at(r, slot, less(r, kk, 1), less(r, kk, 2)), at(r, slot, less(r, kk, 2), less(r, kk, 2)), \
+            at(r, slot, less(r, kk, 1), less(r, kk, 1))
+        sup, before, after = at(r, slot, less(r, kk, 2), less(r, kk, 1)), at(r, slot, less(r, kk, 2), less(r, kk, 3)), \
+            at(r, slot, kk, less(r, kk, 1))
+        smlnum = smallest(r, first, last)
+        tst = r('add', t, absolute(r, dkm), absolute(r, dk))
+        grown = r('select', t, r('ge', BOOL, less(r, kk, 2), first), r('add', t, tst, absolute(r, before)), tst)
+        grown = r('select', t, r('le', BOOL, r('add', I32, kk, k(r, 1)), last), r('add', t, grown, absolute(
+            r, after)), grown)
+        tst = r('select', t, r('eq', BOOL, tst, c(r, 0)), grown, tst)
+        ab, ba = larger(r, absolute(r, sub), absolute(r, sup), t), smaller(r, absolute(r, sub), absolute(r, sup), t)
+        gap = absolute(r, r('sub', t, dkm, dk))
+        aa, bb = larger(r, absolute(r, dk), gap, t), smaller(r, absolute(r, dk), gap, t)
+        s = r('add', t, aa, ab)
+        criterion = r('le', BOOL, r('mul', t, ba, r('div', t, ab, s)), larger(r, smlnum, r('mul', t, c(r, ulp), r(
+            'mul', t, bb, r('div', t, aa, s))), t))
+        hit = r('or', BOOL, r('le', BOOL, absolute(r, sub), smlnum), r('and', BOOL, r(
+            'le', BOOL, absolute(r, sub), r('mul', t, c(r, ulp), tst)), criterion))
+        return [(r('select', I32, hit, kk, k(r, 0)), I32)]
+    passes = []
+    if n > 1:
+        _emit(passes, _record_extreme((n - 1,), kfound, (None,), [(lo, (None,)), (ilo, (None,)), (ihi, (None,)),
+                                                                   (h, None)], deflated, [REDUCTION]),
+              loops=((span, n - 1),))
+    else:
+        passes += _fill(kfound, 0)
+
+    # 346-435 and 570-613: L = K, H(L,L-1) = 0 where L > ILO (`cut`); L >= I-1 the exit (L = I: WR(I) = H(I,I),
+    # WI(I) = 0; L = I-1: DLANV2 of the trailing 2 x 2, its WR/WI pair and rotation); else KDEFL += 1, I1 = L and
+    # I2 = I where not WANTT, and the shifts: exceptional at mod(KDEFL, 2 KEXSH) = 0 (at I) and mod(KDEFL, KEXSH) = 0
+    # (at L), DAT1 = 3/4 and DAT2 = -0.4375, else Francis's double shift from the trailing 2 x 2, scaled by S
+    def stepped(r, v):
+        found, low, top, first, last, defl, count, slot = v
+        zero, one, two = k(r, 0), k(r, 1), k(r, 2)
+        new = larger(r, found, low, I32)
+        leave = r('ge', BOOL, new, less(r, top, 1))
+        single = r('and', BOOL, leave, r('eq', BOOL, new, top))
+        double = r('and', BOOL, leave, r('eq', BOOL, new, less(r, top, 1)))
+        i0, im = _bounded(r, less(r, top, 1), n)[1], _bounded(r, less(r, top, 2), n)[1]
+        hmm, hmi, him, hii = at(r, slot, im, im), at(r, slot, im, i0), at(r, slot, i0, im), at(r, slot, i0, i0)
+        r.scatter(0, [i0], hii, single)
+        r.scatter(1, [i0], c(r, 0), single)
+        kd = r('add', I32, defl, one)
+        ex = [r('add', t, absolute(r, at(r, slot, i0, im)), absolute(r, at(r, slot, im, less(r, top, 3)))),
+              r('add', t, absolute(r, at(r, slot, new, less(r, new, 1))), absolute(r, at(r, slot, r(
+                  'add', I32, new, one), new)))]
+        diagonals = [hii, at(r, slot, less(r, new, 1), less(r, new, 1))]
+        exceptional = [(r('add', t, r('mul', t, c(r, 0.75), s), d), r('mul', t, c(r, -0.4375), s), s,
+                        r('add', t, r('mul', t, c(r, 0.75), s), d)) for s, d in zip(ex, diagonals)]
+        francis = (hmm, hmi, him, hii)
+        twentieth = r('eq', BOOL, r('rem', I32, kd, k(r, 20)), zero)
+        tenth = r('eq', BOOL, r('rem', I32, kd, k(r, 10)), zero)
+        h11, h12, h21, h22 = (r('select', t, twentieth, e0, r('select', t, tenth, e1, f)) for e0, e1, f in zip(
+            exceptional[0], exceptional[1], francis))
+        s = r('add', t, r('add', t, r('add', t, absolute(r, h11), absolute(r, h12)), absolute(r, h21)), absolute(r, h22))
+        safe = r('select', t, r('eq', BOOL, s, c(r, 0)), c(r, 1), s)
+        h11, h21, h12, h22 = (r('div', t, x, safe) for x in (h11, h21, h12, h22))
+        tr = r('div', t, r('add', t, h11, h22), c(r, 2))
+        det = r('sub', t, r('mul', t, r('sub', t, h11, tr), r('sub', t, h22, tr)), r('mul', t, h12, h21))
+        rtdisc = r('sqrt', t, absolute(r, det))
+        conjugate = r('ge', BOOL, det, c(r, 0))
+        plus, minus = r('add', t, tr, rtdisc), r('sub', t, tr, rtdisc)
+        nearer = r('le', BOOL, absolute(r, r('sub', t, plus, h22)), absolute(r, r('sub', t, minus, h22)))
+        shift = r('select', t, nearer, r('mul', t, plus, s), r('mul', t, minus, s))
+        zero_s = r('eq', BOOL, s, c(r, 0))
+        first_r = r('select', t, zero_s, c(r, 0), r('select', t, conjugate, r('mul', t, tr, s), shift))
+        real_s = r('or', BOOL, zero_s, r('not', BOOL, conjugate))
+        first_i = r('select', t, real_s, c(r, 0), r('mul', t, rtdisc, s))
+        second_i = r('select', t, real_s, c(r, 0), r('neg', t, r('mul', t, rtdisc, s)))
+        stay = r('not', BOOL, leave)
+        edge = (one, k(r, n)) if want else (new, top)
+        rotated = flag(r, double)
+        spans = [r('sub', I32, k(r, n), top) if want else zero, larger(r, less(r, less(r, top, 1), 1), zero, I32)
+                 if want else zero, r('add', I32, r('sub', I32, last, first), one)]
+        return [(c(r, 0), t), (c(r, 0), t), (r('select', I32, leave, first, new), I32),
+                (r('select', I32, leave, less(r, new, 1), top), I32), (r('select', I32, leave, zero, kd), I32),
+                (r('select', I32, leave, zero, count), I32), (flag(r, stay), I32),
+                (r('select', I32, r('gt', BOOL, new, first), new, zero), I32), (edge[0], I32), (edge[1], I32),
+                (less(r, edge[0], 1), I32),
+                (r('select', I32, stay, larger(r, r('sub', I32, less(r, top, 2), new), zero, I32), zero), I32),
+                (first_r, t), (first_i, t), (first_r, t), (second_i, t), (rotated, I32)] + [
+            (r('select', I32, double, x, zero), I32) for x in spans] + [
+            (im, I32), (i0, I32), (_bounded(r, top, n)[1], I32)]
+    passes += _record((1,), [(wr, None), (wi, None)] + [(x, (None,)) for x in (
+        lo, i, kdefl, its, go, cut, i1, i2, i1z, mspan, rt1r, rt1i, rt2r, rt2i, pair, erow, ecol, ezz, p1, p2, p3)],
+                      [(x, (None,)) for x in (kfound, lo, i, ilo, ihi, kdefl, its)] + [(h, None)], stepped)
+
+    # 351: H(L,L-1) = 0 where L > ILO
+    def severed(r, v):
+        r.scatter(0, [_bounded(r, less(r, v[0], 1), n)[1], _bounded(r, less(r, v[0], 2), n)[1]], c(r, 0),
+                  r('gt', BOOL, v[0], k(r, 0)))
+        return [(c(r, 0), t)]
+    passes += _record((1,), [(h, None)], [(cut, (None,))], severed)
+
+    # 578-605, a once-gate on the pair's deflation (`pair`, L = I-1, its indices p1 = I-1 and p2 = I kept from before
+    # I and L moved): DLANV2 of H(I-1:I, I-1:I), WR/WI(I-1) and WR/WI(I) its eigenvalues, H's 2 x 2 its standard form,
+    # then DROT(X, Y, CS, SN) (X = CS X + SN Y, Y = CS Y - SN X) of rows I-1, I over columns I+1..I2 and columns I-1, I
+    # over rows I1..I-2 where WANTT, and Z's columns I-1, I over ILOZ..IHIZ where WANTZ
+    def schur(r, v):
+        row, column, slot = v
+        made = _dlanv2(r, t, at(r, slot, row, row), at(r, slot, row, column), at(r, slot, column, row),
+                       at(r, slot, column, column), limits)
+        a_, b_, c_, d_, r1r, r1i, r2r, r2i, cs_, sn_ = made
+        always = r.const(1, BOOL)
+        for output, at_row, value in ((0, row, r1r), (1, row, r1i), (0, column, r2r), (1, column, r2i)):
+            r.scatter(output, [at_row], value, always)
+        return [(c(r, 0), t), (c(r, 0), t)] + [(x, t) for x in (a_, b_, c_, d_, cs_, sn_)]
+    gated = _record((1,), [(wr, None), (wi, None)] + [(x, (None,)) for x in (na, nb, nc, nd, cs, sn)],
+                    [(p1, (None,)), (p2, (None,)), (h, None)], schur)
+
+    def standard(r, v):
+        a_, b_, c_, d_, row, column = v
+        always = r.const(1, BOOL)
+        for x, y, value in ((row, row, a_), (row, column, b_), (column, row, c_), (column, column, d_)):
+            r.scatter(0, [x, y], value, always)
+        return [(c(r, 0), t)]
+    gated += _record((1,), [(h, None)], [(x, (None,)) for x in (na, nb, nc, nd, p1, p2)], standard)
+
+    def rotation(r, v):
+        x, y, cosine, sine = v
+        return [(r('add', t, r('mul', t, cosine, x), r('mul', t, sine, y)), t),
+                (r('sub', t, r('mul', t, cosine, y), r('mul', t, sine, x)), t)]
+    targets = [((None, 0), h, erow, {0: (p1, n - 1), 1: (p3, n - 1)}, {0: (p2, n - 1), 1: (p3, n - 1)})] if want else []
+    targets += [((0, None), h, ecol, {0: (i1z, n - 1), 1: (p1, n - 1)}, {0: (i1z, n - 1), 1: (p2, n - 1)})] if want else []
+    targets += [((0, None), z, ezz, {0: (base, n - 1), 1: (p1, n - 1)}, {0: (base, n - 1), 1: (p2, n - 1)})] if want \
+        else []
+    for picks, target, extent, first, second in targets:
+        x, y = target[...], target[...]
+        _emit(gated, _record((n,), [(x, picks), (y, picks)], [(x, picks), (y, picks), (cs, (None,)), (sn, (None,))],
+                             rotation), loops=((extent, n),), offsets=[(x, first), (y, second)])
+    gated += _fill(pair, 0)
+    passes.append(_Repeat(gated, pair, carried))
+
+    # 439-462: the M search over L+1..I-2 (`mspan` entries), H21S = H(M+1,M) / S, V from the shifts scaled by S, and
+    # |H(M,M-1)| (|V2| + |V3|) <= ULP |V1| (|H(M-1,M-1)| + |H(M,M)| + |H(M+1,M+1)|); M = L where none
+    def leading(r, slot, mm, shifts):
+        one = k(r, 1)
+        r1r, r1i, r2r, r2i = shifts
+        hm = at(r, slot, less(r, mm, 1), less(r, mm, 1))
+        hm1, hmm1 = at(r, slot, mm, mm), at(r, slot, mm, less(r, mm, 1))
+        s = r('add', t, r('add', t, absolute(r, r('sub', t, hm, r2r)), absolute(r, r2i)), absolute(r, hmm1))
+        h21s = r('div', t, hmm1, s)
+        x1 = r('sub', t, r('add', t, r('mul', t, h21s, at(r, slot, less(r, mm, 1), mm)), r('mul', t, r(
+            'sub', t, hm, r1r), r('div', t, r('sub', t, hm, r2r), s))), r('mul', t, r1i, r('div', t, r2i, s)))
+        x2 = r('mul', t, h21s, r('sub', t, r('sub', t, r('add', t, hm, hm1), r1r), r2r))
+        x3 = r('mul', t, h21s, at(r, slot, r('add', I32, mm, one), mm))
+        s = r('add', t, r('add', t, absolute(r, x1), absolute(r, x2)), absolute(r, x3))
+        return hm, hm1, [r('div', t, x, s) for x in (x1, x2, x3)]
+
+    def bulged(r, v):
+        low, *shifts, slot = v
+        mm = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
+        hm, hm1, (x1, x2, x3) = leading(r, slot, mm, shifts)
+        hit = r('le', BOOL, r('mul', t, absolute(r, at(r, slot, less(r, mm, 1), less(r, mm, 2))), r(
+            'add', t, absolute(r, x2), absolute(r, x3))), r('mul', t, r('mul', t, c(r, ulp), absolute(r, x1)), r(
+                'add', t, r('add', t, absolute(r, at(r, slot, less(r, mm, 2), less(r, mm, 2))), absolute(r, hm)),
+                absolute(r, hm1))))
+        return [(r('select', I32, hit, mm, k(r, 0)), I32)]
+
+    def started_at(r, v):
+        found, low, *shifts, slot = v
+        mm = larger(r, found, low, I32)
+        return [(mm, I32)] + [(x, t) for x in leading(r, slot, mm, shifts)[2]]
+    shifts = [(x, (None,)) for x in (rt1r, rt1i, rt2r, rt2i)]
+    if n > 2:
+        _emit(passes, _record_extreme((n - 2,), mfound, (None,), [(lo, (None,))] + shifts + [(h, None)], bulged,
+                                      [REDUCTION]), loops=((mspan, n - 2),))
+    else:
+        passes += _fill(mfound, 0)
+    passes += _record((1,), [(m, (None,)), (v1, (None,)), (v2, (None,)), (v3, (None,))],
+                      [(mfound, (None,)), (lo, (None,))] + shifts + [(h, None)], started_at)
+
+    # 466-561: each static position K = 1..n-1 active where M <= K <= I-1, NR = 3 where K <= I-2: rows K..K+NR-1 over
+    # columns K..I2; columns K..K+NR-1 over rows I1..min(K+3, I) (NR = 3) or I1..I (NR = 2), and Z's over ILOZ..IHIZ
+    def placed(r, v):
+        mm, top, first_row, last_column, low, alive, first, last = v
+        kk, zero, one = r('add', I32, r.index(0), k(r, 1)), k(r, 0), k(r, 1)
+        active = _all(r, [r('ne', BOOL, alive, zero), r('le', BOOL, mm, kk), r('le', BOOL, kk, less(r, top, 1))])
+        nr3 = r('le', BOOL, kk, less(r, top, 2))
+        renewed = r('and', BOOL, active, r('gt', BOOL, kk, mm))
+        rescaled = _all(r, [active, r('eq', BOOL, kk, mm), r('gt', BOOL, mm, low)])
+        triple, double = r('and', BOOL, active, nr3), r('and', BOOL, active, r('not', BOOL, nr3))
+        nr = r('select', I32, nr3, k(r, 3), k(r, 2))
+        columns = r('add', I32, r('sub', I32, last_column, kk), one)
+        rows3 = r('add', I32, r('sub', I32, smaller(r, r('add', I32, kk, k(r, 3)), top, I32), first_row), one)
+        rows2 = r('add', I32, r('sub', I32, top, first_row), one)
+        nz = r('add', I32, r('sub', I32, last, first), one)
+
+        def on(test, x):
+            return r('select', I32, test, x, zero)
+        return [(flag(r, renewed), I32), (nr, I32), (less(r, nr, 1), I32),
+                (r('select', I32, renewed, k(r, 2), r('select', I32, rescaled, one, zero)), I32),
+                (flag(r, r('and', BOOL, renewed, nr3)), I32)] + [
+            (on(test, x), I32) for test, x in ((triple, columns), (double, columns), (triple, rows3), (double, rows2),
+                                               (triple, nz), (double, nz))]
+    if n > 1:
+        passes += _record((n - 1,), [(x, (0,)) for x in (fresh, rlen, rtail, ewrite, eclear, l3, l2, r3, r2, z3, z2)],
+                          [(x, (None,)) for x in (m, i, i1, i2, lo, go, ilo, ihi)], placed)
+
+    # 502-507, 512-517, 523-528 (NR = 3) and 535-558 (NR = 2): SUM = X(K) + V2 X(K+1) [+ V3 X(K+2)], each X(K+d) -=
+    # SUM T(d+1), the entries `nr` of one row or column, then V2..VNR, then T1..TNR
+    def applied(r, v):
+        nr = (len(v) + 1) // 3
+        entries, vs, taus = v[:nr], v[nr:2 * nr - 1], v[2 * nr - 1:]
+        s = entries[0]
+        for e, x in zip(entries[1:], vs):
+            s = r('add', t, s, r('mul', t, x, e))
+        return [(r('sub', t, e, r('mul', t, s, f)), t) for e, f in zip(entries, taus)]
+    for kk in range(1, n):
+        k0, count = kk - 1, min(3, n - kk + 1)
+        own = (lambda x, k0=k0: x[k0:k0 + 1])
+
+        # 477-480: V's NR entries, H(K..K+NR-1, K-1) where K > M (DCOPY), else V at M; then DLARFG(NR, V(1), V(2))
+        # by the existing reflector owner (_linalg_reflector) over that clipped vector, its v(2:NR) V2..VNR, TAU T1
+        # and beta V(1) on exit
+        vector = _temporary((count,), real)
+
+        def sourced(r, v):
+            *column, x1_, x2_, x3_, renewed = v
+            p = r.index(0)
+            incoming = r('select', t, r('eq', BOOL, p, k(r, 0)), x1_, r('select', t, r('eq', BOOL, p, k(r, 1)), x2_, x3_))
+            return [(r('select', t, r('ne', BOOL, renewed, k(r, 0)), column[0], incoming) if column else incoming, t)]
+        given = ([(h[k0:k0 + count, k0 - 1], (0,))] if kk > 1 else []) + [(x, (None,)) for x in (v1, v2, v3)] + [
+            (own(fresh), (None,))]
+        _emit(passes, _record((count,), [(vector, (0,))], given, sourced), loops=(_at(rlen, k0, count),))
+        made = []
+        reflector = _linalg_reflector(vector, t1[0], beta[0], made)
+        _emit(passes, made, sizes={count: _at(rlen, k0, count), count - 1: _at(rtail, k0, count - 1)})
+
+        # 493-497: T2 = T1 V2 and (NR = 3) T3 = T1 V3
+        tail = [reflector[1 + d:2 + d, 0] for d in range(count - 1)]
+        passes += _record((1,), [(x, (None,)) for x in (t2, t3)[:count - 1]], [(t1, (None,))] + [
+            (x, (None,)) for x in tail], lambda r, v: [(r('mul', t, v[0], x), t) for x in v[1:]])
+
+        # 481-492: where K > M, H(K,K-1) = V(1) and H(K+1,K-1) = 0 (extent 2), and H(K+2,K-1) = 0 where K < I-1;
+        # where K = M > L, H(K,K-1) (1 - T1) (extent 1); else no store
+        if kk > 1:
+            head = h[k0:k0 + 2, k0 - 1]
+            _emit(passes, _record((2,), [(head, (0,))], [(head, (0,)), (beta, (None,)), (t1, (None,)), (own(fresh), (
+                None,))], lambda r, v: [(r('select', t, r('ne', BOOL, v[3], k(r, 0)), r('select', t, r(
+                    'eq', BOOL, r.index(0), k(r, 0)), v[1], c(r, 0)), r('mul', t, v[0], r('sub', t, c(r, 1), v[2]))),
+                    t)]), loops=((own(ewrite), 2),))
+            if count == 3:
+                cleared = h[k0 + 2:k0 + 3, k0 - 1]
+                _emit(passes, _record((1,), [(cleared, (0,))], [], lambda r, v: [(c(r, 0), t)]),
+                      loops=((own(eclear), 1),))
+
+        # the reflector's rows K..K+NR-1 over columns K..I2, columns over I1..min(K+3, I) (NR = 3) or I1..I (NR = 2),
+        # and Z's over ILOZ..IHIZ, each NR its own records and extents
+        vs, taus = [(x, (None,)) for x in tail], [(x, (None,)) for x in (t1, t2, t3)]
+        for nr, rows_extent, columns_extent, z_extent in ((3, l3, r3, z3), (2, l2, r2, z2)):
+            if nr > count:
+                continue
+            factors = vs[:nr - 1] + taus[:nr]
+            rows = [h[k0 + d, k0:] for d in range(nr)]
+            _emit(passes, _record((n - k0,), [(x, (0,)) for x in rows], [(x, (0,)) for x in rows] + factors, applied),
+                  loops=((own(rows_extent), n - k0),))
+            for target, at_row, extent in ((h, i1z, columns_extent), (z, base, z_extent)):
+                if target is None:
+                    continue
+                columns = [target[:, k0 + d] for d in range(nr)]
+                _emit(passes, _record((n,), [(x, (0,)) for x in columns], [(x, (0,)) for x in columns] + factors,
+                                      applied), loops=((own(extent), n),),
+                      offsets=[(x, {0: (at_row, n - 1)}) for x in columns])
+
+    # 315 and 563-568: ITS += 1 after a sweep; past ITMAX = 30 max(10, NH) INFO = I (the source's failure), else the
+    # next DO 140 iteration while I >= ILO, its K search over I - L entries
+    def counted(r, v):
+        number, alive, top, low, high, failure, current = v
+        zero, one = k(r, 0), k(r, 1)
+        done = r('select', I32, r('ne', BOOL, alive, zero), r('add', I32, number, one), number)
+        itmax = r('mul', I32, k(r, 30), larger(r, k(r, 10), r('add', I32, r('sub', I32, high, low), one), I32))
+        fail = r('and', BOOL, r('ne', BOOL, alive, zero), r('gt', BOOL, done, itmax))
+        return [(done, I32), (r('select', I32, fail, top, failure), I32),
+                (flag(r, r('and', BOOL, r('not', BOOL, fail), r('ge', BOOL, top, low))), I32),
+                (larger(r, r('sub', I32, top, current), zero, I32), I32)]
+    passes += _scalars([its, info, more, span], [its, go, i, ilo, ihi, info, lo], counted)
+    ops.append(_Repeat(passes, more, carried))
+
+
 # Reference-LAPACK SRC/ztrevc.f 323-409 (SIDE = 'R', HOWMNY = 'B') with zlatrs.f 324-1025 (UPLO = 'U', TRANS = 'N',
 # DIAG = 'N', NORMIN = 'Y'): h the upper triangular Schur form (read only, its diagonal the source's original T(K,K)),
 # z the Schur vectors, vr the eigenvectors Z X, each column scaled to largest CABS1 1. Column KI of x (n x n) is

@@ -1,0 +1,16 @@
+[
+  {
+    "dtype": "torch.float32",
+    "n": 3,
+    "top_records": 4,
+    "leaf_records": 78,
+    "repeat_regions": 2
+  },
+  {
+    "dtype": "torch.float64",
+    "n": 3,
+    "top_records": 4,
+    "leaf_records": 78,
+    "repeat_regions": 2
+  }
+]
