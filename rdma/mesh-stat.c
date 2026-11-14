@@ -94,21 +94,12 @@ static int map_print(struct hdr *m,size_t length){
   free(r);
   return 0;
 }
-/* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
-   (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed).
-   2026-11-04, owner B2, the coordinator's ruling on review V1's finding 1: "client" printed before it, the process of
-   the first open claim's owner, 0 where none, since bin/mesh-bridge.sh (a deployment script this unit may not change)
-   holds a restart while mesh-stat prints "client":[1-9] (its client_attached), and without the field the guard never
-   held and a restart could end a running program.  What must stay: "client" while that script reads it.
-   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the open
-   root's process alone, "client" it and "clients" [it] ([] and 0 where the root is not open), where the claims' heads
-   were walked and each process printed once.  Why: point 5 and the root's note (mesh.h struct mesh_program: "the
-   region holds one program's operand at a time").  What must stay: both fields, "client" while bin/mesh-bridge.sh
-   reads it */
-/* every open publication's holder, in row order, in one pass, as mesh-holders.h mesh_holder_snapshot copies it from
+/* design/plan-to-bridge-change-request.md R8; design/aot-compilation-change-request.md, appendix item 6: "clients"
+   every open publication's holder, in row order, in one pass, as mesh-holders.h mesh_holder_snapshot copies it from
    this read-only mapping of `length` bytes (the slot read, the holder copied, the same open slot read again), then
-   alive by mesh_holder_live; a row whose slot moved meanwhile is skipped, and read again by the next mesh-stat.  The
-   first pid opens both fields, "client" it and "clients" [it, each later one after it]; none: "client" 0, [] */
+   alive by mesh_holder_live; a row whose slot moved meanwhile is skipped, and read again by the next mesh-stat.
+   "client" the first of them, 0 where none, printed before "clients": bin/mesh-bridge.sh holds a restart while it
+   reads "client":[1-9].  What must stay: both fields, "client" first */
 static void clients_print(struct hdr *h,size_t length){
   int listed=0;
   for(uint32_t r=0;r<h->rows;r++){
