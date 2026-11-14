@@ -1,0 +1,2029 @@
+{
+  "case": "multipage-1",
+  "source": "examples/crossing.py and examples/parallel.py",
+  "hidden": 9216,
+  "crossings": 2,
+  "overlap": true,
+  "group": 11141154,
+  "archive": true,
+  "prepared": 2,
+  "records": [
+    {
+      "peer": "mdots-Mac-Studio-3-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/compiler/mesh_compiler/archive.py": "b453b2b984481f73b322d7d345a29db7a24594b2dbc5e052d1c1ddad54c7141e",
+        "/Users/mdot/mesh/compiler/mesh_compiler/ir.py": "61d218f993febc28839e7cbbfb6320f2fe07b8be3d61d38dca2e69f68b938599",
+        "/Users/mdot/mesh/compiler/mesh_compiler/bridge.py": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 3.8093514159991173,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "034af39274c4f6d174fafbc099aded23468551f2a49bbce1129907b81410b108",
+          "preparation": 0,
+          "outputs": [
+            [
+              5,
+              9216
+            ],
+            [
+              5,
+              9216
+            ]
+          ],
+          "error": 0.0005268703898840885
+        },
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "034af39274c4f6d174fafbc099aded23468551f2a49bbce1129907b81410b108",
+          "preparation": 1,
+          "outputs": [
+            [
+              5,
+              9216
+            ],
+            [
+              5,
+              9216
+            ]
+          ],
+          "error": 0.0005268703898840885
+        },
+        {
+          "prepared_owners": [
+            {
+              "preparation": 0,
+              "row_range": [
+                0,
+                77
+              ],
+              "generation": 6,
+              "plans": [
+                5672255488,
+                5672271872
+              ],
+              "received": [
+                {
+                  "row": 0,
+                  "value": 20,
+                  "storage": 20,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    393216,
+                    409600
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 18,
+                  "storage": 18,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    425984,
+                    442368
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 16,
+                  "storage": 16,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    458752,
+                    475136
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 14,
+                  "storage": 14,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    491520,
+                    507904
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 12,
+                  "storage": 12,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    524288,
+                    540672
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 10,
+                  "storage": 10,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    557056,
+                    573440
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 8,
+                  "storage": 8,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    589824,
+                    606208
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 6,
+                  "storage": 6,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    622592,
+                    638976
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 20,
+                  "storage": 20,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    655360,
+                    671744
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 18,
+                  "storage": 18,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    688128,
+                    704512
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 16,
+                  "storage": 16,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    720896,
+                    737280
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 14,
+                  "storage": 14,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    753664,
+                    770048
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 12,
+                  "storage": 12,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    786432,
+                    802816
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 10,
+                  "storage": 10,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    819200,
+                    835584
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 8,
+                  "storage": 8,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    851968,
+                    868352
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 6,
+                  "storage": 6,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    884736,
+                    901120
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 0
+                  },
+                  "completions": [
+                    {
+                      "value": 22,
+                      "counter": 55,
+                      "writers": 5,
+                      "total": 9360,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 7,
+                          "completion": 7,
+                          "later": 2,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 10,
+                          "completion": 10,
+                          "later": 3,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 13,
+                          "completion": 13,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 24,
+                      "counter": 68,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 14,
+                          "completion": 14,
+                          "later": 4,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 0
+                  },
+                  "completions": []
+                }
+              ]
+            },
+            {
+              "preparation": 1,
+              "row_range": [
+                77,
+                77
+              ],
+              "generation": 8,
+              "plans": [
+                5672304640,
+                5672321024
+              ],
+              "received": [
+                {
+                  "row": 0,
+                  "value": 20,
+                  "storage": 20,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    393216,
+                    409600
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 18,
+                  "storage": 18,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    425984,
+                    442368
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 16,
+                  "storage": 16,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    458752,
+                    475136
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 14,
+                  "storage": 14,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    491520,
+                    507904
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 12,
+                  "storage": 12,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    524288,
+                    540672
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 10,
+                  "storage": 10,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    557056,
+                    573440
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 8,
+                  "storage": 8,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    589824,
+                    606208
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 0,
+                  "value": 6,
+                  "storage": 6,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    622592,
+                    638976
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 20,
+                  "storage": 20,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    655360,
+                    671744
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 18,
+                  "storage": 18,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    688128,
+                    704512
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 16,
+                  "storage": 16,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    720896,
+                    737280
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 14,
+                  "storage": 14,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    753664,
+                    770048
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 12,
+                  "storage": 12,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    786432,
+                    802816
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 10,
+                  "storage": 10,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    819200,
+                    835584
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 8,
+                  "storage": 8,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    851968,
+                    868352
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                },
+                {
+                  "row": 1,
+                  "value": 6,
+                  "storage": 6,
+                  "bytes": 18432,
+                  "pages": 2,
+                  "page_bytes": 16384,
+                  "copies": 1,
+                  "offsets": [
+                    884736,
+                    901120
+                  ],
+                  "frame_offsets": [
+                    0
+                  ],
+                  "frames_present": true
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 0
+                  },
+                  "completions": [
+                    {
+                      "value": 22,
+                      "counter": 55,
+                      "writers": 5,
+                      "total": 9360,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 7,
+                          "completion": 7,
+                          "later": 2,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 10,
+                          "completion": 10,
+                          "later": 3,
+                          "count": 36
+                        },
+                        {
+                          "dispatch": 13,
+                          "completion": 13,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 24,
+                      "counter": 68,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 14,
+                          "completion": 14,
+                          "later": 4,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 0
+                  },
+                  "completions": []
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "logs": {
+        "distributed/mdots-Mac-Studio-3-ts-multipage-1-result.json": {
+          "sha256": "c1127c86bd1a908ada831eb255004a04a808aa7c690c3e0ca3c26d1c44b608ea",
+          "bytes": 5699
+        },
+        "distributed/mdots-Mac-Studio-3-ts-multipage-1.stdout": {
+          "sha256": "f5a2c21512f55ce78c143fd7506403c3663ece2110e67da940670590618e2224",
+          "bytes": 21670
+        },
+        "distributed/mdots-Mac-Studio-3-ts-multipage-1.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 10 positions restored (no relation solved)",
+        "prepared self-timed program 2 calls 10 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "m5ult2-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/compiler/mesh_compiler/archive.py": "b453b2b984481f73b322d7d345a29db7a24594b2dbc5e052d1c1ddad54c7141e",
+        "/Users/mdot/mesh/compiler/mesh_compiler/ir.py": "61d218f993febc28839e7cbbfb6320f2fe07b8be3d61d38dca2e69f68b938599",
+        "/Users/mdot/mesh/compiler/mesh_compiler/bridge.py": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 3.789502042112872,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "156cbec71207cae298c1dd8f3cca56de834ecac3beeec82385be2f12172da5a3",
+          "preparation": 0
+        },
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "156cbec71207cae298c1dd8f3cca56de834ecac3beeec82385be2f12172da5a3",
+          "preparation": 1
+        },
+        {
+          "prepared_owners": [
+            {
+              "preparation": 0,
+              "row_range": [
+                0,
+                35
+              ],
+              "generation": 6,
+              "plans": [
+                5672255488,
+                5672271872
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 1
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 1
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "preparation": 1,
+              "row_range": [
+                35,
+                35
+              ],
+              "generation": 8,
+              "plans": [
+                5672304640,
+                5672321024
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 1
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 1
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "logs": {
+        "distributed/m5ult2-ts-multipage-1-result.json": {
+          "sha256": "4b9aff602263dfa4e7e4811463f99528bb15ec18eeb5ea5c81ba3b53c9ce5aa8",
+          "bytes": 5698
+        },
+        "distributed/m5ult2-ts-multipage-1.stdout": {
+          "sha256": "3d952296307936f00e393e25f1b674e4f3c68abc20d234e08f52f80c40ca1db5",
+          "bytes": 7875
+        },
+        "distributed/m5ult2-ts-multipage-1.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 6 positions restored (no relation solved)",
+        "prepared self-timed program 2 calls 6 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "mdots-Mac-Studio-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/compiler/mesh_compiler/archive.py": "b453b2b984481f73b322d7d345a29db7a24594b2dbc5e052d1c1ddad54c7141e",
+        "/Users/mdot/mesh/compiler/mesh_compiler/ir.py": "61d218f993febc28839e7cbbfb6320f2fe07b8be3d61d38dca2e69f68b938599",
+        "/Users/mdot/mesh/compiler/mesh_compiler/bridge.py": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 3.774412333033979,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "b58e71c229f0902dbdcad32be8a9d4ca50490193bd142531d347636626d2f2a6",
+          "preparation": 0
+        },
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "b58e71c229f0902dbdcad32be8a9d4ca50490193bd142531d347636626d2f2a6",
+          "preparation": 1
+        },
+        {
+          "prepared_owners": [
+            {
+              "preparation": 0,
+              "row_range": [
+                0,
+                35
+              ],
+              "generation": 6,
+              "plans": [
+                5672255488,
+                5672271872
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 2
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 2
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "preparation": 1,
+              "row_range": [
+                35,
+                35
+              ],
+              "generation": 8,
+              "plans": [
+                5672304640,
+                5672321024
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 2
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 2
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "logs": {
+        "distributed/mdots-Mac-Studio-ts-multipage-1-result.json": {
+          "sha256": "1faf2fe22d8d2314742142dd8a18f161d22d51c36256e101ed80e72a4ff833e0",
+          "bytes": 5698
+        },
+        "distributed/mdots-Mac-Studio-ts-multipage-1.stdout": {
+          "sha256": "73796bfb8e76d0e95062fca1df8cb0084817090bf169e21509e77a6f3b2112f8",
+          "bytes": 7875
+        },
+        "distributed/mdots-Mac-Studio-ts-multipage-1.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 8 positions restored (no relation solved)",
+        "prepared self-timed program 2 calls 8 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "mdots-Mac-Studio-2-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/compiler/mesh_compiler/archive.py": "b453b2b984481f73b322d7d345a29db7a24594b2dbc5e052d1c1ddad54c7141e",
+        "/Users/mdot/mesh/compiler/mesh_compiler/ir.py": "61d218f993febc28839e7cbbfb6320f2fe07b8be3d61d38dca2e69f68b938599",
+        "/Users/mdot/mesh/compiler/mesh_compiler/bridge.py": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 3.7298485420033103,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "f63780a3bf7db3e33074c3891fac8f778ab6e14cd9ab6aef38d8ba83bfc390f6",
+          "preparation": 0
+        },
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "f63780a3bf7db3e33074c3891fac8f778ab6e14cd9ab6aef38d8ba83bfc390f6",
+          "preparation": 1
+        },
+        {
+          "prepared_owners": [
+            {
+              "preparation": 0,
+              "row_range": [
+                0,
+                35
+              ],
+              "generation": 6,
+              "plans": [
+                5672255488,
+                5672271872
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 3
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 3
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "preparation": 1,
+              "row_range": [
+                35,
+                35
+              ],
+              "generation": 8,
+              "plans": [
+                5672304640,
+                5672321024
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 3
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 3
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "logs": {
+        "distributed/mdots-Mac-Studio-2-ts-multipage-1-result.json": {
+          "sha256": "986f3f4cb7ef401b6bd357c4fd0e70993576353837c5244c09f550ea808b8a25",
+          "bytes": 5699
+        },
+        "distributed/mdots-Mac-Studio-2-ts-multipage-1.stdout": {
+          "sha256": "8f355b264c9c148459f711a63e164e65b36bbd5538b8f3c9d88262ea3b526767",
+          "bytes": 7875
+        },
+        "distributed/mdots-Mac-Studio-2-ts-multipage-1.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 8 positions restored (no relation solved)",
+        "prepared self-timed program 2 calls 8 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "Ms-Mac-mini-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/compiler/mesh_compiler/archive.py": "b453b2b984481f73b322d7d345a29db7a24594b2dbc5e052d1c1ddad54c7141e",
+        "/Users/mdot/mesh/compiler/mesh_compiler/ir.py": "61d218f993febc28839e7cbbfb6320f2fe07b8be3d61d38dca2e69f68b938599",
+        "/Users/mdot/mesh/compiler/mesh_compiler/bridge.py": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "128c64542bae08be8f795148681b1ccd150871afdcaacd9f8687ddd55235f263",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "089f81408551743feab1e69aa8beb37607267a94504b9500bed5bc499ea99fc8",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "564351af19ec84b2a94024f80693931f75c9817f23bccba12f1ea43b5678ea03",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "b1f0b0cf3949ea83554e243733645b0a1789ed936c48daa93bbe370edcf0ec4f"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 3.847232082975097,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "a3d9e11ac41646a4704473070a9e86e2ca2d836bdb6ae988662d0ea7e7c4d371",
+          "preparation": 0
+        },
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "a3d9e11ac41646a4704473070a9e86e2ca2d836bdb6ae988662d0ea7e7c4d371",
+          "preparation": 1
+        },
+        {
+          "prepared_owners": [
+            {
+              "preparation": 0,
+              "row_range": [
+                0,
+                35
+              ],
+              "generation": 6,
+              "plans": [
+                4563877888,
+                4563894272
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 4
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 4
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "preparation": 1,
+              "row_range": [
+                35,
+                35
+              ],
+              "generation": 8,
+              "plans": [
+                4563927040,
+                4563943424
+              ],
+              "received": [
+                {
+                  "row": 1,
+                  "value": 2,
+                  "storage": 2,
+                  "bytes": 92160,
+                  "pages": 0,
+                  "page_bytes": 0
+                },
+                {
+                  "row": 1,
+                  "value": 4,
+                  "storage": 4,
+                  "bytes": 18432,
+                  "pages": 0,
+                  "page_bytes": 0
+                }
+              ],
+              "scopes": [
+                {
+                  "row": 0,
+                  "source": {
+                    "row": 0,
+                    "node": 4
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 4294967295,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 26,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 2,
+                          "completion": 2,
+                          "later": 4294967295,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "row": 1,
+                  "source": {
+                    "row": 1,
+                    "node": 4
+                  },
+                  "completions": [
+                    {
+                      "value": 6,
+                      "counter": 25,
+                      "writers": 1,
+                      "total": 9216,
+                      "contributions": [
+                        {
+                          "dispatch": 1,
+                          "completion": 1,
+                          "later": 0,
+                          "count": 9216
+                        }
+                      ]
+                    },
+                    {
+                      "value": 8,
+                      "counter": 29,
+                      "writers": 1,
+                      "total": 36,
+                      "contributions": [
+                        {
+                          "dispatch": 4,
+                          "completion": 4,
+                          "later": 1,
+                          "count": 36
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "logs": {
+        "distributed/Ms-Mac-mini-ts-multipage-1-result.json": {
+          "sha256": "e3731d1292797feb55c3cff8a04da1f646e2996552f054a93acf3b17a490ae0f",
+          "bytes": 5698
+        },
+        "distributed/Ms-Mac-mini-ts-multipage-1.stdout": {
+          "sha256": "704db137a88fe3467b421071693988e758c4916e441a935b65d5248370925dba",
+          "bytes": 7875
+        },
+        "distributed/Ms-Mac-mini-ts-multipage-1.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 6 positions restored (no relation solved)",
+        "prepared self-timed program 2 calls 6 positions restored (no relation solved)"
+      ]
+    }
+  ],
+  "observer_command": [
+    "/Users/mdot/.venv-mesh-uv/bin/python",
+    "-u",
+    "-c",
+    "import sys,runpy,json,ctypes as C\nfrom pathlib import Path\nimport parallel,mesh_graph as G\nfrom mesh_compiler import metal as M\nclass Placement(C.Structure):\n _fields_=[('buffer',C.c_void_p),('frames',C.c_void_p),('offsets',C.POINTER(C.c_uint64)),('frame_offsets',C.POINTER(C.c_uint64)),('copies',C.c_uint64),('ahead',C.c_uint64),('shares',C.c_uint32),('padding',C.c_uint32)]\ncompiler=M._compiler()\nplacement=compiler.metal_ir_value_placement\nplacement.argtypes=[C.c_void_p,C.c_uint32,C.POINTER(Placement)]\nplacement.restype=C.c_int\nrows=G.LIB.mesh_graph_scopes_rows\nrows.argtypes=[C.c_void_p,C.POINTER(C.c_size_t)]\nrows.restype=C.POINTER(G.ScopesData)\ndef observe(f,event,arg):\n if event!='return' or f.f_code is not parallel.execute.__code__:return\n sys.setprofile(None)\n programs=f.f_locals.get('programs')\n if programs is None:\n  print(json.dumps({'owner_observation':'unavailable: execute did not reach prepared programs'}),flush=True)\n  return\n out=[]\n for index,program in enumerate(programs):\n  bound=program.function; owner=bound.owner; count=C.c_size_t()\n  scopes=rows(bound.signature.scopes,C.byref(count))\n  record={'preparation':index,'row_range':[owner.planned.rows.first,owner.planned.rows.count],'generation':owner.planned.generation,'plans':[owner.planned.call[k].plan for k in range(owner.planned.calls)],'received':[],'scopes':[]}\n  for r in range(count.value):\n   s=scopes[r]\n   record['scopes'].append({'row':r,'source':{'row':s.source.contents.row,'node':s.source.contents.node} if s.source else None,'completions':[{'value':s.completion[c].value,'counter':s.completion[c].counter,'writers':s.completion[c].writers,'total':s.completion[c].total,'contributions':[{'dispatch':s.writer[w].dispatch,'completion':s.writer[w].completion,'later':s.writer[w].later,'count':s.writer[w].count} for w in range(s.completion[c].writer,s.completion[c].writer+s.completion[c].writers)]} for c in range(s.completions)]})\n  for r,(row,handle) in enumerate(zip(bound.target.rows,bound.programs,strict=True)):\n   for v in dict.fromkeys(x[0] for x in row.marks['received']):\n    info=M.ValueInfo();compiler.metal_ir_value_info(handle,v,C.byref(info))\n    item={'row':r,'value':v,'storage':info.storage,'bytes':info.bytes,'pages':info.pages,'page_bytes':info.page_bytes}\n    if info.pages:\n     p=Placement();status=placement(handle,info.storage,C.byref(p))\n     if status:raise OSError(status,'read retained paged placement')\n     item.update(copies=p.copies,offsets=list(p.offsets[:p.copies*info.pages]),frame_offsets=list(p.frame_offsets[:p.copies]),frames_present=bool(p.frames))\n    record['received'].append(item)\n  out.append(record)\n Path('output_data/compiler-workgroup-20261114/executor/distributed/multipage-1-owners.json').write_text(json.dumps(out,indent=2)+'\\n')\n print(json.dumps({'prepared_owners':out}),flush=True)\nsys.argv=['examples/crossing.py',*sys.argv[1:]]\nsys.setprofile(observe)\ntry:runpy.run_path('examples/crossing.py',run_name='__main__')\nfinally:sys.setprofile(None)\n",
+    "--nodes",
+    "371057962",
+    "455770905",
+    "521750041",
+    "597453729",
+    "1974797816",
+    "--device",
+    "mps",
+    "--archive",
+    "/Users/mdot/mesh/output_data/compiler-workgroup-20261114/executor/distributed/archive-multipage-1",
+    "--prepared",
+    "2"
+  ],
+  "limits": [
+    "Observed two-page offsets were contiguous; fragmented physical placement is not claimed.",
+    "Both owners coexisted before invocation; each was invoked once in sequence.",
+    "Retirement root slots are recorded separately by a read-only region snapshot."
+  ]
+}

@@ -1,0 +1,313 @@
+{
+  "case": "crossing-8",
+  "source": "examples/crossing.py and examples/parallel.py",
+  "hidden": 8,
+  "crossings": 2,
+  "overlap": true,
+  "group": 11141153,
+  "archive": false,
+  "prepared": 1,
+  "records": [
+    {
+      "peer": "mdots-Mac-Studio-3-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 2.356113665999146,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "3b141c6e58e30c629c52d6cc1a20b8dcc5925207c6bd349f5479b988848d1a5c",
+          "outputs": [
+            [
+              5,
+              8
+            ],
+            [
+              5,
+              8
+            ]
+          ],
+          "error": 0.00022831050228310502
+        }
+      ],
+      "logs": {
+        "distributed/mdots-Mac-Studio-3-ts-crossing-8-result.json": {
+          "sha256": "f6e92f3761ec5c013ad6fe10cef90bf3d261959729481d53c300f32b05faee14",
+          "bytes": 2145
+        },
+        "distributed/mdots-Mac-Studio-3-ts-crossing-8.stdout": {
+          "sha256": "f93aba948979b21db42e8069066ba9af6e5ffafd21883ed343297a3dd8a47de0",
+          "bytes": 3574
+        },
+        "distributed/mdots-Mac-Studio-3-ts-crossing-8.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 10 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "m5ult2-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 2.3751657920656726,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "91b5bf76b0c0545d61a224a51fe3ff5a18851bfc010b679314b0cb0c8fe1353b"
+        }
+      ],
+      "logs": {
+        "distributed/m5ult2-ts-crossing-8-result.json": {
+          "sha256": "b1ba2a31f579e7ad941d23523f852a8f32d6450bd0e2fd42750976ec41079418",
+          "bytes": 2146
+        },
+        "distributed/m5ult2-ts-crossing-8.stdout": {
+          "sha256": "ae6f6a8944cad637b673d9ed2f5a56712f5e8b4dddba5ebe88f33f871246bb41",
+          "bytes": 2972
+        },
+        "distributed/m5ult2-ts-crossing-8.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 6 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "mdots-Mac-Studio-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 2.3782851670403033,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "d77fe732a9161608f4e0a94c05b0c8ab6d258ab8c3bae9903826f6ed44c8d7ec"
+        }
+      ],
+      "logs": {
+        "distributed/mdots-Mac-Studio-ts-crossing-8-result.json": {
+          "sha256": "8b5aaf44a65179016cf1b498910ef75a22bb20a49b861cac9773f9c997a287ae",
+          "bytes": 2146
+        },
+        "distributed/mdots-Mac-Studio-ts-crossing-8.stdout": {
+          "sha256": "2ad58be90d55713fe84ad261be0db57f85285ec03110ec86f00581319dfd98fa",
+          "bytes": 2972
+        },
+        "distributed/mdots-Mac-Studio-ts-crossing-8.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 8 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "mdots-Mac-Studio-2-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 2.4225913750124164,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "059196a11bdaf0e04d581784ecde2584455a28d709a26839d4033fbf5bf43a3e"
+        }
+      ],
+      "logs": {
+        "distributed/mdots-Mac-Studio-2-ts-crossing-8-result.json": {
+          "sha256": "bab837fba87931033f1e3a894a4fc1958f4bc1c4ab43216c3404871c8c13a7cf",
+          "bytes": 2146
+        },
+        "distributed/mdots-Mac-Studio-2-ts-crossing-8.stdout": {
+          "sha256": "6dac0ade91b161001b805ba030a69e2c2a9ce374aa6e68e2e8162edf11b711d9",
+          "bytes": 2972
+        },
+        "distributed/mdots-Mac-Studio-2-ts-crossing-8.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 8 positions restored (no relation solved)"
+      ]
+    },
+    {
+      "peer": "Ms-Mac-mini-ts",
+      "heads": {
+        "/Users/mdot/mesh": "684c7b4277d1f275342724ca4cdecd12f6b598ea",
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c"
+      },
+      "before": {
+        "/Users/mdot/mesh/compiler/mesh_compiler/native.py": "cc17bb1b05af0241b11ee1e8ed4fdea8db710b13d4284a1fda2a65ee637b63bb",
+        "/Users/mdot/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+        "/Users/mdot/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+        "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+        "/Users/mdot/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+        "/Users/mdot/mesh/compiler/mesh_compiler/operations.py": "d4ce208338a35ba2a412b5f93afed9c265e52328f9a934ecfc36e29bd913445c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+        "/Users/mdot/mesh/compiler/mesh_compiler/export.py": "ced7983e649d34a66ad614226ab9aedd991377307431b134e5d69d7c0f45213c",
+        "/Users/mdot/mesh/compiler/mesh_compiler/runtime.py": "a3ab8a8d90d0e51edd186178180fcd2ecfdd0e601350d81995dec9b6f9b88897",
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "128c64542bae08be8f795148681b1ccd150871afdcaacd9f8687ddd55235f263",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "089f81408551743feab1e69aa8beb37607267a94504b9500bed5bc499ea99fc8",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "564351af19ec84b2a94024f80693931f75c9817f23bccba12f1ea43b5678ea03",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "b1f0b0cf3949ea83554e243733645b0a1789ed936c48daa93bbe370edcf0ec4f"
+      },
+      "returncode": 0,
+      "changed": [],
+      "seconds": 2.405128583079204,
+      "reports": [
+        {
+          "channels": [
+            {
+              "function": 0,
+              "channels": 8
+            },
+            {
+              "function": 1,
+              "channels": 8
+            }
+          ],
+          "between machines": 16,
+          "signature": "8e7686b682fa285750134e55c85d21882e8e99ce3bd820791d4d571972c1262d"
+        }
+      ],
+      "logs": {
+        "distributed/Ms-Mac-mini-ts-crossing-8-result.json": {
+          "sha256": "9702031959d6a8628302efdb43196ef30fd69177c9a11c35bbcdd7aa4ad731bb",
+          "bytes": 2145
+        },
+        "distributed/Ms-Mac-mini-ts-crossing-8.stdout": {
+          "sha256": "d0e82f6c844c2224c21ffdedac6325bd113cf04e1cb089a6f9809920addeb45d",
+          "bytes": 2972
+        },
+        "distributed/Ms-Mac-mini-ts-crossing-8.stderr": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      "reloads": [
+        "prepared self-timed program 2 calls 6 positions restored (no relation solved)"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "method": "read-only shm_open and mmap; exact observed publication root rows; initial pread returned ESPIPE without reading or changing the region",
+  "command": "PYTHONPATH=/Users/mdot/mesh/rdma /Users/mdot/.venv-mesh-uv/bin/python - <<'PY'\nimport ctypes as C,os,json,struct,mmap\nfrom pathlib import Path\nimport mesh\nbase=Path('/Users/mdot/mesh/output_data/compiler-workgroup-20261114/executor/distributed')\nlines=(base/'multipage-1.stdout').read_text().splitlines()\n(owners,)=[json.loads(s)['prepared_owners'] for s in lines if s.startswith('{\"prepared_owners\"')]\nlib=C.CDLL(None,use_errno=True);lib.shm_open.argtypes=[C.c_char_p,C.c_int,C.c_uint];lib.shm_open.restype=C.c_int\nfd=lib.shm_open(b'/mesh0',os.O_RDONLY,0)\nif fd<0:raise OSError(C.get_errno(),'shm_open read-only mesh0')\ntry:\n with mmap.mmap(fd,mmap.PAGESIZE,access=mmap.ACCESS_READ) as head:\n  h=mesh.Header.from_buffer_copy(head[:C.sizeof(mesh.Header)])\n extent=h.page_off+max(sum(x['row_range']) for x in owners)*32\n view=mmap.mmap(fd,extent,access=mmap.ACCESS_READ)\n records=[]\n for x in owners:\n  first,count=x['row_range'];root=first+count-1\n  mapping,address,device,publication=struct.unpack_from('=4Q',view,h.page_off+root*32)\n  records.append(dict(generation=x['generation'],rows=[first,count],root=root,publication=publication))\n result=dict(version=h.version,node=h.node,bridge_pid=h.bridge_pid,rows=h.rows,generation=h.generation,preparing_client=h.preparing_client,device_client=h.device_client,publications=records)\n (base/'multipage-1-retired.json').write_text(json.dumps(result,indent=2)+'\\n')\n print(json.dumps(result))\nfinally:\n if 'view' in locals():view.close()\n os.close(fd)\nPY",
+  "results": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "534932",
+        "wall_time_seconds": 0.076628667,
+        "exit_code": 0,
+        "original_token_count": 72,
+        "output": "{\"version\": 121, \"node\": 371057962, \"bridge_pid\": 95542, \"rows\": 5373952, \"generation\": 8, \"preparing_client\": 0, \"device_client\": 0, \"publications\": [{\"generation\": 6, \"rows\": [0, 77], \"root\": 76, \"publication\": 0}, {\"generation\": 8, \"rows\": [77, 77], \"root\": 153, \"publication\": 0}]}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "846908",
+        "wall_time_seconds": 0.088370333,
+        "exit_code": 0,
+        "original_token_count": 72,
+        "output": "{\"version\": 121, \"node\": 455770905, \"bridge_pid\": 32109, \"rows\": 5373952, \"generation\": 8, \"preparing_client\": 0, \"device_client\": 0, \"publications\": [{\"generation\": 6, \"rows\": [0, 35], \"root\": 34, \"publication\": 0}, {\"generation\": 8, \"rows\": [35, 35], \"root\": 69, \"publication\": 0}]}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "b7c8bb",
+        "wall_time_seconds": 0.086997917,
+        "exit_code": 0,
+        "original_token_count": 72,
+        "output": "{\"version\": 121, \"node\": 521750041, \"bridge_pid\": 33866, \"rows\": 5373952, \"generation\": 8, \"preparing_client\": 0, \"device_client\": 0, \"publications\": [{\"generation\": 6, \"rows\": [0, 35], \"root\": 34, \"publication\": 0}, {\"generation\": 8, \"rows\": [35, 35], \"root\": 69, \"publication\": 0}]}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "92b7eb",
+        "wall_time_seconds": 0.000005416,
+        "exit_code": 0,
+        "original_token_count": 71,
+        "output": "{\"version\": 121, \"node\": 597453729, \"bridge_pid\": 5415, \"rows\": 5373952, \"generation\": 8, \"preparing_client\": 0, \"device_client\": 0, \"publications\": [{\"generation\": 6, \"rows\": [0, 35], \"root\": 34, \"publication\": 0}, {\"generation\": 8, \"rows\": [35, 35], \"root\": 69, \"publication\": 0}]}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "780eb1",
+        "wall_time_seconds": 0.076571917,
+        "exit_code": 0,
+        "original_token_count": 72,
+        "output": "{\"version\": 121, \"node\": 1974797816, \"bridge_pid\": 51394, \"rows\": 1048576, \"generation\": 8, \"preparing_client\": 0, \"device_client\": 0, \"publications\": [{\"generation\": 6, \"rows\": [0, 35], \"root\": 34, \"publication\": 0}, {\"generation\": 8, \"rows\": [35, 35], \"root\": 69, \"publication\": 0}]}\n"
+      }
+    }
+  ]
+}
