@@ -185,13 +185,18 @@ struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,o
                     struct mesh_value *root; size_t *value_first; const uint32_t *calls,*chains,*ordered;
                     uint32_t ncalls,norders; const struct mesh_graph_relation *relation;
                     const struct mesh_graph_closure *closure; const size_t *use_first;
-                    const struct mesh_local_use *use; };
-_Static_assert(sizeof(struct mesh_local)==288 && offsetof(struct mesh_local,bytes)==152 &&
+                    const struct mesh_local_use *use; const uint32_t *source_calls;
+                    const uint64_t *source_outstanding; uint32_t sources,padding; size_t *row,*order,*source_row,
+                    *source_order,*demand_first; uint32_t *demand_of,*release_of; };
+_Static_assert(offsetof(struct mesh_local,bytes)==152 &&
                offsetof(struct mesh_local,values)==160 && offsetof(struct mesh_local,offsets)==168 &&
                offsetof(struct mesh_local,first)==176 && offsetof(struct mesh_local,offset)==184 &&
                offsetof(struct mesh_local,functions)==192 && offsetof(struct mesh_local,function)==200 &&
                offsetof(struct mesh_local,value_first)==216 && offsetof(struct mesh_local,ncalls)==248 &&
-               offsetof(struct mesh_local,relation)==256 && offsetof(struct mesh_local,use)==280,
+               offsetof(struct mesh_local,relation)==256 && offsetof(struct mesh_local,use)==280 &&
+               offsetof(struct mesh_local,source_calls)==288 && offsetof(struct mesh_local,sources)==304 &&
+               offsetof(struct mesh_local,row)==312 && offsetof(struct mesh_local,demand_first)==344 &&
+               offsetof(struct mesh_local,release_of)==360 && sizeof(struct mesh_local)==368,
                "mesh_local: rdma/mesh.py Local");
 int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
                     const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,
@@ -199,6 +204,21 @@ int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_
                     uint32_t nroots,const size_t *use_first,const struct mesh_local_use *use,uint64_t quantum,
                     struct mesh_local *out);
 void mesh_local_free(struct mesh_local *out);
+/* design/aot-compilation-change-request.md A2, A4 and A7 to A10, appendix items 2 and 6: one program's joint network
+   plan, mesh_plan's over its instances functions[count] (calls[j] call j's), with mesh_plan_local's program operands
+   (order, ordered, closure, chains, roots, use_first, use) and the original source family (source_calls[j] call j's
+   source function of `sources`, source_outstanding[] each one's issue bound: its own rows, A10's successor and delay).
+   Its result `out` is mesh_plan_local's owner: its planned record mesh_plan's (rows, arena, used, signature), its
+   copies rows of pages from planned.rows.first (first[]/offset[], value_first as mesh_plan_local's), the instance and
+   source rows (row/order, source_row/source_order), and each instance's declared rows' demands (demand_of from
+   demand_first[f]) with the release a sent row's demand shares (release_of; MESH_ABSENT a row this node does not
+   send). A shared root transported by a demand is a run 1 root (a caller's run 0 root: EINVAL) */
+int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,
+                      uint32_t count,const uint32_t *calls,uint32_t ncalls,const uint32_t *source_calls,
+                      uint32_t sources,const uint64_t *source_outstanding,const struct mesh_graph_relation *order,
+                      const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
+                      const uint32_t *chains,struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
+                      const struct mesh_local_use *use,uint64_t deadline,struct mesh_local *out);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7: the whole solved local result, saved in one
    archive (*bytes the caller's, released with free) and loaded without planning again: each function's value table,
    outstanding and plan and its compiled parts as mesh_plan_save keeps them (host, work and their relation, or flat edges

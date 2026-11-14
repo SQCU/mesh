@@ -159,7 +159,10 @@ class Local(C.Structure):
                 ('root', C.POINTER(Value)), ('value_first', C.POINTER(Z)), ('calls', C.POINTER(U)),
                 ('chains', C.POINTER(U)), ('ordered', C.POINTER(U)), ('ncalls', U), ('norders', U),
                 ('relation', C.c_void_p), ('closure', C.POINTER(mesh_graph.Closed)), ('use_first', C.POINTER(Z)),
-                ('use', C.POINTER(LocalUse))]
+                ('use', C.POINTER(LocalUse)), ('source_calls', C.POINTER(U)), ('source_outstanding', C.POINTER(Q)),
+                ('sources', U), ('padding', U), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
+                ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('demand_first', C.POINTER(Z)),
+                ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U))]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
@@ -305,6 +308,9 @@ for name, result, arguments in (
                                       C.c_void_p, C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z),
                                       C.POINTER(LocalUse), Q, C.POINTER(Local)]),
         ('mesh_local_free', None, [C.POINTER(Local)]),
+        ('mesh_plan_program', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), U,
+                                        C.POINTER(Q), C.c_void_p, C.POINTER(U), U, C.c_void_p, C.POINTER(U),
+                                        C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse), Q, C.POINTER(Local)]),
         ('mesh_local_save', C.c_int, [C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
         ('mesh_local_load', C.c_int, [C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),

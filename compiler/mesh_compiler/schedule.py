@@ -620,8 +620,10 @@ def viewed(owner, local):
 # given; `root_sources` and `analysis` the CallAnalysis's; `roots` mesh.Value[S] (bytes, run 0 a caller's root, shares
 # as solved); `uses` (use_first, use); `plan_calls[j]` call j's instance in `functions` (Function[K]; the source
 # function stays analysis.calls[j]), the local result's calls; `prepared` the declare_program owner its bindings and
-# uses come from; `plan` a transported program's (None here); `owner` the native owner. A loaded result has no
-# bindings, sources, analysis or prepared owner: its rows bind through the saved Target
+# uses come from; `plan` a transported program's planned record (mesh_plan_program; None locally); `ports[j]` the
+# prepared PortRecords with each sent row's solved demand and release; `context` the planning context (None locally);
+# `owner` the native owner. A loaded result has no bindings, sources, analysis, prepared owner or ports: its rows bind
+# through the saved Target
 @dataclasses.dataclass(eq=False)
 class Solved:
     functions: object
@@ -639,6 +641,8 @@ class Solved:
     plan_calls: object
     prepared: object
     plan: object
+    ports: tuple
+    context: object
     owner: object
 
     def saved(self):
@@ -655,8 +659,10 @@ class Solved:
 # (its Slot's; None: no numeric site on this machine), `direction` mesh.SEND (this call owns the row) or mesh.RECEIVE
 # (this call consumes it), `transfer` the row's position in its owner's combined declared array, `owner` the producing
 # call, `consumer` the consuming call (None: the program's outer output), `storage` the shared program root (its
-# source storage), `view` and `bytes` its original strided view and logical bytes, `source` and `destination` the
-# row's machines
+# source storage), `view` its original strided view, `payload` the view's logical bytes, `extent` the backing root's
+# bytes (the source storage's), `at` the view's byte offset in it, `output` the owner's output position, `source` and
+# `destination` the row's machines, `demand` and `release` the solved demand and the release its sends share
+# (mesh-collective.h struct mesh_local demand_of, release_of; None before the solve or where nothing is sent)
 @dataclasses.dataclass(frozen=True)
 class PortRecord:
     root: object
@@ -666,9 +672,14 @@ class PortRecord:
     consumer: object
     storage: int
     view: tuple
-    bytes: int
+    payload: int
+    extent: int
+    at: int
+    output: int
     source: object
     destination: object
+    demand: object = None
+    release: object = None
 
 
 # design/aot-compilation-change-request.md A2, A4, A8 and A10; mesh-collective.h struct mesh_declared, struct
@@ -679,7 +690,10 @@ class PortRecord:
 # identity, kind, value, root, from, to): its function's intrinsic declarations with each value remapped once through
 # wire_values (root 0), then each cross-call row of a port it owns, in CallPort and destination order (identity its
 # (owner, storage) above the intrinsic ones, root storage + 1, value its typed root or MESH_ABSENT); `weights[j]` and
-# `dependences[j]` the intrinsic ones, a cross-call row's weight the default unit cost; `arrays[j]` the native
+# `dependences[j]` the intrinsic ones, a cross-call row's weight the default unit cost; `extents[j]` each row's backing
+# bytes (an intrinsic row's declared value's, Declarations.values[value][0]; a cross-call row's source storage's) and
+# `costs[j]` its weight's provenance ("declared"; "absent": no cost operand is supplied for a call boundary, the
+# default unit weight stands in); `arrays[j]` the native
 # Declared and Weight arrays of those rows with what they hold; `source_bindings`, `declarations`, `wire_values` and
 # `planning` as given
 @dataclasses.dataclass(eq=False)
@@ -693,6 +707,8 @@ class Prepared:
     declared: tuple
     weights: tuple
     dependences: tuple
+    extents: tuple
+    costs: tuple
     arrays: tuple
     declarations: object
     wire_values: object
@@ -714,7 +730,7 @@ def declare_program(analysis, bindings, declarations, wire_values, planning):
                                      value.storage_offset() * value.element_size() - slot.offset), slot.reference)
                 used.setdefault((s, binding.call, slot.root), None)
     node = {machine: k for k, machine in enumerate(planning.nodes)} if planning is not None else {}
-    declared, weights, dependences, ports, identities = [], [], [], [[] for _ in range(J)], []
+    declared, weights, dependences, ports, identities, extents, costs = [], [], [], [[] for _ in range(J)], [], [], []
     for j in range(J):
         key = analysis.keys[analysis.calls[j]]
         intrinsic, wires = (declarations or {}).get(key), (wire_values or {}).get(key, {})
@@ -723,6 +739,9 @@ def declare_program(analysis, bindings, declarations, wire_values, planning):
                           mesh.ABSENT if value == mesh.ABSENT else wires.get(value, mesh.ABSENT), 0, sent, landed)
                          for source, destination, identity, kind, value, sent, landed in rows])
         weights.append([tuple(weight) for weight in (intrinsic.weights if intrinsic is not None else [])])
+        extents.append([intrinsic.values[value][0] if value != mesh.ABSENT else 0
+                        for *_, value, _, _ in rows])
+        costs.append(["declared"] * len(rows))
         dependences.append(list(intrinsic.dependences) if intrinsic is not None else [])
         identities.append({None: 1 + max((row[2] for row in rows), default=-1)})
     for port in analysis.ports:
@@ -731,6 +750,7 @@ def declare_program(analysis, bindings, declarations, wire_values, planning):
         a, mine = port.owner, identities[port.owner]
         owned = slots.get((a, "output", port.output))
         tensor = port.leaf.meta["val"]
+        extent = analysis.storages[port.storage][1].meta["val"].untyped_storage().nbytes()
         for destination in (machine for machine in port.machines if machine != port.source):
             identity = mine.setdefault((a, port.storage), mine[None] + len(mine) - 1)
             transfer = len(declared[a])
@@ -738,7 +758,10 @@ def declare_program(analysis, bindings, declarations, wire_values, planning):
                                 mesh.ABSENT if owned is None else owned, port.storage + 1, port.view, port.view))
             weights[a].append((unit_cost(None),) * 4)
             record = dict(transfer=transfer, owner=a, consumer=port.consumer, storage=port.storage, view=port.view,
-                          bytes=tensor.numel() * tensor.element_size(), source=port.source, destination=destination)
+                          payload=tensor.numel() * tensor.element_size(), extent=extent, at=port.view[0],
+                          output=port.output, source=port.source, destination=destination)
+            extents[a].append(extent)
+            costs[a].append("absent")
             ports[a].append(PortRecord(owned, mesh.SEND, **record))
             if port.consumer is not None:
                 ports[port.consumer].append(PortRecord(slots.get((port.consumer, "input", port.input)), mesh.RECEIVE,
@@ -756,13 +779,11 @@ def declare_program(analysis, bindings, declarations, wire_values, planning):
                        (mesh.Weight * max(len(weighted), 1))(*[mesh.Weight(*weight) for weight in weighted]), held))
     return Prepared(analysis, tuple(bindings), tuple(resolved.items()), tuple(sorted(used)), analysis.root_sources,
                     tuple(tuple(found) for found in ports), tuple(map(tuple, declared)), tuple(map(tuple, weights)),
-                    tuple(map(tuple, dependences)), tuple(arrays), declarations, wire_values, planning)
+                    tuple(map(tuple, dependences)), tuple(map(tuple, extents)), tuple(map(tuple, costs)),
+                    tuple(arrays), declarations, wire_values, planning)
 
 
 def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan_calls, declared):
-    if planning is not None:
-        raise NotImplementedError("solve_program under planning: mesh_plan takes no program roots, uses or closure yet "
-                                  "(output_data/compiler-workgroup-20261114/compiler/placement.status.md, section 13)")
     J, S, K = len(analysis.nodes), len(analysis.storages), len(functions)
     instances = (mesh.U * max(J, 1))(*plan_calls)
     resolved, used = dict(declared.bindings), declared.uses
@@ -777,16 +798,36 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
     for s in range(S):
         use_first[s + 1] += use_first[s]
     ordered = (mesh.U * max(len(analysis.order_edges), 1))(*analysis.order_edges)
-    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, ordered))
-    mesh.check(mesh.LIB.mesh_plan_local(functions, K, instances, J, C.c_void_p(analysis.relation.pointer),
-                                        ordered, len(analysis.order_edges),
-                                        C.cast(analysis.closure.owned.made, C.c_void_p), analysis.chains, roots, S,
-                                        use_first, use, quantum, C.byref(owner.local)))
+    outstanding = (mesh.Q * max(len(analysis.keys), 1))(*[analysis.outstanding[key] for key in analysis.keys])
+    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, ordered, outstanding))
+    relation, closure = C.c_void_p(analysis.relation.pointer), C.cast(analysis.closure.owned.made, C.c_void_p)
+    if planning is None:
+        mesh.check(mesh.LIB.mesh_plan_local(functions, K, instances, J, relation, ordered, len(analysis.order_edges),
+                                            closure, analysis.chains, roots, S, use_first, use, quantum,
+                                            C.byref(owner.local)))
+    else:
+        mesh.check(mesh.LIB.mesh_plan_program(C.byref(planning.context), planning.group, planning.program, functions,
+                                              K, instances, J, analysis.calls, len(analysis.keys), outstanding,
+                                              relation, ordered, len(analysis.order_edges), closure, analysis.chains,
+                                              roots, S, use_first, use,
+                                              time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS,
+                                              C.byref(owner.local)))
     local, calls = owner.local, owner.local.planned.call
+    found = bool(local.demand_first)
+
+    def solved(record):
+        if not found or record.direction != mesh.SEND:
+            return record
+        at = local.demand_first[plan_calls[record.owner]] + record.transfer
+        release = local.release_of[at]
+        return dataclasses.replace(record, demand=local.demand_of[at],
+                                   release=None if release == mesh.ABSENT else release)
     return Solved(functions, local, local.planned, *viewed(owner, local),
                   tuple((*entry, reference, calls[entry[0]].every, calls[entry[0]].ordinal)
                         for entry, reference in resolved.items()), tuple(bindings), analysis.root_sources, analysis,
-                  roots, (use_first, use), instances, declared, None, owner)
+                  roots, (use_first, use), instances, declared, local.planned if planning is not None else None,
+                  tuple(tuple(map(solved, records)) for records in declared.ports),
+                  planning.context if planning is not None else None, owner)
 
 
 # mesh-collective.h mesh_local_load: the saved result of `data` (Solved.saved), loaded, never solved: its Function[],
@@ -800,4 +841,4 @@ def loaded_program(data):
                      lambda status: status == 0))
     local = owner.local
     return Solved(local.function, local, local.planned, *viewed(owner, local), (), (), (), None, local.root,
-                  (local.use_first, local.use), local.calls, None, None, owner)
+                  (local.use_first, local.use), local.calls, None, None, (), None, owner)

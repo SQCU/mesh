@@ -1,0 +1,49 @@
+{
+  "/Users/mdot/dox/mesh": {
+    "head": "d59f7b949b03e18da735213ff9c35e60131fe68c",
+    "sha256": {
+      "rdma/Makefile": "de0d06b940c9a3a8cdad87d1d6437845e7753450dcb027cebbe112ac727a33cf",
+      "rdma/mesh-graph.c": "6370345ff2a286485eff3bb886fdade4017d520ecbd97ac66740a0ff7ed7b84f",
+      "rdma/mesh-graph.h": "184e6d8abe4657334b44c1eefb87d9c5970f2e52fbdffff6aea715fedb5fd53e",
+      "rdma/mesh-collective.c": "7028264dd71933098c798fac52d0991764cb6937a24f8752aa84400e8bf4999c",
+      "rdma/mesh-collective.h": "d4a8a7b38146568c05961e6342d5a6a63bd1d2bfd5e72c01ca5672b1cfaee912",
+      "rdma/mesh-dataflow.c": "fbbf2cf5ddfe3ee2c3207d5e4b2fbd35e63534ad0a1fcf522ca0b13a88201df6",
+      "rdma/mesh-dataflow.h": "c60c40be42e3b7cdd18419c84311d26721ca243765bd6a456ac08a5cc89cbc10",
+      "rdma/mesh-call.c": "b73f650ce518138f4c70db6570c8d438ca1d26b29fb267a8728ef2f73f6a4152",
+      "rdma/mesh.h": "a770c02456acd094a87998a8e80d7fff564cae379cbf4d3e60fb9a04ade94357",
+      "rdma/mesh.py": "20165e47eb00d01bac702e67ec6a4a79faaa2d5d91488cfabca856353796a330",
+      "rdma/mesh_graph.py": "9ca69cd690fa222b87ede71986cae60a47c4af906f9d2d93c7221b66160e1dce",
+      "rdma/mesh-metal.m": "318c78b668d91de3998da7455bb4a73a230fea06e5312d242fb278c551204f1b",
+      "rdma/mesh-metal.h": "6337e4630f16450ae2605c1f56363521516c2e986b937f5b442f3f87dcfb1ce5",
+      "compiler/mesh_compiler/metal.py": "c7857956a64726eff9bf99c765f774d495ac1ebda170bd204c2bdfaefd54a63d",
+      "compiler/mesh_compiler/native.py": "b11ad23394aeeb6274d2209adf136454f89e93be860800f2fe60eb69b1a54890",
+      "compiler/mesh_compiler/schedule.py": "720f28a3d14beee187a2811bd27384f8c00772872bafba7bab79a2a93c9c99d6",
+      "compiler/mesh_compiler/archive.py": "58ec0c516dd496ce94ac42f9f10d7616084f69c47544fe43229e958171868e72"
+    }
+  },
+  "/Users/mdot/metal-microbench": {
+    "head": "f3ebe8808153d4229f7351936cfe73bb5ac8331a",
+    "sha256": {
+      "Makefile": "0b2267ff132e06b01d5430ff8c6fc25ce8a69c86c9d4a3be7057827d29b3bd96",
+      "metal_ir.h": "1ddaa9d8ad07bfa2a62056ba22f903d99a8a4e6e5feec7ddeea4640e68812572",
+      "metal_ir.mm": "02ef65b8d9af4c164db2bd6f93c07d7f08a48a52bd613d3222fb30f71f167e47",
+      "metal_transform.mm": "4c7d3aeb89c87323305fbcef5c63000f25d3ed583839946ed9512584c531f3a7",
+      "metal_lower.h": "f43492c428d89c36777fd1f9414979c0143d8d806414d9900246568b69e9f7f7",
+      "metal_lower.mm": "f218d3b8070b72f3fe10dae38565181bb1d58a407831b7621776bedd30b1b9b9",
+      "metal_clone.h": "05e8c696ef9c0671ff96f6f1d053f4562aded8f0b6180a3552aecbb6abb5f2e8",
+      "metal_clone.mm": "8f6bbe8d513e273ca0756770811bdffb913712971195bada31e2c8ef667dceae",
+      "metal_archive.mm": "7cd02581a2bb5cbb3f221b6d7fbc0cb17fa4be2c4071a4bab4edf452221897ee",
+      "metal_native.mm": "0baae609ff1c7f1aab6db459ffb8c47ba39f352b76b96bf0581db6ad3d0cae33",
+      "metal_transport.mm": "f90bc8bdc8475a12c99c82171d099225c50f8a90f5a01bbe321660af6f4cbf88",
+      "metal_neural.mm": "739bc6d30c86740ceb5442090cb4c8580c29e6298aa8468554a3b68a2f0d80d4",
+      "metal_capture.h": "30a21e50bc9f386e897fdcc2b95442bb3b462ea5a5f43a8b8188fb964cfe8d5e",
+      "metal_capture.m": "cd7c15bafcbfee4a9d434754ff069da8c302c63ec208a2db3c5837aa119fc77c",
+      "metal_program.m": "054f5af03b482201a014088c63b6f0bec35bb127c30fa7fd9480e6f1ec7db420",
+      "metal_recording.h": "55cd76bacccb514ddcbdee76778939f67a9fcbf7123b5d659dc747bfab96b37a",
+      "metal_program.h": "f35775d462e2d71ab6cec511ac591883856bcb9ab6182e393f018ac49771fbf0",
+      "metal_submission.h": "a6ad545a5e7bb62e704802ef188ae3a5607a164069812035bcc7479624cf6456",
+      "tools/native_bench.m": "1730b01b46db9ba078003c5718918f05ebc4693b054580c362a0250266969922",
+      "tools/e2b_replay.m": "7d9075a38f71d7634a2fc9927245e506f915ced6bdc6886ae32f72299f2e2907"
+    }
+  }
+}

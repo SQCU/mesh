@@ -1,0 +1,30 @@
+{
+  "source_manifest": "local-native-entry-source.json",
+  "source_changed_since_snapshot": [
+    {
+      "path": "/Users/mdot/dox/mesh/compiler/mesh_compiler/metal.py",
+      "before": "c7857956a64726eff9bf99c765f774d495ac1ebda170bd204c2bdfaefd54a63d",
+      "after": "48c3134995f3dec739c182de89cd55e5e5ff984b0a53281033b902c0d24adfd4"
+    },
+    {
+      "path": "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py",
+      "before": "b11ad23394aeeb6274d2209adf136454f89e93be860800f2fe60eb69b1a54890",
+      "after": "16981a16220c03711b96fa13dfe0af21a1e8664c282feb18eb991adf1609e69b"
+    }
+  ],
+  "sha256": {
+    "/Users/mdot/dox/mesh/rdma/libmesh.dylib": "4c371dc18676ba5e2c7533e30018954eb27b3cd0ad4907a26813ada56472f5e0",
+    "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303",
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "682d891b5bd17416c38b7eb896a4e0adb2746601c3ca48edcbc13649645dd8da",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "638edf8ad1d7785a8de6bb78246b964f7a2a6fbd713b645df39b1239d91fd484",
+    "/Users/mdot/metal-microbench/.build/e2b_replay": "57a039cdfa747809d405d9679bf4825e82faf1c400d874bfe7b9a082406e65e5",
+    "/Users/mdot/metal-microbench/.build/native_bench": "d45fad424afe58b4d26c015122c1062ec814f07cc90561c0429299da12f5d976"
+  },
+  "current_heads": {
+    "/Users/mdot/dox/mesh": "c92cd826f983481bc3b29356b8f891483082b5df",
+    "/Users/mdot/metal-microbench": "e7db540c27b715059e69c05350304997cbc86eb3"
+  },
+  "build_exit": 0,
+  "abi_exit": 0,
+  "client_status": "first run failed at generated CPU entry name; corrected source rebuilt; retry pending"
+}
