@@ -46,13 +46,14 @@ void mesh_graph_search_free(struct mesh_graph_search *made);
 uint32_t mesh_graph_row_head(const void *context, size_t k);
 /* rows of a retained relation (context its struct mesh_graph_relation_data, first its row_first): edge[row_edge[k]].to */
 uint32_t mesh_graph_relation_head(const void *context, size_t k);
-/* A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988: over rows (first, head) whose heads all precede
-   their row (`following` 0) or all follow it (`following` 1) in vertex order, bit u of reached[v * words + u / 64] set
-   where a path of rows leads from v to u, words = (vertices + 63) / 64; EINVAL where a head is on the other side of its
-   row; freed by mesh_graph_closure_free */
+/* A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988: over rows (first, head), the vertices processed
+   in the order order[0], order[step], ..., order[(vertices - 1) * step] (each vertex once; a search's postorder over the
+   same rows, or its reverse with step -1 from the last element), every head before its row in that order: bit u of
+   reached[v * words + u / 64] set where a path of rows leads from v to u, words = (vertices + 63) / 64; EINVAL where the
+   order is not a permutation of the vertices or a head is not before its row; freed by mesh_graph_closure_free */
 struct mesh_graph_closure { uint32_t vertices; size_t words; uint64_t *reached; };
 int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                       const void *context, int following, struct mesh_graph_closure **made);
+                       const void *context, const uint32_t *order, ptrdiff_t step, struct mesh_graph_closure **made);
 void mesh_graph_closure_free(struct mesh_graph_closure *made);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */
@@ -302,6 +303,7 @@ struct mesh_graph_relation_data {
   const size_t *source_first, *source;
   const uint32_t *class_of;
   const unsigned char *kept;
+  uint32_t query;
 };
 void mesh_graph_relation_retain(struct mesh_graph_relation *);
 void mesh_graph_relation_free(struct mesh_graph_relation *);
@@ -314,6 +316,39 @@ int mesh_graph_relation_quotient(struct mesh_graph_relation *parent, uint32_t cl
 int mesh_graph_relation_contract(struct mesh_graph_relation *parent, const unsigned char *kept, void (*release)(void *),
                                  void *owner, struct mesh_graph_relation **out);
 int mesh_graph_relation_synchronization(struct mesh_graph_relation *, const unsigned char **redundant, size_t *kept);
+/* design/compilation-composition-change-request.md items 6.4 and 7: a root made by mesh_graph_relation_views is the
+   one mesh_graph_dependences_views (self 0, query DIRECTED) or mesh_graph_conflicts_views (self 1, query SELF) solve
+   over `view` and the supplied edges, its conflict records owned by the relation, `owner` (views, pairs, supplied)
+   adopted as mesh_graph_relation_create's; a root of mesh_graph_relation_create has query NONE; a derived relation
+   has its root's. mesh_graph_relation_witness answers the orientation from_view -> to_view of two of the root's
+   original views from that query alone: known 0 where it did not decide the pair (NONE, or a pair of one vertex under
+   DIRECTED); else record the original conflict record of the pair (reverse 1 where that record orients it
+   to_view -> from_view) or SIZE_MAX, no hazard. GIVEN records are no evidence. mesh_graph_relation_cause is the
+   witness's hazard in the asked orientation, view_conflicts' own: key and given the record's, from_view and to_view
+   as asked; ENODATA where not known, ENOENT where there is none */
+enum { MESH_GRAPH_QUERY_NONE, MESH_GRAPH_QUERY_DIRECTED, MESH_GRAPH_QUERY_SELF };
+struct mesh_graph_witness { size_t record; uint32_t reverse, known; };
+_Static_assert(sizeof(struct mesh_graph_witness) == 16, "mesh_graph_witness");
+int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
+                              const uint32_t *from, const uint32_t *to, int self, void (*release)(void *), void *owner,
+                              struct mesh_graph_relation **out);
+int mesh_graph_relation_witness(const struct mesh_graph_relation *, size_t from_view, size_t to_view,
+                                struct mesh_graph_witness *out);
+int mesh_graph_relation_cause(const struct mesh_graph_relation *, const struct mesh_graph_witness *,
+                              struct mesh_graph_cause *out);
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7: the complete retained result, saved and loaded
+   without solving, deriving or projecting again. mesh_graph_relation_save writes the relation and its parent chain,
+   root first, into *bytes (*length of them, the caller's, released with free): the root's original views with their
+   pairs, its conflict records and witness index, each relation's edges, members, outgoing and incoming rows, query, a
+   derived relation's sources and operand (class_of or kept), and its synchronization mask and kept count where it was
+   computed. mesh_graph_relation_load returns that chain with every array a borrowed span of `bytes` (8-byte aligned,
+   EINVAL otherwise) except the root's view headers, whose pairs are relocated into `bytes`; on success the root adopts
+   `owner` as mesh_graph_relation_create does (release(owner) with the chain's last reference, `bytes` borrowed until
+   then); on failure the caller keeps `owner` and nothing is kept. EINVAL for an archive whose spans or indices are
+   out of bounds */
+int mesh_graph_relation_save(const struct mesh_graph_relation *, void **bytes, size_t *length);
+int mesh_graph_relation_load(const void *bytes, size_t length, void (*release)(void *), void *owner,
+                             struct mesh_graph_relation **out);
 enum { MESH_GRAPH_COMPLETION_EVENT = 1 };
 struct mesh_graph_event { uint32_t object, role, argument, padding; uint64_t lookback; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };
