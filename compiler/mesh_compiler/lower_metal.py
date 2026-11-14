@@ -26,8 +26,9 @@ Root = collections.namedtuple("Root", "name kind role root value")
 Output = collections.namedtuple("Output", "root value literal metadata kind written")
 # compiler/mesh_compiler/placement.py place `input_parts`: one placed partition of an input on one processor, `input`
 # the whole input's placeholder Root, `root`/`value` the partition's typed root and ValueID (`typed`), `source` the
-# original partition Node
-InputPart = collections.namedtuple("InputPart", "processor input root value source")
+# original partition Node, `landing` the ValueID of its source view (its landing geometry) in `input.root`, None for a
+# non-tensor
+InputPart = collections.namedtuple("InputPart", "processor input root value source landing")
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: a result the program stores into its original input's root
 MUTATIONS = (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)
 # torch 2.14.0 torch/export/graph_signature.py InputKind; metal-microbench metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE
@@ -298,10 +299,17 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             return builder.roots[_key(value)], view
 
         # compiler/mesh_compiler/schedule.py assemble `input_parts`: each partition's typed root and ValueID by `typed`,
-        # its whole input the Root the placeholder loop appended for that placeholder's copy
+        # its whole input the Root the placeholder loop appended for that placeholder's copy, its landing the ValueID of
+        # its landing geometry (storage offset, shape, stride) on that placeholder's own typed view, as_strided
+        def landed(whole, geometry):
+            if geometry is None:
+                return None
+            offset, sizes, strides = geometry
+            return builder.value(_stored(env[copied[whole]].as_strided(sizes, strides, offset)))
         ported = dict(zip([node for node in nodes if node.op == "placeholder"], inputs, strict=True))
-        input_parts = {position: tuple(InputPart(processor, ported[copied[whole]], *typed(part), part)
-                                       for processor, whole, part in parts)
+        input_parts = {position: tuple(InputPart(processor, ported[copied[whole]], *typed(part), part,
+                                                 landed(whole, geometry))
+                                       for processor, whole, part, geometry in parts)
                        for position, parts in module.meta.get("input_parts", {}).items()}
 
         # metal-microbench metal_ir.h metal_ir_value_axis, before metal_ir_construct: each shard's work axes

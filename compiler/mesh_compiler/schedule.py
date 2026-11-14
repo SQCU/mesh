@@ -298,7 +298,8 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
 # compiler/mesh_compiler/decompose.py decompose: `decomposed` each expanded node's original source node, the copy of
 # each of them here its module's meta["decomposed"] key; compiler/mesh_compiler/placement.py place `input_parts`: each
 # placeholder this machine copied, by its position among the original placeholders, its partitions on this
-# machine's processors as (processor, original placeholder, original partition Node), resolved by `copied`
+# machine's processors as (processor, original placeholder, original partition Node, its landing geometry), resolved
+# by `copied`
 def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source, decomposed,
              parts):
     graph, copied, tasks = torch.fx.Graph(), {}, {}
@@ -337,7 +338,8 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         if arrival not in local}, relation=source, copied=dict(copied), output=output.meta["processor"], vertices=tuple(
         None if node in local and not landing(node) else copied.get(node) for node in source.functions),
         decomposed={copied[node]: original for node, original in decomposed.items() if node in copied},
-        input_parts={position: tuple((processor, node, part) for processor, part in parts[node] if processor in members)
+        input_parts={position: tuple((processor, node, part, geometry) for processor, part, geometry in parts[node]
+                                     if processor in members)
                      for position, node in enumerate(n for n in nodes if n.op == "placeholder")
                      if node in copied and node in parts})
     return module

@@ -25,7 +25,8 @@ def on_devices(graph_module, processors):
     graph_module = copy.deepcopy(graph_module, memo)
     transfers = {channel: (memo[sender], memo[arrival]) for channel, (sender, arrival) in original.items()}
     graph, graph_module.meta["transfers"] = graph_module.graph, transfers
-    graph_module.meta["input_parts"] = {memo[node]: tuple((processor, memo[part]) for processor, part in pieces)
+    graph_module.meta["input_parts"] = {memo[node]: tuple((processor, memo[part], geometry)
+                                                          for processor, part, geometry in pieces)
                                         for node, pieces in parts.items()}
     # compiler/mesh_compiler/placement.py `work_axes`: its values are the copy's (torch.fx Graph.node_copy copies meta
     # shallowly)

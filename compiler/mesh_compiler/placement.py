@@ -8,6 +8,7 @@ import pathlib
 import sys
 
 import torch
+from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
 
 from .ir import JOIN, PAGES, RECV, SEND, constant, evaluated, given, shape, view, views
@@ -107,8 +108,11 @@ def padded(graph, node, dimension, sizes, j, processor, mirrored=False):
     if not uneven(sizes) or held_by(sizes, j)[1] == most(sizes):
         return node
     start, count = held_by(sizes, j)
-    return call(graph, PAD, (node, [0, 0] * (len(shape(node)) - 1 - dimension) + [
+    made = call(graph, PAD, (node, [0, 0] * (len(shape(node)) - 1 - dimension) + [
         start, most(sizes) - start - count][::-1 if mirrored else 1], 0), processor)
+    if "landing" in node.meta:
+        made.meta["landing"] = node.meta["landing"]
+    return made
 
 
 # Y. Xu et al., GSPMD, arXiv:2105.04663, section 4.1
@@ -155,14 +159,26 @@ def interleaved(graph, pieces, dimension, processor):
     return value
 
 
+# torch 2.14.0 aten slice.Tensor on the source's own fake value: a placeholder's partition's source view (meta
+# "landing"), the same SLICE of the placeholder's value, or of its input's source view, kept across padding
+def landed(made, node, arguments):
+    source = node.meta["landing"] if "landing" in node.meta else node.meta["val"] if node.op == "placeholder" else None
+    if source is not None:
+        with detect_fake_mode([source]):
+            made.meta["landing"] = SLICE(source, *arguments)
+    return made
+
+
 def cut(graph, node, dimension, sizes, j, shards, processor, wide):
     if sizes == STRIPED:
-        node = call(graph, SLICE, (node, dimension, j, shape(node)[dimension], shards), processor)
+        arguments = dimension, j, shape(node)[dimension], shards
+        node = landed(call(graph, SLICE, (node, *arguments), processor), node, arguments)
         return padded(graph, node, dimension, sizes, j, processor) if wide else node
     low = bases(sizes)[j] if wide else sum(sizes[:j])
     high = low + (max(sizes) if wide else sizes[j])
-    return node if (low, high) == (0, shape(node)[dimension]) else call(
-        graph, SLICE, (node, dimension, low, max(low, high)), processor)
+    arguments = dimension, low, max(low, high)
+    return node if (low, high) == (0, shape(node)[dimension]) else landed(
+        call(graph, SLICE, (node, *arguments), processor), node, arguments)
 
 
 def several(value):
@@ -817,9 +833,15 @@ def place(graph_module, placement):
 
     values = mesh_graph.forward(nodes, operands, transfer)
     # each placeholder's own placed value: its holders' partition Nodes in holder order, or a whole one its stated
-    # processor's and the placeholder itself
+    # processor's and the placeholder itself, each with its landing geometry, (storage offset, shape, stride) of its
+    # source view in the placeholder's storage (`landed`; a whole one's its own value's), None for a non-tensor
+    def landing(part):
+        source = part.meta.get("landing", part.meta.get("val"))
+        return (source.storage_offset(), tuple(source.shape), tuple(source.stride())) if isinstance(
+            source, torch.Tensor) else None
     graph_module.meta["input_parts"] = {
-        node: tuple(zip((stated[node],) if values[node][2] == (None,) else flat(values[node][2]), values[node][3]))
+        node: tuple((processor, part, landing(part)) for processor, part in zip(
+            (stated[node],) if values[node][2] == (None,) else flat(values[node][2]), values[node][3]))
         for node in nodes if node.op == "placeholder"}
     for node in reversed(replaced):
         graph.erase_node(node)
