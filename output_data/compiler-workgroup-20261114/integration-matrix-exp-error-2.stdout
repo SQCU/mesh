@@ -1,0 +1,23 @@
+{"stage": "imports", "source_before": {"compiler/mesh_compiler/operations.py": "e24b153192be60215fe24e6f7f2493285ae89445e77bf8f493c0c4a3cad1d6b6", "compiler/mesh_compiler/export.py": "b122ac918c0a04f2ca7a90846477cef1649a9739ce253c8c2b4089a3dc94e6e0", "compiler/mesh_compiler/driver.py": "a09814e3ea49f1758f8c814d8c5a703087932b0e8ac72e1628a09b7b4a9d80dd", "compiler/mesh_compiler/schedule.py": "25ef76e23a034d00d1c75e2fe296817d611e9ee71232a58b343b35631eb8c580", "compiler/mesh_compiler/lower_metal.py": "c16038d42792563e44b4513122e16aedb8111a7fc41b6a3192a096954d6058d9"}, "source_after": {"compiler/mesh_compiler/operations.py": "e24b153192be60215fe24e6f7f2493285ae89445e77bf8f493c0c4a3cad1d6b6", "compiler/mesh_compiler/export.py": "b122ac918c0a04f2ca7a90846477cef1649a9739ce253c8c2b4089a3dc94e6e0", "compiler/mesh_compiler/driver.py": "a09814e3ea49f1758f8c814d8c5a703087932b0e8ac72e1628a09b7b4a9d80dd", "compiler/mesh_compiler/schedule.py": "25ef76e23a034d00d1c75e2fe296817d611e9ee71232a58b343b35631eb8c580", "compiler/mesh_compiler/lower_metal.py": "c16038d42792563e44b4513122e16aedb8111a7fc41b6a3192a096954d6058d9"}}
+{"stage": "compile", "count": 17.0}
+prepared retained order 6 dispatches 4 commands 2 native entries 0 later passes
+prepared dataflow 206 values 364 bytes 6 schedule positions; 0 crossings longest local stretch 6
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source dbed8a76168a2a153df472cd5700856a94b7cfce28c6afe65abb674e58bc0fe1
+prepared kernel 1 synchronization 21 0 0 0 source 3949afb3bb64f103a8eb736cd7a2950adc732c09fe1696a480724b568bbed823
+prepared kernel 3 synchronization 3 0 0 0 source a46da4842db166222062d70942788574e1a6237447fa85985a108523fb226882
+prepared kernel 4 synchronization 0 0 0 0 source ef19362395fbadfeaf7df29520ceb9e88cdfaddee98e6190d386dd0c3cb9ee4b
+prepared dependencies 4 barriers 4 commands
+prepared self-timed program 4 calls 4 positions 1 residues 1 phases 1 plan order edges 3 kept of the unrolled dependences 1 fence waits 2 program-thread waits 0 send-completion waits 0 left to the plan's start 2 start waits
+{"stage": "prepare"}
+prepared retained order 6 dispatches 4 commands 2 native entries 0 later passes
+prepared dataflow 206 values 364 bytes 6 schedule positions; 0 crossings longest local stretch 6
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source dbed8a76168a2a153df472cd5700856a94b7cfce28c6afe65abb674e58bc0fe1
+prepared kernel 1 synchronization 21 0 0 0 source 3949afb3bb64f103a8eb736cd7a2950adc732c09fe1696a480724b568bbed823
+prepared kernel 3 synchronization 3 0 0 0 source a46da4842db166222062d70942788574e1a6237447fa85985a108523fb226882
+prepared kernel 4 synchronization 0 0 0 0 source ef19362395fbadfeaf7df29520ceb9e88cdfaddee98e6190d386dd0c3cb9ee4b
+prepared dependencies 4 barriers 4 commands
+prepared self-timed program 4 calls 4 positions restored (no relation solved)
+{"stage": "invoke"}
+{"stage": "error", "type": "RuntimeError", "message": "execution 0 of the program: operation 72: check 4, batch 0, info 1: linalg.matrix_exp", "out": [[7.0, 7.0], [7.0, 7.0]], "all_nan": true}

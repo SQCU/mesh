@@ -1,8 +1,9 @@
 # Matrix exponential error/result handoff: status
 
-Integration worker, session `59368744-da56-491a-871a-1be809c0cc93`, `claude-opus-5-5`. **Implemented, HOLD** for root's
-review and public-caller observation.
-No native or API edit is needed. The change is Python only, in `compiler/mesh_compiler/operations.py`
+Integration worker, session `59368744-da56-491a-871a-1be809c0cc93`, `claude-opus-5-5`. **Correction 2: contract
+published, Python side implemented, HOLD for executor/native pairing** (see the last section, which needs one
+native call and its `metal.py` binding).
+Correction 1 needed no native or API edit. That change was Python only, in `compiler/mesh_compiler/operations.py`
 (the matrix-exp tail, `ASSERTIONS`, `_instruction`). Compiler64's real-eigen sections are not touched.
 
 ## Contract
@@ -82,3 +83,76 @@ The functional assertion source is a working checkpoint. NaNs-before-error remai
 unproved until this same caller executes. In particular, where construction supplies
 a destination copy, statement order alone does not prove copy completion before the
 native check; the actual retained dependency and observation must establish it.
+
+## Correction 2 (integration-matrix-exp-error-2.md): the check's dependency operand
+
+### What is missing (source, inspected)
+
+The actual caller is `aten.linalg_matrix_exp.out(a, out=out)`. Its `out` is a mutation target, so `lower_metal`
+supplies the assertion node a destination, and `_instruction`'s functional-assertion branch emits
+`_copy(out_view, dep_token)` and then `_asserted`'s ops.
+- **Gap 1:** `_asserted` builds `_Check(info, 4, msg)`, which drops `dep_token`.
+- **Gap 2:** metal_ir's check operation (`metal_ir.mm` `metal_ir_check`) has `op.inputs = {value}` (the status alone).
+  So the native CHECK dispatch's effects are a read of `info` and nothing else.
+- **Result:** within the assertion's source vertex, nothing orders the GPU copy into `out` before the host CHECK. The
+  GIVEN source cause `where_4` → assertion orders both after `where_4`, but neither before the other. That's why the
+  error reached the caller with `out` still `[[7, 7], [7, 7]]`, and the NaNs landed afterwards.
+
+### Contract (published before any shared edit)
+
+1. **`operations.py` (mine, done below):**
+   - `_Check(info, code, message='', dep_token=None)` gains `.dep_token`, the typed value the check depends on, named
+     after torch's `_functional_assert_async.msg` operand `dep_token`.
+   - `_asserted` sets it, for `_functional_assert_async` only, to `outs[0]`: the assertion's result as `_instruction`
+     gives it. That's the destination written by the copy where `lower_metal` supplies one, else `dep_token` itself.
+   - Every other `_Check` keeps `dep_token=None`.
+2. **Native, metal-microbench `metal_ir.h`/`metal_ir.mm` (executor/native owner, not edited):**
+   - `void metal_ir_check_dep_token(struct metal_ir_program *, uint32_t operation, uint32_t value);`
+   - Executor review identified the existing `op.gathers` carrier: retain `value` there as a whole-value
+     dependency. `OperandEffects` already consumes such values with `Whole()`, without a map over the status box;
+     cloning, archive and realization retain them. The status remains `inputs[0]`.
+   - Dependence construction then orders the CHECK dispatch after `value`'s writers, with the same host completion
+     wait it already gives the status `value` written on the GPU. So the error follows the output write and its
+     completion.
+   - The check's test still reads only its status (`inputs[0]`). `metal_ir_check_info`, NativeChecked, the cancel and
+     every other check are unchanged.
+3. **`metal.py` `_Builder` (executor047, not edited):**
+   - Add `('metal_ir_check_dep_token', None, [P, U, U])` to `_compiler`'s table.
+   - After `metal_ir_check`, if `g.dep_token is not None`, call
+     `self.lib.metal_ir_check_dep_token(self.p, operation, self.value(_stored(g.dep_token)))`.
+     `_stored` is needed because a complex result's typed value is its real pairs.
+4. **No change to** `lower_metal`, the source relation, native failure semantics or other assertions. There's no
+   numerical read, no added synchronization beyond the actual producer's completion, and no new graph algorithm.
+
+### Python side (implemented; `operations.py`, two hunks, not staged)
+
+- **`_Check`** (at 1802): it gains `dep_token=None` (`self.dep_token`), with a citation to the operand of
+  `_functional_assert_async.msg`.
+- **`_asserted`:** for `target.overloadpacket is A._functional_assert_async`, it sets `dep_token = outs[0]`, the
+  assertion's result that `_instruction` hands it.
+- **Unchanged:** the producer (`_matrix_exponential`), `_instruction`'s branch, every other `_Check`, and other workers'
+  hunks in the file (`_zlahqr`, `seeded`/`Generator`/`_rrelu`/`_stepped`).
+
+### Checks
+
+- `ast.parse` passes, and `git diff --check` is clean.
+- **Source consistency:** the actual `operations._instruction` was called on meta tensors for
+  `_functional_assert_async.msg(predicate, 'linalg.matrix_exp', token)`. This is Python construction only: no native
+  library and no target.
+  - **No destination:** the result is `dep_token`; the ops are `_Generic ne`, `_Generic where`, `_Check`; and
+    `check.dep_token is` the result.
+  - **Destination:** the result is the destination; the ops are the `_Generic` copy, `ne`, `where`, `_Check`; and
+    `check.dep_token is` the destination.
+  - Plain `_assert_async`'s check has `dep_token None`.
+
+### Still missing (pairing required, then root's observation)
+
+- The native `metal_ir_check_dep_token` (item 2) and `metal._Builder`'s binding and call (item 3).
+- Until both land, the `dep_token` is carried to `metal._Builder` but not encoded, so the native ordering is as
+  observed.
+- Root's public-caller observation is the acceptance: `out` already NaN when the RuntimeError reaches the caller.
+- **For the frontend (optional, not needed for correctness):**
+  - The copy exists because the destination record lands on the assertion node. A functional assertion's result is
+    its `dep_token` (upstream meta). So `ir.views` could carry the destination to `dep_token`'s producer (`where_4`),
+    which would then write `out` directly.
+  - The check's `dep_token` would then be `out` itself, with no copy.
