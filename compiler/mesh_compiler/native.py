@@ -388,15 +388,20 @@ class Target:
         return (*owner.span(owner.solution.function_value_first[f], self.counts[f]),
                 owner.function[f].value[self.counts[f]].shares)
 
+    # metal_recording.h MetalRecorderPrepare and MetalRecorderReplay (metal_capture.m MetalRecorder: no capture is
+    # prepared after the recorder's first replay): the one recorder of the whole machine's rows, every row's program
+    # finalized (or relocated), transport-prepared, captured and placed first, each capture and its transport and
+    # placement owners retained with `owned`; then those same captures replayed in original row order, a row with no
+    # program a NULL call; each call its planned call's
     def placed(self, owned, libs, gpu, owner, programs, finalize):
         M, compiler, (lib, _), transport = libs
         error, planned = C.create_string_buffer(ROOM), owner.planned
         recorder = made(lib.MetalRecorderOpen(gpu, error, ROOM), error, "recorder", errno.ENODEV)
         owned(lambda: M.PUT(recorder, M.SELECTOR[b"release"]))
-        buffer, calls = owner.bound(owned, M), []
+        buffer, captured = owner.bound(owned, M), []
         for r, (row, program) in enumerate(zip(self.rows, programs)):
             if program is None:
-                calls.append(M.Call(None, row.planned + 1, None, 0))
+                captured.append((row, None))
                 continue
             marks, wires, call = row.marks, None, row.planned
             if marks["transfers"]:
@@ -453,10 +458,16 @@ class Target:
             if wires is not None:
                 M.STATE_BUFFER(recorder, M._SEL(b"state:buffer:status:"), ready, wires.state, word.value)
             checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
+            captured.append((row, ready))
+        calls = []
+        for row, ready in captured:
+            if ready is None:
+                calls.append(M.Call(None, row.planned + 1, None, 0))
+                continue
             replay = M.Replay()
             checked(lib.MetalRecorderReplay(recorder, ready, C.byref(replay), error, ROOM), error, "replay")
             owned(lambda replay=replay: lib.MetalReplayDestroy(C.byref(replay)))
-            calls.append(M.Call(C.pointer(replay), call + 1, None, 0))
+            calls.append(M.Call(C.pointer(replay), row.planned + 1, None, 0))
         return recorder, (M.Call * len(calls))(*calls)
 
     # body k's callable interface before its lowering: each distinct input or state root (its first placeholder's), its
