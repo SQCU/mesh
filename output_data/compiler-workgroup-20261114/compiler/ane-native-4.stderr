@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "<stdin>", line 9, in <module>
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 24, in compile_module
+    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 94, in compile_captured
+    target = native.compile_program(captured, constructed, declared, analysis,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 1377, in compile_program
+    target.constructed(plan_calls, libs, instances)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 784, in constructed
+    checked(compiler.metal_ir_construct(constructing, gpu, error, ROOM), error, "construction")
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 78, in checked
+    raise OSError(status, f"{what}: {error.value.decode()}")
+OSError: [Errno 22] construction: ANE operation 9: integer shift (MIL has no shift operations)

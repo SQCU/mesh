@@ -1,0 +1,11 @@
+{
+  "exit_code": 1,
+  "invoked": false,
+  "error": "ANE operation 9: integer shift (MIL has no shift operations)",
+  "log_hashes": {
+    "ane-native-4.stdout": "b958b4b9c8ebe85b351a32b8be5b84a1eb3661cce83156db81df9b5d6d50854f",
+    "ane-native-4.stderr": "d493230deffc88533c55848d00cda463cf821bc0d829374bcdf77daa0f1fa1f9"
+  },
+  "source_commit": "eb1e675d",
+  "native_source_commit": "7f7ed436"
+}
