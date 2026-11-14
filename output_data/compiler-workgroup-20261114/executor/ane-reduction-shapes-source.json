@@ -1,0 +1,17 @@
+{
+  "source_commit": "ff3609f7dbc99c5a386e0d43a14719dab09838c0",
+  "source": "metal_neural.mm",
+  "source_sha256": "e013f91a33e0ca9e16664fedbb9b260ca6f8cf9b182a9d5864b29eeefc79559b",
+  "session": "e48f4bc7-7cef-4afd-ae50-fc1b4618fa73",
+  "model": "claude-opus-5-5",
+  "strict_exit": 0,
+  "strict_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "session_log_sha256": "9aeaae0bfa7447a2c618f80e09f8438fd5f6f4200301b0e3caf9687ab3123d33",
+  "shared_build": false,
+  "target_run": false,
+  "open": [
+    "same-storage cross-ValueID MIL stale-read path",
+    "nonempty unsigned extrema use signed MIL comparison",
+    "runtime tree and ANE hardware placement unmeasured"
+  ]
+}
