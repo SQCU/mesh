@@ -52,6 +52,8 @@ def compile_program(program, args, functions, processors, placement, cost=unit_c
 # operands and every construction, which keeps them; ONE completed native target of the compilation machine's
 # constructions by function key and the analysis, its node Planning.here with a context and the machine without
 def compile_captured(captured, processors, placement, cost=unit_cost, planning=None, machine=None):
+    # Rejection filters are not part of even temporary integration validation.
+    # Capture, construction, and planning exceptions propagate from their responsible stage.
     engines = {name: d for name, (_, d) in processors.items() if d in ENGINES}
     processors = {name: (machine, HOST if name in engines else torch.device(d))
                   for name, (machine, d) in processors.items()}

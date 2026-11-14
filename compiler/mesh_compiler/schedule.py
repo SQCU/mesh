@@ -292,6 +292,8 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     tasks = [(cost(node), lane[node.meta["processor"]]) for node in functions]
     edges = [(task[earlier], task[later]) for earlier, later in graph.edges()]
     before = graph.ancestors(functions[::-1], successors=True)
+    # Rejection filters are not part of even temporary integration validation.
+    # Zero-byte payloads need no transport row; their source operations and dependence causes remain above.
     carried = [transfer for transfer in carried if all(transfer[4])]
     declared = declarations(module, transfers, carried, machines, cost, functions, before, tasks, edges, planning,
                             writers, source)

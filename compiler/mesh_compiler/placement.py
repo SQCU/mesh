@@ -636,6 +636,8 @@ def meshed(graph, node, held, replaced):
     return dims, sizes, grid, shards
 
 
+# Rejection filters are not part of even temporary integration validation.
+# A partition-rule miss retains the operation; transfer() reshards its result to the requested placement.
 def partitioned(graph, node, held, want, replaced, whole):
     target = None
     if any(several(v) for v in held):
