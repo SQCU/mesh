@@ -1,0 +1,226 @@
+{
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "diagnostic": "existing prefix/firstStep/lastStep outputs additionally retained as outer results; ownership/lifetimes and emitted bindings change",
+  "records": [
+    {
+      "stage": "compile",
+      "shape": [
+        4,
+        4
+      ],
+      "dtype": "torch.float32"
+    },
+    {
+      "stage": "retained_outputs",
+      "calls": 9,
+      "added": {
+        "prefix_agenda": "getitem_4",
+        "prefix_top": "getitem_5",
+        "prefix_norm": "getitem_6",
+        "step1_blocks": "getitem_8",
+        "step1_vectors": "getitem_9",
+        "step1_agenda": "getitem_10",
+        "step1_top": "getitem_11",
+        "step7_agenda": "getitem_34",
+        "step7_top": "getitem_35"
+      },
+      "changed": "outer result ownership/lifetimes only; same original calls and numerical bodies"
+    },
+    {
+      "stage": "prepare"
+    },
+    {
+      "stage": "invoke"
+    },
+    {
+      "stage": "result",
+      "eigenvalue_error": 0.3628804865188151,
+      "residual": 0.6454972243679028,
+      "orthogonality": 0.0,
+      "values": [
+        0.0,
+        0.0,
+        1.0,
+        4.0
+      ],
+      "vectors": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "reference_values": [
+        0.254718759825861,
+        1.8227170808871087,
+        3.1772829191128906,
+        4.74528124017414
+      ],
+      "finite": true
+    },
+    {
+      "stage": "retained_state",
+      "prefix_agenda": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "prefix_top": [
+        1
+      ],
+      "prefix_norm": [
+        6.0
+      ],
+      "step1_blocks": [
+        [
+          4.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          3.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          2.0,
+          1.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ]
+      ],
+      "step1_vectors": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "step1_agenda": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "step1_top": [
+        0
+      ],
+      "step7_agenda": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "step7_top": [
+        0
+      ]
+    }
+  ],
+  "assessment": "prefix runtime state is correct; first Step returns unchanged blocks/vectors/agenda and top0; exact original failure persists. Active size vs numerical split remains unresolved.",
+  "logs": {
+    "eigh-retained-state.stdout": {
+      "sha256": "02e8473b846d39d36a2f69f190e59d111b034e5ae20eb1af7e934a4921ea0e51",
+      "bytes": 102490
+    },
+    "eigh-retained-state.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  }
+}
