@@ -6,8 +6,7 @@ import weakref
 
 import torch
 
-# torch 2.14 _inductor/cpp_builder.py: on Darwin a model links with -undefined dynamic_lookup, so its effect shim calls
-# bind at load to this library's exports
+# torch 2.14 _inductor/cpp_builder.py _get_shared_cflags
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh-aoti.dylib'), mode=C.RTLD_GLOBAL)
 P, Q, Z = C.c_void_p, C.c_uint64, C.c_size_t
 for name, result, arguments in (
@@ -22,35 +21,35 @@ for name, result, arguments in (
     function.restype, function.argtypes = result, arguments
 MESSAGE = 4096
 ENTRY = C.cast(LIB.mesh_aoti_run, P).value
-# torch 2.14 torch/csrc/inductor/aoti_runner/pybind.cpp: the handles cross as unnamed capsules
+# torch 2.14 torch/csrc/inductor/aoti_runner/pybind.cpp
 CAPSULE = C.pythonapi
 CAPSULE.PyCapsule_GetPointer.restype, CAPSULE.PyCapsule_GetPointer.argtypes = P, [C.py_object, C.c_char_p]
 CAPSULE.PyCapsule_New.restype, CAPSULE.PyCapsule_New.argtypes = C.py_object, [P, C.c_char_p, P]
 
-# rdma/mesh.h MESH_SEND, MESH_RECEIVE; the invocation operand {mesh_ctx address, plan, execution}
-SEND, RECEIVE = 0, 1
+# design/compiler-native-assignment-2026-11-13.md, invocation operand
 INVOCATION = torch.zeros(3, dtype=torch.uint64)
-# torch 2.14 torch/library.py Library.define and register_fake; mesh-call.h mesh_host_started, mesh_transfers_start;
-# mesh-collective.h mesh_host_publish, mesh_host_wait.  Every effect writes the invocation operand, the transport's
-# state, so the effects keep their order through the compiled graph's own dependences; publish writes `sent`, the
-# prepared storage it stores `value` into, and wait writes `view`, the prepared storage it makes ready
+# torch 2.14 torch/library.py Library.define, register_fake; rdma/mesh-call.h mesh_host_started, mesh_transfers_start;
+# rdma/mesh-collective.h mesh_host_publish, mesh_host_wait
 LIBRARY = torch.library.Library("mesh", "FRAGMENT")
 for schema in ("mesh_start(Tensor(a!) invocation) -> ()",
-               "mesh_publish(Tensor(a!) invocation, int transfer, Tensor value, Tensor(b!) sent) -> ()",
-               "mesh_wait(Tensor(a!) invocation, int transfer, int direction, int delay, Tensor(b!) view) -> ()"):
+               "mesh_publish(Tensor(a!) invocation, int transfer, Tensor sent) -> ()",
+               "mesh_wait(Tensor(a!) invocation, int transfer, int delay, Tensor(b!) view) -> ()",
+               "mesh_sent(Tensor(a!) invocation, int transfer, int delay, Tensor view) -> ()"):
     LIBRARY.define(schema)
-START, PUBLISH, WAIT = (torch.ops.mesh.mesh_start.default, torch.ops.mesh.mesh_publish.default,
-                        torch.ops.mesh.mesh_wait.default)
-for effect in (START, PUBLISH, WAIT):
+START, PUBLISH, WAIT, SENT = (torch.ops.mesh.mesh_start.default, torch.ops.mesh.mesh_publish.default,
+                              torch.ops.mesh.mesh_wait.default, torch.ops.mesh.mesh_sent.default)
+for effect in (START, PUBLISH, WAIT, SENT):
     torch.library.register_fake(effect, lambda *arguments: None, lib=LIBRARY)
 # torch 2.14 _inductor/config.py aot_inductor.custom_ops_to_c_shims; _inductor/codegen/cpp_wrapper_cpu.py
-# get_c_shim_func_name, generate_c_shim_fallback_kernel; _inductor/ir.py FallbackKernel.create, a void result's handle
+# get_c_shim_func_name, generate_c_shim_fallback_kernel; _inductor/ir.py FallbackKernel.create
 SHIMS = {
     START: ["AOTITorchError aoti_torch_cpu_mesh_start(AtenTensorHandle invocation, AtenTensorHandle *ret0)"],
     PUBLISH: ["AOTITorchError aoti_torch_cpu_mesh_publish(AtenTensorHandle invocation, int64_t transfer, "
-              "AtenTensorHandle value, AtenTensorHandle sent, AtenTensorHandle *ret0)"],
-    WAIT: ["AOTITorchError aoti_torch_cpu_mesh_wait(AtenTensorHandle invocation, int64_t transfer, int64_t direction, "
-           "int64_t delay, AtenTensorHandle view, AtenTensorHandle *ret0)"]}
+              "AtenTensorHandle sent, AtenTensorHandle *ret0)"],
+    WAIT: ["AOTITorchError aoti_torch_cpu_mesh_wait(AtenTensorHandle invocation, int64_t transfer, int64_t delay, "
+           "AtenTensorHandle view, AtenTensorHandle *ret0)"],
+    SENT: ["AOTITorchError aoti_torch_cpu_mesh_sent(AtenTensorHandle invocation, int64_t transfer, int64_t delay, "
+           "AtenTensorHandle view, AtenTensorHandle *ret0)"]}
 
 
 # torch 2.14 torch/_C/_aoti unsafe_alloc_void_ptrs_from_tensors, alloc_tensors_by_stealing_from_void_ptrs
@@ -83,8 +82,7 @@ class Model:
         return Prepared(self, arguments, views, invocation, context, plan, execution)
 
 
-# design/compiler-native-assignment-2026-11-13.md, prepared binding: arguments are the AOT input positions of the
-# ordinary call arguments; views are (AOT input position, prepared tensors over its solved copies in copy order)
+# design/compiler-native-assignment-2026-11-13.md, prepared-input binding
 class Prepared:
     def __init__(self, model, arguments, views, invocation, context, plan, execution):
         first = [0]

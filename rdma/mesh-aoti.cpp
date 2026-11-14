@@ -45,7 +45,7 @@ extern "C" void *mesh_aoti_load(const char *package_path, const char *model_name
     return nullptr;
 }
 
-/* aoti_runtime/interface.h AOTInductorModelContainerRun: inputs stolen, outputs owned by the caller */
+/* torch 2.14 aoti_runtime/interface.h AOTInductorModelContainerRun */
 static int ran(AOTIModelPackageLoader *loader, std::vector<at::Tensor> &&inputs, void **outputs, size_t output_count,
                char *error, size_t room) {
     std::vector<at::Tensor> results = loader->boxed_run(std::move(inputs));
@@ -79,8 +79,7 @@ extern "C" void mesh_aoti_free(void *model) {
     delete static_cast<AOTIModelPackageLoader *>(model);
 }
 
-/* the AOT input positions of the ordinary arguments and of the prepared views, view v's solved copies
-   copies[first[v] .. first[v + 1]), and the invocation operand {mesh_ctx address, plan, execution} at its position */
+/* design/compiler-native-assignment-2026-11-13.md, prepared-input binding */
 struct Binding {
     AOTIModelPackageLoader *loader;
     size_t input_count;
@@ -150,11 +149,8 @@ extern "C" void mesh_aoti_unbind(void *binding) {
     delete static_cast<Binding *>(binding);
 }
 
-/* the effect shims named by mesh_aoti.SHIMS for aot_inductor.custom_ops_to_c_shims (torch 2.14
-   _inductor/codegen/cpp_wrapper_cpu.py get_c_shim_func_name, generate_c_shim_fallback_kernel): the tensor operand after
-   the invocation is the prepared storage the effect hands to (publish) or takes back from (wait) the transport, which
-   only the AOT graph's dependences consume; the last parameter is the result handle a void FallbackKernel passes as
-   nullptr (ir.py FallbackKernel.create, packed.outputs = [None]) */
+/* torch 2.14 _inductor/config.py aot_inductor.custom_ops_to_c_shims; _inductor/codegen/cpp_wrapper_cpu.py
+   get_c_shim_func_name, generate_c_shim_fallback_kernel; _inductor/ir.py FallbackKernel.create */
 struct Invocation {
     struct mesh_ctx *context;
     uint64_t plan, execution;
@@ -171,7 +167,7 @@ static void check(const char *call, int status, int64_t transfer, uint64_t execu
                                  std::to_string(execution) + ": " + strerror(status));
 }
 
-/* compiler/mesh_compiler/bridge.py Published.start; mesh-call.h mesh_host_started, mesh_transfers_start */
+/* rdma/mesh-call.h mesh_host_started, mesh_transfers_start */
 extern "C" AOTITorchError aoti_torch_cpu_mesh_start(AtenTensorHandle invocation, AtenTensorHandle *) {
     AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
         Invocation at = invoked(invocation);
@@ -180,29 +176,33 @@ extern "C" AOTITorchError aoti_torch_cpu_mesh_start(AtenTensorHandle invocation,
     });
 }
 
-/* mesh-collective.h mesh_host_publish; compiler/mesh_compiler/bridge.py Carried.put: the compiled value is stored into
-   the prepared storage with torch's own typed copy, since the compiled graph writes a graph input only at its final
-   write-back, after any effect in the body */
-extern "C" AOTITorchError aoti_torch_cpu_mesh_publish(AtenTensorHandle invocation, int64_t transfer,
-                                                      AtenTensorHandle value, AtenTensorHandle sent, AtenTensorHandle *) {
+/* rdma/mesh-collective.h mesh_host_publish */
+extern "C" AOTITorchError aoti_torch_cpu_mesh_publish(AtenTensorHandle invocation, int64_t transfer, AtenTensorHandle,
+                                                      AtenTensorHandle *) {
     AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
         Invocation at = invoked(invocation);
-        torch::aot_inductor::tensor_handle_to_tensor_pointer(sent)->copy_(
-            *torch::aot_inductor::tensor_handle_to_tensor_pointer(value));
         mesh_host_publish(at.context, at.plan, static_cast<uint32_t>(transfer), at.execution);
     });
 }
 
-/* mesh-collective.h mesh_host_wait, for the generation `delay` invocations before this one: 0 for this invocation's
-   arrival or completion, a producer-supplied solved copy count for a copy's reuse; the first `delay` invocations have
-   no such generation */
-extern "C" AOTITorchError aoti_torch_cpu_mesh_wait(AtenTensorHandle invocation, int64_t transfer, int64_t direction,
-                                                   int64_t delay, AtenTensorHandle, AtenTensorHandle *) {
-    AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
-        Invocation at = invoked(invocation);
-        uint64_t waited = at.execution - static_cast<uint64_t>(delay);
-        if (at.execution >= static_cast<uint64_t>(delay))
-            check("mesh_host_wait", mesh_host_wait(at.context, at.plan, static_cast<uint32_t>(transfer), waited,
-                                                   static_cast<uint32_t>(direction)), transfer, waited);
-    });
+/* rdma/mesh-collective.h mesh_host_wait; design/compiler-native-assignment-2026-11-13.md, send completion before
+   reuse */
+static void waited(AtenTensorHandle invocation, int64_t transfer, int64_t delay, uint32_t direction) {
+    Invocation at = invoked(invocation);
+    uint64_t generation = at.execution - static_cast<uint64_t>(delay);
+    if (at.execution >= static_cast<uint64_t>(delay))
+        check("mesh_host_wait", mesh_host_wait(at.context, at.plan, static_cast<uint32_t>(transfer), generation,
+                                               direction), transfer, generation);
+}
+
+/* rdma/mesh.h MESH_RECEIVE */
+extern "C" AOTITorchError aoti_torch_cpu_mesh_wait(AtenTensorHandle invocation, int64_t transfer, int64_t delay,
+                                                   AtenTensorHandle, AtenTensorHandle *) {
+    AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ waited(invocation, transfer, delay, MESH_RECEIVE); });
+}
+
+/* rdma/mesh.h MESH_SEND */
+extern "C" AOTITorchError aoti_torch_cpu_mesh_sent(AtenTensorHandle invocation, int64_t transfer, int64_t delay,
+                                                   AtenTensorHandle, AtenTensorHandle *) {
+    AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ waited(invocation, transfer, delay, MESH_SEND); });
 }
