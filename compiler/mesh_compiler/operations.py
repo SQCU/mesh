@@ -2256,8 +2256,12 @@ SQUARING = {torch.float64: (5.371920351148152, (1.495585217958292e-002, 2.539398
             torch.float32: (3.925724783138660, (4.258730016922831e-001, 1.880152677804762e+000), (3, 5, 7))}
 
 
-# JAX jax/_src/scipy/linalg.py _squaring: the current result squared where i < n_squarings, at most max_squarings.
-# The source condition is inside the existing compiled numerical repetition; no square runs after it becomes false.
+# JAX jax/_src/scipy/linalg.py _squaring (design/torch-source-lowering-change-request.md item 6): lax.scan over
+# arange(max_squarings), each step i the current result squared where i < n_squarings, else kept. Compiled as its
+# `limit` static steps per batch member, step i's matrix extent n where i < count and 0 else (_emit over _gemm and
+# _assigned's element loops), so an inactive step writes nothing and the result is kept; each step is queued work,
+# with no _Repeat's NativeRepeatTest and NativeRepeatComplete host waits (metal_lower.mm 1837-1857, metal_program.h
+# 239-250)
 torch.library.define('mesh::matrix_exp_squares', '(Tensor x, Tensor count, int limit) -> Tensor')
 
 
@@ -2274,17 +2278,12 @@ def _matrix_exp_squares(outs, x, count, limit):
     n, t = x.shape[-1], _class(count)
     for member in itertools.product(*map(range, x.shape[:-2])):
         current, required = out[member], count[member]
-        iteration, active = (_temporary((1,), torch.int32) for _ in range(2))
-
-        def condition(r, v):
-            return [(_convert(r, r('and', BOOL, r('lt', BOOL, r('cast', t, v[0]), v[1]),
-                                          r('lt', BOOL, v[0], r.const(limit, I32))), BOOL, I32), I32)]
-        ops += _fill(iteration, 0) + _scalars([active], [iteration, required], condition)
-        squared = _temporary((n, n), x.dtype)
-        body = _gemm(squared, current, (0, 2), current, (2, 1), (n, n, n)) + _copy(current, squared)
-        body += _scalars([iteration], [iteration], lambda r, v: [(r('add', I32, v[0], r.const(1, I32)), I32)])
-        body += _scalars([active], [iteration, required], condition)
-        ops.append(_Repeat(body, active, (current, iteration, active)))
+        for i in range(limit):
+            g, squared = _temporary((1,), torch.int32), _temporary((n, n), x.dtype)
+            ops += _scalars([g], [required], lambda r, v, i=i: [(r('select', I32, r('lt', BOOL, r.const(i, t), v[0]),
+                                                                  r.const(n, I32), r.const(0, I32)), I32)])
+            _emit(ops, _gemm(squared, current, (0, 2), current, (2, 1), (n, n, n)), loops=((g, n), (g, n), (g, n)))
+            _assigned(current, squared, g, ops)
     return ops
 
 

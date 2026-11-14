@@ -1,0 +1,7 @@
+# numerical-48: `_matrix_exp_squares` as JAX's fixed scan, statically predicated (SAME64), operations.py only, source HOLD, unstaged
+- **Removed host waits:** the site's `_Repeat` (mutable iteration/active condition) lowered JAX `_squaring`'s fixed `lax.scan` over arange(max_squarings) to metal_lower.mm 1837–1857's submit plus NativeRepeatTest before each pass and metal_program.h 239–250's NativeRepeatComplete shared-event wait at each pass end. It is gone, along with its iteration and condition buffers.
+- **Now (operations.py 2259–2287):** per batch member, `limit` static steps. Step i writes g = (i < count) ? n : 0, then `_emit`s `_gemm(squared, current)` with loops ((g,n),(g,n),(g,n)) and `_assigned(current, squared, g)`. Both are `_record` element loops over the matrix dimensions only; a complex value is one element, with no real-pair component loop.
+  - An inactive step writes nothing, so the current result is kept and the undefined `squared` is never read into it.
+- **Kept:** x dtype, per-member `count`, the initial `_copy(out, x)`, `limit` 0 (no steps) and empty batch (no members). `_matrix_exponential`'s NaN and `_functional_assert_async` dependency order is untouched.
+- **Residual cost:** inactive steps still issue zero-domain dispatches, so this is not device-control specialization. The scalar Padé switch and the overflow-before-solve work stay open.
+- **Checks:** AST passes. pyflakes shows only the 2 warnings already at HEAD. Delta is +12/−13. No import, build, target, run or backup.
