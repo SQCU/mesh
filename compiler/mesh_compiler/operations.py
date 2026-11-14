@@ -3787,6 +3787,432 @@ def _zgehd2(h, z, ilo, ihi, ops):
     return tau
 
 
+# Reference-LAPACK SRC/dlapy3.f: sqrt(x^2 + y^2 + z^2) by the largest magnitude W, their sum where W is zero or above
+# the overflow threshold `huge`, of region values
+def _dlapy3(r, t, x, y, z, huge):
+    a, b, c = (r('abs', t, v) for v in (x, y, z))
+    w = r('select', t, r('ge', BOOL, a, b), a, b)
+    w = r('select', t, r('ge', BOOL, w, c), w, c)
+    plain = r('or', BOOL, r('eq', BOOL, w, r.const(0, t)), r('gt', BOOL, w, r.const(huge, t)))
+    safe = r('select', t, plain, r.const(1, t), w)
+    q = [r('div', t, v, safe) for v in (a, b, c)]
+    total = r('add', t, r('add', t, r('mul', t, q[0], q[0]), r('mul', t, q[1], q[1])), r('mul', t, q[2], q[2]))
+    return r('select', t, plain, r('add', t, r('add', t, a, b), c), r('mul', t, w, r('sqrt', t, total)))
+
+
+# Reference-LAPACK SRC/zlarfg.f 144-211 with N = 2, in one region: ALPHA and X (complex record values) to (ALPHA on
+# exit, BETA real; TAU; X on exit). Its KNT rescaling loop (at most 20 passes, the source's bound) and the undo are
+# unrolled; SAFMIN = DLAMCH('S') / DLAMCH('E')
+def _larfg2(r, t, alpha, x, limits):
+    def c(value):
+        return r.const(value, t)
+
+    def chosen(test, a, b):
+        return _chosen(r, t, test, a, b)
+    safmin = limits.tiny / (limits.eps / 2)
+    rsafmn, zero = 1 / safmin, c(0)
+    ar, ai = _complex_parts(r, t, alpha)
+    xv = _complex_parts(r, t, x)
+    trivial = r('and', BOOL, r('eq', BOOL, _modulus(r, t, xv), zero), r('eq', BOOL, ai, zero))
+
+    def signed(re, im, norm):
+        d = _dlapy3(r, t, re, im, norm, limits.max)
+        return r('select', t, r('lt', BOOL, re, zero), d, r('neg', t, d))
+    beta = signed(ar, ai, _modulus(r, t, xv))
+    small = r('lt', BOOL, r('abs', t, beta), c(safmin))
+    large = r('and', BOOL, r('not', BOOL, small), r('gt', BOOL, r('abs', t, beta), c(limits.max / 2)))
+    running, knt, sb, sr, si, sx = small, r.const(0, I32), beta, ar, ai, xv
+    for _ in range(20):
+        knt = r('select', I32, running, r('add', I32, knt, r.const(1, I32)), knt)
+        sx = chosen(running, _real_scaled(r, t, sx, c(rsafmn)), sx)
+        sb, si, sr = (r('select', t, running, r('mul', t, v, c(rsafmn)), v) for v in (sb, si, sr))
+        running = r('and', BOOL, running, r('lt', BOOL, r('abs', t, sb), c(safmin)))
+    lx, lr, li = _real_scaled(r, t, xv, c(safmin)), r('mul', t, ar, c(safmin)), r('mul', t, ai, c(safmin))
+    fx = chosen(small, sx, chosen(large, lx, xv))
+    fr = r('select', t, small, sr, r('select', t, large, lr, ar))
+    fi = r('select', t, small, si, r('select', t, large, li, ai))
+    rescaled = r('or', BOOL, small, large)
+    fb = r('select', t, rescaled, signed(fr, fi, _modulus(r, t, fx)), beta)
+    tau = (r('div', t, r('sub', t, fb, fr), fb), r('div', t, r('neg', t, fi), fb))
+    inverse = _complex_value(r, t, 'div', (c(1), zero), (r('sub', t, fr, fb), fi), 1, None)
+    made = _complex_value(r, t, 'mul', inverse, fx, 1, None)
+    undone = fb
+    for j in range(20):
+        undone = r('select', t, r('gt', BOOL, knt, r.const(j, I32)), r('mul', t, undone, c(safmin)), undone)
+    undone = r('select', t, large, r('mul', t, undone, c(rsafmn)), undone)
+    return (r('select', t, trivial, ar, undone), chosen(trivial, (zero, zero), tau), chosen(trivial, xv, made))
+
+
+# Reference-LAPACK SRC/zlahqr.f 250-573 on one complex upper Hessenberg member h in place: WANTT = WANTZ = (z given),
+# ILOZ = ILO and IHIZ = IHI (zgeev/zhseqr). w (complex, n) receives W(ILO..IHI); ilo, ihi and info are one-element
+# int32 (INFO = 0, or I where the source fails); `held` holds the caller's temporaries the iteration carries. One
+# _Repeat pass is one DO 130 iteration: labels 30 and 140 are flattened (on deflation W(I) = H(I,I), KDEFL = 0,
+# I = L - 1, then L = ILO and ITS = 0), so ITS runs 0..ITMAX for each I. The searches over K and M take the first hit
+# from the top as the largest. Each bulge step K = M..I-1 is a static position with its actual active extents
+def _zlahqr(h, z, w, ilo, ihi, info, ops, held=()):
+    n, t, real, dtype = h.shape[-1], _class(h.real), h.real.dtype, h.dtype
+    limits, want = torch.finfo(real), z is not None
+    safmin, ulp = limits.tiny, limits.eps
+    ops += _fill(info, 0)
+    if not n:
+        return
+    (i, lo, its, kdefl, more, span, base, i1, i2, i1z, kfound, go, cut, mspan, mfound, m, fl, erow, ecol, ezz, iz,
+     ip) = (_temporary((1,), torch.int32) for _ in range(22))
+    shift, v1, v2, t1, vv2, tmp = (_temporary((1,), dtype) for _ in range(6))
+    beta, t2, rt = (_temporary((1,), real) for _ in range(3))
+    sites = max(n - 1, 1)
+    fresh, eleft, eright, ez, erows, ecols, ezc = (_temporary((sites,), torch.int32) for _ in range(7))
+    carried = (*held, h, *([z] if want else []), w, ilo, ihi, info, i, lo, its, kdefl, more, span, base, i1, i2, i1z,
+               kfound, go, cut, mspan, mfound, m, fl, erow, ecol, ezz, iz, ip, shift, v1, v2, t1, vv2, tmp, beta, t2,
+               rt, fresh, eleft, eright, ez, erows, ecols, ezc)
+
+    def c(r, value):
+        return r.const(value, t)
+
+    def k(r, value):
+        return r.const(value, I32)
+
+    def flag(r, x):
+        return _convert(r, x, BOOL, I32)
+
+    def larger(r, a, b, kind):
+        return r('select', kind, r('ge', BOOL, a, b), a, b)
+
+    def smaller(r, a, b, kind):
+        return r('select', kind, r('le', BOOL, a, b), a, b)
+
+    def at(r, slot, row, column):
+        return _entry(r, t, slot, h, _bounded(r, row, n)[1], _bounded(r, column, n)[1])
+
+    def smallest(r, low, high):
+        nh = r('add', I32, r('sub', I32, high, low), k(r, 1))
+        return r('mul', t, c(r, safmin), r('div', t, r('cast', t, nh), c(r, ulp)))
+
+    def divided(r, x, s):
+        return tuple(r('div', t, p, s) for p in _complex_parts(r, t, x))
+
+    # 250 and 262-267, with the state at label 30 (I = IHI, L = ILO, ITS = 0, KDEFL = 0; I1 = 1, I2 = N where WANTT):
+    # the trash, H(J+2,J) for J = ILO..IHI-2 (H(IHI,IHI-2) the last) and H(J+3,J) for J = ILO..IHI-3, zero
+    def started(r, v):
+        low, high = v
+        zero, one = k(r, 0), k(r, 1)
+        return [(r('sub', I32, low, one), I32), (high, I32), (low, I32), (zero, I32), (zero, I32),
+                (flag(r, r('ge', BOOL, high, low)), I32), (r('sub', I32, high, low), I32), (one, I32),
+                (k(r, n), I32), (zero, I32)] + [(larger(r, r('sub', I32, r('sub', I32, high, low), k(r, d)), zero, I32),
+                                                 I32) for d in (1, 2)]
+    ops += _scalars([base, i, lo, its, kdefl, more, span, i1, i2, i1z, erow, ecol], [ilo, ihi], started)
+    for band, extent in ((2, erow), (3, ecol)):
+        if n > band:
+            trash = h[...]
+            _emit(ops, _record((n - band,), [(trash, ({0: 1, None: band}, 0))], [], lambda r, v: [(c(r, 0), t)]),
+                  loops=((extent, n - band),), offsets=[(trash, {0: (base, n - 1), 1: (base, n - 1)})])
+
+    # 269-291: each subdiagonal H(I,I-1), I = ILO+1..IHI in order, made real: SC = conj(H/CABS1(H)) / |H/CABS1(H)|,
+    # H(I,I-1) = |H(I,I-1)|, row I (columns I..JHI) by SC, column I (rows JLO..min(JHI, I+1)) and Z's by conj(SC)
+    for row in range(2, n + 1):
+        def realized(r, v, row=row):
+            x, low, high = v
+            zero = k(r, 0)
+            active = _all(r, [r('le', BOOL, r('add', I32, low, k(r, 1)), k(r, row)), r('le', BOOL, k(r, row), high),
+                              r('ne', BOOL, _part(r, t, x, 1), c(r, 0))])
+            safe = r('select', t, active, _cabs1(r, t, x), c(r, 1))
+            first = divided(r, x, safe)
+            norm = r('select', t, active, _modulus(r, t, first), c(r, 1))
+            sc = divided(r, _conjugate(r, t, first), norm)
+            jhi, jlo = (k(r, n), k(r, 1)) if want else (high, low)
+            spans = [r('add', I32, r('sub', I32, jhi, k(r, row)), k(r, 1)),
+                     r('add', I32, r('sub', I32, smaller(r, jhi, k(r, row + 1), I32), jlo), k(r, 1)),
+                     r('add', I32, r('sub', I32, high, low), k(r, 1))]
+            return [(_chosen(r, t, active, _modulus(r, t, x), x), t), (sc, t)] + [
+                (r('select', I32, active, x, zero), I32) for x in spans]
+        entry = h[row - 1:row, row - 2]
+        ops += _scalars([entry, tmp, erow, ecol, ezz], [entry, ilo, ihi], realized)
+        line = h[row - 1, row - 1:]
+        _emit(ops, _record((n - row + 1,), [(line, (0,))], [(line, (0,)), (tmp, (None,))], lambda r, v: [(_times(
+            r, t, v[1], v[0]), t)]), loops=((erow, n - row + 1),))
+        for target, at_row, extent in ((h, None if want else base, ecol), (z, base, ezz)):
+            if target is None:
+                continue
+            column = target[:, row - 1]
+            _emit(ops, _record((n,), [(column, (0,))], [(column, (0,)), (tmp, (None,))], lambda r, v: [(_times(
+                r, t, _conjugate(r, t, v[1]), v[0]), t)]), loops=((extent, n),),
+                  offsets=[(column, {0: (at_row, n - 1)})] if at_row is not None else [])
+
+    # 338-367: the K search over L+1..I (`span` = I - L entries): CABS1(H(K,K-1)) <= SMLNUM, or Ahues and Tisseur's
+    # test where |Re H(K,K-1)| <= ULP TST (TST zero: |Re H(K-1,K-2)| where K-2 >= ILO, |Re H(K+1,K)| where K+1 <= IHI)
+    def deflated(r, v):
+        low, first, last, slot = v
+        kk = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
+        one, two, three = k(r, 1), k(r, 2), k(r, 3)
+        sub, dkm, dk = at(r, slot, r('sub', I32, kk, one), r('sub', I32, kk, two)), \
+            at(r, slot, r('sub', I32, kk, two), r('sub', I32, kk, two)), at(r, slot, r('sub', I32, kk, one), r(
+                'sub', I32, kk, one))
+        sup = at(r, slot, r('sub', I32, kk, two), r('sub', I32, kk, one))
+        before = at(r, slot, r('sub', I32, kk, two), r('sub', I32, kk, three))
+        after = at(r, slot, kk, r('sub', I32, kk, one))
+        smlnum = smallest(r, first, last)
+        tst = r('add', t, _cabs1(r, t, dkm), _cabs1(r, t, dk))
+        grown = r('select', t, r('ge', BOOL, r('sub', I32, kk, two), first), r('add', t, tst, r(
+            'abs', t, _part(r, t, before, 0))), tst)
+        grown = r('select', t, r('le', BOOL, r('add', I32, kk, one), last), r('add', t, grown, r(
+            'abs', t, _part(r, t, after, 0))), grown)
+        tst = r('select', t, r('eq', BOOL, tst, c(r, 0)), grown, tst)
+        ab = larger(r, _cabs1(r, t, sub), _cabs1(r, t, sup), t)
+        ba = smaller(r, _cabs1(r, t, sub), _cabs1(r, t, sup), t)
+        gap = _cabs1(r, t, _plus(r, t, dkm, dk, 'sub'))
+        aa, bb = larger(r, _cabs1(r, t, dk), gap, t), smaller(r, _cabs1(r, t, dk), gap, t)
+        s = r('add', t, aa, ab)
+        criterion = r('le', BOOL, r('mul', t, ba, r('div', t, ab, s)), larger(r, smlnum, r('mul', t, c(r, ulp), r(
+            'mul', t, bb, r('div', t, aa, s))), t))
+        hit = r('or', BOOL, r('le', BOOL, _cabs1(r, t, sub), smlnum), r('and', BOOL, r(
+            'le', BOOL, r('abs', t, _part(r, t, sub, 0)), r('mul', t, c(r, ulp), tst)), criterion))
+        return [(r('select', I32, hit, kk, k(r, 0)), I32)]
+    passes = []
+    if n > 1:
+        _emit(passes, _record_extreme((n - 1,), kfound, (None,), [(lo, (None,)), (ilo, (None,)), (ihi, (None,)),
+                                                                   (h, None)], deflated, [REDUCTION]),
+              loops=((span, n - 1),))
+    else:
+        passes += _fill(kfound, 0)
+
+    # 366-420: L = K, H(L,L-1) = 0 where L > ILO (`cut`), the exit (L >= I: W(I) = H(I,I), label 140), else
+    # KDEFL += 1, I1 = L and I2 = I where not WANTT, and the shift T: exceptional at mod(KDEFL, 2 KEXSH) = 0
+    # (DAT1 |Re H(I,I-1)| + H(I,I)) and mod(KDEFL, KEXSH) = 0 (DAT1 |Re H(L+1,L)| + H(L,L)), else Wilkinson's
+    def stepped(r, v):
+        found, low, top, first, defl, count, slot = v
+        zero, one = k(r, 0), k(r, 1)
+        new = larger(r, found, low, I32)
+        leave = r('ge', BOOL, new, top)
+        diagonal = at(r, slot, r('sub', I32, top, one), r('sub', I32, top, one))
+        for part in (0, 1):
+            r.scatter(0, [_bounded(r, r('sub', I32, top, one), n)[1], k(r, part)], _part(r, t, diagonal, part), leave)
+        kd = r('add', I32, defl, one)
+        two = k(r, 2)
+        hii, hii1 = diagonal, at(r, slot, r('sub', I32, top, one), r('sub', I32, top, two))
+        hl1l, hll = at(r, slot, new, r('sub', I32, new, one)), at(r, slot, r('sub', I32, new, one), r(
+            'sub', I32, new, one))
+        him, himm = at(r, slot, r('sub', I32, top, two), r('sub', I32, top, one)), \
+            at(r, slot, r('sub', I32, top, two), r('sub', I32, top, two))
+        hii = _complex_parts(r, t, hii)
+        exceptional = [(r('add', t, r('mul', t, c(r, 0.75), r('abs', t, _part(r, t, x, 0))), _part(r, t, d, 0)),
+                        _part(r, t, d, 1)) for x, d in ((hii1, hii), (hl1l, hll))]
+        u = _complex_value(r, t, 'mul', _complex_value(r, t, 'sqrt', _complex_parts(r, t, him), None, 1, None),
+                           _complex_value(r, t, 'sqrt', _complex_parts(r, t, hii1), None, 1, None), 1, None)
+        su = _cabs1(r, t, u)
+        x = _real_scaled(r, t, _plus(r, t, himm, hii, 'sub'), c(r, 0.5))
+        sx = _cabs1(r, t, x)
+        s = larger(r, su, sx, t)
+        safe = r('select', t, r('eq', BOOL, s, c(r, 0)), c(r, 1), s)
+        xs, us = divided(r, x, safe), divided(r, u, safe)
+        y = _real_scaled(r, t, _complex_value(r, t, 'sqrt', _plus(r, t, _times(r, t, xs, xs), _times(r, t, us, us)),
+                                              None, 1, None), s)
+        unit = divided(r, x, r('select', t, r('gt', BOOL, sx, c(r, 0)), sx, c(r, 1)))
+        flip = r('and', BOOL, r('gt', BOOL, sx, c(r, 0)), r('lt', BOOL, r('add', t, r(
+            'mul', t, unit[0], _part(r, t, y, 0)), r('mul', t, unit[1], _part(r, t, y, 1))), c(r, 0)))
+        y = _chosen(r, t, flip, _negated(r, t, y), y)
+        wilkinson = _chosen(r, t, r('ne', BOOL, su, c(r, 0)), _plus(r, t, hii, _times(r, t, u, _complex_value(
+            r, t, 'div', u, _plus(r, t, x, y), 1, None)), 'sub'), hii)
+        shifted = _chosen(r, t, r('eq', BOOL, r('rem', I32, kd, k(r, 20)), zero), exceptional[0], _chosen(
+            r, t, r('eq', BOOL, r('rem', I32, kd, k(r, 10)), zero), exceptional[1], wilkinson))
+        stay = r('not', BOOL, leave)
+        edge = (one, k(r, n)) if want else (new, top)
+        return [(diagonal, t), (r('select', I32, leave, first, new), I32),
+                (r('select', I32, leave, r('sub', I32, new, one), top), I32), (r('select', I32, leave, zero, kd), I32),
+                (r('select', I32, leave, zero, count), I32), (flag(r, stay), I32),
+                (r('select', I32, r('gt', BOOL, new, first), new, zero), I32), (edge[0], I32), (edge[1], I32),
+                (r('sub', I32, edge[0], one), I32),
+                (r('select', I32, stay, larger(r, r('sub', I32, r('sub', I32, top, one), new), zero, I32), zero), I32),
+                (shifted, t)]
+    passes += _record((1,), [(w, None)] + [(x, (None,)) for x in (lo, i, kdefl, its, go, cut, i1, i2, i1z, mspan,
+                                                                    shift)],
+                      [(x, (None,)) for x in (kfound, lo, i, ilo, kdefl, its)] + [(h, None)], stepped)
+
+    def severed(r, v):
+        for part in (0, 1):
+            r.scatter(0, [_bounded(r, r('sub', I32, v[0], k(r, 1)), n)[1], _bounded(r, r('sub', I32, v[0], k(r, 2)),
+                                                                                  n)[1], k(r, part)],
+                      c(r, 0), r('gt', BOOL, v[0], k(r, 0)))
+        return [(c(r, 0), t)]
+    passes += _record((1,), [(h, None)], [(cut, (None,))], severed)
+
+    # 424-453: the M search over L+1..I-1 (`mspan` entries), |H10| |H21| <= ULP CABS1(H11S) (CABS1(H11) + CABS1(H22))
+    # of the scaled H11S = (H(M,M) - T) / S and H21 = Re H(M+1,M) / S; M = L where none, V = (H11S, H21) at M
+    def leading(r, slot, mm, shifted):
+        one = k(r, 1)
+        h11, h22 = at(r, slot, r('sub', I32, mm, one), r('sub', I32, mm, one)), at(r, slot, mm, mm)
+        h21 = _part(r, t, at(r, slot, mm, r('sub', I32, mm, one)), 0)
+        h11s = _plus(r, t, h11, shifted, 'sub')
+        s = r('add', t, _cabs1(r, t, h11s), r('abs', t, h21))
+        return h11, h22, divided(r, h11s, s), r('div', t, h21, s)
+
+    def bulged(r, v):
+        low, shifted, slot = v
+        mm = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
+        h11, h22, h11s, h21 = leading(r, slot, mm, shifted)
+        h10 = _part(r, t, at(r, slot, r('sub', I32, mm, k(r, 1)), r('sub', I32, mm, k(r, 2))), 0)
+        hit = r('le', BOOL, r('mul', t, r('abs', t, h10), r('abs', t, h21)), r('mul', t, c(r, ulp), r(
+            'mul', t, _cabs1(r, t, h11s), r('add', t, _cabs1(r, t, h11), _cabs1(r, t, h22)))))
+        return [(r('select', I32, hit, mm, k(r, 0)), I32)]
+
+    def started_at(r, v):
+        found, low, shifted, slot = v
+        mm = larger(r, found, low, I32)
+        _, _, h11s, h21 = leading(r, slot, mm, shifted)
+        return [(mm, I32), (h11s, t), (h21, t)]
+    if n > 1:
+        _emit(passes, _record_extreme((n - 1,), mfound, (None,), [(lo, (None,)), (shift, (None,)), (h, None)], bulged,
+                                      [REDUCTION]), loops=((mspan, n - 1),))
+        passes += _record((1,), [(m, (None,)), (v1, (None,)), (v2, (None,))],
+                          [(mfound, (None,)), (lo, (None,)), (shift, (None,)), (h, None)], started_at)
+
+        # 457-535: each static position K = 1..n-1 active where M <= K <= I-1, its actual extents: rows K, K+1 over
+        # columns K..I2; columns K, K+1 over rows I1..min(K+2, I) and Z's over ILO..IHI; at K = M > L the extra
+        # scaling over rows I1..I and columns M..I2 (Z's columns M..I)
+        def placed(r, v):
+            mm, top, first_row, last_column, low, alive, first, last = v
+            kk, zero, one = r('add', I32, r.index(0), k(r, 1)), k(r, 0), k(r, 1)
+            active = _all(r, [r('ne', BOOL, alive, zero), r('le', BOOL, mm, kk), r('le', BOOL, kk, r('sub', I32, top,
+                                                                                                         one))])
+            extra = _all(r, [active, r('eq', BOOL, kk, mm), r('gt', BOOL, mm, low)])
+            spans = [(active, r('add', I32, r('sub', I32, last_column, kk), one)),
+                     (active, r('add', I32, r('sub', I32, smaller(r, r('add', I32, kk, k(r, 2)), top, I32),
+                                                       first_row), one)),
+                     (active, r('add', I32, r('sub', I32, last, first), one)),
+                     (extra, r('add', I32, r('sub', I32, top, first_row), one)),
+                     (extra, r('add', I32, r('sub', I32, last_column, mm), one)),
+                     (extra, r('add', I32, r('sub', I32, top, mm), one))]
+            return [(flag(r, r('and', BOOL, active, r('gt', BOOL, kk, mm))), I32)] + [
+                (r('select', I32, test, size, zero), I32) for test, size in spans]
+        passes += _record((n - 1,), [(x, (0,)) for x in (fresh, eleft, eright, ez, erows, ecols, ezc)],
+                          [(x, (None,)) for x in (m, i, i1, i2, lo, go, ilo, ihi)], placed)
+
+        def swept(r, v):
+            a, b, tau, real_t2, x2 = v
+            s = _plus(r, t, _times(r, t, tau, a), _times(r, t, real_t2, b))
+            return [(_plus(r, t, a, s, 'sub'), t), (_plus(r, t, b, _times(r, t, s, _conjugate(r, t, x2)), 'sub'), t)]
+
+        def chased(r, v):
+            a, b, tau, real_t2, x2 = v
+            s = _plus(r, t, _times(r, t, _conjugate(r, t, tau), a), _times(r, t, real_t2, b))
+            return [(_plus(r, t, a, s, 'sub'), t), (_plus(r, t, b, _times(r, t, s, x2), 'sub'), t)]
+        reflector = [(x, (None,)) for x in (t1, t2, vv2)]
+        for kk in range(1, n):
+            k0, own = kk - 1, (lambda x, k0=kk - 1: x[k0:k0 + 1])
+
+            # V from H(K,K-1), H(K+1,K-1) where K > M (else V at M), ZLARFG(2, V(1), V(2)), T2 = Re(T1 V2)
+            def reflected(r, v, kk=kk):
+                if kk > 1:
+                    first, second, renewed, top, below = v
+                    test = r('ne', BOOL, renewed, k(r, 0))
+                    alpha, x = _chosen(r, t, test, top, first), _chosen(r, t, test, below, second)
+                else:
+                    alpha, x = v[0], v[1]
+                b, tau, made = _larfg2(r, t, alpha, x, limits)
+                return [(b, t), (tau, t), (made, t), (_complex_value(r, t, 'mul', tau, made, 1, None)[0], t)]
+            given = [(v1, (None,)), (v2, (None,)), (own(fresh), (None,))]
+            if kk > 1:
+                given += [(h[k0:k0 + 1, k0 - 1], (None,)), (h[k0 + 1:k0 + 2, k0 - 1], (None,))]
+            passes += _record((1,), [(beta, (None,)), (t1, (None,)), (vv2, (None,)), (t2, (None,))], given, reflected)
+            if kk > 1:
+                pair = h[k0:k0 + 2, k0 - 1]
+                passes += _record((2,), [(pair, (0,))], [(pair, (0,)), (beta, (None,)), (own(fresh), (None,))],
+                                  lambda r, v: [(_chosen(r, t, r('ne', BOOL, v[2], k(r, 0)), _chosen(
+                                      r, t, r('eq', BOOL, r.index(0), k(r, 0)), v[1], c(r, 0)), v[0]), t)])
+            upper, lower = h[k0, k0:], h[k0 + 1, k0:]
+            _emit(passes, _record((n - k0,), [(upper, (0,)), (lower, (0,))],
+                                  [(upper, (0,)), (lower, (0,))] + reflector, chased),
+                  loops=((own(eleft), n - k0),))
+            for target, at_row, extent in ((h, i1z, eright), (z, base, ez)):
+                if target is None:
+                    continue
+                left_column, right_column = target[:, k0], target[:, k0 + 1]
+                _emit(passes, _record((n,), [(left_column, (0,)), (right_column, (0,))],
+                                      [(left_column, (0,)), (right_column, (0,))] + reflector, swept),
+                      loops=((own(extent), n),), offsets=[(left_column, {0: (at_row, n - 1)}),
+                                                          (right_column, {0: (at_row, n - 1)})])
+
+            # 510-534: TEMP = (1 - T1) / |1 - T1|; H(M+1,M) by conj(TEMP), H(M+2,M+1) by TEMP where M+2 <= I, then for
+            # J = M..I, J /= M+1: row J's columns J+1..I2 by TEMP, column J's rows I1..J-1 (and Z's) by conj(TEMP)
+            def phase(r, tau):
+                d = _plus(r, t, (c(r, 1), c(r, 0)), tau, 'sub')
+                return divided(r, d, _modulus(r, t, d))
+
+            def rescaled(r, v, kk=kk):
+                x, tau, low_row, top, last_column = v
+                temp, one = phase(r, tau), k(r, 1)
+                p = r('add', I32, r('add', I32, low_row, one), r.index(0))
+                q = r('add', I32, k(r, kk), r.index(1))
+
+                def equal(a, value):
+                    return r('eq', BOOL, a, k(r, value))
+                tests = [(_all(r, [equal(p, kk + 1), equal(q, kk)]), _conjugate(r, t, temp)),
+                         (_all(r, [equal(p, kk + 2), equal(q, kk + 1), r('le', BOOL, k(r, kk + 2), top)]), temp),
+                         (_all(r, [r('le', BOOL, k(r, kk), p), r('le', BOOL, p, top), r('not', BOOL, equal(p, kk + 1)),
+                                   r('le', BOOL, r('add', I32, p, one), q), r('le', BOOL, q, last_column)]), temp),
+                         (_all(r, [r('le', BOOL, q, top), r('not', BOOL, equal(q, kk + 1)),
+                                   r('le', BOOL, r('add', I32, p, one), q)]), _conjugate(r, t, temp))]
+                for test, factor in tests:
+                    x = _chosen(r, t, test, _times(r, t, factor, x), x)
+                return [(x, t)]
+            block = h[:, k0:]
+            _emit(passes, _record((n, n - k0), [(block, (0, 1))], [(block, (0, 1)), (t1, (None,)), (i1z, (None,)),
+                                                                    (i, (None,)), (i2, (None,))], rescaled),
+                  loops=((own(erows), n), (own(ecols), n - k0)), offsets=[(block, {0: (i1z, n - 1)})])
+            if want:
+                block = z[:, k0:]
+                _emit(passes, _record((n, n - k0), [(block, (0, 1))], [(block, (0, 1)), (t1, (None,))],
+                                      lambda r, v, kk=kk: [(_chosen(r, t, r('ne', BOOL, r(
+                                          'add', I32, k(r, kk), r.index(1)), k(r, kk + 1)), _times(
+                                          r, t, _conjugate(r, t, phase(r, v[1])), v[0]), v[0]), t)]),
+                      loops=((own(ez), n), (own(ezc), n - k0)), offsets=[(block, {0: (base, n - 1)})])
+
+    # 539-550: H(I,I-1) made real where its imaginary part is nonzero: RTEMP = |TEMP|, TEMP = TEMP / RTEMP, row I's
+    # columns I+1..I2 by conj(TEMP), column I's rows I1..I-1 and Z's rows ILOZ..IHIZ by TEMP
+    def realness(r, v):
+        top, alive, first_row, last_column, low, high, slot = v
+        zero, one = k(r, 0), k(r, 1)
+        x = at(r, slot, r('sub', I32, top, one), r('sub', I32, top, k(r, 2)))
+        turned = r('and', BOOL, r('ne', BOOL, alive, zero), r('ne', BOOL, _part(r, t, x, 1), c(r, 0)))
+        size = _modulus(r, t, x)
+        temp = divided(r, x, r('select', t, turned, size, c(r, 1)))
+        return [(temp, t), (size, t), (flag(r, turned), I32)] + [(r('select', I32, turned, s, zero), I32) for s in (
+            r('sub', I32, last_column, top), r('sub', I32, top, first_row), r('add', I32, r('sub', I32, high, low), one))] \
+            + [(_bounded(r, r('sub', I32, top, one), n)[1], I32), (_bounded(r, top, n)[1], I32)]
+    passes += _record((1,), [(x, (None,)) for x in (tmp, rt, fl, erow, ecol, ezz, iz, ip)],
+                      [(x, (None,)) for x in (i, go, i1, i2, ilo, ihi)] + [(h, None)], realness)
+
+    def settled(r, v):
+        size, turned, row = v
+        column, test = _bounded(r, r('sub', I32, row, k(r, 1)), n)[1], r('ne', BOOL, turned, k(r, 0))
+        r.scatter(0, [row, column, k(r, 0)], size, test)
+        r.scatter(0, [row, column, k(r, 1)], c(r, 0), test)
+        return [(c(r, 0), t)]
+    passes += _record((1,), [(h, None)], [(rt, (None,)), (fl, (None,)), (iz, (None,))], settled)
+    line = h[...]
+    _emit(passes, _record((n,), [(line, (None, 0))], [(line, (None, 0)), (tmp, (None,))], lambda r, v: [(_times(
+        r, t, _conjugate(r, t, v[1]), v[0]), t)]), loops=((erow, n),), offsets=[(line, {0: (iz, n - 1), 1: (ip, n - 1)})])
+    for target, at_row, extent in ((h, i1z, ecol), (z, base, ezz)):
+        if target is None:
+            continue
+        column = target[...]
+        _emit(passes, _record((n,), [(column, (0, None))], [(column, (0, None)), (tmp, (None,))], lambda r, v: [(_times(
+            r, t, v[1], v[0]), t)]), loops=((extent, n),), offsets=[(column, {0: (at_row, n - 1), 1: (iz, n - 1)})])
+
+    # 336 and 552-557: ITS += 1 after a sweep; past ITMAX = 30 max(10, NH) INFO = I (the source's failure), else the
+    # next DO 130 iteration while I >= ILO, its K search over I - L entries
+    def counted(r, v):
+        count, alive, top, low, high, failure, current = v
+        zero, one = k(r, 0), k(r, 1)
+        done = r('select', I32, r('ne', BOOL, alive, zero), r('add', I32, count, one), count)
+        itmax = r('mul', I32, k(r, 30), larger(r, k(r, 10), r('add', I32, r('sub', I32, high, low), one), I32))
+        fail = r('and', BOOL, r('ne', BOOL, alive, zero), r('gt', BOOL, done, itmax))
+        return [(done, I32), (r('select', I32, fail, top, failure), I32),
+                (flag(r, r('and', BOOL, r('not', BOOL, fail), r('ge', BOOL, top, low))), I32),
+                (larger(r, r('sub', I32, top, current), zero, I32), I32)]
+    passes += _scalars([its, info, more, span], [its, go, i, ilo, ihi, info, lo], counted)
+    ops.append(_Repeat(passes, more, carried))
+
+
 # an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
 def _bounded(r, at, size):
     zero, last = r.const(0, I32), r.const(size - 1, I32)

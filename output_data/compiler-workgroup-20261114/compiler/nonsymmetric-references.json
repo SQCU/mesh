@@ -63,5 +63,10 @@
     "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/zlascl.f",
     "bytes": 10020,
     "sha256": "234985ca8dbed9188a8e7289e8810aae82848d03686fdab24e9677c6eeec9cd3"
+  },
+  "dlapy3": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dlapy3.f",
+    "bytes": 2859,
+    "sha256": "2d66c1a43bed8fd323c5c790af5c069a750003c135a4a77a8803669f4a6193b3"
   }
 }
