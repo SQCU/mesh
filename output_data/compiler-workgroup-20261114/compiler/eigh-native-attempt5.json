@@ -1,0 +1,46 @@
+{
+  "client": "unchanged4x4float32Hermitian/MPS; eigh-native-command.md",
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "stages": [
+    "compile",
+    "native_save",
+    "native_restore_no_relation_solved",
+    "prepare",
+    "invoke",
+    "result"
+  ],
+  "result": {
+    "stage": "result",
+    "eigenvalue_error": 0.3628804865188151,
+    "residual": 0.6454972243679028,
+    "orthogonality": 0.0,
+    "values": [
+      0.0,
+      0.0,
+      1.0,
+      4.0
+    ],
+    "reference_values": [
+      0.254718759825861,
+      1.8227170808871087,
+      3.1772829191128906,
+      4.74528124017414
+    ],
+    "finite": true
+  },
+  "assessment": "numerical accuracy failed; compilation, native persistence and invocation completed",
+  "source_fix": "metal1f605fa9 (native sites/marks/unitOf appended through one shared owner)",
+  "build": "eigh-sites-source.json/eigh-sites-binaries.json/eigh-sites-abi.json",
+  "source_hashes_unchanged_during_build": true,
+  "logs": {
+    "eigh-native-5.stdout": {
+      "sha256": "182f98b480402404071581d25297e775c0272fc923b22a4f79c17b5b6b73b168",
+      "bytes": 101491
+    },
+    "eigh-native-5.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  }
+}

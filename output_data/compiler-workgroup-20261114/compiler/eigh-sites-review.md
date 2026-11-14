@@ -1,0 +1,5 @@
+# Actual site correspondence and Hermitian invocation
+
+Metal1f605fa9 routes both MetalNativeWaits site producers through MetalNativeSiteWhen. The existing conditions and marks are preserved, and sites/marks/unitOf now grow together. The measured ICB consumer is unchanged. The held source passed independent strict C checks and the canonical recorder/tools rebuild; the fresh ABI probe passed (RepeatRegion40, Signature416, Function168, Planned152, Local376, ValueInfo120). Source and binary hashes are in the adjacent eigh-sites manifests.
+
+The unchanged 4×4 float32 MPS Hermitian attempt5 completed compile, native save/load with no relation solved, preparation and invocation, exit0 with empty stderr. This crosses the earlier native binding, preparation and site-index failures. It does **not** pass numerical accuracy: eigenvalues [0,0,1,4], normalized eigenvalue error0.3628804865 and residual0.6454972244 (orthogonality0, all finite). The compact result and original log hashes are in eigh-native-attempt5.json. The next bounded diagnosis follows the actual initial agenda/state and first Step; no cause is assigned from the result alone.
