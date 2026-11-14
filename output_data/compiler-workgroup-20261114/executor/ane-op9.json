@@ -1,0 +1,233 @@
+{
+  "error": "[Errno 22] construction: ANE operation 9: integer shift (MIL has no shift operations)",
+  "program": 44405991424,
+  "calls": [
+    1,
+    2,
+    3
+  ],
+  "values": 2878,
+  "operations": 1374,
+  "operation9": {
+    "identity": 0,
+    "place": 2,
+    "erased": 0,
+    "kind": 0,
+    "padding": 0
+  },
+  "records": [
+    {
+      "source_node": "qdwh_eigh_step_default",
+      "target": "mesh.qdwh_eigh_step.default",
+      "arguments": "(blocks, vectors, agenda, top, norm, site)",
+      "record_type": "_Sort",
+      "record_node": 0,
+      "first": 9,
+      "end": 13,
+      "operands": [
+        {
+          "role": "x",
+          "root": 39,
+          "dtype": "torch.float32",
+          "shape": [
+            2
+          ],
+          "stride": [
+            1
+          ],
+          "offset": 0,
+          "native": {
+            "role": 2,
+            "scalar": 13,
+            "storage": 39,
+            "function": 4294967295,
+            "index": 4294967295,
+            "word": 0,
+            "of": 4294967295,
+            "range": 0,
+            "received": 0,
+            "sent": 0,
+            "zeroed": 0,
+            "sendings": 0,
+            "identity": 0,
+            "bytes": 8,
+            "offset": 0,
+            "at": 0,
+            "data_bytes": 0,
+            "data": null,
+            "buffer": null,
+            "page_bytes": 0,
+            "pages": 0,
+            "source": 4294967295
+          }
+        },
+        {
+          "role": "values",
+          "root": 41,
+          "dtype": "torch.float32",
+          "shape": [
+            2
+          ],
+          "stride": [
+            1
+          ],
+          "offset": 0,
+          "native": {
+            "role": 2,
+            "scalar": 13,
+            "storage": 41,
+            "function": 4294967295,
+            "index": 4294967295,
+            "word": 0,
+            "of": 4294967295,
+            "range": 0,
+            "received": 0,
+            "sent": 0,
+            "zeroed": 0,
+            "sendings": 0,
+            "identity": 0,
+            "bytes": 8,
+            "offset": 0,
+            "at": 0,
+            "data_bytes": 0,
+            "data": null,
+            "buffer": null,
+            "page_bytes": 0,
+            "pages": 0,
+            "source": 4294967295
+          }
+        },
+        {
+          "role": "indices",
+          "root": 43,
+          "dtype": "torch.int32",
+          "shape": [
+            2
+          ],
+          "stride": [
+            1
+          ],
+          "offset": 0,
+          "native": {
+            "role": 2,
+            "scalar": 7,
+            "storage": 43,
+            "function": 4294967295,
+            "index": 4294967295,
+            "word": 0,
+            "of": 4294967295,
+            "range": 0,
+            "received": 0,
+            "sent": 0,
+            "zeroed": 0,
+            "sendings": 0,
+            "identity": 0,
+            "bytes": 8,
+            "offset": 0,
+            "at": 0,
+            "data_bytes": 0,
+            "data": null,
+            "buffer": null,
+            "page_bytes": 0,
+            "pages": 0,
+            "source": 4294967295
+          }
+        },
+        {
+          "role": "extent",
+          "root": 34,
+          "dtype": "torch.int32",
+          "shape": [
+            1
+          ],
+          "stride": [
+            1
+          ],
+          "offset": 0,
+          "native": {
+            "role": 2,
+            "scalar": 7,
+            "storage": 34,
+            "function": 4294967295,
+            "index": 4294967295,
+            "word": 0,
+            "of": 4294967295,
+            "range": 0,
+            "received": 0,
+            "sent": 0,
+            "zeroed": 0,
+            "sendings": 0,
+            "identity": 0,
+            "bytes": 4,
+            "offset": 0,
+            "at": 0,
+            "data_bytes": 0,
+            "data": null,
+            "buffer": null,
+            "page_bytes": 0,
+            "pages": 0,
+            "source": 4294967295
+          }
+        }
+      ],
+      "regions": {},
+      "sort": {
+        "axis": 0,
+        "k": 2,
+        "descending": false,
+        "bounded": true
+      },
+      "constructed_operations": [
+        {
+          "operation": 9,
+          "identity": 0,
+          "place": 2,
+          "erased": 0,
+          "kind": 0,
+          "padding": 0
+        },
+        {
+          "operation": 10,
+          "identity": 0,
+          "place": 2,
+          "erased": 0,
+          "kind": 0,
+          "padding": 0
+        },
+        {
+          "operation": 11,
+          "identity": 0,
+          "place": 2,
+          "erased": 0,
+          "kind": 0,
+          "padding": 0
+        },
+        {
+          "operation": 12,
+          "identity": 0,
+          "place": 2,
+          "erased": 0,
+          "kind": 0,
+          "padding": 0
+        }
+      ]
+    }
+  ],
+  "body_keys": [
+    {
+      "function": 0,
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+      "program": 44405988864
+    },
+    {
+      "function": 1,
+      "key": "('qdwh_eigh_step', 'p', (2, 2), 'torch.float32', 10)",
+      "program": 44405991424
+    },
+    {
+      "function": 2,
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'suffix', '_linalg_eigh')",
+      "program": 44405993984
+    }
+  ]
+}

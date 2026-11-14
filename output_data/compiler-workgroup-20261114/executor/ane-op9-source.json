@@ -1,0 +1,18 @@
+{
+  "metal_commit": "7f7ed4362bbd865e64e7e4361854c605cc8f4699",
+  "mesh_commit": "67694d706470e52f5da69a41204bc80b6408bb8f",
+  "corrected_process_exit": 0,
+  "initial_collector_error": "_Sort has no sizes field",
+  "numeric_invocation": false,
+  "production_changes": false,
+  "sha256": {
+    "output_data/compiler-workgroup-20261114/executor/ane-op9-diagnostic.py": "30052a09c153b1bc262ed8a97108301b9543c72fa5cb2224d0cd57e18c7b102e",
+    "output_data/compiler-workgroup-20261114/executor/ane-op9.json": "253e792330481f1011f0b18b6438d42fb4ade759bfd5e416fc9ded9810db4fb8",
+    "output_data/compiler-workgroup-20261114/executor/ane-op9-2.stdout": "f5bbe1487c8dae3a198398b7a3fb9bcf2f7645886e79959ab8bc0fad811671dc",
+    "output_data/compiler-workgroup-20261114/executor/ane-op9-2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "output_data/compiler-workgroup-20261114/executor/ane-op9.stderr": "25d61800a4a575a9f0ac7a1621c8f9bbd625df94837ff72274ff3a99583a0cc8",
+    "/Users/mdot/metal-microbench/metal_neural.mm": "d649ff3f42305f5810221a0c2adaa6315775d28979019c79417a157d1724e085",
+    "/Users/mdot/metal-microbench/metal_ir.mm": "a787bcbb30e71853b5c22696abdc89a66a935d194524fef24be5aabbf700d885",
+    "compiler/mesh_compiler/operations.py": "358b40228d64cbb1474be3b6beb3250781ccef338db5a2800b04fbbba18144c8"
+  }
+}
