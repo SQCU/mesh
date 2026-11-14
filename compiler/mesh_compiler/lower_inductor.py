@@ -1,166 +1,135 @@
-# design/data-flow.md; design/torch-source-lowering-change-request.md item 3
-import copy
+# design/compiler-archive-assignment-2026-11-13.md; design/compilation-composition-change-request.md items 1 and 7;
+# torch 2.14 torch/_inductor/__init__.py aot_compile, torch/_inductor/package/package.py package_aoti;
+# output_data/compiler-workgroup-20261113/executor/aoti-binding-contract.md
+import dataclasses
 import pathlib
-import sys
+import shutil
+import tempfile
 
 import torch
-from torch import Tensor
-from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
-from torch._inductor import ir as inductor
-from torch._inductor.dependencies import WeakDep
-from torch._inductor.lowering import fallback_handler, register_lowering
-from torch._inductor.virtualized import V
+from torch._inductor import aot_compile
+from torch._inductor.package import package_aoti
 
-from .ir import RECV, SEND
+from .ir import RECV, SEND, channel_of
 
-sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
-import mesh_graph
-
-WITH_EFFECTS = torch.ops.higher_order.with_effects
-COPY = torch.ops.aten.copy_.default
+THREAD = "host"
+OPTIONS = {"aot_inductor.package": True, "layout_optimization": False, "reorder_for_peak_memory": False}
+RECIPE = ("regions", "program", "released", "arguments", "results", "layouts")
+FIELDS = (*RECIPE, "values", "record")
 
 
-@torch.library.custom_op("mesh::recv_strided", mutates_args=())
-def recv_strided(channel: int, shape: list[int], stride: list[int], dtype: torch.dtype,
-                 device: torch.device, after: list[Tensor]) -> Tensor:
-    return RECV(channel)
+# design/torch-source-lowering-change-request.md item 3: a received value has the strides of the value sent
+def received(node, strides):
+    value = node.meta["val"]
+    return value.as_strided(value.shape, strides[channel_of(node)], value.storage_offset()) if (
+        node.target is RECV) else value
 
 
-@recv_strided.register_fake
-def recv_strided_fake(channel, shape, stride, dtype, device, after):
-    return torch.empty_strided(shape, stride, dtype=dtype, device=device)
+def layout(value):
+    return str(value.dtype).removeprefix("torch."), tuple(value.shape), tuple(value.stride()), value.storage_offset()
 
 
-_register_effectful_op(recv_strided, _EffectType.ORDERED)
-RECV_STRIDED = torch.ops.mesh.recv_strided.default
-call_recv_strided = fallback_handler(RECV_STRIDED, add_to_fallback_set=False)
+# One region of the scheduled body: its nodes in scheduled order; values of other entries are its inputs and the
+# caller's constants are buffers of the compiled model; each keeps its original node's metadata
+def body(nodes, given, folded, written, constants, operands):
+    root, graph, held = torch.nn.Module(), torch.fx.Graph(), {}
+    for k, value in enumerate(given):
+        held[value] = graph.placeholder(f"value{k}")
+        held[value].meta.update(value.meta, val=operands[value])
+    for k, value in enumerate(folded):
+        root.register_buffer(f"constant{k}", constants[value.target])
+        held[value] = graph.get_attr(f"constant{k}")
+        held[value].meta.update(value.meta)
+    for node in nodes:
+        held[node] = graph.node_copy(node, held.__getitem__)
+    graph.output(tuple(held[value] for value in written))
+    return torch.fx.GraphModule(root, graph)
 
 
-@torch.library.custom_op("mesh::send_strided", mutates_args=())
-def send_strided(value: Tensor, channel: int, stride: list[int], after: list[Tensor]) -> None:
-    SEND(value, channel)
-
-
-@send_strided.register_fake
-def send_strided_fake(value, channel, stride, after):
-    return None
-
-
-_register_effectful_op(send_strided, _EffectType.ORDERED)
-SEND_STRIDED = torch.ops.mesh.send_strided.default
-call_send_strided = fallback_handler(SEND_STRIDED, add_to_fallback_set=False)
-
-
-# design/torch-source-lowering-change-request.md item 3; torch/_inductor/lowering.py control_deps_op_lowering
-def in_order(call, after, *arguments):
-    for value in after:
-        value.realize()
-    first = len(V.graph.operations)
-    result = call(*arguments, [])
-    for made in V.graph.operations[first:]:
-        V.graph.additional_buffer_deps[made.get_operation_name()].update(value.get_name() for value in after)
-    return result
-
-
-# torch/_inductor/graph.py never_reuse_but_free_buffers
-@register_lowering(RECV_STRIDED, type_promotion_kind=None)
-def lower_recv_strided(*arguments):
-    result = in_order(call_recv_strided, arguments[-1], *arguments[:-1])
-    V.graph.never_reuse_but_free_buffers.add(result.get_name())
-    return result
-
-
-# design/compilation-composition-change-request.md item 2; torch/_inductor/ir.py ExternKernel.require_exact_strides
-@register_lowering(SEND_STRIDED, type_promotion_kind=None)
-def lower_send_strided(value, channel, stride, after):
-    first = len(V.graph.operations)
-    stated = inductor.ExternKernel.require_exact_strides(value, stride)
-    if len(V.graph.operations) != first:
-        raise NotImplementedError(f"channel {channel}: the strides {stride} of the sent value are a copy of the "
-                                  f"compiled value, which the scheduled graph does not hold")
-    return in_order(call_send_strided, after, stated, channel, stride)
-
-
-# torch 2.15 aten/src/ATen/native/native_functions.yaml, the overloads that take `out`;
-# torch/_dynamo/variables/torch.py, "Attempted to call op with non-contiguous `out=` tensor"
-def functional(target):
-    given = [(a.name, str(a.type)) for a in target._schema.arguments[:-1]]
-    overloads = (getattr(target.overloadpacket, name) for name in target.overloadpacket.overloads())
-    return next(over for over in overloads if [(a.name, str(a.type)) for a in over._schema.arguments] == given)
-
-
-# design/torch-source-lowering-change-request.md item 3; rdma/mesh_graph.py extremes
-def adapt(module, device, carried, laid):
-    module = copy.deepcopy(module)
+# S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, section 1: the processor's
+# compiled order; its numerical regions between channel effects each compile to one model of one package
+def lower(module, *, constants, received_strides):
     graph = module.graph
-    sent, receives, written, parts = [], False, {}, set()
-    named = {node.name: node for node in graph.nodes if node.op == "call_function"}
-    read = lambda node: [user for user in node.users if user in written]
-    for node in list(graph.nodes):
-        if node in parts:
+    placeholders = [node for node in graph.nodes if node.op == "placeholder"]
+    output = next(node for node in graph.nodes if node.op == "output")
+    results = tuple(output.args[0] or ())
+    entries, run = [], []
+    for node in (n for n in graph.nodes if n.op == "call_function"):
+        if channel_of(node) is None:
+            run.append(node)
             continue
-        if node.target is WITH_EFFECTS:
-            token, operator, *arguments = node.args
-            with graph.inserting_before(node):
-                call = graph.call_function(operator, tuple(arguments), dict(node.kwargs))
-            for getitem in list(node.users):
-                if getitem.args[1] > 1:
-                    raise NotImplementedError(f"{operator}: effectful operator with several results")
-                if getitem.args[1] == 1:
-                    call.meta["val"] = getitem.meta.get("val")
-                getitem.replace_all_uses_with(token if getitem.args[1] == 0 else call)
-                graph.erase_node(getitem)
-                parts.add(getitem)
-            graph.erase_node(node)
-            node = call
-        elif node.target is SEND:
-            sent += [named[name] for name in node.args[0].meta.get("view", ())[:1] if name in named] + [node.args[0]]
-            node.target = SEND_STRIDED
-            node.args = (*node.args, list(node.args[0].meta["val"].stride()), mesh_graph.extremes(list(written), read)[1])
-            written = {}
-        elif node.target is RECV:
-            channel, value = node.args[0], node.meta["val"]
-            node.target = RECV_STRIDED
-            node.args = (channel, list(value.shape), laid.get(channel, list(value.stride())), value.dtype,
-                         torch.device("cpu") if channel in carried else device, mesh_graph.extremes(list(written), read)[1])
-            receives, written = True, {}
-        elif node.op == "call_function" and "out" in node.kwargs:
-            with graph.inserting_before(node):
-                made = graph.call_function(functional(node.target), node.args,
-                                           {key: value for key, value in node.kwargs.items() if key != "out"})
-            made.meta["val"], written[made] = node.meta["val"], None
-            node.target, node.args, node.kwargs = COPY, (node.kwargs["out"], made), {}
-        if node.op == "call_function" and isinstance(node.meta.get("val"), Tensor):
-            written[node] = None
-    output = next(n for n in graph.nodes if n.op == "output")
-    output.args = (tuple(output.args[0]) + tuple(dict.fromkeys(sent)),)
-    module.recompile()
-    return module, receives
+        entries += [tuple(run)] * bool(run) + [node]
+        run = []
+    entries += [tuple(run)] * bool(run)
+    place = {node: k for k, entry in enumerate(entries)
+             for node in (entry if isinstance(entry, tuple) else (entry,))}
+    folds = lambda value, k: value.op == "placeholder" and value.target in constants and isinstance(entries[k], tuple)
+    used = {}
+    for node, k in place.items():
+        for value in node.all_input_nodes:
+            if place.get(value) != k and not folds(value, k):
+                used.setdefault(value, []).append(k)
+    kept = [node for node in [*placeholders, *place] if node in used or node in results or node.target is RECV]
+    slot = {value: s for s, value in enumerate(kept)}
+    last = {value: max(used.get(value, [place.get(value)])) for value in kept if value not in results}
+    operands = {value: received(value, received_strides) for value in kept}
+    program, regions, files = [], [], {}
+    for k, entry in enumerate(entries):
+        if isinstance(entry, tuple):
+            inside = set(entry)
+            read = list(dict.fromkeys(u for node in entry for u in node.all_input_nodes if u not in inside))
+            given = [value for value in read if not folds(value, k)]
+            written = [node for node in entry if node in slot]
+            name = f"region{len(regions)}"
+            made = body(entry, given, [value for value in read if folds(value, k)], written, constants, operands)
+            files[name] = aot_compile(made, tuple(operands[value] for value in given), options=OPTIONS)
+            program.append(("run", len(regions)))
+            regions.append((name, tuple(slot[value] for value in given), tuple(slot[value] for value in written)))
+        else:
+            sent = entry.target is SEND
+            program.append(("send" if sent else "recv", channel_of(entry), slot[entry.args[0] if sent else entry]))
+    directory = tempfile.TemporaryDirectory(prefix="mesh-aoti-")
+    package = package_aoti(str(pathlib.Path(directory.name) / "package.pt2"), files)
+    # compiler/mesh_compiler/schedule.py schedule: its solved edges between this body's nodes, by entry
+    record = {
+        "tasks": [(THREAD, tuple(n.name for n in entry) if isinstance(entry, tuple) else (entry.name,))
+                  for entry in entries],
+        "operations": [(THREAD, "send" if entry.target is SEND else "recv", k, channel_of(entry), 0, 0)
+                       for k, entry in enumerate(entries) if not isinstance(entry, tuple)],
+        "dependences": sorted({(place[a], place[b]) for a, b in module.meta["dependences"] if place[a] != place[b]})}
+    return Target(package, tuple(regions), tuple(program),
+                  tuple(tuple(slot[v] for v in kept if last.get(v) == k) for k in range(len(entries))),
+                  tuple(slot.get(node) for node in placeholders),
+                  tuple(("slot", slot[r]) if isinstance(r, torch.fx.Node) else ("constant", r) for r in results),
+                  tuple(layout(operands[value]) for value in kept), {value.name: slot[value] for value in kept},
+                  record, directory)
 
 
-# design/torch-source-lowering-change-request.md:250; torch/_inductor/config.py _pre_fusion_custom_pass;
-# torch/_inductor/scheduler.py Scheduler.compute_dependencies, additional_buffer_deps
-def chained(nodes):
-    for written, following in zip(nodes, nodes[1:]):
-        names = written.get_buffer_names()
-        if names and not names & {dep.name for dep in following.unmet_dependencies}:
-            following.add_fake_dep(WeakDep(next(iter(names)), following.get_name(), is_fake=True))
-    for node in nodes[:1]:
-        node.scheduler.compute_ancestors()
-    return nodes
+# output_data/compiler-workgroup-20261113/executor/aoti-binding-contract.md: one bound native model per region
+@dataclasses.dataclass
+class Target:
+    package: str
+    regions: tuple
+    program: tuple
+    released: tuple
+    arguments: tuple
+    results: tuple
+    layouts: tuple
+    values: dict
+    record: dict
+    directory: object = None
+
+    def __post_init__(self):
+        from mesh_aoti import Model
+        self.models = [Model(self.package, name, len(inputs), len(outputs)) for name, inputs, outputs in self.regions]
+
+    def saved(self, directory, processor):
+        name = f"{processor}.aoti.pt2"
+        shutil.copyfile(self.package, pathlib.Path(directory) / name)
+        return {"package": name, **{field: getattr(self, field) for field in FIELDS}}
 
 
-# design/torch-source-lowering-change-request.md item 1; compiler/mesh_compiler/driver.py lowered
-def lower(scheduled):
-    compiled, carried = {}, {channel for channel, *_ in scheduled.carried}
-    laid = {node.args[1]: list(node.args[0].meta["val"].stride()) for module in scheduled.modules.values()
-            for node in module.graph.nodes if node.target is SEND}
-    for processor, module in scheduled.modules.items():
-        if scheduled.devices[processor].type == "mps":
-            compiled[processor] = module
-            continue
-        adapted, receives = adapt(module, scheduled.devices[processor], carried, laid)
-        options = {"layout_optimization": False, "reorder_for_peak_memory": False, "_pre_fusion_custom_pass": chained,
-                   **({"assume_unaligned_fallback_output": True} if receives else {})}
-        compiled[processor] = torch.compile(adapted, backend="inductor", options=options)
-    return compiled
+def restore(saved, directory):
+    sequence = lambda value: tuple(map(sequence, value)) if isinstance(value, list) else value
+    return Target(str(pathlib.Path(directory) / saved["package"]), *(sequence(saved[field]) for field in RECIPE),
+                  saved["values"], saved["record"])

@@ -246,8 +246,9 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
                    planning) if carried else None
     order = plan.order if plan else ordered(tasks, edges, len(lane))
     listed = sorted(functions, key=lambda node: order[task[node]])
-    return {processor: assemble(processor, [node for node in listed if node.meta["processor"] == processor], nodes)
-            for processor in processors}, plan
+    pairs = [(functions[earlier], functions[later]) for earlier, later in edges]
+    return {processor: assemble(processor, [node for node in listed if node.meta["processor"] == processor], nodes,
+                                pairs, transfers) for processor in processors}, plan
 
 
 # rdma/mesh-collective.h mesh_plan; design/plan-to-bridge-change-request.md R5
@@ -258,7 +259,7 @@ def ordered(tasks, edges, resources):
     return list(function[0].order[:len(tasks)])
 
 
-def assemble(processor, order, nodes):
+def assemble(processor, order, nodes, pairs, transfers):
     graph, copied = torch.fx.Graph(), {}
     for node in nodes:
         if node.op == "placeholder" and any(u.meta["processor"] == processor for u in node.users):
@@ -272,7 +273,12 @@ def assemble(processor, order, nodes):
     here = output.meta["processor"] == processor
     results = map_arg(output.args[0], copied.__getitem__) if here else ()
     graph.output(results).meta["processor"] = processor
-    return torch.fx.GraphModule(torch.nn.Module(), graph)
+    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    module.meta["dependences"] = [(copied[earlier], copied[later]) for earlier, later in pairs
+                                  if earlier.meta["processor"] == later.meta["processor"] == processor]
+    module.meta["received_strides"] = {channel: tuple(sent.args[0].meta["val"].stride())
+                                       for channel, (sent, arrival) in transfers.items() if arrival in copied}
+    return module
 
 
 # compiler/mesh_compiler/ir.py Scheduled; compiler/mesh_compiler/placement.py place, transfers

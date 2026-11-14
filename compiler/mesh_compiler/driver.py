@@ -1,8 +1,10 @@
-# design/the-compiler.md
+# design/the-compiler.md; design/compiler-archive-assignment-2026-11-13.md
 import dataclasses
 
 import torch
+from torch.export.graph_signature import OutputKind
 
+from . import lower_inductor
 from .devices import ENGINES, HOST, on_devices
 from .export import export
 from .ir import Scheduled
@@ -10,8 +12,15 @@ from .placement import place
 from .schedule import argument_buffers, carried, schedule, unit_cost
 from .signature import signature
 
+# design/compilation-composition-change-request.md items 1 and 7: one target lowerer finishes each scheduled body
+TARGETS = {
+    "cpu": lambda module, constants, received: lower_inductor.lower(
+        module, constants=constants, received_strides=received),
+}
 
-# compiler/mesh_compiler/ir.py Planning; compiler/mesh_compiler/bridge.py planning
+
+# compiler/mesh_compiler/ir.py Planning; compiler/mesh_compiler/bridge.py planning;
+# compiler/mesh_compiler/placement.py place, transfers
 def compile_module(module, args, processors, placement, cost=unit_cost, stored=(), planning=None, **export_options):
     engines = {name: d for name, (_, d) in processors.items() if d in ENGINES}
     processors = {name: (machine, HOST if name in engines else torch.device(d))
@@ -35,18 +44,18 @@ def compile_module(module, args, processors, placement, cost=unit_cost, stored=(
                      between, engines, plan, stored=stored, invariant=placed.meta["invariant"])
 
 
-def lowered(scheduled, lowerings):
-    functions = {}
-    for lower in lowerings:
-        made = lower(scheduled)
-        modules = {processor: function for processor, function in made.items()
-                   if isinstance(function, torch.fx.GraphModule)}
-        functions.update((processor, function) for processor, function in made.items() if processor not in modules)
-        scheduled = dataclasses.replace(scheduled, modules=modules)
-    return {**scheduled.modules, **functions}
+# design/compiler-archive-assignment-2026-11-13.md, "Exact assigned connection"
+def lowered(scheduled):
+    mutated = {key for kind, key in scheduled.exported.outputs if kind == OutputKind.BUFFER_MUTATION}
+    constants = {name: tensor.detach() for name, (key, tensor) in scheduled.exported.state.items()
+                 if key not in mutated}
+    return {processor: TARGETS[scheduled.engines.get(processor, scheduled.devices[processor].type)](
+                module, {name: constants[name] for name in scheduled.inputs[processor] if name in constants},
+                module.meta["received_strides"])
+            for processor, module in scheduled.modules.items()}
 
 
 # design/synchronization-signature-change-request.md item 1; compiler/mesh_compiler/ir.py Scheduled.functions
-def compiled(scheduled, lowerings, executions=1):
-    scheduled = dataclasses.replace(scheduled, functions=lowered(scheduled, lowerings))
+def compiled(scheduled, executions=1):
+    scheduled = dataclasses.replace(scheduled, functions=lowered(scheduled))
     return dataclasses.replace(scheduled, signature=signature(scheduled, executions)["record"])
