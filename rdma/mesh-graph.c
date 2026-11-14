@@ -4291,7 +4291,24 @@ static uint64_t greedy_align_by_n(uint64_t number, uint64_t n) {
 }
 /* TensorFlow Lite 6cf18d88, tensorflow/lite/delegates/gpu/common/memory_management/greedy_by_size_assignment.cc:68-143,
    GreedyBySizeAssignment, and internal.h:31, kNotAssigned; Y. Pisarchyk and J. Lee, arXiv:2001.03288, 2020, §5.2 */
-int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*intersect)(const void *context, size_t a, size_t b),
+/* the record `idx` assigned at `at`: ordered_allocs kept in order of offset, `total` raised to its end (GreedyBySizeAssignment's
+   insertion, above) */
+static void greedy_assign(size_t *ordered_allocs, size_t *allocs, uint64_t *offset, const uint64_t *size, size_t idx,
+                          uint64_t at, uint64_t *total) {
+  size_t it = 0;
+  while (it < *allocs && offset[ordered_allocs[it]] <= at) it++;
+  memmove(ordered_allocs + it + 1, ordered_allocs + it, (*allocs - it) * sizeof *ordered_allocs);
+  ordered_allocs[it] = idx;
+  ++*allocs;
+  offset[idx] = at;
+  if (at + size[idx] > *total) *total = at + size[idx];
+}
+static int greedy_pinned(const uint64_t *pinned, size_t r) { return pinned && pinned[r / 64] >> (r % 64) & 1; }
+/* `pinned` (NULL: none), bit r % 64 of word r / 64: record r's offset[r] is given (an occupied range already
+   reserved: design/aot-compilation-change-request.md, appendix item 6), assigned before the size-ordered pass, which
+   places the other records around it */
+int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, const uint64_t *pinned,
+                              int (*intersect)(const void *context, size_t a, size_t b),
                               const void *context, uint64_t align, uint64_t *offset, uint64_t *total) {
   struct greedy_record *ordered_records = malloc((records + 1) * sizeof *ordered_records);
   size_t *ordered_allocs = malloc((records + 1) * sizeof *ordered_allocs), allocs = 0;
@@ -4299,8 +4316,11 @@ int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*inters
   *total = 0;
   for (size_t i = 0; !result && i < records; i++) ordered_records[i] = (struct greedy_record){size[i], i};
   if (!result) qsort(ordered_records, records, sizeof *ordered_records, greedy_compare_by_size);
+  for (size_t i = 0; !result && i < records; i++)
+    if (greedy_pinned(pinned, i)) greedy_assign(ordered_allocs, &allocs, offset, size, i, offset[i], total);
   for (size_t r = 0; !result && r < records; r++) {
     const size_t idx = ordered_records[r].idx;
+    if (greedy_pinned(pinned, idx)) continue;
     uint64_t best_diff = UINT64_MAX, best_offset = UINT64_MAX, prev_offset = 0;
     for (size_t k = 0; k < allocs; k++) {
       const size_t allocated_id = ordered_allocs[k];
@@ -4318,13 +4338,7 @@ int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*inters
     }
     if (*total + allocs * (align - 1) < prev_offset) { result = EINVAL; break; }
     if (best_offset == UINT64_MAX) best_offset = prev_offset;
-    size_t it = 0;
-    while (it < allocs && offset[ordered_allocs[it]] <= best_offset) it++;
-    memmove(ordered_allocs + it + 1, ordered_allocs + it, (allocs - it) * sizeof *ordered_allocs);
-    ordered_allocs[it] = idx;
-    allocs++;
-    offset[idx] = best_offset;
-    if (best_offset + size[idx] > *total) *total = best_offset + size[idx];
+    greedy_assign(ordered_allocs, &allocs, offset, size, idx, best_offset, total);
   }
   free(ordered_records); free(ordered_allocs);
   return result;

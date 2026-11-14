@@ -141,7 +141,7 @@ static void replace_turn(void){
     replacing=0;
     return;
   }
-  /* differs from the tag: main's region has one client, not MESH_CLIENTS slots (hdr `client`, `client_start`) */
+  /* the bridge, its children, and each open publication's holder (below) */
   pid_t holders[3*MESH_PORTS+1];
   uint32_t count=0;
   uint64_t start;
@@ -150,10 +150,20 @@ static void replace_turn(void){
   for(uint32_t a=0;!wanted && a<2*MESH_PORTS;a++)
     if(own->child[a].pid && mesh_holds((pid_t)own->child[a].pid,own->child[a].start))holders[count++]=(pid_t)own->child[a].pid;
   /* differs from the tag: the one client's pid and start, where the tag's loop read each client slot's owner and start */
-  const pid_t pid=(pid_t)(uint32_t)atomic_load(&m->client);
-  if(pid && mesh_holds(pid,atomic_load(&m->client_start)))holders[count++]=pid;
+  /* each open publication's holder, as mesh-holders.h mesh_holder_snapshot copies it from this read-only mapping (the
+     slot read, the holder copied, the same open slot read again), watched where mesh_holder_live finds it alive; a row
+     whose slot moved meanwhile is skipped, and read again at the next replace_turn */
+  uint32_t published=0;
+  for(uint32_t r=0;r<m->rows;r++){
+    struct mesh_identity holder;
+    if(!mesh_holder_snapshot(m,size,r,&holder) || !mesh_holder_live(holder))continue;
+    struct kevent64_s watch;
+    EV_SET64(&watch,(uint64_t)(uint32_t)holder.client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_HOLDER,0,0);
+    kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+    published++;
+  }
   munmap(m,size);
-  if(!count){
+  if(!count && !published){
     replacing=0;
     if(!wanted && shm_unlink(MESH_NAME) && errno!=ENOENT){
       if(!timer_open)reopen_later();

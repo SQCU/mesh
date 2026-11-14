@@ -23,19 +23,25 @@ class Context(C.Structure):
                 ('start', Q)]
 
 
+# mesh-dataflow.h struct mesh_range
+class Range(C.Structure):
+    _fields_ = [('first', U), ('count', U)]
+
+
 # mesh.h struct hdr
 class Header(C.Structure):
     _fields_ = [('magic', U), ('version', U), ('pgsz', U), ('block', U), ('rows', U), ('node', U), ('vacant0', U),
                 ('links', U), ('vacant1', U), ('wire_pages', U), ('vacant7', U), ('vacant14', U), ('vacant2', Q),
                 ('planes_off', Q), ('arena_off', Q), ('page_off', Q), ('buffer_off', Q), ('link_off', Q),
-                ('vacant3', Q), ('target_off', Q), ('vacant4', Q), ('vacant5', Q), ('data_off', Q), ('length', Q),
-                ('vacant6', Q), ('target_stride', Q), ('client', Q), ('bridge_pid', Q), ('device_client', Q),
+                ('generation', Q), ('target_off', Q), ('preparing_client', Q), ('preparing_start', Q), ('data_off', Q),
+                ('length', Q), ('vacant6', Q), ('target_stride', Q), ('vacant15', Q), ('bridge_pid', Q),
+                ('device_client', Q),
                 ('serial', Q), ('control', Q), ('port_phase', U), ('port_domain', U), ('port_code', C.c_int64),
                 ('port_prepared', Q), ('view_map', Q), ('view', Q), ('vacant8', Q), ('view_off', Q),
                 ('view_nodes', Q), ('map', Q), ('map_off', Q), ('map_nodes', Q), ('map_serial', Q),
-                ('bridge_off', Q), ('client_start', Q), ('boot', Q), ('health', Q), ('busy', Q), ('idle_since', Q),
+                ('bridge_off', Q), ('vacant16', Q), ('boot', Q), ('health', Q), ('busy', Q), ('idle_since', Q),
                 ('stopping', Q), ('vacant9', Q), ('vacant10', Q), ('vacant11', Q), ('vacant12', Q), ('vacant13', Q),
-                ('map_room', Q), ('algo_off', Q), ('plans', Q), ('deliveries_off', Q), ('deliveries_room', Q),
+                ('map_room', Q), ('vacant17', Q), ('plans', Q), ('deliveries_off', Q), ('deliveries_room', Q),
                 ('delivered', Q), ('delivery_read', Q * 8), ('view_sequencer', U), ('vacant22', U), ('view_boot', Q)]
 
 
@@ -46,12 +52,6 @@ class Hop(C.Structure):
 
 
 SEND, RECEIVE = 0, 1
-
-
-# mesh.h struct mesh_algo
-class Algo(C.Structure):
-    _fields_ = [('published', Q), ('retired', Q), ('released', Q), ('plans', U), ('nodes', U), ('group', Q),
-                ('table', Q), ('adjacent', Q)]
 
 
 # mesh.h struct mesh_state, struct mesh_delivery, struct mesh_submission
@@ -90,7 +90,7 @@ class Strided(C.Structure):
 
 
 class Declared(C.Structure):
-    _fields_ = [('source', U), ('destination', U), ('identity', U), ('kind', U), ('value', U), ('padding', U),
+    _fields_ = [('source', U), ('destination', U), ('identity', U), ('kind', U), ('value', U), ('root', U),
                 ('from_', Strided), ('to', Strided)]
 
 
@@ -142,13 +142,24 @@ class Planned(C.Structure):
                 ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('padding', U), ('orders', Z),
                 ('cause', C.POINTER(PlannedCause)), ('horizon', Q), ('functions', U), ('extents', Z),
                 ('first', C.POINTER(Z)), ('transfer', C.POINTER(PlannedTransfer)),
-                ('extent', C.POINTER(mesh_graph.Access)), ('owned', C.c_void_p)]
+                ('extent', C.POINTER(mesh_graph.Access)), ('owned', C.c_void_p), ('used', Q * 2),
+                ('arena', Range * 2), ('rows', Range), ('generation', Q)]
 
 
-# mesh-collective.h struct mesh_local, mesh_plan_local
+# mesh-collective.h struct mesh_local_use: call `call` binds a program root to its function's value `value`
+class LocalUse(C.Structure):
+    _fields_ = [('call', U), ('value', U)]
+
+
+# mesh-collective.h struct mesh_local, mesh_plan_local, mesh_local_save and mesh_local_load: the whole solved result
+# with its operands (functions, roots, value_first, calls, chains, ordered edges, relation, closure, uses)
 class Local(C.Structure):
     _fields_ = [('planned', Planned), ('bytes', Q), ('values', Z), ('offsets', Z), ('first', C.POINTER(Z)),
-                ('offset', C.POINTER(Q))]
+                ('offset', C.POINTER(Q)), ('functions', U), ('roots', U), ('function', C.POINTER(Function)),
+                ('root', C.POINTER(Value)), ('value_first', C.POINTER(Z)), ('calls', C.POINTER(U)),
+                ('chains', C.POINTER(U)), ('ordered', C.POINTER(U)), ('ncalls', U), ('norders', U),
+                ('relation', C.c_void_p), ('closure', C.POINTER(mesh_graph.Closed)), ('use_first', C.POINTER(Z)),
+                ('use', C.POINTER(LocalUse))]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
@@ -250,6 +261,9 @@ CONTEXT = C.POINTER(Context)
 # is the client" above: mesh_retire retires the program's operand (mesh.h struct mesh_algo, A9's `<algo>`) where hdr
 # `client`, its holder, is the client and its `published` is not 0 (`retired` = `published`), taking the region and the
 # client word as before.  What must stay: each binding the header's declaration
+# 121 (design/plan-to-bridge-change-request.md R8; output_data/compiler-workgroup-20261114/compiler/publication-4.md):
+# mesh_retire takes the region and the planned result whose publication it closes; mesh_publications_clear empties a
+# private copy's publication slots and preparation identity.
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1, R-7
 # and R-10; "The revisions of 14b9a757"): mesh_plan takes the preparation's one absolute deadline, CLOCK_MONOTONIC
 # nanoseconds, last; mesh_transfers_start takes none (each wait bounded by MESH_PLATFORM_NS without progress);
@@ -287,14 +301,16 @@ for name, result, arguments in (
         ('mesh_plan_load', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
                                      C.POINTER(U), Q, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Planned)]),
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
-        ('mesh_plan_local', C.c_int, [C.POINTER(Function), Q, C.POINTER(Local)]),
+        ('mesh_plan_local', C.c_int, [C.POINTER(Function), U, C.POINTER(U), U, C.c_void_p, C.POINTER(U), U,
+                                      C.c_void_p, C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z),
+                                      C.POINTER(LocalUse), Q, C.POINTER(Local)]),
         ('mesh_local_free', None, [C.POINTER(Local)]),
-        ('mesh_local_save', C.c_int, [C.POINTER(Function), C.POINTER(Local), C.POINTER(C.c_void_p),
-                                      C.POINTER(Z)]),
-        ('mesh_local_load', C.c_int, [C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Function), C.POINTER(Local)]),
+        ('mesh_local_save', C.c_int, [C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
+        ('mesh_local_load', C.c_int, [C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
-        ('mesh_retire', None, [C.c_void_p, Q]),
+        ('mesh_retire', None, [C.c_void_p, C.POINTER(Planned)]),
+        ('mesh_publications_clear', None, [C.c_void_p]),
         ('mesh_backing_bind', None, [CONTEXT, U, U, U, U]),
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
         ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),

@@ -25,9 +25,8 @@
    units outstanding names none: MESH_STREAM_GIVEN alone), told in the region (`busy`), and the wall clock at which
    none last came to be (`idle_since`, 0 while any is) */
 /* differs from the tag: main has no streams (mesh-bridge.h: the data path is the page lists'), and what a client holds of
-   the bridge is its one client word, hdr `client` (the client's pid in its low 32 bits), so `busy` is 1 while that word
-   names a client, 0 where it names none or this bridge (main's mesh_retire writes its retirer's pid there until it
-   stores 0), in place of the tag's count of streams whose owner names a client */
+   the bridge is its open publications, so `busy` is 1 while any open publication's holder lives (clients_turn), in
+   place of the tag's count of streams whose owner names a client */
 /* 2026-11-04, owner B2 (design/plan-to-bridge-change-request.md R8: "there is no client word"; e6bd7db2's section 6,
    "Holders and clients", as design/compilation-coordination.md ruling 1 and Q5 take it: "busy = 1 where any open claim
    names a live client other than the bridge"), reversing the note above's one-client form, in which `busy` read hdr
@@ -868,47 +867,49 @@ void order_heard(struct port *from,const struct message *heard,const unsigned ch
    it A10's order constraints between the program's calls"; "A plan's destinations exist before its first message".
    What must stay: `submitted` the executions sent, never more; nothing sent twice that was sent once */
 static int unsent;
-/* the plan standing here named (group, epoch) on this node's map serial, NULL where none: the claims' heads walked
-   (mesh-dataflow.h mesh_head_after, mesh_head_state), at most one such plan standing (mesh_plan's EEXIST).
-   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
-   revisions of 4e78f6f4"): the plan at place epoch - 1 among the program's plans (mesh.h mesh_program_plan: function
-   k + 1 is named (group, k + 1), mesh-collective.h struct mesh_function), epoch at least 1, where the program's root
-   names `group` and the plan's `serial` is this node's map serial; no search.  Why: point 5, "The program's group
-   still names its plans, as NCCL's `ncclUniqueId` names a communicator"; "Nothing walks heads to find it";
-   design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "the bridge reads the
-   serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: a plan of another
-   map serial not matched.
-   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and K2; "The
-   revisions of 55b9cbad"): the plan at place epoch - 1 of the operand (mesh.h mesh_algo_plan, the bridge's one reading
-   of the program's plans: its `published` acquired, then `retired`, then the plan's `closed`), then the operand's
-   `group` and the plan's `serial` compared, where the root's `owner` and `closed` were read and the epoch tested
-   against 0 and `plans`.  Why: K2, "Run-time bound and null tests of facts the plan fixes go", and mesh_algo_plan,
-   which tests no bound: every rank passes the same IR (mesh-collective.h mesh_plan: "every rank passes the same IR but
-   its values"; struct mesh_function: function k is named (group, k + 1), so an epoch is at least 1 and at most
-   `plans`); `group` is read after mesh_algo_plan's acquire of `published`, which orders it behind the publication.
-   The coordinator's ruling on d61df2a9 (one reading of the publication), reversing this unit's first form, which read
-   `published` and `retired` again before `group`.  What must stay: one reading of the publication; a plan of another
-   map serial not matched.
-   2026-11-06 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2 and G2; the
-   coordinator's ruling on sub-agent D's finding; "The revisions of 55b9cbad"), reversing the order above, in which
-   mesh_algo_plan read the table word at place epoch - 1 before `group` was compared, so a message of another launch's
-   group with an epoch past this operand's `plans` was read past its table: the operand's openness by mesh.h
-   mesh_algo_open (the one reading of the publication, mesh 52a12eb0), then its `group` compared, then the plan at
-   place epoch - 1 (mesh_algo_state), its `closed` (acquire) and its `serial`.  Why: a message of this operand's group
-   names one of its own places, which the plan fixes at every rank (struct mesh_function: function k is named (group,
-   k + 1)), and any other group's is let go before any table word is read.  What must stay: the group compared before
-   any table word is read; one reading of the publication; a plan of another map serial not matched
-   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-3:
-   "every field of the published operand is read through the acquired publication, never before it (McKenney and
-   Slingwine)"; mesh.h mesh_algo_standing, "read by a caller that has acquired the publication"; aot A7, corrected
-   2026-11-06; "The revisions of 14b9a757", R-3 and A7): the plan at place epoch - 1 by mesh_algo_standing (its
-   `closed`, acquire), after mesh_algo_open's acquire and the `group` read behind it, where its `closed` was read here;
-   and matched where its `serial` is the installed view's identifier (hdr `view`, view_installed), where it was this
-   node's `map_serial`: a plan's serial is the view it was made in (mesh.h struct mesh_state).  What must stay: the
-   publication acquired first, then `group`, then the table word; a plan of another view not matched */
+/* the publications (mesh-bridge.h struct seen_publication), found again when `plans` changed: every root row's slot
+   scanned, each open one's record read (this thread being the releaser), sorted by group; where the table could not
+   grow, those found, and found again at the next call.  plan_here: the plan named (group, epoch) is its publication's,
+   found by group and still open (its slot its generation), at place epoch - 1, standing and of the installed view;
+   no bound test of a fact the plan fixes (K2) */
+static struct seen_publication *seen;
+static uint32_t seen_count,seen_room;
+static uint64_t seen_plans=UINT64_MAX;
+static int seen_group(const void *a,const void *b){
+  const uint64_t x=((const struct seen_publication *)a)->group,y=((const struct seen_publication *)b)->group;
+  return (x>y)-(x<y);
+}
+const struct seen_publication *publications_seen(uint32_t *count){
+  const uint64_t plans=atomic_load_explicit(&M->plans,memory_order_acquire);
+  if(plans!=seen_plans){
+    uint32_t found=0;
+    int whole=1;
+    for(uint32_t r=0;whole && r<M->rows;r++){
+      const uint64_t slot=mesh_slot(M,r);
+      if(!mesh_slot_open(slot))continue;
+      if(found==seen_room){
+        struct seen_publication *grown=realloc(seen,(size_t)(2*seen_room+1)*sizeof *grown);
+        if(!grown){whole=0;continue;}
+        seen=grown;seen_room=2*seen_room+1;
+      }
+      const struct mesh_algo *algo=mesh_slot_record(M,r);
+      seen[found++]=(struct seen_publication){.group=algo->group,.generation=slot,.holder=algo->holder,.row=r,
+                                              .plans=algo->plans};
+    }
+    qsort(seen,found,sizeof *seen,seen_group);
+    seen_count=found;
+    if(whole)seen_plans=plans;
+  }
+  *count=seen_count;
+  return seen;
+}
+/* the plan of name (group, epoch): its publication by group, open, then its place epoch - 1 */
 static struct mesh_state *plan_here(uint64_t group,uint64_t epoch){
-  if(!mesh_algo_open(M) || mesh_algo(M)->group!=group)return NULL;
-  struct mesh_state *state=mesh_algo_standing(M,(uint32_t)(epoch-1));
+  uint32_t count;
+  const struct seen_publication *all=publications_seen(&count),key={.group=group};
+  const struct seen_publication *p=bsearch(&key,all,count,sizeof *all,seen_group);
+  if(!p || mesh_slot(M,p->row)!=p->generation)return NULL;
+  struct mesh_state *state=mesh_algo_standing(M,mesh_slot_record(M,p->row),(uint32_t)(epoch-1));
   return state && !mesh_view_compare(mesh_plan_view(state),view_installed())?state:NULL;
 }
 /* 2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", K2:
@@ -1467,97 +1468,29 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   else map_put(&heard);
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
 }
-/* tag pre-return-20261103 rdma/mesh-records.c clients_turn (3f72cbde), adapted: main's one client word, not slots */
-/* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first
-   seen (its exit, the event loop's EVFILT_PROC, retires every slot it holds: a holder's death is that event, not a
-   poll), one already gone retired at once; the rows of a retired client released but those a request outstanding on a
-   lane names (mesh-dataflow.c mesh_retired_release, mesh_pinned), a stream a gone client held let go (mesh-link.c
-   streams_let_go: its port's progress thread, which posts nothing of it once the client retired, ends the holding), and
-   the streams held told (busy_tell) */
-/* differs from the tag: main has one client word, hdr `client` (its pid in the low 32 bits), not MESH_CLIENTS slots, so
-   the tag's loop is its one slot, s = 0: `owners[0]` its last read, its watch's udata 0 (the tag's slot index; the
-   event loop's EVFILT_PROC of udata 0 retires hdr `client` where its low 32 bits are the event's ident).  Main's word has
-   no MESH_RETIRING bit: a retirement writes its retirer's pid there (mesh-dataflow.c mesh_retire), this bridge's
-   skipped as the tag skips its own, another's watched as a client's.  mesh_retired_release keeps the rows a port's plan
-   may still name (any port's `prepared` nonzero, mesh-dataflow.c c01fa79d) and returns how many it kept, as the tag's
-   did, so `unreleased` stays set until none is kept */
-/* 2026-11-04, sub-assignment 7 (design/disjoint-pages-change-request.md, C3.4: "The bridge's own turn releases a
-   retired plan's pages once no port holds them", deferred reclamation; design/disjoint-pages-revision-coordination.md,
-   "The program's claim and its sections" and D10), the note above made exact for the claims per plan: what
-   mesh_retired_release keeps is each closed claim whose generation a port's `prepared` holds (after a seq_cst fence),
-   not every closed claim while any port holds any plan, and the count it returns is of the closed claims kept.  And
-   the order of this turn's last calls is reversed from the tag's (release, then let go): streams_let_go first, then
-   the release, so a cancellation this turn computes from a plan's entries (mesh-flow.c plan_cancel) lands in that
-   plan's pages before this turn's release can let them go.  What must stay: the cancellation before the release */
-/* 2026-11-04, owner B2 (design/plan-to-bridge-change-request.md R8: "The code must hold nothing for a program but its
-   plans' claims ... there is no client word"; e6bd7db2's section 6, "Holders and clients", as design/compilation-
-   coordination.md ruling 1 and Q5 take it: "clients_turn walks the heads.  It adds an EVFILT_PROC watch for each open
-   claim's pid, idempotent per pid, and retires at once a pid already gone"), reversing the one-client form above, in
-   which the turn read hdr `client`, which nothing writes from 110 (L3), and kept its last read in `owners[0]`: the
-   turn walks the claims' heads (mesh-dataflow.h mesh_head_after), and for each open claim (its owner not 0, `closed`
-   0) of a process other than this bridge adds the watch of its pid's exit, EV_ADD, which kqueue makes once a pid (an
-   event added again only updates the one there), udata 0 (the event loop's EVFILT_PROC retires every owner of that
-   pid: clients_gone); a pid already gone (ESRCH) has the claim's owner retired at once (mesh_retire: its claims closed,
-   `plans` raised).  streams_let_go's call goes: a gone client's claims are closed by its retirement, and the ports end
-   its plans (mesh-flow.c).  The turn then submits and delivers the sequencer's work (orders_submit, orders_deliver),
-   and the release runs where hdr `plans` moved since the last turn (a claim closed or a plan published: `plans_seen`,
-   in `owners[0]`'s place) or on a liveness turn, as before.  What must stay: the release last, after this turn's
-   cancellations and deliveries, on this thread.
-   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
-   revisions of 4e78f6f4"), reversing the walk of the claims' heads above: the program's root (mesh.h struct
-   mesh_program, at the layout's one place), where it is open (`owner` not 0, `closed` 0, each acquire) and its owner
-   a process other than this bridge: retired at once (mesh-dataflow.h mesh_retire: the root closed, `plans` raised)
-   where that process does not hold the region (mesh-holders.h mesh_holds, by its pid and the root's `start`: a pid a
-   later process reuses reads gone), else its exit watched as before (EV_ADD, udata 0; ESRCH retires it at once).  The
-   release (mesh_retired_release) is the root's.  Why: point 5, the claim's head record goes, and "Release at
-   retirement stays deferred reclamation (RCU)"; the root is the program's one record (A9, "What the bridge runs":
-   "searches for nothing").  What must stay: the release last, after this turn's cancellations and deliveries, on
-   this thread.
-   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
-   revisions of 55b9cbad"), reversing the root's `owner`, `closed` and `start` above: the operand (mesh.h struct
-   mesh_algo), where it is published and not retired (`published` not 0 and not `retired`, each acquire), and its holder
-   (hdr `client`, its low 32 bits the pid, and `client_start`, read after the publication is acquired: mesh_plan stores
-   them before `published`) a process other than this bridge: retired at once (mesh-dataflow.h mesh_retire(M, hdr
-   `client`)) where the holder does not hold the region (mesh-holders.h mesh_holds, by its pid and start), else its
-   exit watched as before (EV_ADD, udata 0; ESRCH retires it at once).  Why: G4, "Its fields are what A9 and the
-   failport's lifecycle need: the operand's publication (B2's single writer) and the holder the heartbeat already
-   knows, reused as the failport's code is" (mesh-heartbeat.c replace_turn reads the same two words as its one client
-   holder).  What must stay: the release last, after this turn's cancellations and deliveries, on this thread.
-   2026-11-06 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G2: "merge
-   duplicated patterns"; the coordinator's review; "The revisions of 55b9cbad"): the operand's openness by mesh.h
-   mesh_algo_open (mesh 52a12eb0), where this turn read `published` and `retired` itself; hdr `client` read after it.
-   What must stay: the holder read after the publication
-   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8: "One
-   writer a word (W11; Lamport's single-writer registers): the program writes `retired`, the bridge writes only
-   `released`, and a gone holder is read from the heartbeat's words"; R-10: "the holder's read and gone-holder test",
-   merged; W11: "(mesh-dataflow.c 78; mesh-records.c 1430, 1493; mesh-link.c 381)"; mesh-holders.h mesh_algo_holder;
-   "The revisions of 14b9a757", R-8 and R-10), reversing the retirement above:
-   - The holder is mesh_algo_holder's one read ({0} where the operand is not open), tested by mesh_holds(pid, start)
-     alone.  A holder that holds is watched for its exit as before (EV_ADD, EV_ONESHOT, udata 0) and makes `busy` 1; a
-     watch that fails (ESRCH: the process in its exit, which mesh_holds still reads as holding) wants nothing, since
-     every turn reads the holder again, at most MESH_PAUSE_NS apart (mesh-link.c turn_due).
-   - A holder that does not hold the region is gone: hdr `plans` raised and woken (mesh.h mesh_notify, a count of many
-     raisers), so each port walks and ends the plans of a gone holder (mesh-flow.c), and this turn's release runs
-     (`plans_seen`); no `retired` is written.  It is raised once a gone holder (`gone_seen`, the last one this turn
-     raised for, as `plans_seen` is the last count it read), since each raise wakes the loop for another turn
-     (control_watch) and the operand stays open, its holder gone, until its release.
-   - The test of this bridge's own pid goes: the holder is mesh_plan's copy of a program's context (mesh.h struct
-     mesh_algo's note), never this bridge's, and a pid this bridge took again reads gone by its start.
-   What must stay: the release last, after this turn's cancellations and deliveries, on this thread; the holder read
-   after the publication */
+/* the bridge parent's turn, on main's one thread (design/plan-to-bridge-change-request.md R8; P. E. McKenney and
+   J. D. Slingwine, PDCS 1998): each open publication's holder (its record's whole identity) watched for its exit while
+   it lives (`busy`); one gone flags this turn's release, which closes its publication (mesh-dataflow.h
+   mesh_retired_release; nothing retired here); then the island's announcements, counts, arrivals, submissions and
+   deliveries; then the release, last, where `plans` moved or a liveness turn runs, `unreleased` kept while a closed
+   publication is still held.  What must stay: the release last, after this turn's cancellations and deliveries, on
+   this thread */
 static uint64_t plans_seen;
-static struct mesh_algo_holder gone_seen;
 void clients_turn(int liveness){
   uint64_t busy=0;
-  const struct mesh_algo_holder holder=mesh_algo_holder(M);
-  if(holder.pid && mesh_holds(holder.pid,holder.start)){
-    struct kevent64_s watch;EV_SET64(&watch,(uint32_t)holder.pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
-    kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-    busy=1;
-  }
-  else if(holder.pid && (holder.pid!=gone_seen.pid || holder.start!=gone_seen.start)){
-    gone_seen=holder;
-    mesh_notify(&M->plans);
+  /* each open publication's holder watched while it lives; one gone has its publication closed by this turn's release
+     (mesh-dataflow.h mesh_retired_release) */
+  uint32_t count;
+  const struct seen_publication *all=publications_seen(&count);
+  for(uint32_t e=0;e<count;e++){
+    if(mesh_slot(M,all[e].row)!=all[e].generation)continue;
+    if(mesh_holder_live(all[e].holder)){
+      struct kevent64_s watch;
+      EV_SET64(&watch,(uint32_t)all[e].holder.client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
+      kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+      busy=1;
+    }
+    else unreleased=1;
   }
   orders_announce(liveness);
   counts_tell(liveness);
@@ -1603,26 +1536,11 @@ void clients_turn(int liveness){
   if(unreleased || liveness)unreleased=mesh_retired_release(M)!=0;
   busy_tell(busy);
 }
-/* not the tag's (2026-11-04, owner B2: e6bd7db2's section 6, "Holders and clients", as design/compilation-
-   coordination.md ruling 1 and Q5 take it: "The event loop's EVFILT_PROC retires every owner of the event's pid"): each
-   open claim whose owner's process is `pid` has that owner retired (mesh-dataflow.h mesh_retire: every claim it owns
-   closed, `plans` raised and woken); mesh-link.c's event loop, on main's thread.
-   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
-   root's owner retired where the root is open and its owner's process is `pid`, where every open claim's was.  What
-   must stay: on main's thread.
-   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
-   revisions of 55b9cbad"): the operand's holder, hdr `client`, retired (mesh_retire) where the operand is published
-   and not retired (each acquire) and the holder's process is `pid`, where the root's `owner` and `closed` were read.
-   What must stay: on main's thread.
-   2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2; the coordinator's review): the operand's
-   openness by mesh.h mesh_algo_open (mesh 52a12eb0), hdr `client` read after it.  What must stay: on main's thread
-   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8 and
-   R-10; mesh-holders.h mesh_algo_holder; "The revisions of 14b9a757", R-8), reversing the retirement: where the open
-   operand's holder (mesh_algo_holder, its one read) is the process `pid` whose exit the event tells, hdr `plans` raised
-   and woken (mesh.h mesh_notify), so each port walks and ends the plans of a gone holder (mesh-flow.c), and the loop's
-   next turn runs the release (clients_turn, mesh-dataflow.c mesh_retired_release, which reads the holder gone itself);
-   no `retired` is written (R-8: "the bridge writes only `released`").  What must stay: on main's thread; a holder's
-   death this event, not a poll */
+/* a process's exit (EVFILT_PROC): where it holds an open publication, hdr `plans` raised, so this thread's next
+   release closes that publication; nothing retired here.  What must stay: on main's thread; a holder's death is this
+   event, not a poll */
 void clients_gone(pid_t pid){
-  if(mesh_algo_holder(M).pid==pid)mesh_notify(&M->plans);
+  uint32_t count;
+  const struct seen_publication *all=publications_seen(&count);
+  for(uint32_t e=0;e<count;e++)if((pid_t)(uint32_t)all[e].holder.client==pid){mesh_notify(&M->plans);return;}
 }

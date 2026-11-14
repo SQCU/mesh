@@ -13,15 +13,21 @@
 #include <time.h>
 /* design/algorithm-sources.md#programtensor */
 /* design/plan-to-bridge-change-request.md R8; P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser,
-   Practical lock-freedom, 2004 */
-void mesh_retire(struct hdr *m,uint64_t client){
-  struct mesh_algo *algo=mesh_algo(m);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
-  if(atomic_load_explicit(&m->client,memory_order_acquire)==client && published)
-    atomic_store_explicit(&algo->retired,published,memory_order_release);
+   Practical lock-freedom, 2004: the result's own publication closed (its root row's slot G to G | 1), so no reader
+   acquires it again; its rows and pages released by mesh_retired_release once none holds it */
+void mesh_retire(struct hdr *m,const struct mesh_planned *planned){
+  uint64_t open=planned->generation;
+  if(open)atomic_compare_exchange_strong_explicit(&mesh_page(m)[planned->rows.first+planned->rows.count-1].publication,
+                                                 &open,open|1,memory_order_seq_cst,memory_order_relaxed);
   mesh_notify(&m->plans);
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
+}
+/* a private copy of the region's metadata (compiler/mesh_compiler/bridge.py planning) holds none of its publications:
+   no record of it is copied */
+void mesh_publications_clear(struct hdr *m){
+  mesh_holder_store(&m->preparing,(struct mesh_identity){0,0});
+  for(uint32_t r=0;r<m->rows;r++)atomic_store_explicit(&mesh_page(m)[r].publication,0,memory_order_relaxed);
 }
 
 /* design/aot-compilation-change-request.md, appendix item 6; NVIDIA, CUDA Programming Guide §4.2.3.1 */
@@ -55,7 +61,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
-  mesh_retire(c->M,c->client);
   int status=munmap(c->M,c->len);
   int error=status?errno:0;
   if(close(c->fd) && !error) error=errno;
@@ -106,11 +111,11 @@ void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint64_t address){
   if(row!=MESH_ABSENT)atomic_store_explicit(&mesh_page(c->M)[row].device,address,memory_order_relaxed);
 }
 
-/* M. M. Michael, IEEE TPDS 15(6), 2004 */
-static int mesh_holding_retained(struct hdr *m,const struct mesh_algo *algo,uint64_t published){
+/* M. M. Michael, IEEE TPDS 15(6), 2004: a port announcing generation G (`prepared`), or holding a plan of it */
+static int mesh_holding_retained(struct hdr *m,const struct mesh_algo *algo,uint64_t generation){
   const uint32_t links=m->links>MESH_PORTS?m->links:MESH_PORTS;
   for(uint32_t p=0;p<links;p++)
-    if(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire)==published)return 1;
+    if(atomic_load_explicit(&mesh_links(m)[p].port.prepared,memory_order_acquire)==generation)return 1;
   for(uint32_t k=0;k<algo->plans;k++)
     if(atomic_load_explicit(&mesh_algo_state(m,algo,k)->held,memory_order_acquire))return 1;
   return 0;
@@ -118,17 +123,36 @@ static int mesh_holding_retained(struct hdr *m,const struct mesh_algo *algo,uint
 
 /* design/algorithm-sources.md#programtensor */
 /* design/aot-compilation-change-request.md, appendix item 6; P. E. McKenney and J. D. Slingwine, Read-copy update,
-   1998; K. Fraser, Practical lock-freedom, 2004; C++20 [atomics.order] p4.4 */
+   1998; K. Fraser, Practical lock-freedom, 2004; M. M. Michael, IEEE TPDS 15(6), 2004; C++20 [atomics.order] p4.4:
+   on the bridge's one thread (the only remover), each publication slot:
+   - open, its holder gone (mesh_holds): closed (G to G | 1), so no reader acquires it again;
+   - closed: after a seq_cst fence, released (the slot 0, its rows and pages free to a preparation) where no port
+     announces G and no plan of it is held; kept closed, still discoverable, otherwise;
+   `plans` raised where a slot moved, so the ports walk.
+   A reader announces G, fences, and re-reads the slot G before it reads the record: either it reads the slot closed
+   and acquires nothing, or its announcement precedes this fence and this test reads it.  1 where a closed
+   publication is still held */
 uint32_t mesh_retired_release(struct hdr *m){
-  struct mesh_algo *algo=mesh_algo(m);
-  const uint64_t published=mesh_algo_unreleased(m);
-  const struct mesh_algo_holder holder=mesh_algo_holder(m);
-  if(!published || mesh_holds(holder.pid,holder.start))return 0;
-  atomic_thread_fence(memory_order_seq_cst);
-  if(mesh_holding_retained(m,algo,published))return 1;
-  atomic_store_explicit(&algo->released,published,memory_order_release);
-  os_sync_wake_by_address_all(&algo->released,sizeof algo->released,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-  return 0;
+  uint32_t held=0,moved=0;
+  for(uint32_t r=0;r<m->rows;r++){
+    _Atomic uint64_t *word=&mesh_page(m)[r].publication;
+    uint64_t slot=atomic_load_explicit(word,memory_order_acquire);
+    if(!slot)continue;
+    const struct mesh_algo *algo=mesh_slot_record(m,r);
+    if(mesh_slot_open(slot)){
+      if(mesh_holder_live(algo->holder))continue;
+      uint64_t open=slot;
+      moved|=atomic_compare_exchange_strong_explicit(word,&open,slot|1,memory_order_seq_cst,memory_order_acquire);
+      slot=open==slot?slot|1:open;
+      if(mesh_slot_open(slot) || !slot)continue;
+    }
+    atomic_thread_fence(memory_order_seq_cst);
+    if(mesh_holding_retained(m,algo,slot&~UINT64_C(1))){held=1;continue;}
+    atomic_store_explicit(word,0,memory_order_release);
+    moved=1;
+  }
+  if(moved)mesh_notify(&m->plans);
+  return held;
 }
 
 uint32_t mesh_cables(const struct mesh_record *a,const struct mesh_record *b,struct mesh_cable *out){

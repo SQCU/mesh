@@ -577,8 +577,11 @@ int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
    and heapLayout.cpp:13-23, do_arcs_overlap */
 int mesh_graph_arcs_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start, uint64_t b_end);
 /* TensorFlow Lite 6cf18d88, tensorflow/lite/delegates/gpu/common/memory_management/greedy_by_size_assignment.h:43-45,
-   GreedyBySizeAssignment; design/torch-capture-change-request.md item 6 */
-int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*intersect)(const void *context, size_t a, size_t b),
+   GreedyBySizeAssignment; design/torch-capture-change-request.md item 6.  `pinned` (NULL: none), a bitmap of records
+   (bit r % 64 of word r / 64) whose offset[r] is given and kept: they are assigned first, and the others placed around
+   those they intersect */
+int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, const uint64_t *pinned,
+                              int (*intersect)(const void *context, size_t a, size_t b),
                               const void *context, uint64_t align, uint64_t *offset, uint64_t *total);
 
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context);

@@ -10,7 +10,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 120u
+#define MESH_VERSION 121u
 #define MESH_ABSENT UINT32_MAX
 #ifndef MESH_PLATFORM_NS
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
@@ -32,13 +32,24 @@ _Static_assert(sizeof(struct mesh_buffer)==32 && _Alignof(struct mesh_buffer)==3
   offsetof(struct mesh_buffer,start)==24,"mesh_buffer");
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M10 */
+/* `publication` (design/plan-to-bridge-change-request.md R8; design/aot-compilation-change-request.md, appendix item
+   6; M. M. Michael, IEEE TPDS 15(6), 2004): the stable publication slot of a program's root row, 0 none, G (even,
+   hdr `generation`) its publication open, G | 1 closed (retired, its rows and pages not yet released) */
 struct mesh_page_entry {
   _Alignas(16) _Atomic uint64_t mapping;
   _Atomic uintptr_t address;
   _Atomic uint64_t device;
+  _Atomic uint64_t publication;
 };
 _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_entry)==16 &&
-  offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16,"mesh_page_entry");
+  offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16 &&
+  offsetof(struct mesh_page_entry,publication)==24,"mesh_page_entry");
+/* design/pages-and-functions.md#what-the-page-table-is */
+struct mesh_range { uint32_t first,count; };
+/* a whole holder identity, read and written as one 16-byte atomic: mesh_ctx `client` (its low 32 bits the pid) and
+   the process start (mesh-holders.h mesh_started) */
+struct mesh_identity { uint64_t client,start; };
+_Static_assert(sizeof(struct mesh_identity)==16 && __atomic_always_lock_free(16,0),"mesh_identity: one 16-byte atomic");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 struct mesh_target { uint64_t word; uint32_t count,stride; };
@@ -142,12 +153,14 @@ _Static_assert(sizeof(struct mesh_sync)==32 && offsetof(struct mesh_sync,entry)=
    M. Cowan et al., MSCCLang, ASPLOS 2023, §5;
    L. Lamport, On interprocess communication, Distributed Computing 1(2), 1986;
    P. E. McKenney and J. D. Slingwine, Read-copy update, PDCS 1998 */
-struct mesh_algo { _Alignas(64) _Atomic uint64_t published; _Atomic uint64_t retired,released; uint32_t plans,nodes;
-  uint64_t group,table,adjacent; };
-_Static_assert(sizeof(struct mesh_algo)==64 && offsetof(struct mesh_algo,retired)==8 &&
-  offsetof(struct mesh_algo,released)==16 && offsetof(struct mesh_algo,plans)==24 && offsetof(struct mesh_algo,nodes)==28 &&
-  offsetof(struct mesh_algo,group)==32 && offsetof(struct mesh_algo,table)==40 &&
-  offsetof(struct mesh_algo,adjacent)==48,"mesh_algo");
+/* a program's publication record, at the head of its own table item (the page its root row, rows.first + rows.count
+   - 1, maps), its functions' plan table and adjacency after it: `rows` and `arena[a]` its exact reservation (arena a
+   {first, used[a] blocks}; equal where one arena is shared), `holder` its publisher */
+struct mesh_algo { uint32_t plans,nodes; uint64_t group,table,adjacent; struct mesh_identity holder;
+                   struct mesh_range rows,arena[2]; };
+_Static_assert(sizeof(struct mesh_algo)==72 && offsetof(struct mesh_algo,group)==8 && offsetof(struct mesh_algo,table)==16 &&
+  offsetof(struct mesh_algo,adjacent)==24 && offsetof(struct mesh_algo,holder)==32 && offsetof(struct mesh_algo,rows)==48 &&
+  offsetof(struct mesh_algo,arena)==56,"mesh_algo");
 
 /* design/aot-compilation-change-request.md, appendix item 2;
    E. A. Lee and D. G. Messerschmitt, IEEE Trans. Computers C-36(1), 1987 */
@@ -163,10 +176,17 @@ struct hdr {
   uint32_t vacant7;
   uint32_t vacant14;
   uint64_t vacant2;
-  uint64_t planes_off,arena_off,page_off,buffer_off,link_off,vacant3,target_off,vacant4,vacant5,data_off,length;
+  uint64_t planes_off,arena_off,page_off,buffer_off,link_off;
+  /* the publications' generations, 2 apart (struct mesh_page_entry `publication`); the preparation identity, one
+     preparation at a time (mesh-collective.c plan_prepare) */
+  _Atomic uint64_t generation;
+  uint64_t target_off;
+  struct mesh_identity preparing;
+  uint64_t data_off,length;
   uint64_t vacant6,target_stride;
   /* design/plan-to-bridge-change-request.md R8 */
-  _Atomic uint64_t client,bridge_pid,device_client,serial,control;
+  uint64_t vacant15;
+  _Atomic uint64_t bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
   /* design/aot-compilation-change-request.md A7 */
   _Atomic uint64_t view_map,view;
@@ -177,11 +197,11 @@ struct hdr {
   _Atomic uint64_t map,map_off,map_nodes;
   _Atomic uint64_t map_serial;
   uint64_t bridge_off;
-  _Atomic uint64_t client_start;
+  uint64_t vacant16;
   uint64_t boot;
   _Atomic uint64_t health,busy,idle_since,stopping;
   uint64_t vacant9,vacant10,vacant11,vacant12,vacant13,map_room;
-  uint64_t algo_off;
+  uint64_t vacant17;
   _Atomic uint64_t plans;
   /* design/aot-compilation-change-request.md, appendix item 2;
      X. Défago, A. Schiper and P. Urbán, ACM Comput. Surv. 36(4), 2004, §5.2.4 and Fig. 5 */
@@ -195,13 +215,14 @@ struct hdr {
 };
 _Static_assert(offsetof(struct hdr,links)==28 && offsetof(struct hdr,wire_pages)==36 && offsetof(struct hdr,planes_off)==56 &&
   offsetof(struct hdr,target_off)==104 && offsetof(struct hdr,data_off)==128 && offsetof(struct hdr,target_stride)==152 &&
-  offsetof(struct hdr,client)==160 && offsetof(struct hdr,view_map)==224 && offsetof(struct hdr,view)==232 &&
+  offsetof(struct hdr,generation)==96 && offsetof(struct hdr,preparing)==112 &&
+  offsetof(struct hdr,vacant15)==160 && offsetof(struct hdr,view_map)==224 && offsetof(struct hdr,view)==232 &&
   offsetof(struct hdr,map_serial)==288 &&
-  offsetof(struct hdr,bridge_off)==296 && offsetof(struct hdr,client_start)==304 && offsetof(struct hdr,stopping)==344 &&
+  offsetof(struct hdr,bridge_off)==296 && offsetof(struct hdr,vacant16)==304 && offsetof(struct hdr,stopping)==344 &&
   offsetof(struct hdr,vacant7)==40 && offsetof(struct hdr,vacant14)==44 && offsetof(struct hdr,vacant8)==240 &&
   offsetof(struct hdr,view_off)==248 && offsetof(struct hdr,view_nodes)==256 && offsetof(struct hdr,map_off)==272 &&
   offsetof(struct hdr,vacant9)==352 && offsetof(struct hdr,vacant13)==384 && offsetof(struct hdr,map_room)==392 &&
-  offsetof(struct hdr,algo_off)==400 && offsetof(struct hdr,plans)==408 && offsetof(struct hdr,deliveries_off)==416 &&
+  offsetof(struct hdr,vacant17)==400 && offsetof(struct hdr,plans)==408 && offsetof(struct hdr,deliveries_off)==416 &&
   offsetof(struct hdr,delivered)==432 && offsetof(struct hdr,delivery_read)==440 &&
   offsetof(struct hdr,view_sequencer)==504 && offsetof(struct hdr,view_boot)==512 && sizeof(struct hdr)==520,
   "struct hdr: no field moves");
@@ -251,29 +272,26 @@ static inline struct mesh_hop *mesh_hops(struct hdr *m,const struct mesh_state *
 static inline struct mesh_state *mesh_state_at(struct hdr *m,uint64_t at){
   return at?(struct mesh_state *)((char *)m+at):NULL;
 }
-static inline struct mesh_algo *mesh_algo(struct hdr *m){ return (struct mesh_algo *)((char *)m+m->algo_off); }
+/* design/plan-to-bridge-change-request.md R8; M. M. Michael, IEEE TPDS 15(6), 2004; P. E. McKenney and J. D.
+   Slingwine, Read-copy update, PDCS 1998: row `row`'s publication slot (acquire), whether a slot value is an open
+   publication (even, not 0), and the record its root row maps, read only once the slot is re-read the same under an
+   announced hazard (mesh-flow.c plans_walk) or by the releaser's own thread */
+static inline uint64_t mesh_slot(struct hdr *m,uint32_t row){
+  return atomic_load_explicit(&mesh_page(m)[row].publication,memory_order_acquire);
+}
+static inline int mesh_slot_open(uint64_t slot){ return slot && !(slot&1); }
+static inline struct mesh_algo *mesh_slot_record(struct hdr *m,uint32_t row){
+  return (struct mesh_algo *)(void *)mesh_at(m,(uint32_t)atomic_load_explicit(&mesh_page(m)[row].mapping,
+                                                                              memory_order_relaxed));
+}
 static inline struct mesh_state *mesh_algo_state(struct hdr *m,const struct mesh_algo *algo,uint32_t k){
   return mesh_state_at(m,((const uint64_t *)(const void *)((const char *)m+algo->table))[k]);
 }
-/* design/aot-compilation-change-request.md A9; P. E. McKenney and J. D. Slingwine, Read-copy update, PDCS 1998 */
-static inline uint64_t mesh_algo_unreleased(struct hdr *m){
-  const struct mesh_algo *algo=mesh_algo(m);
-  const uint64_t published=atomic_load_explicit(&algo->published,memory_order_acquire);
-  return published && atomic_load_explicit(&algo->released,memory_order_acquire)!=published?published:0;
-}
-static inline uint64_t mesh_algo_open(struct hdr *m){
-  const uint64_t published=mesh_algo_unreleased(m);
-  return published && atomic_load_explicit(&mesh_algo(m)->retired,memory_order_acquire)!=published?published:0;
-}
-static inline struct mesh_state *mesh_algo_standing(struct hdr *m,uint32_t k){
-  struct mesh_state *state=mesh_algo_state(m,mesh_algo(m),k);
+static inline struct mesh_state *mesh_algo_standing(struct hdr *m,const struct mesh_algo *algo,uint32_t k){
+  struct mesh_state *state=mesh_algo_state(m,algo,k);
   return !atomic_load_explicit(&state->closed,memory_order_acquire)?state:NULL;
 }
-static inline struct mesh_state *mesh_algo_plan(struct hdr *m,uint32_t k){
-  return mesh_algo_open(m)?mesh_algo_standing(m,k):NULL;
-}
-static inline const uint32_t *mesh_algo_adjacent(struct hdr *m,uint32_t i,uint32_t *count){
-  const struct mesh_algo *algo=mesh_algo(m);
+static inline const uint32_t *mesh_algo_adjacent(struct hdr *m,const struct mesh_algo *algo,uint32_t i,uint32_t *count){
   const uint32_t *first=(const uint32_t *)(const void *)((const char *)m+algo->adjacent);
   *count=first[i+1]-first[i];
   return first+algo->nodes+1+first[i];

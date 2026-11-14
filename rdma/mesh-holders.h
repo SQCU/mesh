@@ -1,7 +1,7 @@
 /* The probes of a process that holds this node's region, each holder recorded in the region by its pid and start
    (mesh.h): the bridge (hdr `bridge_pid`, struct mesh_bridge_pages `bridge_start`), each port's child (a struct
-   mesh_holder of mesh_bridge_pages(m)->child: pid, device `unit`, start) and the attached client (hdr `client`'s low 32
-   bits, hdr `client_start`).  The holder table's operations are lines of its readers and writers at tag
+   mesh_holder of mesh_bridge_pages(m)->child: pid, device `unit`, start) and each publication's publisher (its record's
+   whole identity, struct mesh_identity: its client's low 32 bits the pid, and its start).  The holder table's operations are lines of its readers and writers at tag
    pre-return-20261103 (mesh-link.c child_elsewhere, child_spawn, child_reaped, region_open and main; mesh-heartbeat.c
    bridge_of and replace_turn), brought over verbatim by their owners and calling these; none is a function here. */
 #ifndef MESH_HOLDERS_H
@@ -30,19 +30,41 @@ static inline uint64_t mesh_started(pid_t process){
 /* the process `pid` of start `start` alive (a start of 0, which a region an earlier bridge or library wrote holds:
    the pid alone) */
 static inline int mesh_holds(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_gone(pid); }
-/* The open operand's holder (2026-11-06, design/compilation-coordination.md, "The root cause of the copies, and the
-   revised work list", R-8: "a gone holder is read from the heartbeat's words", and R-10: "the holder's read and
-   gone-holder test", W13: "(mesh-link.c 377–381; mesh-records.c 1425–1430, 1491–1493; mesh-stat.c 118–120)", each
-   merged; "The revisions of 14b9a757"): hdr `client`'s low 32 bits its pid and hdr `client_start` its start, the words
-   mesh-heartbeat.c replace_turn reads as its one client holder, read after the publication's acquire (mesh.h
-   mesh_algo_open: mesh_plan stores them before `published`); {0} where the operand is not open.  The one read of the
-   holder: the bridge parent's turn and its exit event, the region's adoption, mesh-stat, the release and a port's test
-   of a plan's standing read it here, and test it gone by mesh_holds(pid, start) alone; none writes `retired` for it
-   (R-8).  What must stay: the holder read after the publication */
-struct mesh_algo_holder { pid_t pid; uint32_t padding; uint64_t start; };
-static inline struct mesh_algo_holder mesh_algo_holder(struct hdr *m){
-  if(!mesh_algo_open(m))return (struct mesh_algo_holder){0};
-  return (struct mesh_algo_holder){.pid=(pid_t)(uint32_t)atomic_load_explicit(&m->client,memory_order_acquire),
-                                   .start=atomic_load_explicit(&m->client_start,memory_order_acquire)};
+/* a whole holder identity alive (mesh_holds, the one failure detector), and its 16-byte atomics: one compare-and-
+   swap of the whole identity (arm64 caspal), one store */
+static inline int mesh_holder_live(struct mesh_identity holder){
+  return mesh_holds((pid_t)(uint32_t)holder.client,holder.start);
+}
+static inline int mesh_holder_swap(struct mesh_identity *at,struct mesh_identity *expected,struct mesh_identity desired){
+  return __atomic_compare_exchange((unsigned __int128 *)(void *)at,(unsigned __int128 *)(void *)expected,
+                                   (unsigned __int128 *)(void *)&desired,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+}
+static inline void mesh_holder_store(struct mesh_identity *at,struct mesh_identity value){
+  __atomic_store((unsigned __int128 *)(void *)at,(unsigned __int128 *)(void *)&value,__ATOMIC_RELEASE);
+}
+/* A diagnostic's copy of row `row`'s open publication's holder, from a mapping of `length` bytes that may be read-only
+   (mesh-stat.c, mesh-heartbeat.c), with no hazard, lock or registration: the root row's slot G read (acquire); its
+   mapping (the record's page) and the record's two holder scalars each read once (relaxed atomic loads), at addresses
+   bounded by the mapping; an acquire fence; the same slot read again.  1 and *holder where both reads are the same open
+   G, else 0 (the diagnostic's next turn reads again).  Why it is the holder: a slot goes 0, then G (mesh-collective.c
+   plan_publish: a unique even generation, `generation` raised by 2), then G | 1 (mesh-dataflow.c mesh_retire,
+   mesh_retired_release's close), then 0 (the release), and a record's page is reused only by a preparation after its
+   slot is 0 (plan_reserve pins every slot not 0), so the same G read after the copies means no release, and no reuse,
+   came between.  No pointer is kept past the second read.  The copy is an observation: whether its process lives is
+   mesh_holds' (mesh_holder_live) */
+static inline int mesh_holder_snapshot(struct hdr *m,size_t length,uint32_t row,struct mesh_identity *holder){
+  if(m->page_off>length || (length-m->page_off)/sizeof(struct mesh_page_entry)<=row)return 0;
+  const uint64_t slot=mesh_slot(m,row);
+  if(!mesh_slot_open(slot))return 0;
+  const uint64_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row].mapping,memory_order_relaxed);
+  if(m->data_off>length || !m->pgsz || page>(length-m->data_off)/m->pgsz ||
+     length-m->data_off-page*m->pgsz<sizeof(struct mesh_algo))return 0;
+  const struct mesh_algo *algo=(const struct mesh_algo *)(const void *)((const char *)m+m->data_off+page*m->pgsz);
+  const struct mesh_identity copied={__atomic_load_n(&algo->holder.client,__ATOMIC_RELAXED),
+                                     __atomic_load_n(&algo->holder.start,__ATOMIC_RELAXED)};
+  atomic_thread_fence(memory_order_acquire);
+  if(mesh_slot(m,row)!=slot)return 0;
+  *holder=copied;
+  return 1;
 }
 #endif

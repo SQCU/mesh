@@ -34,7 +34,10 @@ enum { MESH_JOIN, MESH_PAGES };
    elements merged into one run */
 void mesh_strided_extents(const struct mesh_strided *view,void (*visit)(void *context,uint64_t offset,uint64_t length),
                           void *context);
-struct mesh_declared { uint32_t source,destination,identity,kind,value,padding; struct mesh_strided from,to; };
+/* `root` 0: `value` the owner function's ValueID; r + 1: the program's shared root r (the joint program's roots[r], a
+   cross-call wire owned by its producing call), `value` the owner's typed ValueID of it (MESH_ABSENT: no numeric site
+   on this node) */
+struct mesh_declared { uint32_t source,destination,identity,kind,value,root; struct mesh_strided from,to; };
 _Static_assert(sizeof(struct mesh_declared)==88 && offsetof(struct mesh_declared,from)==24 &&
                offsetof(struct mesh_declared,to)==56,"mesh_declared: rdma/mesh.py Declared");
 /* design/aot-compilation-change-request.md A3; O. Sinnen and L. A. Sousa, IEEE TPDS 16(6) 2005, Definition 1 */
@@ -105,16 +108,27 @@ struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signatur
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
                       struct mesh_planned_cause *cause; uint64_t horizon;
                       uint32_t functions; size_t extents,*first; struct mesh_planned_transfer *transfer;
-                      struct mesh_graph_access *extent; void *owned; };
+                      struct mesh_graph_access *extent; void *owned; uint64_t used[2];
+                      struct mesh_range arena[2],rows; uint64_t generation; };
 /* `owned`: a loaded result's own memory and its archive's owner (mesh_plan_load, mesh_local_load), released by
-   mesh_planned_free; NULL for a planned result */
+   mesh_planned_free; NULL for a planned result.  `used[a]`: the blocks (m->block pages each) the plan's placement
+   solved in distinct arena a, a as mesh_arena_range(m, a) (one shared arena: used[0], used[1] 0), as mesh_plan placed
+   them or the loaded archive saved them; 0 for a local result.  `arena[a]`: the pages of arena a the placement's pages
+   are offsets from: its reservation, {first, used[a] blocks} (mesh_plan and mesh_plan_load reserve it), equal ranges
+   where one arena is shared; mesh_plan_save saves them; {0} for a
+   local result.  `rows`: its reserved page-table rows, its value rows then its root row (rows.first + rows.count - 1,
+   its publication's stable slot: mesh.h struct mesh_page_entry `publication`); `generation`: its publication's (0
+   none), which mesh-dataflow.h mesh_retire closes */
 _Static_assert(sizeof(struct mesh_planned_call)==40 && offsetof(struct mesh_planned_call,function)==16 &&
                offsetof(struct mesh_planned_call,waits)==32 && offsetof(struct mesh_planned,owned)==96 &&
-               sizeof(struct mesh_planned)==104 && offsetof(struct mesh_planned,calls)==24 &&
+               offsetof(struct mesh_planned,calls)==24 &&
                offsetof(struct mesh_planned,orders)==32 && offsetof(struct mesh_planned,cause)==40 &&
                offsetof(struct mesh_planned,horizon)==48 && offsetof(struct mesh_planned,functions)==56 &&
                offsetof(struct mesh_planned,extents)==64 && offsetof(struct mesh_planned,first)==72 &&
                offsetof(struct mesh_planned,transfer)==80 && offsetof(struct mesh_planned,extent)==88 &&
+               offsetof(struct mesh_planned,used)==104 && offsetof(struct mesh_planned,arena)==120 &&
+               offsetof(struct mesh_planned,rows)==136 && offsetof(struct mesh_planned,generation)==144 &&
+               sizeof(struct mesh_planned)==152 &&
                sizeof(struct mesh_planned_transfer)==24 &&
                sizeof(struct mesh_planned_cause)==8,"mesh_planned: rdma/mesh.py Planned");
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
@@ -130,35 +144,72 @@ int mesh_plan_load(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh
 /* mesh_plan_load's archive (8-byte aligned `bytes`, EINVAL otherwise) restores each function's compiled parts (host,
    work, and their relation or flat edges) into functions[f] before its inputs are checked, as views of `bytes`, with
    the result's order, cause and extents; on success the result adopts `owner` (release(owner) once the result, freed
-   by mesh_planned_free, and every loaded relation are released), on failure the caller keeps it */
+   by mesh_planned_free, and every loaded relation are released), on failure the caller keeps it.  mesh_plan and
+   mesh_plan_load are each one preparation (hdr `preparing`, until `deadline`): the plan's rows and the used blocks of
+   each distinct arena reserved around every live publication's (mesh_graph_greedy_by_size, pinned), its saved pages
+   and rows relocated to them from the archive's origins (`arena`, `rows`), then published at its root row */
 void mesh_planned_free(struct mesh_planned *);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/torch-capture-change-request.md item 6;
-   design/aot-compilation-change-request.md, appendix item 2: one lowered machine function's own storage, no transfer.
-   `function` its parts (host, work, edge: its compiled actors) and its values (each value's section.bytes, begin,
-   end, kind, lag and run: run 1 a root this function's storage holds, run 0 one the caller holds), `quantum` the
-   alignment of every placed copy. `planned` one call {plan 0, lead 0, function 0, ordinal 0, every 1, the function's
-   parts, waits 0}, the horizon of its parts' Bff, the function's own edges as MESH_PLANNED_PART orders on part
-   vertices from 0, no signature; `bytes` the arena the caller allocates, offset[first[v], first[v + 1]) value v's
-   copies' byte offsets in it (none where run is 0). Each value's section.count is set to its copies (its bytes and
-   pages untouched) and its shares to 1 where one of its copies' assigned bytes meets another copy's */
+   design/aot-compilation-change-request.md A10 and appendix items 2 and 6; design/disjoint-pages-change-request.md:
+   one program's lowered machine functions' own storage, no transfer. functions[f] its parts (host, work, edge: its
+   compiled actors) and its values (each value's section.bytes, begin, end, kind, lag and run: run 1 one this function's
+   storage holds, run 0 an interface value the program binds); call j a call of functions[calls[j]]; `order` the calls'
+   retained relation, ordered[q] its edge carrying order q, `closure` its closure over the calls (row b b's
+   predecessors), chains[j] call j's head (h <= j, chains[h] == h; NULL each its own); roots[r] one program root (one
+   source storage: section.bytes, kind, run 1 placed, run 0 the caller's), its uses use[use_first[r] .. use_first[r +
+   1]) the calls binding it to their function's run 0 value; `quantum` the alignment of every placed copy. Each function
+   has `every` copies of its calls (its calls' count) per execution of the plan's horizon; copy c of function f is call
+   c % every of block c / every, root copy t block t, a root's occurrences its uses (none: it meets every copy). A
+   lagged, transferred or invariant value's copy meets its function's other copies as their circular lifetimes do and
+   every other copy; any other two copies, of one function or not, meet unless both are of one block and every
+   occurrence of one precedes every occurrence of the other (in one call by its value's begin and end, across calls by
+   `closure`, never by call number). `planned` one call {plan 0, lead 0, function,
+   ordinal, every, parts, waits 0} per call, the horizon of their parts' Bff, its orders: each call's function edges as
+   MESH_PLANNED_PART orders on that call's part vertices from 0 (cause pair the call), each order q from and to call
+   ordinals (MESH_ORDER_CONFLICT where a view hazard is among its edge's causes, else MESH_ORDER_FLOW; pair q), each
+   chain's successive calls (delay 0) and its last before its head (delay 1) as MESH_PLANNED_CHAIN (pair UINT32_MAX)
+   on call ordinals; no signature; `bytes` the arena the caller allocates, first[] over function 0's values, ...,
+   function count - 1's, then the roots, offset[first[v], first[v + 1]) each one's copies' byte offsets in it (none
+   where run is 0). Each value's and root's section.count is set to its copies (its bytes and pages untouched) and its
+   shares to 1 where one of its copies' assigned bytes meets another copy's */
+struct mesh_local_use { uint32_t call,value; };
+_Static_assert(sizeof(struct mesh_local_use)==8,"mesh_local_use: rdma/mesh.py LocalUse");
+/* the whole solved result's operands, as mesh_plan_local was given them (a solved result borrows them from the
+   caller; a loaded one owns its Function[] descriptors and closure header and borrows every array from its archive):
+   function[functions], root[roots], value_first[functions + 1] (produced here: function f's values are first[]'s
+   entries value_first[f] .. value_first[f + 1], the roots from value_first[functions]), calls[ncalls], chains[ncalls]
+   (NULL: each call its own head), ordered[norders] (the edges of `relation` that are orders), the calls' `closure`,
+   and use_first[roots + 1] and use[] */
 struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
-                    uint64_t *offset; };
-_Static_assert(sizeof(struct mesh_local)==144 && offsetof(struct mesh_local,bytes)==104 &&
-               offsetof(struct mesh_local,values)==112 && offsetof(struct mesh_local,offsets)==120 &&
-               offsetof(struct mesh_local,first)==128 && offsetof(struct mesh_local,offset)==136,
+                    uint64_t *offset; uint32_t functions,roots; struct mesh_function *function;
+                    struct mesh_value *root; size_t *value_first; const uint32_t *calls,*chains,*ordered;
+                    uint32_t ncalls,norders; const struct mesh_graph_relation *relation;
+                    const struct mesh_graph_closure *closure; const size_t *use_first;
+                    const struct mesh_local_use *use; };
+_Static_assert(sizeof(struct mesh_local)==288 && offsetof(struct mesh_local,bytes)==152 &&
+               offsetof(struct mesh_local,values)==160 && offsetof(struct mesh_local,offsets)==168 &&
+               offsetof(struct mesh_local,first)==176 && offsetof(struct mesh_local,offset)==184 &&
+               offsetof(struct mesh_local,functions)==192 && offsetof(struct mesh_local,function)==200 &&
+               offsetof(struct mesh_local,value_first)==216 && offsetof(struct mesh_local,ncalls)==248 &&
+               offsetof(struct mesh_local,relation)==256 && offsetof(struct mesh_local,use)==280,
                "mesh_local: rdma/mesh.py Local");
-int mesh_plan_local(struct mesh_function *function,uint64_t quantum,struct mesh_local *out);
+int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
+                    const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,
+                    const struct mesh_graph_closure *closure,const uint32_t *chains,struct mesh_value *roots,
+                    uint32_t nroots,const size_t *use_first,const struct mesh_local_use *use,uint64_t quantum,
+                    struct mesh_local *out);
 void mesh_local_free(struct mesh_local *out);
-/* design/compilation-composition-change-request.md items 3, 6.4 and 7: the local plan's result and the function it
-   was planned from (its value table, outstanding and plan, and its compiled parts as mesh_plan_save keeps them: host,
-   work and their relation, or flat edges where it has none), saved in one archive (*bytes the caller's, released with
-   free) and loaded without planning again. `bytes` (8-byte aligned, EINVAL otherwise) are borrowed: the loaded
-   function's value table, host, work, edges and relation and the result's arrays are views of them; on success the
-   result adopts `owner` (release(owner) once the result, freed by mesh_local_free, and the loaded relation are both
-   released), on failure the caller keeps it and the result and function are zeroed */
-int mesh_local_save(const struct mesh_function *function,const struct mesh_local *local,void **bytes,size_t *length);
-int mesh_local_load(const void *bytes,size_t length,void (*release)(void *),void *owner,struct mesh_function *function,
-                    struct mesh_local *local);
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7: the whole solved local result, saved in one
+   archive (*bytes the caller's, released with free) and loaded without planning again: each function's value table,
+   outstanding and plan and its compiled parts as mesh_plan_save keeps them (host, work and their relation, or flat edges
+   where it has none), the roots, value_first, calls, chains, ordered edges, the calls' relation
+   (mesh_graph_relation_save) and closure, the uses, and the planned calls, orders, causes, first and offset. `bytes`
+   (8-byte aligned, EINVAL otherwise) are borrowed: the loaded Function[] descriptors and closure header are the
+   result's own, every array a view of them; on success the result adopts `owner` (release(owner) once the result,
+   freed by mesh_local_free, and every loaded relation are released), on failure the caller keeps it and the result is
+   zeroed */
+int mesh_local_save(const struct mesh_local *local,void **bytes,size_t *length);
+int mesh_local_load(const void *bytes,size_t length,void (*release)(void *),void *owner,struct mesh_local *local);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

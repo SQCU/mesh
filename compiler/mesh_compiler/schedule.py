@@ -1,16 +1,20 @@
 # design/data-flow.md; design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5
 import ctypes as C
 import dataclasses
+import functools
 import operator
 import pathlib
 import sys
 import time
+import weakref
 
 import torch
 
-from torch.fx.node import map_arg
+from torch.export.graph_signature import OutputKind
+from torch.fx.node import Node, map_arg
+from torch.multiprocessing.reductions import StorageWeakRef
 
-from .ir import HOST, RECV, channel_of, views
+from .ir import HOST, JOIN, RECV, channel_of, views
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -344,3 +348,456 @@ def argument_buffers(modules, output_processor, held, transfers, groups=None):
     edges += [(at[sender], at[receiver]) for sender, receiver in ends if sender != receiver]
     component = mesh_graph.components(len(at), edges)
     return inputs, sorted(p for p in modules if component[at[p]] != component[at[output_processor]]), stored
+
+
+# M. C. Rinard and P. C. Diniz, Commutativity analysis, ACM TOPLAS 19(6), 1997, sections 3.2.1, 4.9.1 and 4.9.2: a fixed
+# body's associative and commutative operators, a difference the sum with a negation, a product distributed over a sum,
+# each in one normal form (its operands flattened and sorted)
+ALGEBRA = {torch.ops.aten.add: "add", torch.ops.aten.mul: "mul", torch.ops.aten.sub: "sub", torch.ops.aten.neg: "neg",
+           torch.ops.aten.maximum: "maximum", torch.ops.aten.minimum: "minimum"}
+
+
+def normal(name, operands):
+    def of(e, kind):
+        return isinstance(e, tuple) and e[:1] == (kind,)
+    if name == "sub":
+        return normal("add", (operands[0], normal("neg", operands[1:])))
+    if name == "neg":
+        return operands[0][1] if of(operands[0], "neg") else ("neg", operands[0])
+    for i, e in enumerate(operands):
+        if name == "mul" and of(e, "add"):
+            return normal("add", tuple(normal("mul", operands[:i] + operands[i + 1:] + (term,)) for term in e[1:]))
+    return (name, *sorted((f for e in operands for f in (e[1:] if of(e, name) else (e,))), key=repr))
+
+
+# Rinard and Diniz, sections 3.2.1 and 4.9.2; torch v2.14.0 torch/fx/interpreter.py: a fixed body run over symbols
+class Symbolic(torch.fx.Interpreter):
+    def call_function(self, target, args, kwargs):
+        name = None if kwargs else ALGEBRA.get(getattr(target, "overloadpacket", None))
+        if name and len(args) == 1 + (name != "neg"):
+            return normal(name, tuple(args))
+        return target, tuple(args), tuple(sorted(kwargs.items()))
+
+
+# Rinard and Diniz, sections 3.1 and 4.8: whether two calls of `function` (one result, its USER_OUTPUT) composed through
+# its user input placeholder k, the first's result the second's input k, give one result in either order, symbolically
+# over the exported fixed body: every other user input the call's own symbol, its state and tokens shared
+def commutes(function, k):
+    names = [n.name for n in function.graph_module.graph.nodes if n.op == "placeholder"]
+    result = [kind for kind, _ in function.outputs].index(OutputKind.USER_OUTPUT)
+
+    def run(receiver, call):
+        return Symbolic(function.graph_module).run(*[
+            receiver if i == k else ("input", call, i) if name in function.user_inputs else ("state", name)
+            for i, name in enumerate(names)], enable_io_processing=False)[result]
+    return names[k] in function.user_inputs and run(run(("receiver",), 1), 2) == run(run(("receiver",), 2), 1)
+
+
+# design/aot-compilation-change-request.md A10 and appendix item 6; A. J. Bernstein, IEEE Trans. Electronic Computers
+# EC-15(5), 1966; Rinard and Diniz, section 2; R. P. Dilworth, Annals of Math., 1950; D. R. Fulkerson, Proc. AMS, 1956:
+# a CapturedProgram's calls analysed. Call j is the original call node nodes[j] of function keys[calls[j]];
+# `storages[s]` storage s's (StorageWeakRef, first holder: the first call's leaf bound to it), s the views' key;
+# `accesses[v]` the relation's view v's (call, operand): ("input", placeholder, leaf), every tensor the call binds to
+# one of its function's placeholders (state and user inputs alike, ir.Call), read, or ("written", output, leaf), the
+# leaf bound to a mutation output's target placeholder, written; `results` each (call, output, leaf, storage) of a
+# call's tensor output, its storage a root whether or not a later call reads it; `root_sources[s]` storage s's
+# caller source (compiler/mesh_compiler/native.py Operand.source): ("input", its outer flat placeholder position),
+# ("result", s, its storage's bytes, its device) of a program result's, None a call's internal planned root; `held`
+# the storages with a source;
+# `supplied[g]` GIVEN cause g with its role:
+# ("value", producer, consumer, leaf), a commuting chain's member reading its head's receiver and a chain's last
+# consumer following every member, or ("chain", a, b, head), the successive calls of one head's label (the commuting
+# chains, `paths`, and each persistent written storage's calls, an outer input's or state's); `chains[j]` call j's
+# head, the least call of its label (mesh_plan `chains`); `relation` the one relation of those views and causes
+# (mesh_graph.dependences_supplied), `graph` it (Graph.from_conflicts), `search` its owned search over incoming rows
+# and `closure` each call's predecessors (Graph.ancestors over that search's postorder); `order_edges` its edges with a
+# view hazard or a value cause, projected as mesh_plan's `orders` and `causes` (ORDER_CONFLICT where a view hazard is
+# among an edge's causes, ORDER_FLOW otherwise) until the planner takes `relation`; `widths[key]` the function's fewest
+# chains covering its calls in `closure` (mesh_graph.closure_chains), `outstanding[key]` their count
+# design/aot-compilation-change-request.md A2, A4 and A10; design/plan-to-bridge-change-request.md R6: one value
+# crossing a call boundary or the program's: produced by call `owner` at its output spec `output` (None: the caller's
+# outer placeholder at position `output`), bound by call `consumer` at its placeholder `input` (None: the program's
+# outer output at position `input`); `storage` its source storage (CallAnalysis.storages), `view` the leaf's strided
+# view (byte offset, element bytes, (size, byte stride) pairs: mesh_graph.strided), `source` the owner's machine (its
+# function's output processor's; None the caller's input), `machines` the consumer's (its placeholder's stated
+# processors', a sharding's flattened; the outer output processor's), `leaf` the original FX Node
+@dataclasses.dataclass(frozen=True)
+class CallPort:
+    owner: object
+    output: int
+    consumer: object
+    input: int
+    storage: int
+    view: tuple
+    source: object
+    machines: tuple
+    leaf: object
+
+
+@dataclasses.dataclass(eq=False)
+class CallAnalysis:
+    nodes: tuple
+    keys: tuple
+    calls: object
+    storages: list
+    accesses: list
+    results: list
+    root_sources: list
+    held: frozenset
+    supplied: list
+    relation: object
+    graph: object
+    search: object
+    closure: object
+    order_edges: list
+    orders: object
+    causes: object
+    norders: int
+    chains: object
+    paths: object
+    widths: dict
+    outstanding: dict
+    placements: dict
+    machines: dict
+    output_processor: object
+    output_machine: object
+    ports: tuple
+
+
+def analyse(captured, placements, machines, output_processor):
+    from .placement import flat
+    nodes, keys = tuple(captured.calls), tuple(captured.functions)
+    entries, ordinal = [captured.calls[node] for node in nodes], {key: f for f, key in enumerate(keys)}
+    J, storage, storages, views, accesses = len(nodes), {}, [], [], []
+    placeholders = {key: [n.name for n in f.graph_module.graph.nodes if n.op == "placeholder"]
+                    for key, f in captured.functions.items()}
+
+    def rooted(tensor, holder):
+        key = storage.setdefault(StorageWeakRef(tensor.untyped_storage()), len(storage))
+        if key == len(storages):
+            storages.append((StorageWeakRef(tensor.untyped_storage()), holder))
+        return key
+
+    def viewed(tensor, holder, j, write, operand):
+        key = rooted(tensor, holder)
+        views.append((key, *mesh_graph.strided(tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()),
+                                               tensor.dtype.itemsize), j, write))
+        accesses.append((j, operand))
+
+    def value(leaf):
+        return leaf.meta.get("val") if isinstance(leaf, Node) else None
+    existing = {StorageWeakRef(value(n).untyped_storage()) for n in captured.exported.graph_module.graph.nodes
+                if n.op == "placeholder" and isinstance(value(n), torch.Tensor)}
+    for j, call in enumerate(entries):
+        function, names = captured.functions[call.function], placeholders[call.function]
+        for i, leaf in enumerate(call.inputs):
+            if isinstance(value(leaf), torch.Tensor):
+                viewed(value(leaf), leaf, j, 0, ("input", i, leaf))
+        state = {key: name for name, (key, _) in function.state.items()}
+        for o, (kind, target) in enumerate(function.outputs):
+            if kind in (OutputKind.USER_INPUT_MUTATION, OutputKind.BUFFER_MUTATION):
+                leaf = call.inputs[names.index(target if kind == OutputKind.USER_INPUT_MUTATION else state[target])]
+                viewed(value(leaf), leaf, j, 1, ("written", o, leaf))
+    results = [(j, o, leaf, rooted(value(leaf), leaf)) for j, call in enumerate(entries)
+               for o, leaf in enumerate(call.outputs) if isinstance(value(leaf), torch.Tensor)]
+    returned, root_sources = [], [None] * len(storages)
+    map_arg(captured.exported.graph_module.graph.output_node().args, returned.append)
+    outer = [n for n in captured.exported.graph_module.graph.nodes if n.op == "placeholder"]
+    for i, n in enumerate(outer):
+        s = storage.get(StorageWeakRef(value(n).untyped_storage())) if isinstance(value(n), torch.Tensor) else None
+        if s is not None and root_sources[s] is None:
+            root_sources[s] = ("input", i)
+    for n in returned:
+        s = storage.get(StorageWeakRef(value(n).untyped_storage())) if isinstance(value(n), torch.Tensor) else None
+        if s is not None and root_sources[s] is None:
+            root_sources[s] = ("result", s, value(n).untyped_storage().nbytes(), value(n).device)
+    held = frozenset(s for s, source in enumerate(root_sources) if source is not None)
+    outer_at, ports = {n: i for i, n in enumerate(outer)}, []
+
+    def stated(held):
+        return tuple(dict.fromkeys(machines[q] for q in ((held,) if isinstance(held, str) else flat(held[1]))))
+
+    def ported(owner, output, consumer, input, leaf, source, at):
+        tensor = value(leaf)
+        s = storage.get(StorageWeakRef(tensor.untyped_storage())) if isinstance(tensor, torch.Tensor) else None
+        if s is not None:
+            ports.append(CallPort(owner, output, consumer, input, s, mesh_graph.strided(
+                tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()), tensor.dtype.itemsize), source,
+                at, leaf))
+    produced = {leaf: (j, o) for j, call in enumerate(entries) for o, leaf in enumerate(call.outputs)
+                if isinstance(leaf, Node)}
+    for b, call in enumerate(entries):
+        for i, leaf in enumerate(call.inputs):
+            if leaf in produced:
+                a, o = produced[leaf]
+                ported(a, o, b, i, leaf, machines[placements[entries[a].function][1]],
+                       stated(placements[call.function][0][i]))
+            elif leaf in outer_at:
+                ported(None, outer_at[leaf], b, i, leaf, None, stated(placements[call.function][0][i]))
+    for k, leaf in enumerate(captured.exported.graph_module.graph.output_node().args[0]):
+        if leaf in produced:
+            a, o = produced[leaf]
+            ported(a, o, None, k, leaf, machines[placements[entries[a].function][1]], (machines[output_processor],))
+        elif leaf in outer_at:
+            ported(None, outer_at[leaf], None, k, leaf, None, (machines[output_processor],))
+    link, follower = {}, {}
+    commuting = functools.cache(lambda key, k: commutes(captured.functions[key], k))
+    for b, call in enumerate(entries):
+        function, reads = captured.functions[call.function], [u for u in call.inputs if isinstance(u, Node)]
+        single = [kind for kind, _ in function.outputs] == [OutputKind.USER_OUTPUT]
+        for k, u in enumerate(call.inputs):
+            a = produced.get(u, (None,))[0]
+            if (a is not None and single and entries[a].function == call.function and len(entries[a].outputs) == 1
+                    and len(u.users) == 1 and reads.count(u) == 1 and link.get(a, (a, k))[1] == k
+                    and commuting(call.function, k)):
+                link[b], follower[a] = (a, k), b
+                break
+    paths = mesh_graph.paths(range(J), lambda a: [follower[a]] if a in follower else [])
+    step = {j: chain for chain in paths for j in chain}
+    supplied = []
+    for b, call in enumerate(entries):
+        read = [entries[step[b][0]].inputs[link[b][1]] if b in link and k == link[b][1] else u
+                for k, u in enumerate(call.inputs)]
+        for u in dict.fromkeys(u for u in read if u in produced):
+            a = produced[u][0]
+            members = step[a] if a in step and step[a][-1] == a else (a,)
+            supplied += [("value", m, b, u) for m in members]
+    persistent = {s for s, (ref, _) in enumerate(storages) if ref in existing} & {v[0] for v in views if v[-1]}
+    groups = [list(chain) for chain in paths] + [sorted({v[-2] for v in views if v[0] == s}) for s in persistent]
+    label = mesh_graph.components(J, [pair for group in groups for a, b in zip(group, group[1:])
+                                      for pair in ((a, b), (b, a))])
+    least = {}
+    for j, c in enumerate(label):
+        least.setdefault(c, j)
+    head = [least[c] for c in label]
+    supplied += [("chain", a, b, head[b]) for a, b in mesh_graph.successive(J, head)]
+    relation = mesh_graph.dependences_supplied(J, views, [(a, b) for _, a, b, _ in supplied])
+    graph = mesh_graph.Graph.from_conflicts(range(J), relation)
+    search = graph.search(graph.vertices, incoming=True)
+    closure = graph.ancestors(mesh_graph.ordered(search, search.made.contents.postorder,
+                                                 range(search.made.contents.count)), incoming=True)
+    hazards = [{relation.conflict(k).kind != mesh_graph.GIVEN or supplied[relation.conflict(k).given][0]
+                for k in relation.members(e)} for e in range(relation.data.edges)]
+    order_edges = [e for e, kinds in enumerate(hazards) if kinds & {True, "value"}]
+    edges = relation.edges()
+    widths = {key: mesh_graph.closure_chains(closure, [j for j in range(J) if entries[j].function == key])
+              for key in keys}
+    return CallAnalysis(nodes, keys, (mesh.U * max(J, 1))(*[ordinal[call.function] for call in entries]), storages,
+                        accesses, results, root_sources, held, supplied, relation, graph, search, closure,
+                        order_edges,
+                        (mesh.U * max(2 * len(order_edges), 1))(*[x for e in order_edges for x in edges[e]]),
+                        (mesh.U * max(len(order_edges), 1))(*[mesh.ORDER_CONFLICT if True in hazards[e] else
+                                                              mesh.ORDER_FLOW for e in order_edges]),
+                        len(order_edges), (mesh.U * max(J, 1))(*head), paths, widths,
+                        {key: count for key, (count, _) in widths.items()}, placements, machines, output_processor,
+                        machines[output_processor], tuple(ports))
+
+
+# mesh-collective.h mesh_plan_local, mesh_local_load: one solved or loaded result, released by mesh_local_free with its
+# last reference; `held` what it borrows (the caller's inputs when solved, the archive's bytes when loaded)
+class LocalOwner:
+    def __init__(self, held=()):
+        self.local, self.held = mesh.Local(), held
+        self.freed = weakref.finalize(self, mesh.LIB.mesh_local_free, C.byref(self.local))
+
+
+# mesh-collective.h struct mesh_local value_first, first and offset: native views of one result, owned by `owner`:
+# function f's values' first entries, the roots', every copy's byte offset
+def viewed(owner, local):
+    F, S, prefix = local.functions, local.roots, local.value_first
+    return ([mesh_graph.View(owner, local.first, range(prefix[f], prefix[f + 1] + 1), int) for f in range(F)],
+            mesh_graph.View(owner, local.first, range(prefix[F], prefix[F] + S + 1), int),
+            mesh_graph.View(owner, local.offset, range(local.offsets), int))
+
+
+# design/aot-compilation-change-request.md A5 to A10 and appendix item 6; design/disjoint-pages-change-request.md;
+# mesh-collective.h mesh_plan_local, mesh_local_save, mesh_local_load: one solved program. `functions` Function[K], the
+# calls' instances; `local` the owned result and `planned` its planned record; `function_value_first[k]`,
+# `root_first` and `offsets` native views (viewed); `bindings` each (call, rootValueID, sourceStorageIndex, delta,
+# originalReference, every, ordinal), its source storage resolved once from the Slot's reference, `delta` the source
+# view's byte offset less the Slot's, (every, ordinal) its call's generation (function f's copy of execution e = t *
+# every + ordinal is e % (horizon * every), a root's copy block e // every); `source_bindings` the native Bindings
+# given; `root_sources` and `analysis` the CallAnalysis's; `roots` mesh.Value[S] (bytes, run 0 a caller's root, shares
+# as solved); `uses` (use_first, use); `plan_calls[j]` call j's instance in `functions` (Function[K]; the source
+# function stays analysis.calls[j]), the local result's calls; `prepared` the declare_program owner its bindings and
+# uses come from; `plan` a transported program's (None here); `owner` the native owner. A loaded result has no
+# bindings, sources, analysis or prepared owner: its rows bind through the saved Target
+@dataclasses.dataclass(eq=False)
+class Solved:
+    functions: object
+    local: object
+    planned: object
+    function_value_first: list
+    root_first: object
+    offsets: object
+    bindings: tuple
+    source_bindings: tuple
+    root_sources: list
+    analysis: object
+    roots: object
+    uses: tuple
+    plan_calls: object
+    prepared: object
+    plan: object
+    owner: object
+
+    def saved(self):
+        data, length = C.c_void_p(), mesh.Z()
+        mesh.check(mesh.LIB.mesh_local_save(C.byref(self.local), C.byref(data), C.byref(length)))
+        try:
+            return C.string_at(data, length.value)
+        finally:
+            SYSTEM.free(data)
+
+
+# mesh.h MESH_SEND, MESH_RECEIVE; design/aot-compilation-change-request.md A2, A4 and A10; design/plan-to-bridge-
+# change-request.md R6: one call's end of one port row: `root` this call's typed root ValueID at the port's position
+# (its Slot's; None: no numeric site on this machine), `direction` mesh.SEND (this call owns the row) or mesh.RECEIVE
+# (this call consumes it), `transfer` the row's position in its owner's combined declared array, `owner` the producing
+# call, `consumer` the consuming call (None: the program's outer output), `storage` the shared program root (its
+# source storage), `view` and `bytes` its original strided view and logical bytes, `source` and `destination` the
+# row's machines
+@dataclasses.dataclass(frozen=True)
+class PortRecord:
+    root: object
+    direction: int
+    transfer: int
+    owner: int
+    consumer: object
+    storage: int
+    view: tuple
+    bytes: int
+    source: object
+    destination: object
+
+
+# design/aot-compilation-change-request.md A2, A4, A8 and A10; mesh-collective.h struct mesh_declared, struct
+# mesh_weight: the program's declarations, prepared once before typed construction. `bindings` each (call,
+# rootValueID, sourceStorageIndex, delta, originalReference), the native Bindings' slots resolved once against
+# analysis.storages (`delta` the source view's byte offset less the Slot's); `uses` each (storage, call, rootValueID)
+# once, in order; `ports[j]` call j's PortRecords; `declared[j]` owner call j's combined rows (source, destination,
+# identity, kind, value, root, from, to): its function's intrinsic declarations with each value remapped once through
+# wire_values (root 0), then each cross-call row of a port it owns, in CallPort and destination order (identity its
+# (owner, storage) above the intrinsic ones, root storage + 1, value its typed root or MESH_ABSENT); `weights[j]` and
+# `dependences[j]` the intrinsic ones, a cross-call row's weight the default unit cost; `arrays[j]` the native
+# Declared and Weight arrays of those rows with what they hold; `source_bindings`, `declarations`, `wire_values` and
+# `planning` as given
+@dataclasses.dataclass(eq=False)
+class Prepared:
+    analysis: object
+    source_bindings: tuple
+    bindings: tuple
+    uses: tuple
+    root_sources: list
+    ports: tuple
+    declared: tuple
+    weights: tuple
+    dependences: tuple
+    arrays: tuple
+    declarations: object
+    wire_values: object
+    planning: object
+
+
+def declare_program(analysis, bindings, declarations, wire_values, planning):
+    J, at = len(analysis.nodes), {ref: s for s, (ref, _) in enumerate(analysis.storages)}
+    resolved, used, slots = {}, {}, {}
+    for binding in bindings:
+        for side, entries in (("input", binding.inputs), ("output", binding.outputs)):
+            for position, slot in enumerate(entries):
+                slots[binding.call, side, position] = slot.root
+                value = slot.reference.meta.get("val") if isinstance(slot.reference, Node) else None
+                if slot.root is None or not isinstance(value, torch.Tensor):
+                    continue
+                s = at[StorageWeakRef(value.untyped_storage())]
+                resolved.setdefault((binding.call, slot.root, s,
+                                     value.storage_offset() * value.element_size() - slot.offset), slot.reference)
+                used.setdefault((s, binding.call, slot.root), None)
+    node = {machine: k for k, machine in enumerate(planning.nodes)} if planning is not None else {}
+    declared, weights, dependences, ports, identities = [], [], [], [[] for _ in range(J)], []
+    for j in range(J):
+        key = analysis.keys[analysis.calls[j]]
+        intrinsic, wires = (declarations or {}).get(key), (wire_values or {}).get(key, {})
+        rows = intrinsic.declared if intrinsic is not None else []
+        declared.append([(source, destination, identity, kind,
+                          mesh.ABSENT if value == mesh.ABSENT else wires.get(value, mesh.ABSENT), 0, sent, landed)
+                         for source, destination, identity, kind, value, sent, landed in rows])
+        weights.append([tuple(weight) for weight in (intrinsic.weights if intrinsic is not None else [])])
+        dependences.append(list(intrinsic.dependences) if intrinsic is not None else [])
+        identities.append({None: 1 + max((row[2] for row in rows), default=-1)})
+    for port in analysis.ports:
+        if port.owner is None:
+            continue
+        a, mine = port.owner, identities[port.owner]
+        owned = slots.get((a, "output", port.output))
+        tensor = port.leaf.meta["val"]
+        for destination in (machine for machine in port.machines if machine != port.source):
+            identity = mine.setdefault((a, port.storage), mine[None] + len(mine) - 1)
+            transfer = len(declared[a])
+            declared[a].append((node[port.source], node[destination], identity, JOIN,
+                                mesh.ABSENT if owned is None else owned, port.storage + 1, port.view, port.view))
+            weights[a].append((unit_cost(None),) * 4)
+            record = dict(transfer=transfer, owner=a, consumer=port.consumer, storage=port.storage, view=port.view,
+                          bytes=tensor.numel() * tensor.element_size(), source=port.source, destination=destination)
+            ports[a].append(PortRecord(owned, mesh.SEND, **record))
+            if port.consumer is not None:
+                ports[port.consumer].append(PortRecord(slots.get((port.consumer, "input", port.input)), mesh.RECEIVE,
+                                                       **record))
+    arrays = []
+    for rows, weighted in zip(declared, weights):
+        held = []
+
+        def view(offset, element, pairs):
+            held.append((mesh.Q * max(2 * len(pairs), 1))(*[word for pair in pairs for word in pair]))
+            return mesh.Strided(offset, element, len(pairs), 0, held[-1])
+        arrays.append(((mesh.Declared * max(len(rows), 1))(*[
+                           mesh.Declared(source, destination, identity, kind, value, root, view(*sent), view(*landed))
+                           for source, destination, identity, kind, value, root, sent, landed in rows]),
+                       (mesh.Weight * max(len(weighted), 1))(*[mesh.Weight(*weight) for weight in weighted]), held))
+    return Prepared(analysis, tuple(bindings), tuple(resolved.items()), tuple(sorted(used)), analysis.root_sources,
+                    tuple(tuple(found) for found in ports), tuple(map(tuple, declared)), tuple(map(tuple, weights)),
+                    tuple(map(tuple, dependences)), tuple(arrays), declarations, wire_values, planning)
+
+
+def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan_calls, declared):
+    if planning is not None:
+        raise NotImplementedError("solve_program under planning: mesh_plan takes no program roots, uses or closure yet "
+                                  "(output_data/compiler-workgroup-20261114/compiler/placement.status.md, section 13)")
+    J, S, K = len(analysis.nodes), len(analysis.storages), len(functions)
+    instances = (mesh.U * max(J, 1))(*plan_calls)
+    resolved, used = dict(declared.bindings), declared.uses
+    roots = (mesh.Value * max(S, 1))()
+    for s, (_, holder) in enumerate(analysis.storages):
+        roots[s].section.bytes = holder.meta["val"].untyped_storage().nbytes()
+        roots[s].kind, roots[s].run = mesh.EXECUTION, int(analysis.root_sources[s] is None)
+    use_first, use = (mesh.Z * (S + 1))(), (mesh.LocalUse * max(len(used), 1))(
+        *[mesh.LocalUse(call, root) for _, call, root in sorted(used)])
+    for s, _, _ in used:
+        use_first[s + 1] += 1
+    for s in range(S):
+        use_first[s + 1] += use_first[s]
+    ordered = (mesh.U * max(len(analysis.order_edges), 1))(*analysis.order_edges)
+    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, ordered))
+    mesh.check(mesh.LIB.mesh_plan_local(functions, K, instances, J, C.c_void_p(analysis.relation.pointer),
+                                        ordered, len(analysis.order_edges),
+                                        C.cast(analysis.closure.owned.made, C.c_void_p), analysis.chains, roots, S,
+                                        use_first, use, quantum, C.byref(owner.local)))
+    local, calls = owner.local, owner.local.planned.call
+    return Solved(functions, local, local.planned, *viewed(owner, local),
+                  tuple((*entry, reference, calls[entry[0]].every, calls[entry[0]].ordinal)
+                        for entry, reference in resolved.items()), tuple(bindings), analysis.root_sources, analysis,
+                  roots, (use_first, use), instances, declared, None, owner)
+
+
+# mesh-collective.h mesh_local_load: the saved result of `data` (Solved.saved), loaded, never solved: its Function[],
+# roots, planned record and copies from the canonical owner, which borrows `data` (lent: compiler/mesh_compiler/metal.py
+# _lent) until its last reference is freed
+def loaded_program(data):
+    from .metal import _lent
+    owner = LocalOwner((data,))
+    mesh.check(_lent(data, lambda release, lent: mesh.LIB.mesh_local_load(data, len(data), release, lent,
+                                                                           C.byref(owner.local)),
+                     lambda status: status == 0))
+    local = owner.local
+    return Solved(local.function, local, local.planned, *viewed(owner, local), (), (), (), None, local.root,
+                  (local.use_first, local.use), local.calls, None, None, owner)

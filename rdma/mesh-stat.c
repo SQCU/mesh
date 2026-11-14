@@ -94,38 +94,6 @@ static int map_print(struct hdr *m,size_t length){
   free(r);
   return 0;
 }
-/* not the tag's (2026-11-04, owner B2: design/plan-to-bridge-change-request.md R8; e6bd7db2's section 6, "Holders and
-   clients", as design/compilation-coordination.md ruling 1 and Q5 take it: "mesh-stat prints "clients":[pids] in place
-   of client"): the process of an open claim at head `head` (its owner word's low 32 bits; the owner not 0 and `closed`
-   0, each read with acquire), 0 where none is open there.
-   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The
-   revisions of 4e78f6f4"): the process of the program's root (mesh.h struct mesh_program, at the layout's one place)
-   where it is open (its owner word's low 32 bits; `owner` not 0 and `closed` 0, each read with acquire), 0 where it is
-   not, where it was a claim head's.  Why: point 5, "These go: ... the claim's head record"; one program's operand at
-   the layout's place (A9, "What the bridge runs: the self-timed schedule": "searches for nothing").  What must stay:
-   the owner's process, 0 where none.
-   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
-   revisions of 55b9cbad"), reversing the root's `owner` and `closed`: the process of the operand's holder (hdr
-   `client`'s low 32 bits, read after the publication is acquired: mesh_plan stores it before `published`) where the
-   operand (mesh.h struct mesh_algo) is published and not retired (`published` not 0 and not `retired`, each acquire),
-   0 where it is not.  Why: G4, "Its fields are what A9 and the failport's lifecycle need: the operand's publication
-   (B2's single writer) and the holder the heartbeat already knows"; the record is MSCCL-IR's `<algo>` and is not
-   called the root ("Root" names the trees' roots).  What must stay: the holder's process, 0 where none.
-   2026-11-06 ("Review of 4e78f6f4 against the requirement lines", G2: "merge duplicated patterns"; the coordinator's
-   review): the operand's openness by mesh.h mesh_algo_open (mesh 52a12eb0), hdr `client` read after it.  What must
-   stay: as above
-   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8 and
-   R-10: "the holder's read and gone-holder test" merged; W13: "(mesh-link.c 377–381; mesh-records.c 1425–1430,
-   1491–1493; mesh-stat.c 118–120)"; "The revisions of 14b9a757", R-10): the holder by mesh-holders.h mesh_algo_holder,
-   its one read ({0} where the operand is not open), and its process where it holds the region by mesh_holds(pid,
-   start), else 0.  Why: R-8, "the bridge writes only `released`, and a gone holder is read from the heartbeat's words":
-   a gone holder's operand stays open until the bridge releases it, so the gone-holder test is read here as at every
-   site, and "client" names a live holder, as it did when the bridge retired a gone one (bin/mesh-bridge.sh's restart
-   guard reads it).  What must stay: the holder's process, 0 where none holds */
-static pid_t clients_open(struct hdr *h){
-  const struct mesh_algo_holder holder=mesh_algo_holder(h);
-  return mesh_holds(holder.pid,holder.start)?holder.pid:0;
-}
 /* "clients": the processes of the region's open claims, each once, in the order of their first claim's head
    (mesh-dataflow.h mesh_head_after, a walk of a moving set: a claim taken or closed meanwhile may be met or missed).
    2026-11-04, owner B2, the coordinator's ruling on review V1's finding 1: "client" printed before it, the process of
@@ -137,10 +105,21 @@ static pid_t clients_open(struct hdr *h){
    were walked and each process printed once.  Why: point 5 and the root's note (mesh.h struct mesh_program: "the
    region holds one program's operand at a time").  What must stay: both fields, "client" while bin/mesh-bridge.sh
    reads it */
-static void clients_print(struct hdr *h){
-  const pid_t client=clients_open(h);
-  printf("\"client\":%d,\"clients\":[",(int)client);
-  if(client)printf("%d",(int)client);
+/* every open publication's holder, in row order, in one pass, as mesh-holders.h mesh_holder_snapshot copies it from
+   this read-only mapping of `length` bytes (the slot read, the holder copied, the same open slot read again), then
+   alive by mesh_holder_live; a row whose slot moved meanwhile is skipped, and read again by the next mesh-stat.  The
+   first pid opens both fields, "client" it and "clients" [it, each later one after it]; none: "client" 0, [] */
+static void clients_print(struct hdr *h,size_t length){
+  int listed=0;
+  for(uint32_t r=0;r<h->rows;r++){
+    struct mesh_identity holder;
+    if(!mesh_holder_snapshot(h,length,r,&holder) || !mesh_holder_live(holder))continue;
+    const int pid=(int)(pid_t)(uint32_t)holder.client;
+    if(listed)printf(",%d",pid);
+    else printf("\"client\":%d,\"clients\":[%d",pid,pid);
+    listed=1;
+  }
+  if(!listed)printf("\"client\":0,\"clients\":[");
   printf("],");
 }
 /* design/algorithm-sources.md#programcopy */
@@ -173,7 +152,7 @@ int main(int argc,char **argv){
      every other field as before, in its place */
   printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,",alive?"true":"false",alive?"true":"false",
     paired?"true":"false",(unsigned long long)pid);
-  clients_print(h);
+  clients_print(h,bytes);
   printf("\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"links\":%u,\"paired_links\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
     h->version,h->node,h->pgsz,h->block,h->rows,h->links,paired,(long long)h->port.code,h->port.domain);
   for(uint32_t i=0;i<h->links;i++){

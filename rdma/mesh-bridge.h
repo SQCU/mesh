@@ -457,35 +457,25 @@ extern _Atomic uint64_t exit_at;
 extern _Atomic uint32_t faulted,terminated;
 extern char self_path[PATH_MAX];
 extern uint32_t ones;
-/* The bridge's reading of the program's plans, each at its compile-time place (2026-11-05;
-   design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5, and "The revisions of
-   4e78f6f4"): from place *k on, the first place among the program's plans, below the root's `plans`, at which a plan
-   stands (mesh.h mesh_program_plan: function k + 1's, the root's `table` word k), its state section with *k that
-   place; NULL where none stands at *k or past it.  A reader takes them as for(uint32_t k=0;(state=plan_from(&k));k++).
-   It is the one form of every reader here (mesh-flow.c plans_walk, streams_cancel, plan_stale; mesh-records.c
-   orders_announce, counts_tell, orders_submit), where each walked the claims' heads (mesh-dataflow.h mesh_head_after,
-   mesh_head_state, removed).  Why: point 5, "R1's method is U-Net's and VIA's queues of descriptors over registered
-   memory, which the interface knows from the endpoint's creation; it does not search for them.  So the serialized
-   operand's place is a constant the region's layout names once ... Nothing walks heads to find it";
-   design/aot-compilation-change-request.md A9, "What the bridge runs: the self-timed schedule": "So the bridge reads
-   the serialized operand at a place its compilation fixed, and searches for nothing".  What must stay: every plan read
-   at its place and none searched for.
-   2026-11-05 (118; design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4 and
-   K2; "The revisions of 55b9cbad"): the places below struct mesh_algo `plans` (mesh.h mesh_algo_plan, which tests no
-   bound now), where it read the root's.  What must stay: as above */
-/* 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-3:
-   "Publication is read as RCU's publish-subscribe (W5): every field of the published operand is read through the
-   acquired publication, never before it (McKenney and Slingwine)"; W5: "the bridge reads `plans` before
-   `mesh_algo_open` acquires `published` (mesh-bridge.h 436; mesh.h 1114–1116), so a replan with fewer plans can be
-   read past.  The count is read from the published operand after the acquire, so the index is bounded by
-   construction"; "The revisions of 14b9a757"): the publication acquired first (mesh.h mesh_algo_open), then `plans`
-   read, then each place's plan (mesh_algo_standing), where `plans` was read before the acquire at each step.  What
-   must stay: every plan read at its place and none searched for */
+/* design/aot-compilation-change-request.md A7 and appendix item 6; design/plan-to-bridge-change-request.md R8:
+   mesh-records.c's publications, found on the bridge's thread when `plans` changed (each open slot's root row,
+   generation, group, plans and holder, ascending by group), read on that thread only: it is the one releaser, so a
+   record whose slot still holds its generation is the one published.  Every plan is read at its place in its
+   publication's table (mesh_algo_standing), none searched for */
+struct seen_publication { uint64_t group,generation; struct mesh_identity holder; uint32_t row,plans; };
+const struct seen_publication *publications_seen(uint32_t *count);
+/* every plan standing, place k of the publications in their order (k their places' running count) */
 static inline struct mesh_state *plan_from(uint32_t *k){
-  if(!mesh_algo_open(M))return NULL;
-  for(const uint32_t plans=mesh_algo(M)->plans;*k<plans;++*k){
-    struct mesh_state *state=mesh_algo_standing(M,*k);
-    if(state)return state;
+  uint32_t count,base=0;
+  const struct seen_publication *seen=publications_seen(&count);
+  for(uint32_t e=0;e<count;base+=seen[e++].plans){
+    if(*k>=base+seen[e].plans)continue;
+    if(mesh_slot(M,seen[e].row)!=seen[e].generation){*k=base+seen[e].plans;continue;}
+    const struct mesh_algo *algo=mesh_slot_record(M,seen[e].row);
+    for(;*k<base+seen[e].plans;++*k){
+      struct mesh_state *state=mesh_algo_standing(M,algo,*k-base);
+      if(state)return state;
+    }
   }
   return NULL;
 }
@@ -597,24 +587,8 @@ void clients_turn(int liveness);
    message_heard); 2026-11-05: an ARRIVE, a VIEW and a COUNT too ("The revisions of abecd389", PB; "The revisions of
    3f106747", VW and BS) */
 void order_heard(struct port *from,const struct message *heard,const unsigned char *payload);
-/* 2026-11-04, owner B3 (design/compilation-coordination.md, "The appendix's revisions", O1 and H1): `uint64_t
-   orders_due(void)` (the pending head's bound, its arrival + MESH_PLATFORM_NS, which mesh-link.c turn_due waited for:
-   the coordinator's ruling Q4') goes with the bound.  Why: the fixed sequencer delivers in sequence-number order with
-   no timeout and no skip (Defago et al., Fig. 5; design/aot-compilation-change-request.md, appendix items 2 and 3).
-   What must stay: order_heard and clients_turn as declared */
-/* not the tag's (2026-11-04, owner B2: e6bd7db2's section 6, "Holders and clients", as the contract's ruling 1 and Q5
-   take it): every open claim's owner whose process is `pid` retired, the event loop's EVFILT_PROC of clients_turn's
-   watch (mesh-link.c).
-   2026-11-05 (design/compilation-coordination.md, "The documents' corrections of 2026-11-05", point 5): the program's
-   root's owner where its process is `pid` and the root is open (mesh.h struct mesh_program), where it was every open
-   claim's.  What must stay: the declaration.
-   2026-11-05 (design/compilation-coordination.md, "Review of 4e78f6f4 against the requirement lines", G4; "The
-   revisions of 55b9cbad"): the operand's holder, hdr `client`, retired (mesh-dataflow.h mesh_retire) where its process
-   is `pid` and the operand (mesh.h struct mesh_algo) is published and not retired.  What must stay: the declaration
-   2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-8; "The
-   revisions of 14b9a757"): nothing retired: where the operand's holder (mesh-holders.h mesh_algo_holder) is `pid`,
-   hdr `plans` raised and woken, so each port ends the gone holder's plans and the release reads it gone.  What must
-   stay: the declaration */
+/* a process's exit (EVFILT_PROC): where it holds an open publication, hdr `plans` raised, so this thread's release
+   closes that publication (mesh-dataflow.h mesh_retired_release); nothing retired here */
 void clients_gone(pid_t pid);
 
 /* mesh-flow.c */

@@ -3,8 +3,6 @@
 #include "mesh.h"
 #include "mesh-holders.h"
 #include <errno.h>
-/* design/pages-and-functions.md#what-the-page-table-is */
-struct mesh_range { uint32_t first,count; };
 /* design/disjoint-pages-change-request.md, Appendix C, C3.4; design/plan-to-bridge-change-request.md R8;
    design/aot-compilation-change-request.md A7 and appendix item 6;
    L. Lamport, Time, clocks, and the ordering of events in a distributed system, CACM 21(7), 1978, IR1 */
@@ -24,7 +22,9 @@ int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */
 /* design/plan-to-bridge-change-request.md R8 */
-void mesh_retire(struct hdr *,uint64_t client);
+struct mesh_planned;
+void mesh_retire(struct hdr *,const struct mesh_planned *);
+void mesh_publications_clear(struct hdr *);
 /* design/aot-compilation-change-request.md, appendix item 6;
    NVIDIA, CUDA Programming Guide §4.2.3.1, cudaGraphExecDestroy() */
 void mesh_plan_retire(struct mesh_ctx *,uint64_t plan);

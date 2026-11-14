@@ -17,10 +17,11 @@ from .ir import Planning
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
 
-CONTEXT, PUBLISHED = mesh.Context(), itertools.count(1)
+PUBLISHED = itertools.count(1)
 
 
-# rdma/mesh-dataflow.h mesh_view_whole, mesh_nodes_read; design/aot-compilation-change-request.md A7;
+# rdma/mesh-dataflow.h mesh_view_whole, mesh_nodes_read, mesh_publications_clear (the private copy holds none of the
+# region's publications: their records are not copied); design/aot-compilation-change-request.md A7;
 # compiler/mesh_compiler/ir.py Planning
 def planning():
     live = mesh.Context()
@@ -33,7 +34,7 @@ def planning():
         C.memmove(address, live.M, header.data_off)
         if mesh.LIB.mesh_view_whole(live.M, before):
             break
-    C.memset(address + header.algo_off, 0, C.sizeof(mesh.Algo))
+    mesh.LIB.mesh_publications_clear(address)
     made = mesh.Context(M=address, len=header.length, client=live.client, fd=-1, start=live.start)
     mesh.check(mesh.LIB.mesh_detach(C.byref(live)))
     nodes = mesh.Nodes()
@@ -42,35 +43,55 @@ def planning():
                     sum(1 << int(node) for node in os.environ["MESH_PROGRAM"].split(",")))
 
 
+# design/plan-to-bridge-change-request.md R8; design/aot-compilation-change-request.md, appendix item 6: one prepared
+# program's attached region mapping (its own client) and, adopted only once its load succeeded, its loaded result.
+# Every holder of its mapped bytes keeps it: the Published, its arena's backing (torch.frombuffer keeps that buffer
+# object, so every view of the arena does) and a native buffer lent it; it refers to none of them. `release`, its one
+# finalizer (_retired), runs when the last holder goes, or at once where its preparation fails
+class _Mapping:
+    __slots__ = ('context', 'loaded', 'release', '__weakref__')
+
+    def __init__(self):
+        self.context, self.loaded = mesh.Context(), []
+        mesh.check(mesh.LIB.mesh_attach(C.byref(self.context), None))
+        self.release = weakref.finalize(self, _retired, self.context, self.loaded)
+
+
 # rdma/mesh-collective.h mesh_plan_load (the record's bytes lent to the loaded plan, which restores the function's
-# compiled parts and relation from them); rdma/mesh-dataflow.h mesh_retire, mesh_view_values, struct mesh_view;
+# compiled parts and relation from them, reserves its rows and pages beside every live publication's and publishes it
+# at its root row); compiler/mesh_compiler/metal.py _lent; rdma/mesh-dataflow.h mesh_attach, mesh_retire (its own
+# publication closed), mesh_detach, mesh_view_values, struct mesh_view; design/plan-to-bridge-change-request.md R8 and
+# design/aot-compilation-change-request.md, appendix item 6: each Published its own mapping and client, retired and
+# released with it alone;
 # rdma/mesh-collective.c plan_block, plan_items, plan_saved_page; design/disjoint-pages-change-request.md C3.3;
 # design/compilation-composition-change-request.md item 7; compiler/mesh_compiler/ir.py Plan arena_bytes, offsets;
 # torch 2.14 frombuffer
 class Published:
     placements, stepped = staticmethod(lambda: ()), staticmethod(lambda: None)
 
-    def __init__(self, plan, group):
-        self.source, self.context = plan, C.addressof(CONTEXT)
+    def __init__(self, plan, group, mapping):
+        self.source, self.mapping, self.context = plan, mapping, C.addressof(mapping.context)
         self.function, self.held = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences,
                                                  plan.outstanding, plan.tasks, plan.before, plan.senders,
                                                  plan.receivers, plan.resources)
-        import mesh_compile
+        from .metal import _lent
         calls, made = (mesh.U * 1)(0), mesh.Planned()
-        mesh.LIB.mesh_retire(CONTEXT.M, CONTEXT.client)
-        mesh.check(mesh_compile._lent(plan.record, lambda release, owner: mesh.LIB.mesh_plan_load(
-            C.byref(CONTEXT), group, plan.program, self.function, 1, calls, 1, None, None, 0, None,
+        mesh.check(_lent(plan.record, lambda release, owner: mesh.LIB.mesh_plan_load(
+            C.byref(mapping.context), group, plan.program, self.function, 1, calls, 1, None, None, 0, None,
             time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, plan.record, len(plan.record), release,
             owner, C.byref(made)), lambda status: status == 0))
+        mapping.loaded.append(made)
         self.planned = made
-        weakref.finalize(self, mesh.LIB.mesh_planned_free, C.byref(made))
         self.plan, self.execution = self.function[0].plan, 0
         sections = [value.section for value in self.function[0].value[:len(plan.values)]]
         self.first, self.offset, view = ((mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(),
                                          mesh.View())
-        mesh.LIB.mesh_view_values(C.byref(CONTEXT), self.function, 1, self.first, self.offset, C.byref(view))
-        self.arena = torch.frombuffer((C.c_byte * view.bytes).from_address(view.address), dtype=torch.uint8) if (
-            view.bytes) else torch.empty(0, dtype=torch.uint8)
+        mesh.LIB.mesh_view_values(C.byref(mapping.context), self.function, 1, self.first, self.offset, C.byref(view))
+        backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None
+        if backing is not None:
+            backing.mapping = mapping
+        self.arena = torch.frombuffer(backing, dtype=torch.uint8) if backing is not None else torch.empty(
+            0, dtype=torch.uint8)
 
     def bound(self, owned, M):
         from .native import planned_buffer
@@ -79,6 +100,15 @@ class Published:
     def copies(self, index):
         from .native import viewed
         return viewed(self.first, C.addressof(self.offset), index)
+
+
+# a _Mapping's end: its loaded result's publication closed (the bridge releases its rows and pages once no port holds
+# it) and that result freed, then its mapping detached
+def _retired(context, loaded):
+    for planned in loaded:
+        mesh.LIB.mesh_retire(context.M, C.byref(planned))
+        mesh.LIB.mesh_planned_free(C.byref(planned))
+    mesh.check(mesh.LIB.mesh_detach(C.byref(context)))
 
 
 # design/compilation-composition-change-request.md item 7; rdma/mesh-dataflow.h mesh_attach, mesh_nodes_read;
@@ -90,10 +120,14 @@ def prepare(scheduled, entry=None):
     if scheduled.plan is None:
         key = scheduled.output_processor if entry is None else entry
         return key, scheduled.functions[key].prepare(None, constants)
-    mesh.check(mesh.LIB.mesh_attach(C.byref(CONTEXT), None))
-    found = mesh.Nodes()
-    mesh.check(mesh.LIB.mesh_nodes_read(C.byref(CONTEXT), C.byref(found)))
-    (key,) = [group for group in scheduled.functions if scheduled.machines[group] == found.node[found.self]] if (
-        entry is None) else (entry,)
-    published = Published(scheduled.plan, (int(os.environ["MESH_GROUP"]) << 32) + next(PUBLISHED))
-    return key, scheduled.functions[key].prepare(published, constants)
+    mapping = _Mapping()
+    try:
+        found = mesh.Nodes()
+        mesh.check(mesh.LIB.mesh_nodes_read(C.byref(mapping.context), C.byref(found)))
+        (key,) = [group for group in scheduled.functions if scheduled.machines[group] == found.node[found.self]] if (
+            entry is None) else (entry,)
+        published = Published(scheduled.plan, (int(os.environ["MESH_GROUP"]) << 32) + next(PUBLISHED), mapping)
+        return key, scheduled.functions[key].prepare(published, constants)
+    except BaseException:
+        mapping.release()
+        raise
