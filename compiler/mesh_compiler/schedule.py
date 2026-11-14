@@ -452,7 +452,8 @@ def commutes(function, k):
 # generated state's conflict key (past `storages`, no caller storage) to (its body's source ordinal, machine group, state
 # Root, view); `constructions` the program's one construction owner, every (function key, machine group) body's
 # ConstructedMachine (compiler/mesh_compiler/driver.py compile_captured), kept with the analysis with `declarations`,
-# each function's Declarations, whose endpoints those bodies were constructed with
+# each function's Declarations, whose endpoints those bodies were constructed with; `operands` the CallOperands it was
+# analysed from (its captured functions' placeholder order)
 # design/aot-compilation-change-request.md A2, A4 and A10; design/plan-to-bridge-change-request.md R6: one value
 # crossing a call boundary or the program's: produced by call `owner` at its output spec `output` (None: the caller's
 # outer placeholder at position `output`), bound by call `consumer` at its placeholder `input` (None: the program's
@@ -504,6 +505,7 @@ class CallAnalysis:
     generated: dict
     constructions: dict
     declarations: dict
+    operands: object
 
 
 # design/aot-compilation-change-request.md A10; design/compilation-composition-change-request.md items 6 and 7: a
@@ -688,7 +690,7 @@ def analyse(operands, constructions, declarations):
                         len(order_edges), (mesh.U * max(J, 1))(*head), paths, widths,
                         {key: count for key, (count, _) in widths.items()}, operands.placements, operands.machines,
                         operands.output_processor, operands.machines[operands.output_processor], operands.ports,
-                        generated, constructions, declarations)
+                        generated, constructions, declarations, operands)
 
 
 # mesh-collective.h mesh_plan_local, mesh_local_load: one solved or loaded result, released by mesh_local_free with its
@@ -847,25 +849,77 @@ class CopyRecord:
     transfers: tuple
 
 
+# metal-microbench metal_ir.h metal_ir_value_info, metal_ir_value_shape and metal_ir_value_layout; compiler/
+# mesh_compiler/metal.py _Builder.value (one linear term per dimension): typed value `value` of a constructed body's
+# program as mesh_graph.strided (its byte offset in its storage root, element bytes, pairs), with its ValueInfo
+def typed_view(made, value):
+    from .metal import Term, ValueInfo
+    from .operations import SCALAR
+    info, at = ValueInfo(), C.c_int64()
+    made.compiler.metal_ir_value_info(made.program, value, C.byref(info))
+    rank = made.compiler.metal_ir_value_shape(made.program, value, None, 0)
+    shape, terms = (mesh.Q * max(rank, 1))(), (Term * max(rank, 1))()
+    made.compiler.metal_ir_value_shape(made.program, value, shape, rank)
+    made.compiler.metal_ir_value_layout(made.program, value, terms, rank, C.byref(at))
+    element = next(t for t, code in SCALAR.items() if code == info.scalar).itemsize
+    return mesh_graph.strided(at.value, list(shape[:rank]), [terms[d].coefficient for d in range(rank)], element), info
+
+
+# design/aot-compilation-change-request.md A4 and A9; design/plan-to-bridge-change-request.md R1 and R2: one endpoint of
+# original call `call`'s intrinsic transfer `transfer` (its row of Prepared.declared[call]), `direction` mesh.SEND or
+# mesh.RECEIVE, on `machine` and `processor` (its original occurrence's): `construction` the existing ConstructedMachine
+# of machine group `group` holding `channel`, `occurrence` the original source SEND or RECV node
+# (construction.relation.supplied) and `vertex` its source vertex (construction.relation.functions; its emitted
+# operations construction.vertices[vertex]), `logical` its logical wire value there (Declarations.endpoints); `root`
+# its selected typed Root: construction.sent[channel], or construction.received[channel] (the receive wire), or, a
+# RECV with a landing (construction.landings[channel]: its interface destination Root and copy operations) whose
+# destination is bound to a run 1 shared root, that destination; `view` that Root's typed view (typed_view) in its
+# backing's coordinates, `backing` that backing's bytes: unbound (`storage` None) its typed root's, bound to run 1
+# shared root `storage` that root's full extent, the view moved by the binding's `delta` (the call's outer reference's
+# byte offset less the typed interface view's); `staged` a landing kept: the receive wire selected (its own geometry
+# and bytes), the landing's copy into its destination retained, `storage` and `delta` the destination's binding
+@dataclasses.dataclass(frozen=True)
+class EndpointRecord:
+    call: int
+    transfer: int
+    direction: int
+    machine: object
+    processor: object
+    construction: object
+    group: object
+    channel: object
+    occurrence: object
+    vertex: int
+    root: object
+    logical: int
+    view: tuple
+    backing: int
+    storage: object
+    delta: int
+    staged: bool
+
+
 # design/aot-compilation-change-request.md A2, A4, A8 and A10; mesh-collective.h struct mesh_declared, struct
 # mesh_weight, mesh_declared_group: the program's declarations, prepared once before typed construction. `bindings`
 # each (call, rootValueID, sourceStorageIndex, delta, originalReference), the native Bindings' slots resolved once
 # against analysis.storages (`delta` the source view's byte offset less the Slot's), with each land copy's (`bind`);
 # `uses` each (storage, call, rootValueID) once, in order, a land copy's with them; `ports[j]` call j's PortRecords;
 # `declared[j]` owner call j's combined rows (source, destination, identity, kind, value, root, from, to): its
-# function's intrinsic declarations with each value remapped
-# once through wire_values (root 0), then each cross-call row of a port it owns, in CallPort and destination order
+# function's intrinsic declarations projected from its EndpointRecords, then each cross-call row of a port it owns,
+# in CallPort and destination order
 # (identity its (owner, storage) above the intrinsic ones, root its PortRecord `wire` + 1, value its typed root on a run
 # 1 root, a staging wire's ValueID once bound (`bind`), else MESH_ABSENT); `weights[j]` and `dependences[j]` the
 # intrinsic ones, a cross-call row's weight the default unit cost; `extents[j]` each row's backing bytes (an intrinsic
-# row's declared value's, Declarations.values[value][0]; a cross-call row's source storage's) and `costs[j]` its
+# row's selected endpoint backing; a cross-call row's source storage's) and `costs[j]` its
 # weight's provenance ("declared"; "absent": no cost operand is supplied for a call boundary, the default unit weight
 # stands in); `arrays[j]` the native Declared and Weight arrays of those rows with what they hold; `grouped[j]` their
 # one canonical grouping on this node (mesh.Grouped, its arrays held; None locally), which mesh_plan_program consumes;
 # `wires` the staging WireRoots (joint roots S ..), `copies` the CopyRecords they require; `wired` native's map {(call,
 # wire root): typed ValueID on this node} (`bind`); `remapped` and `remapped_roots` native's canonical append view
 # and storage-root maps (`remap`); `input_parts` native's {call: its body's ConstructedMachine.input_parts} here,
-# retained as given (each normal land CopyRecord's `part` one of its InputParts);
+# retained as given (each normal land CopyRecord's `part` one of its InputParts); `endpoints[j]` call j's intrinsic
+# transfers' EndpointRecords (sender, receiver per transfer), whose views are its intrinsic rows' from and to and whose
+# local endpoint gives each row's value, root and extent;
 # `source_bindings`, `declarations`, `wire_values` and `planning` as given (the original ValueIDs)
 @dataclasses.dataclass(eq=False)
 class Prepared:
@@ -891,6 +945,7 @@ class Prepared:
     remapped: object = None
     remapped_roots: object = None
     input_parts: object = None
+    endpoints: tuple = ()
 
     # metal-microbench metal_ir.h metal_ir_append and metal_ir_value_info: native's canonical append results, each
     # {call: array indexed by the call's original ValueID} for the calls it appended to only, retained as given, once
@@ -899,7 +954,9 @@ class Prepared:
     # through that call's `roots`: the resolved bindings' rootValueID and the uses' ValueID (storage, delta and leaf as
     # they are), each PortRecord's slot (its port call's), each owner call's Declared value in its rows and its native
     # array (MESH_ABSENT staying absent), each CopyRecord slot's root (its copy call's); each CopyRecord slot's view
-    # through `values` (the Slot's ordinal, offset and reference kept). A view ValueID is never a planned root.
+    # through `values` (the Slot's ordinal, offset and reference kept), each local EndpointRecord's Root (its root
+    # through `roots`, its value through `values`; a remote endpoint's IDs are its machine's and kept). A view ValueID
+    # is never a planned root.
     # source_bindings, wire_values, the groupings and the declared geometry keep the originals, and bind's operands are
     # the final programs' already
     def remap(self, values, roots):
@@ -922,6 +979,10 @@ class Prepared:
         self.copies = tuple(copy if copy.slot is None else dataclasses.replace(copy, slot=dataclasses.replace(
             copy.slot, root=moved(roots, copy.call, copy.slot.root), view=moved(values, copy.call, copy.slot.view)))
                             for copy in self.copies)
+        here = self.planning.nodes[self.planning.here] if self.planning is not None else None
+        self.endpoints = tuple(tuple(dataclasses.replace(e, root=e.root._replace(
+            root=moved(roots, j, e.root.root), value=moved(values, j, e.root.value))) if e.machine == here else e
+            for e in records) for j, records in enumerate(self.endpoints))
 
     # native's wire-to-ValueID map, {(call, wire root): its distinct typed ValueID of that wire on this node}: each
     # staging wire row's value (its owner's ValueID of the wire, MESH_ABSENT where the owner has none here), and
@@ -963,17 +1024,70 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
                                      value.storage_offset() * value.element_size() - slot.offset), slot.reference)
                 used.setdefault((s, binding.call, slot.root), None)
     node = {machine: k for k, machine in enumerate(planning.nodes)} if planning is not None else {}
-    declared, weights, dependences, found, identities, extents, costs = [], [], [], [], [], [], []
+    here, by_call, held_by, origin = planning.here if planning is not None else None, {}, {}, {}
+    for binding in bindings:
+        by_call[binding.call] = binding
+    # each channel's endpoints' constructions (analysis.constructions, every participant's the same), and each
+    # function's original SEND and RECV occurrences with their source vertices (its SourceRelation's channel causes)
+    for (key, group), made in analysis.constructions.items():
+        for direction, ends in ((mesh.SEND, made.sent), (mesh.RECEIVE, made.received)):
+            for channel in ends:
+                held_by[key, channel, direction] = group, made
+        origin.setdefault(key, ({n: k for k, n in enumerate(made.relation.functions)},
+                                {channel: (sent, arrival) for kind, sent, arrival, channel in made.relation.supplied
+                                 if kind == "channel"}))
+    names = {key: [n.target for n in f.graph_module.graph.nodes if n.op == "placeholder"]
+             for key, f in analysis.operands.captured.functions.items()}
+
+    # call j's binding of a body's typed root: the call's outer reference at that root's interface position (an input
+    # by placeholder target, an output by position) as (storage, its byte offset less the typed interface view's)
+    def binding_of(j, key, made, root):
+        for typed, slot in ([(r, by_call[j].inputs[names[key].index(r.name)]) for r in made.inputs if r.root == root] +
+                            [(r, by_call[j].outputs[o]) for o, r in enumerate(made.outputs) if r.root == root]):
+            value = slot.reference.meta.get("val") if isinstance(slot.reference, Node) else None
+            if isinstance(value, torch.Tensor):
+                return (at[StorageWeakRef(value.untyped_storage())],
+                        value.storage_offset() * value.element_size() - typed_view(made, typed.value)[0][0])
+        return None, 0
+
+    def endpoint(j, key, intrinsic, t, side, direction):
+        channel, (m, logical) = intrinsic.channels[t], intrinsic.endpoints[t][side]
+        (group, made), (vertex, occurrences) = held_by[key, channel, direction], origin[key]
+        root, occurrence = (made.sent if direction == mesh.SEND else made.received)[channel], occurrences[channel][side]
+        landing = made.landings.get(channel) if direction == mesh.RECEIVE else None
+        storage, delta = binding_of(j, key, made, (root if landing is None else landing[0]).root)
+        direct = storage is not None and analysis.root_sources[storage] is None
+        root = landing[0] if landing is not None and direct else root
+        view, _ = typed_view(made, root.value)
+        if direct:
+            view, backing = (view[0] + delta, *view[1:]), analysis.storages[storage][1].meta["val"].untyped_storage(
+                ).nbytes()
+        else:
+            backing = typed_view(made, root.root)[1].bytes
+        return EndpointRecord(j, t, direction, intrinsic.nodes[m], occurrence.meta.get("processor"), made, group,
+                              channel, occurrence, vertex[occurrence], root, logical, view, backing, storage, delta,
+                              landing is not None and not direct)
+
+    def shared(e):
+        return e is not None and e.storage is not None and not e.staged and analysis.root_sources[e.storage] is None
+    declared, weights, dependences, found, identities, extents, costs, located = [], [], [], [], [], [], [], []
     for j in range(J):
         key = analysis.keys[analysis.calls[j]]
-        intrinsic, wires = (declarations or {}).get(key), (wire_values or {}).get(key, {})
+        intrinsic = (declarations or {}).get(key)
         rows = intrinsic.declared if intrinsic is not None else []
+        # each intrinsic transfer's sender and receiver endpoints, projected before its row: from and to their typed
+        # views on every participant alike, value, root and extent this node's endpoint's
+        ends = [tuple(endpoint(j, key, intrinsic, t, side, direction) for side, direction in
+                      ((0, mesh.SEND), (1, mesh.RECEIVE))) for t in range(len(rows))]
+        local = [next((e for e, m in zip(pair, row[:2]) if m == here), None) for pair, row in zip(ends, rows)]
+        located.append(tuple(e for pair in ends for e in pair))
         declared.append([(source, destination, identity, kind,
-                          mesh.ABSENT if value == mesh.ABSENT else wires.get(value, mesh.ABSENT), 0, sent, landed)
-                         for source, destination, identity, kind, value, sent, landed in rows])
+                          mesh.ABSENT if e is None else e.root.root, e.storage + 1 if shared(e) else 0,
+                          sender.view, receiver.view)
+                         for (source, destination, identity, kind, *_), (sender, receiver), e
+                         in zip(rows, ends, local)])
         weights.append([tuple(weight) for weight in (intrinsic.weights if intrinsic is not None else [])])
-        extents.append([intrinsic.values[value][0] if value != mesh.ABSENT else 0
-                        for *_, value, _, _ in rows])
+        extents.append([0 if e is None else e.backing for e in local])
         costs.append(["declared"] * len(rows))
         dependences.append(list(intrinsic.dependences) if intrinsic is not None else [])
         identities.append({None: 1 + max((row[2] for row in rows), default=-1)})
@@ -1059,7 +1173,7 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
                                      slot, leaf, part, tuple(transfers))
                           for (kind, call, owner, machine, storage, wire, _, output, position, _), (
                               processor, original, slot, leaf, part, transfers) in copies.items()),
-                    input_parts=input_parts)
+                    input_parts=input_parts, endpoints=tuple(located))
 
 
 # The joint roots: the S source storages, then the declaration owner's staging wires (Prepared.wires, run 1, their
