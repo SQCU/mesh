@@ -1,0 +1,50 @@
+{
+  "scope": "Unchanged 4x4 float32 MPS Hermitian compile_module case, after whole storage-class local proof correction",
+  "source": {
+    "mesh": "0c7a84bd33c901aa822ff20a1be4379050b2d5aa",
+    "native": "430a9fe18d9ca0c12c3c8649b4747b5672ec21f2"
+  },
+  "exit_code": 143,
+  "termination": "Supervisor SIGTERM to owned PID13471 after the live preparation query diagnosis; child13482 also exited. No other process signaled.",
+  "stage": "MetalProgramPrepare -> mesh_graph_relation_views -> view_conflicts",
+  "prepared_rows": 9,
+  "replay_rows": 9,
+  "invoke_reached": false,
+  "query_observed_elapsed_seconds": 706,
+  "query": {
+    "views": 107046,
+    "outer_index": 5815,
+    "a": {
+      "view_index": 72007,
+      "key": 0,
+      "offset": 0,
+      "element": 1,
+      "dimensions": 0,
+      "vertex": 20,
+      "write": 1,
+      "pairs": []
+    },
+    "b": {
+      "view_index": 60317,
+      "key": 0,
+      "offset": 0,
+      "element": 1,
+      "dimensions": 0,
+      "vertex": 16,
+      "write": 1,
+      "pairs": []
+    },
+    "read_error": "success"
+  },
+  "method": "Read-only one-second process sample, then LLDB read of optimized stack inputs using the matched disassembly; no inferior function calls or memory writes; detached and resumed before later termination.",
+  "interpretation": "The sampled pair is duplicate synthetic key0/offset0/element1/dims0/write1 coherence views. Touch emits that marker per marked physical effect. The existing host/residue/part bucket needs one marker per direction; all real placed views remain required.",
+  "evidence": {
+    "eigh-native-3.stdout": "5c4df81dd341b349892bbf0d3e87f5abe90cf0a00a377a5c30c90f956aa76d4c",
+    "eigh-native-3.stderr": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+    "eigh-native-3.sample.txt": "6a1ea2965fcc635baa712164234cbac6d517f95d70c80f775cc67afc5aeafa19",
+    "eigh-native-3.lldb.txt": "12a716312004a24cb7f543cf8a28301dca7ff5f98b1a289bdf6c6808d83de836",
+    "eigh-native-3.query.txt": "9748f834ce4057207b974ca0c1be1594646ae9f68b7539e85b3e7184e5e6d7b2",
+    "view-conflicts-disassembly.txt": "75e7bd97d8b07e3b3467ec5863cb50df1c218ba42b2fc9bfedf666ce1e4496bf"
+  },
+  "next": "Correct only the synthetic-marker producer in the existing bucket, rebuild, then retry the same numerical client."
+}

@@ -1,0 +1,15 @@
+{
+  "RepeatRegion": 40,
+  "Signature": 416,
+  "Function": 168,
+  "Planned": 152,
+  "Local": 376,
+  "ValueInfo": 120,
+  "compile_program": true,
+  "repeat_symbols": [
+    true,
+    true,
+    true,
+    true
+  ]
+}

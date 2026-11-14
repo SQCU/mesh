@@ -1,0 +1,61 @@
+{
+  "/Users/mdot/dox/mesh": {
+    "head": "56435fa44bbdf5594e8cce489d1be5c43308987f",
+    "sha256": {
+      "rdma/mesh-collective.c": "2379b44d80e15629e0e18c18a55fbc26ee270635d107d52e993c78fdb4026350",
+      "rdma/mesh-collective.h": "0d74b5a5a2b8fa436dab1a5de2a4079feb013e0c7c05cc24c446511c546a9fde",
+      "rdma/mesh-dataflow.c": "7a1f768b6a97866b4e0a415071f1970395a4f0f6cbef2dc6f7a6e0abe69fc2aa",
+      "rdma/mesh-dataflow.h": "c60c40be42e3b7cdd18419c84311d26721ca243765bd6a456ac08a5cc89cbc10",
+      "rdma/mesh-call.c": "b73f650ce518138f4c70db6570c8d438ca1d26b29fb267a8728ef2f73f6a4152",
+      "rdma/mesh-graph.c": "753746d9e3c133484b7d76da2a4655052ee2523b6f34b40e105ea79bc74ef172",
+      "rdma/mesh-graph.h": "ca68f0dd3799fc4f7ac44d3637859c106d71571438cd1b69141f48c02e964cd4",
+      "rdma/mesh-metal.h": "5cf8853fe92bedfd5f7ebe024f2fa64817cc16a4242361c65105a81901f4d34a",
+      "rdma/mesh-metal.m": "318c78b668d91de3998da7455bb4a73a230fea06e5312d242fb278c551204f1b",
+      "rdma/mesh.h": "a770c02456acd094a87998a8e80d7fff564cae379cbf4d3e60fb9a04ade94357",
+      "rdma/mesh-holders.h": "bb714329b34ac4984754b23a05f93f7188159114583ceb55dabfd8fc58c72ab3",
+      "rdma/Makefile": "de0d06b940c9a3a8cdad87d1d6437845e7753450dcb027cebbe112ac727a33cf",
+      "rdma/mesh_graph.py": "958a8e225958bae8d0561987d958be5bee3fd9f13858e42fe26b27f63440b02e",
+      "compiler/mesh_compiler/metal.py": "5c5316c4ba468152e2c061c078e0ff54f4429a63b68fa5ee6b7ed828963ec50e",
+      "compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+      "compiler/mesh_compiler/lower_metal.py": "0d0c82eeb8f9b02321174eedafc18c0f61e802e492b40ab608c7e967a6d132b4",
+      "compiler/mesh_compiler/shares.py": "acbf47873b6d3074fd383f9cea70ca93d3e2c15c83e4b0ad025b6d771f750a89",
+      "examples/engines.py": "7183e250d252871f3c73a0d76cc4d3b93f3cc2d45db2b60deca3acf0cb2725ea",
+      "compiler/mesh_compiler/operations.py": "6d92107bab8cb8c514621f7254390d77758c2475ddb0c650043ed6bd3dbfcc2c",
+      "compiler/mesh_compiler/decompose.py": "460dd8ae3466be4061d9969a0daabdeadcdce6c47aeba93ead92b0259965dc05",
+      "compiler/mesh_compiler/export.py": "a8266b223369d88e7713460b1192261e4ec514daa9481f80cbb3b46e3c4c6b00",
+      "compiler/mesh_compiler/driver.py": "cfe4f8ab9a2408700ad4e96d8f0b4396e14e329f8b6506772b5717d9527da3b9"
+    },
+    "head_after_build": "56435fa44bbdf5594e8cce489d1be5c43308987f"
+  },
+  "/Users/mdot/metal-microbench": {
+    "head": "e7dc23834b3f87ba463345c80e9da63d7f03a295",
+    "sha256": {
+      "metal_ir.h": "d140ec9bef7287723c579ea6b389bf8c154d20b30981f1bc8d4b6efe70551aa4",
+      "metal_ir.mm": "5cfbe5a234c532e670482947472bf6f128762de96b7b6369597e5648e62c564e",
+      "metal_clone.h": "05e8c696ef9c0671ff96f6f1d053f4562aded8f0b6180a3552aecbb6abb5f2e8",
+      "metal_clone.mm": "8f6bbe8d513e273ca0756770811bdffb913712971195bada31e2c8ef667dceae",
+      "metal_transform.mm": "ecdf5b2a77dc9792598a2e3eebb454870b4c93140b501f21532bdab1cedbeb60",
+      "metal_lower.h": "0fb9bb982c00b3f1dd2a45c45a498934d96c7c07f11ddd1ea35ccdfd3b33ce20",
+      "metal_lower.mm": "82cfa728e0a7a36cfeaf46f01f5d0363f4fd750ad1db4d37baee280ea9306e5a",
+      "metal_native.h": "4b45c998706cd4f8ca033e1c92c06c33adc205868544868f90545b544ea847b4",
+      "metal_native.mm": "0506290a08c7d860d54539578a033ed7f17b2811d2a580c937a564c53ab43e8d",
+      "metal_transport.mm": "48f0efd645ac2922dcf7e8b4d851a6983ad1b051737e83980e6bc3036d6ac74d",
+      "metal_neural.mm": "739bc6d30c86740ceb5442090cb4c8580c29e6298aa8468554a3b68a2f0d80d4",
+      "metal_archive.mm": "2d5b22fc18da29b7051adee764f2b900d253b7a1b644756b10e337859996c858",
+      "metal_program.h": "77254c9b9bfea8875ce421f98a8ab2694bd0720bbbcf3da41a4c981eae4ea41b",
+      "metal_recording.h": "a0736034e85fae6f84a6de856d9dd410037b0ed85c85917566463188c7d0d661",
+      "metal_capture.h": "30a21e50bc9f386e897fdcc2b95442bb3b462ea5a5f43a8b8188fb964cfe8d5e",
+      "metal_capture.m": "0c894ecd4b2c53e3f376d5289a67d7842cc8d948b362dd0b98b2d3ec86b5cdaf",
+      "metal_program.m": "5bf96f87d232fa6941bc8095cb5959fa40e19b9d8e639ff02fdf7925458957fe",
+      "tools/native_bench.m": "1730b01b46db9ba078003c5718918f05ebc4693b054580c362a0250266969922",
+      "tools/e2b_replay.m": "4e7f7a9e5f471bfa8ae55cbeaee57b328ca1cd8acc169de287f508f8f5f89619",
+      "Makefile": "0b2267ff132e06b01d5430ff8c6fc25ce8a69c86c9d4a3be7057827d29b3bd96",
+      "provider/litert_mesh.cc": "49f08a9a0df1f06511dbf6191ffba41d75ce88e07353907dd4090dcc53b08922",
+      "metal_submission.h": "ea8ea9c811954c47b1e4c836b2a27406cfa2a48b949d74c8b7657a5cc03fcfbd"
+    },
+    "head_after_build": "e7dc23834b3f87ba463345c80e9da63d7f03a295"
+  },
+  "changed_during_build": [],
+  "exit_code": 0,
+  "elapsed_seconds": 22.340285875005065
+}
