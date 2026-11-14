@@ -24,6 +24,10 @@ from .operations import (ANE, CPU, GPU, _copy, _held, _instruction, _key, _local
 
 Root = collections.namedtuple("Root", "name kind role root value")
 Output = collections.namedtuple("Output", "root value literal metadata kind written")
+# compiler/mesh_compiler/placement.py place `input_parts`: one placed partition of an input on one processor, `input`
+# the whole input's placeholder Root, `root`/`value` the partition's typed root and ValueID (`typed`), `source` the
+# original partition Node
+InputPart = collections.namedtuple("InputPart", "processor input root value source")
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: a result the program stores into its original input's root
 MUTATIONS = (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)
 # torch 2.14.0 torch/export/graph_signature.py InputKind; metal-microbench metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE
@@ -77,6 +81,8 @@ class ConstructedMachine:
     # compiler/mesh_compiler/operations.py Generator `state`, its words when the program draws: the initial STATE of
     # the generator root, which the native program's operand starts from (uint32 each)
     initial_words: tuple = ()
+    # compiler/mesh_compiler/schedule.py assemble `input_parts`: each original placeholder position's InputParts here
+    input_parts: dict = dataclasses.field(default_factory=dict)
 
     def __post_init__(self):
         self.freed = weakref.finalize(self, self.compiler.metal_ir_program_free, self.program)
@@ -287,6 +293,22 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             view = builder.value(_stored(value))
             return builder.roots[_key(value)], view
 
+        # compiler/mesh_compiler/schedule.py assemble `input_parts`: each partition's typed root and ValueID by `typed`,
+        # its whole input the Root the placeholder loop appended for that placeholder's copy
+        ported = dict(zip([node for node in nodes if node.op == "placeholder"], inputs, strict=True))
+        input_parts = {position: tuple(InputPart(processor, ported[copied[whole]], *typed(part), part)
+                                       for processor, whole, part in parts)
+                       for position, parts in module.meta.get("input_parts", {}).items()}
+
+        # metal-microbench metal_ir.h metal_ir_value_axis, before metal_ir_construct: each shard's work axes
+        # (compiler/mesh_compiler/placement.py `work_axes`, source nodes, as `typed` takes them) at their typed views,
+        # the shard's task and the original full extent
+        for node in nodes:
+            for reference, dimension, full in node.meta.get("work_axes", ()):
+                status = compiler.metal_ir_value_axis(builder.p, typed(reference)[1], dimension, tasks[node][0], full)
+                if status:
+                    raise OSError(status, "the work axis of %s" % node.name)
+
         vertices = tuple(tuple(emitted.get(node, ())) for node in module.meta["vertices"])
         accesses = tuple(typed(node) for node, _ in source.accesses)
         given = tuple(typed(operand) if kind == "value" else sent.get(operand) or received.get(operand) or typed(sink)
@@ -318,4 +340,4 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                               {k: tuple(ops) for k, ops in stores.items()}, source, vertices, accesses, given, writers,
                               builder.base, binding, {k: tuple(sorted(ops)) for k, ops in decomposed.items()},
                               initial_words=tuple(word & 0xFFFFFFFF for word in generator.state.tolist()) if state
-                              else ())
+                              else (), input_parts=input_parts)

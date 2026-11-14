@@ -574,7 +574,7 @@ def meshed(graph, node, held, replaced):
                                 members, node.name)
                 for k, region in zip(line, made):
                     regions[k] = region
-        columns = [regions, *([local(v, leaf) for leaf in leaves] for v in held[1:])]
+        columns, rows = [regions, *([local(v, leaf) for leaf in leaves] for v in held[1:])], ()
     elif node.target not in (EXPAND, FLIP) and (
             torch.Tag.pointwise in getattr(node.target, "tags", ()) or RULES.get(node.target) is aligned):
         rows = aligned(node, shapes, out)
@@ -588,8 +588,15 @@ def meshed(graph, node, held, replaced):
         return None
     shards = []
     for k, (processor, at) in enumerate(zip(leaves, index)):
-        arguments = iter([column[k] for column in columns])
+        given = [column[k] for column in columns]
+        arguments = iter(given)
         shard = graph.node_copy(node, lambda n: next(arguments))
+        # metal-microbench metal_ir.h metal_ir_value_axis: (FX value, dimension, original full extent) per mesh
+        # dimension d, of the aligned values the shard reads along d and of its own output
+        shard.meta["work_axes"] = (
+            *((n, row.index(d), shapes[i][row.index(d)]) for i, (n, row) in enumerate(zip(given, rows)) for d in dims
+              if d in row),
+            *((shard, d, out[d]) for d in dims))
         for d in exchanged:
             unpadded(shard, d - 2)
         shard.meta.update(of=node.name, order={}, pairs=0, units=(
@@ -727,6 +734,12 @@ def partitioned(graph, node, held, want, replaced, whole):
                      for n, row in zip(local, rows)]
             arguments = iter(local)
         shard = graph.node_copy(node, lambda n: next(arguments))
+        # metal-microbench metal_ir.h metal_ir_value_axis: (FX value, dimension, original full extent) of each value
+        # the shard reads along `along`, and of its own output where `along` is an output dimension
+        shard.meta["work_axes"] = (
+            *((n, row.index(along), shapes[i][row.index(along)]) for i, (n, row) in enumerate(zip(local, rows))
+              if along in row),
+            *(((shard, along, out[along]),) if along >= 0 else ()))
         if window and kept[j] is None:
             unpadded(shard, along - 2)
         if node.target in (EXPAND, VIEW):
@@ -802,7 +815,12 @@ def place(graph_module, placement):
                 value = *want, reshard(graph, plainly(graph, value), *want)
         return value
 
-    mesh_graph.forward(nodes, operands, transfer)
+    values = mesh_graph.forward(nodes, operands, transfer)
+    # each placeholder's own placed value: its holders' partition Nodes in holder order, or a whole one its stated
+    # processor's and the placeholder itself
+    graph_module.meta["input_parts"] = {
+        node: tuple(zip((stated[node],) if values[node][2] == (None,) else flat(values[node][2]), values[node][3]))
+        for node in nodes if node.op == "placeholder"}
     for node in reversed(replaced):
         graph.erase_node(node)
     views(graph)

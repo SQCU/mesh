@@ -20,11 +20,19 @@ def copied(graph, value, device, processor):
 # compiler/mesh_compiler/ir.py views; compiler/mesh_compiler/placement.py place, transfers; torch 2.15
 # torch/fx/graph_module.py GraphModule.__deepcopy__ and torch/fx/graph.py Graph.__deepcopy__, val_map=memo
 def on_devices(graph_module, processors):
-    original = graph_module.meta["transfers"]
-    memo = {id(original): original}
+    original, parts = graph_module.meta["transfers"], graph_module.meta["input_parts"]
+    memo = {id(original): original, id(parts): parts}
     graph_module = copy.deepcopy(graph_module, memo)
     transfers = {channel: (memo[sender], memo[arrival]) for channel, (sender, arrival) in original.items()}
     graph, graph_module.meta["transfers"] = graph_module.graph, transfers
+    graph_module.meta["input_parts"] = {memo[node]: tuple((processor, memo[part]) for processor, part in pieces)
+                                        for node, pieces in parts.items()}
+    # compiler/mesh_compiler/placement.py `work_axes`: its values are the copy's (torch.fx Graph.node_copy copies meta
+    # shallowly)
+    for node in graph.nodes:
+        if "work_axes" in node.meta:
+            node.meta["work_axes"] = tuple((memo[value], dimension, full)
+                                           for value, dimension, full in node.meta["work_axes"])
     rewired = [arrival for _, arrival in transfers.values()]
     for node in [n for n in graph.nodes if n.op != "placeholder"]:
         _, device = processors[node.meta["processor"]]
@@ -48,6 +56,10 @@ def on_devices(graph_module, processors):
             with graph.inserting_after(arrival):
                 landed = copied(graph, arrival, there, arrival.meta["processor"])
             arrival.replace_all_uses_with(landed, lambda user: user is not landed)
+            for user in landed.users:
+                if "work_axes" in user.meta:
+                    user.meta["work_axes"] = tuple((landed if value is arrival else value, dimension, full)
+                                                   for value, dimension, full in user.meta["work_axes"])
             rewired += [landed, *landed.users]
     views(rewired)
     graph_module.recompile()

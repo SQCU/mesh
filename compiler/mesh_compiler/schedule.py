@@ -285,7 +285,8 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
     sequence = tuple(identity[node] for node in listed)
     return {group: assemble(group, held, [node for node in listed if node.meta["processor"] in held], nodes, pairs,
-                            transfers, local, identity, writers, sequence, source, module.meta["decomposed"])
+                            transfers, local, identity, writers, sequence, source, module.meta["decomposed"],
+                            module.meta.get("input_parts", {}))
             for group, held in members.items()}, declared
 
 
@@ -295,8 +296,11 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
 # one copy of the sent value (aten.clone, its "out" the receive's "to", its task and vertex the receive's);
 # compiler/mesh_compiler/ir.py views;
 # compiler/mesh_compiler/decompose.py decompose: `decomposed` each expanded node's original source node, the copy of
-# each of them here its module's meta["decomposed"] key
-def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source, decomposed):
+# each of them here its module's meta["decomposed"] key; compiler/mesh_compiler/placement.py place `input_parts`: each
+# placeholder this machine copied, by its position among the original placeholders, its partitions on this
+# machine's processors as (processor, original placeholder, original partition Node), resolved by `copied`
+def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source, decomposed,
+             parts):
     graph, copied, tasks = torch.fx.Graph(), {}, {}
     for node in nodes:
         if node.op == "placeholder" and any(u.meta["processor"] in members for u in node.users):
@@ -332,7 +336,10 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         channel: (copied.get(sent), copied.get(arrival)) for channel, (sent, arrival) in transfers.items()
         if arrival not in local}, relation=source, copied=dict(copied), output=output.meta["processor"], vertices=tuple(
         None if node in local and not landing(node) else copied.get(node) for node in source.functions),
-        decomposed={copied[node]: original for node, original in decomposed.items() if node in copied})
+        decomposed={copied[node]: original for node, original in decomposed.items() if node in copied},
+        input_parts={position: tuple((processor, node, part) for processor, part in parts[node] if processor in members)
+                     for position, node in enumerate(n for n in nodes if n.op == "placeholder")
+                     if node in copied and node in parts})
     return module
 
 
