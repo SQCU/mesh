@@ -970,7 +970,11 @@ class Target:
     # (bridge.Published: the network result it loaded once; or None: a new arena of the retained local solution), the
     # target itself unchanged, so independently prepared Bounds coexist, with no lowering, solve, finalization or
     # compilation; constants: {placeholder name: tensor} for the bodies' CONSTANT roots, attached as
-    # compiler/mesh_compiler/metal.py _Builder.attach attached them and held as those roots' handles, by (row, root)
+    # compiler/mesh_compiler/metal.py _Builder.attach attached them and held as those roots' handles, by (row, root);
+    # rdma/mesh_graph.py from_record and free, metal_recording.h MetalProgramSignatureBind: the target's saved signature
+    # record parsed once and bound to the loaded native program's own rows (its per-row structure verified, its loaded
+    # programs retained by the signature's scope owner), freed with this preparation, the
+    # Bound's `signature`
     def prepare(self, published, constants):
         libs = libraries()
         M, compiler, (lib, device), _ = libs
@@ -1001,6 +1005,10 @@ class Target:
             native = made(lib.MetalProgramLoad(recorder, calls, len(calls), C.byref(owner.planned), archive, error,
                                                ROOM), error, "the loaded program's calls")
             owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
+            signature = mesh_graph.from_record(self.signature)
+            owned(lambda: mesh_graph.free(signature))
+            checked(lib.MetalProgramSignatureBind(native, self.node, C.byref(signature), error, ROOM), error,
+                    "the loaded signature")
             ended = made(M.OBJECT(gpu, M._SEL(b"newSharedEvent")), error, "the program's event", errno.ENOMEM)
             owned(lambda: M.PUT(ended, M.SELECTOR[b"release"]))
             owned(lambda: lib.MetalProgramEnd(native, ended, error, ROOM))
@@ -1014,7 +1022,8 @@ class Target:
                 generators[k] = buffer
             count = mesh.U()
             uses = lib.MetalProgramExternals(native, C.byref(count))
-        return Bound(self, owner, native, ended, generators, fixed, owned, libs, (uses, count.value), tuple(programs))
+        return Bound(self, owner, native, ended, generators, fixed, owned, libs, (uses, count.value), tuple(programs),
+                     signature)
 
     # The typed recipe: explicit records for the bodies (by function ordinal: a captured function's key, which may be a
     # callable, is compilation-only), rows, operands, inter-call roots, constants and outer outputs (no tuple-keyed
@@ -1089,10 +1098,11 @@ def leaf_restored(saved):
 # operands it uses on the GPU, read once; `argued` {(row, root): operand ordinal}; `programs` each row's loaded program
 # (Target.prepare's, None for a row without one), owned with `owned`
 class Bound:
-    def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses, programs):
+    def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses, programs, signature):
         self.target, self.owner, self.program, self.ended, self.generator = target, owner, program, ended, generator
         self.fixed, self.owned, self.libs, self.executions, self.uses = fixed, owned, libs, 0, uses
         self.programs = programs
+        self.signature = signature
         self.argued = {at: a for a, operand in enumerate(target.operands) for at in operand.occurrences}
         self.gpu = frozenset(use.argument for use in uses[0][:uses[1]] if use.uses & METAL_EXTERNAL_GPU)
 

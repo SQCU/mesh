@@ -117,7 +117,7 @@ def execute(model, inputs, engines, args):
               'between machines': sum(len(transfers) for transfers in scheduled.carried.values()),
               'processors': {name: [machine, engine] for name, (machine, engine) in processors.items()},
               'seconds': time.perf_counter() - started,
-              'signature': bytes(mesh_graph.from_record(scheduled.signature).digest).hex(),
+              'signature': bytes(program.function.signature.digest).hex(),
               'core ml': program.function.placements()}
     if result is not None:
         with torch.no_grad():

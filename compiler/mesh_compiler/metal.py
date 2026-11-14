@@ -342,6 +342,7 @@ def _recorder():
                 ('MetalProgramPhases', None, [P, C.POINTER(Q), C.POINTER(Q)]),
                 ('MetalProgramSignatureNode', C.c_int, [P, U, C.c_size_t, C.POINTER(Q),
                                                         C.POINTER(mesh_graph.Signature), text, room]),
+                ('MetalProgramSignatureBind', C.c_int, [P, U, C.POINTER(mesh_graph.Signature), text, room]),
                 ('MetalProgramExternals', C.POINTER(ExternalUse), [P, C.POINTER(U)]),
                 ('MetalProgramRunArguments', C.c_int, [P, P, Q, Q, P, P, P, C.POINTER(Argument), U, text, room]),
                 ('MetalProgramRunObserved', C.c_int, [P, P, Q, Q, P, P, P, C.POINTER(Argument), U, text, room]),
