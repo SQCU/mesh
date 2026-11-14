@@ -1,0 +1,14 @@
+{
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "47a08af36983c6c4ae4df577e5a63084d92be4524c435294a721c7e64b552d4d",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/decompose.py": "2241669f9c8a979d41352dab453fd81bbfe0316208905dc6167f62b03a5b47f4",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py": "f6f7d498c9243c8a608e3b5821d73fd3fe4ea00023bfe095e7048bef23629279",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/export.py": "99167e0e390650d0917c5450b77b39e1b37818525908ab969ee2bf242bf38f42",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/ir.py": "c409bd26eac2fe5c69036e9d5b234264986a892f39b1256f97c01462a133d919",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/runtime.py": "5b9b859d08606bfcccf89e3fbb4c2e048ab8d8c5e40a8371a866d056a065db6c",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/archive.py": "7baf062ea7740fcf4a31b13e3352f6cf6a04f40adad31dc6724003fc2797125f",
+  "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "f912ffa513257ffa621c54d3506c30a734dcb2255be6c4b7c95f504831d57f82",
+  "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "feadfd0199bd3bb73ac5b3dcd5ef954024c2c6d9797ad12b4765b62bc02e52b7"
+}

@@ -1,0 +1,25 @@
+{"import_complete": true, "source_unchanged_during_import": true}
+compile
+prepare
+invoke
+{"dtype": "torch.float32", "shape": [2, 2, 2], "relative_errors": [3.365406924352477e-08, 4.126309189662324e-07], "finite": true, "source_counts": [0.0, 2.0], "result": [[[0.9814597964286804, 0.32268089056015015], [-0.16134044528007507, 1.626821517944336]], [[2.0708935260772705, 7.852317810058594], [-5.88923978805542, 4.03397274017334]]], "reference": [[[0.9814597388383777, 0.32268087656754013], [-0.16134043828377007, 1.626821491973458]], [[2.0708941306014235, 7.8523215977518], [-5.88924119831385, 4.033974530039377]]], "changed_paths": []}
+prepared retained order 6 dispatches 5 commands 1 native entries 0 later passes
+prepared dataflow 330 values 680 bytes 6 schedule positions; 0 crossings longest local stretch 6
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source b58199d8919f7201ba965fe38c0a2997d292b35c6b3b041eed8cad15463c55a1
+prepared kernel 1 synchronization 24 0 0 0 source 61666fab55d7e03d024dd7dacf7dd0126c443b5edadd26671f096d4e415a913c
+prepared kernel 2 synchronization 54 0 0 0 source 0e76f7344325cdb45eadf5ecabbf792e6fcf04b84d4bc154c499182a3784e6d4
+prepared kernel 3 synchronization 53 0 0 0 source 054120aeb3d0f31d4746eb95d7a48f46467dc4faaba2bb4f179ed424edb22f07
+prepared kernel 4 synchronization 11 0 0 0 source 9b36ddf622dc65308bae9931511688d44e2c42c6d82478a55c7164b3d2795426
+prepared dependencies 5 barriers 5 commands
+prepared self-timed program 2 calls 2 positions 1 residues 1 phases 0 plan order edges 1 kept of the unrolled dependences 0 fence waits 1 program-thread waits 0 send-completion waits 0 left to the plan's start 1 start waits
+prepared retained order 6 dispatches 5 commands 1 native entries 0 later passes
+prepared dataflow 330 values 680 bytes 6 schedule positions; 0 crossings longest local stretch 6
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source b58199d8919f7201ba965fe38c0a2997d292b35c6b3b041eed8cad15463c55a1
+prepared kernel 1 synchronization 24 0 0 0 source 61666fab55d7e03d024dd7dacf7dd0126c443b5edadd26671f096d4e415a913c
+prepared kernel 2 synchronization 54 0 0 0 source 0e76f7344325cdb45eadf5ecabbf792e6fcf04b84d4bc154c499182a3784e6d4
+prepared kernel 3 synchronization 53 0 0 0 source 054120aeb3d0f31d4746eb95d7a48f46467dc4faaba2bb4f179ed424edb22f07
+prepared kernel 4 synchronization 11 0 0 0 source 9b36ddf622dc65308bae9931511688d44e2c42c6d82478a55c7164b3d2795426
+prepared dependencies 5 barriers 5 commands
+prepared self-timed program 2 calls 2 positions restored (no relation solved)
