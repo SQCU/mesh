@@ -2,7 +2,7 @@
 
 Style: [Google developer documentation style guide](https://developers.google.com/style/highlights).
 
-This records the contracts reviewed in the current workgroup, at mesh `a6cd754f` and metal-microbench `12d5303b`.
+This records the contracts reviewed in the current workgroup, through mesh `264227fb` and metal-microbench `f132ccf2`.
 It is evidence about those revisions, not a new specification or an indefinitely current description of code.
 The method is the operator's [local compositional review](../../design/compiler-workgroup-2026-11-13.md#local-compositional-review).
 The requirement roles below come from the existing [composition request](../../design/compilation-composition-change-request.md),
@@ -13,7 +13,7 @@ The requirement roles below come from the existing [composition request](../../d
 
 ## Accounting
 
-The current wave has **ten established local contracts**, composing into three longer sections of the required
+The current wave has **eleven established local contracts**, composing into three longer sections of the required
 data flow. Establishment here is by source review against the assigned inputs, transformation and output, with
 the consumer connection inspected. The numerical and build evidence has its own scope below.
 
@@ -33,6 +33,7 @@ of a cross-cutting clause. This is not a percentage based on document, function 
 | 8 | LiteRT compiled model/signature → retained typed Program and ordered interface → phase binding/composition | Composition 2/5/6 and typed-source correction | `provider/litert_mesh.h/.cc`; metal `76d81c90` |
 | 9 | Retained typed body and backing correspondence → canonical typed clone/remapping → composed phase Program with views and ownership retained | Composition 2/5/6, values/effects contract | `metal_ir_append`, `metal_clone`; metal `76d81c90` |
 | 10 | Source-declared alias identities → canonical storage owner/access policy → planner value, host address and final binding, with separate transfer identities/geometry | Composition 2/6.4; AOT A5/A8; bridge R2/R4 | `tools/e2b_replay.m`; metal `12d5303b` |
+| 11 | Exact dependence witnesses → combined endpoint-side obligation → selected native wait, without another overlap query | Composition 6/6.4 | `mesh-graph.{h,c}`, `mesh_graph.py`, `metal_recording.m`, IR/archive propagation; mesh `e4b2a96e`, metal `f61a2ff3` |
 
 These results compose as follows:
 
@@ -41,7 +42,7 @@ These results compose as follows:
 2. **Numerical artifact ownership:** scheduled body → selected lowering → numerical artifact → native Model →
    saved/restored Model (3–7). The effect recipe's native consumer is a separate open obligation.
 3. **Typed program and physical storage:** LiteRT export → retained body composition → source-declared storage
-   ownership → planning → host/target binding (8–10).
+   ownership → planning → host/target binding → witnessed native wait selection (8–11).
 
 An unchanged numerical producer can remain the correct owner behind an established boundary. Untouched runtime
 or target work is counted as remaining work; it does not revoke these local results.
@@ -64,40 +65,35 @@ another solve. They should not be assigned again or credited as new work from th
 
 ## Next assignments, in priority order
 
-### 1. Dependence causes through native wait selection — assigned
+### 1. Dependence causes through native wait selection — completed locally
 
-Existing physical-access analysis returns causes, but native preparation discards the access endpoints and then
-`MetalHostSide` re-queries overlap to recover the GPU-to-CPU obligation. The next paired unit retains those actual
-view endpoints and the caller's CPU/GPU side labels through the composed relation, then consumes them during wait
-selection. It deletes the second overlap query. The existing graph algorithm remains the only intersection owner.
+The paired unit retains actual view endpoints and the caller's CPU/GPU side labels through the composed relation,
+then consumes them during wait selection. `MetalHostSide` and its second overlap query are deleted. The existing
+graph algorithm remains the only intersection owner.
 
 The agreed fields are `size_t from_view,to_view` on the existing cause/conflict records. They refer to the exact
 input view array; GIVEN edges have SIZE_MAX witnesses and retain their given identity. Distinct witness causes
 must survive until the consumer has combined their obligations. Serialization/remapping must preserve the
 association or first discharge the relevant property; naked indices are not independent provenance.
 
-Codex compiler supervises the same numerical Opus 5.5 session on the canonical graph producer/header/Python ABI.
-Codex frontends supervises the same LiteRT Opus 5.5 session on the native preparation consumer and necessary IR/
-archive propagation. Both sides are one connection, and remain **open** until jointly reviewed. This unit does not
-yet remove repeated intra-invocation conflict derivation; retained provenance makes that subsequent assignment
-concrete without dropping newly introduced physical-alias or inter-call constraints.
+Codex reviewed both sides as one connection, including IR/archive propagation. The canonical E2B build and fresh
+shared-library ABI checks pass; see [the bounded review](dependence-witness-review.md). This does not remove repeated
+intra-invocation conflict derivation or implement endpoint-aware transitive reduction. Those remain distinct
+obligations; neither is counted as completed here.
 
 ### 2. Solved local storage and effects into native whole-body lowering
 
-The existing `viewed` relation follows local receive → sender storage, and `stored` computes lifetimes. The missing
-handoff is channel → solved Plan value/section, exact view, sender task and receiver task, followed by its native
-consumer. Pure-local scheduling currently takes the ordering-only path and loses this storage-producing result.
+Producer/consumer inspection refined this assignment: when source processors select the same actual machine,
+target and device, their bodies can compose while scheduling still owns the global graph and transfer identities.
+Their internal SEND/RECV pairs become ordinary value edges before AOT compilation. Such an erased channel does
+not require a native queue, readiness counter or fabricated RDMA declaration. Genuine device copies and external
+effects remain explicit. Original task/resource correspondence and required dependence ordering survive composition.
 
-Keep local channels as ordinary dependency/storage relations; they are not fabricated RDMA declarations.
-`Plan.completion` is a timing estimate, not a runtime completion counter. The caller's explicit Planning operand
-supplies allocation context. Native lowering must realize the actual task relation as fixed order or selected
-synchronization, with the exact prepared operands, rather than invent a queue/slot interpreter.
-
-Installed Torch's `custom_ops_to_c_shims` / `custom_op_libs` provide direct native effect calls inside AOT.
-The connected assignment consumes the retained scheduled CPU body and effect bindings together, replacing the
-interim region/run/send/recv recipe. It reuses the established Model and archive owners. CPU bodies remain
-lowerable until composition, as composition requirement 7 states. The local completion operand still needs its
-producer/consumer agreement; no worker has been assigned to guess it.
+The running assignments connect that composed body to one upstream AOT package/model entry, displacing the
+region/run/send/recv recipe. Remaining native effects consume actual prepared views, plan and invocation operands
+through installed Torch's direct C-shim interface. The existing Model and archive remain their owners. CPU bodies
+stay lowerable until composition, as composition requirement 7 states. `Plan.completion` remains a timing estimate;
+it is not a runtime completion counter. These assignments are **in progress**, not additional completed rows.
 
 ### 3. The resulting native program into invocation, archive and signature
 
@@ -111,7 +107,7 @@ This can be co-designed with item 2; the ordering here is a dependency, not a ba
 Further CPU/MPS/ANE lowering, fusion, publication and reuse under changed placement/routing must extend the same
 retained body/effect/storage contracts. Assign a concrete transformation with its actual consumers and deletion
 target, rather than reopening already established boundaries or introducing another execution regime. These
-unreviewed units are not included in the ten-row count.
+unreviewed units are not included in the eleven-row count.
 
 ## Measurement for subsequent workgroups
 
