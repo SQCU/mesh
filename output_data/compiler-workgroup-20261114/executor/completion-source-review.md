@@ -18,7 +18,23 @@ SAMEe48 private strict compilation passed the actual native units and callers; t
 the affected translation unit. Original malformed source remains unchanged and fails parsing. No shared rebuild
 or runtime observation is claimed for this snapshot.
 
-The signature join is explicitly unfinished. A potential winning site is not an unconditional publisher.
-Canonical graph integration must consume the actual completion scope, including first/later GPU alternatives,
-through emission, composition and archive. Current ordinary atomic counts are one increment per host completion,
-independent of the publication span; they do not supply that missing enforcement relation.
+Native checkpoints fa9f4a8a and 27da6185 use the canonical graph completion records directly. Signature emission
+borrows each original row Program's vectors and retains the Programs; its realized occurrences preserve the actual
+program iteration, writer invocation and physical counter copy separately. Actual native sites and residue-specific
+ICB members supply first/later alternatives; a missing writer correspondence fails compilation. No winning
+processor or whole-PART-before-publication relation is fabricated. Partial allocation and attachment cleanup were
+reviewed. Strict private checks passed live capture/program, archive/IR/transport and both tools.
+
+Current SEND constructors make owner equal to the emitting call (Target.ported's intrinsic and cross-call SEND
+branches); land adds RECEIVE only. A prior mismatch claim based solely on reading port.owner was withdrawn after
+checking those actual constructors. GPU and host publication generations therefore agree on this production path.
+
+The same structural identity owner now hashes received declaration geometry and readiness class/span mappings,
+excluding raw process pointers and transport relocation offsets. This is a structural row identity, not a hash of
+all numerical code. Normal archive encoding is unchanged by that correction.
+
+The matched build and execution of this signature extension remain pending. Graph scope18 (134fba30) pairs the
+actual publication event with the bridge read while retaining both sides' original owners through composition.
+Saved source references and binding to the original loaded row Programs are the next paired consumer unit. The
+conditional publication event is not a new runtime action, and its pairing alone does not discharge every task-graph
+dependence obligation; that enforcement limit remains explicit.
