@@ -127,13 +127,20 @@ void mesh_planned_free(struct mesh_planned *);
    copies' byte offsets in it (none where run is 0). Each value's section.count is set to its copies (its bytes and
    pages untouched) and its shares to 1 where one of its copies' assigned bytes meets another copy's */
 struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
-                    uint64_t *offset; };
-_Static_assert(sizeof(struct mesh_local)==136 && offsetof(struct mesh_local,bytes)==96 &&
+                    uint64_t *offset; void *owned; };
+_Static_assert(sizeof(struct mesh_local)==144 && offsetof(struct mesh_local,bytes)==96 &&
                offsetof(struct mesh_local,values)==104 && offsetof(struct mesh_local,offsets)==112 &&
-               offsetof(struct mesh_local,first)==120 && offsetof(struct mesh_local,offset)==128,
-               "mesh_local: rdma/mesh.py Local");
+               offsetof(struct mesh_local,first)==120 && offsetof(struct mesh_local,offset)==128 &&
+               offsetof(struct mesh_local,owned)==136,"mesh_local: rdma/mesh.py Local");
 int mesh_plan_local(struct mesh_function *function,uint64_t quantum,struct mesh_local *out);
 void mesh_local_free(struct mesh_local *out);
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7: the local plan's result and the function it
+   was planned from (its value table, its parts' host, work and edges, its parts, edges, outstanding and plan), saved
+   in one archive (*bytes the caller's, released with free) and loaded without planning again: `function`'s arrays
+   then in local->owned, released by mesh_local_free with the result (mesh_plan_local leaves owned NULL, the caller's
+   function its own) */
+int mesh_local_save(const struct mesh_function *function,const struct mesh_local *local,void **bytes,size_t *length);
+int mesh_local_load(const void *bytes,size_t length,struct mesh_function *function,struct mesh_local *local);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

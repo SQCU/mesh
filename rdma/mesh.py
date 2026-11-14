@@ -148,7 +148,7 @@ class Planned(C.Structure):
 # mesh-collective.h struct mesh_local, mesh_plan_local
 class Local(C.Structure):
     _fields_ = [('planned', Planned), ('bytes', Q), ('values', Z), ('offsets', Z), ('first', C.POINTER(Z)),
-                ('offset', C.POINTER(Q))]
+                ('offset', C.POINTER(Q)), ('owned', C.c_void_p)]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
@@ -286,6 +286,9 @@ for name, result, arguments in (
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
         ('mesh_plan_local', C.c_int, [C.POINTER(Function), Q, C.POINTER(Local)]),
         ('mesh_local_free', None, [C.POINTER(Local)]),
+        ('mesh_local_save', C.c_int, [C.POINTER(Function), C.POINTER(Local), C.POINTER(C.c_void_p),
+                                      C.POINTER(Z)]),
+        ('mesh_local_load', C.c_int, [C.c_void_p, Z, C.POINTER(Function), C.POINTER(Local)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, Q]),

@@ -9,3 +9,7 @@ SAME Opus5.5 schedule sessiondc4b988b private strict C/ObjC and ctypes size/offs
 Canonical `make libmesh.dylib` completed0 for16261afc (`compiler/local-plan-libmesh-build.log`). Fresh actual Local136 call/free on a zero-operation function produced one call, horizon1, zero arena bytes, no bridge signature, and released/zeroed its result (`compiler/local-plan-libmesh-abi.log`). This is ABI/owner evidence, not numerical execution or bridge evidence.
 
 Storage alignment companion Metal f789a1aa retains ordinary Tint pointer alignment plus explicit actual native Check and Neural I/O type alignment in Binding. Storage24 ctypes matches. All8 private libIR translation units passed strict syntax. Canonical affected Metal build/archivev30 and actual caller tests remain pending.
+
+## Coordinated canonical build and fresh ABI
+
+`make .build/e2b_replay .build/native_bench` completed with exit 0 after rebuilding graph/transport, libIR, recorder, provider and actual callers. Log: `local-construction-metal-build.log`. Fresh process with canonical library path resolved actual compiler symbols, observed Local136/Storage24 (alignment offset16), and created/queried/freed an empty Program; log `local-construction-abi.log`. This is linked ABI evidence, not numerical execution or proof of unfinished source-edge/external invocation paths. Numerical specialization and actual whole-target consumer coverage remain separately required.
