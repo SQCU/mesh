@@ -15,7 +15,7 @@ import torch.nn.functional as F
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
 import mesh_graph
-from mesh_compiler import shares
+from mesh_compiler import archive, shares
 from mesh_compiler.driver import compile_module, compile_program, compiled
 from mesh_compiler.ir import TrainingResult
 from mesh_compiler.placement import counts
@@ -156,9 +156,13 @@ def arguments(description):
     parser.add_argument('--upper', type=float, nargs='+')
     parser.add_argument('--times', nargs='+', default=[])
     parser.add_argument('--comm', type=float, default=1.0752e-10)
+    parser.add_argument('--archive', type=pathlib.Path)
+    parser.add_argument('--prepared', type=int, default=1)
     args = parser.parse_args()
     if args.solve and not args.upper:
         parser.error('--solve takes its bounds from --upper')
+    if args.prepared < 1:
+        parser.error('--prepared must be positive')
     return args
 
 
@@ -189,21 +193,28 @@ def execute(model, inputs, placement, args, loss=None, functions=None, **told):
     placed = placement(tuple(processors))
     scheduled = compiled(compile_module(model, inputs, processors, placed, **options) if functions is None else
                          compile_program(model, inputs, functions, processors, placed, **options))
-    program = Program(scheduled)
-    result = program(*inputs)
-    report = {'channels': [{'function': k, 'channels': scheduled.channels[body.key]}
-                           for k, body in enumerate(program.function.target.bodies)],
-              'between machines': sum(len(transfers) for transfers in scheduled.carried.values()),
-              'signature': bytes(program.function.signature.digest).hex(), **told}
-    if result is not None:
-        with torch.no_grad():
-            expected = (model if loss is None else Eager(model, loss))(*inputs)
-        pairs = list(zip(torch.utils._pytree.tree_leaves(expected), torch.utils._pytree.tree_leaves(result),
-                         strict=True))
-        report['outputs'] = [list(got.shape) for _, got in pairs]
-        report['error'] = max(((got.cpu().double() - want.double()).abs().max() /
-                               want.double().abs().max().clamp(min=1e-12)).item() for want, got in pairs)
-    print(json.dumps(report), flush=True)
+    if args.archive is not None:
+        archive.save(args.archive, scheduled)
+        scheduled = archive.load(args.archive)
+    programs, expected = [Program(scheduled) for _ in range(args.prepared)], None
+    for index, program in enumerate(programs):
+        result = program(*inputs)
+        report = {'channels': [{'function': k, 'channels': scheduled.channels[body.key]}
+                               for k, body in enumerate(program.function.target.bodies)],
+                  'between machines': sum(len(transfers) for transfers in scheduled.carried.values()),
+                  'signature': bytes(program.function.signature.digest).hex(), **told}
+        if args.prepared > 1:
+            report['preparation'] = index
+        if result is not None:
+            if expected is None:
+                with torch.no_grad():
+                    expected = (model if loss is None else Eager(model, loss))(*inputs)
+            pairs = list(zip(torch.utils._pytree.tree_leaves(expected), torch.utils._pytree.tree_leaves(result),
+                             strict=True))
+            report['outputs'] = [list(got.shape) for _, got in pairs]
+            report['error'] = max(((got.cpu().double() - want.double()).abs().max() /
+                                   want.double().abs().max().clamp(min=1e-12)).item() for want, got in pairs)
+        print(json.dumps(report), flush=True)
     return result
 
 
