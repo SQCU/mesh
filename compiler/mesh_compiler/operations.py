@@ -2185,6 +2185,38 @@ SQUARING = {torch.float64: (5.371920351148152, (1.495585217958292e-002, 2.539398
             torch.float32: (3.925724783138660, (4.258730016922831e-001, 1.880152677804762e+000), (3, 5, 7))}
 
 
+# JAX jax/_src/scipy/linalg.py _squaring: the current result squared where i < n_squarings, at most max_squarings.
+# The source condition is inside the existing compiled numerical repetition; no square runs after it becomes false.
+torch.library.define('mesh::matrix_exp_squares', '(Tensor x, Tensor count, int limit) -> Tensor')
+
+
+@torch.library.register_fake('mesh::matrix_exp_squares')
+def _matrix_exp_squares_shape(x, count, limit):
+    return torch.empty_like(x)
+
+
+MATRIX_EXP_SQUARES = torch.ops.mesh.matrix_exp_squares.default
+
+
+def _matrix_exp_squares(outs, x, count, limit):
+    out, ops = outs[0], _copy(outs[0], x)
+    n, t = x.shape[-1], _class(count)
+    for member in itertools.product(*map(range, x.shape[:-2])):
+        current, required = out[member], count[member]
+        iteration, active = (_temporary((1,), torch.int32) for _ in range(2))
+
+        def condition(r, v):
+            return [(_convert(r, r('and', BOOL, r('lt', BOOL, r('cast', t, v[0]), v[1]),
+                                          r('lt', BOOL, v[0], r.const(limit, I32))), BOOL, I32), I32)]
+        ops += _fill(iteration, 0) + _scalars([active], [iteration, required], condition)
+        squared = _temporary((n, n), x.dtype)
+        body = _gemm(squared, current, (0, 2), current, (2, 1), (n, n, n)) + _copy(current, squared)
+        body += _scalars([iteration], [iteration], lambda r, v: [(r('add', I32, v[0], r.const(1, I32)), I32)])
+        body += _scalars([active], [iteration, required], condition)
+        ops.append(_Repeat(body, active, (current, iteration, active)))
+    return ops
+
+
 def _matrix_exponential(a, max_squarings):
     if not a.numel():
         return torch.empty_like(a)
@@ -2221,8 +2253,7 @@ def _matrix_exponential(a, max_squarings):
         below = (norm < conds[j - 1])[..., None, None]
         u, v = torch.where(below, u, parts[0]), torch.where(below, v, parts[1])
     result = torch.linalg.solve_ex(v - u, u + v).result
-    for i in range(max_squarings):
-        result = torch.where((count > i)[..., None, None], torch.matmul(result, result), result)
+    result = MATRIX_EXP_SQUARES(result, count, max_squarings)
     over = count > max_squarings
     A._assert_async.msg(over.logical_not(), 'linalg.matrix_exp')
     return torch.where(over[..., None, None], math.nan, result)
@@ -5386,6 +5417,8 @@ def _lowering(local, page, generator=None):
                                                           generator, local.site)
     if local.target is striped:
         return lambda args, kwargs, outs: _striped(outs[0], *args)
+    if local.target is MATRIX_EXP_SQUARES:
+        return lambda args, kwargs, outs: _matrix_exp_squares(outs, **_operands(local.target, args, kwargs))
     if local.target is LSTSQ_SCALED:
         return lambda args, kwargs, outs: _lstsq_scaled(outs, **_operands(local.target, args, kwargs))
     if local.target is LSTSQ_UNSCALE:

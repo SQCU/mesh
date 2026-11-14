@@ -1,0 +1,5 @@
+# Matrix exponential squaring condition
+
+`_matrix_exponential` previously emitted all `max_squarings` products and selected the prior value after the required count. The same JAX `_squaring` condition now reaches a fake-only `mesh.matrix_exp_squares` target with an actual `_Repeat` lowering. Per batch member, its current result, iteration counter and condition are carried; the matrix product temporary retains its ordinary lifetime. The condition is `iteration < count && iteration < limit`. Once false, no further square runs. The outer over-limit assertion and NaN selection remain unchanged.
+
+The record uses the existing `_gemm`, copy, scalar and repeat owners; placement/source membership use the existing recursive encoder. No native ABI, planner, algorithm, or iteration policy was added. AST and duplicate-definition checks pass. No native result is claimed yet. Computing multiple Pade candidates in the preceding source formula remains a separate efficiency concern; this checkpoint does not establish whole-operator performance.
