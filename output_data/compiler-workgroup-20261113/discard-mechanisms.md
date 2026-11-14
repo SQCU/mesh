@@ -208,3 +208,43 @@ it three arguments for a now-displaced consumer. Exact Fraction partitioning
 also has two implementations; the callers will share its existing owner without
 changing numerical precision. These assignments do not reopen numerical
 lowering, create another evaluator, or authorize deleting supported public paths.
+
+## Completed caller connections, 14 November 2026
+
+This dated checkpoint supersedes the pending statuses above for the callers listed
+here. It closes the immediate caller-centralization assignment, not every older
+change request or every unexamined route in either repository.
+
+| Actual caller | Retained producer and direct consumer | Checkpoint |
+|---|---|---|
+| Native source construction, append and conflict decisions | One relation registration function; original positive and negative witnesses, geometry and shared maps reach the actual operation-relation/fusion consumers. The copying wrapper is removed. | Mesh `04e1eed3`, metal `79d7e7a6`, `32f4960a`; exact source-carrier review in mesh `bbb7ed1f`. |
+| Recorder, ordering, replay and saved Function | Original relation rows and Actor quotient survive preparation and local/network archive relocation. Ordering no longer copies edge triples; actual C tool callers keep the same owner. | Mesh `246228d2`, metal `bc2be2c3`, `5889e933`. |
+| Placement and event scheduling | Original source graph, masked searches, labels and event result stay owned through their consumers; one native Dependence array reaches Function/Plan. Fraction partitioning uses the existing separator implementation. | Mesh `c15f33b1`, `246228d2`, `d2c63c08`. |
+| E2B preparation | One incoming DFS forest plus canonical ancestor queries replaces per-query traversal; original incoming rows supply successors. | Metal `df43fff9`. |
+| Sharding completion | Typed projection operands and distinct shard atoms reach the native finite solver; the original node order, atoms, operands and solved state remain on IR. Python forward/backward callbacks and duplicate merge logic are removed. | Mesh `11e39c11`. |
+| Logical first use and backing-owner last use | Both actual callers use the same native lifetime aggregation and Mapping views of its retained arrays. This also repairs their stale helper signature. | Mesh `11e39c11`. |
+| Call-analysis paths and width | One retained DFS supplies chain views. Width reads the existing closure directly through the shared chain algorithm; Calls retains both original closures and native width results. | Mesh `11e39c11`. |
+
+The canonical native build and fresh ABI checks passed for the shared relation,
+Function and archive changes. Existing local Engines CPU and GPU clients both
+reported normalized maximum error 0.0. For each target, the actual outer
+`archive.save → load → Program` path ran two distinct input allocations, preserved
+the signature, returned fresh outputs and left the first output unchanged after
+the second call. GPU inputs and outputs remained CPU tensors, using borrowed
+backing storage. The observed errors were 0.0 and 6.902263703523204e-05, with no
+new project tolerance inferred. Details: [executor/function-binding-review.md](executor/function-binding-review.md).
+
+Actual `tools.prepare_e2b.dataflow` on the existing two-rank, three-region prepared
+model reproduced all 426 saved actions exactly; see
+[integration-prepared-dataflow.json](integration-prepared-dataflow.json). No model
+execution or performance measurement is implied by that preparation observation.
+
+The last additive graph APIs passed a further narrow libmesh build and fresh
+symbol/ABI check. Existing Engines export then completed actual
+`partition → lower` with `Shard(0,(1,3))`, retaining counts `(8,24)`, four transfer
+declarations and both native lifetime results. See
+[frontends/partition-lower-check.json](frontends/partition-lower-check.json) and
+[compiler/graph-consumers-review.md](compiler/graph-consumers-review.md).
+The call-analysis changes were source-reviewed and compiled; this last observation
+does not execute `_analyse`. No live network relocation, ANE execution or throughput
+improvement is claimed by these local checks.

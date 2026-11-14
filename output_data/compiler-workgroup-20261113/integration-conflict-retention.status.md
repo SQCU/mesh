@@ -186,3 +186,9 @@ The operator's subsequent single graph-module/result-view instruction adds an im
 this representation too: canonical graph results must stay owned and accessible through their consumers. A
 Program-level projection of hazard kinds is not an excuse to introduce a second graph-result owner or discard
 its original relation/correspondence. That consolidation is coordinated with the native graph-owner migration.
+
+## Subsequent work
+
+This intermediate assignment was completed through the graph consolidation recorded in
+[integration-graph-consumers.status.md](integration-graph-consumers.status.md). Its dated final checkpoint
+identifies the commits and actual caller observations; the earlier build hold is expired.

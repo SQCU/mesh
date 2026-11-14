@@ -5,11 +5,15 @@ Style: [Google developer documentation style guide, highlights](https://develope
 2026-11-13, integration worker (Claude Opus 5.5, `claude-opus-5-5`, session
 `59368744-da56-491a-871a-1be809c0cc93`).
 
-**READY.** The original-geometry owner correction (section 4) is complete, with its narrow syntax check.
-`metal_ir.h` and `metal_ir.mm` are now held for the compiler supervisor's canonical library and executable build,
-until root releases the window. The native `Depends` checkpoint is committed (metal-microbench `09a604f1`). The
-memory-result corrections in sections 3 and 4 are uncommitted. Evidence is syntax only: nothing has been built,
-linked or run by me.
+Final checkpoint, 14 November 2026: metal `79d7e7a6` connects retained source witnesses and function analysis;
+`32f4960a` finishes the one registration function and removes the unused copying `ImportConflicts` wrapper.
+The matched native build and actual CPU/GPU plus outer-archive observations are recorded in
+[function-binding-review.md](executor/function-binding-review.md). Exact source carrier review is in
+[source-given-review.md](compiler/source-given-review.md).
+
+The sections below preserve the worker's intermediate source-review observations. Their build holds,
+uncommitted labels, draft interfaces and proposed checks are historical, superseded by the commits and
+observations above; they are neither current assignments nor additional requirements.
 
 ## 1. Native consumer: `metal_native.mm` `Depends`/`Recognize`
 
@@ -35,6 +39,9 @@ linked or run by me.
   recursion's edges (result → its instruction's operands), and the leaves are the same.
 
 ## 2. Memory results: `Program` access relations on `mesh_graph_relation`
+
+Superseded where it describes `viewConflicts`: section 5 removes that map, and witnesses come from the retained
+relations' own queries.
 
 - **Before.** `viewConflicts` kept only kind + 1, and `Decided` freed the solver's records.
 - **Now:**
@@ -67,15 +74,18 @@ linked or run by me.
   - `ViewPool` after `ViewRelation`; the `Program::viewPool` comment and its type `std::shared_ptr<ViewPool>` (the
     `viewIds` field is gone, moved into `ViewPool::ids`).
   - `viewRelations` and the `viewConflicts` type (`@@ -773 +797,2`).
-  - The `OperationConflicts` declaration, then the `Witness` and public `Pooled` declarations after it.
+  - `ViewOriginal`, the `ViewWitness` (relation, `mesh_graph_witness`) and `EffectConflict` (with `witness`) types.
+  - `Program::viewOriginals`, which replaces `viewConflicts`, with its comment.
+  - The `OperationConflicts`, `Witness` (int, out), `ImportConflicts` and public `Pooled` declarations.
   - Not mine: `operationEdges`, and `mesh_graph_relation *relation` (`@@ -762,0 +785,2`).
 - `metal_ir.mm`:
   - `Access` and the public `Pooled(const Program &, const mesh_graph_view &)`, before `Accesses`; in `Accesses`,
     `Pooled(p, Record(v))`.
-  - `Decision` (with `geometry`)/`Undecided`, `Decided`, `Hazards`, `Witness`, `OperationConflicts` and `Conflict`
-    (the hunks between `bool Conflict(..vector..)` and `Renumber`).
+  - `Decision` (geometry and views)/`Undecided`, `Register`, `Answer`, `Failed`, `Decided`, `Hazards`, `Witness`,
+    `ImportConflicts`, `OperationConflicts` and `Conflict` (the hunks between `bool Conflict(..vector..)` and
+    `Renumber`); `Ordered` is removed.
   - The `metal_ir_specialize` copy lines `p->viewPool = s->viewPool; p->operationViewIds = s->operationViewIds;` and
-    `p->viewRelations = s->viewRelations; p->viewConflicts = s->viewConflicts;`.
+    `p->viewRelations = s->viewRelations; p->viewOriginals = s->viewOriginals;`.
   - Every other hunk in `metal_ir.mm` belongs to other owners.
 
 ## Checks
@@ -88,7 +98,7 @@ The `.build/libmetal_ir.dylib` rule's flags with `-fsyntax-only` (logs in `/tmp/
 `metal_transport.mm` and `metal_neural.mm` each exit 0 with no diagnostics. Root reports that the canonical libmesh
 rebuild passes with the search and relation symbols. I have not linked against it.
 
-## 3. Corrections after review (uncommitted)
+## 3. Corrections after review (committed in `4db95f8d`)
 
 - **`ViewWitness`** is now `{uint32_t relation = UINT32_MAX; size_t record = SIZE_MAX;}`. The record index keeps
   the canonical `size_t` with a `SIZE_MAX` sentinel, so `ViewWitness{at, e}` no longer truncates. Pool identities
@@ -97,7 +107,7 @@ rebuild passes with the search and relation symbols. I have not linked against i
 - **Key.** `Access(key, offset, element, write, pairs, count)` builds the pool key, the exact access operands. Both
   `Pooled` and `Witness` use it, so they cannot diverge.
 
-## 4. Original geometry under one shared owner (uncommitted)
+## 4. Original geometry under one shared owner (committed in `4db95f8d`)
 
 - **Owner.** `struct ViewPool { std::deque<View> views; std::map<std::vector<uint64_t>, uint32_t> ids; }` in
   `metal_ir.h`. It holds each distinct access's original geometry once, its identity its index.
@@ -122,74 +132,209 @@ rebuild passes with the search and relation symbols. I have not linked against i
 - **Check.** `metal_ir.mm` and `metal_transform.mm` exit 0 with no diagnostics under the canonical flags with
   `-fsyntax-only`. Only `metal_ir.mm` names the pool.
 
-## Source-witness import: the API to connect to this pool (for the compiler's contract)
+## 5. `ImportConflicts` and the original query-view consumer (uncommitted)
 
-The contract has not arrived yet. These are the existing entry points it should use, so that it shares this pool
-and adds no second copy of the views:
+This is written against the published `mesh-graph.h` query API: `mesh_graph_relation_views`, `mesh_graph_witness`,
+`mesh_graph_relation_witness` and `mesh_graph_relation_cause`. Their definitions are in the working-tree
+`mesh-graph.c`.
 
-- `Pooled(p, view)` names an imported access by the same identity the fusion queries and `Witness` use. The
-  identity key is `{key, offset, element, write, pairs}`, and `vertex` is not part of it.
-- `p.viewPool->views[id]` is that access's original geometry, borrowed while any holder retains the pool. An
-  importer that keeps it longer holds the `shared_ptr`.
-- `Witness(p, from, to)` and `viewRelations[...]` serve the decided memory witnesses, as in the next section.
-- Not yet provided: inserting decided facts produced outside metal_ir (for example, a frontend memory witness
-  imported into `viewConflicts`). The contract would have to state which relation owns those records. I have not
-  added an import path ahead of it.
+- **The reduced cache is gone.** `Program::viewConflicts`, a map from an ordered pool pair to a seeded fact, is
+  deleted along with its pair seeding. Nothing enumerates pairs to seed negatives.
+- **Correspondence.** `Program::viewOriginals[x]` lists `ViewOriginal{relation, view}`: every original view of a
+  retained relation whose pool identity is x. `Register(p, at)` fills it from `viewRelations[at].pool`, skipping
+  `UINT32_MAX`. Original view indexes are unchanged.
+- **The query-view consumer (`Answer`).** An ordered pair (x, y) is answered by any retained relation holding views of
+  both, through `mesh_graph_relation_witness(relation, from.view, to.view, &w)`. No solver or ISL is involved. The
+  first known witness is the answer.
+  - Known hazards come back as the original record.
+  - Known absences come back with `record = SIZE_MAX, known = 1`, and are kept.
+  - A reversed pair comes back with `reverse = 1`. It reuses the symmetric fact, and its direction is
+    `mesh_graph_relation_cause`'s.
+  - Unknown is `known = 0`: no retained query decided the pair, for example two views on one vertex under DIRECTED.
+- **Decided's producer.** Undecided pairs are only those whose `Answer` is unknown. Each group of from-accesses that
+  shares a partner set makes one `mesh_graph_relation_views(2, views, ..., 0, nullptr, nullptr, self 0, Undecided,
+  made, &relation)` call: the one DIRECTED query, whose original records the relation owns.
+  - `Decision` now holds only the shared geometry and the views.
+  - The relation is retained in `viewRelations`, and its views are registered.
+  - Every pair the group decided, including absences, is then answered by that relation's own query.
+- **Consumers.** `Hazards` visits each same-storage pair whose witness is a known hazard.
+  - `Conflict(p, a, b, mine, theirs)` answers as before: hazard existence is symmetric, so a reversed witness
+    answers it.
+  - `OperationConflicts` appends `EffectConflict{mine, theirs, relation, witness, record}`, where `record` is the
+    root's original record. Its direction in that orientation is `mesh_graph_relation_cause(relation, &witness)`. No
+    Program code derives RAW/WAR/WAW.
+- **`ImportConflicts(Program &, const std::shared_ptr<mesh_graph_relation> &original, const std::vector<uint32_t>
+  &pool)`** appends `{original, pool}`, retaining the relation without copying it, and registers its views. From
+  then on, its own query answers the pairs it decided: positive witnesses, absences, and reversed pairs.
+  Undecided pairs, such as same-vertex pairs or views it does not hold, are queried once by `Decided` when asked.
+- **`int Witness(const Program &, const mesh_graph_view &from, const mesh_graph_view &to, ViewWitness &out)`** (the
+  finalized relation's lookup) finds both exact accesses in the pool, without inserting them, and answers through
+  `Answer`. It returns `known = 0` where either access is not pooled or no retained query decided the pair.
+- **Unchanged:**
+  - The shared `ViewPool` geometry owner and `Pooled`.
+  - `Changed`, which invalidates the operation-to-view association only, because the facts are immutable.
+  - The batching of undecided pairs.
+  - `metal_ir_specialize` now shares `viewRelations` and copies the `viewOriginals` index.
+- **Checks.** `metal_ir.mm` and `metal_transform.mm` exit 0 with no diagnostics under the canonical flags with
+  `-fsyntax-only`. No other source names the changed types.
 
-## Review of the `ImportConflicts` seed contract (to implement when the window is released)
+### Interface for the finalized `Program` relation and the source importer
 
-The contract is
-`ImportConflicts(Program &, const std::shared_ptr<mesh_graph_relation> &original, const std::vector<uint32_t> &pool)`,
-where `pool[a]` is the Program identity (`Pooled`) of `original` view a, or `UINT32_MAX` for an access with no
-Program counterpart.
+- **Import:** the numerical producer forms `pool` from exact source accesses and calls `ImportConflicts(p, original,
+  pool)` with the source relation made by `mesh_graph_relation_views`. A `mesh_graph_relation_create` root has query
+  NONE, so it answers no pair.
+- **Final records:** each final view goes through `Pooled` (the same interning), and a pair is answered by
+  `Witness`. A known witness carries `relation` (an index into `p.viewRelations`) and the graph-owned witness; the
+  record is `mesh_graph_relation_data(...)->conflict[witness.record]` and the direction is
+  `mesh_graph_relation_cause`. An unknown pair is new geometry, queried once by the canonical solver.
+- **Lifetime:** records are borrowed while the program holds the relation. Keep the `shared_ptr` to hold one longer.
+  The pool's geometry is held by every Decided relation's owner. An imported relation's owner is its producer's.
 
-It fits the present owner:
+## 6. Known-answer memo (uncommitted)
 
-- **Retain without copying.** Append `{original, pool}` to `viewRelations`. `ViewRelation` already holds a
-  `std::shared_ptr<mesh_graph_relation>` and the view/pool correspondence, so the original relation is retained,
-  not copied.
-- **Positive witnesses.** For each original record r with both `pool[r.from_view]` and `pool[r.to_view]`
-  represented, `viewConflicts[Ordered(pool[from], pool[to])] = ViewWitness{relation, r}`. That is r's own identity,
-  with no RAW/WAR/WAW re-derived.
-- **Coverage (no-hazard facts).** Only for the pairs the original query actually decided, which depends on its mode
-  (`dependences_views` or `conflicts_views`) and on its vertex assignment. My batches decide exactly their
-  from × partner cross pairs. Recording an imported pair as "decided, no hazard" needs the graph owner's exact
-  coverage of `original`, and the numerical supervisor is coordinating that addition. Until it exists, an import
-  registers positive witnesses only, and other pairs stay undecided, to be solved once by `Decided` if they are
-  ever asked.
-- **Orientation.** `viewConflicts` is per ordered pair. A query in the opposite order of an imported positive
-  witness needs the graph owner's directional cause projection, which is also pending. It must not be re-derived
-  here, nor re-solved for a known geometry pair.
-- **Final dispatch relation.** Its records' accesses go through the same `Pooled`, so known pairs resolve to these
-  witnesses; only unknown geometry reaches the solver.
-- **Unchanged.** `Changed` invalidation (operation-to-view association only) and the `Decided` batching.
+- **Field.** `Program::viewAnswers`, an `std::unordered_map<uint64_t, ViewWitness>` keyed by the ordered pool pair
+  `x << 32 | y`. It holds only answers already asked and known: `{relation, original mesh_graph_witness}`, which
+  covers a hazard record or a known absence (`record = SIZE_MAX, known = 1`) and its `reverse` orientation, exactly as
+  the retained relation's own query answered.
+- **`Answer`** returns the memo entry for a pair asked before, without joining `viewOriginals[x] × viewOriginals[y]`
+  again. Otherwise it asks the retained relations, and records the answer only when it is known.
+  - An unknown answer is never held, so a later `Decided` query or `ImportConflicts` can still decide that pair.
+  - No pair is seeded: entries exist only for pairs some consumer actually asked.
+- **Specialization.** `metal_ir_specialize` copies `viewAnswers` with `viewRelations` and `viewOriginals`. Each
+  entry's `relation` names the same shared relation in the copy.
+- **Not touched:** `Changed` (known answers are immutable access facts, so nothing invalidates them), the graph C
+  owner, the source setter, the final `Relation`, and the work rows.
+- **Check.** `metal_ir.mm` exits 0 with no diagnostics under the canonical flags with `-fsyntax-only`.
+- **Hunks:** in `metal_ir.h`, the `viewAnswers` field and its comment line; in `metal_ir.mm`, `Answer`'s memo lookup
+  and `emplace`, and the specialize copy line.
 
-## Exact memory-only access for the finalized `Program` relation (compiler supervisor)
+## 7. Paired source setter (implemented, uncommitted; HOLD for the supervisor's build or commit window)
 
-`const ViewWitness *Witness(const Program &p, const mesh_graph_view &from, const mesh_graph_view &to)`
-(`metal_ir.h`, after `OperationConflicts`):
+Published in metal-microbench `metal_ir.h`, working tree, uncommitted, exactly as root approved:
 
-- **Lookup.** The exact access key of each view is `{key, view.offset, view.element, write, view.pairs[0 .. 2 *
-  view.dims)}`. `vertex` is not part of it.
-  - It returns `nullptr` where either access was never pooled, or the ordered pair `(from, to)` is undecided.
-  - Otherwise it returns the witness. `record == SIZE_MAX` means decided with no hazard: disjoint, both reads,
-    both commutative, or an empty view, all by the canonical relation.
-- **The record.** `const struct mesh_graph_relation_data *d =
-  mesh_graph_relation_data(p.viewRelations[w->relation].relation.get());` gives `d->conflict[w->record]`, the
-  canonical solver's original record.
-  - Its `from_view` and `to_view` index `d->view`.
-  - `p.viewRelations[w->relation].pool[...]` gives their pool identities.
-  - Its `from` is vertex 0, the `from` access. Its `kind` and `key` are the solver's.
-- **Orientation.** Facts are per ordered pair, because the kind depends on order. A finalized record oriented
-  `(to, from)` asks `Witness(p, to, from)`, which may be undecided even when `(from, to)` is decided.
-- **Coverage.** Facts are decided lazily, for the pairs that fusion queries asked. The finalized relation reuses a
-  witness only where its view pair has the identical exact accesses (same flags) in the same order. It solves the
-  rest itself, without re-solving these, and without creating a second Program-wide relation.
-- **Lifetime.** A record is borrowed while the `Program` holds the relation (`viewRelations`). A consumer that
-  keeps it longer copies the `std::shared_ptr` (`p.viewRelations[w->relation].relation`) or calls
-  `mesh_graph_relation_retain`, then later `mesh_graph_relation_free`. Its records and views are its own, and its views' pairs are the shared pool's, which its owner retains (section 4).
+- **C** (beside `metal_ir_operation_edges`):
+  - `enum { METAL_IR_SOURCE_VALUE, METAL_IR_SOURCE_LITERAL, METAL_IR_SOURCE_SENT, METAL_IR_SOURCE_RECEIVED,
+    METAL_IR_SOURCE_EXTERNAL };`
+  - `struct metal_ir_source_operand { uint32_t kind, value; };`
+  - `int metal_ir_source_relation(struct metal_ir_program *, struct mesh_graph_relation *original, const size_t
+    *operation_first, const uint32_t *operations, const uint32_t *view_values, size_t givens, const struct
+    metal_ir_source_operand *given, void (*release)(void *), void *owner, char *error, size_t room);`
+- **C++** (beside `ViewRelation`):
+  - `struct SourceRelation { std::shared_ptr<mesh_graph_relation> original; const size_t *operationFirst; const
+    uint32_t *operations; const uint32_t *viewValues; size_t givens; const metal_ir_source_operand *given; Owner
+    metadataOwner; }`. It cannot be copied, and its destructor releases the adopted metadata owner once.
+  - `struct SourceBinding { std::shared_ptr<const SourceRelation> source; uint32_t operationOffset = 0;
+    std::shared_ptr<const std::vector<uint32_t>> values = nullptr; }`. A null `values` is the identity; otherwise it
+    maps a source declaration ValueID to this program's ValueID.
+  - `Program::sourceRelations`, a `std::vector<SourceBinding>`.
+- **Reading a binding** (numerical consumer): original vertex v is
+  `source->operations[source->operationFirst[v] .. source->operationFirst[v + 1])`, each plus `operationOffset`.
+  Original view w is `values ? (*values)[source->viewValues[w]] : source->viewValues[w]`, where `UINT32_MAX` is
+  external. GIVEN record g's operand is `source->given[g]`, whose `value` maps the same way as a view's.
 
-## Unresolved interfaces
+- **Setter.** `metal_ir_source_relation` (beside `metal_ir_operation_edges`):
+  - It reports EINVAL through `error`, adopting nothing and retaining nothing, only for an actual out-of-range memory
+    operand: an operation ID ≥ the program's operations, a view or VALUE/SENT/RECEIVED given ValueID ≥ its values.
+  - Otherwise it retains `original` (`mesh_graph_relation_retain`, held by a `shared_ptr` with
+    `mesh_graph_relation_free`), borrows the arrays, and adopts `{owner, release}` as `metadataOwner`. The record's
+    destructor releases it once.
+  - It then appends `SourceBinding{record, 0, nullptr}` and calls `ImportConflicts(p, original, Geometry(p,
+    binding))`.
+  - The original's views, records and GIVEN operands are unchanged and authoritative. No source edge or operation
+    product is made.
+- **Geometry correspondence (`Geometry`, before `metal_ir_append`).** Original view w gets a pool identity only where
+  the program accesses its exact geometry:
+  - its typed value (`BoundValue`: through `values`, `UINT32_MAX` external), taken whole (`Whole`), is a single byte
+    view with w's offset, element and pairs, and with w's write;
+  - its key is that value's storage;
+  - no other source storage key among the original's views maps to that storage.
+  - Distinct source storages coalesced onto one typed storage, and changed coordinates, get `UINT32_MAX`. Their
+    absences are therefore never imported as facts. Their correspondence stays in the binding, and their pairs are
+    decided anew, once, where asked.
+- **Append.** After the existing operation-edge remap, each source binding becomes
+  `{b.source, b.operationOffset + operations, values = out ∘ b.values}`; the identity becomes `out`, and external
+  stays `UINT32_MAX`. `ImportConflicts` then runs through the destination's own geometry. The `SourceRelation` and
+  its original record IDs are shared, not copied.
+- **Specialization.** `p->sourceRelations = s->sourceRelations`, sharing the owners, beside the view-relation copies.
+- **Checks.**
+  - `metal_ir.mm` and `metal_transform.mm` exit 0 under the canonical C++ flags with `-fsyntax-only`.
+  - `tools/e2b_replay.m`, a C includer of the new C declarations, exits 0 under its rule with `-fsyntax-only`.
+  - Nothing has been built, linked or run.
+- **Hunks:**
+  - `metal_ir.h`: the C enum, struct and setter declarations after `metal_ir_operation_edge_records`;
+    `SourceRelation` and `SourceBinding` after `ViewRelation`; and `Program::sourceRelations` after `viewAnswers`.
+  - `metal_ir.mm`: `BoundValue` and `Geometry` before `metal_ir_append`; the source-binding loop after its
+    operation-edge remap; the specialize copy line; and `metal_ir_source_relation` after
+    `metal_ir_operation_edge_records`.
+- **Not mine, untouched:** the downstream source discharge, fusion legality, final `Relation`, the graph C owner,
+  `Work`/`Changed`, and the Python callers.
+
+## 8. Setter review correction: pairwise storage-key equivalence (uncommitted; READY, HOLD)
+
+- **`Geometry`.** The root-wide `keyed` map and its `keyed.second` exclusion are deleted. Every individually exact
+  view-to-pool mapping is kept: typed value whole, a single view with w's offset, element, pairs and write, keyed by the
+  value's storage.
+- **`Answer`.** For each candidate retained relation holding both accesses' original views, and before its witness
+  is asked or accepted, it compares the original keys' equality, `original[from.view].key ==
+  original[to.view].key` (the root's views), with the typed keys' equality,
+  `p.viewPool->views[x].key == p.viewPool->views[y].key`. A candidate is used only where the two agree.
+  - Distinct original storages merged into one typed storage give no absence.
+  - One original storage split into two typed storages gives its hazard to neither.
+  - Same-storage pairs with preserved coordinates stay reusable, even where another root was merged.
+  - Distinct-storage pairs stay distinct.
+  - Other candidates are still searched. Only an accepted known answer is memoized.
+  - Decided's own relations always agree, because their views are the pool's.
+- **Orientation** remains the graph owner's (`mesh_graph_relation_witness` and `_cause`).
+- **Comment.** The `ImportConflicts` declaration comment states the pairwise condition.
+- **Check.** `metal_ir.mm` exits 0 with no diagnostics under the canonical flags with `-fsyntax-only`.
+- **Hunks:** in `metal_ir.mm`, `Geometry` (the filter removed, its comment), and `Answer`'s comment and key check; in
+  `metal_ir.h`, the `ImportConflicts` comment line.
+- **Unchanged:** the setter, append and source record (accepted), the downstream numerical and source-effect code,
+  and the graph owner.
+
+**READY.** Holding `metal_ir.h` and `metal_ir.mm` for the supervisor's build or commit window.
+
+## 9. Shared `ViewRelation.pool` owner (uncommitted; READY for the joint build)
+
+- **Exact type.** `struct ViewRelation { std::shared_ptr<mesh_graph_relation> relation;
+  std::shared_ptr<const std::vector<uint32_t>> pool; };`. `pool[v]` is the Program pool identity of the relation's
+  original view v, `UINT32_MAX` for none. It is immutable, made once where the relation is registered, and shared,
+  never copied, by specialization (`viewRelations` is copied as `shared_ptr`s) and by any result that retains it.
+- **Producers.**
+  - `Decided` moves its derived map into the owner (`make_shared<const vector>(std::move(pool))`).
+  - `metal_ir_source_relation` and the append's source bindings move `Geometry`'s freshly derived map into the owner
+    through the internal `Retained`, so no second copy is made.
+  - The public `ImportConflicts(Program &, const std::shared_ptr<mesh_graph_relation> &, const std::vector<uint32_t> &)`
+    is unchanged. It makes the owner once from its argument, the caller's own vector.
+- **Reads.** `Register` reads `*pool`. No other read existed. The pairwise alias-equivalence check in `Answer` is
+  unchanged.
+- **Final decider (compiler-owned; documented fields, not edited by me).** Under the working-tree `mesh-graph.h`,
+  `mesh_graph_decided` is `{struct mesh_graph_relation *relation; const uint32_t *map; struct mesh_graph_witness
+  witness;}`, and `mesh_graph_relation_decided` takes a `const uint32_t *map`. For a known answer `w` from
+  `Answer`, the decider writes:
+  - `relation = p.viewRelations[w.relation].relation.get()`;
+  - `map = p.viewRelations[w.relation].pool->data()`;
+  - `witness = w.witness`.
+
+  To keep the map alive past the program, it retains `p.viewRelations[w.relation].pool` (the
+  `shared_ptr<const std::vector<uint32_t>>`) alongside the relation in its result owner. It does not copy the map or
+  borrow Program storage.
+- **Checks** (canonical `.build/libmetal_ir.dylib` flags with `-fsyntax-only`):
+  - `metal_transform.mm` exits 0 with no diagnostics.
+  - `metal_ir.mm` has exactly 3 errors, all in the compiler's in-progress `FinalDecider` against the working-tree
+    header's new `map` field and parameter:
+    - line 1868, `*out = {relation, witness}`, no viable `=` for the 3-field `mesh_graph_decided`;
+    - lines 2112 and 2223, `mesh_graph_relation_decided` calls without `map`.
+  - None of the errors is in my hunks. They clear when that consumer adopts the fields above.
+- **Hunks:**
+  - `metal_ir.h`: the `ViewRelation` definition and its comment.
+  - `metal_ir.mm`: `Register`'s read; `Decided`'s `push_back`; `Retained` plus `ImportConflicts`; and the two
+    `Retained` calls in `metal_ir_append` and `metal_ir_source_relation`.
+- **Not touched:** the numerical operation relation, the final decider, archive ownership, and the graph owner.
+
+**READY** for the joint build. `metal_ir.h` and `metal_ir.mm` are held.
+
+## Interfaces awaiting review at the intermediate checkpoint
 
 - The numerical worker's operation relation (`Program::relation`, with source edges, composition and fusion
   legality) is separate from these memory-only access relations. If its legality needs memory conflicts between
