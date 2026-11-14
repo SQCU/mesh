@@ -99,6 +99,33 @@ def units(fixed, processors, times, comm, upper, heads):
     return {part: counts(heads, ratios, len(processors)) for part, ratios in solved.items()}
 
 
+# design/unequal-shards-change-request.md item 7
+class Timed(torch.fx.Interpreter):
+    def __init__(self, module, device, times):
+        super().__init__(module)
+        self.device, self.times = device, times
+
+    def run_node(self, node):
+        started = time.perf_counter()
+        result = super().run_node(node)
+        if self.device.type == 'mps':
+            torch.mps.synchronize()
+        if node.op == 'call_function':
+            self.times[node.meta['processor']].setdefault(shares.kind(node), {})[shares.units(node)[0]] = (
+                time.perf_counter() - started)
+        return result
+
+
+# design/unequal-shards-change-request.md item 7; compiler/mesh_compiler/schedule.py assemble, members;
+# compiler/mesh_compiler/runtime.py Arguments
+taken(fixed, inputs):
+    prepared = Arguments(fixed)
+    module = fixed.modules[prepared.entry]
+    times = {p: {} for p in module.meta['members']}
+    Timed(module, prepared.device, times).run(*prepared.prepare(inputs, {}))
+    return times
+
+
 # design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/output_data/window-20260928/bandwidth.json
 def chosen(model, inputs, placement, args, heads):
     if not args.upper:

@@ -14,9 +14,19 @@ Mesh `b25ec14b` removes `def ` from the headers of `rdma/mesh_compile.py` `_repl
 `load`, `_runner`; `compiler/mesh_compiler/lower_coreml.py` `lower`; and `examples/tp.py` `taken`.
 Their bodies remain intact. Actual parsing fails in all three files. This is intentional.
 Do not repair these headers, execute the old paths, introduce compatibility dispatch, or count their
-feature coverage as a reason to preserve their execution. Dead bodies may be moved, with malformed headers
-unchanged, to explicitly identified reference source outside production imports. This is relocation of the
-operator-requested dead material, not a source backup or an alternative implementation.
+feature coverage as a reason to preserve their execution.
+
+The operator corrected root's unauthorized relocation:
+
+> i didn't say that the obsolete code should be moved, i said it should be mangled s.t. it is impossible to compile or interpret it without obvious errors
+
+> this is the fastest way to cause all callers to be updated immediately and the instruction was very pragmetic and literal
+
+The malformed code must stay in its original files. Root's reference/retired relocation is reversed, including
+the native signature wrappers in metal_recording.m. Production imports and builds must migrate to the actual
+replacement owners. Do not move the old code, repair or hide its syntax, or parse around it at import time.
+Required live algorithms move by responsibility into their new owners; this is not permission to clone a whole
+old module under a new name. There is one live implementation of each required algorithm.
 
 ## Connected implementation units
 
@@ -29,7 +39,15 @@ operator-requested dead material, not a source backup or an alternative implemen
 | Executor / native | Completed typed neural operation plus invocation operand addresses → prepared neural invocation → generated native call | Composition 1/6/7; source-lowering. Connect changing external inputs/results/state through the existing actual native argument boundary; no unconditional staging copies or alternate execution path. |
 | Executor / archive | Joint compiled functions/calls, retained plan and native entry → one saved artifact → relocation and invocation | AOT A8/A9/A10; composition 6/7. Pair with frontend/compiler; loaded output consumes the saved result, not old `load` or reconstruction. |
 | Frontends / measurement | Actual compiled units and their source correspondence → execution-cost observations → existing cost/share consumer | Unequal-shards 6/7/14, AOT A3. Displace dead `taken`/FX timing. Supplied costs remain compiler inputs. Use existing measurements/client machinery; no new evaluator or benchmark grid. |
-| Root / integration | Actual compiled phase/node correspondence → signature → existing consumers; dead reference relocation | Synchronization-signature; composition 6/7. Use retained phase results and correct map identity, not legacy `_period`. Keep deliberate malformed reference bodies unparseable and outside production dependencies. |
+| Root / integration | Actual compiled phase/node correspondence → signature → existing consumers; live primitive ownership | Synchronization-signature; composition 6/7. Use retained phase results and correct map identity, not legacy `_period`. Keep obsolete bodies malformed in their original files and update actual callers. |
+
+After the correction, the Python native ABI and typed C encoder belong to `compiler/mesh_compiler/metal.py`;
+pure tensor/structured numerical operations belong to `operations.py`; placed-operation decomposition belongs
+to `decompose.py`. `lower_metal.py` consumes those owners directly. The native typed capture/preparation producer
+belongs to `metal_capture.m` and the completed native program consumer to `metal_program.m`, sharing their
+actual produced records once. Old `mesh_compile.py`, `lower_coreml.py`, `examples/tp.py` and `metal_recording.m`
+remain malformed where instructed; their consumers must change. These names locate current assignments,
+not new permanent requirements or authority for reproducing inherited module structure.
 
 Same Opus 5.5 sessions, Codex supervisors, no new worker tree. Supervisors settle the explicit producer/result/
 consumer contracts together before implementation crosses a shared file. Each unit must actually connect its
