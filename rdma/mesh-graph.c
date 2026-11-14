@@ -157,6 +157,46 @@ int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(
   return 0;
 }
 
+int mesh_graph_longest(const struct mesh_graph_relation *relation, int incoming, const uint32_t *order, ptrdiff_t step,
+                       const double *weight, double *length) {
+  const struct mesh_graph_relation_data *d = mesh_graph_relation_data(relation);
+  const uint32_t vertices = d->vertices;
+  const size_t *first = incoming ? d->in_first : d->row_first, *entry = incoming ? d->in_edge : d->row_edge;
+  uint32_t *rank = malloc(((size_t)vertices + 1) * sizeof *rank);
+  int status = rank ? 0 : ENOMEM;
+  for (uint32_t v = 0; !status && v < vertices; v++) rank[v] = UINT32_MAX;
+  for (uint32_t i = 0; !status && i < vertices; i++) {
+    const uint32_t v = order[(ptrdiff_t)i * step];
+    if (v >= vertices || rank[v] != UINT32_MAX) status = EINVAL;
+    else rank[v] = i;
+  }
+  for (uint32_t i = 0; !status && i < vertices; i++) {
+    const uint32_t v = order[(ptrdiff_t)i * step];
+    double best = 0;
+    for (size_t k = first[v]; !status && k < first[v + 1]; k++) {
+      const size_t e = entry[k];
+      const uint32_t u = incoming ? d->edge[e].from : d->edge[e].to;
+      if (u >= vertices || rank[u] >= i) status = EINVAL;
+      else if (k == first[v] || length[u] + weight[e] > best) best = length[u] + weight[e];
+    }
+    length[v] = best;
+  }
+  free(rank);
+  return status;
+}
+
+int mesh_graph_boundaries(const struct mesh_graph_relation *relation, const uint32_t *class_of,
+                          const unsigned char *excluded, unsigned char *source, unsigned char *sink) {
+  const struct mesh_graph_relation_data *d = mesh_graph_relation_data(relation);
+  for (uint32_t v = 0; v < d->vertices; v++) source[v] = sink[v] = 1;
+  for (size_t e = 0; e < d->edges; e++)
+    if (!excluded[e] && class_of[d->edge[e].from] == class_of[d->edge[e].to]) {
+      source[d->edge[e].to] = 0;
+      sink[d->edge[e].from] = 0;
+    }
+  return 0;
+}
+
 /* the breadth-first search of mesh_graph_breadth over both directions of each edge, row v's entries in edge order and
    side order, as the edges were scanned; parent[from] is from */
 uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
@@ -975,7 +1015,10 @@ static int synchronization_solve(uint32_t vertices, size_t edges, uint32_t (*tai
 static uint32_t view_hazard(const struct mesh_graph_view *from, const struct mesh_graph_view *to);
 static int view_conflicts(size_t views, const struct mesh_graph_view *view, size_t supplied,
                           const uint32_t *supplied_from, const uint32_t *supplied_to, int self,
-                          struct mesh_graph_conflict **conflict, size_t *edges);
+                          int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
+                          void *context, struct mesh_graph_conflict **conflict, struct mesh_graph_origin **origin,
+                          struct mesh_graph_relation ***decider, const uint32_t ***decider_map, size_t *deciders,
+                          size_t *edges);
 /* design/compilation-composition-change-request.md items 6, 6.4 and 7: mesh-graph.h struct mesh_graph_relation */
 struct mesh_graph_relation {
   size_t references;
@@ -991,11 +1034,21 @@ struct mesh_graph_relation {
   size_t kept;
   struct mesh_graph_conflict *owned;
   size_t *witness, witnesses;
+  /* mesh_graph_relation_decided: each record's deciding original; every relation that answered a pair, retained, in
+     the order first answered, with its map; this query's own map */
+  struct mesh_graph_origin *origin;
+  struct mesh_graph_relation **decider;
+  size_t deciders;
+  const uint32_t **decider_map;
+  const uint32_t *map;
   /* the synchronization mask returned (its own `redundant`, or a loaded archive's); `loaded`: edge, first, member,
      row_first, row_edge, in_first, in_edge, source_first, source and witness are borrowed from mesh_graph_relation_load's
      archive */
   const unsigned char *mask;
   int loaded;
+  /* mesh_graph_relation_newest: the iteration's vertices and the iterations it folds (newest_lag 0: no newest
+     projection), retained and archived with it */
+  uint32_t newest_count, newest_lag;
 };
 static struct mesh_graph_relation *relation_new(void) {
   struct mesh_graph_relation *r = calloc(1, sizeof *r);
@@ -1007,9 +1060,11 @@ static struct mesh_graph_relation *relation_new(void) {
 static void relation_drop(struct mesh_graph_relation *r) {
   if (!r->loaded) {
     free(r->edge); free(r->first); free(r->member); free(r->row_first); free(r->row_edge); free(r->in_first);
-    free(r->in_edge); free(r->source_first); free(r->source); free(r->witness);
+    free(r->in_edge); free(r->source_first); free(r->source); free(r->witness); free(r->origin);
   }
   free(r->redundant); free(r->owned);
+  for (size_t d = 0; d < r->deciders; d++) mesh_graph_relation_free(r->decider[d]);
+  free(r->decider); free(r->decider_map);
   pthread_mutex_destroy(&r->lock);
   free(r);
 }
@@ -1025,26 +1080,19 @@ void mesh_graph_relation_free(struct mesh_graph_relation *r) {
   }
 }
 const struct mesh_graph_relation_data *mesh_graph_relation_data(const struct mesh_graph_relation *r) { return &r->data; }
-/* the edges (sorted by from, then to) by tail and by head, the same edge identities */
+static uint32_t relation_tail(const void *context, size_t e);
+static uint32_t relation_head(const void *context, size_t e);
+/* the edges, in any order, by tail and by head (mesh_graph_rows, each row in edge order), the same edge identities */
 static int relation_rows(struct mesh_graph_relation *r) {
   const uint32_t vertices = r->data.vertices;
   const size_t edges = r->data.edges;
   r->row_first = malloc(((size_t)vertices + 1) * sizeof *r->row_first);
   r->row_edge = malloc((edges + 1) * sizeof *r->row_edge);
-  r->in_first = calloc((size_t)vertices + 1, sizeof *r->in_first);
+  r->in_first = malloc(((size_t)vertices + 1) * sizeof *r->in_first);
   r->in_edge = malloc((edges + 1) * sizeof *r->in_edge);
   if (!r->row_first || !r->row_edge || !r->in_first || !r->in_edge) return ENOMEM;
-  for (size_t e = 0, v = 0; v <= vertices; v++) {
-    while (e < edges && r->edge[e].from < v) e++;
-    r->row_first[v] = e;
-  }
-  for (size_t e = 0; e < edges; e++) { r->row_edge[e] = e; r->in_first[r->edge[e].to + 1]++; }
-  for (uint32_t v = 0; v < vertices; v++) r->in_first[v + 1] += r->in_first[v];
-  size_t *at = malloc(((size_t)vertices + 1) * sizeof *at);
-  if (!at) return ENOMEM;
-  memcpy(at, r->in_first, ((size_t)vertices + 1) * sizeof *at);
-  for (size_t e = 0; e < edges; e++) r->in_edge[at[r->edge[e].to]++] = e;
-  free(at);
+  mesh_graph_rows(vertices, edges, relation_tail, r->edge, r->row_first, r->row_edge);
+  mesh_graph_rows(vertices, edges, relation_head, r->edge, r->in_first, r->in_edge);
   r->data.row_first = r->row_first; r->data.row_edge = r->row_edge;
   r->data.in_first = r->in_first; r->data.in_edge = r->in_edge;
   return 0;
@@ -1082,6 +1130,7 @@ static void relation_derived(struct mesh_graph_relation *r, struct mesh_graph_re
   r->data.parent = parent;
   r->data.source_first = r->source_first; r->data.source = r->source;
   r->data.query = parent->data.query;
+  r->data.origin = parent->data.origin;
 }
 struct relation_key { uint32_t from, to; size_t index; };
 static int relation_key_before(const void *a, const void *b) {
@@ -1158,15 +1207,68 @@ int mesh_graph_relation_create(uint32_t vertices, size_t views, const struct mes
 int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
                               const uint32_t *from, const uint32_t *to, int self, void (*release)(void *), void *owner,
                               struct mesh_graph_relation **out) {
+  return mesh_graph_relation_decided(vertices, views, view, supplied, from, to, self, NULL, NULL, NULL, release, owner,
+                                     out);
+}
+int mesh_graph_relation_decided(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
+                                const uint32_t *from, const uint32_t *to, int self, const uint32_t *map,
+                                int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
+                                void *context, void (*release)(void *), void *owner, struct mesh_graph_relation **out) {
   *out = NULL;
   struct mesh_graph_conflict *conflict = NULL;
-  size_t count = 0;
-  int result = view_conflicts(views, view, supplied, from, to, self != 0, &conflict, &count);
+  struct mesh_graph_origin *origin = NULL;
+  struct mesh_graph_relation **decider = NULL;
+  const uint32_t **decider_map = NULL;
+  size_t count = 0, deciders = 0;
+  int result = view_conflicts(views, view, supplied, from, to, self != 0, decide, context, &conflict,
+                              decide ? &origin : NULL, &decider, &decider_map, &deciders, &count);
   if (!result) result = relation_root(vertices, views, view, count, conflict,
                                       self ? MESH_GRAPH_QUERY_SELF : MESH_GRAPH_QUERY_DIRECTED, release, owner, out);
-  if (result) { free(conflict); return result; }
+  if (result) { free(conflict); free(origin); free(decider); free(decider_map); return result; }
   (*out)->owned = conflict;
+  (*out)->origin = origin;
+  (*out)->data.origin = origin;
+  for (size_t d = 0; d < deciders; d++) mesh_graph_relation_retain(decider[d]);
+  (*out)->decider = decider;
+  (*out)->decider_map = decider_map;
+  (*out)->deciders = deciders;
+  (*out)->map = map;
   return 0;
+}
+size_t mesh_graph_relation_deciders(const struct mesh_graph_relation *r, struct mesh_graph_relation *const **relation,
+                                    const uint32_t *const **maps, const uint32_t **map) {
+  while (r->parent) r = r->parent;
+  *relation = r->decider;
+  *maps = r->decider_map;
+  *map = r->map;
+  return r->deciders;
+}
+int mesh_graph_relation_convex(const struct mesh_graph_relation *r, size_t members, const uint32_t *member, size_t copies,
+                               const uint32_t *copy, int *convex) {
+  const struct mesh_graph_relation_data *d = &r->data;
+  *convex = 1;
+  for (size_t k = 0; k < members; k++) if (member[k] >= d->vertices) return EINVAL;
+  for (size_t k = 0; k < copies; k++) if (copy[k] >= d->vertices) return EINVAL;
+  unsigned char *role = calloc((size_t)d->vertices + 1, 1);
+  uint32_t *root = malloc((d->edges + 1) * sizeof *root);
+  if (!role || !root) { free(role); free(root); return ENOMEM; }
+  for (size_t k = 0; k < copies; k++) role[copy[k]] = 2;
+  for (size_t k = 0; k < members; k++) role[member[k]] = 1;
+  uint32_t roots = 0;
+  for (size_t k = 0; k < members; k++)
+    for (size_t q = d->row_first[member[k]]; q < d->row_first[member[k] + 1]; q++) {
+      const uint32_t head = d->edge[d->row_edge[q]].to;
+      if (!role[head]) { role[head] = 3; root[roots++] = head; }
+    }
+  int result = 0;
+  if (roots) {
+    struct mesh_graph_search *s = NULL;
+    result = mesh_graph_search(d->vertices, d->row_first, mesh_graph_relation_head, d, roots, root, 0, &s);
+    for (size_t k = 0; !result && k < members; k++) if (s->place[member[k]] != UINT32_MAX) *convex = 0;
+    mesh_graph_search_free(s);
+  }
+  free(role); free(root);
+  return result;
 }
 static const struct mesh_graph_relation *relation_of_root(const struct mesh_graph_relation *r) {
   while (r->parent) r = r->parent;
@@ -1314,6 +1416,47 @@ int mesh_graph_relation_contract(struct mesh_graph_relation *parent, const unsig
   mesh_graph_relation_retain(parent);
   r->release = release; r->owner = owner;
   *out = r;
+  return 0;
+}
+/* mesh-graph.h mesh_graph_relation_newest: the folded edges in the parent's edge order, each its parent edge's */
+int mesh_graph_relation_newest(struct mesh_graph_relation *parent, uint32_t count, uint32_t lag,
+                               struct mesh_graph_relation **out) {
+  *out = NULL;
+  const struct mesh_graph_relation_data *up = &parent->data;
+  if (!count || !lag || up->vertices > (uint64_t)lag * count) return EINVAL;
+  const uint64_t newest = (uint64_t)(lag - 1) * count;
+  size_t edges = 0;
+  for (size_t e = 0; e < up->edges; e++) edges += up->edge[e].to >= newest;
+  struct mesh_graph_relation *r = relation_new();
+  int result = r ? 0 : ENOMEM;
+  if (!result) {
+    r->edge = malloc((edges + 1) * sizeof *r->edge);
+    r->source_first = malloc((edges + 1) * sizeof *r->source_first);
+    r->source = malloc((edges + 1) * sizeof *r->source);
+    if (!r->edge || !r->source_first || !r->source) result = ENOMEM;
+  }
+  for (size_t e = 0, k = 0; !result && e < up->edges; e++) {
+    const struct mesh_graph_dependence x = up->edge[e];
+    if (x.to < newest) continue;
+    r->edge[k] = (struct mesh_graph_dependence){x.from % count, (uint32_t)(x.to - newest), x.delay + lag - 1 - x.from / count};
+    r->source_first[k] = k; r->source[k] = e;
+    k++;
+  }
+  if (!result) {
+    r->source_first[edges] = edges;
+    relation_derived(r, parent, count, edges);
+    r->newest_count = count; r->newest_lag = lag;
+    result = relation_compose(r);
+    if (!result) result = relation_rows(r);
+  }
+  if (result) { if (r) { r->parent = NULL; relation_drop(r); } return result; }
+  mesh_graph_relation_retain(parent);
+  *out = r;
+  return 0;
+}
+int mesh_graph_relation_newest_operands(const struct mesh_graph_relation *r, uint32_t *count, uint32_t *lag) {
+  if (!r->newest_lag) return ENOENT;
+  *count = r->newest_count; *lag = r->newest_lag;
   return 0;
 }
 int mesh_graph_relation_synchronization(struct mesh_graph_relation *r, const unsigned char **redundant, size_t *kept) {
@@ -2297,14 +2440,30 @@ static uint32_t view_hazard(const struct mesh_graph_view *from, const struct mes
   return from->write && to->write ? MESH_GRAPH_WRITE_AFTER_WRITE :
          from->write ? MESH_GRAPH_READ_AFTER_WRITE : MESH_GRAPH_WRITE_AFTER_READ;
 }
+/* a pair the decider answered: its two views as the record orients them, and the deciding original */
+struct view_decided { size_t from_view, to_view; struct mesh_graph_origin origin; };
+static int view_decided_before(const void *a, const void *b) {
+  const struct view_decided *x = a, *y = b;
+  if (x->from_view != y->from_view) return x->from_view < y->from_view ? -1 : 1;
+  return (x->to_view > y->to_view) - (x->to_view < y->to_view);
+}
 static int view_conflicts(size_t views, const struct mesh_graph_view *view, size_t supplied,
                           const uint32_t *supplied_from, const uint32_t *supplied_to, int self,
-                          struct mesh_graph_conflict **conflict, size_t *edges) {
+                          int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
+                          void *context, struct mesh_graph_conflict **conflict, struct mesh_graph_origin **origin,
+                          struct mesh_graph_relation ***decider, const uint32_t ***decider_map, size_t *deciders,
+                          size_t *edges) {
   *conflict = NULL; *edges = 0;
+  if (origin) *origin = NULL;
+  if (decider) { *decider = NULL; *decider_map = NULL; *deciders = 0; }
+  struct mesh_graph_relation **answered = NULL;
+  const uint32_t **answered_map = NULL;
+  size_t answers = 0, answer_room = 0;
   for (size_t e = 0; e < supplied; e++) if (supplied_from[e] >= supplied_to[e]) return EINVAL;
   if (supplied >= SIZE_MAX / sizeof(struct mesh_graph_conflict) - 64 || views >= SIZE_MAX / sizeof(struct view_hull)) return ENOMEM;
   struct view_hull *hull = malloc((views + 1) * sizeof *hull);
-  size_t made = supplied, held = supplied + 64, count = 0;
+  size_t made = supplied, held = supplied + 64, count = 0, decideds = 0, room = 0;
+  struct view_decided *decided = NULL;
   struct mesh_graph_conflict *edge = malloc(held * sizeof *edge);
   int result = hull && edge ? 0 : ENOMEM;
   for (size_t e = 0; !result && e < supplied; e++)
@@ -2330,7 +2489,30 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
       for (uint32_t d = 0; d < a->view.dims; d++) empty |= !a->view.pairs[2 * d];
       for (uint32_t d = 0; d < b->view.dims; d++) empty |= !b->view.pairs[2 * d];
       if (empty) continue;
-      const int meets = a == b ? 1 : view_meets(ctx, &pa, &pb);
+      struct mesh_graph_decided d = {NULL, NULL, {SIZE_MAX, 0, 0}};
+      if (a != b && decide) {
+        const int status = decide(context, hull[i].index, hull[j].index, &d);
+        if (status) { result = status; break; }
+        /* every answering (relation, map) input once, in the order first answered: one relation under two maps (a
+           source appended under two bindings) is two inputs */
+        size_t seen = answers;
+        for (size_t q = answers; d.witness.known && q-- > 0;)
+          if (answered[q] == d.relation && answered_map[q] == d.map) { seen = q; break; }
+        if (d.witness.known && seen == answers) {
+          if (answers == answer_room) {
+            const size_t more = answer_room ? 2 * answer_room : 8;
+            struct mesh_graph_relation **grown = realloc(answered, more * sizeof *grown);
+            if (grown) answered = grown;
+            const uint32_t **maps = grown ? realloc(answered_map, more * sizeof *maps) : NULL;
+            if (maps) answered_map = maps;
+            if (!grown || !maps) { result = ENOMEM; break; }
+            answer_room = more;
+          }
+          answered[answers] = d.relation;
+          answered_map[answers++] = d.map;
+        }
+      }
+      const int meets = a == b ? 1 : d.witness.known ? d.witness.record != SIZE_MAX : view_meets(ctx, &pa, &pb);
       if (meets < 0) { result = -meets; break; }
       if (!meets) continue;
       const struct mesh_graph_view *lo = a->vertex < b->vertex ? a : b, *hi = a->vertex < b->vertex ? b : a;
@@ -2345,6 +2527,17 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
           edge = more; held *= 2;
         }
         edge[made++] = (struct mesh_graph_conflict){lo->vertex, hi->vertex, kind, 0, a->key, first, second};
+        if (d.witness.known) {
+          if (decideds == room) {
+            if (room > SIZE_MAX / 4 / sizeof *decided) { result = ENOMEM; break; }
+            struct view_decided *more = realloc(decided, (room ? 2 * room : 64) * sizeof *more);
+            if (!more) { result = ENOMEM; break; }
+            decided = more; room = room ? 2 * room : 64;
+          }
+          struct mesh_graph_witness w = d.witness;
+          w.reverse ^= first != hull[i].index;
+          decided[decideds++] = (struct view_decided){first, second, {d.relation, w}};
+        }
         kind = kind == MESH_GRAPH_READ_AFTER_WRITE ? MESH_GRAPH_WRITE_AFTER_READ : MESH_GRAPH_READ_AFTER_WRITE;
         const size_t swapped = first;
         first = second;
@@ -2356,22 +2549,48 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
     if (k && !view_edge_before(edge + k, edge + k - 1)) continue;
     edge[count++] = edge[k];
   }
+  if (!result && origin) {
+    if (decideds) qsort(decided, decideds, sizeof *decided, view_decided_before);
+    struct mesh_graph_origin *of = malloc((count + 1) * sizeof *of);
+    if (!of) result = ENOMEM;
+    for (size_t k = 0; !result && k < count; k++) {
+      of[k] = (struct mesh_graph_origin){NULL, {SIZE_MAX, 0, 0}};
+      if (edge[k].kind == MESH_GRAPH_GIVEN) continue;
+      size_t lo = 0, hi = decideds;
+      while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (decided[mid].from_view < edge[k].from_view ||
+            (decided[mid].from_view == edge[k].from_view && decided[mid].to_view < edge[k].to_view)) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo < decideds && decided[lo].from_view == edge[k].from_view && decided[lo].to_view == edge[k].to_view)
+        of[k] = decided[lo].origin;
+    }
+    if (!result) *origin = of;
+    else free(of);
+  }
   if (!result) { *edges = count; *conflict = edge; edge = NULL; }
+  if (!result && decider) {
+    *decider = answered; *decider_map = answered_map; *deciders = answers;
+    answered = NULL; answered_map = NULL;
+  }
   if (ctx) isl_ctx_free(ctx);
-  free(hull); free(edge);
+  free(hull); free(edge); free(decided); free(answered); free(answered_map);
   return result;
 }
 
 int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
                                const uint32_t *supplied_from, const uint32_t *supplied_to,
                                struct mesh_graph_conflict **conflict, size_t *count) {
-  return view_conflicts(views, view, supplied, supplied_from, supplied_to, 1, conflict, count);
+  return view_conflicts(views, view, supplied, supplied_from, supplied_to, 1, NULL, NULL, conflict, NULL, NULL, NULL,
+                        NULL, count);
 }
 
 int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
                                  const uint32_t *supplied_from, const uint32_t *supplied_to,
                                  struct mesh_graph_conflict **conflict, size_t *count) {
-  return view_conflicts(views, view, supplied, supplied_from, supplied_to, 0, conflict, count);
+  return view_conflicts(views, view, supplied, supplied_from, supplied_to, 0, NULL, NULL, conflict, NULL, NULL, NULL,
+                        NULL, count);
 }
 
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2, Definition 3, §7,
@@ -3211,19 +3430,29 @@ int mesh_graph_archive_read(const void *bytes, size_t length, struct mesh_graph_
   return 0;
 }
 
-/* design/compilation-composition-change-request.md items 3, 6.4 and 7: mesh-graph.h mesh_graph_relation_save. A
-   relation and its parent chain, root first: struct relation_archive, then each relation's struct relation_entry and
-   its arrays, each at an 8-byte boundary (record_align): the root's views (pairs zeroed), every view's pairs, its
-   conflicts and witness index; every relation's edge, first, member, row_first, row_edge, in_first and in_edge; a
-   derived relation's source_first, source and operand (a quotient's class_of, a contraction's kept, over its parent's
-   vertices); its synchronization mask where it was computed */
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7: mesh-graph.h mesh_graph_relation_save. The
+   relations a relation references (its parent; a root's deciding relations, mesh_graph_relation_decided's; theirs),
+   each once, in mesh_graph_search's postorder from it (every reference to an earlier relation, the relation itself
+   last): struct relation_archive, then each relation's struct relation_entry and its arrays, each at an 8-byte
+   boundary (record_align): a root's views (pairs zeroed), every view's pairs, its conflicts and witness index, its
+   origin records (struct relation_origin: the deciding relation's ID, UINT64_MAX for none, and its witness), its
+   deciders in the order first answered (struct relation_decider: ID, and its map's presence and length), its own map
+   and each decider's map (uint32_t view identities); every relation's edge, first, member, row_first, row_edge,
+   in_first and in_edge; a derived relation's source_first, source and operand (a quotient's class_of, a
+   contraction's kept, over its parent's vertices; a newest projection's count and lag); its synchronization mask where
+   it was computed */
 _Static_assert(sizeof(size_t) == 8 && sizeof(struct mesh_graph_view) == 48 && sizeof(struct mesh_graph_conflict) == 40 &&
-               sizeof(struct mesh_graph_dependence) == 16, "relation archive: native arrays of 8-byte alignment");
+               sizeof(struct mesh_graph_dependence) == 16 && sizeof(struct mesh_graph_origin) == 24,
+               "relation archive: native arrays of 8-byte alignment");
 struct relation_archive { uint64_t magic, bytes; uint32_t relations, padding; };
-struct relation_entry { uint64_t views, conflicts, pairs, witnesses, edges, members, sources, operand, kept;
-                        uint32_t vertices, kind, query, synchronized; };
-enum { RELATION_ROOT, RELATION_QUOTIENT, RELATION_CONTRACT };
-#define RELATION_ARCHIVE UINT64_C(0x314c45524748534d)
+struct relation_entry { uint64_t views, conflicts, pairs, witnesses, edges, members, sources, operand, kept, deciders;
+                        uint32_t vertices, kind, query, synchronized, parent, origins, mapped, padding; };
+struct relation_origin { uint64_t relation; struct mesh_graph_witness witness; };
+_Static_assert(sizeof(struct relation_origin) == sizeof(struct mesh_graph_origin), "relation_origin");
+/* a root's decider: its ID, and its map's presence and length (its root's views) */
+struct relation_decider { uint64_t relation, views; uint32_t mapped, padding; };
+enum { RELATION_ROOT, RELATION_QUOTIENT, RELATION_CONTRACT, RELATION_NEWEST };
+#define RELATION_ARCHIVE UINT64_C(0x334c45524748534d)
 struct relation_state { int synchronized; const unsigned char *mask; size_t kept; };
 struct relation_cursor { char *out; size_t at; };
 static void *relation_put(struct relation_cursor *c, const void *data, size_t size) {
@@ -3231,6 +3460,67 @@ static void *relation_put(struct relation_cursor *c, const void *data, size_t si
   if (at && size) memcpy(at, data, size);
   c->at = record_align(c->at + size);
   return at;
+}
+/* x's place in `node` (count of them where it is none) */
+static size_t relation_place(const struct mesh_graph_relation *const *node, size_t count,
+                             const struct mesh_graph_relation *x) {
+  size_t k = 0;
+  while (k < count && node[k] != x) k++;
+  return k;
+}
+static void *relation_grow(void *array, size_t *room, size_t need, size_t width) {
+  if (need <= *room) return array;
+  const size_t more = need > SIZE_MAX / 2 / width ? need : 2 * need;
+  void *grown = realloc(array, more * width);
+  if (grown) *room = more;
+  return grown;
+}
+/* the relations `r` references, each once: the relation's own operands (its parent; a root's deciders) found from r,
+   then ordered by mesh_graph_search's postorder over those operands (every operand before its user, r last) */
+static int relation_graph(const struct mesh_graph_relation *r, const struct mesh_graph_relation ***out,
+                          uint32_t *count) {
+  *out = NULL; *count = 0;
+  size_t rooms = 8, heads = 0, headroom = 8, n = 1;
+  const struct mesh_graph_relation **node = malloc(rooms * sizeof *node);
+  size_t *first = malloc((rooms + 1) * sizeof *first);
+  uint32_t *head = malloc(headroom * sizeof *head);
+  int status = node && first && head ? 0 : ENOMEM;
+  if (!status) node[0] = r;
+  for (size_t i = 0; !status && i < n; i++) {
+    const struct mesh_graph_relation *x = node[i];
+    first[i] = heads;
+    const size_t operands = x->parent ? 1 : x->deciders;
+    for (size_t k = 0; !status && k < operands; k++) {
+      const struct mesh_graph_relation *y = x->parent ? x->parent : x->decider[k];
+      size_t j = relation_place(node, n, y);
+      if (j == n) {
+        const struct mesh_graph_relation **grown = relation_grow(node, &rooms, n + 1, sizeof *node);
+        if (grown) node = grown;
+        size_t *firsts = grown ? realloc(first, (rooms + 1) * sizeof *first) : NULL;
+        if (firsts) first = firsts;
+        if (!grown || !firsts || n + 1 >= UINT32_MAX) { status = ENOMEM; break; }
+        node[n++] = y;
+      }
+      uint32_t *heads_grown = relation_grow(head, &headroom, heads + 1, sizeof *head);
+      if (!heads_grown) { status = ENOMEM; break; }
+      head = heads_grown;
+      head[heads++] = (uint32_t)j;
+    }
+  }
+  struct mesh_graph_search *search = NULL;
+  const uint32_t start = 0;
+  if (!status) {
+    first[n] = heads;
+    status = mesh_graph_search((uint32_t)n, first, mesh_graph_row_head, head, 1, &start, 0, &search);
+  }
+  const struct mesh_graph_relation **ordered = NULL;
+  if (!status && !(ordered = malloc(n * sizeof *ordered))) status = ENOMEM;
+  for (uint32_t k = 0; !status && k < search->count; k++) ordered[k] = node[search->postorder[k]];
+  if (!status) { *out = ordered; *count = search->count; }
+  else free(ordered);
+  mesh_graph_search_free(search);
+  free(node); free(first); free(head);
+  return status;
 }
 static void relation_emit(struct relation_cursor *c, const struct mesh_graph_relation *const *chain,
                           const struct relation_state *state, uint32_t n) {
@@ -3241,24 +3531,42 @@ static void relation_emit(struct relation_cursor *c, const struct mesh_graph_rel
     const struct mesh_graph_relation_data *d = &r->data;
     struct relation_entry e = {.edges = d->edges, .members = d->first[d->edges], .kept = state[k].kept,
                                .vertices = d->vertices, .query = d->query,
-                               .synchronized = (uint32_t)!!state[k].synchronized};
-    if (k) {
-      e.kind = d->class_of ? RELATION_QUOTIENT : RELATION_CONTRACT;
+                               .synchronized = (uint32_t)!!state[k].synchronized, .parent = UINT32_MAX};
+    if (r->parent) {
+      e.kind = r->newest_lag ? RELATION_NEWEST : d->class_of ? RELATION_QUOTIENT : RELATION_CONTRACT;
       e.sources = d->source_first[d->edges];
-      e.operand = chain[k - 1]->data.vertices;
+      e.operand = r->parent->data.vertices;
+      e.parent = (uint32_t)relation_place(chain, n, r->parent);
     } else {
       e.kind = RELATION_ROOT;
       e.views = d->views; e.conflicts = d->conflicts; e.witnesses = r->witnesses;
+      e.origins = d->origin != NULL; e.deciders = r->deciders; e.mapped = r->map != NULL;
       for (size_t v = 0; v < d->views; v++) e.pairs += 2 * (uint64_t)d->view[v].view.dims;
     }
     relation_put(c, &e, sizeof e);
-    if (!k) {
+    if (!r->parent) {
       struct mesh_graph_view *views = relation_put(c, d->view, d->views * sizeof *d->view);
       for (size_t v = 0; views && v < d->views; v++) views[v].view.pairs = NULL;
       for (size_t v = 0; v < d->views; v++)
         relation_put(c, d->view[v].view.pairs, 2 * (size_t)d->view[v].view.dims * sizeof(uint64_t));
       relation_put(c, d->conflict, d->conflicts * sizeof *d->conflict);
       relation_put(c, r->witness, r->witnesses * sizeof *r->witness);
+      for (size_t q = 0; e.origins && q < d->conflicts; q++) {
+        const struct mesh_graph_origin *o = d->origin + q;
+        const struct relation_origin saved = {o->relation ? relation_place(chain, n, o->relation) : UINT64_MAX,
+                                              o->witness};
+        relation_put(c, &saved, sizeof saved);
+      }
+      for (size_t q = 0; q < r->deciders; q++) {
+        const uint32_t *map = r->decider_map ? r->decider_map[q] : NULL;
+        const struct relation_decider saved = {relation_place(chain, n, r->decider[q]),
+                                               map ? relation_of_root(r->decider[q])->data.views : 0, map != NULL, 0};
+        relation_put(c, &saved, sizeof saved);
+      }
+      if (r->map) relation_put(c, r->map, d->views * sizeof *r->map);
+      for (size_t q = 0; q < r->deciders; q++)
+        if (r->decider_map && r->decider_map[q])
+          relation_put(c, r->decider_map[q], relation_of_root(r->decider[q])->data.views * sizeof *r->decider_map[q]);
     }
     relation_put(c, d->edge, d->edges * sizeof *d->edge);
     relation_put(c, d->first, (d->edges + 1) * sizeof *d->first);
@@ -3267,10 +3575,13 @@ static void relation_emit(struct relation_cursor *c, const struct mesh_graph_rel
     relation_put(c, d->row_edge, d->edges * sizeof *d->row_edge);
     relation_put(c, d->in_first, ((size_t)d->vertices + 1) * sizeof *d->in_first);
     relation_put(c, d->in_edge, d->edges * sizeof *d->in_edge);
-    if (k) {
+    if (r->parent) {
       relation_put(c, d->source_first, (d->edges + 1) * sizeof *d->source_first);
       relation_put(c, d->source, e.sources * sizeof *d->source);
-      if (d->class_of) relation_put(c, d->class_of, (size_t)e.operand * sizeof *d->class_of);
+      if (r->newest_lag) {
+        const uint32_t scalars[2] = {r->newest_count, r->newest_lag};
+        relation_put(c, scalars, sizeof scalars);
+      } else if (d->class_of) relation_put(c, d->class_of, (size_t)e.operand * sizeof *d->class_of);
       else relation_put(c, d->kept, (size_t)e.operand);
     }
     if (state[k].synchronized) relation_put(c, state[k].mask, d->edges);
@@ -3279,14 +3590,13 @@ static void relation_emit(struct relation_cursor *c, const struct mesh_graph_rel
 }
 int mesh_graph_relation_save(const struct mesh_graph_relation *r, void **bytes, size_t *length) {
   *bytes = NULL; *length = 0;
+  const struct mesh_graph_relation **chain = NULL;
   uint32_t n = 0;
-  for (const struct mesh_graph_relation *x = r; x; x = x->parent) n++;
-  const struct mesh_graph_relation **chain = malloc((size_t)n * sizeof *chain);
+  int status = relation_graph(r, &chain, &n);
+  if (status) return status;
   struct relation_state *state = malloc((size_t)n * sizeof *state);
-  if (!chain || !state) { free(chain); free(state); return ENOMEM; }
-  uint32_t k = n;
-  for (const struct mesh_graph_relation *x = r; x; x = x->parent) chain[--k] = x;
-  for (k = 0; k < n; k++) {
+  if (!state) { free(chain); return ENOMEM; }
+  for (uint32_t k = 0; k < n; k++) {
     struct mesh_graph_relation *x = (struct mesh_graph_relation *)(uintptr_t)chain[k];
     pthread_mutex_lock(&x->lock);
     state[k] = (struct relation_state){x->synchronized, x->mask, x->kept};
@@ -3303,13 +3613,22 @@ int mesh_graph_relation_save(const struct mesh_graph_relation *r, void **bytes, 
   free(chain); free(state);
   return out ? 0 : ENOMEM;
 }
-/* the loaded root's owner: its relocated view headers and the caller's archive owner (NULL release until success) */
-struct relation_loaded { void (*release)(void *); void *owner; struct mesh_graph_view *view; };
-static void relation_loaded_release(void *owner) {
-  struct relation_loaded *l = owner;
-  free(l->view);
-  if (l->release) l->release(l->owner);
-  free(l);
+/* the caller's archive owner, shared by every loaded root (NULL release until success), and one root's own
+   relocated headers: its views and its origin records */
+struct relation_loaded { size_t roots; void (*release)(void *); void *owner; };
+struct relation_root {
+  struct relation_loaded *shared;
+  struct mesh_graph_view *view;
+  struct mesh_graph_origin *origin;
+};
+static void relation_root_release(void *owner) {
+  struct relation_root *o = owner;
+  struct relation_loaded *shared = o->shared;
+  free(o->view); free(o->origin); free(o);
+  if (__atomic_fetch_sub(&shared->roots, 1, __ATOMIC_ACQ_REL) == 1) {
+    if (shared->release) shared->release(shared->owner);
+    free(shared);
+  }
 }
 struct relation_reader { const char *bytes; size_t at, length; int status; };
 static const void *relation_take(struct relation_reader *x, uint64_t count, size_t width) {
@@ -3328,27 +3647,32 @@ static int relation_csr(const size_t *first, size_t rows, size_t total) {
   for (size_t i = 0; i < rows; i++) if (first[i + 1] < first[i]) return EINVAL;
   return first[rows] == total ? 0 : EINVAL;
 }
-/* one relation's arrays as borrowed spans of the archive, each index checked against what it indexes */
+/* one relation's arrays as borrowed spans of the archive, each index checked against what it indexes; a root's
+   origins and deciders refer to the relations made before it (made[0 .. at)) */
 static int relation_restore(struct relation_reader *x, struct mesh_graph_relation *r, const struct relation_entry *e,
-                            struct relation_loaded *loaded) {
+                            struct mesh_graph_relation *const *made, uint32_t at, struct relation_root *root) {
   struct mesh_graph_relation_data *d = &r->data;
   if (!r->parent) {
     const struct mesh_graph_view *stored = relation_take(x, e->views, sizeof *stored);
     const uint64_t *pairs = relation_take(x, e->pairs, sizeof *pairs);
     d->conflict = relation_take(x, e->conflicts, sizeof *d->conflict);
     r->witness = (size_t *)(uintptr_t)relation_take(x, e->witnesses, sizeof *r->witness);
+    const struct relation_origin *origin = relation_take(x, e->origins ? e->conflicts : 0, sizeof *origin);
+    const struct relation_decider *decider = relation_take(x, e->deciders, sizeof *decider);
+    const uint32_t *map = relation_take(x, e->mapped ? e->views : 0, sizeof *map);
     if (x->status) return x->status;
-    if (!(loaded->view = malloc(((size_t)e->views + 1) * sizeof *loaded->view))) return ENOMEM;
+    if (e->origins > 1) return EINVAL;
+    if (!(root->view = malloc(((size_t)e->views + 1) * sizeof *root->view))) return ENOMEM;
     uint64_t used = 0;
     for (size_t v = 0; v < e->views; v++) {
       const uint64_t count = 2 * (uint64_t)stored[v].view.dims;
       if (count > e->pairs - used) return EINVAL;
-      loaded->view[v] = stored[v];
-      loaded->view[v].view.pairs = count ? pairs + used : NULL;
+      root->view[v] = stored[v];
+      root->view[v].view.pairs = count ? pairs + used : NULL;
       used += count;
     }
     if (used != e->pairs) return EINVAL;
-    d->vertices = e->vertices; d->views = (size_t)e->views; d->view = loaded->view;
+    d->vertices = e->vertices; d->views = (size_t)e->views; d->view = root->view;
     d->conflicts = (size_t)e->conflicts; d->query = e->query; r->witnesses = (size_t)e->witnesses;
     for (size_t k = 0; k < d->conflicts; k++) {
       const struct mesh_graph_conflict *y = d->conflict + k;
@@ -3356,6 +3680,32 @@ static int relation_restore(struct relation_reader *x, struct mesh_graph_relatio
           (y->to_view != SIZE_MAX && y->to_view >= d->views)) return EINVAL;
     }
     if (relation_index(r->witness, r->witnesses, d->conflicts)) return EINVAL;
+    if (e->origins) {
+      if (!(root->origin = malloc((d->conflicts + 1) * sizeof *root->origin))) return ENOMEM;
+      for (size_t k = 0; k < d->conflicts; k++) {
+        const struct relation_origin *o = origin + k;
+        const struct mesh_graph_relation *by = o->relation == UINT64_MAX ? NULL
+                                                : o->relation < at ? made[o->relation] : r;
+        if (by == r || o->witness.known > 1 || o->witness.reverse > 1 ||
+            (by && o->witness.record != SIZE_MAX && o->witness.record >= relation_of_root(by)->data.conflicts))
+          return EINVAL;
+        root->origin[k] = (struct mesh_graph_origin){by, o->witness};
+      }
+      r->origin = root->origin; d->origin = root->origin;
+    }
+    if (e->mapped > 1) return EINVAL;
+    if (!(r->decider = malloc(((size_t)e->deciders + 1) * sizeof *r->decider)) ||
+        !(r->decider_map = malloc(((size_t)e->deciders + 1) * sizeof *r->decider_map))) return ENOMEM;
+    for (; r->deciders < e->deciders; r->deciders++) {
+      const struct relation_decider *g = decider + r->deciders;
+      if (g->relation >= at || g->mapped > 1 ||
+          (g->mapped && g->views != relation_of_root(made[g->relation])->data.views)) return EINVAL;
+      r->decider[r->deciders] = made[g->relation];
+      r->decider_map[r->deciders] = g->mapped ? relation_take(x, g->views, sizeof *r->decider_map[r->deciders]) : NULL;
+      if (x->status) return x->status;
+      mesh_graph_relation_retain(r->decider[r->deciders]);
+    }
+    r->map = e->mapped ? map : NULL;
   }
   r->edge = (struct mesh_graph_dependence *)(uintptr_t)relation_take(x, e->edges, sizeof *r->edge);
   r->first = (size_t *)(uintptr_t)relation_take(x, e->edges + 1, sizeof *r->first);
@@ -3368,7 +3718,11 @@ static int relation_restore(struct relation_reader *x, struct mesh_graph_relatio
     r->source_first = (size_t *)(uintptr_t)relation_take(x, e->edges + 1, sizeof *r->source_first);
     r->source = (size_t *)(uintptr_t)relation_take(x, e->sources, sizeof *r->source);
     if (e->kind == RELATION_QUOTIENT) d->class_of = relation_take(x, e->operand, sizeof *d->class_of);
-    else d->kept = relation_take(x, e->operand, 1);
+    else if (e->kind == RELATION_CONTRACT) d->kept = relation_take(x, e->operand, 1);
+    else {
+      const uint32_t *scalars = relation_take(x, 2, sizeof *scalars);
+      if (scalars) { r->newest_count = scalars[0]; r->newest_lag = scalars[1]; }
+    }
   }
   if (e->synchronized) { r->mask = relation_take(x, e->edges, 1); r->synchronized = 1; r->kept = (size_t)e->kept; }
   if (x->status) return x->status;
@@ -3384,6 +3738,8 @@ static int relation_restore(struct relation_reader *x, struct mesh_graph_relatio
     if (e->operand != r->parent->data.vertices || relation_csr(r->source_first, edges, (size_t)e->sources) ||
         relation_index(r->source, (size_t)e->sources, r->parent->data.edges)) return EINVAL;
     for (size_t v = 0; d->class_of && v < e->operand; v++) if (d->class_of[v] >= d->vertices) return EINVAL;
+    if (e->kind == RELATION_NEWEST && (!r->newest_lag || r->newest_count != d->vertices ||
+                                       r->parent->data.vertices > (uint64_t)r->newest_lag * r->newest_count)) return EINVAL;
   }
   return 0;
 }
@@ -3393,34 +3749,41 @@ int mesh_graph_relation_load(const void *bytes, size_t length, void (*release)(v
   if ((uintptr_t)bytes % 8) return EINVAL;
   struct relation_reader x = {bytes, 0, length, 0};
   const struct relation_archive *head = relation_take(&x, 1, sizeof *head);
-  if (!head || head->magic != RELATION_ARCHIVE || head->bytes != length || !head->relations) return EINVAL;
-  struct relation_loaded *loaded = calloc(1, sizeof *loaded);
-  if (!loaded) return ENOMEM;
-  struct mesh_graph_relation *r = NULL;
-  int status = 0;
-  for (uint32_t k = 0; !status && k < head->relations; k++) {
+  if (!head || head->magic != RELATION_ARCHIVE || head->bytes != length || !head->relations ||
+      head->relations > length / sizeof(struct relation_entry)) return EINVAL;
+  const uint32_t n = head->relations;
+  struct mesh_graph_relation **made = calloc(n, sizeof *made);
+  struct relation_loaded *shared = calloc(1, sizeof *shared);
+  int status = made && shared ? 0 : ENOMEM;
+  uint32_t count = 0;
+  for (; !status && count < n; count++) {
     const struct relation_entry *e = relation_take(&x, 1, sizeof *e);
-    if (!e || (k == 0) != (e->kind == RELATION_ROOT) || e->kind > RELATION_CONTRACT || e->query > MESH_GRAPH_QUERY_SELF) {
+    if (!e || e->kind > RELATION_NEWEST || e->query > MESH_GRAPH_QUERY_SELF ||
+        (e->kind == RELATION_ROOT) != (e->parent == UINT32_MAX) || (e->parent != UINT32_MAX && e->parent >= count)) {
       status = EINVAL;
       break;
     }
-    struct mesh_graph_relation *n = relation_new();
-    if (!n) { status = ENOMEM; break; }
-    n->loaded = 1;
-    if (r) relation_derived(n, r, e->vertices, (size_t)e->edges);
-    else { n->release = relation_loaded_release; n->owner = loaded; }
-    r = n;
-    status = relation_restore(&x, r, e, loaded);
+    struct mesh_graph_relation *m = relation_new();
+    struct relation_root *root = m && e->parent == UINT32_MAX ? calloc(1, sizeof *root) : NULL;
+    if (!m || (e->parent == UINT32_MAX && !root)) { if (m) relation_drop(m); status = ENOMEM; break; }
+    m->loaded = 1;
+    made[count] = m;
+    if (root) { root->shared = shared; shared->roots++; m->release = relation_root_release; m->owner = root; }
+    else {
+      relation_derived(m, made[e->parent], e->vertices, (size_t)e->edges);
+      mesh_graph_relation_retain(made[e->parent]);
+    }
+    status = relation_restore(&x, m, e, made, count, root);
+    if (status) { count++; break; }
   }
   if (!status && x.at != length) status = EINVAL;
-  if (status) {
-    if (r) mesh_graph_relation_free(r);
-    else free(loaded);
-    return status;
-  }
-  loaded->release = release; loaded->owner = owner;
-  *out = r;
-  return 0;
+  if (!status) { shared->release = release; shared->owner = owner; }
+  const size_t roots = shared ? shared->roots : 0;
+  for (uint32_t k = 0; k < count; k++) if (status || k + 1 < n) mesh_graph_relation_free(made[k]);
+  if (!roots) free(shared);
+  if (!status) *out = made[n - 1];
+  free(made);
+  return status;
 }
 
 /* design/synchronization-signature-change-request.md item 1; L. Lamport, CACM 21(7), 1978 */
@@ -3824,15 +4187,31 @@ void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(voi
 
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2; B. R. Rau, MICRO 1994;
    design/torch-source-lowering-change-request.md item 3 */
-size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32_t *tail, uint32_t row, uint32_t count,
-                          uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge) {
+size_t mesh_graph_delayed_rows(const size_t *first, const size_t *order, uint32_t (*tail)(const void *context, size_t e),
+                               const void *context, const unsigned char *redundant, uint32_t row, uint32_t count,
+                               uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge) {
   size_t made = 0;
   for (size_t q = first[row]; q < first[row + 1]; q++) {
-    const uint32_t from = tail[order[q]], delay = lag - 1 - from / count;
+    const size_t e = order[q];
+    if (redundant && redundant[e]) continue;
+    const uint32_t from = tail(context, e), delay = lag - 1 - from / count;
     if (t < delay) continue;
     source[made] = from % count; slot[made] = (uint32_t)((t - delay) % lag);
-    if (edge) edge[made] = order[q];
+    if (edge) edge[made] = e;
     made++;
   }
   return made;
+}
+size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32_t *tail, uint32_t row, uint32_t count,
+                          uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge) {
+  return mesh_graph_delayed_rows(first, order, mesh_graph_row_head, tail, NULL, row, count, lag, t, source, slot, edge);
+}
+uint32_t mesh_graph_relation_tail(const void *context, size_t e) {
+  return ((const struct mesh_graph_relation_data *)context)->edge[e].from;
+}
+size_t mesh_graph_relation_delayed(const struct mesh_graph_relation_data *relation, const unsigned char *redundant,
+                                   uint32_t offset, uint32_t row, uint32_t count, uint32_t lag, uint64_t t,
+                                   uint32_t *source, uint32_t *slot, size_t *edge) {
+  return mesh_graph_delayed_rows(relation->in_first + offset, relation->in_edge, mesh_graph_relation_tail, relation,
+                                 redundant, row, count, lag, t, source, slot, edge);
 }

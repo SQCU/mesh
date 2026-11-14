@@ -1,0 +1,22 @@
+{
+  "scope": "Canonical retained relation, archive and function analysis build checkpoint; source GIVEN and current group quotient followups remain open.",
+  "files": {
+    "/Users/mdot/dox/mesh/rdma/mesh-graph.h": "9090ce8f1fbaa8e184e1e3d564d8fe47090ac930c4a2c607d4360507af9c3525",
+    "/Users/mdot/dox/mesh/rdma/mesh-graph.c": "661ac2f8d71d8236335e39ea0d29759e054600470b01ea3a13fe067fc7612675",
+    "/Users/mdot/metal-microbench/metal_ir.h": "1b8c8e7895aeb87761464882cad37cf9c15a2ad6332362fcb8b6a910f1761932",
+    "/Users/mdot/metal-microbench/metal_ir.mm": "b7c381b6a01e4d0e89d29ba41d120feddfd156210357b0bac851705374591c85",
+    "/Users/mdot/metal-microbench/metal_transform.mm": "3030b1f4c6c4f8463671c9aa384a2745ef4772f9dda9ee37d6cca914603f7760",
+    "/Users/mdot/metal-microbench/metal_archive.mm": "5d9e9c0448e63cf56f1ba7f031497611d3e9a4cd268e8c8c5ca2f00fe349352f",
+    "/Users/mdot/metal-microbench/metal_native.mm": "8731dc3f1fd975bad7a6d1135234ac883bb9df4e5d46ee74032b639dc183ee5b"
+  },
+  "build": {
+    "libmesh": 35551,
+    "metal": 55755,
+    "exit": 0
+  },
+  "logs": [
+    "compiler/full-retained-libmesh-build.log",
+    "compiler/full-retained-native-build.log",
+    "compiler/full-retained-abi.log"
+  ]
+}

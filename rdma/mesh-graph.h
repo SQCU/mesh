@@ -55,6 +55,22 @@ struct mesh_graph_closure { uint32_t vertices; size_t words; uint64_t *reached; 
 int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                        const void *context, const uint32_t *order, ptrdiff_t step, struct mesh_graph_closure **made);
 void mesh_graph_closure_free(struct mesh_graph_closure *made);
+/* T. H. Cormen et al., Introduction to Algorithms, 3rd ed., §24.2, DAG-SHORTEST-PATHS with max for min; S. Zhang et al.,
+   HAP, EuroSys 2024, §3.2: over a retained relation's prerequisite rows (incoming: in_first/in_edge, a row's heads the
+   edges' `from`; else row_first/row_edge, its heads their `to`), the vertices processed in order[0], order[step], ...
+   (each vertex once, every head before its row), length[v] = 0 for a vertex with no prerequisite, else the largest
+   length[head] + weight[e] over its row's edges e (weight indexed by the relation's own edges); EINVAL where the order
+   is not a permutation or a head is not before its row */
+struct mesh_graph_relation;
+int mesh_graph_longest(const struct mesh_graph_relation *relation, int incoming, const uint32_t *order, ptrdiff_t step,
+                       const double *weight, double *length);
+/* F. Harary, Graph Theory, 1969 (sources and sinks); L. Lamport, CACM 21(7), 1978; M. Lam, PLDI 1988, §2.3;
+   design/disjoint-pages-change-request.md C3.3 and C3.5: over a retained relation's edges e not excluded[e] (its
+   mesh_graph_relation_synchronization mask) with class_of[from] == class_of[to], source[v] is 0 where such an edge enters
+   v and sink[v] is 0 where one leaves v, else 1; class_of, source and sink have the relation's vertices, excluded its
+   edges; returns 0 */
+int mesh_graph_boundaries(const struct mesh_graph_relation *relation, const uint32_t *class_of,
+                          const unsigned char *excluded, unsigned char *source, unsigned char *sink);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
@@ -290,6 +306,12 @@ int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edge
    borrowed until the relation is freed. mesh_graph_relation_synchronization is mesh_graph_synchronization's mask
    over the relation's edges, computed once. EINVAL for an endpoint or class out of range */
 struct mesh_graph_relation;
+struct mesh_graph_witness { size_t record; uint32_t reverse, known; };
+_Static_assert(sizeof(struct mesh_graph_witness) == 16, "mesh_graph_witness");
+/* a record's deciding original (mesh_graph_relation_decided): the retained relation and its witness, oriented as the
+   record is */
+struct mesh_graph_origin { const struct mesh_graph_relation *relation; struct mesh_graph_witness witness; };
+_Static_assert(sizeof(struct mesh_graph_origin) == 24, "mesh_graph_origin");
 struct mesh_graph_relation_data {
   uint32_t vertices;
   size_t views, conflicts, edges;
@@ -304,6 +326,7 @@ struct mesh_graph_relation_data {
   const uint32_t *class_of;
   const unsigned char *kept;
   uint32_t query;
+  const struct mesh_graph_origin *origin;
 };
 void mesh_graph_relation_retain(struct mesh_graph_relation *);
 void mesh_graph_relation_free(struct mesh_graph_relation *);
@@ -315,6 +338,15 @@ int mesh_graph_relation_quotient(struct mesh_graph_relation *parent, uint32_t cl
                                  void (*release)(void *), void *owner, struct mesh_graph_relation **out);
 int mesh_graph_relation_contract(struct mesh_graph_relation *parent, const unsigned char *kept, void (*release)(void *),
                                  void *owner, struct mesh_graph_relation **out);
+/* M. Lam, PLDI 1988, §2.3 (modulo variable expansion, the unrolled copies' inverse): `parent` over `lag` iterations of
+   `count` vertices folded onto its last iteration, a derived relation over `count` vertices: each parent edge into
+   the last iteration, from x to (lag - 1) count + y, as {x % count, y, its delay + lag - 1 - x / count}, in the
+   parent's edge order, its one source that parent edge (its members that edge's); its operands `count` and `lag`,
+   retained and archived (mesh_graph_relation_newest_operands: 0 and them for such a relation, ENOENT for any other).
+   EINVAL where `count` or `lag` is 0 or the parent has more than lag x count vertices */
+int mesh_graph_relation_newest(struct mesh_graph_relation *parent, uint32_t count, uint32_t lag,
+                               struct mesh_graph_relation **out);
+int mesh_graph_relation_newest_operands(const struct mesh_graph_relation *, uint32_t *count, uint32_t *lag);
 int mesh_graph_relation_synchronization(struct mesh_graph_relation *, const unsigned char **redundant, size_t *kept);
 /* design/compilation-composition-change-request.md items 6.4 and 7: a root made by mesh_graph_relation_views is the
    one mesh_graph_dependences_views (self 0, query DIRECTED) or mesh_graph_conflicts_views (self 1, query SELF) solve
@@ -327,8 +359,6 @@ int mesh_graph_relation_synchronization(struct mesh_graph_relation *, const unsi
    witness's hazard in the asked orientation, view_conflicts' own: key and given the record's, from_view and to_view
    as asked; ENODATA where not known, ENOENT where there is none */
 enum { MESH_GRAPH_QUERY_NONE, MESH_GRAPH_QUERY_DIRECTED, MESH_GRAPH_QUERY_SELF };
-struct mesh_graph_witness { size_t record; uint32_t reverse, known; };
-_Static_assert(sizeof(struct mesh_graph_witness) == 16, "mesh_graph_witness");
 int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
                               const uint32_t *from, const uint32_t *to, int self, void (*release)(void *), void *owner,
                               struct mesh_graph_relation **out);
@@ -336,16 +366,50 @@ int mesh_graph_relation_witness(const struct mesh_graph_relation *, size_t from_
                                 struct mesh_graph_witness *out);
 int mesh_graph_relation_cause(const struct mesh_graph_relation *, const struct mesh_graph_witness *,
                               struct mesh_graph_cause *out);
+/* design/compilation-composition-change-request.md items 6.4 and 7: mesh_graph_relation_views (self and query as
+   there) whose pair test asks `decide` first. For each candidate pair of distinct views a and b (one key, hulls that
+   meet, not both reads, not both write 2, both nonempty), decide(context, a, b, &d) either answers it from a retained
+   relation (d.relation, and d.witness that relation's mesh_graph_relation_witness for the pair oriented a -> b:
+   known 1, record its original record or SIZE_MAX for its established absence), or leaves it (witness.known 0) to be
+   solved here, once. A nonzero return ends the query with that status. The records are the solver's own, as
+   mesh_graph_relation_views makes them. data.origin[k] is record k's deciding relation and witness, `reverse`
+   relative to record k's own from_view -> to_view, and {NULL, {SIZE_MAX, 0, 0}} for a pair solved here or a GIVEN
+   record. d.map is the deciding relation's map: its views' identities in the caller's namespace (borrowed under
+   `owner`); `map` is this query's own (view v's identity map[v], borrowed under `owner`, NULL for none).
+   mesh_graph_relation_deciders gives every (relation, map) input that answered one of the root's pairs, hazard or
+   absence, once in the order first answered (*relation, retained by the result until its last reference), its map
+   (*maps) and the root's own map (*map): the provenance of each answer, an absence included, with no table of
+   pairs. Derived relations share their root's origin and deciders. 0 deciders and NULL maps for a relation not made
+   here */
+struct mesh_graph_decided { struct mesh_graph_relation *relation; const uint32_t *map; struct mesh_graph_witness witness; };
+int mesh_graph_relation_decided(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
+                                const uint32_t *from, const uint32_t *to, int self, const uint32_t *map,
+                                int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
+                                void *context, void (*release)(void *), void *owner, struct mesh_graph_relation **out);
+size_t mesh_graph_relation_deciders(const struct mesh_graph_relation *, struct mesh_graph_relation *const **relation,
+                                    const uint32_t *const **maps, const uint32_t **map);
+/* design/compilation-composition-change-request.md item 7, "fusion may discharge internal edges but cannot erase
+   required ordering through outside work": whether vertices member[0 .. members) of `r` can be made one. *convex is 0
+   where a path of r's outgoing rows leaves the members and returns to them, and 1 otherwise. A path among the members
+   is discharged, as is an edge from a member to one of copy[0 .. copies), a vertex holding its own copy of the
+   members' work. One mesh_graph_search of the rows, from the heads of the members' rows that are neither members nor
+   copies. EINVAL for a member or copy out of range */
+int mesh_graph_relation_convex(const struct mesh_graph_relation *, size_t members, const uint32_t *member, size_t copies,
+                               const uint32_t *copy, int *convex);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7: the complete retained result, saved and loaded
-   without solving, deriving or projecting again. mesh_graph_relation_save writes the relation and its parent chain,
-   root first, into *bytes (*length of them, the caller's, released with free): the root's original views with their
-   pairs, its conflict records and witness index, each relation's edges, members, outgoing and incoming rows, query, a
-   derived relation's sources and operand (class_of or kept), and its synchronization mask and kept count where it was
-   computed. mesh_graph_relation_load returns that chain with every array a borrowed span of `bytes` (8-byte aligned,
-   EINVAL otherwise) except the root's view headers, whose pairs are relocated into `bytes`; on success the root adopts
-   `owner` as mesh_graph_relation_create does (release(owner) with the chain's last reference, `bytes` borrowed until
-   then); on failure the caller keeps `owner` and nothing is kept. EINVAL for an archive whose spans or indices are
-   out of bounds */
+   without solving, deriving or projecting again. mesh_graph_relation_save writes into *bytes (*length of them, the
+   caller's, released with free) the relation and every relation it references, each once (its parent, a root's
+   deciding relations, theirs), in mesh_graph_search's postorder from it: each root's original views with their pairs,
+   its conflict records, witness index, origin records (each record's deciding relation and witness), deciders, its
+   own map and its deciders' maps (mesh_graph_relation_deciders);
+   each relation's edges, members, outgoing and incoming rows and query; a derived relation's sources and operand
+   (class_of, kept, or newest count and lag); and its synchronization mask and kept count where it was computed.
+   mesh_graph_relation_load returns the same relations, the same references between them, with every array a borrowed
+   span of `bytes` (8-byte aligned, EINVAL otherwise), the maps included, except each root's view headers (pairs
+   relocated into `bytes`), origin records (relations relocated), deciders (retained) and the deciders' map pointers. On success every loaded root shares `owner`, adopted
+   as mesh_graph_relation_create does: release(owner) once the last of them is freed, `bytes` borrowed until then. On
+   failure the caller keeps `owner` and nothing is kept. EINVAL for an archive whose spans or indices are out of
+   bounds */
 int mesh_graph_relation_save(const struct mesh_graph_relation *, void **bytes, size_t *length);
 int mesh_graph_relation_load(const void *bytes, size_t length, void (*release)(void *), void *owner,
                              struct mesh_graph_relation **out);
@@ -447,9 +511,21 @@ int mesh_graph_greedy_by_size(size_t records, const uint64_t *size, int (*inters
 
 void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(void *context, uint32_t k), void *context);
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2; B. R. Rau, MICRO 1994;
-   design/torch-source-lowering-change-request.md item 3 */
+   design/torch-source-lowering-change-request.md item 3: over row `row` of rows (first, order), each edge e = order[q]
+   not redundant[e] (NULL: none) whose tail(context, e), a vertex of `lag` unrolled iterations of `count`, is
+   delay = lag - 1 - tail / count iterations before, where t >= delay: its source tail % count, its slot
+   (t - delay) % lag and (edge non-NULL) e, in row order; returns the count made. mesh_graph_delayed is it over a flat
+   tail array; mesh_graph_relation_delayed over a relation's incoming rows from vertex `offset` (in_first + offset,
+   in_edge, the tail edge[e].from: mesh_graph_relation_tail), e the relation's edge */
+size_t mesh_graph_delayed_rows(const size_t *first, const size_t *order, uint32_t (*tail)(const void *context, size_t e),
+                               const void *context, const unsigned char *redundant, uint32_t row, uint32_t count,
+                               uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge);
 size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32_t *tail, uint32_t row, uint32_t count,
                           uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge);
+uint32_t mesh_graph_relation_tail(const void *context, size_t e);
+size_t mesh_graph_relation_delayed(const struct mesh_graph_relation_data *relation, const unsigned char *redundant,
+                                   uint32_t offset, uint32_t row, uint32_t count, uint32_t lag, uint64_t t,
+                                   uint32_t *source, uint32_t *slot, size_t *edge);
 /* design/compilation-composition-change-request.md item 6: the producer execution e a consumer's execution
    e_b = b every_b + ordinal_b reads, e = (e_b / every) producer + ordinal in 64 bits, every = every_b, producer the
    producing function's every_f, ordinal the producing call's ordinal_f; {1, 1, 0} the consumer's own (e = e_b). Its
