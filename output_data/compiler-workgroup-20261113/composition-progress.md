@@ -153,3 +153,27 @@ CPU linear case is exact and erases four internal channels. Its actual generated
 products into disjoint views of one output buffer, with no concatenation/copy kernel. These are bounded numerical
 and code-generation observations, not a benchmark claim for the fleet. Logs are
 `executor/engines-direct-canonical-ffn.log` and `executor/engines-canonical-linear.log`.
+
+## Subsequent connected corrections in this workgroup
+
+The table above is the earlier checkpoint through `a11354fa`. The current connected-loss inventory is
+[discard-mechanisms.md](discard-mechanisms.md), updated through `426340ae`/metal `732f58c9` and named active units.
+The following formerly open obligations are closed at the stated local boundaries:
+
+- Upstream mixed-width alias mutations: tracked patch `b0fb5029`, actual no-hook body/Target/archive evidence
+  `be70e342`.
+- Requested planner signature span: retained operands/proofs `61531cca`; Python and native Metal consumers
+  `ddda9ac8`/metal `732f58c9`.
+- Fanout and source versions: actual publication/completion identity, RAW causes and static copy/effect
+  construction `01163a03`/`b5155090`; one construction owner reused by both emitters in `426340ae`.
+- Live state roles: InputKind retained to selection, binding and archive in `e107c5e6`; caller-visible input
+  mutation admitted and written back on the current reference route in `e1c6b2da`.
+- Exact owned graph/actor results: `5a43e4b6`, metal `ee02e6c4`, mesh `0dcdcd15`; logical transfer extents:
+  `6cec6b10` and metal `442eba53`; local eligibility proof retention: metal `d6084ff4`.
+
+These extend the existing contracts; they are not extra counts for individual helper APIs. The canonical
+E2B/native-bench build and fresh ABI imports cover the owned-result/extents/sending-generation batch. Current
+whole-machine target replacement, supplied-source-relation handoff, immutable numerical specialization,
+external binding and archive recipe work remain separately reviewed active connections. In particular, a
+working source constructor does not establish the completed native caller, and the current reference route's
+writeback does not establish compiled writeback in that new machine entry.
