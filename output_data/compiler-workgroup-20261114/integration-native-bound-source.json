@@ -1,0 +1,14 @@
+{
+  "source": "compiler/mesh_compiler/native.py",
+  "scope": [
+    "Bound.__init__",
+    "Bound.invoked"
+  ],
+  "nonblank_noncomment_lines_before": 36,
+  "nonblank_noncomment_lines_after": 32,
+  "delta": -4,
+  "supervisor_ast": "PASS",
+  "supervisor_pyflakes": "PASS",
+  "runtime": "Least observation active; error recovery pending",
+  "finished_source_ns": 1794691653218010000
+}

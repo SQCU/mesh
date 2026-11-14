@@ -1153,7 +1153,7 @@ def borrowed(compiler, program, owner):
 class Bound:
     def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses, programs, signature):
         self.target, self.owner, self.program, self.ended, self.generator = target, owner, program, ended, generator
-        self.fixed, self.owned, self.libs, self.executions, self.uses = fixed, owned, libs, 0, uses
+        self.fixed, self.owned, self.libs, self.uses = fixed, owned, libs, uses
         self.programs, self.work = programs, None
         self.signature = signature
         self.argued = {at: a for a, operand in enumerate(target.operands) for at in operand.occurrences}
@@ -1233,39 +1233,35 @@ class Bound:
             shape, stride)
 
     # the one invocation through `run`: metal_recording.h MetalProgramRunArguments (the native program's entry) or
-    # MetalProgramRunObserved (its observation entry), with the same operands, results, lifetimes and end. The
-    # executions it consumed are metal_recording.h MetalProgramIssued's count once it returns, whatever its status:
-    # metal_program.m MetalProgramExecute counts each entered execution, a failed one cancelled and `ended` signalled at
-    # that count, and MetalStepOrigin's failure before entry consumes none. That count is the next invocation's first;
-    # this one's operands stay held until `ended` reaches it. A failed run's error is made at its return, from its
-    # message and MetalProgramCheckFailure's record (both written within the run, metal_program.h NativeChecked, and
-    # reset only by the next run's entry), and raised after that end
+    # MetalProgramRunObserved (its observation entry), with the same operands, results, lifetimes and end. Its first
+    # execution is metal_recording.h MetalProgramIssued's count (metal_program.m MetalProgramExecute counts each
+    # entered execution; MetalStepOrigin's failure before entry consumes none). A failed run's error is made at its
+    # return, from its message and MetalProgramCheckFailure's record (both written within the run, metal_program.h
+    # NativeChecked, and reset only by the next run's entry), before metal_recording.h MetalProgramEnd writes the same
+    # message buffer. MetalProgramEnd ends the program's issued executions (its wait on `ended`, cancelling and draining
+    # work that makes no progress, and the notifications MetalExternalRelease's operand release is among) while this
+    # call's borrowed operands are still held; the run's error is raised, else the end's
     def invoked(self, run, given):
         M, _, (lib, _), _ = self.libs
-        error, execution, operands = C.create_string_buffer(ROOM), self.executions, self.target.operands
+        error, operands = C.create_string_buffer(ROOM), self.target.operands
+        execution = lib.MetalProgramIssued(self.program)
         allocated = {}
         for source in (*(operand.source for operand in operands), *(r[1] for r, _ in self.target.outputs
                                                                      if isinstance(r, tuple))):
             if source[0] == "result" and source[1] not in allocated:
                 allocated[source[1]] = torch.empty(source[2], dtype=torch.uint8, device=source[3])
         borrowed = {}
-
-        def ended():
-            return M.VALUE(self.ended, M._SEL(b"signaledValue"))
         try:
             table = (Argument * max(len(operands), 1))(*[self.argument(a, operand, given, allocated, borrowed)
                                                          for a, operand in enumerate(operands)])
             status = run(self.program, self.owner.context, execution, 1, self.ended, M.START, M.STARTED, table,
                          len(operands), error, ROOM)
-            issued = lib.MetalProgramIssued(self.program)
             failed = status and M._execution_error({"lib": lib, "program": self.program}, status,
                                                    f"execution {execution} of the program: {error.value.decode()}")
-            self.executions = issued
-            if issued > execution:
-                M._wait(lambda: ended() >= issued, ended, f"execution {execution} of the program: no end for "
-                                                          "MESH_PLATFORM_NS")
+            end = lib.MetalProgramEnd(self.program, self.ended, error, ROOM)
             if status:
                 raise failed
+            checked(end, error, f"execution {execution} of the program's end")
         finally:
             for _, buffer in borrowed.values():
                 M.PUT(buffer, M.SELECTOR[b"release"])
