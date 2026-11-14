@@ -409,6 +409,7 @@ def _compiler():
                                          C.POINTER(U), C.POINTER(U), C.POINTER(U), C.POINTER(Expr), U, C.POINTER(Term),
                                          U, U, Q]),
                 ('metal_ir_states', None, [P, U, U, C.POINTER(U), C.POINTER(Q)]),
+                ('metal_ir_symbol', U, [P, U, U, Q]), ('metal_ir_loop_extent', None, [P, U, U, U]),
                 ('metal_ir_check', U, [P, U, U, Q]),
                 ('metal_ir_check_message', None, [P, U, C.c_char_p]),
                 ('metal_ir_lapack', U, [P, C.POINTER(Lapack), U, C.POINTER(Q), U, C.POINTER(U), U, C.POINTER(U),
@@ -622,12 +623,13 @@ class _Builder:
         lib, p = self.lib, self.p
         inputs, outputs = [self.value(t) for t, _ in g.inputs], [self.value(t) for t, _ in g.outputs]
         exprs, terms, loops = [], [], len(g.sizes)
+        dims = loops + len(g.symbols)
         for t, rows in g.inputs + g.outputs:
             for d in range(len(t.shape)):
-                row = rows[d] if rows is not None else (0,) * (loops + 1)
+                row = rows[d] if rows is not None else (0,) * (dims + 1)
                 first = len(terms)
-                terms += [Term(l, 0, c, 1, 0) for l, c in enumerate(row[:loops]) if c]
-                exprs.append(Expr(first, len(terms) - first, row[loops]))
+                terms += [Term(l, 0, c, 1, 0) for l, c in enumerate(row[:dims]) if c]
+                exprs.append(Expr(first, len(terms) - first, row[dims]))
         op = lib.metal_ir_generic(p, loops, _array(mesh.Q, g.sizes), _array(mesh.U, g.iterators), len(inputs),
                                   _array(mesh.U, inputs), len(outputs), _array(mesh.U, outputs),
                                   _array(mesh.U, g.combiner), _array(mesh.U, g.start), _array(mesh.U, g.accumulator),
@@ -636,6 +638,12 @@ class _Builder:
         if g.states:
             lib.metal_ir_states(p, op, len(g.states), _array(mesh.U, [kind for kind, _ in g.states]),
                                 _array(mesh.Q, [_bits(identity, kind) for kind, identity in g.states]))
+        # metal_ir_symbol in the record's order (its dimension loops + k), each scalar its own typed value, then each
+        # loop's metal_ir_loop_extent where a symbol clips it
+        symbol = [lib.metal_ir_symbol(p, op, self.value(t), bound) for t, bound in g.symbols]
+        for loop, k in enumerate(g.extents):
+            if k is not None:
+                lib.metal_ir_loop_extent(p, op, loop, symbol[k])
         self.replay(lib.metal_ir_region(p, op, BODY), g.body, len(inputs))
         if g.states:
             self.replay(lib.metal_ir_region(p, op, COMBINE), g.combine, 0)

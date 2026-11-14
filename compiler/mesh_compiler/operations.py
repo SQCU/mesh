@@ -291,13 +291,17 @@ def _powi(r, a, b, t):
 
 
 # one structured operation, metal_ir_generic's operands: its loops `sizes` with `iterators`, inputs and outputs each
-# (tensor view, affine rows over the loops, (loops + 1) coefficients a row; None: read only by metal_ir_extract), per
-# output its combiner, starting value and accumulator kind, coupled REGION states (kind, identity) with their combine
-# and finalize regions, and the permitted numerical transformations
+# (tensor view, affine rows over the loops and then the symbols, (loops + symbols + 1) coefficients a row; None: read
+# only by metal_ir_extract), per output its combiner, starting value and accumulator kind, coupled REGION states (kind,
+# identity) with their combine and finalize regions, and the permitted numerical transformations; metal_ir_symbol's
+# `symbols` (one-element tensor, bound) in order, symbol k the rows' dimension len(sizes) + k, and per loop its
+# metal_ir_loop_extent `extents`, the index of the symbol clipping it or None (its static size)
 class _Generic:
     def __init__(self, sizes, inputs, outputs, body, iterators=None, combiner=None, accumulator=None, start=None,
-                 states=None, combine=None, finalize=None, precision=0):
+                 states=None, combine=None, finalize=None, precision=0, symbols=None, extents=None):
         self.sizes, self.inputs, self.outputs, self.body = tuple(sizes), list(inputs), list(outputs), body
+        self.symbols = list(symbols) if symbols is not None else []
+        self.extents = tuple(extents) if extents is not None else (None,) * len(self.sizes)
         self.iterators = tuple(iterators) if iterators is not None else (PARALLEL,) * len(self.sizes)
         self.combiner = list(combiner) if combiner is not None else [ASSIGN] * len(self.outputs)
         self.accumulator = list(accumulator) if accumulator is not None else [_class(t) for t, _ in self.outputs]

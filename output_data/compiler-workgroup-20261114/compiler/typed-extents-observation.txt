@@ -1,0 +1,24 @@
+operations [0, 1] symbol value IDs: s 5 x 3 a 6 out 7
+calls [('metal_ir_symbol', 1, 5, 8, 1), ('metal_ir_loop_extent', 1, 0, 1)]
+metal_ir_lower 0
+s value info: role 2 storage 4 (TEMPORARY = 2)
+dispatch 0 kind 0 kernel 0 effects (key, offset, element, pairs, write) [(0, 0, 4, [], 0), (1, 0, 4, [(8, 4)], 0), (2, 0, 4, [(8, 4)], 1)]
+relation (from, to, hazard, key, from_view, to_view) [(0, 0, 'write after write', 2, 2, 2)]
+Shell cwd was reset to /Users/mdot/dox/mesh
+
+--- producer and consumer as the transform groups them
+operations [0, 1] symbol value IDs: s 5 x 3 a 6 out 7
+calls [('metal_ir_symbol', 1, 5, 8, 1), ('metal_ir_loop_extent', 1, 0, 1)]
+metal_ir_lower 0
+s value info: role 2 storage 4 (TEMPORARY = 2)
+dispatch 0 members [0, 1] kind 0 kernel 0 effects (key, offset, element, pairs, write) [(0, 0, 4, [], 0), (1, 0, 4, [(8, 4)], 0), (2, 0, 4, [(8, 4)], 1)]
+relation (from, to, hazard, key, from_view, to_view) [(0, 0, 'write after write', 2, 2, 2)]
+--- producer placed on the CPU, its own dispatch
+operations [0, 1] symbol value IDs: s 5 x 3 a 6 out 7
+calls [('metal_ir_symbol', 1, 5, 8, 1), ('metal_ir_loop_extent', 1, 0, 1)]
+metal_ir_lower 0
+s value info: role 2 storage 4 (TEMPORARY = 2)
+dispatch 0 members [0] kind 1 kernel 0 effects (key, offset, element, pairs, write) [(0, 0, 4, [], 0), (4, 0, 4, [], 1)]
+dispatch 1 members [1] kind 0 kernel 1 effects (key, offset, element, pairs, write) [(1, 0, 4, [(8, 4)], 0), (2, 0, 4, [(8, 4)], 1), (4, 0, 4, [], 0)]
+relation (from, to, hazard, key, from_view, to_view) [(0, 0, 'write after write', 4, 1, 1), (0, 1, 'read after write', 4, 1, 4), (1, 1, 'write after write', 2, 3, 3)]
+Shell cwd was reset to /Users/mdot/dox/mesh
