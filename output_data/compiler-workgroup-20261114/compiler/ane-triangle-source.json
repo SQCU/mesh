@@ -1,0 +1,272 @@
+[
+  {
+    "name": "full",
+    "target": "aten.full.default",
+    "arguments": "([2, 2], True)",
+    "dtype": "torch.bool",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "tril",
+    "target": "aten.tril.default",
+    "arguments": "(full,)",
+    "dtype": "torch.bool",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "permute",
+    "target": "aten.permute.default",
+    "arguments": "(a_1, [1, 0])",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "where",
+    "target": "aten.where.self",
+    "arguments": "(tril, a_1, permute)",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "arange",
+    "target": "aten.arange.start_step",
+    "arguments": "(0, 2)",
+    "dtype": "torch.uint8",
+    "shape": [
+      2
+    ]
+  },
+  {
+    "name": "arange_1",
+    "target": "aten.arange.start_step",
+    "arguments": "(0, 2)",
+    "dtype": "torch.uint8",
+    "shape": [
+      2
+    ]
+  },
+  {
+    "name": "unsqueeze",
+    "target": "aten.unsqueeze.default",
+    "arguments": "(arange, -1)",
+    "dtype": "torch.uint8",
+    "shape": [
+      2,
+      1
+    ]
+  },
+  {
+    "name": "eq",
+    "target": "aten.eq.Tensor",
+    "arguments": "(unsqueeze, arange_1)",
+    "dtype": "torch.bool",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "_to_copy",
+    "target": "aten._to_copy.default",
+    "arguments": "(eq,)",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "expand",
+    "target": "aten.expand.default",
+    "arguments": "(_to_copy, [2, 2])",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "clone",
+    "target": "aten.clone.default",
+    "arguments": "(expand,)",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "arange_2",
+    "target": "aten.arange.start_step",
+    "arguments": "(0, 3)",
+    "dtype": "torch.int32",
+    "shape": [
+      3
+    ]
+  },
+  {
+    "name": "unsqueeze_1",
+    "target": "aten.unsqueeze.default",
+    "arguments": "(arange_2, 1)",
+    "dtype": "torch.int32",
+    "shape": [
+      3,
+      1
+    ]
+  },
+  {
+    "name": "eq_1",
+    "target": "aten.eq.Scalar",
+    "arguments": "(unsqueeze_1, 1)",
+    "dtype": "torch.bool",
+    "shape": [
+      3,
+      1
+    ]
+  },
+  {
+    "name": "arange_3",
+    "target": "aten.arange.start_step",
+    "arguments": "(0, 2)",
+    "dtype": "torch.int32",
+    "shape": [
+      2
+    ]
+  },
+  {
+    "name": "eq_2",
+    "target": "aten.eq.Scalar",
+    "arguments": "(arange_3, 1)",
+    "dtype": "torch.bool",
+    "shape": [
+      2
+    ]
+  },
+  {
+    "name": "bitwise_and",
+    "target": "aten.bitwise_and.Tensor",
+    "arguments": "(eq_1, eq_2)",
+    "dtype": "torch.bool",
+    "shape": [
+      3,
+      2
+    ]
+  },
+  {
+    "name": "scalar_tensor",
+    "target": "aten.scalar_tensor.default",
+    "arguments": "(2,)",
+    "dtype": "torch.int32",
+    "shape": []
+  },
+  {
+    "name": "scalar_tensor_1",
+    "target": "aten.scalar_tensor.default",
+    "arguments": "(0,)",
+    "dtype": "torch.int32",
+    "shape": []
+  },
+  {
+    "name": "where_1",
+    "target": "aten.where.self",
+    "arguments": "(bitwise_and, scalar_tensor, scalar_tensor_1)",
+    "dtype": "torch.int32",
+    "shape": [
+      3,
+      2
+    ]
+  },
+  {
+    "name": "expand_1",
+    "target": "aten.expand.default",
+    "arguments": "(where_1, [3, 2])",
+    "dtype": "torch.int32",
+    "shape": [
+      3,
+      2
+    ]
+  },
+  {
+    "name": "clone_1",
+    "target": "aten.clone.default",
+    "arguments": "(expand_1,)",
+    "dtype": "torch.int32",
+    "shape": [
+      3,
+      2
+    ]
+  },
+  {
+    "name": "full_1",
+    "target": "aten.full.default",
+    "arguments": "([1], 1)",
+    "dtype": "torch.int32",
+    "shape": [
+      1
+    ]
+  },
+  {
+    "name": "abs_1",
+    "target": "aten.abs.default",
+    "arguments": "(where,)",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "mul",
+    "target": "aten.mul.Tensor",
+    "arguments": "(abs_1, abs_1)",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "sum_1",
+    "target": "aten.sum.dim_IntList",
+    "arguments": "(mul, [-2, -1])",
+    "dtype": "torch.float32",
+    "shape": []
+  },
+  {
+    "name": "sqrt",
+    "target": "aten.sqrt.default",
+    "arguments": "(sum_1,)",
+    "dtype": "torch.float32",
+    "shape": []
+  },
+  {
+    "name": "unsqueeze_2",
+    "target": "aten.unsqueeze.default",
+    "arguments": "(sqrt, 0)",
+    "dtype": "torch.float32",
+    "shape": [
+      1
+    ]
+  },
+  {
+    "name": "full_2",
+    "target": "aten.full.default",
+    "arguments": "([1], 0)",
+    "dtype": "torch.int32",
+    "shape": [
+      1
+    ]
+  }
+]

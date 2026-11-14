@@ -1,0 +1,9 @@
+{
+  "exit_code": 1,
+  "invoked": false,
+  "error": "ANE operation 20: constant value 44 of a kind Core ML has no tensor for",
+  "log_hashes": {
+    "ane-native-3.stdout": "b958b4b9c8ebe85b351a32b8be5b84a1eb3661cce83156db81df9b5d6d50854f",
+    "ane-native-3.stderr": "cd3b812a1adceaeff6b83f7f26e900e31ca3b80088ce2e83597c176d5f3f134f"
+  }
+}

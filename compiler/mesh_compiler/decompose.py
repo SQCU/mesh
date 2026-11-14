@@ -29,6 +29,15 @@ TRACED = ("val", "tensor_meta")
 # compiler/mesh_compiler/placement.py `work_axes`: a shard's (FX value, dimension, original full extent) triples, the
 # values its own graph's nodes, mapped through every replacement below
 AXES = ("work_axes",)
+# the formulation tracing's decomposition table: torch.export.default_decompositions less the operators a typed
+# structured owner consumes as they are (operations.SOURCES: tril and triu _triangular_part), whose torch/_refs
+# decompositions make int64 index data
+PRESERVED = (A.tril, A.triu)
+
+
+def _decompositions():
+    return {op: rule for op, rule in torch.export.default_decompositions().items()
+            if getattr(op, "overloadpacket", None) not in PRESERVED}
 
 
 # `node`'s work axes, each reference its image under `mapping`: within one graph (`within`) a reference `mapping`
@@ -87,7 +96,7 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
 # input parts take the formulation's result; the nodes whose uses or operands changed (the original's operands, its
 # expanded nodes and its uses) are given to ir.views, which makes their view and destination metadata again
 def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
-    table = dict(torch.export.default_decompositions().items())
+    table = _decompositions()
     graph = graph_module.graph
     sources = graph_module.meta.setdefault("decomposed", {})
     changed = []
@@ -254,7 +263,7 @@ def _fresh(value):
 # torch 2.14.0 torch/fx/experimental/proxy_tensor.py make_fx over the operands' fake values, copied in at the graph's
 # end, its nodes the processor's and the source node's metadata, each in `decomposed` the source's original (`origin`)
 def _formulated(graph, formula, operands, source, processor, mapping, decomposed, origin):
-    table = dict(torch.export.default_decompositions().items())
+    table = _decompositions()
     values = [operand.meta["val"] for operand in operands]
     with detect_fake_mode(values):
         traced = make_fx(formula, decomposition_table=table, tracing_mode="fake")(*values)

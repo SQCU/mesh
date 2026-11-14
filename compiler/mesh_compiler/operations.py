@@ -2352,7 +2352,8 @@ def _qdwh_eigh_state(a, upper=False, site=0):
     else:
         h = torch.where(mask, a, a.mT)
     vectors = torch.eye(n, dtype=a.dtype, device=a.device).expand(*batch, n, n).clone()
-    entry = (torch.arange(n + 1, device=a.device)[:, None] == 1) & (torch.arange(2, device=a.device) == 1)
+    entry = (torch.arange(n + 1, dtype=torch.int32, device=a.device)[:, None] == 1) \
+        & (torch.arange(2, dtype=torch.int32, device=a.device) == 1)
     size = torch.scalar_tensor(n, dtype=torch.int32, device=a.device)
     zero = torch.scalar_tensor(0, dtype=torch.int32, device=a.device)
     agenda = torch.where(entry, size, zero).expand(*batch, n + 1, 2).clone()
