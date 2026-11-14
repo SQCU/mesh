@@ -730,21 +730,31 @@ class WireRoot:
 # `wire`, its typed source endpoint `slot`, the owner's original Binding output Slot (root, view, offset, reference) at
 # its output position `output`) or "land" (on `machine`, an outer output port's destination, on `processor`,
 # analysis.output_processor: the landed wire `wire`, its ValueID Prepared.wired[(call, wire)], into the outer result
-# root `storage` at outer output position `output`, `slot` None); `leaf` the original FX output Node (CallPort.leaf,
-# its meta the typed tensor), `call` the owner, whose instance row on `machine` holds the site; `transfers` the owner's
-# declared rows it serves
+# root `storage` at outer output position `output`, `slot` None) or, a normal land ("land", `input` not None), on
+# `machine`, this node, a row's destination, on `processor`, its InputPart's: the landed wire `wire` into consumer
+# call `call`'s whole logical input at its original input (placeholder) position `input`, `slot` its original
+# Binding.inputs[input] Slot (the copy's destination endpoint, numeric fields None where it has no body), `part` one
+# exact InputPart of that input here (lower_metal.py InputPart, as native's ConstructedMachine.input_parts holds it,
+# its IDs the original Program's: its correspondence, not the copy's target; one record per part), `storage` the
+# caller-owned source S, `output` None; `leaf` the original FX output Node (CallPort.leaf, its meta the typed tensor),
+# `call` the call whose instance row on `machine` holds the site, `owner` the transfer's owner call (stage and outer
+# land: `call`), whose declared rows `transfers` it serves and whose demands and groups they are; `input` and `part`
+# None for stage and outer land
 @dataclasses.dataclass(frozen=True)
 class CopyRecord:
     kind: str
     call: int
+    owner: int
     machine: object
     processor: object
     storage: int
     wire: int
     view: tuple
-    output: int
+    output: object
+    input: object
     slot: object
     leaf: object
+    part: object
     transfers: tuple
 
 
@@ -765,7 +775,8 @@ class CopyRecord:
 # one canonical grouping on this node (mesh.Grouped, its arrays held; None locally), which mesh_plan_program consumes;
 # `wires` the staging WireRoots (joint roots S ..), `copies` the CopyRecords they require; `wired` native's map {(call,
 # wire root): typed ValueID on this node} (`bind`); `remapped` and `remapped_roots` native's canonical append view
-# and storage-root maps (`remap`);
+# and storage-root maps (`remap`); `input_parts` native's {call: its body's ConstructedMachine.input_parts} here,
+# retained as given (each normal land CopyRecord's `part` one of its InputParts);
 # `source_bindings`, `declarations`, `wire_values` and `planning` as given (the original ValueIDs)
 @dataclasses.dataclass(eq=False)
 class Prepared:
@@ -790,6 +801,7 @@ class Prepared:
     wired: dict = dataclasses.field(default_factory=dict)
     remapped: object = None
     remapped_roots: object = None
+    input_parts: object = None
 
     # metal-microbench metal_ir.h metal_ir_append and metal_ir_value_info: native's canonical append results, each
     # {call: array indexed by the call's original ValueID} for the calls it appended to only, retained as given, once
@@ -847,7 +859,7 @@ class Prepared:
         self.declared = tuple(map(tuple, rows))
 
 
-def declare_program(analysis, bindings, declarations, wire_values, planning):
+def declare_program(analysis, bindings, declarations, wire_values, planning, *, input_parts=None):
     J, S, at = len(analysis.nodes), len(analysis.storages), {ref: s for s, (ref, _) in enumerate(analysis.storages)}
     resolved, used, slots, endpoints = {}, {}, {}, {}
     for binding in bindings:
@@ -904,15 +916,22 @@ def declare_program(analysis, bindings, declarations, wire_values, planning):
             if port.consumer is not None:
                 found.append((port.consumer, slots.get((port.consumer, "input", port.input)), mesh.RECEIVE, record))
             # the typed endpoints: the owner's original output Slot and leaf (stage, on its function's selected
-            # processor), the outer output position and leaf (land, on the program's output processor)
+            # processor), the outer output position and leaf (land, on the program's output processor), and, landing
+            # here for a consumer call, its original input Slot with each of that input's InputParts here (normal
+            # land, on the part's processor)
             viewed_at = (port.view[0], port.view[1], tuple(map(tuple, port.view[2])))
-            for kind, machine, processor, output, slot in (
-                    (("stage", port.source, analysis.placements[analysis.keys[analysis.calls[a]]][1], port.output,
-                      endpoints.get((a, "output", port.output))),) if caller else ()) + (
-                    (("land", destination, analysis.output_processor, port.input, None),)
-                    if caller and port.consumer is None else ()):
-                copies.setdefault((kind, a, machine, port.storage, wire, viewed_at, output),
-                                  (processor, port.view, slot, port.leaf, []))[-1].append(transfer)
+            here = planning is not None and destination == planning.nodes[planning.here]
+            parts = ((input_parts or {}).get(port.consumer, {}).get(port.input, ())
+                     if caller and here and port.consumer is not None else ())
+            for kind, call, machine, processor, output, position, slot, k, part in (
+                    (("stage", a, port.source, analysis.placements[analysis.keys[analysis.calls[a]]][1], port.output,
+                      None, endpoints.get((a, "output", port.output)), None, None),) if caller else ()) + (
+                    (("land", a, destination, analysis.output_processor, port.input, None, None, None, None),)
+                    if caller and port.consumer is None else ()) + tuple(
+                    ("land", port.consumer, destination, part.processor, None, port.input,
+                     endpoints.get((port.consumer, "input", port.input)), k, part) for k, part in enumerate(parts)):
+                copies.setdefault((kind, call, a, machine, port.storage, wire, viewed_at, output, position, k),
+                                  (processor, port.view, slot, port.leaf, part, []))[-1].append(transfer)
     arrays = []
     for rows, weighted in zip(declared, weights):
         held = []
@@ -947,10 +966,11 @@ def declare_program(analysis, bindings, declarations, wire_values, planning):
                     tuple(map(tuple, dependences)), tuple(map(tuple, extents)), tuple(map(tuple, costs)),
                     tuple(arrays), declarations, wire_values, planning, tuple(grouped),
                     tuple(sorted(staged.values(), key=lambda wire: wire.root)),
-                    tuple(CopyRecord(kind, call, machine, processor, storage, wire, original, output, slot, leaf,
-                                     tuple(transfers))
-                          for (kind, call, machine, storage, wire, _, output), (processor, original, slot, leaf,
-                                                                               transfers) in copies.items()))
+                    tuple(CopyRecord(kind, call, owner, machine, processor, storage, wire, original, output, position,
+                                     slot, leaf, part, tuple(transfers))
+                          for (kind, call, owner, machine, storage, wire, _, output, position, _), (
+                              processor, original, slot, leaf, part, transfers) in copies.items()),
+                    input_parts=input_parts)
 
 
 # The joint roots: the S source storages, then the declaration owner's staging wires (Prepared.wires, run 1, their

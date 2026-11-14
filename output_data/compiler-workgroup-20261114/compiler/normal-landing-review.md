@@ -1,0 +1,7 @@
+# Declared normal-input landing
+
+The existing declaration owner now produces normal receiver copies with distinct emitting call B and transfer owner A. Each record retains B's original input position and Slot, the exact InputPart, source storage/wire/view and original leaf, processor, and canonical transfer-group correspondence. The native prefix copies the landed wire into the input's actual selected source view before the existing body materializes padded partitions; it does not replace a padded output or infer coverage from read footprints.
+
+InputPart.landing is the typed source-view operand retained by the placement/device/assemble/constructor producer in4bd1b3bb. The paired native composition in8c2df1e1 consumes it and keeps canonical append value/root maps. SAME64 also aligned the uncommitted numerical outline's input_parts tuple mapping; that does not establish spectral completeness.
+
+Source checks: schedule AST/py_compile/pyflakes pass, and the staged diff is limited to CopyRecord, Prepared's input_parts operand and declare_program's normal-landing projection. Frontend's Crossing observation verifies the pre-padding landing geometry survives actual export/place/device projection, including noncontiguous offset/stride (`frontends/input-landing.json`). No transport execution or network archive roundtrip is claimed. The small chosen-cost caller stopped before invocation on an unplaced ValueID; executor is tracing that separate actual storage/placement handoff.
