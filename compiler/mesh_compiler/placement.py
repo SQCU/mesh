@@ -196,6 +196,23 @@ def several(value):
     return isinstance(value[0], tuple)
 
 
+# torch 2.14.0 torch/_inductor/fx_passes/post_grad.py:1131-1157 is_valid_splitwithsizes_cat and :1728-1732
+# splitwithsizes_cat_replace (a cat of every split_with_sizes part of one input, in order, on the split's dim, is that
+# input), over reshard's own compiler-generated cut parts (a source torch.cat allocates; not that): unit-step aten.slice
+# pieces of one placed source node along `dimension` (identical source, same dim), consecutive from 0 to its extent
+# there (ordered exact full cover), are that source (as cut returns a whole cut uncut), its view, alias and processor
+# kept; other pieces one new aten.cat
+def reassembled(graph, pieces, dimension, processor):
+    at = 0
+    for piece in pieces:
+        if (piece.target is not SLICE or piece.args[0] is not pieces[0].args[0] or piece.args[1] != dimension or
+                piece.args[2] != at or piece.args[4:] not in ((), (1,))):
+            return call(graph, CAT, (pieces, dimension), processor)
+        at = piece.args[3]
+    source = pieces[0].args[0]
+    return source if at == shape(source)[dimension] else call(graph, CAT, (pieces, dimension), processor)
+
+
 def flat(processors):
     return tuple(leaf for p in processors for leaf in (flat(p) if isinstance(p, tuple) else (p,)))
 
@@ -317,7 +334,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
                 exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
                 piece.meta.setdefault("collectives", {})[processor] = kind, exchange
         arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
-                       if extents == STRIPED else call(graph, CAT, (pieces, held), processor))
+                       if extents == STRIPED else reassembled(graph, pieces, held, processor))
         if wide and shape(arrived[-1])[dimension] < most(sizes):
             arrived[-1] = padded(graph, arrived[-1], dimension, sizes, j, processor)
     return arrived
