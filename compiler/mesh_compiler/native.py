@@ -877,8 +877,12 @@ class Target:
     # program's (Row.values); and the outer outputs: one a land copy here writes (`landed`) that copy's row and outer
     # result root; a call's result produced here its row's mapped Output; one produced on another machine and landed by
     # none here its storage s, the caller-owned root it is returned in (CallAnalysis.results; root_sources[s], an outer
-    # input's root byte 0 the placeholder's byte offset in s)
-    def resolved(self, captured, analysis, joint):
+    # input's root byte 0 the placeholder's byte offset in s). The outer outputs are the output owner's alone: this
+    # machine (`here`, compile_program's physical machine, not Target.node's plan index) when it is
+    # CallAnalysis.output_machine (compiler/mesh_compiler/schedule.py, the outer output node's processor's machine);
+    # another machine returns none (compiler/mesh_compiler/runtime.py Program.__call__: an entry other than the output
+    # processor's returns nothing), whatever numerical bodies it holds
+    def resolved(self, captured, analysis, joint, here):
         from .lower_metal import Output
         from .operations import _metadata
         planned = joint.planned
@@ -917,8 +921,9 @@ class Target:
         produced = {leaf: (j, o) for j, node in enumerate(analysis.nodes)
                     for o, leaf in enumerate(captured.calls[node].outputs) if isinstance(leaf, torch.fx.Node)}
         stored, outputs = {leaf: s for _, _, leaf, s in analysis.results}, []
-        for position, (leaf, (kind, _)) in enumerate(zip(captured.exported.graph_module.graph.output_node().args[0],
-                                                         captured.exported.outputs, strict=True)):
+        returned = zip(captured.exported.graph_module.graph.output_node().args[0], captured.exported.outputs,
+                       strict=True) if here == analysis.output_machine else ()
+        for position, (leaf, (kind, _)) in enumerate(returned):
             if position in self.landed:
                 outputs.append(self.landed[position])
             elif leaf in produced:
@@ -1380,7 +1385,7 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
         functions, quantum = target.functions(libs)
         joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
                               declared=prepared)
-        target.resolved(captured, analysis, joint)
+        target.resolved(captured, analysis, joint, here)
         target.solution, target.plan = joint, joint.plan
         target.program = planning.program if planning is not None else None
         with Owned() as owned:
