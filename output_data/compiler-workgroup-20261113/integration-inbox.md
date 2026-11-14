@@ -20,6 +20,18 @@ operands from the actual source; consume them before choosing an allocation impl
 - This caller's ONLY nonzero lag producer is `backing==token ? 1 : 0` near1112. Retain that explicit token recurrence
   owner for the class, including planner lag and the final ahead offset. Do not replace it with MAX(lag), an arbitrary
   first operand, or an invented compatibility policy. No second generation domain was found in this caller.
+- Provider Bind creates contiguous offset-zero interface roots. Its offset-bearing Symbol and reshaped View are
+  fresh INTERNAL values. Keep those logical views through append and bind the canonical physical storage. There
+  is no current source basis for adding a host gather/view interpreter; `Operand.address` remains the storage base.
+
+The simple composition is to export retained bodies before deriving external storage/access policy, form the
+declared storage correspondence once, then bind/append at the original phase positions. Provider only branches
+on CONSTANT for constant reuse; other interface roles do not select numerical operations, so an early export may
+use its default interface roles and destination binding supplies the phase role. In that route, map ALL source
+ValueIDs in each bound interface storage class through call.values to its phase backing. The existing append
+contract accepts a backing with a different logical shape, clones each view's own layout/offset and applies the
+supplied phase role. Otherwise provider View's inherited INPUT/OUTPUT roles would survive a TEMPORARY phase
+binding. Independent constant/state storage stays untouched. No extra append heuristic or role schema is needed.
 
 Implement this finite connection. Existing source locations identify operands and replacement sites; they are
 not authority to preserve the inherited per-Operand allocation. Read the remainder as superseded work history

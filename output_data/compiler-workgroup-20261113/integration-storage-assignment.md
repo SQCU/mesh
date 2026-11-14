@@ -33,7 +33,36 @@ add alias-compatibility rejection filters or unconditional numerical copies to k
 If the existing planner is missing an operand necessary for this exact connection, report that operand and its
 producer/consumer before inventing a new execution regime; Codex will co-design the needed producer change.
 
-## Work and evidence
+## Settled implementation connection
+
+Codex finished the source review after this continuation started. Implement this direct composition; it replaces
+speculation about host offsets or scalar decoding:
+
+1. Export each retained model body before deriving external storage/access policy. Provider Bind creates one
+   contiguous offset-zero interface root per original TFLite tensor index. Repeated interface entries name that
+   same root. Capture those declared correspondences, not later lowered buffer reuse.
+2. Compose the external correspondence with canonical `mesh_graph_components` on symmetric edges. Retain one
+   canonical storage owner and the logical Operand-to-storage relation. Do not duplicate storage policy into every
+   alias or inline another graph algorithm.
+3. Derive storage read-before-write from the existing ordered stage inputs/outputs. Project phase owns/captures
+   and registration to that owner; preserve each transfer declaration/event identity while passing its storage
+   value to mesh_plan. The ONLY nonzero lag producer here is `backing == token ? 1 : 0`; retain that specific
+   recurrence owner and consume it for the plan, initial token storage, final ahead offset and observed result.
+4. Bind each phase to those owners, then append retained bodies at their original positions. Early export may
+   use default interface roles: non-CONSTANT interface roles do not choose provider numerical operations. When
+   assigning the phase role, map ALL source ValueIDs of each bound interface storage class to its phase backing
+   in call.values. Append already clones each view's logical shape/layout/offset and applies that backing role.
+   Independent CONSTANT/STATE storage remains untouched. No new append-role heuristic is needed.
+5. Pass the same owner through planned annotations, value allocation, host addresses and final physical binding.
+   Canonical `metal_ir_value_info.bytes` supplies storage extent; do not reproduce scalar width/layout evaluation
+   in E2B. Provider's nonzero-offset Symbol and reshaped View are INTERNAL logical values, already handled by
+   append/compiler. `Operand.address` is a backing-storage base. No host view/gather interpreter is needed.
+
+This is a consumer responsibility correction, not a new allocator or callback scheme. Keep the existing canonical
+mesh_plan as the sole storage/schedule solver. If an actual missing operand prevents this composition, name the
+exact producer and consumer instead of substituting a new policy.
+
+## Editing and evidence
 
 Resume this same Claude session. Own only `tools/e2b_replay.m` and this worker's status record. No provider numerical
 body renovation, new runtime interpreter, new agent tree, or unrelated cleanup. Read the actual calling path and
