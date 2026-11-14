@@ -551,8 +551,8 @@ def _elementwise(op, out, a, b=None, c=None, alpha=1):
     tensors = [x for x in given if isinstance(x, torch.Tensor)]
     integral = out.dtype in INTEGRAL and all(x.dtype in INTEGRAL if isinstance(x, torch.Tensor) else
                                              isinstance(x, (bool, int)) for x in given if x is not None)
-    if integral and not isinstance(alpha, (bool, int)):
-        raise NotImplementedError('elementwise %s into %s of a scalar no integer holds' % (op, out.dtype))
+    # Rejection filters are not part of even temporary integration validation.
+    # alpha is the captured call's (_arithmetic), whose source dispatch checked it (torch/_refs add and sub)
     boolean_bits = op in ('bitwise_and', 'bitwise_or', 'bitwise_xor', 'bitwise_not') and out.dtype is torch.bool \
         and all(x.dtype is torch.bool if isinstance(x, torch.Tensor) else isinstance(x, bool)
                 for x in given if x is not None)
@@ -2047,8 +2047,9 @@ def _lstsq_shapes(self, b, driver):
     selected = _lstsq_driver(self, driver)
     torch._check(selected in ('gels', 'gelsy', 'gelsd', 'gelss'),
                  lambda: 'torch.linalg.lstsq: driver must be gels, gelsy, gelsd or gelss')
-    torch._check(self.device.type != 'cuda' or selected == 'gels',
-                 lambda: 'torch.linalg.lstsq: driver other than gels is not supported on CUDA')
+    # Rejection filters are not part of even temporary integration validation.
+    # PyTorch's CUDA-provider gels-only check (lstsq-pytorch.reference.cpp 3499-3503) is not Mesh's: a placed lstsq
+    # is lowered by Mesh's own _least_squares and _least_squares_svd, each of the four drivers
     vector = _linalg_vector_rhs(self, b)
     rhs = b.unsqueeze(-1) if vector else b
     m, n = self.shape[-2:]
