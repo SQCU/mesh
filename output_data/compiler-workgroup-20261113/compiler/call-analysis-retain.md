@@ -1,0 +1,7 @@
+# Exact final _analyse result-owner correction
+
+SAME numerical64ddaf6e, Opus5.5. Root rejects the scalar-only discharge in resume26: Calls is still a compilation result handed to the planner. Retain solved native results through Calls, without recomputing/copying them. Existing graph algorithm changes are source-ready; do not alter C/h or other workers' edits.
+
+Append optional `owner` to Calls (defaultNone so archived final constructor remains valid). _analyse retains actual chain Views (and thus one follower Graph/Search), both existing closure owners (`ordered` and `after`), and each function's native width/selected-member result. Existing outstanding scalar values remain unchanged; preserve the original native chain-count scalar itself in the View owner along with selected member/count arrays. Keep every reference direct; no deep-copy graph/bitset/list reconstruction, no new dataclass/schema manager or solve. Return this owner in Calls rather than dropping the pair through `[0]`. Final compiled archive may omit it only after final lowering's actual discharge; no load re-solve.
+
+Edit only Calls declaration, _analyse result construction, closure_chains owner tuple, and status correction. Root593 owns Endpoint/Lifetimes/ends+lower/_place; frontend owns propagate/finite _complete. Private Python AST + diff check, then HOLD promptly. No shared build/commit. Correct status's prior scalar-discharge claim explicitly.
