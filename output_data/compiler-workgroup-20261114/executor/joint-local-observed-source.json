@@ -1,0 +1,44 @@
+{
+  "source": {
+    "mesh": {
+      "commit": "04cd25affd375bcc2877a35982daa64fd3fbd609",
+      "sha256": {
+        "compiler/mesh_compiler/native.py": "16981a16220c03711b96fa13dfe0af21a1e8664c282feb18eb991adf1609e69b",
+        "compiler/mesh_compiler/metal.py": "48c3134995f3dec739c182de89cd55e5e5ff984b0a53281033b902c0d24adfd4",
+        "compiler/mesh_compiler/archive.py": "58ec0c516dd496ce94ac42f9f10d7616084f69c47544fe43229e958171868e72",
+        "compiler/mesh_compiler/schedule.py": "720f28a3d14beee187a2811bd27384f8c00772872bafba7bab79a2a93c9c99d6",
+        "compiler/mesh_compiler/driver.py": "796a1aea2ca34a44de1ec1c7236b95c202150328e5535a2761a37e8715e871fa",
+        "compiler/mesh_compiler/runtime.py": "2258c8f916444774d1af53db7eed26681bb1db2f4e6c846213d4233a7ad2a559",
+        "compiler/mesh_compiler/lower_metal.py": "cf5bfdb149e5f608498fda8cb93a5571b8be963826d61c847a102b4b7f1e99d9",
+        "compiler/mesh_compiler/export.py": "2cdd8734e518532af195f1472a2e35fa94fc3000226d4a48332c2e54a2fc8752",
+        "examples/engines.py": "2a6f7325a671dbb585df89b95303129d86e05650a45318565ffbe5d275133930",
+        "rdma/mesh.py": "20165e47eb00d01bac702e67ec6a4a79faaa2d5d91488cfabca856353796a330",
+        "rdma/mesh-collective.h": "d4a8a7b38146568c05961e6342d5a6a63bd1d2bfd5e72c01ca5672b1cfaee912",
+        "rdma/mesh-collective.c": "7028264dd71933098c798fac52d0991764cb6937a24f8752aa84400e8bf4999c"
+      }
+    },
+    "metal": {
+      "commit": "e7db540c27b715059e69c05350304997cbc86eb3",
+      "sha256": {
+        "metal_ir.h": "1ddaa9d8ad07bfa2a62056ba22f903d99a8a4e6e5feec7ddeea4640e68812572",
+        "metal_ir.mm": "02ef65b8d9af4c164db2bd6f93c07d7f08a48a52bd613d3222fb30f71f167e47",
+        "metal_lower.h": "f43492c428d89c36777fd1f9414979c0143d8d806414d9900246568b69e9f7f7",
+        "metal_lower.mm": "f218d3b8070b72f3fe10dae38565181bb1d58a407831b7621776bedd30b1b9b9",
+        "metal_transform.mm": "4c7d3aeb89c87323305fbcef5c63000f25d3ed583839946ed9512584c531f3a7",
+        "metal_transport.mm": "f90bc8bdc8475a12c99c82171d099225c50f8a90f5a01bbe321660af6f4cbf88",
+        "metal_archive.mm": "7cd02581a2bb5cbb3f221b6d7fbc0cb17fa4be2c4071a4bab4edf452221897ee",
+        "metal_native.mm": "0baae609ff1c7f1aab6db459ffb8c47ba39f352b76b96bf0581db6ad3d0cae33",
+        "metal_capture.m": "cd7c15bafcbfee4a9d434754ff069da8c302c63ec208a2db3c5837aa119fc77c",
+        "metal_program.m": "054f5af03b482201a014088c63b6f0bec35bb127c30fa7fd9480e6f1ec7db420",
+        "metal_recording.h": "55cd76bacccb514ddcbdee76778939f67a9fcbf7123b5d659dc747bfab96b37a",
+        "metal_program.h": "f35775d462e2d71ab6cec511ac591883856bcb9ab6182e393f018ac49771fbf0"
+      }
+    }
+  },
+  "libraries": {
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "682d891b5bd17416c38b7eb896a4e0adb2746601c3ca48edcbc13649645dd8da",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "638edf8ad1d7785a8de6bb78246b964f7a2a6fbd713b645df39b1239d91fd484",
+    "/Users/mdot/dox/mesh/rdma/libmesh.dylib": "4c371dc18676ba5e2c7533e30018954eb27b3cd0ad4907a26813ada56472f5e0",
+    "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303"
+  }
+}
