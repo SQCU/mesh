@@ -1,0 +1,103 @@
+{
+  "functions": 3,
+  "calls": 9,
+  "source_sites": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "function_inputs": [
+    1,
+    6,
+    2
+  ],
+  "outlined_owners": [
+    true,
+    false,
+    true
+  ],
+  "scope": "torch export.capture -> place -> on_devices -> outline; no native construction or invocation",
+  "input": {
+    "dtype": "float32",
+    "shape": [
+      4,
+      4
+    ],
+    "rows": [
+      [
+        4,
+        1,
+        0,
+        0
+      ],
+      [
+        1,
+        3,
+        1,
+        0
+      ],
+      [
+        0,
+        1,
+        2,
+        1
+      ],
+      [
+        0,
+        0,
+        1,
+        1
+      ]
+    ]
+  },
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "source_commit": "1f60d029e433d716ac2dd746bc07639d051a62f9",
+  "sources": {
+    "compiler/mesh_compiler/operations.py": "6d92107bab8cb8c514621f7254390d77758c2475ddb0c650043ed6bd3dbfcc2c",
+    "compiler/mesh_compiler/decompose.py": "460dd8ae3466be4061d9969a0daabdeadcdce6c47aeba93ead92b0259965dc05",
+    "compiler/mesh_compiler/export.py": "a8266b223369d88e7713460b1192261e4ec514daa9481f80cbb3b46e3c4c6b00",
+    "compiler/mesh_compiler/driver.py": "cfe4f8ab9a2408700ad4e96d8f0b4396e14e329f8b6506772b5717d9527da3b9"
+  }
+}
