@@ -1,0 +1,6 @@
+# Numerical filter and native consumer observations
+
+- Source d087a235 removes the lossy `_flat` exception fallback and retains each normalization operand’s original view. AST/diff checks pass; two pre-existing unused-local warnings remain. Metadata assertions are checked by the canonical fake-source retrace before placed lowering.
+- LayerNorm: the ordinary MPS public caller compiled, restored one native row without a relation solve, and invoked successfully. Weight [3,4]/stride [1,3] stayed noncontiguous. Relative error 9.1578786e-8, max absolute error 3.4337909e-7, finite [2,3,4] output. Exit0, stderr empty, all recorded source/library hashes unchanged. Exact source: layernorm-native-command.md; raw logs/result/manifest: layernorm-native-1.*.
+- The unchanged requested-ANE 2×2 Hermitian caller on metal6802572a crossed the previous `round` failure, then stopped during construction at operation1144: `region builtin bitcast has no MIL operation`. Exit1, hashes unchanged. No Program, invocation, hardware placement or numerical result is claimed. Exact raw logs/manifest: ane-native-6.* and ane-native-attempt6.json.
+- Next ANE unit must preserve the actual typed bitcast semantics after identifying its retained source operation and operand kinds. No numeric cast, fallback target, or input restriction replaces it.

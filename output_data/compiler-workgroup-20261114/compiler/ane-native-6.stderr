@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/tmp/mesh-ane-observation.py", line 9, in <module>
+    scheduled = compile_module(Hermitian(), (a,), {'p':(0,'ane')}, lambda node:'p')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 24, in compile_module
+    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 101, in compile_captured
+    target = native.compile_program(captured, constructed, declared, analysis,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 1500, in compile_program
+    target.constructed(context, plan_calls, libs, instances)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 894, in constructed
+    checked(compiler.metal_ir_construct(constructing, gpu, error, ROOM), error, "construction")
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 79, in checked
+    raise OSError(status, f"{what}: {error.value.decode()}")
+OSError: [Errno 22] construction: ANE operation 1144: region builtin bitcast has no MIL operation
