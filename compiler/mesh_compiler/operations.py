@@ -13,6 +13,7 @@ import sys
 
 import torch
 import torch.utils._pytree as pytree
+from torch._prims_common import corresponding_complex_dtype
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_code
@@ -1887,6 +1888,12 @@ ASSERTIONS = (A._assert_async, A._functional_assert_async, A._assert_scalar, A._
 
 
 def _asserted(target, given, outs):
+    # _assert_tensor_metadata(a, size, stride, dtype, device, layout) states its source operand's metadata, which the
+    # capture decides: export.py export's run_decompositions retrace dispatches each such node on that operand's fake
+    # value (torch/fx/experimental/proxy_tensor.py proxy_call, `out = func(*args, **kwargs)`), and
+    # torch/_subclasses/fake_impls.py assert_tensor_metadata raises AssertionError on any mismatch, so every node here
+    # has passed it. The operand here is the placed value, with placement's device and shard extents (as _local_call
+    # drops _to_copy's device), so the already-discharged source check has no records
     if target.overloadpacket is A._assert_tensor_metadata:
         return []
     value = given.get('self', given.get('size'))
@@ -5345,14 +5352,15 @@ def _ztrevc(h, z, vr, ops):
 # Reference-LAPACK SRC/zgeev.f and dgeev.f (JOBVL = 'N', JOBVR = 'V' or 'N') as a fake-only operator (its shape rule
 # alone), lowered by _geev: the eigenvalues (*batch, n) contiguous and the right eigenvectors (*batch, n, n)
 # column-major (PyTorch v2.14.0 meta linalg_eig's non-CUDA layout), or (0,) where `vectors` is false, both of a's
-# complex dtype (a real input's complex counterpart, linalg_eig's toComplexType)
+# complex dtype (a real input's complex counterpart: torch 2.14.0 torch/_meta_registrations.py meta_linalg_eig's
+# utils.corresponding_complex_dtype, each floating kind's, float16 and bfloat16 among them, no admission subset of it)
 torch.library.define('mesh::geev', '(Tensor a, bool vectors) -> (Tensor, Tensor)')
 
 
 @torch.library.register_fake('mesh::geev')
 def _geev_shapes(a, vectors):
     batch, n = a.shape[:-2], a.shape[-1]
-    dtype = a.dtype if a.is_complex() else {torch.float32: torch.complex64, torch.float64: torch.complex128}[a.dtype]
+    dtype = a.dtype if a.is_complex() else corresponding_complex_dtype(a.dtype)
     return (a.new_empty((*batch, n), dtype=dtype),
             a.new_empty((*batch, n, n), dtype=dtype).mT if vectors else a.new_empty((0,), dtype=dtype))
 
@@ -5383,6 +5391,11 @@ def _geev(outs, a, vectors):
     batch, n = a.shape[:-2], a.shape[-1]
     if not n or not a.numel():
         return []
+    # Rejection filters are not part of even temporary integration validation.
+    # Every non-CPU eig reaches this lowering; a kind GEEV's S/D/C/Z transcription lacks fails here, at its lowering.
+    if a.dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
+        raise NotImplementedError('linalg.eig of %s on a non-CPU engine: its GEEV lowering is unfinished '
+                                  '(design/torch-source-lowering-change-request.md item 6)' % a.dtype)
     dtype, real, t = a.dtype, a.real.dtype, _class(a.real)
     whole = a.is_complex()
     limits = torch.finfo(real)
@@ -6626,16 +6639,12 @@ def _histogram(target, given, outs):
 # PyTorch 2.14 documentation, torch.nn.LayerNorm, torch.nn.GroupNorm and torch.nn.BatchNorm2d; torch 2.14.0
 # torch/_refs/__init__.py, native_layer_norm, native_group_norm and _normalize; torch/_decomp/decompositions.py,
 # native_batch_norm_helper: the statistics' groups and the normalized elements both affine loops over x (group norm's
-# channel split into (group, channel of the group)); the mean, then the variance about it, two SUM reductions
+# channel split into (group, channel of the group)); the mean, then the variance about it, two SUM reductions. Each
+# affine and running operand is its own torch view: layer norm's weight is normalized_shape itself (_refs 3578), group
+# norm's a C vector split into (group, C / group) (_refs 3412), batch norm's and the running statistics the C vector;
+# a view torch cannot make raises its own RuntimeError
 NORMS = (A.layer_norm, A.native_layer_norm, A.group_norm, A.native_group_norm, A.batch_norm, A.native_batch_norm,
          A._native_batch_norm_legit, A._native_batch_norm_legit_functional, A._native_batch_norm_legit_no_training)
-
-
-def _flat(value):
-    try:
-        return value.view(-1)
-    except RuntimeError:
-        return value.as_strided((value.numel(),), (value.stride(-1) if value.dim() else 1,), value.storage_offset())
 
 
 def _grouped(value, count):
@@ -6671,7 +6680,7 @@ def _normalized(target, given, outs):
         A.batch_norm, A.native_batch_norm, A._native_batch_norm_legit, A._native_batch_norm_legit_no_training)
     g, ops = _same(len(groups)), []
     if known:
-        rm, rv = _flat(given['running_mean']).view(groups), _flat(given['running_var']).view(groups)
+        rm, rv = given['running_mean'].view(groups), given['running_var'].view(groups)
         f = _Region()
         f.done(_store(f, _load(f, 0, rm, t), t, mean),
                _store(f, f('div', t, f.const(1, t), f('sqrt', t, f('add', t, _load(f, 1, rv, t), f.const(eps, t)))),
@@ -6699,7 +6708,7 @@ def _normalized(target, given, outs):
         if training and given.get('running_mean') is not None:
             # torch 2.14.0 torch/_decomp/decompositions.py, native_batch_norm_helper: the running statistics' update,
             # into the functional variant's results or the running statistics' own storage
-            rm, rv = _flat(given['running_mean']).view(groups), _flat(given['running_var']).view(groups)
+            rm, rv = given['running_mean'].view(groups), given['running_var'].view(groups)
             updated = [o.view(groups) for o in outs[3:5]] if len(outs) == 5 else [rm, rv]
             momentum = float(given['momentum'])
             u = _Region()
@@ -6716,7 +6725,7 @@ def _normalized(target, given, outs):
     inputs = [(view, _same(dims)), (mean, _rows(dims, group_of)), (rstd, _rows(dims, group_of))]
     for affine_value in (weight, bias):
         if affine_value is not None:
-            shaped = _flat(affine_value).view(affine)
+            shaped = affine_value.view(affine)
             y = e('mul' if affine_value is weight else 'add', t, y, _load(e, len(inputs), shaped, t))
             inputs.append((shaped, _rows(dims, channel_of)))
     e.done(_store(e, y, t, out))
@@ -7607,6 +7616,8 @@ def _lowering(local, page, generator=None):
         return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs)
     if packet in VIEWS:
         return lambda args, kwargs, outs: _copy(outs[0], _call(local, args, kwargs))
+    # Rejection filters are not part of even temporary integration validation.
+    # An operation without a lowering above fails here, at its own lowering, and nothing before this declines it.
     raise NotImplementedError('%s: its lowering into the structured basis is unfinished '
                               '(design/torch-source-lowering-change-request.md item 1)' % (local.target,))
 

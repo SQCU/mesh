@@ -1,0 +1,12 @@
+# numerical-42: two rejection-filter corrections (SAME64), operations.py only, source HOLD, unstaged
+- **1. `_flat` deleted.** It caught view's RuntimeError and silently reinterpreted a noncontiguous tensor through `as_strided`. Its three callers in `_normalized` now take the operand's own `.view`:
+  - Running stats: `running_mean.view(groups)` and `running_var.view(groups)`, which only batch norm reaches (groups = (C,)).
+  - Affine weight/bias: `weight.view(affine)`. LayerNorm's affine is normalized_shape itself (`_refs` native_layer_norm 3578, `weight.shape == normalized_shape`), an identity view for any strides. GroupNorm's 1-D C vector splits into (group, C/group) (`_refs` 3412, `weight.ndim == 1`), always viewable. BatchNorm's C vector is an identity view.
+  - Any view torch cannot make now raises its own RuntimeError instead of being swallowed.
+- **2. `_assert_tensor_metadata` → [] kept, now with its source fact cited.** Every capture runs `run_decompositions` (export.py:128). That retrace dispatches each node on its operand's fake value (proxy_tensor.py:1449), and `fake_impls.assert_tensor_metadata` (1555–1591) raises on any size, stride, dtype, layout or device mismatch, so every node in the graph has already passed it.
+  - torch's own producers (functional_tensor.py:349 `.to`, export/utils.py:740, insert_custom_op_guards.py) take dtype, device and layout from the operand's own value.
+  - At lowering the operand is the placed meta value, carrying placement's device and shard extents (as `_local_call` drops `_to_copy`'s device). Re-checking it would reject valid placements, so no check is re-run.
+  - The functional/async dependency path and the dynamic checks are unchanged.
+- **3. Kept from numerical41:** the GEEV `corresponding_complex_dtype` rule, the explicit unfinished-lowering raise, and the comments.
+- **Checks:** AST passes on both files. pyflakes shows only the 2 warnings already at HEAD (operations.py `real` at 1077, `two` at 4679). Cumulative uncommitted delta is +26/−13 (operations.py +24/−13, decompose.py +2). No import, build, target or backup.
+- **Remaining boundary:** a batch-norm weight or running stat that is multidimensional, noncontiguous and C-numel now fails at torch's view. That is explicit, but it has no lowering.

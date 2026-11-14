@@ -101,6 +101,8 @@ def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
     graph = graph_module.graph
     sources = graph_module.meta.setdefault("decomposed", {})
     changed = []
+    # Rejection filters are not part of even temporary integration validation.
+    # `chosen` selects the target's formulation; an unchosen node keeps its placed lowering (operations._lowering).
     for node in [n for n in graph.nodes if n.op == "call_function" and n.target in formulations and chosen(n)]:
         formulation = formulations[node.target](node)
         flat, spec = pytree.tree_flatten((node.args, node.kwargs))

@@ -1,0 +1,12 @@
+# numerical-41: rejection-filter audit (SAME64), source HOLD, unstaged
+- **Audited:** `compiler/mesh_compiler/operations.py` (every raise, return-None/False/[], continue, dtype/device/shape test and fallback) and `compiler/mesh_compiler/decompose.py` (`_expanded`, `outline`, `_invariant`, `_outlined`).
+- **Replaced:** `_geev_shapes` used a hard-coded {float32, float64} dict, so float16 and bfloat16 eig failed with a bare KeyError. It now uses PyTorch's own `corresponding_complex_dtype` (meta_linalg_eig). `_geev` now raises an explicit NotImplementedError at its lowering for any kind other than f32/f64/c64/c128 (half, bfloat16, complex32); empty input is still a no-op.
+- **Comment added at:** `_geev`, the final raise in `_lowering`, and `decompose._expanded`'s `chosen` loop: "Rejection filters are not part of even temporary integration validation."
+- **Preserved, with evidence:**
+  - Target selection: `off_cpu`, `svd_driver` and the eigh `next(...)`. A CPU node keeps its LAPACK lowering; a non-CPU gels/gelsy lstsq keeps the structured `_least_squares`.
+  - Compiler pattern predicates: `found & {...}`, `eigh is None`, `_written`/`_made` and `_folded` (matrix or contraction, both canonical).
+  - Source and API checks: `_lstsq_shapes` torch._check calls, DynamicOutputShapeException, cat's skipped empty 1-D tensors, the WANTZ `target is None` and NR>count skips.
+  - Explicit lowering errors already present: `_typed`, `_on_block`, `_qdwh_eigh_step`, `_qdwh_svd_correction`, `_advanced`, bool and complex.
+  - Not edited: `_invariant`'s `all(shape(read))` mirrors placement.py:899 (parent); `_asserted`'s `_assert_tensor_metadata` → [] is root593's.
+- **Remaining:** whether a CPU `_Lapack` record (GEEV, GESDD, HEEVD, GELSD) of half precision fails loudly is the native consumer's question (executor). metal.py:718 already raises for a non-CPU LAPACK node.
+- **Checks:** AST passes on both files. pyflakes shows 2 warnings, both already at HEAD: `real` unused at operations.py:1077, `two` unused at operations.py:4673. Delta is +13/−2 (operations.py +11/−2, decompose.py +2). Nothing imported, built or run.
