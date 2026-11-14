@@ -9,6 +9,7 @@ from torch.utils import _pytree as pytree
 
 from . import native
 from .ir import Exported, Plan, Scheduled
+from .native import mesh
 
 
 def tuples(value):
@@ -32,8 +33,10 @@ def save(directory, scheduled):
         "invariant": scheduled.invariant,
         "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
-        "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex(),
-                                    "signature": scheduled.plan.signature.hex()},
+        "plan": scheduled.plan and {
+            **{field.name: getattr(scheduled.plan, field.name) for field in dataclasses.fields(scheduled.plan)},
+            "record": scheduled.plan.record.hex(), "signature": scheduled.plan.signature.hex(),
+            "dependences": [[getattr(d, "from"), d.to, d.lag, d.kinds] for d in scheduled.plan.dependences]},
         "targets": {processor: function.saved(directory, processor)
                     for processor, function in scheduled.functions.items()},
         "state_kinds": {name: kind.name for name, kind in exported.state_kinds.items()},
@@ -60,6 +63,8 @@ def load(directory):
                for channel, sender, receiver, dtype, shape, stride in about["carried"]]
     plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"]),
                                      "signature": bytes.fromhex(about["plan"]["signature"]),
+                                     "dependences": (mesh.Dependence * len(about["plan"]["dependences"]))(
+                                         *[mesh.Dependence(*record) for record in about["plan"]["dependences"]]),
                                      "nodes": tuple(about["plan"]["nodes"]),
                                      "offsets": tuple(map(tuple, about["plan"]["offsets"])),
                                      "publications": tuple(map(tuple, about["plan"]["publications"])),

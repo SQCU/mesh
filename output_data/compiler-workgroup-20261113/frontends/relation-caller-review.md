@@ -63,3 +63,20 @@ direct ctypes registrations are deleted. Source graph arrays are not copied into
 enumeration becomes canonical edge order; the declared pair/lag/role set is preserved by source review. Current whole
 mesh-graph.c strict C syntax plus the two Python AST/diff checks pass. Matching actual boundaries/longest API and caller
 observations remain pending the coordinator's library release.
+
+2026-11-14 UTC event-owner checkpoint (SAME Torch30–31, explicit/reported Opus5.5): schedule returns one native
+Dependence array retaining its event relation, source closure, redundancy mask, boundary views and record-to-event/edge
+correspondence. mesh.function borrows that exact array and retains its owner; Declarations/Plan keep it through final
+plan and signature construction. Archive uses shallow Plan projection rather than deepcopy of native owners, retaining
+the existing persisted dependence records. Loaded final plans do not query the source event proof again: the canonical
+plan/template and signature are its final compiled consumers, so no second JSON graph is introduced.
+
+Actual canonical-library observation: a three-event source relation produced three records; Function.dependence had
+the identical native address, its retained owner was the original array, and mask/records remained valid after source
+references were deleted and GC ran. Empty events retained an actual zero-length array/count. AST and diff checks pass.
+This is ownership/API evidence, not live transport execution.
+
+Matching graph observations also passed longest paths with nonnumeric vertex order and borrowed results after Graph
+reference deletion, and native event boundaries. An actual Torch export→placement→devices→schedule construction
+reversed two independent random nodes while preserving original source site IDs 1 and 2; draw consumers saw 2 then 1,
+not reassigned traversal IDs. No statistical or distributed RNG claim.

@@ -114,7 +114,7 @@ class Function(C.Structure):
                 ('work', C.POINTER(C.c_double)), ('edge', C.POINTER(mesh_graph.Dependence)), ('parts', U), ('edges', U),
                 ('task', C.POINTER(Task)), ('before', C.POINTER(mesh_graph.Dependence)), ('sender', C.POINTER(U)),
                 ('receiver', C.POINTER(U)), ('completion', C.POINTER(D)), ('tasks', U), ('resources', U),
-                ('befores', U), ('padding2', U), ('order', C.POINTER(U))]
+                ('befores', U), ('padding2', U), ('order', C.POINTER(U)), ('relation', C.c_void_p)]
 
 
 class View(C.Structure):
@@ -142,13 +142,13 @@ class Planned(C.Structure):
                 ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('padding', U), ('orders', Z),
                 ('cause', C.POINTER(PlannedCause)), ('horizon', Q), ('functions', U), ('extents', Z),
                 ('first', C.POINTER(Z)), ('transfer', C.POINTER(PlannedTransfer)),
-                ('extent', C.POINTER(mesh_graph.Access))]
+                ('extent', C.POINTER(mesh_graph.Access)), ('owned', C.c_void_p)]
 
 
 # mesh-collective.h struct mesh_local, mesh_plan_local
 class Local(C.Structure):
     _fields_ = [('planned', Planned), ('bytes', Q), ('values', Z), ('offsets', Z), ('first', C.POINTER(Z)),
-                ('offset', C.POINTER(Q)), ('owned', C.c_void_p)]
+                ('offset', C.POINTER(Q))]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
@@ -272,6 +272,9 @@ CONTEXT = C.POINTER(Context)
 # 2026-11-09 (design/torch-capture-change-request.md item 2 and its appendix): mesh_plan takes no horizon; it derives
 # it from each Function's `host` and `work` estimates and gives it as Planned `horizon`.  What must stay: each binding
 # the header's declaration
+# mesh-collective.h mesh_plan_load and mesh_local_load: the archive bytes' owner, released once the loaded result and
+# its relations are
+RELEASE = C.CFUNCTYPE(None, C.c_void_p)
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
@@ -282,13 +285,13 @@ for name, result, arguments in (
         ('mesh_plan_save', C.c_int, [CONTEXT, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
                                      C.POINTER(U), C.POINTER(Planned), C.POINTER(C.c_void_p), C.POINTER(Z)]),
         ('mesh_plan_load', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
-                                     C.POINTER(U), Q, C.c_void_p, Z, C.POINTER(Planned)]),
+                                     C.POINTER(U), Q, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Planned)]),
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
         ('mesh_plan_local', C.c_int, [C.POINTER(Function), Q, C.POINTER(Local)]),
         ('mesh_local_free', None, [C.POINTER(Local)]),
         ('mesh_local_save', C.c_int, [C.POINTER(Function), C.POINTER(Local), C.POINTER(C.c_void_p),
                                       C.POINTER(Z)]),
-        ('mesh_local_load', C.c_int, [C.c_void_p, Z, C.POINTER(Function), C.POINTER(Local)]),
+        ('mesh_local_load', C.c_int, [C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Function), C.POINTER(Local)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, Q]),
@@ -321,7 +324,8 @@ def check(status):
 
 
 # mesh-collective.h struct mesh_function, struct mesh_declared, struct mesh_weight, struct mesh_value, struct
-# mesh_dependence, struct mesh_task; mesh-graph.h struct mesh_strided
+# mesh_dependence, struct mesh_task; mesh-graph.h struct mesh_strided; compiler/mesh_compiler/schedule.py dependences:
+# a Dependence array is held as it is, its count its length; (from, to, lag, kinds) records are converted once
 def function(declared, weights, values, dependences, outstanding, tasks=(), before=(), senders=(), receivers=(),
              resources=0):
     held = []
@@ -336,6 +340,7 @@ def function(declared, weights, values, dependences, outstanding, tasks=(), befo
              (Weight * max(len(weights), 1))(*[Weight(*weight) for weight in weights]),
              (Value * max(len(values), 1))(*[Value(Section(0, 0, size, 0, 0), *fields, 0, 0)
                                              for size, *fields in values]),
+             dependences if isinstance(dependences, C.Array) and dependences._type_ is Dependence else
              (Dependence * max(len(dependences), 1))(*[Dependence(*edge) for edge in dependences])]
     made = (Function * 1)(Function(*held[-4:], len(declared), len(values), len(dependences), 0, outstanding, 0, None,
                                    None, None, 0, 0))
