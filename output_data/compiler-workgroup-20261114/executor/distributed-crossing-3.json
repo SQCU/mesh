@@ -1,0 +1,516 @@
+{
+  "scope": "Existing Crossing, five declared nodes, HIDDEN=8 CROSSINGS=2 OVERLAP=1 MPS, group11141146; failure before numerical invocation. One later same-client compile-only live snapshot, group11141147, before owner cleanup.",
+  "source": {
+    "mesh": "1f49965ccb4e031ef81bfd2fd0ee4eac600b2113",
+    "metal": "8e668cb1ef64ae1d0771eb407d4a016c1ae04562"
+  },
+  "local_build": {
+    "exit": 0,
+    "seconds": 103.40027213096619,
+    "changed_source": [],
+    "binaries": {
+      "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303",
+      "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "99b10d5f4a9b75cbe25e62ba0f6645bb17ec6125fb0df443292486509b5a4930",
+      "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "b37eab07741fe28f919acf84fb62186b3e605b0352474dbbcfd976b8c5777d80",
+      "/Users/mdot/metal-microbench/.build/native_bench": "f0c5c32dd1deb907387bdb6c013d92608d2afa1921765989ad7013e156cf0c7e",
+      "/Users/mdot/metal-microbench/.build/e2b_replay": "e27b6e6a53fce3ffc87fa009a572be7382097adcae0696b9da6d61417cd50cf4"
+    }
+  },
+  "local_abi": {
+    "Repeat": 40,
+    "ValueInfo": 120,
+    "Function": 168,
+    "Planned": 152,
+    "Local": 376,
+    "Signature": 416,
+    "issued": true,
+    "check_dep_token": true,
+    "program_new_free": true
+  },
+  "peers": {
+    "mdots-Mac-Studio-3-ts": {
+      "build_seconds": 23.313825130462646,
+      "changed_source": [],
+      "heads": {
+        "/Users/mdot/mesh": "1f49965ccb4e031ef81bfd2fd0ee4eac600b2113",
+        "/Users/mdot/metal-microbench": "8e668cb1ef64ae1d0771eb407d4a016c1ae04562"
+      },
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+        "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "c74cd3ff66eabf69cfb39a243f42ba1a680e8ac0a3704eececb4bdad930ed27f",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "f459284da65b58fa37ce502d402863fd40b2b1666f5740c00c8f719f500d5bc5"
+      },
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "issued": true,
+        "new_free": true,
+        "uninterruptible": [],
+        "clients": []
+      },
+      "failure": "OSError: [Errno 22] replay: Command 1 binding 0 ((null)) in repetition 0 at 18446744073709551615, past its buffer's 376832 bytes",
+      "terminal_process_absent": true,
+      "bridge": {
+        "bridge_pid": 95542,
+        "version": 121,
+        "node": 371057962,
+        "pgsz": 16384,
+        "block": 1,
+        "rows": 5373952,
+        "ready": true,
+        "paired": true,
+        "clients": []
+      }
+    },
+    "m5ult2-ts": {
+      "build_seconds": 23.34221911430359,
+      "changed_source": [],
+      "heads": {
+        "/Users/mdot/mesh": "1f49965ccb4e031ef81bfd2fd0ee4eac600b2113",
+        "/Users/mdot/metal-microbench": "8e668cb1ef64ae1d0771eb407d4a016c1ae04562"
+      },
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+        "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "c74cd3ff66eabf69cfb39a243f42ba1a680e8ac0a3704eececb4bdad930ed27f",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "f459284da65b58fa37ce502d402863fd40b2b1666f5740c00c8f719f500d5bc5"
+      },
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "issued": true,
+        "new_free": true,
+        "uninterruptible": [],
+        "clients": []
+      },
+      "failure": "OSError: [Errno 22] replay: Command 1 binding 2 ((null)) in repetition 0 at 18446744073709551615, past its buffer's 4295131136 bytes",
+      "terminal_process_absent": true,
+      "bridge": {
+        "bridge_pid": 32109,
+        "version": 121,
+        "node": 455770905,
+        "pgsz": 16384,
+        "block": 1,
+        "rows": 5373952,
+        "ready": true,
+        "paired": true,
+        "clients": []
+      }
+    },
+    "mdots-Mac-Studio-ts": {
+      "build_seconds": 23.324347019195557,
+      "changed_source": [],
+      "heads": {
+        "/Users/mdot/mesh": "1f49965ccb4e031ef81bfd2fd0ee4eac600b2113",
+        "/Users/mdot/metal-microbench": "8e668cb1ef64ae1d0771eb407d4a016c1ae04562"
+      },
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+        "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "c74cd3ff66eabf69cfb39a243f42ba1a680e8ac0a3704eececb4bdad930ed27f",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "f459284da65b58fa37ce502d402863fd40b2b1666f5740c00c8f719f500d5bc5"
+      },
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "issued": true,
+        "new_free": true,
+        "uninterruptible": [],
+        "clients": []
+      },
+      "failure": "OSError: [Errno 22] replay: Command 1 binding 2 ((null)) in repetition 0 at 18446744073709551615, past its buffer's 163840 bytes",
+      "terminal_process_absent": true,
+      "bridge": {
+        "bridge_pid": 33866,
+        "version": 121,
+        "node": 521750041,
+        "pgsz": 16384,
+        "block": 1,
+        "rows": 5373952,
+        "ready": true,
+        "paired": true,
+        "clients": []
+      }
+    },
+    "mdots-Mac-Studio-2-ts": {
+      "build_seconds": 23.30737805366516,
+      "changed_source": [],
+      "heads": {
+        "/Users/mdot/mesh": "1f49965ccb4e031ef81bfd2fd0ee4eac600b2113",
+        "/Users/mdot/metal-microbench": "8e668cb1ef64ae1d0771eb407d4a016c1ae04562"
+      },
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+        "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "c74cd3ff66eabf69cfb39a243f42ba1a680e8ac0a3704eececb4bdad930ed27f",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "f459284da65b58fa37ce502d402863fd40b2b1666f5740c00c8f719f500d5bc5"
+      },
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "issued": true,
+        "new_free": true,
+        "uninterruptible": [],
+        "clients": []
+      },
+      "failure": "OSError: [Errno 22] replay: Command 1 binding 2 ((null)) in repetition 0 at 18446744073709551615, past its buffer's 4294983680 bytes",
+      "terminal_process_absent": true,
+      "bridge": {
+        "bridge_pid": 5415,
+        "version": 121,
+        "node": 597453729,
+        "pgsz": 16384,
+        "block": 1,
+        "rows": 5373952,
+        "ready": true,
+        "paired": true,
+        "clients": []
+      }
+    },
+    "Ms-Mac-mini-ts": {
+      "build_seconds": 23.385417222976685,
+      "changed_source": [],
+      "heads": {
+        "/Users/mdot/mesh": "1f49965ccb4e031ef81bfd2fd0ee4eac600b2113",
+        "/Users/mdot/metal-microbench": "8e668cb1ef64ae1d0771eb407d4a016c1ae04562"
+      },
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "8c9444534f4a5768e86e8e07b1fa06e8dee55ad8d5b76d16d1ae25cd5957f12e",
+        "/Users/mdot/mesh/rdma/mesh-flow": "db82addbbfd81c4b5171d89882dcb29c21aed3d97d1ff8f88c1502837389ec45",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "d3930702e456a3b98fe39107e66847d867978285be4bd97e141abac46b606083",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "ffe853a7b326b577d3a0e3d59c3d8e826dc92338236db1041e7c3cc747721a06"
+      },
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "issued": true,
+        "new_free": true,
+        "uninterruptible": [
+          "76413     1 Us   /usr/libexec/PerfPowerServices"
+        ],
+        "clients": []
+      },
+      "failure": "OSError: [Errno 22] replay: Command 1 binding 2 ((null)) in repetition 0 at 18446744073709551615, past its buffer's 4295147520 bytes",
+      "terminal_process_absent": true,
+      "bridge": {
+        "bridge_pid": 51394,
+        "version": 121,
+        "node": 1974797816,
+        "pgsz": 16384,
+        "block": 1,
+        "rows": 1048576,
+        "ready": true,
+        "paired": true,
+        "clients": []
+      }
+    }
+  },
+  "live_snapshot": {
+    "row": 0,
+    "node": 0,
+    "row_fields": {
+      "call": 0,
+      "function": 0,
+      "instance": 0,
+      "planned": 0
+    },
+    "order": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "counts": [
+      69,
+      67
+    ],
+    "arena_bytes": 376832,
+    "dispatch": {
+      "index": 1,
+      "kind": 0,
+      "kernel": 1,
+      "binding": 2,
+      "bindings": 21,
+      "effect": 7,
+      "effects": 23,
+      "source": 0,
+      "sources": 20,
+      "allocation": 0,
+      "allocations": 1,
+      "arguments": 4294967295,
+      "later": 3,
+      "flags": 2,
+      "fill": 0,
+      "groups": [
+        1,
+        1,
+        1
+      ],
+      "threads": [
+        32,
+        1,
+        1
+      ],
+      "bindings_list": [
+        {
+          "slot": 0,
+          "value": 6,
+          "access": 1,
+          "table": 0,
+          "offset": 0,
+          "bytes": 0
+        }
+      ]
+    },
+    "received_value6": {
+      "value_info": {
+        "role": 0,
+        "scalar": 11,
+        "storage": 6,
+        "function": 0,
+        "index": 6,
+        "word": 0,
+        "of": 4294967295,
+        "range": 0,
+        "received": 1,
+        "sent": 0,
+        "zeroed": 0,
+        "sendings": 0,
+        "identity": 0,
+        "bytes": 16,
+        "offset": 0,
+        "at": 0,
+        "data_bytes": 0,
+        "data": null,
+        "buffer": null,
+        "page_bytes": 0,
+        "pages": 0,
+        "source": 4294967295
+      },
+      "storage": {
+        "bytes": 16,
+        "begin": 0,
+        "end": 3,
+        "alignment": 2
+      },
+      "placed": {
+        "status": 0,
+        "buffer": 524979867584,
+        "copies": 1,
+        "ahead": 0,
+        "shares": 0,
+        "offsets": [
+          18446744073709551615
+        ]
+      },
+      "bindings": [],
+      "marked": [
+        [
+          6,
+          0,
+          6
+        ]
+      ],
+      "function": {
+        "index": 0,
+        "value": {
+          "section": {
+            "first": 0,
+            "pages": 1,
+            "bytes": 16,
+            "count": 1,
+            "stride": 1
+          },
+          "kind": 1,
+          "wire": 0,
+          "state": 0,
+          "begin": 0,
+          "end": 3,
+          "lag": 0,
+          "run": 0,
+          "shares": 0,
+          "padding1": 0
+        },
+        "first": [
+          0,
+          1
+        ],
+        "mapped": [
+          18446744073709551615
+        ],
+        "raw": [
+          0
+        ]
+      }
+    },
+    "interpretation": "The live native placement used UINT64_MAX for received root6. The retained function value has run0 and one allocated section copy. Its raw Local row is0; the old mesh_view_program mapped offset is UINT64_MAX. This is mapper consumption, not capacity failure. Multi-page contiguity is not implied."
+  },
+  "artifacts": [
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-3-ts-consumer85-build.log",
+      "sha256": "c7ccec0f48886ac06bfe08b2e1d8a705a463c17c818cac1b97c24a17edba9cce",
+      "bytes": 13710
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-3-ts-consumer85-abi.json",
+      "sha256": "701dba8e19dcc1af009a3282d5555119e18d53f2071162e59ac63ecb6c873603",
+      "bytes": 1286
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-3-ts-crossing-3.stdout",
+      "sha256": "a5c3bd1c849ad997e2e797c5865bf11fde29ec8b30c4a61cdb25111029b6447f",
+      "bytes": 389
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-3-ts-crossing-3.stderr",
+      "sha256": "9a98c4c8b950961a8ccae47d50ab6d17c4680b466f4d8e47c619c4b89482e693",
+      "bytes": 1996
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-3-ts-postcrossing-3.json",
+      "sha256": "b30368b6460a4862b6f80343bcba9a4903a7893453f7219e528ab2d0cdccc5fa",
+      "bytes": 1071
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/m5ult2-ts-consumer85-build.log",
+      "sha256": "4aab3556563f2f26ab45b1923c7d5f8c7fab44de6dc261d707bf5c2e99567590",
+      "bytes": 13709
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/m5ult2-ts-consumer85-abi.json",
+      "sha256": "eedd640e496c06a92b8e4f6902c10d8876d3f3cbb64dfe90925224aac7b75621",
+      "bytes": 1252
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/m5ult2-ts-crossing-3.stdout",
+      "sha256": "d6d76ef1397f0140b598392b72fe798e7c7080f699601f8c8642cd2d05d60648",
+      "bytes": 389
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/m5ult2-ts-crossing-3.stderr",
+      "sha256": "b4435440f575e4610821e6f400789fca379cc76fe74a8281201945fd4e65b5e2",
+      "bytes": 2000
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/m5ult2-ts-postcrossing-3.json",
+      "sha256": "12842cd5757a7f30497da45aa1ef2e86dab91061be75a9081857878b2d9a3389",
+      "bytes": 1037
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-ts-consumer85-build.log",
+      "sha256": "03af94ed8840fa8e9cec980e40f6e02d5e6fa5fb97503a7c7e63c511ec73f753",
+      "bytes": 13710
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-ts-consumer85-abi.json",
+      "sha256": "5379c0e8392557e9387c21890e1d69f58bb0baa6d06b29c102c5dc353e79616d",
+      "bytes": 1269
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-ts-crossing-3.stdout",
+      "sha256": "d6d76ef1397f0140b598392b72fe798e7c7080f699601f8c8642cd2d05d60648",
+      "bytes": 389
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-ts-crossing-3.stderr",
+      "sha256": "47400695f789a0e324bdd230aea91448daf57450f74c104915980a45115396a0",
+      "bytes": 1996
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-ts-postcrossing-3.json",
+      "sha256": "ed948d0ba3404ceeb0f752bd965a30d928deec9ffb9fd727ccaa9fd16c2a8c6c",
+      "bytes": 1054
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-2-ts-consumer85-build.log",
+      "sha256": "42e08f3faaa882b241f5d1a6a72b6807eafaaf7554eadcf69330661fa642a60e",
+      "bytes": 13709
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-2-ts-consumer85-abi.json",
+      "sha256": "34acd1011152b21c44473773781ff71e26dffa603321f49a09cb912c471ef4c6",
+      "bytes": 1286
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-2-ts-crossing-3.stdout",
+      "sha256": "d6d76ef1397f0140b598392b72fe798e7c7080f699601f8c8642cd2d05d60648",
+      "bytes": 389
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-2-ts-crossing-3.stderr",
+      "sha256": "05badf1f233541f4ba461959284a38b87c576c228495d119df696a0148c3fce8",
+      "bytes": 2000
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/mdots-Mac-Studio-2-ts-postcrossing-3.json",
+      "sha256": "767fd5114cd212d2a7543d7856550341eeb2e485a9b237affe061fd31e38f88a",
+      "bytes": 1071
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/Ms-Mac-mini-ts-consumer85-build.log",
+      "sha256": "8a010f8f7c9610cb2428ddf0e6e876220c2aa5d44ab4be7c552e295270cf579c",
+      "bytes": 13710
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/Ms-Mac-mini-ts-consumer85-abi.json",
+      "sha256": "aa6eba528af14b13d6dce8d0da314c486b03093ac0d06d616fc9f5d88705e621",
+      "bytes": 1246
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/Ms-Mac-mini-ts-crossing-3.stdout",
+      "sha256": "d6d76ef1397f0140b598392b72fe798e7c7080f699601f8c8642cd2d05d60648",
+      "bytes": 389
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/Ms-Mac-mini-ts-crossing-3.stderr",
+      "sha256": "b10b121a25bcad336a733cdce4653b199d59eb37ec3954b49d5f775c9585a764",
+      "bytes": 2000
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/Ms-Mac-mini-ts-postcrossing-3.json",
+      "sha256": "112930a26321418781efe8f5116faf52612298f61aa5feda0e4084c529fa9031",
+      "bytes": 982
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/placement-snapshot.stdout",
+      "sha256": "7c72a52a27783f80e7dff2b47fb987aadfe045ba358b0cdad008e2bec147b8c1",
+      "bytes": 23421
+    },
+    {
+      "path": "output_data/compiler-workgroup-20261114/executor/distributed/placement-snapshot.stderr",
+      "sha256": "a64b189687c740f3c53e94724482defe354499ae958d0d18d5aba5ca16950195",
+      "bytes": 1956
+    }
+  ]
+}

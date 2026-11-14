@@ -1,0 +1,12 @@
+{
+  "exit": 0,
+  "seconds": 103.40027213096619,
+  "changed_source": [],
+  "binaries": {
+    "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303",
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "99b10d5f4a9b75cbe25e62ba0f6645bb17ec6125fb0df443292486509b5a4930",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "b37eab07741fe28f919acf84fb62186b3e605b0352474dbbcfd976b8c5777d80",
+    "/Users/mdot/metal-microbench/.build/native_bench": "f0c5c32dd1deb907387bdb6c013d92608d2afa1921765989ad7013e156cf0c7e",
+    "/Users/mdot/metal-microbench/.build/e2b_replay": "e27b6e6a53fce3ffc87fa009a572be7382097adcae0696b9da6d61417cd50cf4"
+  }
+}

@@ -1,0 +1,13 @@
+# Crossing: allocated receive section lost at mapping
+
+The canonical consumer85 build passed locally and on all five peers. Source hashes stayed unchanged during each build; fresh imports matched Repeat40, ValueInfo120, Function168, Planned152, Local376 and Signature416. Source was mesh1f49965c / metal8e668cb1. Existing version121 bridges kept their PIDs and full arenas; no restart occurred.
+
+The unchanged five-node Crossing client (HIDDEN8, CROSSINGS2, OVERLAP1, MPS, group11141146) passed the earlier output recipe and indirect-argument effect boundaries. All five processes then failed during replay before numerical invocation. A received binding was placed at UINT64_MAX. All clients exited; passive bridge status remained ready/paired with no clients.
+
+One authorized compile-only snapshot on the same client, group11141147, inspected the actual live row at replay failure before Owned cleanup. It used row identity to select its program (the replay loop's earlier `r` local was stale). Row0/dispatch1/binding0 reads F16 storage6. The retained function value has section(first0,pages1,bytes16,count1,stride1), run0, raw Local offset0, and mapped offset UINT64_MAX. There is no joined or callable override for this root. Dispatch1 is the ordinary numerical dispatch; dispatch3 is the separate indirect dispatch.
+
+The old mesh_view_program excluded run0 when mapping actual copies. In the network planner, run0 function sections can be allocated dedicated/routed storage; Local.first and section copies already define their presence. This is not evidence of inadequate capacity. No run flag, planner result, numerical operation, buffer size or offset default was changed for the observation.
+
+Compiler checkpoint1cd0bd26 maps every retained section row and returns its per-page offset under the same View. Python consumer pages86 is in progress. Multi-page storage may be physically noncontiguous, so the next paired handoff must annotate original typed paging before construction and relocate existing frame tables from these actual offsets. Crossing3 has no distributed numerical success, paging-runtime or publication claim.
+
+`distributed-crossing-3.json` retains the exact failed root, dispatch, build/ABI results, fleet state and hashes of the original logs. The matching local build manifests are `consumer85-source.json`, `consumer85-binaries.json`, and `consumer85-abi.json`. Frontend independently confirmed the Contents correction with the original Mapped client (error0), plus the existing inter-call mutation client (errors0 and exact returned alias); those results belong to its evidence checkpoint.
