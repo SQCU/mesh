@@ -169,17 +169,23 @@ _Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,d
    is in both: the integer points of offset_a + sum_k i_k stride_k + u = offset_b + sum_l j_l stride_l + v over their
    bounded indices and element bytes u, v, isl_basic_set_is_empty (exact, arbitrary precision), no index or byte
    enumerated and no hull taken for a conflict. The relation keeps each edge's
-   causes (design/compilation-composition-change-request.md, "Retain the value/effect/transfer cause of an edge"):
-   one record {from, to} a distinct (from, to, cause), sorted by from, to, kind, key, given, `from` < `to`; a
-   conflict's cause its key and hazard (the lower vertex's access before the higher's: READ_AFTER_WRITE,
-   WRITE_AFTER_READ, WRITE_AFTER_WRITE), supplied edge g's (supplied_from[g] < supplied_to[g], EINVAL otherwise)
-   GIVEN with `given` g; ERANGE with *edges the count past `room`. The pure relation is its distinct (from, to) */
+   causes (design/compilation-composition-change-request.md, "Retain the value/effect/transfer cause of an edge", item
+   6.4): one record {from, to} a distinct (from, to, cause, witness), sorted by from, to, kind, key, given, from_view,
+   to_view, `from` < `to`; a conflict's cause its key and hazard (the `from` access before the `to` access:
+   READ_AFTER_WRITE, WRITE_AFTER_READ, WRITE_AFTER_WRITE), its witness the two meeting views, from_view `from`'s and
+   to_view `to`'s, indices into `view` as given; supplied edge g's (supplied_from[g] < supplied_to[g], EINVAL
+   otherwise) GIVEN with `given` g and both witnesses SIZE_MAX; ERANGE with *edges the count past `room`. A pair of
+   views of one vertex (mesh_graph_conflicts_views) is one record per hazard, READ_AFTER_WRITE's from_view the
+   written view and WRITE_AFTER_READ's the read one. The pure relation is its distinct (from, to) */
 struct mesh_graph_view { uint64_t key; struct mesh_strided view; uint32_t vertex, write; };
 _Static_assert(sizeof(struct mesh_graph_view) == 48, "mesh_graph_view");
 enum { MESH_GRAPH_READ_AFTER_WRITE, MESH_GRAPH_WRITE_AFTER_READ, MESH_GRAPH_WRITE_AFTER_WRITE, MESH_GRAPH_GIVEN };
-struct mesh_graph_cause { uint64_t key; uint32_t kind, given; };
-_Static_assert(sizeof(struct mesh_graph_cause) == 16, "mesh_graph_cause");
-struct mesh_graph_conflict { uint32_t from, to, kind, given; uint64_t key; };
+struct mesh_graph_cause { uint64_t key; uint32_t kind, given; size_t from_view, to_view; };
+_Static_assert(sizeof(struct mesh_graph_cause) == 32 && offsetof(struct mesh_graph_cause, from_view) == 16 &&
+               offsetof(struct mesh_graph_cause, to_view) == 24, "mesh_graph_cause: rdma/mesh_graph.py Cause");
+struct mesh_graph_conflict { uint32_t from, to, kind, given; uint64_t key; size_t from_view, to_view; };
+_Static_assert(sizeof(struct mesh_graph_conflict) == 40 && offsetof(struct mesh_graph_conflict, from_view) == 24 &&
+               offsetof(struct mesh_graph_conflict, to_view) == 32, "mesh_graph_conflict");
 /* design/compilation-composition-change-request.md: retained exact intersections, including self conflicts;
    caller owns *conflict and releases it with free. */
 int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
@@ -314,7 +320,7 @@ void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(voi
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2; B. R. Rau, MICRO 1994;
    design/torch-source-lowering-change-request.md item 3 */
 size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32_t *tail, uint32_t row, uint32_t count,
-                          uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot);
+                          uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge);
 /* design/compilation-composition-change-request.md item 6: the producer execution e a consumer's execution
    e_b = b every_b + ordinal_b reads, e = (e_b / every) producer + ordinal in 64 bits, every = every_b, producer the
    producing function's every_f, ordinal the producing call's ordinal_f; {1, 1, 0} the consumer's own (e = e_b). Its

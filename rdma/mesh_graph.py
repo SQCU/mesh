@@ -497,7 +497,8 @@ class Viewed(C.Structure):
 
 
 class Cause(C.Structure):
-    _fields_ = [('key', C.c_uint64), ('kind', C.c_uint32), ('given', C.c_uint32)]
+    _fields_ = [('key', C.c_uint64), ('kind', C.c_uint32), ('given', C.c_uint32), ('from_view', C.c_size_t),
+                ('to_view', C.c_size_t)]
 
 
 HAZARDS = ('read after write', 'write after read', 'write after write', 'given')
@@ -555,7 +556,8 @@ def dependences_supplied(vertices, views, supplied):
                                             causes, C.byref(count)))
     found = {}
     for tail, head, cause in zip(tails[:count.value], heads[:count.value], causes[:count.value]):
-        found.setdefault((tail, head), []).append((HAZARDS[cause.kind], cause.key))
+        found.setdefault((tail, head), {})[cause.kind, cause.key, cause.given] = (HAZARDS[cause.kind], cause.key)
+    found = {edge: list(held.values()) for edge, held in found.items()}
     edges, room = list(found), max(len(found), 1)
     redundant, kept = (C.c_ubyte * room)(), C.c_size_t()
     _check(LIB.mesh_graph_synchronization(vertices, len(edges), (C.c_uint32 * room)(*[a for a, _ in edges]),

@@ -1779,7 +1779,9 @@ static int view_edge_before(const void *a, const void *b) {
   if (x->to != y->to) return x->to < y->to ? -1 : 1;
   if (x->kind != y->kind) return x->kind < y->kind ? -1 : 1;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
-  return (x->given > y->given) - (x->given < y->given);
+  if (x->given != y->given) return x->given < y->given ? -1 : 1;
+  if (x->from_view != y->from_view) return x->from_view < y->from_view ? -1 : 1;
+  return (x->to_view > y->to_view) - (x->to_view < y->to_view);
 }
 static int view_conflicts(size_t views, const struct mesh_graph_view *view, size_t supplied,
                           const uint32_t *supplied_from, const uint32_t *supplied_to, int self,
@@ -1792,7 +1794,8 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
   struct mesh_graph_conflict *edge = malloc(held * sizeof *edge);
   int result = hull && edge ? 0 : ENOMEM;
   for (size_t e = 0; !result && e < supplied; e++)
-    edge[e] = (struct mesh_graph_conflict){supplied_from[e], supplied_to[e], MESH_GRAPH_GIVEN, (uint32_t)e, 0};
+    edge[e] = (struct mesh_graph_conflict){supplied_from[e], supplied_to[e], MESH_GRAPH_GIVEN, (uint32_t)e, 0, SIZE_MAX,
+                                           SIZE_MAX};
   for (size_t v = 0; !result && v < views; v++) {
     const struct mesh_strided *s = &view[v].view;
     const struct view_part p = {s->offset, s->element, s->pairs, s->dims};
@@ -1820,6 +1823,7 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
       uint32_t kind = lo->write && hi->write ? MESH_GRAPH_WRITE_AFTER_WRITE :
                        lo->write ? MESH_GRAPH_READ_AFTER_WRITE : MESH_GRAPH_WRITE_AFTER_READ;
       const unsigned directions = 1 + (lo->vertex == hi->vertex && kind != MESH_GRAPH_WRITE_AFTER_WRITE);
+      size_t first = (size_t)(lo - view), second = (size_t)(hi - view);
       for (unsigned direction = 0; direction < directions; direction++) {
         if (made == held) {
           if (held > SIZE_MAX / 2 / sizeof *edge) { result = ENOMEM; break; }
@@ -1827,8 +1831,11 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
           if (!more) { result = ENOMEM; break; }
           edge = more; held *= 2;
         }
-        edge[made++] = (struct mesh_graph_conflict){lo->vertex, hi->vertex, kind, 0, a->key};
+        edge[made++] = (struct mesh_graph_conflict){lo->vertex, hi->vertex, kind, 0, a->key, first, second};
         kind = kind == MESH_GRAPH_READ_AFTER_WRITE ? MESH_GRAPH_WRITE_AFTER_READ : MESH_GRAPH_READ_AFTER_WRITE;
+        const size_t swapped = first;
+        first = second;
+        second = swapped;
       }
     }
   if (!result && made) qsort(edge, made, sizeof *edge, view_edge_before);
@@ -1855,7 +1862,8 @@ int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *vie
   int result = view_conflicts(views, view, supplied, supplied_from, supplied_to, 0, &conflict, edges);
   for (size_t e = 0; !result && e < *edges && e < room; e++) {
     from[e] = conflict[e].from; to[e] = conflict[e].to;
-    cause[e] = (struct mesh_graph_cause){conflict[e].key, conflict[e].kind, conflict[e].given};
+    cause[e] = (struct mesh_graph_cause){conflict[e].key, conflict[e].kind, conflict[e].given, conflict[e].from_view,
+                                         conflict[e].to_view};
   }
   if (!result && *edges > room) result = ERANGE;
   free(conflict);
@@ -2982,12 +2990,14 @@ void mesh_graph_row_visit(const uint32_t *row, uint32_t count, void (*visit)(voi
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2; B. R. Rau, MICRO 1994;
    design/torch-source-lowering-change-request.md item 3 */
 size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32_t *tail, uint32_t row, uint32_t count,
-                          uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot) {
+                          uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge) {
   size_t made = 0;
   for (size_t q = first[row]; q < first[row + 1]; q++) {
     const uint32_t from = tail[order[q]], delay = lag - 1 - from / count;
     if (t < delay) continue;
-    source[made] = from % count; slot[made++] = (uint32_t)((t - delay) % lag);
+    source[made] = from % count; slot[made] = (uint32_t)((t - delay) % lag);
+    if (edge) edge[made] = order[q];
+    made++;
   }
   return made;
 }
