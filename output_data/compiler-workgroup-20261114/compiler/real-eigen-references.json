@@ -1,0 +1,67 @@
+{
+  "dgeev": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dgeev.f",
+    "bytes": 18158,
+    "sha256": "2f091ab4ccf24a8a5d5dab811bf06d92bd6966d51e05aa949aff2b6182690b1b"
+  },
+  "dgebal": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dgebal.f",
+    "bytes": 11707,
+    "sha256": "db4ead38199f14a619da517a2e314db1d5d092fbb9e70e65787fb9918b53964d"
+  },
+  "dgebak": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dgebak.f",
+    "bytes": 7186,
+    "sha256": "e3f034b3ba8f8689cda131f65eb27a6a238c740da61d25020ec186a9df2bc819"
+  },
+  "dgehd2": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dgehd2.f",
+    "bytes": 6297,
+    "sha256": "014886162fdc72f4c6369d61ccba98ec1eda6661174705e1edd06432c3e112ad"
+  },
+  "dgehrd": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dgehrd.f",
+    "bytes": 10978,
+    "sha256": "d7772936eb440a9d72b669deff45f90920a7e1d449c167ccb0b5727aafd743a7"
+  },
+  "dorghr": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dorghr.f",
+    "bytes": 6504,
+    "sha256": "c6755467a12b92a737c58c356143c2d117e071643c36f34f5227b42c3bf0bb83"
+  },
+  "dhseqr": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dhseqr.f",
+    "bytes": 18732,
+    "sha256": "c99ad8f86d70b81f9d01cbcef4dbba42b3d22e1f0ffbbcd203eb3d36c675e289"
+  },
+  "dlahqr": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dlahqr.f",
+    "bytes": 20284,
+    "sha256": "eaaa6fe9421a31e78d03c691324357efdf06dc5bf51242828c3e45204c380d6c"
+  },
+  "dlanv2": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dlanv2.f",
+    "bytes": 8594,
+    "sha256": "de5b92fd580721df673fda406146024c17d821cf26286b973fb2949b82ac5930"
+  },
+  "dtrevc": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dtrevc.f",
+    "bytes": 37101,
+    "sha256": "de3be7f8d2557706ede1727b4b1921faab721d18f58785c1aca4591b8a054b9e"
+  },
+  "dlaln2": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dlaln2.f",
+    "bytes": 18974,
+    "sha256": "8812bbc99a7aeb2c4369ad1f9f563538fe60d71606118c0d11c778bf857ed43f"
+  },
+  "dlarfg": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dlarfg.f",
+    "bytes": 5485,
+    "sha256": "f5500061b122459deb9c2ee883766d1a50228838c15bb3765115cb4f3e74d297"
+  },
+  "dlapy2": {
+    "url": "https://raw.githubusercontent.com/Reference-LAPACK/lapack/master/SRC/dlapy2.f",
+    "bytes": 2995,
+    "sha256": "5bb585a4624cd10e23c8e1214f43ff39b84c1437edd0ece5b284658beb1b60b4"
+  }
+}

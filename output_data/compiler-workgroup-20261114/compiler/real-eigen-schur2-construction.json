@@ -1,0 +1,16 @@
+[
+  {
+    "dtype": "torch.float32",
+    "records": 1,
+    "outputs": 10,
+    "precision": 0,
+    "region_instructions": 927
+  },
+  {
+    "dtype": "torch.float64",
+    "records": 1,
+    "outputs": 10,
+    "precision": 0,
+    "region_instructions": 927
+  }
+]

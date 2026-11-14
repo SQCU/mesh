@@ -3809,6 +3809,130 @@ def _dlapy3(r, t, x, y, z, huge):
     return r('select', t, plain, r('add', t, r('add', t, a, b), c), r('mul', t, w, r('sqrt', t, total)))
 
 
+# Reference-LAPACK SRC/dlapy2.f: sqrt(x^2 + y^2) as W sqrt(1 + (Z/W)^2), W and Z the larger and smaller magnitude;
+# W where Z is zero or W is above the overflow threshold `huge`; a NaN operand itself (y's where both are)
+def _dlapy2(r, t, x, y, huge):
+    a, b = r('abs', t, x), r('abs', t, y)
+    w, z = r('select', t, r('ge', BOOL, a, b), a, b), r('select', t, r('ge', BOOL, a, b), b, a)
+    plain = r('or', BOOL, r('eq', BOOL, z, r.const(0, t)), r('gt', BOOL, w, r.const(huge, t)))
+    q = r('div', t, z, r('select', t, plain, r.const(1, t), w))
+    made = r('select', t, plain, w, r('mul', t, w, r('sqrt', t, r('add', t, r.const(1, t), r('mul', t, q, q)))))
+    made = r('select', t, r('isnan', BOOL, x), x, made)
+    return r('select', t, r('isnan', BOOL, y), y, made)
+
+
+# Fortran SIGN(A, B): |A| with B's sign, a zero B's sign that of 1/B (IEEE 754 -0 below +0)
+def _fortran_sign(r, t, a, b):
+    zero = r.const(0, t)
+    negative = r('or', BOOL, r('lt', BOOL, b, zero), r('and', BOOL, r('eq', BOOL, b, zero), r(
+        'lt', BOOL, r('div', t, r.const(1, t), b), zero)))
+    magnitude = r('abs', t, a)
+    return r('select', t, negative, r('neg', t, magnitude), magnitude)
+
+
+# Reference-LAPACK SRC/dlanv2.f 159-306 in one region of real kind t: the Schur factorization of the real 2 x 2
+# [A B; C D], of region values, to (A, B, C, D, RT1R, RT1I, RT2R, RT2I, CS, SN). Each source branch is selected, and
+# the label 10 rescaling loop is unrolled to its own bound (COUNT <= 20, so at most 21 passes). The region keeps the
+# source's separate products (lines 251-257, Reference-LAPACK issue 1031), with no contraction. `limits` is the real
+# dtype's finfo; SAFMIN/EPS is an exact power of two for F32/F64, so SAFMN2 uses that integer exponent
+def _dlanv2(r, t, a, b, c, d, limits):
+    safmn2 = math.ldexp(1.0, math.trunc(math.log2(limits.tiny / limits.eps) / 2))
+    safmx2, eps = 1 / safmn2, limits.eps
+
+    def k(value):
+        return r.const(value, t)
+
+    def sel(test, x, y):
+        return r('select', t, test, x, y)
+
+    def mul(x, y):
+        return r('mul', t, x, y)
+
+    def add(x, y):
+        return r('add', t, x, y)
+
+    def sub(x, y):
+        return r('sub', t, x, y)
+
+    def neg(x):
+        return r('neg', t, x)
+
+    def sign(x, y):
+        return _fortran_sign(r, t, x, y)
+    zero, one, half = k(0), k(1), k(0.5)
+    first = r('eq', BOOL, c, zero)
+    second = r('and', BOOL, r('not', BOOL, first), r('eq', BOOL, b, zero))
+    third = _all(r, [r('not', BOOL, first), r('not', BOOL, second), r('eq', BOOL, sub(a, d), zero), r(
+        'ne', BOOL, sign(one, b), sign(one, c))])
+    general = _all(r, [r('not', BOOL, first), r('not', BOOL, second), r('not', BOOL, third)])
+
+    # 187-192
+    temp = sub(a, d)
+    p = mul(half, temp)
+    ab, ac = r('abs', t, b), r('abs', t, c)
+    bcmax = sel(r('ge', BOOL, ab, ac), ab, ac)
+    bcmis = mul(mul(sel(r('le', BOOL, ab, ac), ab, ac), sign(one, b)), sign(one, c))
+    scale = sel(r('ge', BOOL, r('abs', t, p), bcmax), r('abs', t, p), bcmax)
+    z = add(mul(r('div', t, p, scale), p), mul(r('div', t, bcmax, scale), bcmis))
+    real_pair = r('and', BOOL, general, r('ge', BOOL, z, k(4 * eps)))
+
+    # 201-211: real eigenvalues
+    zr = add(p, sign(mul(r('sqrt', t, scale), r('sqrt', t, z)), p))
+    ar, dr = add(d, zr), sub(d, mul(r('div', t, bcmax, zr), bcmis))
+    tau = _dlapy2(r, t, c, zr, limits.max)
+    csr, snr, br = r('div', t, zr, tau), r('div', t, c, tau), sub(b, c)
+
+    # 218-238: complex or nearly equal eigenvalues, TEMP and SIGMA rescaled
+    sigma, running = add(b, c), r.const(1, BOOL)
+    for count in range(1, 22):
+        size = sel(r('ge', BOOL, r('abs', t, temp), r('abs', t, sigma)), r('abs', t, temp), r('abs', t, sigma))
+        down = r('and', BOOL, running, r('ge', BOOL, size, k(safmx2)))
+        up = _all(r, [running, r('not', BOOL, down), r('le', BOOL, size, k(safmn2))])
+        sigma = sel(down, mul(sigma, k(safmn2)), sel(up, mul(sigma, k(safmx2)), sigma))
+        temp = sel(down, mul(temp, k(safmn2)), sel(up, mul(temp, k(safmx2)), temp))
+        running = r('and', BOOL, r('or', BOOL, down, up), r.const(count <= 20, BOOL))
+    pc = mul(half, temp)
+    tau = _dlapy2(r, t, sigma, temp, limits.max)
+    cs = r('sqrt', t, mul(half, add(one, r('div', t, r('abs', t, sigma), tau))))
+    sn = mul(neg(r('div', t, pc, mul(tau, cs))), sign(one, sigma))
+
+    # 243-262
+    aa, bb = add(mul(a, cs), mul(b, sn)), add(neg(mul(a, sn)), mul(b, cs))
+    cc, dd = add(mul(c, cs), mul(d, sn)), add(neg(mul(c, sn)), mul(d, cs))
+    ac_ = add(mul(aa, cs), mul(cc, sn))
+    bc_ = add(mul(bb, cs), mul(dd, sn))
+    cc_ = add(neg(mul(aa, sn)), mul(cc, cs))
+    dc_ = add(neg(mul(bb, sn)), mul(dd, cs))
+    mean = mul(half, add(ac_, dc_))
+
+    # 264-291
+    split = _all(r, [r('ne', BOOL, cc_, zero), r('ne', BOOL, bc_, zero), r('eq', BOOL, sign(one, bc_), sign(one, cc_))])
+    turned = r('and', BOOL, r('ne', BOOL, cc_, zero), r('eq', BOOL, bc_, zero))
+    sab, sac = r('sqrt', t, r('abs', t, bc_)), r('sqrt', t, r('abs', t, cc_))
+    pp = sign(mul(sab, sac), cc_)
+    tau1 = r('div', t, one, r('sqrt', t, r('abs', t, add(bc_, cc_))))
+    cs1, sn1 = mul(sab, tau1), mul(sac, tau1)
+    ax = sel(split, add(mean, pp), mean)
+    dx = sel(split, sub(mean, pp), mean)
+    bx = sel(split, sub(bc_, cc_), sel(turned, neg(cc_), bc_))
+    cx = sel(r('or', BOOL, split, turned), zero, cc_)
+    csx = sel(split, sub(mul(cs, cs1), mul(sn, sn1)), sel(turned, neg(sn), cs))
+    snx = sel(split, add(mul(cs, sn1), mul(sn, cs1)), sel(turned, cs, sn))
+
+    # each branch's A, B, C, D, CS and SN
+    complex_ = r('and', BOOL, general, r('not', BOOL, real_pair))
+    outs = []
+    for kept, swapped, pair, other in ((a, d, ar, ax), (b, neg(c), br, bx), (c, zero, zero, cx), (d, a, dr, dx),
+                                       (one, zero, csr, csx), (zero, one, snr, snx)):
+        outs.append(sel(second, swapped, sel(real_pair, pair, sel(complex_, other, kept))))
+    a_, b_, c_, d_, cs_, sn_ = outs
+
+    # 298-306
+    rt1i = sel(r('eq', BOOL, c_, zero), zero, mul(r('sqrt', t, r('abs', t, b_)), r('sqrt', t, r('abs', t, c_))))
+    rt2i = sel(r('eq', BOOL, c_, zero), zero, neg(rt1i))
+    return a_, b_, c_, d_, a_, rt1i, d_, rt2i, cs_, sn_
+
+
 # Reference-LAPACK SRC/zlarfg.f 144-211 with N = 2, in one region: ALPHA and X (complex record values) to (ALPHA on
 # exit, BETA real; TAU; X on exit). Its KNT rescaling loop (at most 20 passes, the source's bound) and the undo are
 # unrolled; SAFMIN = DLAMCH('S') / DLAMCH('E')
