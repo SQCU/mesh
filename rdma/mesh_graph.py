@@ -419,14 +419,20 @@ def free(made):
     LIB.mesh_graph_signature_free(C.byref(made))
 
 
-# design/synchronization-signature-change-request.md items 1, 2, 4 and 6; mesh-graph.h mesh_graph_signature
-def signature(processors, tasks, dependences, operations):
+# design/synchronization-signature-change-request.md items 1, 2, 4 and 6; mesh-graph.h mesh_graph_signature;
+# design/compilation-composition-change-request.md items 3 and 6
+def build_signature(processors, tasks, dependences, operations):
     made = Signature()
     processor, p = _array(Processor, processors)
     task, t = _array(Task, tasks)
     dependence, d = _array(Dependence, dependences)
     operation, o = _array(Operation, operations)
     _check(LIB.mesh_graph_signature(p, processor, t, task, d, dependence, o, operation, C.byref(made)))
+    return made
+
+
+def signature(processors, tasks, dependences, operations):
+    made = build_signature(processors, tasks, dependences, operations)
     try:
         return dict(forms(made), record=record(made))
     finally:
