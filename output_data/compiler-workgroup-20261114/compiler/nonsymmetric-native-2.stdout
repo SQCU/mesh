@@ -1,0 +1,72 @@
+compile
+prepared retained order 42 dispatches 29 commands 13 native entries 0 later passes
+prepared dataflow 535 values 1388 bytes 42 schedule positions; 0 crossings longest local stretch 42
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 1 0 0 0 source 42f757d7adb76e411dc8faa37a9f810c74bdf8af44c203d23ef3b0c10a15efad
+prepared kernel 2 synchronization 0 0 0 0 source 43b66148adaf41e5b005be6ff1daa446975bd90bd618292df6400b3bef3f6dcc
+prepared kernel 4 synchronization 12 0 0 0 source 1296001b3ec1b5c84456d3a700d5374e0686ac985e1173dc54bae057aff5f60c
+prepared kernel 5 synchronization 0 0 0 0 source 3e1ec6d24a3c1de7ac8b706f50872838ef00335d1bd5d4577a4dcb23e7a28fd3
+prepared kernel 7 synchronization 12 0 0 0 source 306ab5f2a5ad5a95826bf5a0ab0944763c0f66e20ec7e8fce5ead21e59f94e3e
+prepared kernel 8 synchronization 1 0 0 0 source 7785fb5fd9b2b53cb98cd61a2fbc5e456a94907745eac5dd4c7ad455993a33e1
+prepared kernel 10 synchronization 5 0 0 0 source 0095353c1e4406ca5f1b89d614f716c273ee65cbf10d3b430a97a41b36a35083
+prepared kernel 12 synchronization 0 0 0 0 source 31ed75c9520ff9be9bf1dba2cdc3e304b94fceb211b8f4074fbdb9e90104a2c8
+prepared kernel 13 synchronization 0 0 0 0 source c401b72273d36bd275dc82a97f52604df2b17dd59e96e0644992959635782342
+prepared kernel 15 synchronization 0 0 0 0 source e444d0f7eb7e52e7f08fb020814a083cb0de1aed5017d68024974545b21dc170
+prepared kernel 16 synchronization 8 0 0 0 source f729751ad63ef142780761c1e26f1dc8abc09dd14520a764012f76811ec24b95
+prepared kernel 18 synchronization 0 0 0 0 source e97bdaba92dbbf11f969db3a234908983bba7a2f3965182adc28936ed882629f
+prepared kernel 19 synchronization 0 0 0 0 source 0c7d5f560584e0ddb189412970ebf0236815f86592416536db5062502828470d
+prepared kernel 21 synchronization 0 0 0 0 source 50486369a1234f16b7d9851af1fcb19667cdfea121679189802b8e2de04038b0
+prepared kernel 22 synchronization 8 0 0 0 source 583a3dbbb5fbb4eb18bd86b84035331eb8966dc0dda6d7611fe535bce57438ad
+prepared kernel 24 synchronization 0 0 0 0 source be3cc4633ec1571cd96576e7faad6a4aa943373073114995fe75aa19acccea1f
+prepared kernel 25 synchronization 0 0 0 0 source 8e7ae92a02ca26ac013fc64a8239ebdcf3768d26adc9b38d55a404f032748829
+prepared kernel 27 synchronization 0 0 0 0 source 4717df9b71a026cae600362cca37c3fca3f45a27aec989575fe34580be94339b
+prepared kernel 28 synchronization 2 0 0 0 source f0441cba8294e8a701f8f621c15533e53f5bfaa33ad2ad62db1703eceb22d108
+prepared kernel 29 synchronization 26 0 0 0 source 423378121e734d3a79f313d063a903c1c00c40f3a31359823ebbe10068713600
+prepared kernel 30 synchronization 25 0 0 0 source 661a13db316ec0a6e9f10db3100fbc0b904042ff9a245fe96fa632a071c5b8c0
+prepared kernel 31 synchronization 7 0 0 0 source 95c413dde86a1c183894f91bba9a429cf08d9eb6b5074c800112461e7e02a2b1
+prepared kernel 33 synchronization 5 0 0 0 source 59adf9bf6ec9031823f0547b88dcdd5e3be9ae7e60963813f7b3e07b0d5a275a
+prepared kernel 34 synchronization 11 0 0 0 source 0f784afdc3e9edf8ae032906e8f704dde3c2144573b3fa87c33dceb3fe173233
+prepared kernel 35 synchronization 0 0 0 0 source 04b3fb6bb2d1ebf3eb09785d3f34786dd6eb581b33d21f5ec7fd63befa6c1385
+prepared kernel 36 synchronization 0 0 0 0 source 4523b57936ff634907e4f19034762d547b07b8ecd35e0947ecb6f7f0e2dcb9c6
+prepared kernel 38 synchronization 19 0 0 0 source eed949066a05d4932a9cc85b89d5dd51cf81c9d7db4199b344b1c95bb1c1062c
+prepared kernel 39 synchronization 23 0 0 0 source ee218383078a6929bd7ed161708ae89f2e38abfdb052eaaef9a257ee6d13d867
+prepared kernel 40 synchronization 1 0 0 0 source 6312014b40097ed002581a65d02e06da2e6ca45ada30694be07698895ea04c0a
+prepared dependencies 27 barriers 29 commands
+prepared self-timed program 3 calls 3 positions 1 residues 1 phases 0 plan order edges 2 kept of the unrolled dependences 0 fence waits 2 program-thread waits 0 send-completion waits 0 left to the plan's start 2 start waits
+prepare
+prepared retained order 42 dispatches 29 commands 13 native entries 0 later passes
+prepared dataflow 535 values 1388 bytes 42 schedule positions; 0 crossings longest local stretch 42
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 1 0 0 0 source 42f757d7adb76e411dc8faa37a9f810c74bdf8af44c203d23ef3b0c10a15efad
+prepared kernel 2 synchronization 0 0 0 0 source 43b66148adaf41e5b005be6ff1daa446975bd90bd618292df6400b3bef3f6dcc
+prepared kernel 4 synchronization 12 0 0 0 source 1296001b3ec1b5c84456d3a700d5374e0686ac985e1173dc54bae057aff5f60c
+prepared kernel 5 synchronization 0 0 0 0 source 3e1ec6d24a3c1de7ac8b706f50872838ef00335d1bd5d4577a4dcb23e7a28fd3
+prepared kernel 7 synchronization 12 0 0 0 source 306ab5f2a5ad5a95826bf5a0ab0944763c0f66e20ec7e8fce5ead21e59f94e3e
+prepared kernel 8 synchronization 1 0 0 0 source 7785fb5fd9b2b53cb98cd61a2fbc5e456a94907745eac5dd4c7ad455993a33e1
+prepared kernel 10 synchronization 5 0 0 0 source 0095353c1e4406ca5f1b89d614f716c273ee65cbf10d3b430a97a41b36a35083
+prepared kernel 12 synchronization 0 0 0 0 source 31ed75c9520ff9be9bf1dba2cdc3e304b94fceb211b8f4074fbdb9e90104a2c8
+prepared kernel 13 synchronization 0 0 0 0 source c401b72273d36bd275dc82a97f52604df2b17dd59e96e0644992959635782342
+prepared kernel 15 synchronization 0 0 0 0 source e444d0f7eb7e52e7f08fb020814a083cb0de1aed5017d68024974545b21dc170
+prepared kernel 16 synchronization 8 0 0 0 source f729751ad63ef142780761c1e26f1dc8abc09dd14520a764012f76811ec24b95
+prepared kernel 18 synchronization 0 0 0 0 source e97bdaba92dbbf11f969db3a234908983bba7a2f3965182adc28936ed882629f
+prepared kernel 19 synchronization 0 0 0 0 source 0c7d5f560584e0ddb189412970ebf0236815f86592416536db5062502828470d
+prepared kernel 21 synchronization 0 0 0 0 source 50486369a1234f16b7d9851af1fcb19667cdfea121679189802b8e2de04038b0
+prepared kernel 22 synchronization 8 0 0 0 source 583a3dbbb5fbb4eb18bd86b84035331eb8966dc0dda6d7611fe535bce57438ad
+prepared kernel 24 synchronization 0 0 0 0 source be3cc4633ec1571cd96576e7faad6a4aa943373073114995fe75aa19acccea1f
+prepared kernel 25 synchronization 0 0 0 0 source 8e7ae92a02ca26ac013fc64a8239ebdcf3768d26adc9b38d55a404f032748829
+prepared kernel 27 synchronization 0 0 0 0 source 4717df9b71a026cae600362cca37c3fca3f45a27aec989575fe34580be94339b
+prepared kernel 28 synchronization 2 0 0 0 source f0441cba8294e8a701f8f621c15533e53f5bfaa33ad2ad62db1703eceb22d108
+prepared kernel 29 synchronization 26 0 0 0 source 423378121e734d3a79f313d063a903c1c00c40f3a31359823ebbe10068713600
+prepared kernel 30 synchronization 25 0 0 0 source 661a13db316ec0a6e9f10db3100fbc0b904042ff9a245fe96fa632a071c5b8c0
+prepared kernel 31 synchronization 7 0 0 0 source 95c413dde86a1c183894f91bba9a429cf08d9eb6b5074c800112461e7e02a2b1
+prepared kernel 33 synchronization 5 0 0 0 source 59adf9bf6ec9031823f0547b88dcdd5e3be9ae7e60963813f7b3e07b0d5a275a
+prepared kernel 34 synchronization 11 0 0 0 source 0f784afdc3e9edf8ae032906e8f704dde3c2144573b3fa87c33dceb3fe173233
+prepared kernel 35 synchronization 0 0 0 0 source 04b3fb6bb2d1ebf3eb09785d3f34786dd6eb581b33d21f5ec7fd63befa6c1385
+prepared kernel 36 synchronization 0 0 0 0 source 4523b57936ff634907e4f19034762d547b07b8ecd35e0947ecb6f7f0e2dcb9c6
+prepared kernel 38 synchronization 19 0 0 0 source eed949066a05d4932a9cc85b89d5dd51cf81c9d7db4199b344b1c95bb1c1062c
+prepared kernel 39 synchronization 23 0 0 0 source ee218383078a6929bd7ed161708ae89f2e38abfdb052eaaef9a257ee6d13d867
+prepared kernel 40 synchronization 1 0 0 0 source 6312014b40097ed002581a65d02e06da2e6ca45ada30694be07698895ea04c0a
+prepared dependencies 27 barriers 29 commands
+prepared self-timed program 3 calls 3 positions restored (no relation solved)
+invoke
+result {"eigenvalue_error": 1.785792177330336e-07, "residual": 1.8001283896542595e-07, "normalization": 2.1324461219052182e-07, "phase_imaginary": 0.0, "finite": true, "values_real": [-2.504751443862915, 1.2375394105911255, 3.2672109603881836], "values_imag": [0.18869471549987793, 0.9786171317100525, -0.4173116087913513], "vectors_real": [[-0.46221256256103516, 0.9405415654182434, 0.03562147915363312], [0.8170077800750732, -0.06009884923696518, 0.27979305386543274], [0.00430186977609992, -0.23773342370986938, 0.9592412710189819]], "vectors_imag": [[0.23832890391349792, 0.0, -0.013213482685387135], [0.0, 0.19022692739963531, -0.011325357481837273], [-0.2490764707326889, -0.1380804479122162, 0.0]]}

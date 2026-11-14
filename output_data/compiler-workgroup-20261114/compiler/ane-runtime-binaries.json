@@ -1,0 +1,12 @@
+{
+  "metal_commit": "7f7ed4362bbd865e64e7e4361854c605cc8f4699",
+  "build_exit": 0,
+  "files": {
+    "/Users/mdot/metal-microbench/metal_neural.mm": "d649ff3f42305f5810221a0c2adaa6315775d28979019c79417a157d1724e085",
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "a2e60f384a1dae093094371c1d4810808c4ea7bdc9dd1931990724d234a727e0",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "be1a351559d4347cf1c600c954fb2ed602fd294cdff6121234cef8bd129ba65e",
+    "/Users/mdot/metal-microbench/.build/native_bench": "f0c5c32dd1deb907387bdb6c013d92608d2afa1921765989ad7013e156cf0c7e",
+    "/Users/mdot/metal-microbench/.build/e2b_replay": "e27b6e6a53fce3ffc87fa009a572be7382097adcae0696b9da6d61417cd50cf4"
+  },
+  "build_log_sha256": "86108d191f38bc4dd97961da6bcbdccff9efacaddc7437391caff99301de58d4"
+}

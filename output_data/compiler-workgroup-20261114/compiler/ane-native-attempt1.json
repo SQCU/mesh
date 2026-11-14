@@ -1,0 +1,10 @@
+{
+  "exit_code": 1,
+  "stage": "metal_ir_construct before Program",
+  "error": "ANE kernel 0: storage 14 of a kind Core ML has no tensor for",
+  "invoked": false,
+  "log_hashes": {
+    "ane-native-1.stdout": "b958b4b9c8ebe85b351a32b8be5b84a1eb3661cce83156db81df9b5d6d50854f",
+    "ane-native-1.stderr": "6173e1e110031367d1bb267575b3a605c14d0ed703077302f7ca66cb0a4b03a0"
+  }
+}

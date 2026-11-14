@@ -1,0 +1,66 @@
+{
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "mesh_commit": "7f4bc3aa9f80835580c3ceda9744313f5f1c6963",
+  "metrics": {
+    "eigenvalue_error": 1.785792177330336e-07,
+    "residual": 1.8001283896542595e-07,
+    "normalization": 2.1324461219052182e-07,
+    "phase_imaginary": 0.0,
+    "finite": true,
+    "values_real": [
+      -2.504751443862915,
+      1.2375394105911255,
+      3.2672109603881836
+    ],
+    "values_imag": [
+      0.18869471549987793,
+      0.9786171317100525,
+      -0.4173116087913513
+    ],
+    "vectors_real": [
+      [
+        -0.46221256256103516,
+        0.9405415654182434,
+        0.03562147915363312
+      ],
+      [
+        0.8170077800750732,
+        -0.06009884923696518,
+        0.27979305386543274
+      ],
+      [
+        0.00430186977609992,
+        -0.23773342370986938,
+        0.9592412710189819
+      ]
+    ],
+    "vectors_imag": [
+      [
+        0.23832890391349792,
+        0.0,
+        -0.013213482685387135
+      ],
+      [
+        0.0,
+        0.19022692739963531,
+        -0.011325357481837273
+      ],
+      [
+        -0.2490764707326889,
+        -0.1380804479122162,
+        0.0
+      ]
+    ]
+  },
+  "files": {
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "c6dcd96d0276586fc4f089934e5f40f4b2c783e9bdad27e1856892a60b1f9821",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/decompose.py": "c9b7c4a9a383dbcdfeef469b8e5248bf5480af2166bc65dca534d115dcfd63f7",
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "a2e60f384a1dae093094371c1d4810808c4ea7bdc9dd1931990724d234a727e0",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "be1a351559d4347cf1c600c954fb2ed602fd294cdff6121234cef8bd129ba65e"
+  },
+  "log_hashes": {
+    "nonsymmetric-native-2.stdout": "0c795f816db899062d408fd8349f4a08aa29eaab3a02083f8bd9b2dccf36ae0d",
+    "nonsymmetric-native-2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
