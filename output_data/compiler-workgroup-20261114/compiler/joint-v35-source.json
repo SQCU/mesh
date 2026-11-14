@@ -1,0 +1,48 @@
+{
+  "/Users/mdot/dox/mesh": {
+    "head": "88e934703f3ea08c407bce17980aa55b08422b10",
+    "sha256": {
+      "rdma/mesh-collective.c": "c99198a46aa33cabc922640a83b7a264b33f07584b82b3902719c18a4951aad1",
+      "rdma/mesh-collective.h": "0d74b5a5a2b8fa436dab1a5de2a4079feb013e0c7c05cc24c446511c546a9fde",
+      "rdma/mesh-dataflow.c": "7a1f768b6a97866b4e0a415071f1970395a4f0f6cbef2dc6f7a6e0abe69fc2aa",
+      "rdma/mesh-dataflow.h": "c60c40be42e3b7cdd18419c84311d26721ca243765bd6a456ac08a5cc89cbc10",
+      "rdma/mesh-call.c": "b73f650ce518138f4c70db6570c8d438ca1d26b29fb267a8728ef2f73f6a4152",
+      "rdma/mesh-graph.c": "6370345ff2a286485eff3bb886fdade4017d520ecbd97ac66740a0ff7ed7b84f",
+      "rdma/mesh-graph.h": "184e6d8abe4657334b44c1eefb87d9c5970f2e52fbdffff6aea715fedb5fd53e",
+      "rdma/mesh-metal.h": "5cf8853fe92bedfd5f7ebe024f2fa64817cc16a4242361c65105a81901f4d34a",
+      "rdma/mesh-metal.m": "318c78b668d91de3998da7455bb4a73a230fea06e5312d242fb278c551204f1b",
+      "rdma/mesh.h": "a770c02456acd094a87998a8e80d7fff564cae379cbf4d3e60fb9a04ade94357",
+      "rdma/mesh-holders.h": "bb714329b34ac4984754b23a05f93f7188159114583ceb55dabfd8fc58c72ab3",
+      "rdma/Makefile": "de0d06b940c9a3a8cdad87d1d6437845e7753450dcb027cebbe112ac727a33cf"
+    }
+  },
+  "/Users/mdot/metal-microbench": {
+    "head": "d598ec53d475c7a60a65cd021d5d6bfbd78f2caf",
+    "sha256": {
+      "metal_ir.h": "189235bb37d088f9912d327b75ed1f59191d0c30db0c1946e40412e7e53f333f",
+      "metal_ir.mm": "b8a5e341bb302832abb7b29d08907c3d64137dd2e88d6105976ae6905128b7b7",
+      "metal_clone.h": "05e8c696ef9c0671ff96f6f1d053f4562aded8f0b6180a3552aecbb6abb5f2e8",
+      "metal_clone.mm": "8f6bbe8d513e273ca0756770811bdffb913712971195bada31e2c8ef667dceae",
+      "metal_transform.mm": "5383d5a879d5a03b079c78002d625f6542894abc049ceb77ddebfea5873818f2",
+      "metal_lower.h": "f43492c428d89c36777fd1f9414979c0143d8d806414d9900246568b69e9f7f7",
+      "metal_lower.mm": "5284c5f8f680b6f444bb9f8a663d7d7f79b2ede85ac3d316cb781a880f234f29",
+      "metal_native.h": "4b45c998706cd4f8ca033e1c92c06c33adc205868544868f90545b544ea847b4",
+      "metal_native.mm": "0506290a08c7d860d54539578a033ed7f17b2811d2a580c937a564c53ab43e8d",
+      "metal_transport.mm": "50064e55d767759a652fd349a9804e23dae068ef21ebced3aa596127f05b2a6a",
+      "metal_neural.mm": "739bc6d30c86740ceb5442090cb4c8580c29e6298aa8468554a3b68a2f0d80d4",
+      "metal_archive.mm": "6dab5129d82c502a2ff33a50937fc3aceb4c70f0acc94bdc7f13cde93662b3ed",
+      "metal_program.h": "f35775d462e2d71ab6cec511ac591883856bcb9ab6182e393f018ac49771fbf0",
+      "metal_recording.h": "55cd76bacccb514ddcbdee76778939f67a9fcbf7123b5d659dc747bfab96b37a",
+      "metal_capture.h": "30a21e50bc9f386e897fdcc2b95442bb3b462ea5a5f43a8b8188fb964cfe8d5e",
+      "metal_capture.m": "ddf13f3abbb52c378d7b1c216b358cc7d87b290b824887c296ba4f003e257720",
+      "metal_program.m": "054f5af03b482201a014088c63b6f0bec35bb127c30fa7fd9480e6f1ec7db420",
+      "tools/native_bench.m": "1730b01b46db9ba078003c5718918f05ebc4693b054580c362a0250266969922",
+      "tools/e2b_replay.m": "4e7f7a9e5f471bfa8ae55cbeaee57b328ca1cd8acc169de287f508f8f5f89619",
+      "Makefile": "0b2267ff132e06b01d5430ff8c6fc25ce8a69c86c9d4a3be7057827d29b3bd96"
+    },
+    "paired_provider_correction": {
+      "provider/litert_mesh.cc": "49f08a9a0df1f06511dbf6191ffba41d75ce88e07353907dd4090dcc53b08922",
+      "description": "Two live static Sort callers pass UINT32_MAX extent; dependency retry succeeded."
+    }
+  }
+}

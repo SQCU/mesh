@@ -57,36 +57,32 @@ class _Mapping:
         self.release = weakref.finalize(self, _retired, self.context, self.loaded)
 
 
-# rdma/mesh-collective.h mesh_plan_load (the record's bytes lent to the loaded plan, which restores the function's
-# compiled parts and relation from them, reserves its rows and pages beside every live publication's and publishes it
-# at its root row); compiler/mesh_compiler/metal.py _lent; rdma/mesh-dataflow.h mesh_attach, mesh_retire (its own
-# publication closed), mesh_detach, mesh_view_values, struct mesh_view; design/plan-to-bridge-change-request.md R8 and
+# rdma/mesh-collective.h mesh_program_load: one prepared network program, its saved source `source`
+# (compiler/mesh_compiler/schedule.py SavedNetwork, or the solved network result: its saved() bytes, its program)
+# loaded once into its own mapping (`mapping`, _Mapping: its own client), its rows and pages reserved beside every live
+# publication's, relocated and published, the loaded Local adopted by `mapping` (lent its bytes:
+# compiler/mesh_compiler/metal.py _lent) until _retired; `group` its preparation's. `solution` the loaded result
+# (schedule.published_program: Function[], roots, prefixes, offsets) whose views hold `mapping` and the byte offsets;
+# `function`, `planned` and `context` its; `offset` every copy's byte offset in `arena`, one mapping of every run 1
+# copy (mesh_view_program; UINT64_MAX a run 0 copy), at `base`; design/plan-to-bridge-change-request.md R8 and
 # design/aot-compilation-change-request.md, appendix item 6: each Published its own mapping and client, retired and
-# released with it alone;
-# rdma/mesh-collective.c plan_block, plan_items, plan_saved_page; design/disjoint-pages-change-request.md C3.3;
-# design/compilation-composition-change-request.md item 7; compiler/mesh_compiler/ir.py Plan arena_bytes, offsets;
-# torch 2.14 frombuffer
+# released with it alone; torch 2.14 frombuffer
 class Published:
-    placements, stepped = staticmethod(lambda: ()), staticmethod(lambda: None)
-
-    def __init__(self, plan, group, mapping):
-        self.source, self.mapping, self.context = plan, mapping, C.addressof(mapping.context)
-        self.function, self.held = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences,
-                                                 plan.outstanding, plan.tasks, plan.before, plan.senders,
-                                                 plan.receivers, plan.resources)
+    def __init__(self, source, group, mapping):
         from .metal import _lent
-        calls, made = (mesh.U * 1)(0), mesh.Planned()
-        mesh.check(_lent(plan.record, lambda release, owner: mesh.LIB.mesh_plan_load(
-            C.byref(mapping.context), group, plan.program, self.function, 1, calls, 1, None, None, 0, None,
-            time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, plan.record, len(plan.record), release,
-            owner, C.byref(made)), lambda status: status == 0))
+        from .schedule import published_program
+        record, program = source.saved(), source.program
+        self.source, self.mapping, self.context = source, mapping, C.addressof(mapping.context)
+        made = mesh.Local()
+        mesh.check(_lent(record, lambda release, owner: mesh.LIB.mesh_program_load(
+            C.byref(mapping.context), group, program, time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS,
+            record, len(record), release, owner, C.byref(made)), lambda status: status == 0))
         mapping.loaded.append(made)
-        self.planned = made
-        self.plan, self.execution = self.function[0].plan, 0
-        sections = [value.section for value in self.function[0].value[:len(plan.values)]]
-        self.first, self.offset, view = ((mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(),
-                                         mesh.View())
-        mesh.LIB.mesh_view_values(C.byref(mapping.context), self.function, 1, self.first, self.offset, C.byref(view))
+        self.offset, view = (mesh.Q * max(made.offsets, 1))(), mesh.View()
+        mesh.LIB.mesh_view_program(C.byref(mapping.context), C.byref(made), self.offset, C.byref(view))
+        self.base, self.execution = C.addressof(self.offset), 0
+        self.solution = published_program(made, (mapping, self.offset), self.offset, source)
+        self.function, self.planned = made.function, made.planned
         backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None
         if backing is not None:
             backing.mapping = mapping
@@ -97,17 +93,17 @@ class Published:
         from .native import planned_buffer
         return planned_buffer(self, owned, M)
 
-    def copies(self, index):
+    def span(self, first, index):
         from .native import viewed
-        return viewed(self.first, C.addressof(self.offset), index)
+        return viewed(first, self.base, index)
 
 
-# a _Mapping's end: its loaded result's publication closed (the bridge releases its rows and pages once no port holds
-# it) and that result freed, then its mapping detached
+# a _Mapping's end: its loaded network result's publication closed (the bridge releases its rows and pages once no
+# port holds it) and that result freed (mesh_local_free), then its mapping detached
 def _retired(context, loaded):
-    for planned in loaded:
-        mesh.LIB.mesh_retire(context.M, C.byref(planned))
-        mesh.LIB.mesh_planned_free(C.byref(planned))
+    for local in loaded:
+        mesh.LIB.mesh_retire(context.M, C.byref(local.planned))
+        mesh.LIB.mesh_local_free(C.byref(local))
     mesh.check(mesh.LIB.mesh_detach(C.byref(context)))
 
 

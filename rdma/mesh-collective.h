@@ -179,7 +179,10 @@ _Static_assert(sizeof(struct mesh_local_use)==8,"mesh_local_use: rdma/mesh.py Lo
    function[functions], root[roots], value_first[functions + 1] (produced here: function f's values are first[]'s
    entries value_first[f] .. value_first[f + 1], the roots from value_first[functions]), calls[ncalls], chains[ncalls]
    (NULL: each call its own head), ordered[norders] (the edges of `relation` that are orders), the calls' `closure`,
-   and use_first[roots + 1] and use[] */
+   and use_first[roots + 1] and use[]; `grouped` a network result's grouped[functions] (mesh_plan_program's operand,
+   the caller's mesh_declared_group results, borrowed with their arrays: the original group records, each demand's
+   first row, and the rows' demand_of and release_of; a loaded one's views of its archive), NULL a local result's */
+struct mesh_grouped;
 struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
                     uint64_t *offset; uint32_t functions,roots; struct mesh_function *function;
                     struct mesh_value *root; size_t *value_first; const uint32_t *calls,*chains,*ordered;
@@ -187,7 +190,8 @@ struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,o
                     const struct mesh_graph_closure *closure; const size_t *use_first;
                     const struct mesh_local_use *use; const uint32_t *source_calls;
                     const uint64_t *source_outstanding; uint32_t sources,padding; size_t *row,*order,*source_row,
-                    *source_order,*demand_first; uint32_t *demand_of,*release_of; };
+                    *source_order,*demand_first; uint32_t *demand_of,*release_of;
+                    const struct mesh_grouped *grouped; };
 _Static_assert(offsetof(struct mesh_local,bytes)==152 &&
                offsetof(struct mesh_local,values)==160 && offsetof(struct mesh_local,offsets)==168 &&
                offsetof(struct mesh_local,first)==176 && offsetof(struct mesh_local,offset)==184 &&
@@ -196,7 +200,8 @@ _Static_assert(offsetof(struct mesh_local,bytes)==152 &&
                offsetof(struct mesh_local,relation)==256 && offsetof(struct mesh_local,use)==280 &&
                offsetof(struct mesh_local,source_calls)==288 && offsetof(struct mesh_local,sources)==304 &&
                offsetof(struct mesh_local,row)==312 && offsetof(struct mesh_local,demand_first)==344 &&
-               offsetof(struct mesh_local,release_of)==360 && sizeof(struct mesh_local)==368,
+               offsetof(struct mesh_local,release_of)==360 && offsetof(struct mesh_local,grouped)==368 &&
+               sizeof(struct mesh_local)==376,
                "mesh_local: rdma/mesh.py Local");
 int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
                     const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,
@@ -204,18 +209,48 @@ int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_
                     uint32_t nroots,const size_t *use_first,const struct mesh_local_use *use,uint64_t quantum,
                     struct mesh_local *out);
 void mesh_local_free(struct mesh_local *out);
+/* design/aot-compilation-change-request.md A4 (AllGather, CollectivePermute, AllToAll) and A9;
+   design/plan-to-bridge-change-request.md R2 and R5: the one canonical grouping of a function's declared rows
+   declared[count] (weights[count]) into demands, on node `self` of a map of `nodes`, which mesh_plan and
+   mesh_plan_program consume and their callers retain before lowering: rows of one source and identity whose from views
+   are alike and whose produced and read weights are equal, their destinations distinct, are one demand, its first row
+   in (source, identity, row) order its owner `first`. The caller's arrays grouped->demand[count], demand_of[count] and
+   release_of[count] receive demand_of[t] row t's demand, release_of[t] the release its sends share (the demands of
+   source `self`, numbered in demand order; MESH_ABSENT a row of another source) and demand[d] {source, identity, first,
+   release, leaves (its destinations' set), bytes (its from view's logical bytes), pages (1: every row MESH_PAGES)};
+   `transfers` count, `demands`, `releases`, `nodes` and `self` as made. EHOSTUNREACH a node past the map; EINVAL a row
+   to its own source, a view out of range or of other bytes than its other, a kind past MESH_PAGES or a weight not
+   positive and finite */
+struct mesh_demand { uint32_t source,identity,first,release; uint64_t leaves,bytes; uint32_t pages,padding; };
+struct mesh_grouped { struct mesh_demand *demand; uint32_t *demand_of,*release_of;
+                      uint32_t transfers,demands,releases,nodes,self,padding; };
+_Static_assert(sizeof(struct mesh_demand)==40 && offsetof(struct mesh_demand,leaves)==16 &&
+               offsetof(struct mesh_demand,pages)==32 && sizeof(struct mesh_grouped)==48 &&
+               offsetof(struct mesh_grouped,transfers)==24 && offsetof(struct mesh_grouped,self)==40,
+               "mesh_demand, mesh_grouped: rdma/mesh.py Demand, Grouped");
+int mesh_declared_group(const struct mesh_declared *declared,const struct mesh_weight *weights,uint32_t count,
+                        uint32_t nodes,uint32_t self,struct mesh_grouped *grouped);
 /* design/aot-compilation-change-request.md A2, A4 and A7 to A10, appendix items 2 and 6: one program's joint network
    plan, mesh_plan's over its instances functions[count] (calls[j] call j's), with mesh_plan_local's program operands
    (order, ordered, closure, chains, roots, use_first, use) and the original source family (source_calls[j] call j's
    source function of `sources`, source_outstanding[] each one's issue bound: its own rows, A10's successor and delay).
-   Its result `out` is mesh_plan_local's owner: its planned record mesh_plan's (rows, arena, used, signature), its
-   copies rows of pages from planned.rows.first (first[]/offset[], value_first as mesh_plan_local's), the instance and
-   source rows (row/order, source_row/source_order), and each instance's declared rows' demands (demand_of from
+   grouped[f] function f's declared rows' grouping on this node, required (mesh_declared_group's, retained by the
+   caller and borrowed by the result, out->grouped; plan_function's demand_of its view; NULL: EINVAL; one of another
+   map or node: ESTALE, of another row count: EINVAL). A function's
+   value of no bytes (an absent, alias or constant slot) and a run 0 value a use binds to a root (its storage the
+   root's; a root 0 declared row naming it transports that root, EINVAL where its function's calls bind it to several)
+   keep their ValueIDs and have no allocation: no pages, no rows, section.count 0. Its result `out` is
+   mesh_plan_local's owner:
+   its planned record mesh_plan's (rows, arena, used, signature), its copies rows of pages from planned.rows.first
+   (first[]/offset[], value_first as mesh_plan_local's), the instance and source rows (row/order,
+   source_row/source_order), and each instance's declared rows' demands (demand_of from
    demand_first[f]) with the release a sent row's demand shares (release_of; MESH_ABSENT a row this node does not
-   send). A shared root transported by a demand is a run 1 root (a caller's run 0 root: EINVAL) */
+   send). A shared root transported by a demand is a run 1 root (a caller's run 0 root: EINVAL; its caller stages it
+   in a run 1 wire root) */
 int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,
-                      uint32_t count,const uint32_t *calls,uint32_t ncalls,const uint32_t *source_calls,
-                      uint32_t sources,const uint64_t *source_outstanding,const struct mesh_graph_relation *order,
+                      uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
+                      const uint32_t *source_calls,uint32_t sources,const uint64_t *source_outstanding,
+                      const struct mesh_graph_relation *order,
                       const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
                       const uint32_t *chains,struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
                       const struct mesh_local_use *use,uint64_t deadline,struct mesh_local *out);
@@ -230,6 +265,28 @@ int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,s
    zeroed */
 int mesh_local_save(const struct mesh_local *local,void **bytes,size_t *length);
 int mesh_local_load(const void *bytes,size_t length,void (*release)(void *),void *owner,struct mesh_local *local);
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/aot-compilation-change-request.md A8 to
+   A10 and appendix item 6; design/plan-to-bridge-change-request.md R8: mesh_plan_program's whole network result `local`
+   saved in one archive (*bytes the caller's, released with free): its local sections (mesh_local_save's), each
+   function's declared transfers (with their strided views), weights, dependences, tasks, before, senders, receivers,
+   completion and order, its plan state, the planned rows' pages, the plan table's adjacency, the planned signature and
+   extents, the source family (source_calls, source_outstanding) and the instance and source rows and demands
+   (row/order, source_row/source_order, demand_first, demand_of, release_of).  mesh_program_load: the same result loaded
+   from `bytes` (8-byte aligned, borrowed: every array a view of them but those it relocates, its own) and published
+   again without planning, one preparation as mesh_plan_load's (hdr `preparing` until `deadline`; its rows and used
+   blocks reserved beside every live publication's; its pages, its value and root sections and its copies' rows
+   relocated to them; its plans, rows and table written; published at its root row).  `local` is then
+   mesh_plan_program's owner: mesh_local_free frees it, mesh-dataflow.h mesh_retire(planned) closes its publication.  On
+   success it adopts `owner` (release(owner) once the result and every loaded relation are released); on failure the
+   caller keeps it and `local` is zeroed */
+int mesh_program_save(struct mesh_ctx *context,uint64_t program,const struct mesh_local *local,void **bytes,
+                      size_t *length);
+int mesh_program_load(struct mesh_ctx *context,uint64_t group,uint64_t program,uint64_t deadline,const void *bytes,
+                      size_t length,void (*release)(void *),void *owner,struct mesh_local *local);
+/* design/torch-capture-change-request.md item 6: a network result's copies (local->first's values: its functions'
+   values, then its roots) as byte offsets offset[k] in one mapping *view of the context's region, each copy's row's
+   page (local->offset[k]); UINT64_MAX for a copy of a run 0 value */
+void mesh_view_program(struct mesh_ctx *,const struct mesh_local *local,uint64_t *offset,struct mesh_view *view);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

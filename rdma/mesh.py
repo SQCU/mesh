@@ -146,6 +146,18 @@ class Planned(C.Structure):
                 ('arena', Range * 2), ('rows', Range), ('generation', Q)]
 
 
+# mesh-collective.h struct mesh_demand, struct mesh_grouped and mesh_declared_group: the one canonical grouping of a
+# function's declared rows into demands on one node (the caller's arrays demand, demand_of, release_of)
+class Demand(C.Structure):
+    _fields_ = [('source', U), ('identity', U), ('first', U), ('release', U), ('leaves', Q), ('bytes', Q),
+                ('pages', U), ('padding', U)]
+
+
+class Grouped(C.Structure):
+    _fields_ = [('demand', C.POINTER(Demand)), ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U)),
+                ('transfers', U), ('demands', U), ('releases', U), ('nodes', U), ('self', U), ('padding', U)]
+
+
 # mesh-collective.h struct mesh_local_use: call `call` binds a program root to its function's value `value`
 class LocalUse(C.Structure):
     _fields_ = [('call', U), ('value', U)]
@@ -162,7 +174,7 @@ class Local(C.Structure):
                 ('use', C.POINTER(LocalUse)), ('source_calls', C.POINTER(U)), ('source_outstanding', C.POINTER(Q)),
                 ('sources', U), ('padding', U), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
                 ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('demand_first', C.POINTER(Z)),
-                ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U))]
+                ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U)), ('grouped', C.POINTER(Grouped))]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
@@ -308,11 +320,16 @@ for name, result, arguments in (
                                       C.c_void_p, C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z),
                                       C.POINTER(LocalUse), Q, C.POINTER(Local)]),
         ('mesh_local_free', None, [C.POINTER(Local)]),
-        ('mesh_plan_program', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), U,
-                                        C.POINTER(Q), C.c_void_p, C.POINTER(U), U, C.c_void_p, C.POINTER(U),
-                                        C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse), Q, C.POINTER(Local)]),
+        ('mesh_declared_group', C.c_int, [C.POINTER(Declared), C.POINTER(Weight), U, U, U, C.POINTER(Grouped)]),
+        ('mesh_plan_program', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
+                                        C.POINTER(U), U, C.POINTER(Q), C.c_void_p, C.POINTER(U), U, C.c_void_p,
+                                        C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse), Q,
+                                        C.POINTER(Local)]),
         ('mesh_local_save', C.c_int, [C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
         ('mesh_local_load', C.c_int, [C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
+        ('mesh_program_save', C.c_int, [CONTEXT, Q, C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
+        ('mesh_program_load', C.c_int, [CONTEXT, Q, Q, Q, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
+        ('mesh_view_program', None, [CONTEXT, C.POINTER(Local), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, C.POINTER(Planned)]),

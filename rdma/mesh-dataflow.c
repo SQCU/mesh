@@ -106,6 +106,28 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,u
   *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
 }
 
+/* design/torch-capture-change-request.md item 6; mesh-collective.h mesh_view_program: a network result's copies in
+   local->first's order (its functions' values, then its roots), each copy k's first row local->offset[k], its bytes
+   that row's page onward (its section's stride rows); the view the least to the greatest of those of run 1 values */
+void mesh_view_program(struct mesh_ctx *c,const struct mesh_local *local,uint64_t *offset,struct mesh_view *view){
+  struct hdr *m=c->M;
+  const uint64_t block=(uint64_t)m->block*m->pgsz;
+  uint64_t low=UINT64_MAX,high=0;
+  for(int pass=0;pass<2;pass++)
+    for(uint32_t f=0,v=0;f<=local->functions;f++){
+      const uint32_t n=f<local->functions?local->function[f].values:local->roots;
+      const struct mesh_value *value=f<local->functions?local->function[f].value:local->root;
+      for(uint32_t i=0;i<n;i++,v++)
+        for(size_t k=local->first[v];k<local->first[v+1];k++){
+          const uint64_t a=atomic_load_explicit(&mesh_page(m)[local->offset[k]].address,memory_order_relaxed),
+                         z=a+(uint64_t)value[i].section.stride*block;
+          if(!pass && value[i].run){if(a<low)low=a;if(z>high)high=z;}
+          if(pass)offset[k]=value[i].run?a-low:UINT64_MAX;
+        }
+    }
+  *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
+}
+
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint64_t address){
   if(row!=MESH_ABSENT)atomic_store_explicit(&mesh_page(c->M)[row].device,address,memory_order_relaxed);
