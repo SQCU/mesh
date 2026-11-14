@@ -1,13 +1,14 @@
 # design/data-flow.md; design/compilation-composition-change-request.md item 7; schedule-emit/schedule_emit/runtime.py;
 # design/compiler-archive-assignment-2026-11-13.md: the selected group entry's completed Target, Scheduled.functions
 import torch
-from torch.export.graph_signature import InputKind, OutputKind
+from torch.export.graph_signature import InputKind
 from torch.utils import _pytree as pytree
 
 from . import bridge
+from .ir import RETURNED
 
 
-# torch 2.15 torch/export/graph_signature.py InputKind; torch/utils/_pytree.py tree_flatten: each placeholder's actual
+# torch 2.14.0 torch/export/graph_signature.py InputKind; torch/utils/_pytree.py tree_flatten: each placeholder's actual
 # state or user handle, as given (its device the explicit graph copies govern), aliases kept
 class Arguments:
     def __init__(self, scheduled, entry=None):
@@ -36,9 +37,9 @@ class Arguments:
         return self.arguments
 
 
-# torch 2.15 torch/export/graph_signature.py OutputKind USER_OUTPUT; torch/utils/_pytree.py tree_unflatten;
-# compiler/mesh_compiler/bridge.py prepare: the user outputs; a buffer or user input mutation is the native program's
-# own store into the caller's state or input storage (compiler/mesh_compiler/lower_metal.py construct), not copied back
+# compiler/mesh_compiler/ir.py RETURNED; torch/utils/_pytree.py tree_unflatten; compiler/mesh_compiler/bridge.py
+# prepare: the returned outputs; a buffer or user input mutation is the native program's own store into the caller's
+# state or input storage (compiler/mesh_compiler/lower_metal.py construct), not copied back
 class Program(Arguments):
     def __init__(self, scheduled, entry=None):
         entry, self.function = bridge.prepare(scheduled, entry)
@@ -50,5 +51,5 @@ class Program(Arguments):
         if self.entry != self.output_processor:
             return None
         user = [value for (kind, _), value in zip(self.exported.outputs, results, strict=True)
-                if kind == OutputKind.USER_OUTPUT]
+                if kind in RETURNED]
         return pytree.tree_unflatten(user, self.exported.out_spec)

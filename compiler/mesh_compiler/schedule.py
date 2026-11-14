@@ -20,6 +20,12 @@ SYSTEM = C.CDLL("/usr/lib/libSystem.B.dylib")
 SYSTEM.free.argtypes = [C.c_void_p]
 PRODUCED, READ, CONSUMED = ((mesh.FROM_PRODUCED, mesh.TO_PRODUCED), (mesh.FROM_SOURCE_READ, mesh.TO_SOURCE_READ),
                             (0, 0))
+CLONE = torch.ops.aten.clone.default
+
+
+# compiler/mesh_compiler/ir.py views: a receive whose arrival lands in an existing destination (its "to" record)
+def landing(node):
+    return node.target is RECV and node.meta.get("to") is not None
 
 
 def unit_cost(task):
@@ -269,7 +275,8 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     side = {processor: (groups or {}).get(processor, processor) for processor in processors}
     local = {end for ends in transfers.values() if len({side[end.meta["processor"]] for end in ends}) == 1
              for end in ends}
-    pairs = graph.contract([node not in local for node in graph.vertices]).edges() if local else graph.edges()
+    pairs = graph.contract([node not in local or landing(node) for node in graph.vertices]).edges() if local else \
+        graph.edges()
     identity = {node: (k, resource) for k, (node, (_, resource)) in enumerate(zip(functions, tasks))}
     members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
     sequence = tuple(identity[node] for node in listed)
@@ -279,7 +286,10 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
 
 
 # design/compilation-composition-change-request.md items 2, 3 and 6; M. Abadi et al., TensorFlow, arXiv:1603.04467,
-# section 3.2.2: a Send/Receive pair stands only for an edge between devices; compiler/mesh_compiler/ir.py views;
+# section 3.2.2: a Send/Receive pair stands only for an edge between devices, so a local pair is erased, its receive
+# the sent value, except a receive landing in an existing destination (`landing`), which stays at its position as
+# one copy of the sent value (aten.clone, its "out" the receive's "to", its task and vertex the receive's);
+# compiler/mesh_compiler/ir.py views;
 # compiler/mesh_compiler/decompose.py decompose: `decomposed` each expanded node's original source node, the copy of
 # each of them here its module's meta["decomposed"] key
 def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source, decomposed):
@@ -288,7 +298,12 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         if node.op == "placeholder" and any(u.meta["processor"] in members for u in node.users):
             copied[node] = graph.node_copy(node)
     for node in order:
-        if node in local:
+        if node in local and landing(node):
+            copied[node] = graph.create_node("call_function", CLONE, (copied[transfers[channel_of(node)][0].args[0]],),
+                                             name=node.name)
+            copied[node].meta.update(processor=node.meta["processor"], val=node.meta["val"], out=node.meta["to"])
+            tasks[copied[node]] = identity[node]
+        elif node in local:
             copied[node] = copied[transfers[channel_of(node)][0].args[0]]
         else:
             copied[node] = graph.node_copy(node, copied.__getitem__)
@@ -299,7 +314,7 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
     output = nodes[-1]
     here = output.meta["processor"] in members
     results = map_arg(output.args[0], copied.__getitem__) if here else ()
-    graph.output(results).meta["processor"] = group
+    graph.output(results).meta.update(processor=group, destination=output.meta.get("destination", {}) if here else {})
     views([copied[user] for node in order if node in local and node.target is RECV for user in node.users
            if user in copied and user not in local])
     module = torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -312,7 +327,7 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         if arrival in copied and arrival not in local}, order=sequence, transfers={
         channel: (copied.get(sent), copied.get(arrival)) for channel, (sent, arrival) in transfers.items()
         if arrival not in local}, relation=source, copied=dict(copied), output=output.meta["processor"], vertices=tuple(
-        None if node in local else copied.get(node) for node in source.functions),
+        None if node in local and not landing(node) else copied.get(node) for node in source.functions),
         decomposed={copied[node]: original for node, original in decomposed.items() if node in copied})
     return module
 

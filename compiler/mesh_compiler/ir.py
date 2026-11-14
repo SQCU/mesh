@@ -1,4 +1,5 @@
 # design/data-flow.md
+import collections
 import operator
 import pathlib
 import sys
@@ -9,7 +10,9 @@ import torch
 from torch import Tensor
 from torch._guards import detect_fake_mode
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+from torch.export.graph_signature import OutputKind
 from torch.fx.node import map_arg
+from torch.utils import _pytree as pytree
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -58,6 +61,38 @@ class Exported:
     outputs: list
     out_spec: object
     state_kinds: dict
+
+
+# torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order
+RETURNED = (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT, OutputKind.GRADIENT_TO_PARAMETER,
+            OutputKind.GRADIENT_TO_USER_INPUT)
+
+
+# design/unequal-shards-change-request.md item 8; torch 2.14.0 torch/export/experimental/__init__.py
+# _export_forward_backward; torch/export/graph_signature.py ExportBackwardSignature gradients_to_parameters and
+# gradients_to_user_inputs; torch/utils/_pytree.py _register_namedtuple: a program with a loss returns its forward
+# outputs, its parameters' gradients by target and its user inputs' gradients by target
+TrainingResult = collections.namedtuple("TrainingResult", "outputs parameters inputs")
+pytree._register_namedtuple(TrainingResult, serialized_type_name="mesh_compiler.ir.TrainingResult")
+
+
+# design/aot-compilation-change-request.md A10; P. Barham et al., Pathways, arXiv:2203.12533, section 3: one original
+# call node's captured function (its CapturedProgram.functions key), its inputs one outer FX Node or literal per
+# placeholder of that function in order, its outputs one outer FX Node or literal per output spec of that function
+@dataclass
+class Call:
+    function: tuple
+    inputs: list
+    outputs: list
+
+
+# design/aot-compilation-change-request.md A1 and A10: the outer call graph (its flat inputs, state, outputs and their
+# roles), each captured function's Exported by key in first-call order, each original call node's Call in program order
+@dataclass
+class CapturedProgram:
+    exported: Exported
+    functions: dict
+    calls: dict
 
 
 # rdma/mesh-collective.h struct mesh_function, mesh_plan, mesh_plan_save
@@ -130,7 +165,7 @@ def shape(node):
     return tuple((value[0] if isinstance(value, (tuple, list)) else value).shape)
 
 
-# design/problems-of-14b9a757-change-request.md item 6; torch 2.15 torch/_tensor_docs.py view, reshape and contiguous
+# design/problems-of-14b9a757-change-request.md item 6; torch 2.14.0 torch/_tensor_docs.py view, reshape and contiguous
 def viewable(value, sizes):
     try:
         value.view(sizes)
@@ -190,14 +225,14 @@ def bases_of(node):
     return [held for held in [view(node)] if held is not None]
 
 
-def based(node, read):
+def based(node, read, destined=False):
     value = node.meta.get("val")
     if not read:
         return node, value.storage_offset() if isinstance(value, torch.Tensor) else 0
     (base, first), = read
     if isinstance(value, torch.Tensor):
         record = base.name, value.storage_offset() - first, tuple(value.shape), tuple(value.stride())
-        if written(node) is not None:
+        if destined or written(node) is not None:
             node.meta["out"] = record
             return base, first
         node.meta["view"] = record
@@ -220,27 +255,60 @@ def destined(node):
         yield node.args[0], sum(low * value.stride(value.dim() - 1 - d) for d, low in enumerate(node.args[1][::2]))
 
 
-# design/problems-of-14b9a757-change-request.md items 1 to 4 and 6, and item 8, step 4
+# design/problems-of-14b9a757-change-request.md items 1 to 4 and 6, and item 8, step 4;
+# design/compilation-composition-change-request.md items 6 and 7; torch 2.14.0 torch/export/graph_signature.py
+# OutputKind.USER_INPUT_MUTATION and BUFFER_MUTATION: the value now at each position of an output node's meta
+# "destination" (export.read: the position's target placeholder) computes into that placeholder: its value that
+# placeholder's own view, its "out" record (a received value's "to") its offset, shape and strides there, its aliases
+# re-evaluated from it; a gathered value's pieces projected by `destined`, consumers first in the graph's reverse
+# order, into its parent's own root where the parent has an "out" (root, parent offset + piece offset, the root's
+# strides, the piece's value that view of the root), else into the parent
 def views(nodes):
     starts = list(getattr(nodes, "nodes", nodes))
     universe = lambda: [n for graph in dict.fromkeys(node.graph for node in starts) for n in graph.nodes]
+    named, destination = {n.name: n for n in universe()}, {}
+    for graph in dict.fromkeys(node.graph for node in starts):
+        output = graph.output_node()
+        for k, name in output.meta.get("destination", {}).items():
+            value = output.args[0][k]
+            if isinstance(value, torch.fx.Node) and value.op != "placeholder" and written(value) is None:
+                destination[value] = named[name]
     nodes = mesh_graph.walk(universe(), starts, lambda n: [u for u in n.users if source(u) is n])
     inside = mesh_graph.Reached(nodes.owner)
     for node in mesh_graph.postorder(nodes, nodes[::-1], lambda n: [m for m in [source(n)] if m in inside]):
         node.meta.pop("to", None)
         node.meta.pop("out", None)
-        if aliasing(node):
+        if node in destination:
+            target = destination[node].meta["val"]
+            with detect_fake_mode([target]):
+                node.meta["val"] = target.as_strided(target.shape, target.stride(), target.storage_offset())
+        elif aliasing(node):
             evaluated(node, node.meta["processor"])
         elif node.target is operator.getitem and aliasing(node.args[0]):
             node.meta["val"] = node.args[0].meta["val"][node.args[1]]
-    mesh_graph.forward(mesh_graph.postorder(universe(), nodes, bases_of), bases_of, based)
-    for node in dict.fromkeys(reader for n in nodes for reader in (n, *n.users)):
+    computed = {node: target for node, target in destination.items() if node.target is not RECV}
+    bases = lambda n: [computed[n]] if n in computed else bases_of(n)
+    mesh_graph.forward(mesh_graph.postorder(universe(), nodes, bases), bases,
+                       lambda node, read: based(node, read, node in computed))
+    for node, target in destination.items():
+        if node.target is RECV:
+            node.meta["to"] = target.name, 0, shape(target), tuple(target.meta["val"].stride())
+    readers = dict.fromkeys(reader for n in nodes for reader in (n, *n.users))
+    for node in [n for n in reversed(universe()) if n in readers]:
+        record = node.meta.get("out")
         for held, offset in destined(node):
             if (held.op == "call_function" and held.target is not operator.getitem and len(held.users) == 1
                     and not {"view", "out"} & held.meta.keys()
                     and isinstance(held.meta["val"], torch.Tensor)):
-                held.meta["to" if held.target is RECV else "out"] = (
-                    node.name, offset, shape(held), tuple(node.meta["val"].stride()))
+                key = "to" if held.target is RECV else "out"
+                if record is None:
+                    held.meta[key] = node.name, offset, shape(held), tuple(node.meta["val"].stride())
+                    continue
+                root = named[record[0]].meta["val"]
+                held.meta[key] = record[0], record[1] + offset, shape(held), record[3]
+                with detect_fake_mode([root]):
+                    held.meta["val"] = root.as_strided(shape(held), record[3],
+                                                       root.storage_offset() + record[1] + offset)
 
 
 def constant(graph, target, arguments, like, processor, **kwargs):

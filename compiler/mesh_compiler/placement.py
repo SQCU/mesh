@@ -601,7 +601,7 @@ def meshed(graph, node, held, replaced):
     return dims, sizes, grid, shards
 
 
-def partitioned(graph, node, held, want, replaced):
+def partitioned(graph, node, held, want, replaced, whole):
     target = None
     if any(several(v) for v in held):
         made = meshed(graph, node, held, replaced) if node.op == "call_function" else None
@@ -610,13 +610,16 @@ def partitioned(graph, node, held, want, replaced):
     if not isinstance(want, str) and several(want):
         want = flat(want[2])[0]
     one = want if isinstance(want, str) else want[2][0]
-    held = [(None, None, (one,), reshard(graph, v, None, None, (one,))) if several(v) else v for v in held]
+    for u, v in zip(operands(node), held, strict=True):
+        if several(v) and (u, one) not in whole:
+            whole[u, one] = reshard(graph, v, None, None, (one,))[0]
+    held = [(None, None, (one,), [whole[u, one]]) if several(v) else v for u, v in zip(operands(node), held)]
     if node.op == "call_function" and (any(v[0] is not None for v in held) or not isinstance(want, str)):
         if node.target is ADDMM:
             product = graph.call_function(MM, node.args[1:])
             product.meta = dict(node.meta)
             first = want if isinstance(want, str) else want[2][0]
-            held = [partitioned(graph, product, held[1:], first, replaced), held[0]]
+            held = [partitioned(graph, product, held[1:], first, replaced, whole), held[0]]
             node.target, node.args = ADD, (product, node.args[0])
         shapes, out = [shape(n) for n in operands(node)], shape(node)
         if node.target is VIEW:
@@ -643,7 +646,10 @@ def partitioned(graph, node, held, want, replaced):
         target = target[0], counts(out[target[0]], units, len(target[2])), target[2]
     if target is None:
         processor = want if isinstance(want, str) else want[2][0]
-        arguments = iter([reshard(graph, plainly(graph, v), None, None, (processor,))[0] for v in held])
+        for u, v in zip(operands(node), held, strict=True):
+            if (u, processor) not in whole:
+                whole[u, processor] = reshard(graph, plainly(graph, v), None, None, (processor,))[0]
+        arguments = iter([whole[u, processor] for u in operands(node)])
         node.args, node.kwargs = map_arg((node.args, node.kwargs), lambda n: next(arguments))
         node.meta["processor"] = processor
         return None, None, (processor,), [node]
@@ -777,7 +783,7 @@ def place(graph_module, placement):
     for node in nodes:
         if node.op == "placeholder":
             node.meta["stated"] = stated[node]
-    replaced = []
+    replaced, whole = [], {}
 
     def transfer(node, held):
         want = stated[node] if node in stated else flat(held[0][2])[0]
@@ -790,7 +796,7 @@ def place(graph_module, placement):
             want = dimension, counts(shape(node)[dimension], units, len(processors)), processors
         with graph.inserting_before(placed[0] if node.op == "placeholder" else node):
             value = ((None, None, (None,), [node]) if node.op == "placeholder" else
-                     partitioned(graph, node, held, want, replaced))
+                     partitioned(graph, node, held, want, replaced, whole))
         if not isinstance(want, str) and value[:3] != want:
             with graph.inserting_before(placed[0] if node.op == "placeholder" else node.next):
                 value = *want, reshard(graph, plainly(graph, value), *want)

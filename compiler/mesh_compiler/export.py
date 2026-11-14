@@ -1,19 +1,27 @@
 # design/data-flow.md
+import inspect
+import itertools
 import operator
 
 import torch
+from torch._guards import detect_fake_mode
 from torch._ops import HigherOrderOperator
+from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode
 from torch.export.experimental import _export_forward_backward
 from torch.export.graph_signature import InputKind, OutputKind
+from torch.fx._symbolic_trace import PH
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
+from torch.multiprocessing.reductions import StorageWeakRef
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils import _pytree as pytree
 
-from .ir import Exported
+from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, written
 
 WITH_EFFECTS = torch.ops.higher_order.with_effects
+COPY = torch.ops.aten.copy.default
 
 
-# design/unequal-shards-change-request.md item 8; torch 2.15 torch/export/experimental/__init__.py
+# design/unequal-shards-change-request.md item 8; torch 2.14.0 torch/export/experimental/__init__.py
 def export(module, args, loss=None, **export_options):
     program = torch.export.export(module, args, **export_options)
     if loss is not None:
@@ -61,26 +69,53 @@ def read(program):
         if node.op == "placeholder" and node.name in state:
             node.meta["state"] = state[node.name][0]
 
-    # torch 2.14.0 torchgen/model.py Tag nondeterministic_seeded (OpOverload.tags); J. K. Salmon et al., SC 2011, §3.1:
-    # each seeded source operation's draw site, numbered in source graph order from 1 before placement
-    seeded = [node for node in nodes if node.op == "call_function"
-              and torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())]
-    for site, node in enumerate(seeded, 1):
-        node.meta["site"] = site
-
-    outputs, gradients, out_spec = [], {}, program.call_spec.out_spec
+    outputs = []
     for spec in signature.output_specs:
-        if spec.kind == OutputKind.GRADIENT_TO_PARAMETER:
-            gradients[spec.target] = 0
-        elif spec.kind not in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT, OutputKind.BUFFER_MUTATION,
-                               OutputKind.USER_INPUT_MUTATION, OutputKind.TOKEN):
+        if spec.kind not in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT, OutputKind.BUFFER_MUTATION,
+                             OutputKind.USER_INPUT_MUTATION, OutputKind.TOKEN, *GRADIENTS):
             raise NotImplementedError(f"output kind {spec.kind}")
-        returned = spec.kind in (OutputKind.LOSS_OUTPUT, OutputKind.GRADIENT_TO_PARAMETER)
-        outputs.append((OutputKind.USER_OUTPUT, None) if returned else (spec.kind, spec.target))
-    if signature.backward_signature is not None:
-        forward = pytree.tree_unflatten([0] * out_spec.num_leaves, out_spec)
-        out_spec = pytree.tree_structure((forward, gradients))
-    return Exported(program.graph_module, state, tokens, user_inputs, outputs, out_spec, state_kinds)
+        outputs.append((spec.kind, spec.target))
+
+    # design/compilation-composition-change-request.md items 6 and 7; torch 2.14.0 torch/export/graph_signature.py
+    # OutputKind.USER_INPUT_MUTATION (its target the input placeholder) and BUFFER_MUTATION (its target the buffer,
+    # its placeholder the state's): the output node's meta "destination", each mutation output's position to its target
+    # placeholder's name, the value at that position computing into it (ir.views), a mutation whose value is another
+    # placeholder first copying it there (aten.copy)
+    graph, stated = program.graph_module.graph, {target: name for name, (target, _) in state.items()}
+    output = graph.output_node()
+    named, values, destinations = {node.name: node for node in nodes}, list(output.args[0]), {}
+    for k, (kind, target) in enumerate(outputs):
+        if kind not in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION):
+            continue
+        destination = named[stated[target] if kind == OutputKind.BUFFER_MUTATION else target]
+        value = values[k]
+        if value is destination or not isinstance(value, torch.fx.Node) or written(value) is not None:
+            continue
+        if value.op == "placeholder":
+            with graph.inserting_before(output):
+                values[k] = graph.call_function(COPY, (destination, value))
+            with detect_fake_mode([destination.meta["val"]]):
+                values[k].meta["val"] = COPY(destination.meta["val"], value.meta["val"])
+        destinations[k] = destination.name
+    output.args, output.meta["destination"] = (tuple(values),), destinations
+    program.graph_module.recompile()
+    return Exported(program.graph_module, state, tokens, user_inputs, outputs,
+                    returned(program.call_spec.out_spec, outputs, signature.backward_signature is not None),
+                    state_kinds)
+
+
+# torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and
+# gradients_to_user_inputs; compiler/mesh_compiler/ir.py TrainingResult: a program's result, its forward outputs, or
+# with a loss its TrainingResult, each gradient map keyed by its output's target in output order
+GRADIENTS = OutputKind.GRADIENT_TO_PARAMETER, OutputKind.GRADIENT_TO_USER_INPUT
+
+
+def returned(forward, outputs, backward):
+    if not backward:
+        return forward
+    parameters, inputs = ({target: 0 for kind, target in outputs if kind == role} for role in GRADIENTS)
+    return pytree.tree_structure(TrainingResult(pytree.tree_unflatten([0] * forward.num_leaves, forward), parameters,
+                                                inputs))
 
 
 # design/aot-compilation-change-request.md A1 and A10; P. Barham et al., Pathways, arXiv:2203.12533, section 3;
@@ -103,20 +138,28 @@ class Function(torch.nn.Module):
         return self.function(*args, **kwargs)
 
 
-class Stated(torch.nn.Module):
-    def __init__(self, function, read, written):
-        super().__init__()
-        self.function, self.read, self.written = function, read, written
-
-    def forward(self, *args, **kwargs):
-        result = self.function(*args[:len(args) - len(self.read)], **kwargs)
-        return (result, *(self.function.get_buffer(name) for name in self.written)) if self.written else result
+def placeholders(function):
+    return [node.name for node in function.graph_module.graph.nodes if node.op == "placeholder"]
 
 
+# torch 2.14.0 torch/_subclasses/fake_tensor.py FakeTensorMode, the capture's one owner of values: the program's
+# arguments and each function's state as its fakes, storages shared where the actual ones are; torch.fx Interpreter:
+# the program interpreted once at compile time on them, each call's function exported once per key (its target, its
+# arguments' structure, each leaf's dtype, device, requires_grad, shape, stride, offset and storage among the call's
+# leaves); torch/_functorch/functional_call.py functional_call: the call's source forward on its fake arguments and
+# its module's fake parameters and buffers, its user and loss outputs that forward's result leaves (a returned input
+# or view of one that input's fake), a mutation output the written fake itself, a token output its exported
+# output's own value and each gradient output its exported output's own value in the capture mode by this call's one
+# FakeTensorConverter.from_real_tensor (one converter a call, so a call of a reused export has its own gradients and
+# the call's gradients keep their views and storages among themselves); the call's value its function's own result (compiler/mesh_compiler/ir.py RETURNED
+# outputs under its out_spec, a TrainingResult with a loss), read between calls by item or by a named field; no
+# actual state or argument is read for its contents or written
 class Captured(torch.fx.Interpreter):
-    def __init__(self, module, functions, options):
+    def __init__(self, module, functions, options, fake):
         super().__init__(module)
-        self.functions, self.options, self.exported = functions, options, {}
+        self.functions, self.options, self.fake, self.exported, self.bound = functions, options, fake, {}, {}
+        with fake:
+            self.token = torch.empty(0)
 
     def run_node(self, node):
         self.calling = node
@@ -124,82 +167,149 @@ class Captured(torch.fx.Interpreter):
 
     def captured(self, target, module, args, kwargs):
         leaves, structure = pytree.tree_flatten((args, kwargs))
-        key = target, str(structure), tuple((str(leaf.dtype), tuple(leaf.shape)) if isinstance(leaf, torch.Tensor)
-                                            else repr(leaf) for leaf in leaves)
+        storages = {}
+        key = target, str(structure), tuple(
+            (str(leaf.dtype), str(leaf.device), leaf.requires_grad, tuple(leaf.shape), tuple(leaf.stride()),
+             leaf.storage_offset(), storages.setdefault(StorageWeakRef(leaf.untyped_storage()), len(storages)))
+            if isinstance(leaf, torch.Tensor) else repr(leaf) for leaf in leaves)
         if key not in self.exported:
             with torch.enable_grad():
                 self.exported[key] = export(module, args, kwargs=kwargs, **self.options)
+        function, names = self.exported[key], placeholders(self.exported[key])
+        values = [self.fake.from_tensor(function.state[name][1]) if name in function.state
+                  else self.token if name in function.tokens else leaves[function.user_inputs.index(name)]
+                  for name in names]
+        held = {name: self.fake.from_tensor(tensor) for name, tensor in [
+            *module.named_parameters(remove_duplicate=False), *module.named_buffers(remove_duplicate=False)]}
+        with self.fake, torch.enable_grad():
+            result = torch.func.functional_call(module, held, tuple(args), kwargs)
+        forward, exported = iter(pytree.tree_leaves(result)), function.graph_module.graph.output_node().args[0]
+        stated, converter = {target: name for name, (target, _) in function.state.items()}, FakeTensorConverter()
+        produced = tuple(
+            next(forward) if kind in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT)
+            else values[names.index(stated[target] if kind == OutputKind.BUFFER_MUTATION else target)]
+            if kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)
+            else converter.from_real_tensor(self.fake, exported[k].meta["val"]) if kind in GRADIENTS
+            else exported[k].meta["val"] if isinstance(exported[k], torch.fx.Node) else exported[k]
+            for k, (kind, target) in enumerate(function.outputs))
         self.calling.meta["function"] = key
+        self.bound[self.calling] = key, values, produced
+        return pytree.tree_unflatten([value for (kind, _), value in zip(function.outputs, produced, strict=True)
+                                      if kind in RETURNED], function.out_spec)
 
     def call_module(self, target, args, kwargs):
-        module = self.fetch_attr(target)
-        self.captured(target, module, args, kwargs)
-        before = attributes(module)
-        result = super().call_module(target, args, kwargs)
-        after = attributes(module)
-        written = {key for kind, key in self.exported[self.calling.meta["function"]].outputs
-                   if kind == OutputKind.BUFFER_MUTATION}
-        rebound = [name for name in before if after.get(name) is not before[name] and name not in written]
-        if rebound:
-            raise NotImplementedError(f"{self.calling.name} rebinds {rebound[0]}, which torch.export captures as no "
-                                      "write; a function's writes are its node's results")
-        self.calling.meta["held"] = before, after
-        return result
+        return self.captured(target, self.fetch_attr(target), args, kwargs)
 
     def call_function(self, target, args, kwargs):
         if target in self.functions:
-            self.captured(target, Function(target), args, kwargs)
-        elif target is not operator.getitem or not isinstance(args[0], (tuple, list, dict)):
+            return self.captured(target, Function(target), args, kwargs)
+        if target not in (operator.getitem, getattr) or not isinstance(args[0], (tuple, list, dict)):
             raise NotImplementedError(f"{self.calling.name} runs between the program's compiled calls; every "
                                       "function of a program is captured")
         return super().call_function(target, args, kwargs)
 
 
-def attributes(module):
-    return {**dict(module.named_parameters()), **dict(module.named_buffers())}
-
-
+# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/fx/_symbolic_trace.py PH: the program's call
+# graph, its placeholders its flat argument leaves
 def calls(program, args, functions, **export_options):
-    graph = Calls(functions).trace(program)
+    parameters = inspect.signature(program.forward).parameters
+    graph = Calls(functions).trace(program, concrete_args={
+        name: pytree.tree_map(lambda _: PH, value) for name, value in zip(parameters, args)})
     for node in graph.nodes:
         if node.op not in ("placeholder", "call_module", "call_function", "output"):
             raise NotImplementedError(f"{node.name} runs between the program's compiled calls; every function of a "
                                       "program is captured")
-    module = torch.fx.GraphModule(program, graph)
-    captured = Captured(module, functions, export_options)
-    captured.run(*args)
-    held, last = {}, {}
-    for node in [n for n in module.graph.nodes if "function" in n.meta]:
-        function, called = captured.exported[node.meta["function"]], node.op == "call_module"
-        if not function.state:
-            continue
-        leaf = module.get_submodule(node.target) if called else Function(node.target)
-        state = dict(function.state.values())
-        before, after = node.meta.pop("held", ({}, {}))
-        written = tuple(key for kind, key in function.outputs if kind == OutputKind.BUFFER_MUTATION)
-        paths = {key: f"{node.target}.{key}" if key in before else f"{node.name}_{key}" for key in state}
-        module.add_submodule(f"{node.name}_stated", Stated(leaf, tuple(state), written))
-        with module.graph.inserting_before(node):
-            for key in state.keys() - before.keys():
-                module.register_buffer(paths[key], state[key], persistent=False)
-            read = {key: before.get(key, tensor) for key, tensor in state.items()}
-            taken = [held[id(tensor)][1] if id(tensor) in held else module.graph.get_attr(paths[key])
-                     for key, tensor in read.items()]
-            call = module.graph.call_module(f"{node.name}_stated", (*node.args, *taken), node.kwargs)
-            call.meta = {**node.meta, "read": tuple(state), **({"written": written} if written else {})}
-            node.replace_all_uses_with(module.graph.call_function(operator.getitem, (call, 0)) if written else call)
-            for (key, tensor), value in zip(read.items(), taken):
-                held.setdefault(id(tensor), (tensor, value))
-                if key in written:
-                    value = module.graph.call_function(operator.getitem, (call, 1 + written.index(key)))
-                    last.pop(id(tensor), None)
-                    held[id(after[key])] = after[key], value
-                    last[id(after[key])] = paths[key], value
-        module.graph.erase_node(node)
-    # torch 2.15 torch/export/graph_signature.py OutputKind.BUFFER_MUTATION
-    if last:
-        output = module.graph.output_node()
-        output.args = ((output.args[0], *(value for _, value in last.values())),)
-        module.meta["written"] = tuple(path for path, _ in last.values())
+    return capture(torch.fx.GraphModule(program, graph), args, functions, export_options, program)
+
+
+# design/aot-compilation-change-request.md A1: a module compiled alone, its program one call of it
+def called(module, args, **export_options):
+    root, graph = torch.nn.Module(), torch.fx.Graph()
+    root.function = module
+    leaves, spec = pytree.tree_flatten(args)
+    graph.output(graph.call_module("function", tuple(pytree.tree_unflatten(
+        [graph.placeholder(f"arg_{k}") for k in range(len(leaves))], spec))))
+    return capture(torch.fx.GraphModule(root, graph), args, {"function"}, export_options, module)
+
+
+# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/export/graph_signature.py InputKind and
+# OutputKind: each call node's arguments its function's placeholders in order (the state it reads, its effect tokens,
+# its flat arguments), each the outer node holding that value at the call, and each output spec of its function one
+# node after it with its role in its function's outputs; a value held by its latest node (an output, or a buffer or
+# user input mutation of it, the mutation's value the written fake, Captured.captured), a state placeholder's target
+# its tensor's name in `root` (else its call's name and key) and its kind the function's; the program's outputs its
+# token chain, each written state or argument with its role and target, and each leaf of its actual result (the calls'
+# own results, a training call's TrainingResult among them) a USER_OUTPUT, under that result's structure
+def capture(module, args, functions, options, root):
+    fake = FakeTensorMode(shape_env=ShapeEnv(tracked_fakes=[]), static_shapes=True, allow_non_fake_inputs=True)
+    leaves = [fake.from_tensor(leaf) if isinstance(leaf, torch.Tensor) else leaf for leaf in pytree.tree_leaves(args)]
+    graph, interpreter = module.graph, Captured(module, functions, options, fake)
+    outcome = graph.process_outputs(interpreter.run(*leaves, enable_io_processing=False))
+    named = {id(tensor): name for name, tensor in reversed([*root.named_parameters(remove_duplicate=False),
+                                                            *root.named_buffers(remove_duplicate=False)])}
+    first, inputs = next(iter(graph.nodes)), [node for node in graph.nodes if node.op == "placeholder"]
+    held, roots, chain, written, state, kinds, tokens, bound = {}, {}, [], {}, {}, {}, [], {}
+
+    def hold(node, value):
+        node.meta["val"] = value
+        if isinstance(value, torch.Tensor):
+            held[id(value)] = value, node
+        return node
+
+    def holder(value):
+        return held[id(value)][1] if isinstance(value, torch.Tensor) else value
+
+    for node, value in zip(inputs, leaves, strict=True):
+        roots[id(value)] = hold(node, value)
+    for call, (key, values, produced) in interpreter.bound.items():
+        function, names, arguments = interpreter.exported[key], placeholders(interpreter.exported[key]), []
+        for name, value in zip(names, values):
+            if name in function.tokens:
+                while len(chain) <= function.tokens.index(name):
+                    with graph.inserting_before(first):
+                        chain.append(graph.placeholder("token"))
+                    chain[-1].meta["val"] = value
+                    tokens.append(chain[-1].name)
+                arguments.append(chain[function.tokens.index(name)])
+                continue
+            if name in function.state and id(value) not in held:
+                target, tensor = function.state[name]
+                path = named.get(id(tensor), f"{call.name}_{target}")
+                with graph.inserting_before(first):
+                    roots[id(value)] = hold(graph.placeholder(path.replace(".", "_")), value)
+                state[roots[id(value)].name], kinds[roots[id(value)].name] = (path, tensor), function.state_kinds[name]
+            arguments.append(holder(value))
+        call.args, call.kwargs, outputs, token = tuple(arguments), {}, [], 0
+        with graph.inserting_before(call.next):
+            for k, ((kind, target), value) in enumerate(zip(function.outputs, produced, strict=True)):
+                node = graph.call_function(operator.getitem, (call, k))
+                if kind == OutputKind.TOKEN:
+                    node.meta["val"], chain[token], token = value, node, token + 1
+                else:
+                    hold(node, value)
+                    if kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION) and id(value) in roots:
+                        written[roots[id(value)]] = node
+                outputs.append(node)
+        bound[call] = Call(key, arguments, outputs)
+    results = [(OutputKind.TOKEN, None, node) for node in chain]
+    results += [(OutputKind.BUFFER_MUTATION, state[base.name][0], node) if base.name in state
+                else (OutputKind.USER_INPUT_MUTATION, base.name, node) for base, node in written.items()]
+    results += [(OutputKind.USER_OUTPUT, None, holder(value)) for value in pytree.tree_leaves(outcome)]
+    graph.output_node().args = (tuple(node for *_, node in results),)
+    made = {node for call in bound.values() for node in call.outputs}
+    for node in reversed(list(graph.nodes)):
+        if node.op == "call_function" and node not in bound and node not in made and not node.users:
+            graph.erase_node(node)
+    graph.set_codegen(torch.fx.graph.CodeGen())
     module.recompile()
-    return module, captured.exported
+    # torch 2.14.0 torchgen/model.py Tag nondeterministic_seeded (OpOverload.tags); J. K. Salmon et al., SC 2011, §3.1:
+    # each seeded source operation's draw site, one source namespace numbered from 1 over the captured functions in
+    # their order and each one's graph order, once before placement
+    sites = itertools.count(1)
+    for function in interpreter.exported.values():
+        for node in function.graph_module.graph.nodes:
+            if node.op == "call_function" and torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ()):
+                node.meta["site"] = next(sites)
+    exported = Exported(module, state, tokens, [node.name for node in inputs],
+                        [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds)
+    return CapturedProgram(exported, interpreter.exported, bound)

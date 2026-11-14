@@ -1,82 +1,110 @@
 # design/the-compiler.md; design/compiler-archive-assignment-2026-11-13.md; design/compilation-composition-change-
-# request.md items 1, 3, 6 and 7: one construction, one lowering, one plan of its actual results, the native artifact
+# request.md items 1, 3, 6 and 7; design/aot-compilation-change-request.md A1 and A10: one capture, each captured
+# function's construction, one call analysis, one completed native target
 import dataclasses
-import pathlib
-import sys
 
 import torch
 from torch.export.graph_signature import OutputKind
 
 from . import native
+from .decompose import decompose
 from .devices import ENGINES, HOST, on_devices
-from .export import export
+from .export import called, calls
 from .ir import Scheduled
 from .lower_metal import construct
+from .metal import _machines
+from .operations import Generator, seeded
 from .placement import place
-from .schedule import argument_buffers, carried, schedule, unit_cost
-
-sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
-import mesh_compile
+from .schedule import analyse, carried, schedule, unit_cost
 
 
-# compiler/mesh_compiler/ir.py Planning; compiler/mesh_compiler/bridge.py planning; compiler/mesh_compiler/placement.py
-# place, transfers; compiler/mesh_compiler/schedule.py schedule, Declarations; compiler/mesh_compiler/lower_metal.py
-# construct; compiler/mesh_compiler/native.py compile: one group per machine (its first processor its key), its body
-# in the retained global order, the source declarations (no plan before the lowering), ONE typed construction with
-# every original processor's selected target and device and each output's role (a buffer mutation's by the placeholder
-# torch.export's state names it under), and that machine's completed native target, compiled here (this node's machine
-# alone where there is a plan's context, whose solved Plan the Scheduled keeps), its machine node the plan's node map
-# index (Planning.here) with a context and its source machine without one
-def compile_module(module, args, processors, placement, cost=unit_cost, stored=(), planning=None, **export_options):
+# design/aot-compilation-change-request.md A1: a module compiled alone, the program of its one call
+def compile_module(module, args, processors, placement, cost=unit_cost, planning=None, machine=None,
+                   **export_options):
+    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+
+
+# design/aot-compilation-change-request.md A10: a program's calls of its captured functions
+def compile_program(program, args, functions, processors, placement, cost=unit_cost, planning=None, machine=None,
+                    **export_options):
+    return compile_captured(calls(program, args, functions, **export_options), processors, placement, cost, planning,
+                            machine)
+
+
+# compiler/mesh_compiler/ir.py CapturedProgram and Planning; compiler/mesh_compiler/bridge.py planning;
+# compiler/mesh_compiler/placement.py place; compiler/mesh_compiler/devices.py on_devices;
+# compiler/mesh_compiler/decompose.py decompose; compiler/mesh_compiler/schedule.py analyse, schedule and
+# Declarations; compiler/mesh_compiler/lower_metal.py construct; compiler/mesh_compiler/native.py compile_program: one
+# group per machine (its first processor its key); each function, in the captured order, placed and put on its
+# devices, its placement (its placeholders' stated placements in order, its body's output processor) and the
+# program's output processor (the placement of the captured outer output node) given to the one call analysis before
+# any schedule; a plan's context acquired where a function's transfer crosses machines or an analysis port
+# (schedule.py CallPort) with a source machine has a consumer machine other than it; the
+# compilation machine chosen once (the plan's node map entry Planning.nodes[Planning.here], else `machine`, else the
+# processors' one machine) and the seed's words sampled once; each function decomposed for its targets, scheduled
+# with its source declarations (every machine's body kept, by group), and its body on the compilation machine, where
+# it has one, constructed once with every original processor's selected target and device and each output's role (a
+# buffer mutation's by the placeholder torch.export's state names it under); ONE completed native target of those
+# constructions by function key and the analysis, its node Planning.here with a context and the machine without
+def compile_captured(captured, processors, placement, cost=unit_cost, planning=None, machine=None):
     engines = {name: d for name, (_, d) in processors.items() if d in ENGINES}
     processors = {name: (machine, HOST if name in engines else torch.device(d))
                   for name, (machine, d) in processors.items()}
-    exported = export(module, args, **export_options)
-    placed, output_processor, channels = place(exported.graph_module, placement)
     devices = {name: device for name, (_, device) in processors.items()}
     machines = {name: machine for name, (machine, _) in processors.items()}
     represented = {}
     groups = {name: represented.setdefault(machine, name) for name, machine in machines.items()}
     targets = {name: (engines.get(name, device.type), device) for name, device in devices.items()}
-    graph = on_devices(placed, processors)
-    transfers = graph.meta["transfers"]
-    between = carried(transfers, machines)
-    if planning is None and any(all(transfer[4]) for transfer in between):
+    staged = {}
+    for key, exported in captured.functions.items():
+        placed, output_processor, channels = place(exported.graph_module, placement)
+        graph = on_devices(placed, processors)
+        staged[key] = (placed, output_processor, channels, graph, carried(graph.meta["transfers"], machines),
+                       [node.meta["stated"] for node in placed.graph.nodes if node.op == "placeholder"])
+    placements = {key: (stage[5], stage[1]) for key, stage in staged.items()}
+    output_processor = placement(captured.exported.graph_module.graph.output_node())
+    analysis = analyse(captured, placements, machines, output_processor)
+    if planning is None and (any(all(transfer[4]) for stage in staged.values() for transfer in stage[4]) or any(
+            port.source is not None and any(machine != port.source for machine in port.machines)
+            for port in analysis.ports)):
         from .bridge import planning as acquired
         planning = acquired()
-    modules, declarations = schedule(graph, cost, between, machines, planning=planning, groups=groups)
-    held = {name: pages.device for name, (_, pages) in exported.state.items()}
-    held.update(zip(exported.user_inputs, map(torch.device, stored), strict=bool(stored)))
-    inputs, feedforward, stored = argument_buffers(modules, groups[output_processor], held, transfers, groups=groups)
-    ends = [(channel, groups[sender], groups[receiver], *layout) for channel, sender, receiver, *layout in between]
-    sources = {name: tensor.detach() for name, (_, tensor) in exported.state.items()}
-    placeholder = {key: name for name, (key, _) in exported.state.items()}
-    roles = [(kind, placeholder[key] if kind == OutputKind.BUFFER_MUTATION else key) for kind, key in exported.outputs]
-
-    def compiled_here(group, body):
-        generator = mesh_compile.Generator(mesh_compile.seeded(torch.initial_seed()))
-        machine = construct(body, targets=targets, kinds=exported.state_kinds, sources=sources,
-                            wires=declarations.wires(),
-                            output_roles=roles if group == groups[output_processor] else (),
-                            generator=generator, machines=mesh_compile._machines())
-        return native.compile(machine, declarations, planning.here if planning is not None else machines[group],
-                              planning, generator)
-    functions = {group: compiled_here(group, body) for group, body in modules.items()
-                 if planning is None or machines[group] == declarations.machine}
-    plan = None
     if planning is not None:
-        (here,) = functions
-        plan = functions[here].plan
-    return Scheduled(exported, modules, {g: devices[g] for g in modules}, {g: machines[g] for g in modules},
-                     groups[output_processor], channels, inputs, feedforward, ends,
-                     {g: engines[g] for g in modules if g in engines}, plan, stored=stored,
-                     invariant=placed.meta["invariant"], functions=functions)
+        machine = planning.nodes[planning.here]
+    elif machine is None:
+        (machine,) = dict.fromkeys(machines.values())
+    entry, words = represented[machine], seeded(torch.initial_seed())
+    constructed, declared, modules = {}, {}, {}
+    for key, (placed, produced, channels, graph, between, _) in staged.items():
+        exported = captured.functions[key]
+        modules[key], declared[key] = schedule(decompose(graph, targets), cost, between, machines, planning=planning,
+                                               groups=groups)
+        placeholder = {target: name for name, (target, _) in exported.state.items()}
+        roles = [(kind, placeholder[target] if kind == OutputKind.BUFFER_MUTATION else target)
+                 for kind, target in exported.outputs]
+        if entry in modules[key]:
+            constructed[key] = construct(
+                modules[key][entry], targets=targets, kinds=exported.state_kinds,
+                sources={name: tensor.detach() for name, (_, tensor) in exported.state.items()},
+                wires=declared[key].wires(), output_roles=roles if entry == groups[produced] else (),
+                generator=Generator(words), machines=_machines())
+    target = native.compile_program(captured, constructed, declared, analysis,
+                                    planning.here if planning is not None else machine, planning)
+    used = list(dict.fromkeys(g for body in modules.values() for g in body))
+    return Scheduled(captured.exported, modules, {g: devices[g] for g in used}, {g: machines[g] for g in used},
+                     groups[output_processor],
+                     {key: stage[2] for key, stage in staged.items()},
+                     {entry: [node.name for node in captured.exported.graph_module.graph.nodes
+                              if node.op == "placeholder"]}, [],
+                     {key: [(channel, groups[sender], groups[receiver], *layout)
+                            for channel, sender, receiver, *layout in stage[4]] for key, stage in staged.items()},
+                     {g: engines[g] for g in used if g in engines}, target.plan if planning is not None else None,
+                     invariant={key: stage[0].meta["invariant"] for key, stage in staged.items()},
+                     functions={entry: target})
 
 
 # design/synchronization-signature-change-request.md item 1; compiler/mesh_compiler/ir.py Scheduled.functions: the
-# machine entry's completed native target's own signature record (MetalProgramSignature), no recomposition: the output
-# machine's without a plan (every machine compiled here), this node's (the plan's machine, the one compiled) with one
+# one completed native target's own signature record (MetalProgramSignature), no recomposition
 def compiled(scheduled):
-    entry = scheduled.output_processor if scheduled.plan is None else next(
-        group for group in scheduled.functions if scheduled.machines[group] == scheduled.plan.machine)
-    return dataclasses.replace(scheduled, signature=scheduled.functions[entry].signature)
+    (target,) = scheduled.functions.values()
+    return dataclasses.replace(scheduled, signature=target.signature)
