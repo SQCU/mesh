@@ -1001,8 +1001,10 @@ def restore(saved, directory):
 # lowered instances emitted, each with its operands' ordinals and the joint result's placements, as one finalized,
 # signed and saved native program, the instances and construction copies released after. `node` the program's machine
 # (Target.node: the plan's node map index under `planning`, the bridge's context where calls transfer; else the
-# machine)
-def compile_program(captured, machines, declarations, analysis, node, planning=None):
+# machine); `targets` the driver's authoritative selection {original processor: (selected kind, torch.device)}
+# (compiler/mesh_compiler/driver.py compile_captured), retained as given for the compilation (`Target.targets`,
+# released after it): a copy-only row's target is its CopyRecord processor's entry
+def compile_program(captured, machines, declarations, analysis, node, planning=None, *, targets):
     from .schedule import declare_program, solve_program
 
     def built(machine):
@@ -1015,6 +1017,7 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
                                   for j in range(len(analysis.nodes))), captured.exported.out_spec, node=node,
                     generators=tuple((k, tuple(body.machine.initial_words)) for k, body in enumerate(bodies)
                                      if body.state))
+    target.targets = targets
     libs = libraries()
     M, _, (_, device), _ = libs
     for k in (k for k, body in enumerate(bodies) if body.machine is not None):
@@ -1040,5 +1043,5 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
             target.compile(Arena(target, owned, M, gpu) if planning is None else Mapped(target))
             owned.finalizer()
         instances.finalizer()
-    target.instances = target.templates = target.call_ports = None
+    target.instances = target.templates = target.call_ports = target.targets = None
     return target
