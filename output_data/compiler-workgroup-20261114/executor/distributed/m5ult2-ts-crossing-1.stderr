@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "/Users/mdot/mesh/examples/crossing.py", line 54, in <module>
+    main()
+  File "/Users/mdot/mesh/examples/crossing.py", line 50, in main
+    return parallel.execute(model, inputs, placement, args, functions={'work'})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/mesh/examples/parallel.py", line 191, in execute
+    compile_program(model, inputs, functions, processors, placed, **options))
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/mesh/compiler/mesh_compiler/driver.py", line 30, in compile_program
+    return compile_captured(calls(program, args, functions, **export_options), processors, placement, cost, planning,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/mesh/compiler/mesh_compiler/driver.py", line 94, in compile_captured
+    target = native.compile_program(captured, constructed, declared, analysis,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/mesh/compiler/mesh_compiler/native.py", line 1381, in compile_program
+    joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/mesh/compiler/mesh_compiler/schedule.py", line 1019, in solve_program
+    mesh.check(mesh.LIB.mesh_plan_program(C.byref(planning.context), planning.group, planning.program, functions,
+  File "/Users/mdot/mesh/rdma/mesh.py", line 362, in check
+    raise OSError(status, os.strerror(status))
+OSError: [Errno 12] Cannot allocate memory
