@@ -34,10 +34,14 @@ ATEN = torch.ops.aten
 # original metadata, and each surviving SEND/RECV as fixed native effect sites (rdma/mesh_aoti.py START, WAIT, SENT,
 # PUBLISH) on its typed view of the one arena input: copy e % copies of its value, at the offset the plan solved
 # (Plan.offsets, a constant table of the model) plus its declared start. Each emitted site is one task of the record:
-# RECV maps to its WAIT and SEND to its PUBLISH for the scheduled dependences contracted through the numerical nodes
-# (rdma/mesh_graph.py contract); SENT precedes PUBLISH, START precedes every site, and PUBLISH of execution e - copies
-# precedes SENT of execution e (M. Lam, PLDI 1988, section 2.3). `start` is the plan's retained START object on this
-# machine, or None: the invocation input and START exist exactly when it does
+# RECV maps to its WAIT and SEND to the PUBLISH of its supplied representative for the scheduled dependences
+# contracted through the numerical nodes (rdma/mesh_graph.py contract); START precedes every site (M. Lam, PLDI 1988,
+# section 2.3). `start` is the plan's retained START object on this machine, or None: the invocation input and START
+# exist exactly when it does. compiler/mesh_compiler/schedule.py assemble, module.meta["writers"]; solved,
+# Plan.publications; rdma/mesh_graph.py dependences_views, postorder, contract, quotient: a copy is a SEND's source node,
+# Plan value, sent view and read-after-write writer causes; a PUBLISH is a supplied representative, after each copy of
+# the same writer causes whose view intersects one of its transfers'; one SENT(c, copies) per completion
+# representative c and its value's copies precedes every copy it intersects; the output follows every emitted operation
 def body(module, constants, tensors, effects, start, extent):
     import mesh_aoti as native
     root, graph, held, examples = torch.nn.Module(), torch.fx.Graph(), {}, []
@@ -48,14 +52,85 @@ def body(module, constants, tensors, effects, start, extent):
     solved = {value: offsets for _, value, offsets, *_ in effects.values()}
     values = list(dict.fromkeys(effects[channel_of(node)][1] for node in sites))
     first = dict(zip(values, itertools.accumulate((len(solved[value]) for value in values), initial=0)))
+    before, writes, sends = {}, {}, [node for node in sites if node.target is SEND]
+    for a, b in module.meta["dependences"]:
+        before.setdefault(b, []).append(a)
+    for writer, reader in module.meta["writers"]:
+        writes.setdefault(reader, set()).add(writer)
+    group = {}
+    for node in sends:
+        _, value, _, _, (offset, element, pairs), *_ = effects[channel_of(node)]
+        group[node] = (node.args[0], value, offset, element, tuple(map(tuple, pairs)),
+                       frozenset(writes.get(node, ())))
+    groups = list(dict.fromkeys(group.values()))
+    index = {key: k for k, key in enumerate(groups)}
+    edges = mesh_graph.dependences_views(len(groups), [(value, offset, element, pairs, k, 1) for k, (
+        _, value, offset, element, pairs, _) in enumerate(groups)])[0] if groups else []
+    overlaps = {k: {k} for k in range(len(groups))}
+    for a, b in edges:
+        overlaps[a].add(b)
+        overlaps[b].add(a)
+    supplied = {node: effects[channel_of(node)][6] for node in sends}
+    completion = {node: effects[channel_of(node)][7] for node in sends}
+    units, outlets, completions, owner, member = {}, {}, {}, {}, {}
+    for node in sends:
+        units.setdefault(supplied[node], set()).add(index[group[node]])
+        outlets.setdefault(index[group[node]], set()).add(supplied[node])
+        completions.setdefault(index[group[node]], {})[completion[node]] = None
+        owner[completion[node]] = supplied[node]
+        member.setdefault(index[group[node]], []).append(node)
+    completions = {k: [c for c in found if c is not None] for k, found in completions.items()}
+    item = lambda u: ("publish", supplied[u]) if u.target is SEND else ("node", u)
+    affected, waits = {}, {}
+    for k, (_, value, *_) in enumerate(groups):
+        for c in dict.fromkeys(c for i in sorted(overlaps[k]) for c in completions[i]):
+            affected.setdefault((c, len(solved[value])), {})[k] = None
+            waits.setdefault(k, []).append((c, len(solved[value])))
+    preds, items = {}, []
+    for node in (n for n in nodes if n.op not in ("placeholder", "output")):
+        if node.target is not SEND:
+            preds[item(node)] = [item(u) for u in dict.fromkeys([*node.all_input_nodes, *before.get(node, ())])
+                                 if u.op != "placeholder"]
+            items.append(item(node))
+            continue
+        k = index[group[node]]
+        if member[k][0] is node:
+            for key in waits.get(k, ()):
+                items += [("sent", key)] * (("sent", key) not in preds)
+                preds["sent", key] = []
+            preds["write", k] = [("sent", key) for key in waits.get(k, ())] + [item(u) for u in dict.fromkeys([
+                groups[k][0], *(u for n in member[k] for u in before.get(n, ()))]) if u.op != "placeholder" and not (
+                u.target is SEND and supplied[u] in outlets[k])]
+            items.append(("write", k))
+        if [n for n in sends if supplied[n] == supplied[node]][-1] is node:
+            preds[item(node)] = [("write", j) for j in sorted({j for g in units[supplied[node]] for j in overlaps[g]
+                                                                if groups[j][5] == groups[g][5]})]
+            items.append(item(node))
+    exposed = {}
+    for s in units:
+        for _, j in preds["publish", s]:
+            exposed.setdefault(j, []).append(s)
+    order = mesh_graph.postorder(items[::-1], preds.__getitem__)
+    made, published, waited = {}, {}, {}
 
-    def site(made, primitive, key, ordinal, *sources):
-        tasks.append((THREAD, (made.name, *(source.name for source in sources))))
+    def site(call, primitive, key, ordinal, *sources):
+        tasks.append((THREAD, (call.name, *(source.name for source in sources))))
         operations.append((THREAD, primitive, len(tasks) - 1, key, 1, ordinal))
         return len(tasks) - 1
 
+    def view_of(k):
+        if k not in made:
+            made[k] = typed(member[k][0])
+        return made[k]
+
+    def publish(s):
+        members = [node for node in sends if supplied[node] == s]
+        published[s] = site(graph.call_function(native.PUBLISH, (invocation, s, made[index[group[members[0]]]])),
+                            "host_publish", ("publication", s), 1, *members)
+        emitted.update((node, published[s]) for node in members)
+
     def typed(node):
-        _, value, offsets, size, sent, landed = effects[channel_of(node)]
+        _, value, offsets, size, sent, landed, *_ = effects[channel_of(node)]
         offset, element, pairs = sent if node.target is SEND else landed
         sizes = [n for n, _ in pairs] if node.target is SEND else list(carried(node).shape)
         residue = graph.call_function(ATEN.remainder.Scalar, (execution, len(offsets)))
@@ -95,41 +170,48 @@ def body(module, constants, tensors, effects, start, extent):
         execution = graph.call_function(ATEN.select.int, (invocation, 0, 2))
     if start is not None:
         started = site(graph.call_function(native.START, (invocation,)), "bridge_start", start, 1)
-    for node in (n for n in nodes if n.op != "placeholder"):
-        if node.target is RECV:
-            transfer, *_ = effects[channel_of(node)]
-            views[node] = typed(node)
-            emitted[node] = site(graph.call_function(native.WAIT, (invocation, transfer, 0, views[node])),
-                                 "host_wait", ("arrival", transfer), 1, node)
-            held[node] = views[node]
-        elif node.target is SEND:
-            transfer, _, offsets, _, sent, _ = effects[channel_of(node)]
-            view, value = typed(node), node.args[0]
-            released = site(graph.call_function(native.SENT, (invocation, transfer, len(offsets), view)),
-                            "host_wait", ("completion", transfer), 1 - len(offsets), node)
-            graph.call_function(ATEN.copy_.default, (view, graph.call_function(ATEN.as_strided.default, (
-                held[value], [n for n, _ in sent[2]], list(value.meta["val"].stride())))))
-            emitted[node] = site(graph.call_function(native.PUBLISH, (invocation, transfer, view)),
-                                 "host_publish", ("publication", transfer), 1, node)
-            dependences += [(released, emitted[node], 0), (emitted[node], released, len(offsets))]
-        elif node.op == "output":
-            graph.output(tuple(held[value] for value in tensors)).meta.update(node.meta)
+    for kind, of in order:
+        if kind == "sent":
+            c, copies = of
+            waited[of] = site(graph.call_function(native.SENT, (invocation, c, copies, view_of(next(iter(
+                affected[of]))))), "host_wait", ("completion", c), 1 - copies, *(n for n in sends if completion[n] == c))
+        elif kind == "write":
+            source, _, _, _, pairs, _ = groups[of]
+            graph.call_function(ATEN.copy_.default, (view_of(of), graph.call_function(ATEN.as_strided.default, (
+                held[source], [n for n, _ in pairs], list(source.meta["val"].stride())))))
+        elif kind == "publish":
+            publish(of)
+        elif of.target is RECV:
+            transfer, *_ = effects[channel_of(of)]
+            views[of] = typed(of)
+            emitted[of] = site(graph.call_function(native.WAIT, (invocation, transfer, 0, views[of])),
+                               "host_wait", ("arrival", transfer), 1, of)
+            held[of] = views[of]
         else:
-            held[node] = graph.node_copy(node, held.__getitem__)
+            held[of] = graph.node_copy(of, held.__getitem__)
+    output = module.graph.output_node()
+    graph.output(tuple(held[value] for value in tensors)).meta.update(output.meta)
+    for (c, copies), task in waited.items():
+        dependences += [(published[owner[c]], task, copies)] + [
+            (task, published[s], 0) for k in affected[c, copies] for s in exposed[k]]
     vertices = list(dict.fromkeys([end for pair in module.meta["dependences"] for end in pair] + sites))
     at = {node: k for k, node in enumerate(vertices)}
-    dependences += [(emitted[vertices[a]], emitted[vertices[b]], 0) for a, b in mesh_graph.contract(
-        [node in emitted for node in vertices], [(at[a], at[b]) for a, b in module.meta["dependences"]])]
+    contracted = mesh_graph.contract([node in emitted for node in vertices],
+                                     [(at[a], at[b]) for a, b in module.meta["dependences"]])
+    dependences += [(a, b, 0) for a, b in mesh_graph.quotient(
+        [emitted.get(node, len(tasks) + k) for k, node in enumerate(vertices)], contracted)]
     dependences += [(started, k, 0) for k in range(1, len(tasks))]
     entry = [(THREAD, tuple(node.name for node in nodes if node.op == "call_function"))]
-    record = {"tasks": tasks or entry, "dependences": sorted(set(dependences)), "operations": operations}
+    record = {"tasks": tasks or entry, "dependences": sorted(set(dependences)), "operations": operations,
+              "publications": [(effects[channel_of(node)][0], emitted[node]) for node in sends]}
     return torch.fx.GraphModule(root, graph), examples, bool(sites), record, mode
 
 
 # compiler/mesh_compiler/schedule.py assemble: one composed body per (machine, target, device) group, compiled once
 # through Inductor's own forward compilation (no second AOT autograd pass), so the body's copies and effects stay
 # mutations of their inputs; effects: channel -> (declared transfer, its value, the value's solved copy offsets in the
-# arena, its byte extent, declared sent view, declared landed view); extent: the arena's bytes (Plan.arena_bytes)
+# arena, its byte extent, declared sent view, declared landed view, supplied and completion representatives of
+# Plan.publications); extent: the arena's bytes (Plan.arena_bytes)
 def lower(module, *, constants, effects, start, extent):
     import mesh_aoti as native
     placeholders = [node for node in module.graph.nodes if node.op == "placeholder"]

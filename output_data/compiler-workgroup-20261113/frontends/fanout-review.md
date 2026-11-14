@@ -46,6 +46,52 @@ hunks. Raw turn 11 and its exact work order are under metal-microbench's
 `output_data/compiler-workgroup-20261113/frontends/torch`. This document records the source finding and intended
 connection, not acceptance of an unwritten consumer or numerical/throughput evidence.
 
+## Connected source review
+
+Producer checkpoint `01163a03` preserves the native representatives. The current consumer additionally retains
+the RAW writer/read pairs from the original canonical source conflict call and remaps them through the existing
+Node-copy correspondence. For the same exact source view, the complete RAW predecessor set is a conservative
+version discriminator: an intervening conflicting write changes it. It is not claimed to be a unique reaching
+definition. No second original-source conflict solve or alias-chain version inference is used.
+
+`Plan.places` now keeps `(processor, root, version)`; source declared identity and wire value both consume that
+version. Receiving assembly roots remain independent of remote source writer labels. Existing sender lifetimes
+remain conservatively bounded by root production through the last local task; native transport far/start-lead
+extends them in the existing planner. Compiler review confirms that these bounds contain every staging/publication
+use. Distinct live versions reach the same existing allocation owner as distinct values; physical reuse is still
+that owner's decision, not a shadow buffer scheme.
+
+The body substitutes static write/completion/publication vertices, uses canonical conflicts only on the newly
+introduced copy operands, and orders them with the canonical graph owner. A native completion/threshold has one
+emitted SENT site. A supplied representative has one publication. Original SEND endpoints map to that site in the
+signature, and original dependencies compose through contract/quotient without self-edges. Return is emitted after
+all body effects. The first draft's publication flush before every RECV and compensating current-execution waits
+were rejected and deleted; they would have preserved late redundant writes by imposing extra waits.
+
+Supervisor syntax and diff checks pass. After the matching native graph/Planned rebuild, direct observations of
+the existing body API established:
+
+| Source case | Copies | SENT sites | PUBLISH sites | Observed order/correspondence |
+|---|---:|---:|---:|---|
+| Two identical views, same native demand | 1 | 1 | 1 | Both logical endpoints map to the same emitted publication |
+| Same view, independent native demands | 1 | 2 | 2 | Both completion obligations precede the one copy |
+| Two intersecting views | 2 | 2 | 2 | Both writes precede either exposing publication |
+| Disjoint `[0,64)` and `[64,128)` views | 2 | 2 | 2 | Each completion/write/publication chain remains independent |
+| Broadcast view, zero outer stride | 1 | 1 | 1 | Distinct dimensions and source stride rank agree |
+
+In these constructed compiler-input cases, source multiplication precedes every blocking reuse wait, output is
+last, graph lint passes and the composed signature has no zero-delay self-edge. The canonical source dependence
+API on an actual in-place `add_` graph yields an empty initial SEND writer set and `{add_}` for the subsequent
+SEND; the source node/view remains part of the copy identity. This demonstrates a changed version discriminator,
+not a fabricated unique reaching-definition result. The first observation script incorrectly expected the pure
+initial producer to appear as an explicit RAW cause; inspection showed it is an ordinary dataflow operand and
+the assertion was not a compiler failure.
+
+The existing CPU FFN client passed again on this final source (ROWS=2, K=32, N=48, LAYERS=1; maximum relative
+error 0.0003511235991), recorded in `fanout-cpu-current.log`. It covers current ordinary compilation/invocation;
+the focused checks cover transformed IR construction. No live bridge/fleet execution or throughput result is
+asserted.
+
 ## Supervision
 
 The first resumed turn spent about eight minutes reading/reasoning without a source edit or a concrete reported

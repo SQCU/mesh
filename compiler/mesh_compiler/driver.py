@@ -68,13 +68,14 @@ def compile_module(module, args, processors, placement, cost=unit_cost, stored=(
 
 
 # design/compiler-archive-assignment-2026-11-13.md, "Exact assigned connection"; rdma/mesh-collective.h
-# struct mesh_declared, mesh_plan_save: each declared transfer of this machine with its value's solved copies
+# struct mesh_declared, mesh_plan_save: each declared transfer of this machine with its value's solved copies and its
+# native supplied and completion representatives (compiler/mesh_compiler/schedule.py solved, Plan.publications)
 def lowered(scheduled):
     plan, fields = scheduled.plan, [name for name, _ in mesh.Section._fields_]
     constants = {name: tensor.detach() for name, (_, tensor) in scheduled.exported.state.items()
                  if scheduled.exported.state_kinds[name] == InputKind.CONSTANT_TENSOR}
     effects = {channel: (transfer, value, plan.offsets[value], plan.sections[value][fields.index("bytes")], sent,
-                         landed)
+                         landed, *plan.publications[transfer])
                for transfer, (channel, (*_, value, sent, landed)) in enumerate(zip(plan.channels, plan.declared))
                if value != mesh.ABSENT} if plan else {}
     start = started(plan) if plan else None

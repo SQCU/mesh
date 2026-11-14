@@ -12,8 +12,8 @@ WAITED = "host_wait"
 
 
 # compiler/mesh_compiler/lower_inductor.py body: each record's tasks are its emitted native effect sites, its
-# dependences carry their execution delays, and a transfer's publication precedes its arrival wait only where both
-# emitting records are present
+# dependences carry their execution delays, its `publications` map each original transfer to its emitted PUBLISH, and a
+# transfer's publication precedes its arrival wait only where both emitting records are present
 def operands(scheduled, executions=1):
     plan = scheduled.plan
     machines = list(plan.nodes) if plan else list(dict.fromkeys(scheduled.machines.values()))
@@ -25,11 +25,11 @@ def operands(scheduled, executions=1):
         for index, (kind, _) in enumerate(record["tasks"]):
             places[processor, index] = seen[kind] = seen.get(kind, -1) + 1
         places[processor] = {kind: last + 1 for kind, last in seen.items()}
+        for transfer, task in record["publications"]:
+            published[transfer] = processor, first[processor] + task
         for _, primitive, task, key, _, _ in record["operations"]:
             role, transfer = key if isinstance(key, tuple) else (None, key)
-            if role == "publication":
-                published[transfer] = processor, first[processor] + task
-            elif role == "arrival":
+            if role == "arrival":
                 arrived.append((transfer, processor, first[processor] + task))
             if key is not None and not isinstance(key, int):
                 objects.setdefault((processor, key), mesh_graph.LOWERED + len(objects))
