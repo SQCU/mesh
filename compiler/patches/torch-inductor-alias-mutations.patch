@@ -1,0 +1,252 @@
+--- a/torch/_inductor/graph.py
++++ b/torch/_inductor/graph.py
+@@ -517,6 +517,8 @@
+         self.removed_buffers: OrderedSet[str] = OrderedSet()
+         self.removed_inplace_buffers: OrderedSet[str] = OrderedSet()
+         self.mutated_buffers: OrderedSet[str] = OrderedSet()
++        self.alias_roots: dict[str, OrderedSet[str]] = {}
++        self.root_aliases: defaultdict[str, OrderedSet[str]] = defaultdict(OrderedSet)
+         self.sdpa_constraint_cache: dict[tuple, ir.IRNode] = {}
+         self.never_reuse_buffers: OrderedSet[str] = OrderedSet()
+         self.inplaced_to_remove: OrderedSet[str] = OrderedSet()
+@@ -1189,12 +1191,53 @@
+         if not isinstance(name, str):
+             raise AssertionError(f"Expected str, got {type(name)}")
+         self.mutated_buffers.add(name)
++        for alias in self.alias_family(name):
++            self.mutated_buffers.add(alias)
++            for user in self.name_to_users.get(alias, ()):
++                user.realize()
+ 
+         if name not in self.name_to_users:
+             return
+ 
+         for user in self.name_to_users[name]:
+             user.realize()
++
++    def register_alias(self, name: str, aliased: str) -> None:
++        roots = self.alias_roots.get(aliased, OrderedSet([aliased]))
++        self.alias_roots.setdefault(name, OrderedSet()).update(roots)
++        for root in roots:
++            self.root_aliases[root].add(name)
++
++    def alias_family(self, name: str) -> list[str]:
++        roots = self.alias_roots.get(name)
++        if roots is None:
++            if name not in self.root_aliases:
++                return []
++            roots = OrderedSet([name])
++        family: OrderedSet[str] = OrderedSet()
++        for root in roots:
++            family.add(root)
++            family.update(self.root_aliases[root])
++        family.discard(name)
++        return list(family)
++
++    def alias_mutation_outputs(
++        self,
++        name: str,
++        node: ir.Operation,
++        physical: bool,
++        exclude: OrderedSet[str],
++    ) -> list[ir.MutationOutput]:
++        return [
++            ir.AliasMutationOutput(
++                ir.NoneLayout(device=node.get_device()),
++                self.get_buffer(alias),
++                node,
++                physical,
++            )
++            for alias in self.alias_family(name)
++            if alias not in exclude
++        ]
+ 
+     def get_original_value_of_constant(self, name: str) -> torch.Tensor:
+         """
+--- a/torch/_inductor/ir.py
++++ b/torch/_inductor/ir.py
+@@ -5269,6 +5269,9 @@
+         if not isinstance(src.data.layout, FlexibleLayout):
+             raise AssertionError(type(src.data.layout))
+         src.data.layout = MutationLayoutSHOULDREMOVE(dst)
++        src.data.alias_mutation_outputs = V.graph.alias_mutation_outputs(
++            dst.get_name(), src.data, True, OrderedSet([dst.get_name()])
++        )
+         return src.data
+ 
+     def as_fixed(self) -> Self:  # type: ignore[override]
+@@ -5540,6 +5543,12 @@
+     _original_inner_fn: Callable[..., Any] | None = None
+     _original_ranges: Sequence[_IntLike] | None = None
+     _original_reduction_ranges: Sequence[_IntLike] | None = None
++    alias_mutation_outputs: list[MutationOutput] = dataclasses.field(
++        default_factory=list
++    )
++
++    def get_outputs(self) -> list[Buffer]:
++        return [self, *self.alias_mutation_outputs]
+ 
+     @contextlib.contextmanager
+     def with_original_inner_fn(self) -> Iterator[None]:
+@@ -7146,6 +7155,9 @@
+         default_factory=dict
+     )
+     mutation_outputs: list[MutationOutput] = dataclasses.field(default_factory=list)
++    alias_mutation_outputs: list[MutationOutput] = dataclasses.field(
++        default_factory=list
++    )
+ 
+     def __init__(
+         self,
+@@ -7175,12 +7187,41 @@
+         self.collect_arg_kwarg_properties()
+         self.unbacked_bindings = {}
+         self.mutation_outputs = []
++        self.alias_mutation_outputs = []
+         self.fx_node = V.graph.current_node
+         # Annotations dict for storing metadata (e.g., KernelTemplateChoice)
+         self.annotations: dict[str, object] = {}
+ 
+     def get_outputs(self) -> list[Buffer]:
+-        return [self, *self.mutation_outputs]
++        return [self, *self.mutation_outputs, *self.alias_mutation_outputs]
++
++    def add_alias_mutation_outputs(self) -> None:
++        if not V.graph.root_aliases:
++            return
++        mutated = OrderedSet(
++            [
++                *self.get_mutation_names(),
++                *(
++                    name
++                    for output in self.mutation_outputs
++                    for name in output.get_mutation_names()
++                ),
++            ]
++        )
++        exclude = mutated | OrderedSet(
++            [
++                self.get_name(),
++                *(
++                    name
++                    for output in self.alias_mutation_outputs
++                    for name in output.get_mutation_names()
++                ),
++            ]
++        )
++        for name in mutated:
++            made = V.graph.alias_mutation_outputs(name, self, False, exclude)
++            exclude |= OrderedSet(output.get_mutation_names()[0] for output in made)
++            self.alias_mutation_outputs.extend(made)
+ 
+     def get_unbacked_symbol_defs(self) -> OrderedSet[sympy.Symbol]:
+         return OrderedSet()
+@@ -8359,6 +8400,21 @@
+         ]
+ 
+ 
++class AliasMutationOutput(MutationOutput):
++    def __init__(
++        self,
++        layout: OutputSpec,
++        mutated_node: IRNode,
++        mutating_node: Operation,
++        physical: bool,
++    ) -> None:
++        super().__init__(layout, mutated_node, mutating_node)
++        self.physical = physical
++
++    def get_inputs_that_alias_output(self) -> Sequence[str]:
++        return [self.mutating_node.get_name()] if self.physical else []
++
++
+ class OrderingBarrier(NopKernel):
+     """A no-op that creates a rename chain for scheduling order.
+ 
+@@ -8951,6 +9007,7 @@
+         V.graph.mark_buffer_mutated(x.get_name())
+         self.name = V.graph.register_buffer(self)
+         V.graph.register_operation(self)
++        self.add_alias_mutation_outputs()
+ 
+ 
+ # Used to deal with torch.complex types
+@@ -8989,6 +9046,7 @@
+         V.graph.mark_buffer_mutated(inputs[0].get_name())
+         self.name = V.graph.register_buffer(self)
+         V.graph.register_operation(self)
++        self.add_alias_mutation_outputs()
+ 
+     @classmethod
+     def create(
+@@ -9046,6 +9104,7 @@
+         V.graph.mark_buffer_mutated(variable.get_name())
+         self.name = V.graph.register_buffer(self)
+         V.graph.register_operation(self)
++        self.add_alias_mutation_outputs()
+         self.python_kernel_name = "inductor_ops.resize_storage_bytes_"
+         self.cpp_kernel_name = "torch::inductor::resize_storage_bytes_"
+         if not isinstance(variable, (BaseView, StorageBox, TensorBox)):
+@@ -9159,6 +9218,7 @@
+         V.graph.mark_buffer_mutated(x.get_name())
+         self.name = V.graph.register_buffer(self)
+         V.graph.register_operation(self)
++        self.add_alias_mutation_outputs()
+ 
+ 
+ class IndexPutFallback(ExternKernel):
+@@ -9203,6 +9263,7 @@
+         V.graph.mark_buffer_mutated(self.input_name(0))
+         self.name = V.graph.register_buffer(self)
+         V.graph.register_operation(self)
++        self.add_alias_mutation_outputs()
+ 
+ 
+ class DeviceCopy(ExternKernelOut):
+@@ -9552,6 +9613,7 @@
+             # Record aliasing relationship so memory planning doesn't wrongly
+             # reuse its storage.
+             self.alias_names.append(tensor_args[0].get_name())
++            self.register_alias_facts()
+             return
+ 
+         def has_functionalize_impl(op: torch._ops.OpOverload) -> bool:
+@@ -9624,6 +9686,7 @@
+ 
+         for info, arg in torch._library.utils.zip_schema(schema, args, kwargs):
+             handle_aliasing_and_mutation(info, arg)
++        self.register_alias_facts()
+ 
+     def get_read_writes(self) -> dependencies.ReadWrites:
+         read_writes = super().get_read_writes()
+@@ -9733,6 +9796,12 @@
+         # Note: We don't pass args/kwargs here because they're IRNodes, not actual values
+         # The check is done on the op_overload itself
+         return is_impure(self.op_overload)  # pyrefly: ignore[bad-argument-type]
++
++    def register_alias_facts(self) -> None:
++        if isinstance(self.layout, Layout):
++            for aliased in self.get_inputs_that_alias_output():
++                V.graph.register_alias(self.get_name(), aliased)
++        self.add_alias_mutation_outputs()
+ 
+     def get_inputs_that_alias_output(self) -> Sequence[str]:
+         if not isinstance(
+@@ -10063,6 +10132,17 @@
+         else:
+             context = nullcontext()
+ 
++        if isinstance(kernel, torch._ops.OpOverload) and V.graph.root_aliases:
++            for info, arg in torch._library.utils.zip_schema(
++                kernel._schema, args, kwargs
++            ):
++                if info.alias_info is None or not info.alias_info.is_write:
++                    continue
++                for leaf in pytree.tree_leaves(arg):
++                    name = leaf.maybe_get_name() if isinstance(leaf, IRNode) else None
++                    if name is not None and V.graph.alias_family(name):
++                        V.graph.mark_buffer_mutated(name)
++
+         with context:
+             result = cls.process_kernel(kernel, *args, **kwargs)
+         example_output = result.example_output
