@@ -132,11 +132,13 @@ libmesh-coreml.dylib: mesh-coreml.m Makefile
 # An explicit compiler target, built for the interpreter whose torch the program loads,
 # `make -C rdma libmesh-aoti.dylib PYTHON=/Users/mdot/.venv-mesh-uv/bin/python`: that torch's
 # torch.utils.cpp_extension include_paths() and library_paths(), and the flags cpp_extension gives a standalone library
-# (-std=c++20 -fPIC, -lc10 -ltorch_cpu -ltorch, -Wl,-rpath at the library path)
+# (-std=c++20 -fPIC, -lc10 -ltorch_cpu -ltorch, -Wl,-rpath at the library path).  Its effect shims call libmesh.dylib's
+# mesh_host_started, mesh_transfers_start, mesh_host_publish and mesh_host_wait, declared by the headers libmesh is built
+# from, so it links libmesh.dylib beside it (@loader_path)
 PYTHON ?= python3
 AOTI_TORCH = $(shell TORCH_DEVICE_BACKEND_AUTOLOAD=0 $(PYTHON) -c "from torch.utils import cpp_extension as e; print(' '.join(['-isystem ' + p for p in e.include_paths()] + ['-L' + p + ' -Wl,-rpath,' + p for p in e.library_paths()]))")
-libmesh-aoti.dylib: mesh-aoti.cpp Makefile
-	c++ -std=c++20 -fPIC -O2 -Wall -Wextra -Werror $(AOTI_TORCH) -dynamiclib -Wl,-install_name,@rpath/libmesh-aoti.dylib -o $@ mesh-aoti.cpp -lc10 -ltorch_cpu -ltorch
+libmesh-aoti.dylib: mesh-aoti.cpp $(HEADERS) libmesh.dylib Makefile
+	c++ $(CPPFLAGS) -std=c++20 -fPIC -O2 -Wall -Wextra -Werror $(AOTI_TORCH) -dynamiclib -Wl,-install_name,@rpath/libmesh-aoti.dylib -o $@ mesh-aoti.cpp -lc10 -ltorch_cpu -ltorch -L. -lmesh -Wl,-rpath,@loader_path
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit FORCE
