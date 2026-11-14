@@ -1,0 +1,279 @@
+{
+  "source": {
+    "mesh": "11f3c44b0d47bec58d4b2464d2cea617edc10e66",
+    "metal": "a062967125d62c7f6d3a4f801ee77b2e5081ed88"
+  },
+  "group": 11141148,
+  "command": "set -e\ncd /Users/mdot/mesh\nmkdir -p output_data/compiler-workgroup-20261114/executor/distributed\nprintf '%s\\n' $$ > output_data/compiler-workgroup-20261114/executor/distributed/crossing-4.pid\nexport TORCH_DEVICE_BACKEND_AUTOLOAD=0\nexport DYLD_INSERT_LIBRARIES=/Users/mdot/metal-microbench/.build/libmetal_recording.dylib\nexport DYLD_LIBRARY_PATH=/Users/mdot/metal-microbench/.build:/Users/mdot/mesh/rdma\nexport PYTHONPATH=/Users/mdot/mesh/compiler:/Users/mdot/mesh/rdma:/Users/mdot/mesh/examples\nexport MESH_GROUP=11141148 MESH_PROGRAM=0,1,2,3,4 HIDDEN=8 CROSSINGS=2 OVERLAP=1\nexec /Users/mdot/.venv-mesh-uv/bin/python -u examples/crossing.py --nodes 371057962 455770905 521750041 597453729 1974797816 --device mps",
+  "abi": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "4d4919",
+        "wall_time_seconds": 0.457906875,
+        "exit_code": 0,
+        "original_token_count": 69,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "536335",
+        "wall_time_seconds": 0.416636333,
+        "exit_code": 0,
+        "original_token_count": 69,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "cc2102",
+        "wall_time_seconds": 0.451159834,
+        "exit_code": 0,
+        "original_token_count": 69,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "4fa8c1",
+        "wall_time_seconds": 0.401067084,
+        "exit_code": 0,
+        "original_token_count": 69,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "24d1c3",
+        "wall_time_seconds": 0.423263584,
+        "exit_code": 0,
+        "original_token_count": 69,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5}\n"
+      }
+    }
+  ],
+  "pre": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "0eabe9",
+        "wall_time_seconds": 0.038410375,
+        "exit_code": 0,
+        "original_token_count": 321,
+        "output": "{\"status\": \"io.mesh.bridge pid 95535 (its heartbeat)\\n{\\\"up\\\":true,\\\"ready\\\":true,\\\"paired\\\":true,\\\"bridge_pid\\\":95542,\\\"client\\\":0,\\\"clients\\\":[],\\\"version\\\":121,\\\"node\\\":371057962,\\\"pgsz\\\":16384,\\\"block\\\":1,\\\"rows\\\":5373952,\\\"links\\\":8,\\\"paired_links\\\":6,\\\"code\\\":0,\\\"domain\\\":0,\\\"peers\\\":[{\\\"node\\\":597453729,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":597453729,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":597453729,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":597453729,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":521750041,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":521750041,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0}]}\\n\", \"rc\": 0, \"processes\": [], \"repos\": {\"/Users/mdot/mesh\": {\"head\": \"11f3c44b0d47bec58d4b2464d2cea617edc10e66\", \"tracked\": \"\"}, \"/Users/mdot/metal-microbench\": {\"head\": \"a062967125d62c7f6d3a4f801ee77b2e5081ed88\", \"tracked\": \"\"}}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "9ead94",
+        "wall_time_seconds": 0.568805625,
+        "exit_code": 0,
+        "original_token_count": 312,
+        "output": "{\"status\": \"io.mesh.bridge pid 32103 (its heartbeat)\\n{\\\"up\\\":true,\\\"ready\\\":true,\\\"paired\\\":true,\\\"bridge_pid\\\":32109,\\\"client\\\":0,\\\"clients\\\":[],\\\"version\\\":121,\\\"node\\\":455770905,\\\"pgsz\\\":16384,\\\"block\\\":1,\\\"rows\\\":5373952,\\\"links\\\":8,\\\"paired_links\\\":4,\\\"code\\\":0,\\\"domain\\\":0,\\\"peers\\\":[{\\\"node\\\":521750041,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":521750041,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":0,\\\"phase\\\":3,\\\"code\\\":50,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":521750041,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":597453729,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":0,\\\"phase\\\":3,\\\"code\\\":50,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0}]}\\n\", \"rc\": 0, \"processes\": [], \"repos\": {\"/Users/mdot/mesh\": {\"head\": \"11f3c44b0d47bec58d4b2464d2cea617edc10e66\", \"tracked\": \"\"}, \"/Users/mdot/metal-microbench\": {\"head\": \"a062967125d62c7f6d3a4f801ee77b2e5081ed88\", \"tracked\": \"\"}}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "7ff9bc",
+        "wall_time_seconds": 0.5839695,
+        "exit_code": 0,
+        "original_token_count": 316,
+        "output": "{\"status\": \"io.mesh.bridge pid 33857 (its heartbeat)\\n{\\\"up\\\":true,\\\"ready\\\":true,\\\"paired\\\":true,\\\"bridge_pid\\\":33866,\\\"client\\\":0,\\\"clients\\\":[],\\\"version\\\":121,\\\"node\\\":521750041,\\\"pgsz\\\":16384,\\\"block\\\":1,\\\"rows\\\":5373952,\\\"links\\\":8,\\\"paired_links\\\":5,\\\"code\\\":0,\\\"domain\\\":0,\\\"peers\\\":[{\\\"node\\\":455770905,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":455770905,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":0,\\\"phase\\\":3,\\\"code\\\":50,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":455770905,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":371057962,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":371057962,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0}]}\\n\", \"rc\": 0, \"processes\": [], \"repos\": {\"/Users/mdot/mesh\": {\"head\": \"11f3c44b0d47bec58d4b2464d2cea617edc10e66\", \"tracked\": \"\"}, \"/Users/mdot/metal-microbench\": {\"head\": \"a062967125d62c7f6d3a4f801ee77b2e5081ed88\", \"tracked\": \"\"}}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "45ab1c",
+        "wall_time_seconds": 0.238925291,
+        "exit_code": 0,
+        "original_token_count": 320,
+        "output": "{\"status\": \"io.mesh.bridge pid 5409 (its heartbeat)\\n{\\\"up\\\":true,\\\"ready\\\":true,\\\"paired\\\":true,\\\"bridge_pid\\\":5415,\\\"client\\\":0,\\\"clients\\\":[],\\\"version\\\":121,\\\"node\\\":597453729,\\\"pgsz\\\":16384,\\\"block\\\":1,\\\"rows\\\":5373952,\\\"links\\\":8,\\\"paired_links\\\":6,\\\"code\\\":0,\\\"domain\\\":0,\\\"peers\\\":[{\\\"node\\\":371057962,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":371057962,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":371057962,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":371057962,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":1974797816,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":455770905,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0}]}\\n\", \"rc\": 0, \"processes\": [], \"repos\": {\"/Users/mdot/mesh\": {\"head\": \"11f3c44b0d47bec58d4b2464d2cea617edc10e66\", \"tracked\": \"\"}, \"/Users/mdot/metal-microbench\": {\"head\": \"a062967125d62c7f6d3a4f801ee77b2e5081ed88\", \"tracked\": \"\"}}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "99e298",
+        "wall_time_seconds": 0.568908416,
+        "exit_code": 0,
+        "original_token_count": 298,
+        "output": "{\"status\": \"io.mesh.bridge pid 51307 (its heartbeat)\\n{\\\"up\\\":true,\\\"ready\\\":true,\\\"paired\\\":true,\\\"bridge_pid\\\":51394,\\\"client\\\":0,\\\"clients\\\":[],\\\"version\\\":121,\\\"node\\\":1974797816,\\\"pgsz\\\":16384,\\\"block\\\":1,\\\"rows\\\":1048576,\\\"links\\\":8,\\\"paired_links\\\":1,\\\"code\\\":0,\\\"domain\\\":0,\\\"peers\\\":[{\\\"node\\\":597453729,\\\"phase\\\":2,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":80000000000},{\\\"node\\\":0,\\\"phase\\\":1,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":1,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0},{\\\"node\\\":0,\\\"phase\\\":0,\\\"code\\\":0,\\\"domain\\\":0,\\\"device\\\":\\\"\\\",\\\"bandwidth\\\":0}]}\\n\", \"rc\": 0, \"processes\": [], \"repos\": {\"/Users/mdot/mesh\": {\"head\": \"11f3c44b0d47bec58d4b2464d2cea617edc10e66\", \"tracked\": \"\"}, \"/Users/mdot/metal-microbench\": {\"head\": \"a062967125d62c7f6d3a4f801ee77b2e5081ed88\", \"tracked\": \"\"}}}\n"
+      }
+    }
+  ],
+  "result": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "83865f",
+        "wall_time_seconds": 4.375e-06,
+        "exit_code": 255,
+        "original_token_count": 0,
+        "output": ""
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "8ba645",
+        "wall_time_seconds": 1.959e-06,
+        "exit_code": 255,
+        "original_token_count": 0,
+        "output": ""
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "2bca8e",
+        "wall_time_seconds": 1.625e-06,
+        "exit_code": 255,
+        "original_token_count": 0,
+        "output": ""
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "b3fff8",
+        "wall_time_seconds": 1.458e-06,
+        "exit_code": 255,
+        "original_token_count": 0,
+        "output": ""
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "8058d2",
+        "wall_time_seconds": 1.583e-06,
+        "exit_code": 255,
+        "original_token_count": 0,
+        "output": ""
+      }
+    }
+  ],
+  "post": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "cd608e",
+        "wall_time_seconds": 0.071112916,
+        "exit_code": 0,
+        "original_token_count": 231,
+        "output": "pid 17759\n  PID STAT COMMAND\n\nio.mesh.bridge pid 95535 (its heartbeat)\n{\"up\":true,\"ready\":true,\"paired\":true,\"bridge_pid\":95542,\"client\":0,\"clients\":[],\"version\":121,\"node\":371057962,\"pgsz\":16384,\"block\":1,\"rows\":5373952,\"links\":8,\"paired_links\":6,\"code\":0,\"domain\":0,\"peers\":[{\"node\":597453729,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":597453729,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":597453729,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":597453729,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":521750041,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":521750041,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0}]}\n\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "2a1d2d",
+        "wall_time_seconds": 0.055672833,
+        "exit_code": 0,
+        "original_token_count": 223,
+        "output": "pid 96391\n  PID STAT COMMAND\n\nio.mesh.bridge pid 32103 (its heartbeat)\n{\"up\":true,\"ready\":true,\"paired\":true,\"bridge_pid\":32109,\"client\":0,\"clients\":[],\"version\":121,\"node\":455770905,\"pgsz\":16384,\"block\":1,\"rows\":5373952,\"links\":8,\"paired_links\":4,\"code\":0,\"domain\":0,\"peers\":[{\"node\":521750041,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":521750041,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":0,\"phase\":3,\"code\":50,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":521750041,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":597453729,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":0,\"phase\":3,\"code\":50,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0}]}\n\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "279efd",
+        "wall_time_seconds": 0.077526916,
+        "exit_code": 0,
+        "original_token_count": 227,
+        "output": "pid 98199\n  PID STAT COMMAND\n\nio.mesh.bridge pid 33857 (its heartbeat)\n{\"up\":true,\"ready\":true,\"paired\":true,\"bridge_pid\":33866,\"client\":0,\"clients\":[],\"version\":121,\"node\":521750041,\"pgsz\":16384,\"block\":1,\"rows\":5373952,\"links\":8,\"paired_links\":5,\"code\":0,\"domain\":0,\"peers\":[{\"node\":455770905,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":455770905,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":0,\"phase\":3,\"code\":50,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":455770905,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":371057962,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":371057962,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0}]}\n\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "f99934",
+        "wall_time_seconds": 0.0095535,
+        "exit_code": 0,
+        "original_token_count": 231,
+        "output": "pid 18391\n  PID STAT COMMAND\n\nio.mesh.bridge pid 5409 (its heartbeat)\n{\"up\":true,\"ready\":true,\"paired\":true,\"bridge_pid\":5415,\"client\":0,\"clients\":[],\"version\":121,\"node\":597453729,\"pgsz\":16384,\"block\":1,\"rows\":5373952,\"links\":8,\"paired_links\":6,\"code\":0,\"domain\":0,\"peers\":[{\"node\":371057962,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":371057962,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":371057962,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":371057962,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":1974797816,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":455770905,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0}]}\n\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "9e82e9",
+        "wall_time_seconds": 0.030118333,
+        "exit_code": 0,
+        "original_token_count": 209,
+        "output": "pid 30689\n  PID STAT COMMAND\n\nio.mesh.bridge pid 51307 (its heartbeat)\n{\"up\":true,\"ready\":true,\"paired\":true,\"bridge_pid\":51394,\"client\":0,\"clients\":[],\"version\":121,\"node\":1974797816,\"pgsz\":16384,\"block\":1,\"rows\":1048576,\"links\":8,\"paired_links\":1,\"code\":0,\"domain\":0,\"peers\":[{\"node\":597453729,\"phase\":2,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":80000000000},{\"node\":0,\"phase\":1,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":1,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0},{\"node\":0,\"phase\":0,\"code\":0,\"domain\":0,\"device\":\"\",\"bandwidth\":0}]}\n\n"
+      }
+    }
+  ],
+  "outcome": "All five SSH clients ended 255 after replay preparation; no numerical result or Python exception. No remaining owned PIDs; bridges unchanged and ready. Cause not established; no retry.",
+  "logs": {
+    "distributed/Ms-Mac-mini-ts-crossing-4.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/Ms-Mac-mini-ts-crossing-4.stdout": {
+      "sha256": "8d666d59a7dcf7d2ff5844aa60628f9f3211a25152b9f81270af61ec921ce65c",
+      "bytes": 741
+    },
+    "distributed/m5ult2-ts-crossing-4.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/m5ult2-ts-crossing-4.stdout": {
+      "sha256": "070c9a35117df11c11de07427b98b21376217dcd7b662a78a74b9cdbe1dcb4a3",
+      "bytes": 741
+    },
+    "distributed/mdots-Mac-Studio-2-ts-crossing-4.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/mdots-Mac-Studio-2-ts-crossing-4.stdout": {
+      "sha256": "570d4a8298fea3c8ff6b23a0160cc73932f365e770d607bae4b7c7bd095d0041",
+      "bytes": 741
+    },
+    "distributed/mdots-Mac-Studio-3-ts-crossing-4.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/mdots-Mac-Studio-3-ts-crossing-4.stdout": {
+      "sha256": "99372b72c59fdf2f4080e01f9ee5a5b08360033d5a7019f0fe9f67c25808bcab",
+      "bytes": 431
+    },
+    "distributed/mdots-Mac-Studio-ts-crossing-4.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/mdots-Mac-Studio-ts-crossing-4.stdout": {
+      "sha256": "497b5d920ec4efd4747b2254fd4d20f9cfd86ebf6e3c3e6f0bf8f58c68a77e5d",
+      "bytes": 741
+    }
+  }
+}

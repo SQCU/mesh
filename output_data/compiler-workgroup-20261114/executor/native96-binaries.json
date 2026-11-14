@@ -1,0 +1,8 @@
+{
+  "/Users/mdot/dox/mesh/rdma/libmesh.dylib": "e496c5a59e68853d4173fa1c989b100cdb3b4f40a9c3472ed3985926ab2c74b6",
+  "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303",
+  "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "8fa44a6de22511f4f0b13d9fd9e606e238ec1d006a391c6ee8143752820123d3",
+  "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "24c35edd6fe8a431f2788537d47f89fb77ea07bae67bea3393af80fd6a263676",
+  "/Users/mdot/metal-microbench/.build/native_bench": "f0c5c32dd1deb907387bdb6c013d92608d2afa1921765989ad7013e156cf0c7e",
+  "/Users/mdot/metal-microbench/.build/e2b_replay": "e27b6e6a53fce3ffc87fa009a572be7382097adcae0696b9da6d61417cd50cf4"
+}
