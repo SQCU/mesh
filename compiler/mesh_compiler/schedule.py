@@ -1095,10 +1095,28 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
     for j, made in enumerate(declared.grouped):
         if made is not None:
             grouped[plan_calls[j]] = made
+    # mesh-collective.h struct mesh_function declared, weights, count, dependence, dependences and outstanding: each
+    # network instance plan_calls[j] its call's prepared rows (Prepared.arrays[j], borrowed: the native Declared and
+    # Weight arrays as remapped and bound, the rows its grouping was made over), their intrinsic dependences
+    # (Prepared.dependences[j], one retained Dependence array) and its original source function's issue bound
+    # (analysis.outstanding); an instance two calls share keeps one record, ValueError where theirs differ
+    dependence, installed = [], {}
+    for j, f in enumerate(plan_calls if planning is not None else ()):
+        record = (declared.declared[j], declared.weights[j], tuple(bytes(x) for x in declared.dependences[j]),
+                  analysis.outstanding[analysis.keys[analysis.calls[j]]])
+        if installed.setdefault(f, (j, record))[1] != record:
+            raise ValueError(f"calls {installed[f][0]} and {j} share instance {f} with different prepared rows")
+        if installed[f][0] != j:
+            continue
+        rows, weighted, _ = declared.arrays[j]
+        dependence.append((mesh.Dependence * max(len(declared.dependences[j]), 1))(*declared.dependences[j]))
+        functions[f].declared, functions[f].weights, functions[f].count = rows, weighted, len(declared.declared[j])
+        functions[f].dependence, functions[f].dependences = dependence[-1], len(declared.dependences[j])
+        functions[f].outstanding = record[3]
     ordered = (mesh.U * max(len(analysis.order_edges), 1))(*analysis.order_edges)
     outstanding = (mesh.Q * max(len(analysis.keys), 1))(*[analysis.outstanding[key] for key in analysis.keys])
-    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, grouped, ordered,
-                        outstanding))
+    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, grouped, dependence,
+                        ordered, outstanding))
     relation, closure = C.c_void_p(analysis.relation.pointer), C.cast(analysis.closure.owned.made, C.c_void_p)
     if planning is None:
         mesh.check(mesh.LIB.mesh_plan_local(functions, K, instances, J, relation, ordered, len(analysis.order_edges),
