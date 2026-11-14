@@ -12,8 +12,9 @@ one phase storage. But the later E2B consumer allocates a separate `mesh_value` 
 host address from that separate value, and binds only the surviving IR storage root. A host write to a non-root
 operand can therefore reach different bytes than the compiled operation. Fix this actual consumer handoff.
 
-Producer: the retained model's declared storage relation, carried through the composed program and exposed by
-`metal_ir_value_info.storage` and `metal_ir_storages`. Consumer: the existing E2B construction of `mesh_value`,
+Producer: the retained model's declared storage relation, exposed by its **unlowered** `metal_ir_value_info.storage`.
+Retain that correspondence during export; later allocation reuse is not new alias authority. `metal_ir_storages`
+supplies the compiled spans/lifetimes for allocation. Consumer: the existing E2B construction of `mesh_value`,
 `mesh_declared.value`, `placed`, host `Operand.address`, and `metal_ir_value_planned` / `metal_ir_value_placed`.
 Pass the same storage identity through those consumers before the single `mesh_plan` call; do not reconstruct
 aliasing from names, parse emitted text, or repair addresses after allocation. Keep each logical value's layout
