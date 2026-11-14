@@ -1,0 +1,19 @@
+{
+  "source_sha256": {
+    "compiler/mesh_compiler/operations.py": "61c81c2355688b859f753495f697c2220499f7c564b7458de622a5d841c54cc4",
+    "compiler/mesh_compiler/decompose.py": "b4ba411065f356aea0974749256c3918077c6921cdb0caa89816b539c67defe5",
+    "compiler/mesh_compiler/devices.py": "4d89dd74017573251e47c4c22691ce7a28955c361699f699b578f41875f9ba17",
+    "compiler/mesh_compiler/export.py": "8b945c8d80c0bb3a9a8b58918150f6de94b35d24dfe0e624fa4052c9b6a9b387",
+    "compiler/mesh_compiler/driver.py": "cfe4f8ab9a2408700ad4e96d8f0b4396e14e329f8b6506772b5717d9527da3b9",
+    "compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+    "compiler/mesh_compiler/metal.py": "5c5316c4ba468152e2c061c078e0ff54f4429a63b68fa5ee6b7ed828963ec50e",
+    "compiler/mesh_compiler/lower_metal.py": "0d0c82eeb8f9b02321174eedafc18c0f61e802e492b40ab608c7e967a6d132b4"
+  },
+  "binary_reference": "eigh-parts-binaries.json",
+  "AST": "operations/decompose/export PASS",
+  "framework_stage": "svd-output-aliases-2.json PASS; actual output aliases and offsets match prototypes",
+  "native_invocation": "PASS: compile_module\u2192Program\u2192invocation; 19 native rows restored, no relation solved",
+  "changed_source_during_attempt": [],
+  "changed_source_during_run": [],
+  "changed_binaries": []
+}

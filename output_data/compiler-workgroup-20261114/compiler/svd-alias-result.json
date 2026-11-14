@@ -1,0 +1,157 @@
+{
+  "call": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float32', 'cpu', False, (3, 2), (2, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+  "outputs": [
+    {
+      "position": 7,
+      "prototype": {
+        "node": "slice_1",
+        "shape": [
+          3,
+          2
+        ],
+        "stride": [
+          1,
+          3
+        ],
+        "offset": 0,
+        "storage": 7,
+        "storage_bytes": 36
+      },
+      "actual": {
+        "node": "getitem_10",
+        "shape": [
+          3,
+          2
+        ],
+        "stride": [
+          1,
+          3
+        ],
+        "offset": 0,
+        "storage": 7,
+        "storage_bytes": 36
+      }
+    },
+    {
+      "position": 8,
+      "prototype": {
+        "node": "slice_2",
+        "shape": [
+          3,
+          1
+        ],
+        "stride": [
+          1,
+          3
+        ],
+        "offset": 6,
+        "storage": 7,
+        "storage_bytes": 36
+      },
+      "actual": {
+        "node": "getitem_11",
+        "shape": [
+          3,
+          1
+        ],
+        "stride": [
+          1,
+          3
+        ],
+        "offset": 6,
+        "storage": 7,
+        "storage_bytes": 36
+      }
+    },
+    {
+      "position": 9,
+      "prototype": {
+        "node": "unsqueeze_17",
+        "shape": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "offset": 0,
+        "storage": 8,
+        "storage_bytes": 1
+      },
+      "actual": {
+        "node": "getitem_12",
+        "shape": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "offset": 0,
+        "storage": 8,
+        "storage_bytes": 1
+      }
+    },
+    {
+      "position": 11,
+      "prototype": {
+        "node": "unsqueeze_18",
+        "shape": [
+          1
+        ],
+        "stride": [
+          1
+        ],
+        "offset": 0,
+        "storage": 8,
+        "storage_bytes": 1
+      },
+      "actual": {
+        "node": "getitem_14",
+        "shape": [
+          1
+        ],
+        "stride": [
+          1
+        ],
+        "offset": 0,
+        "storage": 8,
+        "storage_bytes": 1
+      }
+    },
+    {
+      "position": 13,
+      "prototype": {
+        "node": "unsqueeze_20",
+        "shape": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "offset": 0,
+        "storage": 8,
+        "storage_bytes": 1
+      },
+      "actual": {
+        "node": "getitem_16",
+        "shape": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "offset": 0,
+        "storage": 8,
+        "storage_bytes": 1
+      }
+    }
+  ],
+  "scope": "Actual prefix outputs whose shared storage was lost in attempt1; complete local observation file svd-output-aliases-2.json"
+}

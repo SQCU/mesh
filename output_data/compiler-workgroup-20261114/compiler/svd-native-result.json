@@ -1,0 +1,75 @@
+{
+  "client": "svd-native-command.md",
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "result": {
+    "stage": "result",
+    "singular_value_error": 5.0976035769100345e-08,
+    "residual": 1.1912316182883549e-07,
+    "left_orthogonality": 1.6477487401734166e-07,
+    "right_orthogonality": 2.2364842321244014e-07,
+    "finite": true,
+    "shapes": [
+      [
+        3,
+        3
+      ],
+      [
+        2
+      ],
+      [
+        2,
+        2
+      ]
+    ],
+    "values": [
+      8.366600036621094,
+      4.264961148692237e-07
+    ],
+    "reference_values": [
+      8.366600265340756,
+      4.774488599422642e-16
+    ],
+    "u": [
+      [
+        0.2672611474990845,
+        -0.9561828374862671,
+        0.11952287703752518
+      ],
+      [
+        0.5345224738121033,
+        0.04390185698866844,
+        -0.8440132141113281
+      ],
+      [
+        0.8017837405204773,
+        0.2894596755504608,
+        0.5228345394134521
+      ]
+    ],
+    "vh": [
+      [
+        0.44721361994743347,
+        0.8944271802902222
+      ],
+      [
+        -0.8944270610809326,
+        0.44721361994743347
+      ]
+    ]
+  },
+  "native_reload": "19 rows restored; no relation solved",
+  "source": "9cf1d279 numerical composition + fb8e95db actual output alias producer",
+  "manifest": "svd-alias-source.json",
+  "logs": {
+    "svd-native-2.stdout": {
+      "bytes": 34706,
+      "sha256": "cb4f6bb7f753ea7e5722c7b31ad23a51ecb7fb0cc7d33cc0c27370e124ea076a"
+    },
+    "svd-native-2.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "scope": "One real full rectangular rank-deficient MPS SVD case; no complex/ANE/least-squares/nonHermitian-eig/iteration-count/performance claim"
+}
