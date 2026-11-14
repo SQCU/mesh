@@ -96,9 +96,10 @@ int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh
    addition completes `total` (the lowering's count of those threadgroups, a reader's first and later pass counted
    once) resets the counter to 0 and releases. `transfer` the declared transfer of the writer's own call
    (metal_ir.h METAL_IR_PUBLISH for a CPU writer) */
-struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,padding; };
-/* declared before mesh_plan as {.transfer} (planned call `call`'s transfer, `total` 0 until the lowering counts it);
-   prepared after it: the supplied and status words of that call's plan */
+struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,owner; };
+/* declared before mesh_plan as {.transfer,.owner} (one release group of the value: its representative transfer and
+   its owner call, `total` 0 until the lowering counts it); prepared after it: the supplied and status words of that
+   call's plan, in place (transfer and owner kept) */
 int mesh_metal_release_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
                                uint32_t call,struct mesh_metal_release *release);
 /* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3: the lifetime obligation of a range

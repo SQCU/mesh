@@ -2,8 +2,9 @@
 # completed machine program (its native target, joint result and recipe), with the captured program's per-function
 # records as explicit typed records indexed by function ordinal (the completed target's body order, CallAnalysis.keys);
 # a captured function's key, which may be a callable, is compilation-only and is not saved. Scheduled.plan is the one
-# target's joint owner's own result (compiler/mesh_compiler/native.py Target.plan, saved and loaded with that owner),
-# kept in no record of its own here
+# target's joint owner's own result and Scheduled.signature that target's signature record
+# (compiler/mesh_compiler/native.py Target.plan and Target.signature, saved and restored with the target;
+# compiler/mesh_compiler/driver.py compiled), kept in no record of their own here
 import json
 import pathlib
 
@@ -47,8 +48,6 @@ def save(directory, scheduled):
         "outputs": [[kind.name, key] for kind, key in exported.outputs],
         "out_spec": pytree.treespec_dumps(exported.out_spec),
     }))
-    if scheduled.signature:
-        (directory / "signature.record").write_bytes(scheduled.signature)
 
 
 def load(directory):
@@ -65,10 +64,9 @@ def load(directory):
     carried = {record["function"]: [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
                                             for channel, sender, receiver, dtype, shape, stride in record["transfers"]]
                for record in about["carried"]}
-    record = directory / "signature.record"
     channels = {record["function"]: record["channels"] for record in about["channels"]}
     return Scheduled(exported, {}, devices, about["machines"], about["output_processor"], channels,
                      about["inputs"], about["feedforward"], carried, about["engines"], target.plan,
-                     signature=record.read_bytes() if record.exists() else None, stored=about["stored"],
+                     signature=target.signature, stored=about["stored"],
                      invariant={record["function"]: tuples(record["records"]) for record in about["invariant"]},
                      functions=functions)

@@ -210,8 +210,10 @@ class Range(C.Structure):
                 ('field', C.POINTER(mesh.U)), ('at', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U)]
 
 
+# mesh_metal_release: one release record of a value, declared {transfer, owner} (its group's transfer and owner call),
+# prepared in place (supplied, status); 32 bytes
 class Release(C.Structure):
-    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('padding', mesh.U)]
+    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U)]
 
 
 class Sending(C.Structure):
@@ -224,13 +226,13 @@ class CheckFailure(C.Structure):
     _fields_ = [('identity', mesh.Q), ('batch', mesh.Q), ('info', C.c_int64), ('code', mesh.U), ('padding', mesh.U)]
 
 
-# metal_ir.h struct metal_ir_value_info and struct metal_ir_storage
+# metal_ir.h struct metal_ir_value_info (`received`, `sent` and `sendings` record counts: metal_ir_value_ranges,
+# metal_ir_value_releases, metal_ir_value_sendings; `page_bytes` at 104, 120 bytes) and struct metal_ir_storage
 class ValueInfo(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('role', 'scalar', 'storage', 'function', 'index', 'word', 'of', 'range',
                                           'received', 'sent', 'zeroed', 'sendings')] + [
         (name, mesh.Q) for name in ('identity', 'bytes', 'offset', 'at', 'data_bytes')] + [
-        ('data', C.c_void_p), ('buffer', C.c_void_p), ('release', Release), ('page_bytes', mesh.Q),
-        ('pages', mesh.U), ('source', mesh.U)]
+        ('data', C.c_void_p), ('buffer', C.c_void_p), ('page_bytes', mesh.Q), ('pages', mesh.U), ('source', mesh.U)]
 
 
 class Storage(C.Structure):
@@ -434,6 +436,7 @@ def _compiler():
                 ('metal_ir_value_sends', None, [P, U, C.POINTER(Release)]),
                 ('metal_ir_value_received', None, [P, U, C.POINTER(Range)]),
                 ('metal_ir_value_sent', None, [P, U, C.POINTER(Release)]),
+                ('metal_ir_value_releases', C.POINTER(Release), [P, U, C.POINTER(U)]),
                 ('metal_ir_value_sending', None, [P, U, C.POINTER(Sending)]),
                 ('metal_ir_transport', None, [P, Q]),
                 ('metal_ir_generic', U, [P, U, C.POINTER(Q), C.POINTER(U), U, C.POINTER(U), U, C.POINTER(U),

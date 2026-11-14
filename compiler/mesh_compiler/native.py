@@ -123,16 +123,16 @@ def viewed(first, base, index):
     return C.cast(base + C.sizeof(mesh.Q) * first[index], C.POINTER(mesh.Q)), first[index + 1] - first[index]
 
 
-# One preparation of a local program on its joint result (compiler/mesh_compiler/schedule.py solve_program: its
-# mesh.Local over every function's values and the roots): one arena allocation of the result's bytes
-# (compiler/mesh_compiler/metal.py _NEW_BUFFER, the shared Metal allocation) and the result's own planned record; the
-# copies read in place. A local program has no transport, context or status
+# One preparation of a local program on its joint result (`solution`, compiler/mesh_compiler/schedule.py solve_program
+# or loaded_program: its mesh.Local over every function's values and the roots): one arena allocation of the result's
+# bytes (compiler/mesh_compiler/metal.py _NEW_BUFFER, the shared Metal allocation) and the result's own planned record;
+# the copies' byte offsets read in place (local.offset). A local program has no transport, context or status
 class Arena:
     context = None
 
     def __init__(self, target, owned, M, gpu):
         joint, error = target.solution, C.create_string_buffer(ROOM)
-        self.target, self.function, self.planned = target, joint.functions, joint.planned
+        self.solution, self.function, self.planned = joint, joint.functions, joint.planned
         self.base = C.cast(joint.offsets.items, C.c_void_p).value
         buffer = made(M._NEW_BUFFER(gpu, M._SEL(b"newBufferWithLength:options:"), max(joint.local.bytes, 1), M.SHARED),
                       error, "the program's arena", errno.ENOMEM)
@@ -146,24 +146,22 @@ class Arena:
     def span(self, first, index):
         return viewed(first, self.base, index)
 
-    def placements(self, r):
-        return self.target.placements(self, r)
 
-    def stepped(self, r):
-        return self.target.stepped(self, r)
-
-
-# rdma/mesh-collective.h mesh_plan; rdma/mesh-dataflow.h mesh_view_values: a program with declared transfers at
-# compilation, on its joint result under the Planning context (its Planned, context and mapped view with that view's
-# first/offset arrays, as schedule.solved returns them), the copies read in place; `mapping` the mapped bytes' lifetime
-# owner, the joint result's native owner (schedule.Solved owner, never this wrapper or the Target), held by the arena's
-# backing (torch.frombuffer keeps that object, so every view of the arena does) and by its buffer; the run-time owner
-# is bridge.Published
+# rdma/mesh-collective.h mesh_plan_program and mesh_view_program: a program with declared transfers at compilation, on
+# its joint network result (`solution`, under the Planning context, whose local.offset holds each copy's row page):
+# each copy's byte offset (`offset`, owned here; UINT64_MAX a run 0 value's) in the one mapping `view` of the context's
+# region, the arena that view; `mapping` the mapped bytes' lifetime owner, the joint result's native owner
+# (schedule.Solved owner, holding the result and, through its declaration owner's planning, the compile context; never
+# this wrapper or the Target), held by the arena's backing (torch.frombuffer keeps that object, so every view of the
+# arena does) and by its buffer; the run-time owner is bridge.Published
 class Mapped:
     def __init__(self, target):
         joint = target.solution
-        self.target, self.function, self.planned, self.context = target, joint.functions, joint.planned, joint.context
-        self.base, view, self.mapping = C.cast(joint.offsets.items, C.c_void_p).value, joint.view, joint.owner
+        self.solution, self.function, self.planned = joint, joint.functions, joint.planned
+        self.context, self.mapping = C.addressof(joint.context), joint.owner
+        self.offset, view = (mesh.Q * max(joint.local.offsets, 1))(), mesh.View()
+        mesh.LIB.mesh_view_program(C.byref(joint.context), C.byref(joint.local), self.offset, C.byref(view))
+        self.base = C.addressof(self.offset)
         backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None
         if backing is not None:
             backing.mapping = joint.owner
@@ -175,12 +173,6 @@ class Mapped:
 
     def span(self, first, index):
         return viewed(first, self.base, index)
-
-    def placements(self, r):
-        return self.target.placements(self, r)
-
-    def stepped(self, r):
-        return self.target.stepped(self, r)
 
 
 # compiler/mesh_compiler/metal.py _placed_buffer (metal_recording.h MetalBufferBorrow, its release callback): a plan
@@ -299,10 +291,12 @@ class Operand:
 # (`generators`: (body, ConstructedMachine.initial_words)), each row's CONSTANT roots' outer constants (`constants`:
 # (row, root ValueID, the outer placeholder's name)); `node`
 # the program's machine (its map index, the plan's node map's with a plan, the source machine's without); `solution` the
-# joint result (compiler/mesh_compiler/schedule.py solve_program, holding its declaration owner Prepared; saved once,
-# loaded by loaded_program), `plan` that joint owner's network result (Solved.plan: None for a local result), the one
-# Scheduled.plan references, `artifact` the one MetalProgramSave of every row, `signature` its
-# MetalProgramSignatureNode record
+# joint owner (compiler/mesh_compiler/schedule.py: solve_program's Solved, holding its declaration owner Prepared;
+# restored, loaded_program's local Solved or a network result's SavedNetwork, its saved bytes), saved once, read by no
+# preparation (each preparation owner holds its own prepared Solved); `plan` that owner's network result (its own
+# `.plan`: None for a local result), the one Scheduled.plan references; `artifact` the one MetalProgramSave of every
+# row, `signature` its MetalProgramSignatureNode record (the one Scheduled.signature is); `program` the network program
+# (Planning.program, the mesh_program_save/load mask), None for a local result
 @dataclasses.dataclass
 class Target:
     bodies: tuple
@@ -320,6 +314,7 @@ class Target:
     plan: object = None
     artifact: bytes = None
     signature: bytes = None
+    program: int = None
 
     # body k's explicit roots: its interface slots and its input, state, received and sent roots
     def explicit(self, k):
@@ -328,13 +323,13 @@ class Target:
         return {root for root in (*body.slots, *(r.root for r in (*body.inputs, *body.state, *built.received.values(),
                                                                   *built.sent.values()))) if root is not None}
 
-    # row r's own storages and inter-call roots on the owner (schedule.Solved): each run value of its call instance at
-    # its full copies (function_value_first[instance]); each planned inter-call root at the joint root's copies
-    # (root_first[s]), with that root's shares, projected through the call's generation: execution e = t every +
-    # ordinal reads root copy t = e // every, so entry i of its every x copies table is root copy i // every, moved by
-    # the byte delta
+    # row r's own storages and inter-call roots on the preparation owner (its prepared schedule.Solved, `solution`, and
+    # its copies' byte offsets, `span`): each run value of its call instance at its full copies
+    # (function_value_first[instance]); each planned inter-call root at the joint root's copies (root_first[s]), with
+    # that root's shares, projected through the call's generation: execution e = t every + ordinal reads root copy
+    # t = e // every, so entry i of its every x copies table is root copy i // every, moved by the byte delta
     def placements(self, owner, r):
-        f, joint = self.rows[r].instance, self.solution
+        f, joint = self.rows[r].instance, owner.solution
         value, first = owner.function[f].value, joint.function_value_first[f]
         for v in range(self.counts[f]):
             if value[v].run:
@@ -352,7 +347,7 @@ class Target:
         f = self.rows[r].instance
         if not self.steps[f]:
             return None
-        return (*owner.span(self.solution.function_value_first[f], self.counts[f]),
+        return (*owner.span(owner.solution.function_value_first[f], self.counts[f]),
                 owner.function[f].value[self.counts[f]].shares)
 
     def placed(self, owned, libs, gpu, owner, programs, finalize):
@@ -404,11 +399,11 @@ class Target:
             owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
             for value, function, index in marks["placed"]:
                 compiler.metal_ir_value_placed(program, value, buffer,
-                                               *owner.span(self.solution.function_value_first[function], index), 0,
+                                               *owner.span(owner.solution.function_value_first[function], index), 0,
                                                owner.function[function].value[index].shares)
-            for value, offsets, count, shares in owner.placements(r):
+            for value, offsets, count, shares in self.placements(owner, r):
                 compiler.metal_ir_value_placed(program, value, buffer, offsets, count, 0, shares)
-            step = owner.stepped(r)
+            step = self.stepped(owner, r)
             if step is not None:
                 compiler.metal_ir_step_placed(program, buffer, *step)
             # metal_ir.h metal_ir_value_placed with no buffer: each callable operand's root one logical copy, shared
@@ -518,9 +513,9 @@ class Target:
     # instance (`instances`, released with `owned`), its group's constructed program specialized, THAT call's Ports
     # declared (each received range of transfer `transfer` of its owner call landing for call j, among `plan_calls`,
     # the calls as the plan takes them; `context` the compile owner's, read for its page geometry; each sent range's
-    # release), each intrinsic wire's plan value (instance plan_calls[j], ValueID the wire's root), then its
-    # structural lowering (transport, checks, step, the arrays the plan reads); a call whose function has no body on
-    # this node has no instance
+    # release record {transfer, owner call}, metal_ir_value_sends appending one per Port), each intrinsic wire's plan
+    # value (instance plan_calls[j], ValueID the wire's root), then its structural lowering (transport, checks, step,
+    # the arrays the plan reads); a call whose function has no body on this node has no instance
     def instanced(self, context, plan_calls, libs, owned):
         M, compiler, _, transport = libs
         error, listed = C.create_string_buffer(ROOM), (mesh.U * max(len(plan_calls), 1))(*plan_calls)
@@ -542,7 +537,7 @@ class Target:
                     compiler.metal_ir_value_receives(instance, port.root, C.byref(landed))
                     marks["received"].append((port.root, *port.section, bytes(landed)))
                 else:
-                    release = M.Release(transfer=port.transfer)
+                    release = M.Release(transfer=port.transfer, owner=port.owner)
                     compiler.metal_ir_value_sends(instance, port.root, C.byref(release))
                     marks["sent"].append((port.root, port.owner, bytes(release)))
                 marks["transfers"].append((port.owner, port.transfer))
@@ -691,10 +686,11 @@ class Target:
     # metal-microbench metal_ir.h metal_ir_archive_load (compiler/mesh_compiler/metal.py _archive_loaded: the archive
     # borrows and, loaded, owns the artifact's own bytes), metal_ir_archive_program and metal_ir_loaded;
     # metal_recording.h MetalProgramLoad (given the archive handle, which it retains): the completed artifact, every
-    # row's program in row order, relocated onto its run-time owner (bridge.Published, or None: a new arena of the
-    # retained local solution), with no lowering, solve, finalization or compilation; constants: {placeholder name:
-    # tensor} for the bodies' CONSTANT roots, attached as compiler/mesh_compiler/metal.py _Builder.attach attached them
-    # and held as those roots' handles, by (row, root)
+    # row's program in row order, relocated onto its run-time owner and that owner's own prepared solution
+    # (bridge.Published: the network result it loaded once; or None: a new arena of the retained local solution), the
+    # target itself unchanged, so independently prepared Bounds coexist, with no lowering, solve, finalization or
+    # compilation; constants: {placeholder name: tensor} for the bodies' CONSTANT roots, attached as
+    # compiler/mesh_compiler/metal.py _Builder.attach attached them and held as those roots' handles, by (row, root)
     def prepare(self, published, constants):
         libs = libraries()
         M, compiler, (lib, device), _ = libs
@@ -769,12 +765,15 @@ class Target:
                 "constants": [list(entry) for entry in self.constants],
                 "spec": pytree.treespec_dumps(self.spec), "node": self.node}
 
-    # the artifact, the joint result as its own owner saves it (compiler/mesh_compiler/schedule.py), and the recipe
+    # the artifact; the joint owner as it saves itself (compiler/mesh_compiler/schedule.py: a local Solved through
+    # mesh_local_save, a network one through mesh_program_save, a restored SavedNetwork its original bytes), its kind
+    # ("local", or "network" with its program) named in the companion record; the signature record and the recipe
     def saved(self, directory, key):
         directory, name = pathlib.Path(directory), f"{key}.native"
         (directory / name).write_bytes(self.artifact)
         (directory / f"{key}.joint").write_bytes(self.solution.saved())
-        return {"artifact": name, "joint": f"{key}.joint", "signature": self.signature.hex(), "recipe": self.recipe()}
+        return {"artifact": name, "joint": f"{key}.joint", "kind": "local" if self.program is None else "network",
+                "program": self.program, "signature": self.signature.hex(), "recipe": self.recipe()}
 
 
 # a joint root's source record (schedule.Solved root_sources, Operand.source) as a saved record, a result's device by
@@ -948,9 +947,11 @@ class Bound:
         return outputs, made_
 
 
-# The saved artifact, its joint result (compiler/mesh_compiler/schedule.py loaded_program: loaded, never planned
-# again; the target's `plan` that owner's own, None for a local result) and its typed recipe, as the frontend's Root and
-# Output records; no construction is retained
+# The saved artifact, its joint owner and its typed recipe, as the frontend's Root and Output records; no construction
+# is retained. A local owner is loaded (compiler/mesh_compiler/schedule.py loaded_program: never planned again); a
+# network owner is its saved bytes and program (schedule.SavedNetwork), with no attachment, publication, reservation,
+# solve or relocation here: its one preparation (bridge.Published, mesh_program_load) loads it. The target's `plan` is
+# that owner's own (None for a local result)
 def restore(saved, directory):
     from .lower_metal import Root
     from .schedule import loaded_program
@@ -971,14 +972,19 @@ def restore(saved, directory):
         "placed": [tuple(entry) for entry in row["marks"]["placed"]]}}) for row in recipe["rows"])
     operands = tuple(Operand(source_restored(operand["source"]), operand["offset"],
                              tuple(map(tuple, operand["occurrences"]))) for operand in recipe["operands"])
-    joint = loaded_program((directory / saved["joint"]).read_bytes())
+    record = (directory / saved["joint"]).read_bytes()
+    if saved["kind"] == "network":
+        from .schedule import SavedNetwork
+        joint = SavedNetwork(record, saved["program"])
+    else:
+        joint = loaded_program(record)
     return Target(bodies, rows, pytree.treespec_loads(recipe["spec"]),
                   tuple((("root", source_restored(r[1]), r[2]) if isinstance(r, list) else r,
                          leaf and leaf_restored(leaf)) for r, leaf in recipe["outputs"]), operands,
                   tuple(tuple(map(tuple, row)) for row in recipe["joined"]), tuple(recipe["counts"]),
                   tuple(recipe["steps"]), tuple((k, tuple(words)) for k, words in recipe["generators"]),
                   tuple(map(tuple, recipe["constants"])), recipe["node"], joint, joint.plan, artifact=artifact,
-                  signature=bytes.fromhex(saved["signature"]))
+                  signature=bytes.fromhex(saved["signature"]), program=saved["program"])
 
 
 # design/aot-compilation-change-request.md A10 and appendix item 6; design/compilation-composition-change-request.md
@@ -1024,7 +1030,8 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
         joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
                               declared=prepared)
         target.resolved(captured, analysis, joint)
-        target.solution, target.plan = joint, joint.plan if planning is not None else None
+        target.solution, target.plan = joint, joint.plan
+        target.program = planning.program if planning is not None else None
         with Owned() as owned:
             gpu = device()
             owned(lambda: M.PUT(gpu, M.SELECTOR[b"release"]))
