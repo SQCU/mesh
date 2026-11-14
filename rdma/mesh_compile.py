@@ -7244,7 +7244,7 @@ class ValueInfo(C.Structure):
 
 # metal-microbench metal_ir.h struct metal_ir_storage
 class Storage(C.Structure):
-    _fields_ = [('bytes', mesh.Q), ('begin', mesh.U), ('end', mesh.U)]
+    _fields_ = [('bytes', mesh.Q), ('begin', mesh.U), ('end', mesh.U), ('alignment', mesh.Q)]
 
 
 MACHINES = []
