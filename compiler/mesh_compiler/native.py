@@ -7,6 +7,7 @@
 import ctypes as C
 import dataclasses
 import errno
+import itertools
 import mmap
 import pathlib
 import sys
@@ -494,8 +495,10 @@ class Target:
             # by every execution (a state or mutated input is the caller's one storage), its address the invocation's
             for root in (root for operand in self.operands for at, root in operand.occurrences if at == r):
                 compiler.metal_ir_value_placed(program, root, None, None, 1, 0, 0)
+            # metal_recording.h MetalRecorderState: the transport's state buffer and this program's status word offset
             if wires is not None:
-                M.STATE_BUFFER(recorder, M._SEL(b"state:buffer:status:"), ready, wires.state, word.value)
+                checked(lib.MetalRecorderState(recorder, ready, wires.state, word.value, error, ROOM), error,
+                        "the transport state")
             checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
             captured.append((row, ready))
         calls = []
@@ -725,12 +728,14 @@ class Target:
     # compiler/mesh_compiler/schedule.py Prepared (remapped and bound: its rows', ports' and wires' ValueIDs the row
     # programs') and mesh-collective.h mesh_declared_group (Prepared.grouped[owner]: demand_of, release_of, each
     # Demand's `first`): each original call's Ports on this machine (`here`), `call_ports[j]` (its Ports, receives
-    # first, and its intrinsic wires' typed roots, the rows' values), ((), ()) for a call with no program here:
-    # - each intrinsic row t of Prepared.declared[j] whose channel (declarations[key].channels[t]) this body receives
-    #   or sends (ConstructedMachine.received, .sent), owner j, its range the wire's whole declared value
-    #   (Declarations.values) at byte 0, in its instance's Function where no joint root binds its typed root, else in
-    #   that root's (`joint`: a Prepared.bindings storage s or a Prepared.wired wire, (None, s); mesh-collective.c
-    #   plan_function resolves the plan value through the same bound use);
+    # first, and its intrinsic wires' typed roots, the rows' values), ((), ()) for a call with no program here; `joint`
+    # each (call, root) a Prepared.bindings storage s or Prepared.wired wire binds, (None, s):
+    # - each of call j's intrinsic endpoints on this machine (Prepared.endpoints[j], schedule.declare_program's
+    #   EndpointRecords, remapped), owner j, transfer its row: its typed root (`root`), its range its `backing` at its
+    #   view's byte (`view`), in its instance's Function where it is unbound or `staged` (a caller run 0 destination's:
+    #   its declared receive wire, ConstructedMachine.received), else in its shared run 1 root `storage`, (None, s); a
+    #   receive so bound to a shared root has its interface landing copy (ConstructedMachine.landings) in `direct[j]`,
+    #   {channel: its body operation IDs}, erased at construction (Target.constructed), every other's kept;
     # - each PortRecord of Prepared.ports[j] with a typed site here: received where its destination is this machine,
     #   on its slot where its wire is its run 1 storage itself; sent where its source is, on its slot so, else on the
     #   call's staging wire ValueID (Prepared.wired); its range the record's backing extent at its byte `at`, at the
@@ -741,7 +746,7 @@ class Target:
     # A sent row's release is its canonical one: its release ordinal (release_of[t]) and that release's representative
     # row (its demand's `first`), one record per (owner, release)
     def ported(self, prepared, declarations, analysis, plan_calls, here):
-        self.call_ports = []
+        self.call_ports, self.direct = [], []
         self.joint = {(call, root): (None, s) for (call, root, s, _), _ in prepared.bindings}
         self.joint.update(((call, root), (None, wire)) for (call, wire), root in prepared.wired.items())
         for j, row in enumerate(self.rows):
@@ -749,6 +754,7 @@ class Target:
             built = body.machine
             if built is None and self.composites[j] is None:
                 self.call_ports.append(((), ()))
+                self.direct.append({})
                 continue
 
             def released(t, owner=j):
@@ -756,18 +762,19 @@ class Target:
                 if found is None or found.release_of[t] == mesh.ABSENT:
                     return None, t
                 return found.release_of[t], found.demand[found.demand_of[t]].first
-            received, sent, wires = [], [], ()
+            received, sent, wires, direct = [], [], (), {}
             if built is not None:
                 intrinsic = tuple(zip(prepared.declared[j], declarations[analysis.keys[row.function]].channels))
-                for t, (declared, channel) in enumerate(intrinsic):
-                    if channel in built.received:
-                        root = self.root_of(j, built.received[channel].root)
-                        received.append(Port(mesh.RECEIVE, t, j, root, body.declared[channel][2], 0, declared[4],
-                                             self.joint.get((j, root), (f, root))))
-                    if channel in built.sent:
-                        root = self.root_of(j, built.sent[channel].root)
-                        sent.append(Port(mesh.SEND, t, j, root, body.declared[channel][2], 0, declared[4],
-                                         self.joint.get((j, root), (f, root)), *released(t)))
+                for e in (e for e in prepared.endpoints[j] if e.machine == here):
+                    root, joint = e.root.root, e.storage is not None and not e.staged
+                    section = (None, e.storage) if joint else (f, root)
+                    if e.direction == mesh.RECEIVE:
+                        received.append(Port(mesh.RECEIVE, e.transfer, j, root, e.backing, e.view[0], root, section))
+                        if joint and e.channel in e.construction.landings:
+                            direct[e.channel] = e.construction.landings[e.channel][1]
+                    else:
+                        sent.append(Port(mesh.SEND, e.transfer, j, root, e.backing, e.view[0], root, section,
+                                         *released(e.transfer)))
                 wires = tuple(dict.fromkeys(declared[4] for declared, _ in intrinsic if declared[4] != mesh.ABSENT))
             for record in prepared.ports[j]:
                 staged = record.wire != record.storage
@@ -790,23 +797,56 @@ class Target:
                     received.append(Port(mesh.RECEIVE, t, copy.owner, root, record.extent, record.at, root,
                                          (None, copy.wire)))
             self.call_ports.append((tuple(received + sent), wires))
+            self.direct.append(direct)
 
-    # metal-microbench metal_ir.h metal_ir_value_planned, metal_ir_clone and metal_ir_construct; metal_ir.mm
-    # ExternallyVisible and Realize (a storage with a planned value, its symbolic plan function/index identity, is
-    # visible and kept; no physical placement or buffer is implied) and metal_ir_value_paged (a paged storage root, a
-    # plan value's page-table rows): each call's paged geometry, each of its intrinsic network Ports' typed root whose
-    # Port.section is its function's own (instance, ValueID) (Target.ported: bound by no joint root, which keeps its
-    # dense owner, Target.located), each call's such roots its `intrinsic` candidates (Target.functions), with the
-    # context's page quantum (mesh.h struct hdr block x pgsz, the plan's row: mesh-collective.c plan_quantum, `context`
-    # the compile owner's) and the page count of its whole typed backing Port.bytes; each composite program
-    # (`composites`) constructed once per paged geometry of its calls; each numerical body's other calls grouped by
-    # their construction facts (each call's intrinsic wires, its planned roots: a sent wire is a TEMPORARY root; its
-    # other port roots are interface roots, visible by their roles; its paged geometry); each group's program given its
-    # first call's wires' planned identity (plan value (plan_calls[j], root), rebound on each instance) and paged
-    # geometry and constructed once, the source program the first group's and, cloned from it before its construction
-    # (metal_ir_clone: every value, operation and region identity the source's, its external marks included), a copy
-    # each further group's; `templates[j]` call j's constructed program, None where it has no program on this node; the
-    # copies released with `owned`
+    # metal-microbench metal_ir.h metal_ir_source_relation (it appends: once per constructed program, after its copy
+    # selection): row j's body's original relation (ConstructedMachine.relation) joined to `program`, each original
+    # vertex's live operations (ConstructedMachine.vertices less its direct landing copies, Target.ported `direct`, at
+    # the row's append offset), each original view's and GIVEN operand's typed ValueID through the row's append map
+    # (view_of), a direct receive's GIVEN operand its destination (ConstructedMachine.landings); the arrays and the
+    # relation's owner adopted by the program (compiler/mesh_compiler/metal.py _lent), released with its last holder
+    def related(self, program, j, libs):
+        from .lower_metal import operand
+        M, compiler, _, _ = libs
+        row = self.rows[j]
+        built, direct = self.bodies[row.function].machine, self.direct[j]
+        gone = {op for ops in direct.values() for op in ops}
+        vertices = [[op + row.offset for op in ops if op not in gone] for ops in built.vertices]
+        flat = [op for ops in vertices for op in ops]
+        views = [M.NONE if access is None or access[0] == "literal" else self.view_of(j, access[1])
+                 for access in built.accesses]
+        given = []
+        for (kind, _, _, channel), typed in zip(built.relation.supplied, built.supplied, strict=True):
+            made_ = operand(built.landings[channel][0] if kind != "value" and channel in direct else typed)
+            if made_.kind in (M.SOURCE_VALUE, M.SOURCE_SENT, M.SOURCE_RECEIVED):
+                made_.value = self.view_of(j, made_.value)
+            given.append(made_)
+        arrays = ((C.c_size_t * (len(vertices) + 1))(*itertools.accumulate(map(len, vertices), initial=0)),
+                  (mesh.U * max(len(flat), 1))(*flat), (mesh.U * max(len(views), 1))(*views),
+                  (M.SourceOperand * max(len(given), 1))(*given))
+        error = C.create_string_buffer(ROOM)
+        checked(M._lent((built.relation, arrays), lambda release, owner: compiler.metal_ir_source_relation(
+            program, built.relation.relation.pointer, *arrays[:3], len(given), arrays[3], release, owner, error, ROOM),
+            lambda status: status == 0), error, "the source relation")
+
+    # metal-microbench metal_ir.h metal_ir_value_planned, metal_ir_clone, metal_ir_operation_erase and
+    # metal_ir_construct; metal_ir.mm ExternallyVisible and Realize (a storage with a planned value, its symbolic plan
+    # function/index identity, is visible and kept; no physical placement or buffer is implied) and metal_ir_value_paged
+    # (a paged storage root, a plan value's page-table rows): each call's paged geometry, each of its intrinsic network
+    # Ports' typed root whose Port.section is its function's own (instance, ValueID) (Target.ported: bound by no joint
+    # root, which keeps its dense owner, Target.located), each call's such roots its `intrinsic` candidates
+    # (Target.functions), with the context's page quantum (mesh.h struct hdr block x pgsz, the plan's row:
+    # mesh-collective.c plan_quantum, `context` the compile owner's) and the page count of its whole typed backing
+    # Port.bytes; each composite program (`composites`) constructed once per paged geometry and erased landing copies of
+    # its calls; each numerical body's other calls grouped by their construction facts (each call's intrinsic wires, its
+    # planned roots: a sent wire is a TEMPORARY root; its other port roots are interface roots, visible by their roles;
+    # its paged geometry; its erased landing copies, `erased`: its direct receives' interface copies, Target.ported
+    # `direct`, at the row's append offset); each group's program given its first call's wires' planned identity (plan
+    # value (plan_calls[j], root), rebound on each instance) and paged geometry, its copies erased, its source relation
+    # attached once (Target.related) and constructed once, the source program the first group's and, cloned from it
+    # before its construction (metal_ir_clone: every value, operation and region identity the source's, its external
+    # marks included), a copy each further group's; `templates[j]` call j's constructed program, None where it has no
+    # program on this node; the copies released with `owned`
     def constructed(self, context, plan_calls, libs, owned):
         M, compiler, (_, device), _ = libs
         error, templates, sources, classes = C.create_string_buffer(ROOM), [None] * len(self.rows), {}, {}
@@ -816,14 +856,16 @@ class Target:
             quantum = header.block * header.pgsz if header is not None else None
             return tuple(dict.fromkeys((port.root, quantum, -(-port.bytes // quantum)) for port in self.call_ports[j][0]
                                        if port.section[0] is not None))
+        def erased(j):
+            return tuple(sorted(op + self.rows[j].offset for ops in self.direct[j].values() for op in ops))
         self.intrinsic = tuple(frozenset(root for root, _, _ in paged(j)) for j in range(len(self.rows)))
         for j, program in enumerate(self.composites):
             if program is not None:
-                sources.setdefault(program, {}).setdefault(paged(j), []).append(j)
+                sources.setdefault(program, {}).setdefault((paged(j), erased(j)), []).append(j)
         for k, body in ((k, body) for k, body in enumerate(self.bodies) if body.machine is not None):
             groups = sources.setdefault(body.machine.program, {})
             for j in (j for j, row in enumerate(self.rows) if row.function == k and self.composites[j] is None):
-                groups.setdefault((self.call_ports[j][1], paged(j)), []).append(j)
+                groups.setdefault((self.call_ports[j][1], paged(j), erased(j)), []).append(j)
         for program, groups in sources.items():
             programs = [program]
             for _ in range(len(groups) - 1):
@@ -839,6 +881,10 @@ class Target:
                     compiler.metal_ir_value_planned(constructing, root, plan_calls[calls[0]], root, 0)
                 for root, quantum, pages in paged(calls[0]):
                     compiler.metal_ir_value_paged(constructing, root, quantum, pages)
+                for op in erased(calls[0]):
+                    compiler.metal_ir_operation_erase(constructing, op)
+                if self.bodies[self.rows[calls[0]].function].machine is not None:
+                    self.related(constructing, calls[0], libs)
                 checked(compiler.metal_ir_construct(constructing, gpu, error, ROOM), error, "construction")
                 for j in calls:
                     templates[j] = constructing
@@ -1460,6 +1506,6 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
             owned.finalizer()
         instances.finalizer()
     target.instances = target.templates = target.call_ports = target.targets = target.composites = None
-    target.joint = target.intrinsic = None
+    target.joint = target.intrinsic = target.direct = None
     target.landed = None
     return target

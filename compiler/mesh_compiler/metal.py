@@ -70,8 +70,7 @@ def _message(restype, *argtypes):
 _SEL = OBJC.sel_registerName
 OBJECT = _message(C.c_void_p)
 VALUE = _message(C.c_uint64)
-# metal_recording.h state:buffer:status:; MTLDevice.h newBufferWithLength:options:
-STATE_BUFFER = _message(None, C.c_void_p, C.c_void_p, C.c_ulong)
+# MTLDevice.h newBufferWithLength:options:
 _NEW_BUFFER = _message(C.c_void_p, C.c_ulong, C.c_ulong)
 
 
@@ -381,6 +380,7 @@ def _recorder():
                 ('MetalBufferBorrow', P, [P, P, Q, RELEASE, P]),
                 ('MetalRecorderPrepare', P, [P, P, text, room]),
                 ('MetalRecorderReplay', C.c_int, [P, P, C.POINTER(Replay), text, room]),
+                ('MetalRecorderState', C.c_int, [P, P, P, Q, text, room]),
                 ('MetalReplayDestroy', None, [C.POINTER(Replay)]),
                 ('MetalRecorderActors', C.c_int, [P, machine, machine, C.POINTER(_Actors)]),
                 ('MetalRecorderActorsFree', None, [C.POINTER(_Actors)]),
@@ -513,6 +513,7 @@ def _compiler():
                 ('metal_ir_builtin_named', U, [C.c_char_p]),
                 ('metal_ir_scatter', None, [P, U, U, U, C.POINTER(U), U, U]),
                 ('metal_ir_yield', None, [P, U, U, C.POINTER(U)]),
+                ('metal_ir_operation_erase', None, [P, U]),
                 ('metal_ir_construct', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_work_terms', C.c_int, [P, C.POINTER(C.c_size_t), C.POINTER(C.POINTER(WorkTerm)),
                                                   C.POINTER(C.POINTER(Expr)), C.POINTER(C.POINTER(Term)),
@@ -660,10 +661,15 @@ class _Builder:
                 given = _array(mesh.U, [h[x] for x in record[2]])
                 lib.metal_ir_scatter(p, r, record[1], len(record[2]), given, h[record[3]], h[record[4]])
                 h.append(None)
-            else:
+            elif call == 'yield':
                 given = _array(mesh.U, [h[x] for x in record[1]])
                 lib.metal_ir_yield(p, r, len(record[1]), given)
                 h.append(None)
+            else:
+                # Rejection filters are not part of even temporary integration validation: an operation operations.py
+                # _Region records that this encoder has no IR call for is unsupported here, not another one
+                raise NotImplementedError('a region\'s record %r (%s): no metal_ir.h instruction encodes it'
+                                          % (record[:2], KINDS.get(region.kinds[len(h)])))
             if h[-1] == NONE:
                 raise NotImplementedError('a region\'s %s of %s: not an instruction of the IR (metal_ir.h, UINT32_MAX)'
                                           % (' '.join(str(x) for x in record[:2]), KINDS.get(region.kinds[len(h) - 1])))

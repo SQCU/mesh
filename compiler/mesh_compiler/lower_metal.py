@@ -7,7 +7,6 @@
 import collections
 import ctypes as C
 import dataclasses
-import itertools
 import weakref
 
 import torch
@@ -17,7 +16,7 @@ from torch.utils import _pytree as pytree
 
 from .ir import RECV, SEND, written
 from .lower_inductor import copies
-from .metal import (CONSTANT, INPUT, NONE, OUTPUT, RELEASE, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED,
+from .metal import (CONSTANT, INPUT, NONE, OUTPUT, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED,
                     SOURCE_SENT, SOURCE_VALUE, STATE, TEMPORARY, SourceOperand, _Builder, _compiler)
 from .operations import (ANE, CPU, GPU, _Generic, _Lapack, _copy, _held, _instruction, _key, _local_call, _metadata,
                          _placed, _same_view, _stored)
@@ -69,13 +68,15 @@ class ConstructedMachine:
     copies: object
     writes: dict
     stores: dict
+    # metal-microbench metal_ir.h metal_ir_source_relation's operands as constructed: the original relation, each
+    # original vertex's emitted operation IDs, each original view's and GIVEN cause's typed operand; it appends, so it
+    # is attached once to each final constructed program (compiler/mesh_compiler/native.py Target.related), never here
     relation: object
     vertices: tuple
     accesses: tuple
     supplied: tuple
     writers: tuple
     identity: int = 0
-    binding: tuple = ()
     # compiler/mesh_compiler/decompose.py decompose: each expanded original source node here, its expanded nodes'
     # emitted operation IDs (module.meta["decomposed"]), in emission order
     decomposed: dict = dataclasses.field(default_factory=dict)
@@ -93,6 +94,9 @@ class ConstructedMachine:
     # region, never an operation, and its pass's interval), in emission order
     emitted: tuple = ()
     repeated: tuple = ()
+    # each interface RECV's channel (its "to" an input placeholder's storage): (its destination's Root, its copy's
+    # emitted operation IDs from `received[channel]`, its declared logical wire, at the RECV's own position)
+    landings: dict = dataclasses.field(default_factory=dict)
 
     def __post_init__(self):
         self.freed = weakref.finalize(self, self.compiler.metal_ir_program_free, self.program)
@@ -145,7 +149,7 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         named = {node.target: node for node in nodes if node.op == "placeholder"}
         byname = {node.name: node for node in nodes}
         env, records, owners, inputs, landing, sending, held, grouped = {}, [], [], [], [], [], {}, {}
-        dests, advance, associated = {}, None, []
+        dests, advance, associated, interfaced = {}, None, [], {}
 
         # metal-microbench metal_ir.h metal_ir_operation_axis: each of a numerical node's work axes
         # (compiler/mesh_compiler/placement.py `work_axes`: source node, dimension, original full extent), after its
@@ -227,12 +231,25 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                 leaves, spec = pytree.tree_flatten(node.args[0])
             elif node.target is RECV:
                 channel = node.args[0]
-                if "to" in node.meta:
+                if "to" in node.meta and channel in wires and byname[node.meta["to"][0]] in roots:
+                    # an interface RECV (its "to" an input placeholder's storage, `placed`): received in its declared
+                    # logical wire, env[node] its destination's view, the wire copied into that view here, at this
+                    # node's own record position and task (its emitted operations `landings`)
+                    value, held_view = wire(channel, node.meta["val"], True)
+                    env[node] = placed(node.meta["to"])
+                    ops = _copy(env[node], held_view)
+                    _placed(ops, place(node), tasks[node][0])
+                    records += ops
+                    owners += [(tasks[node], None, None, node)] * len(ops)
+                    interfaced[channel] = node
+                    landing.append((channel, value, held_view))
+                elif "to" in node.meta:
                     value, env[node] = wires[channel][1] if channel in wires else None, placed(node.meta["to"])
+                    landing.append((channel, value, env[node]))
                 else:
                     value, env[node] = wire(channel, node.meta["val"], True) if channel in wires else (
                         None, _held(node.meta["val"]))
-                landing.append((channel, value, env[node]))
+                    landing.append((channel, value, env[node]))
             elif node.target is SEND:
                 env[node] = None
                 if node not in made.group:
@@ -361,20 +378,11 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         given = tuple(typed(operand) if kind == "value" else sent.get(operand) or received.get(operand) or typed(sink)
                       for kind, _, sink, operand in source.supplied)
         writers = tuple((tasks[a], tasks[b]) for a, b in module.meta["writers"])
-        # metal-microbench metal_ir.h metal_ir_source_relation: the original relation, each original vertex's operation
-        # IDs (operation_first[V + 1], operations), each original view's typed ValueID, each GIVEN cause's operand; the
-        # arrays borrowed for this ConstructedMachine's lifetime (NULL release and owner)
-        flat = [op for ops in vertices for op in ops]
-        binding = ((C.c_size_t * (len(vertices) + 1))(*itertools.accumulate(map(len, vertices), initial=0)),
-                   (C.c_uint32 * max(len(flat), 1))(*flat),
-                   (C.c_uint32 * max(len(accesses), 1))(*[NONE if access is None or access[0] == "literal"
-                                                          else access[1] for access in accesses]),
-                   (SourceOperand * max(len(given), 1))(*map(operand, given)))
-        error = C.create_string_buffer(4096)
-        status = compiler.metal_ir_source_relation(builder.p, source.relation.pointer, *binding[:3], len(given),
-                                                   binding[3], RELEASE(), None, error, len(error))
-        if status:
-            raise OSError(status, "the source relation: %s" % error.value.decode())
+        # each interface RECV's channel: (its destination's Root, the copy's emitted operation IDs)
+        landings = {}
+        for channel, node in interfaced.items():
+            role = builder.roles[_key(env[node])]
+            landings[channel] = Root(channel, "landing", role, *rooted(env[node], role)), tuple(emitted.get(node, ()))
     except BaseException:
         compiler.metal_ir_program_free(builder.p)
         raise
@@ -385,8 +393,8 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                               sent, ends, {task: tuple(ops) for task, ops in operations.items()}, tuple(advanced),
                               made, {k: tuple(ops) for k, ops in writes.items()},
                               {k: tuple(ops) for k, ops in stores.items()}, source, vertices, accesses, given, writers,
-                              builder.base, binding, {k: tuple(sorted(ops)) for k, ops in decomposed.items()},
+                              builder.base, {k: tuple(sorted(ops)) for k, ops in decomposed.items()},
                               initial_words=tuple(word & 0xFFFFFFFF for word in generator.state.tolist()) if state
                               else (), generated=(state[0], generator.counter) if stepped else (),
                               input_parts=input_parts, emitted=tuple(builder.emitted),
-                              repeated=tuple(builder.repeated))
+                              repeated=tuple(builder.repeated), landings=landings)
