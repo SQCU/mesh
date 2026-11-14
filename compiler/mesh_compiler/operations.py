@@ -1799,10 +1799,12 @@ def _factorization(target, given, outs):
     return ops
 
 
+# torch 2.14.0 aten _functional_assert_async.msg(Tensor self, str assert_msg, Tensor dep_token): `dep_token` the
+# typed value the check depends on, its writers and their completion before the check (None: the status alone)
 class _Check:
-    def __init__(self, info, code, message=''):
+    def __init__(self, info, code, message='', dep_token=None):
         self.info, self.code, self.place, self.node = info, code, CPU, 0
-        self.message = message
+        self.message, self.dep_token = message, dep_token
 
 
 def _linalg_nonsingular(diagonal, code, message):
@@ -1903,7 +1905,10 @@ def _asserted(target, given, outs):
         ops = _elementwise('ne', predicate, value, 0)
     info = _temporary(value.shape, torch.int32)
     ops += _elementwise('where', info, predicate, 0, 1)
-    return ops + [_Check(info, 4, given.get('assert_msg', str(target)))]
+    # a functional assertion's check depends on its result, its dep_token's value or the destination written with it
+    # (_instruction): outs[0]
+    dep_token = outs[0] if target.overloadpacket is A._functional_assert_async else None
+    return ops + [_Check(info, 4, given.get('assert_msg', str(target)), dep_token)]
 
 
 # Reference-LAPACK SRC/dlarfg.f, zlarfg.f, dgeqr2.f, zgeqr2.f, dorg2r.f and zung2r.f
