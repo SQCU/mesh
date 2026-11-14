@@ -296,15 +296,19 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
 # one copy of the sent value (aten.clone, its "out" the receive's "to", its task and vertex the receive's);
 # compiler/mesh_compiler/ir.py views;
 # compiler/mesh_compiler/decompose.py decompose: `decomposed` each expanded node's original source node, the copy of
-# each of them here its module's meta["decomposed"] key; compiler/mesh_compiler/placement.py place `input_parts`: each
+# each of them here its module's meta["decomposed"] key; the placeholders copied, in their original order, those a
+# node of this machine reads and those its write address records (`wrote`: "out", "to") name, a pure destination
+# included; compiler/mesh_compiler/placement.py place `input_parts`: each
 # placeholder this machine copied, by its position among the original placeholders, its partitions on this
 # machine's processors as (processor, original placeholder, original partition Node, its landing geometry), resolved
 # by `copied`
 def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source, decomposed,
              parts):
     graph, copied, tasks = torch.fx.Graph(), {}, {}
+    addressed = {record[0] for node in order for record in wrote(node)}
     for node in nodes:
-        if node.op == "placeholder" and any(u.meta["processor"] in members for u in node.users):
+        if node.op == "placeholder" and (any(u.meta["processor"] in members for u in node.users)
+                                         or node.name in addressed):
             copied[node] = graph.node_copy(node)
     for node in order:
         if node in local and landing(node):
