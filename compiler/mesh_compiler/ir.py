@@ -84,6 +84,7 @@ class Plan:
     nodes: tuple = ()
     arena_bytes: int = 0
     offsets: tuple = ()
+    publications: tuple = ()
 
 
 # rdma/mesh-dataflow.h mesh_view_whole, mesh_nodes_read; rdma/mesh-collective.h mesh_plan;

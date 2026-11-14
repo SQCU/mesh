@@ -137,6 +137,18 @@ def solved(plan, planning):
     mesh.LIB.mesh_view_values(context, function, 1, first, offset, C.byref(view))
     plan.arena_bytes = view.bytes
     plan.offsets = tuple(tuple(offset[first[value]:first[value + 1]]) for value in range(len(sections)))
+    # rdma/mesh.h mesh_transfer_at, struct mesh_publication; rdma/mesh-collective.c plan_supplied, plan_completion and
+    # the publication records of transfer i written for its demand p->of[i]: one supplied word per demand release, one
+    # completion word per sending demand (d->sending = p->sending++), so equal nonzero words are one native action
+    state = mesh.State.from_address(planning.context.M + function[0].plan)
+    supplied, completed = {}, {}
+    plan.publications = tuple(
+        (supplied.setdefault(record.targets[0].word, transfer),
+         completed.setdefault(record.completion, transfer) if record.sends and record.completion else None)
+        if source == planning.here and record.targets[0].word else (None, None)
+        for transfer, (source, *_) in enumerate(plan.declared)
+        for record in [mesh.Publication.from_address(planning.context.M + state.transfers
+                                                     + mesh.PUBLICATION_BYTES * transfer)])
     mesh.LIB.mesh_planned_free(C.byref(made))
     SYSTEM.free(record)
     return plan

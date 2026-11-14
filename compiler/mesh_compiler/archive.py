@@ -63,7 +63,8 @@ def load(directory):
     plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"]),
                                      "signature": bytes.fromhex(about["plan"]["signature"]),
                                      "nodes": tuple(about["plan"]["nodes"]),
-                                     "offsets": tuple(map(tuple, about["plan"]["offsets"]))})
+                                     "offsets": tuple(map(tuple, about["plan"]["offsets"])),
+                                     "publications": tuple(map(tuple, about["plan"]["publications"]))})
     record = directory / "signature.record"
     return Scheduled(exported, {}, devices, about["machines"], about["output_processor"], about["channels"],
                      about["inputs"], about["feedforward"], carried, about["engines"], plan,
