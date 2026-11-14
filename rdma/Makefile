@@ -128,13 +128,6 @@ libmesh-metal4.dylib: mesh-metal4.m Makefile
 	cc -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh-metal4.dylib -o $@ mesh-metal4.m -framework Metal -framework Foundation
 libmesh-coreml.dylib: mesh-coreml.m Makefile
 	cc -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m -framework CoreML -framework Foundation
-# design/compiler-native-assignment-2026-11-13.md;
-# `make -C rdma libmesh-aoti.dylib PYTHON=/Users/mdot/.venv-mesh-uv/bin/python`;
-# torch 2.14 torch/utils/cpp_extension.py include_paths, library_paths, _prepare_ldflags; mesh-call.h, mesh-collective.h
-PYTHON ?= python3
-AOTI_TORCH = $(shell TORCH_DEVICE_BACKEND_AUTOLOAD=0 $(PYTHON) -c "from torch.utils import cpp_extension as e; print(' '.join(['-isystem ' + p for p in e.include_paths()] + ['-L' + p + ' -Wl,-rpath,' + p for p in e.library_paths()]))")
-libmesh-aoti.dylib: mesh-aoti.cpp $(HEADERS) libmesh.dylib Makefile
-	c++ $(CPPFLAGS) -std=c++20 -fPIC -O2 -Wall -Wextra -Werror $(AOTI_TORCH) -dynamiclib -Wl,-install_name,@rpath/libmesh-aoti.dylib -o $@ mesh-aoti.cpp -lc10 -ltorch_cpu -ltorch -L. -lmesh -Wl,-rpath,@loader_path
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit FORCE
