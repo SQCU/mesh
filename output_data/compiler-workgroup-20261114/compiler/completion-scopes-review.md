@@ -13,3 +13,13 @@ The joint graph checkpoint also contains frontend-owned changes: one existing sh
 Private strict syntax checks passed for `mesh-graph.c`, `mesh-collective.c`, `mesh-dataflow.c` and `mesh-call.c`; Python compilation and `git diff --check` passed. Commands/results are in `compiler/schedule-18.jsonl`, with current source status in `compiler/schedule.status.md`. The preceding complete native includer checks are in `compiler/schedule-17.jsonl`.
 
 Open at this checkpoint: a standalone saved writer's `later` index still needs its original native row/readiness source association. The agreed next operand is the original row, actual signature node and structural row identity; a loaded native source binding will retain the original Program. Cross-node event matching will use that explicit source node. The next source turn implements this paired handoff. No shared build or runtime observation has been made for the new signature ABI (408 bytes, seven states).
+
+## Saved source handoff
+
+The follow-up implements that source association. Each row retains `ScopeSource {row, node, identity}` (40 bytes), and the descriptor is 64 bytes. The record preserves this reference and views it on restore; native pointers are never serialized. Event matching now includes the actual signature node. A standalone record has explicit unresolved source references until its original artifact is supplied.
+
+`mesh_graph_scopes_bind` retains the original source pointer array under its adopted owner. Composition snapshots each exact binding owner, so later rebinding a parent cannot invalidate an existing composed view. The graph never interprets native pointers. Python readers borrow immutable record bytes directly and preserve their owner through composition.
+
+Native checkpoint `79732a3f` supplies and resolves those records from the actual loaded `NativeCall` Programs, using their retained structural row identities. It preserves existing bindings from other nodes. Python checkpoint `a01d9019` connects the saved signature to the prepared `Bound` and its report. The identity covers source declaration/readiness correspondence; it is not a numerical binary identity. No full native artifact or readiness table is duplicated into the graph record.
+
+The schedule-19 strict C/header checks, Python compilation and layout checks passed (`compiler/schedule-19.jsonl`). Shared build and runtime verification remain pending at this source checkpoint. Ordinary local numerical clients have no release scopes, so they cannot establish native transported writer/site coverage; any graph ownership check is limited to its public ownership/record contract.

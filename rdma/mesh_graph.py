@@ -523,10 +523,16 @@ class Release(C.Structure):
     _fields_ = [('owner', C.c_uint32), ('transfer', C.c_uint32)]
 
 
+# mesh-graph.h struct mesh_graph_scope_source: a scope row's original artifact row, native node and structural identity
+class ScopeSource(C.Structure):
+    _fields_ = [('row', C.c_uint32), ('node', C.c_uint32), ('identity', C.c_ubyte * 32)]
+
+
 class ScopesData(C.Structure):
     _fields_ = [('completions', C.c_size_t), ('writers', C.c_size_t), ('releases', C.c_size_t),
                 ('completion', C.POINTER(Completion)), ('writer', C.POINTER(CompletionWriter)),
-                ('release_first', C.POINTER(C.c_size_t)), ('release', C.POINTER(Release))]
+                ('release_first', C.POINTER(C.c_size_t)), ('release', C.POINTER(Release)),
+                ('source', C.POINTER(ScopeSource))]
 
 
 class Occurrence(C.Structure):
@@ -741,11 +747,18 @@ def record(made):
     return buffer.raw[:size.value]
 
 
-# a scoped signature's views borrow `buffer`, which the returned signature keeps
+# the caller's immutable bytes viewed in place (other input made bytes once, as its normalization) through a ctypes
+# pointer into them: a scoped signature's views borrow them, so the returned signature keeps both
+def _immutable(data):
+    data = data if isinstance(data, bytes) else bytes(data)
+    return data, C.c_char_p(data)
+
+
 def from_record(data):
-    buffer, made = C.create_string_buffer(bytes(data), len(data)), Signature()
-    _check(LIB.mesh_graph_record_read(C.addressof(buffer), C.byref(made)))
-    made.borrowed = buffer
+    data, pointer = _immutable(data)
+    made = Signature()
+    _check(LIB.mesh_graph_record_read(pointer, C.byref(made)))
+    made.borrowed = (data, pointer)
     return made
 
 
@@ -768,9 +781,10 @@ def archive(made):
 
 
 def from_archive(data):
-    buffer, made = C.create_string_buffer(bytes(data), len(data)), Signature()
-    _check(LIB.mesh_graph_archive_read(C.addressof(buffer), len(data), None, None, C.byref(made)))
-    made.borrowed = buffer
+    data, pointer = _immutable(data)
+    made = Signature()
+    _check(LIB.mesh_graph_archive_read(pointer, len(data), None, None, C.byref(made)))
+    made.borrowed = (data, pointer)
     return made
 
 

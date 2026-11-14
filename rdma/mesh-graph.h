@@ -531,9 +531,19 @@ struct mesh_graph_completion_writer { uint32_t dispatch, completion, later, padd
 struct mesh_graph_release { uint32_t owner, transfer; };
 _Static_assert(sizeof(struct mesh_graph_completion) == 24 && sizeof(struct mesh_graph_completion_writer) == 24 &&
                sizeof(struct mesh_graph_release) == 8, "rdma/mesh_graph.py Completion, CompletionWriter, Release");
+/* a scope row's native source: `row` its original native artifact row (the loaded artifact's
+   nativePreparation.calls[row].program), `node` the native signature node that emitted it (MetalProgramSignatureNode's
+   node argument: its bridge processor's index, every writer of the row on it) and `identity` that row's existing
+   native STRUCTURAL identity (metal_ir_identity's declaration and readiness operands; not a digest of its numerical
+   code or binary), the reference by which a reader re-finds the row in its own artifact */
+struct mesh_graph_scope_source { uint32_t row, node; unsigned char identity[32]; };
+_Static_assert(sizeof(struct mesh_graph_scope_source) == 40, "rdma/mesh_graph.py ScopeSource");
+/* one row's arrays and its source (NULL: a row of no native source, which answers no read), all borrowed */
 struct mesh_graph_scopes_data { size_t completions, writers, releases; const struct mesh_graph_completion *completion;
                                 const struct mesh_graph_completion_writer *writer; const size_t *release_first;
-                                const struct mesh_graph_release *release; };
+                                const struct mesh_graph_release *release;
+                                const struct mesh_graph_scope_source *source; };
+_Static_assert(sizeof(struct mesh_graph_scopes_data) == 64, "rdma/mesh_graph.py ScopesData");
 /* one row's scopes (struct mesh_graph_scopes_data: one native row Program's own vectors, its counts and borrowed
    arrays). mesh_graph_scopes_create: reference counted as struct mesh_graph_relation is, over rows row[0 .. rows), the
    descriptors and their arrays borrowed (no copy), adopting `owner` on success (release_owner(owner) with the last
@@ -546,6 +556,16 @@ int mesh_graph_scopes_create(size_t rows, const struct mesh_graph_scopes_data *r
 void mesh_graph_scopes_retain(struct mesh_graph_scopes *);
 void mesh_graph_scopes_free(struct mesh_graph_scopes *);
 const struct mesh_graph_scopes_data *mesh_graph_scopes_rows(const struct mesh_graph_scopes *, size_t *rows);
+/* the scopes' original native Programs: mesh_graph_scopes_bind sets source[0 .. rows) (one opaque pointer per scope
+   row, NULL for none; `rows` the scopes' row count, EINVAL otherwise), the array and what it points to borrowed under
+   `owner`, adopted on success (release_owner(owner) once the binding is replaced or the scopes freed; NULL: the caller
+   keeps them alive; on failure the caller keeps it, the earlier binding kept). The graph neither reads nor validates a
+   pointer: the native resolver matches each row's mesh_graph_scope_source against its Program first. The binding is
+   apart from the descriptors' owner, which stays retained. mesh_graph_scopes_sources: the bound array, NULL unbound
+   (scopes read from a record or archive are unbound: their sources are references until bound) */
+int mesh_graph_scopes_bind(struct mesh_graph_scopes *, size_t rows, const void *const *source,
+                           void (*release_owner)(void *), void *owner);
+const void *const *mesh_graph_scopes_sources(const struct mesh_graph_scopes *);
 /* one realized occurrence of row `row`'s completion `completion`: `execution` the block execution t (its
    MetalSitesEmit operations' execution), `generation` the writer invocation e = t every + ordinal of its row, `copy`
    e modulo its counter placement's copies (the counter reset to zero for it; no runtime ring generation word is
@@ -557,9 +577,9 @@ const struct mesh_graph_scopes_data *mesh_graph_scopes_rows(const struct mesh_gr
    processor's, and occurs once after its occurrence's `total` completions */
 struct mesh_graph_occurrence { uint32_t completion, site, event, row; uint64_t execution, generation, copy; };
 struct mesh_graph_site { uint32_t first, later, first_site, later_site; };
-/* a MESH_GRAPH_BRIDGE_READ operation `operation` answered by publication event `event`: the event's release owner the
-   read's vertex's task's label, its representative transfer the read's object less MESH_GRAPH_PLAN_SUPPLIED, its value
-   the read's */
+/* a MESH_GRAPH_BRIDGE_READ operation `operation` answered by publication event `event`: the event's row's source node
+   the read's processor's index, its release owner the read's vertex's task's label, its representative transfer the
+   read's object less MESH_GRAPH_PLAN_SUPPLIED, its value the read's (an event of a row without source answers none) */
 struct mesh_graph_answered { uint32_t event, operation; };
 _Static_assert(sizeof(struct mesh_graph_occurrence) == 40 && sizeof(struct mesh_graph_site) == 16 &&
                sizeof(struct mesh_graph_answered) == 8, "rdma/mesh_graph.py Occurrence, Site, Answered");
@@ -600,8 +620,8 @@ int mesh_graph_signature_program(struct mesh_graph_signature *, size_t events, c
    and every signature composed from it, is freed; NULL: the caller keeps them alive), replacing any earlier ones (their
    references released, their SCOPED pairs UNMATCHED again before the new answers), as one transaction: on failure the
    signature is as it was (its earlier scopes, arrays, states and digest), the caller keeps `owner` and its arrays, and
-   no release_owner call is made; every MESH_GRAPH_BRIDGE_READ whose (owner, representative transfer, value) is one
-   event's answered by it (struct mesh_graph_answered; its pair MESH_GRAPH_SCOPED); the counts and digest again. No pair, edge or least delay of the
+   no release_owner call is made; every MESH_GRAPH_BRIDGE_READ whose (node, owner, representative transfer, value) is
+   one event's answered by it (struct mesh_graph_answered; its pair MESH_GRAPH_SCOPED); the counts and digest again. No pair, edge or least delay of the
    task graph changes: an event has no task, so no obligation is covered by it. `realized` the adopted arrays' holder
    (reference counted); `projected` a composed signature's sites, their tasks moved into its task numbering (NULL
    otherwise). EINVAL for an occurrence's row, completion, sites or events out of range, or a site's task out of
@@ -625,9 +645,10 @@ int mesh_graph_archive(const struct mesh_graph_signature *, void *bytes, size_t 
 /* mesh_graph_archive_read: a scoped signature's scopes and realized arrays are views of `bytes` (8-byte aligned), its
    `owner` adopted on success by them (release_owner(owner) once the last signature holding them is freed; NULL: the
    caller keeps `bytes` alive); a signature without scopes borrows nothing and releases `owner` at once. On failure the
-   caller keeps it. mesh_graph_record_read borrows the same views of its record, which the caller keeps alive. A
-   restored writer's `later` is the integer only: the native owner of the metal_ir_laters it indexes (its readiness) is
-   not in the record, so a standalone reload does not carry that provenance */
+   caller keeps it. mesh_graph_record_read borrows the same views of its record, which the caller keeps alive. Each
+   row's mesh_graph_scope_source is kept with it and viewed the same way (no pointer is saved): restored scopes are
+   unbound, their rows' sources explicit references (artifact row, node, structural identity) and no resolved native
+   Program until the native resolver binds the owning artifact's (mesh_graph_scopes_bind) */
 int mesh_graph_archive_read(const void *bytes, size_t length, void (*release_owner)(void *), void *owner,
                             struct mesh_graph_signature *);
 /* design/synchronization-signature-change-request.md item 1; L. Lamport, CACM 21(7), 1978: one program's signature from
@@ -637,8 +658,9 @@ int mesh_graph_archive_read(const void *bytes, size_t length, void (*release_own
    on that processor before it in a's order placed before it. Both producers' completion scopes and realized
    occurrences are kept, each distinct occurrence and publication event once: a's rows, sites, events and tasks first,
    b's after them (b's row r a's rows + r, its own row for the same scopes; site k a's sites + k; event k a's
-   publications + k; task t a's tasks + t), each original scopes and realized holder retained (each owner kept) and only
-   the composed descriptors, occurrences, sites and published values made (mesh_graph_signature_scopes' projected);
+   publications + k; task t a's tasks + t), each original scopes, source binding and realized holder retained (each
+   owner kept) and only the composed descriptors (their sources), bound source pointers, occurrences, sites and
+   published values made (mesh_graph_signature_scopes' projected);
    every BRIDGE_READ answered over all events, no task edge added. EOVERFLOW where a composed row, site or event index
    exceeds uint32_t */
 int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_graph_signature *b,

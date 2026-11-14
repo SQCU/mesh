@@ -3068,9 +3068,12 @@ int mesh_graph_signature_spans(struct mesh_graph_signature *s,size_t spans,const
    mesh_graph_scopes) over borrowed row descriptors, and a signature's realized occurrences, sites and published values
    (struct mesh_graph_realized), each reference counted as relations are, each releasing its adopted owner with its
    last reference; `own` the holder's own arrays (a restored or composed scopes' descriptors, a composed holder's
-   occurrences and published values), `part` the composed operands' holders it retains (each original owner kept) */
+   occurrences and published values), `part` the composed operands' holders it retains (each original owner kept);
+   a scopes' bound native sources `source` (mesh_graph_scopes_bind) kept by `bound`, a holder of the same kind (a
+   composed scopes' own projection of its operands' pointers, retaining their exact holders) */
 struct mesh_graph_scopes { size_t references, rows; const struct mesh_graph_scopes_data *row; void (*release)(void *);
-                           void *owner; void *own; struct mesh_graph_scopes *part[2]; };
+                           void *owner; void *own; struct mesh_graph_scopes *part[2]; const void *const *source;
+                           struct mesh_graph_realized *bound; };
 struct mesh_graph_realized { size_t references; void (*release)(void *); void *owner; void *own;
                              struct mesh_graph_realized *part[2]; };
 static int scopes_row_valid(const struct mesh_graph_scopes_data *d) {
@@ -3106,12 +3109,26 @@ void mesh_graph_scopes_free(struct mesh_graph_scopes *x) {
   if (x->release) x->release(x->owner);
   free(x->own);
   for (int k = 0; k < 2; k++) if (x->part[k]) mesh_graph_scopes_free(x->part[k]);
+  if (x->bound) realized_free(x->bound);
   free(x);
 }
 const struct mesh_graph_scopes_data *mesh_graph_scopes_rows(const struct mesh_graph_scopes *x, size_t *rows) {
   *rows = x->rows;
   return x->row;
 }
+int mesh_graph_scopes_bind(struct mesh_graph_scopes *x, size_t rows, const void *const *source,
+                           void (*release_owner)(void *), void *owner) {
+  if (rows != x->rows || (rows && !source)) return EINVAL;
+  struct mesh_graph_realized *bound = malloc(sizeof *bound);
+  if (!bound) return ENOMEM;
+  *bound = (struct mesh_graph_realized){.references = 1, .release = release_owner, .owner = owner};
+  struct mesh_graph_realized *prior = x->bound;
+  x->source = source; x->bound = bound;
+  /* the earlier binding's owner released; a composed scopes that projected it retains its holder */
+  if (prior) realized_free(prior);
+  return 0;
+}
+const void *const *mesh_graph_scopes_sources(const struct mesh_graph_scopes *x) { return x->source; }
 static void realized_free(struct mesh_graph_realized *x) {
   if (__atomic_fetch_sub(&x->references, 1, __ATOMIC_ACQ_REL) != 1) return;
   if (x->release) x->release(x->owner);
@@ -3125,10 +3142,12 @@ static void signature_states(struct mesh_graph_signature *s) {
   memset(s->states, 0, sizeof s->states);
   for (size_t k = 0; k < s->synchronized; k++) s->states[s->edge[k].state]++;
 }
-/* a publication event's identity: its release's owner call and representative transfer, and its published value */
-struct scope_key { uint32_t owner, transfer; uint64_t value; uint32_t event, padding; };
+/* a publication event's identity: its row's source node, its release's owner call and representative transfer, and its
+   published value */
+struct scope_key { uint32_t node, owner, transfer, event; uint64_t value; };
 static int scope_key_before(const void *a, const void *b) {
   const struct scope_key *x = a, *y = b;
+  if (x->node != y->node) return x->node < y->node ? -1 : 1;
   if (x->owner != y->owner) return x->owner < y->owner ? -1 : 1;
   if (x->transfer != y->transfer) return x->transfer < y->transfer ? -1 : 1;
   return (x->value > y->value) - (x->value < y->value);
@@ -3160,7 +3179,8 @@ static void signature_attach_set(struct mesh_graph_signature *s, const struct si
   signature_states(s);
 }
 /* x's answered reads over the signature's operations: every MESH_GRAPH_BRIDGE_READ answered by the publication event
-   of its (owner, representative transfer, value); none without scopes. The signature is not changed */
+   of its (node: its processor's index, owner, representative transfer, value), an event of a row without source none
+   (no node is assumed for it); none without scopes. The signature is not changed */
 static int signature_answered(const struct mesh_graph_signature *s, struct signature_attached *x) {
   x->answer = NULL; x->answers = 0;
   if (!x->scopes) return 0;
@@ -3168,7 +3188,7 @@ static int signature_answered(const struct mesh_graph_signature *s, struct signa
   for (size_t k = 0; k < x->occurrences; k++) {
     const struct mesh_graph_occurrence *y = x->occurrence + k;
     const struct mesh_graph_scopes_data *d = x->scopes->row + y->row;
-    const size_t n = d->release_first[y->completion + 1] - d->release_first[y->completion];
+    const size_t n = d->source ? d->release_first[y->completion + 1] - d->release_first[y->completion] : 0;
     if (n > SIZE_MAX / sizeof(struct scope_key) - 1 - keys) return ENOMEM;
     keys += n;
   }
@@ -3180,17 +3200,18 @@ static int signature_answered(const struct mesh_graph_signature *s, struct signa
   for (size_t k = 0; k < x->occurrences; k++) {
     const struct mesh_graph_occurrence *y = x->occurrence + k;
     const struct mesh_graph_scopes_data *d = x->scopes->row + y->row;
-    const size_t f = d->release_first[y->completion], n = d->release_first[y->completion + 1] - f;
+    const size_t f = d->release_first[y->completion], n = d->source ? d->release_first[y->completion + 1] - f : 0;
     for (size_t r = 0; r < n; r++)
-      key[keys++] = (struct scope_key){d->release[f + r].owner, d->release[f + r].transfer, x->published[y->event + r],
-                                       y->event + (uint32_t)r, 0};
+      key[keys++] = (struct scope_key){d->source->node, d->release[f + r].owner, d->release[f + r].transfer,
+                                       y->event + (uint32_t)r, x->published[y->event + r]};
   }
   qsort(key, keys, sizeof *key, scope_key_before);
   for (size_t o = 0; o < s->operations; o++) {
     const struct mesh_graph_operation *w = s->operation + o;
     if (w->primitive != MESH_GRAPH_BRIDGE_READ || w->vertex == MESH_GRAPH_NONE || w->object < MESH_GRAPH_PLAN_SUPPLIED)
       continue;
-    const struct scope_key probe = {s->task[w->vertex].label, w->object - MESH_GRAPH_PLAN_SUPPLIED, w->value, 0, 0};
+    const struct scope_key probe = {s->processor[w->processor].index, s->task[w->vertex].label,
+                                    w->object - MESH_GRAPH_PLAN_SUPPLIED, 0, w->value};
     const size_t at = graph_lower(key, keys, sizeof *key, &probe, scope_key_before);
     if (at == keys || scope_key_before(key + at, &probe)) continue;
     answer[answers++] = (struct mesh_graph_answered){key[at].event, (uint32_t)o};
@@ -3645,21 +3666,22 @@ static size_t record_parts(const struct mesh_graph_signature *s, struct record_p
   return at;
 }
 /* the record's program section: its events, spans, repeated rows and proofs; a scoped signature's (GRAPH_PROGRAM_SCOPED)
-   then its rows' counts (struct scope_row_record), each row's completion[], writer[], release_first[completions + 1]
-   and release[], its occurrence[], site[] and published[], every array 8-byte sized, so each starts 8-aligned where the
-   record is */
+   then its rows' counts (struct scope_row_record, `sourced` 1 where the row has a source), each row's completion[],
+   writer[], release_first[completions + 1], release[] and its struct mesh_graph_scope_source where sourced (the
+   reference, never a pointer), its occurrence[], site[] and published[], every array 8-byte sized, so each starts
+   8-aligned where the record is */
 struct program_record { uint64_t magic, events, spans, repeats, proofs, rows, occurrences, sites, publications; };
-struct scope_row_record { uint64_t completions, writers, releases; };
+struct scope_row_record { uint64_t completions, writers, releases, sourced; };
 #define GRAPH_PROGRAM_RECORD UINT64_C(0x414d41524748534d)
 #define GRAPH_PROGRAM_REPEATED UINT64_C(0x5045525048534d47)
-#define GRAPH_PROGRAM_SCOPED UINT64_C(0x504f435348534d47)
+#define GRAPH_PROGRAM_SCOPED UINT64_C(0x324f435348534d47)
 static size_t program_head(const struct mesh_graph_signature *s){
   return s->scopes?sizeof(struct program_record):s->repeats||s->proofs?offsetof(struct program_record,rows):
          offsetof(struct program_record,repeats);
 }
 static size_t scope_row_bytes(const struct mesh_graph_scopes_data *d){
   return d->completions*sizeof *d->completion+d->writers*sizeof *d->writer+(d->completions+1)*sizeof *d->release_first+
-         d->releases*sizeof *d->release;
+         d->releases*sizeof *d->release+(d->source?sizeof *d->source:0);
 }
 static size_t program_scoped(const struct mesh_graph_signature *s){
   if(!s->scopes)return 0;
@@ -3682,7 +3704,7 @@ static void program_scoped_write(const struct mesh_graph_signature *s,char *at){
   static const size_t none=0;
   for(size_t r=0;r<s->scopes->rows;r++){
     const struct mesh_graph_scopes_data *d=s->scopes->row+r;
-    const struct scope_row_record row={d->completions,d->writers,d->releases};
+    const struct scope_row_record row={d->completions,d->writers,d->releases,d->source!=NULL};
     at+=program_put(at,&row,sizeof row);
   }
   for(size_t r=0;r<s->scopes->rows;r++){
@@ -3691,6 +3713,7 @@ static void program_scoped_write(const struct mesh_graph_signature *s,char *at){
     at+=program_put(at,d->writer,d->writers*sizeof *d->writer);
     at+=program_put(at,d->completions?d->release_first:&none,(d->completions+1)*sizeof *d->release_first);
     at+=program_put(at,d->release,d->releases*sizeof *d->release);
+    if(d->source)at+=program_put(at,d->source,sizeof *d->source);
   }
   at+=program_put(at,s->occurrence,s->occurrences*sizeof *s->occurrence);
   at+=program_put(at,s->site,s->sites*sizeof *s->site);
@@ -3713,13 +3736,14 @@ static int program_scoped_read(struct mesh_graph_signature *s,const struct progr
     struct mesh_graph_scopes_data *d=row+r;
     *d=(struct mesh_graph_scopes_data){.completions=(size_t)x.completions,.writers=(size_t)x.writers,
                                        .releases=(size_t)x.releases};
-    const size_t bytes=scope_row_bytes(d);
+    const size_t bytes=scope_row_bytes(d)+(x.sourced?sizeof *d->source:0);
     if(bytes>room-used){result=EINVAL;break;}
     const char *y=at+used;
     d->completion=(const void *)y;y+=d->completions*sizeof *d->completion;
     d->writer=(const void *)y;y+=d->writers*sizeof *d->writer;
     d->release_first=(const void *)y;y+=(d->completions+1)*sizeof *d->release_first;
-    d->release=(const void *)y;
+    d->release=(const void *)y;y+=d->releases*sizeof *d->release;
+    d->source=x.sourced?(const void *)y:NULL;
     used+=bytes;
   }
   if(!result && (body->occurrences>room/sizeof *s->occurrence || body->sites>room/sizeof *s->site ||
@@ -4275,32 +4299,38 @@ static uint32_t compose_processor(struct mesh_graph_signature *s, struct mesh_gr
 /* design/synchronization-signature-change-request.md items 1 and 6: a composed signature's attachment, both
    operands' occurrences kept (mesh-graph.h mesh_graph_compose): a's rows, sites, publication events and tasks first,
    b's after them (b's row r composed row a's rows + r, its own for the same scopes; its site k a's sites + k; its event
-   k a's publications + k; its task t a's tasks + t), each operand's scopes and realized holder retained, so each
-   original owner is kept, and only the composed descriptors, occurrences, sites and published values made; one
-   operand's own (its sites' tasks moved for b) where the other has no scopes */
+   k a's publications + k; its task t a's tasks + t), each operand's scopes, source binding and realized holder
+   retained, so each original owner is kept, and only the composed descriptors (their sources borrowed as they are),
+   bound source pointers, occurrences, sites and published values made; one operand's realized arrays (its sites'
+   tasks moved for b) where the other has no scopes. The composed scopes are always the result's own, so that a later
+   mesh_graph_scopes_bind of an operand's scopes leaves the binding projected here, and its holder, as they were */
 static int compose_scopes(struct mesh_graph_signature *s, const struct mesh_graph_signature *a,
                           const struct mesh_graph_signature *b) {
   const int both = a->scopes && b->scopes, same = a->scopes == b->scopes;
   const struct mesh_graph_signature *g = b->scopes ? b : a;
-  const size_t rows = both && !same ? a->scopes->rows : 0, lead = both ? a->sites : 0, sites = lead + g->sites,
-               occurrences = (both ? a->occurrences : 0) + g->occurrences,
+  struct mesh_graph_scopes *const part[2] = {both && !same ? a->scopes : NULL, g->scopes};
+  const size_t rows = part[0] ? part[0]->rows : 0, total = rows + g->scopes->rows, lead = both ? a->sites : 0,
+               sites = lead + g->sites, occurrences = (both ? a->occurrences : 0) + g->occurrences,
                publications = (both ? a->publications : 0) + g->publications;
+  const int bound = (part[0] && part[0]->bound) || g->scopes->bound;
   /* the occurrence's uint32_t row, site and event indices */
-  if (both && ((uint64_t)rows + b->scopes->rows > UINT32_MAX || sites > UINT32_MAX || publications > UINT32_MAX))
-    return EOVERFLOW;
+  if (both && (total > UINT32_MAX || sites > UINT32_MAX || publications > UINT32_MAX)) return EOVERFLOW;
   struct mesh_graph_site *projected = b->scopes && sites ? malloc(sites * sizeof *projected) : NULL;
   struct mesh_graph_occurrence *occurrence =
     both ? malloc(occurrences * sizeof *occurrence + publications * sizeof *s->published + 1) : NULL;
   struct mesh_graph_realized *realized = both ? malloc(sizeof *realized) : NULL;
-  struct mesh_graph_scopes_data *row = both && !same ? malloc((rows + b->scopes->rows + 1) * sizeof *row) : NULL;
-  struct mesh_graph_scopes *scopes = both && !same ? malloc(sizeof *scopes) : NULL;
-  if ((b->scopes && sites && !projected) || (both && (!occurrence || !realized)) || (both && !same && (!row || !scopes))) {
-    free(projected); free(occurrence); free(realized); free(row); free(scopes);
+  struct mesh_graph_scopes_data *row = malloc((total + 1) * sizeof *row);
+  struct mesh_graph_scopes *scopes = malloc(sizeof *scopes);
+  const void **pointer = bound ? malloc((total + 1) * sizeof *pointer) : NULL;
+  struct mesh_graph_realized *binding = bound ? malloc(sizeof *binding) : NULL;
+  if ((b->scopes && sites && !projected) || (both && (!occurrence || !realized)) || !row || !scopes ||
+      (bound && (!pointer || !binding))) {
+    free(projected); free(occurrence); free(realized); free(row); free(scopes); free(pointer); free(binding);
     return ENOMEM;
   }
-  struct signature_attached x = {.scopes = g->scopes, .realized = g->realized, .occurrences = g->occurrences,
-                                 .sites = sites, .publications = g->publications, .occurrence = g->occurrence,
-                                 .site = g->site, .published = g->published};
+  struct signature_attached x = {.realized = g->realized, .occurrences = g->occurrences, .sites = sites,
+                                 .publications = g->publications, .occurrence = g->occurrence, .site = g->site,
+                                 .published = g->published};
   if (projected) {
     if (lead) memcpy(projected, a->site, lead * sizeof *projected);
     for (size_t k = 0; k < b->sites; k++) {
@@ -4326,14 +4356,24 @@ static int compose_scopes(struct mesh_graph_signature *s, const struct mesh_grap
     x.realized = realized; x.occurrences = occurrences; x.publications = publications;
     x.occurrence = occurrence; x.published = published;
   } else realized_retain(x.realized);
-  if (scopes) {
-    if (rows) memcpy(row, a->scopes->row, rows * sizeof *row);
-    if (b->scopes->rows) memcpy(row + rows, b->scopes->row, b->scopes->rows * sizeof *row);
-    mesh_graph_scopes_retain(a->scopes); mesh_graph_scopes_retain(b->scopes);
-    *scopes = (struct mesh_graph_scopes){.references = 1, .rows = rows + b->scopes->rows, .row = row, .own = row,
-                                         .part = {a->scopes, b->scopes}};
-    x.scopes = scopes;
-  } else mesh_graph_scopes_retain(x.scopes);
+  /* the descriptors and bound pointers of part[0] (a's, different scopes) then part[1] (the scoped or same scopes) */
+  *scopes = (struct mesh_graph_scopes){.references = 1, .rows = total, .row = row, .own = row,
+                                       .part = {part[0], part[1]}};
+  size_t at = 0;
+  for (int k = 0; k < 2; k++) {
+    if (!part[k]) continue;
+    mesh_graph_scopes_retain(part[k]);
+    if (part[k]->rows) memcpy(row + at, part[k]->row, part[k]->rows * sizeof *row);
+    for (size_t r = 0; bound && r < part[k]->rows; r++) pointer[at + r] = part[k]->source ? part[k]->source[r] : NULL;
+    if (part[k]->bound) realized_retain(part[k]->bound);
+    at += part[k]->rows;
+  }
+  if (bound) {
+    *binding = (struct mesh_graph_realized){.references = 1, .own = pointer,
+                                            .part = {part[0] ? part[0]->bound : NULL, part[1]->bound}};
+    scopes->source = pointer; scopes->bound = binding;
+  }
+  x.scopes = scopes;
   const int result = signature_attach(s, x);
   if (result) { free(projected); realized_free(x.realized); mesh_graph_scopes_free(x.scopes); }
   return result;
@@ -4495,10 +4535,19 @@ static int signature_drawn(const struct mesh_graph_synchronized *e) {
 }
 /* a scoped signature's completion scopes, occurrences, sites, publication events and answered reads, one line each
    (none for a signature without scopes: its text is as before) */
+/* a scope row's source as printed: its original artifact row, native node and structural identity, or none */
+static void signature_source(struct graph_sink *t, const struct mesh_graph_scopes_data *d) {
+  if (!d->source) { graph_put(t, " source none"); return; }
+  graph_put(t, " source artifact %u node %u identity ", d->source->row, d->source->node);
+  for (size_t k = 0; k < sizeof d->source->identity; k++) graph_put(t, "%02x", d->source->identity[k]);
+}
 static void signature_scoped(struct graph_sink *t, const struct mesh_graph_signature *s) {
   if (!s->scopes) return;
   for (size_t row = 0; row < s->scopes->rows; row++) {
     const struct mesh_graph_scopes_data *d = s->scopes->row + row;
+    graph_put(t, "%% scope_source row %zu", row);
+    signature_source(t, d);
+    graph_put(t, "\n");
     for (size_t c = 0; c < d->completions; c++) {
       const struct mesh_graph_completion *x = d->completion + c;
       graph_put(t, "%% scope row %zu %zu value %u counter %u total %llu writers %u+%u releases %zu+%zu\n", row, c,
@@ -4639,10 +4688,13 @@ int mesh_graph_dot(const struct mesh_graph_signature *s, char *text, size_t room
     const struct mesh_graph_occurrence *x = s->occurrence + k;
     const struct mesh_graph_scopes_data *d = s->scopes->row + x->row;
     const size_t f = d->release_first[x->completion], n = d->release_first[x->completion + 1] - f;
-    for (size_t r = 0; r < n; r++)
-      graph_put(&t, "  e%llu [shape=diamond label=\"publication %llu\\nscope %u execution %llu value %llu\"];\n",
-                (unsigned long long)(x->event + r), (unsigned long long)(x->event + r), x->completion,
+    for (size_t r = 0; r < n; r++) {
+      graph_put(&t, "  e%llu [shape=diamond label=\"publication %llu\\nrow %u scope %u execution %llu value %llu\\n",
+                (unsigned long long)(x->event + r), (unsigned long long)(x->event + r), x->row, x->completion,
                 (unsigned long long)x->execution, (unsigned long long)s->published[x->event + r]);
+      signature_source(&t, d);
+      graph_put(&t, "\"];\n");
+    }
   }
   for (size_t k = 0; k < s->answers; k++)
     graph_put(&t, "  e%u -> o%u [label=\"scoped\" style=bold];\n", s->answer[k].event, s->answer[k].operation + 1);
@@ -4698,8 +4750,10 @@ int mesh_graph_space_time(const struct mesh_graph_signature *s, char *text, size
     const struct mesh_graph_occurrence *x = s->occurrence + k;
     const struct mesh_graph_scopes_data *d = s->scopes->row + x->row;
     const struct mesh_graph_completion *c = d->completion + x->completion;
-    graph_put(&t, "publication events %u+%zu of row %u scope %u execution %llu, once after all %llu completions of tasks",
-              x->event, d->release_first[x->completion + 1] - d->release_first[x->completion], x->row, x->completion,
+    graph_put(&t, "publication events %u+%zu of row %u", x->event,
+              d->release_first[x->completion + 1] - d->release_first[x->completion], x->row);
+    signature_source(&t, d);
+    graph_put(&t, " scope %u execution %llu, once after all %llu completions of tasks", x->completion,
               (unsigned long long)x->execution, (unsigned long long)c->total);
     for (uint32_t w = 0; w < c->writers; w++) {
       graph_put(&t, " %u", s->site[x->site + w].first);
