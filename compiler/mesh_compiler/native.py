@@ -233,8 +233,11 @@ def planned_buffer(owner, owned, M):
 # logical wire value, its logical bytes, declared sent view, declared landed view; each call's ports are its Row's).
 # `slots` its callable interface roots in their stable order (each marked metal_ir_value_external with its slot
 # before its one numerical construction: an input or state root, its generator state, each
-# further output root but a CONSTANT); `placeholders` and `results`, per placeholder i and output spec o, (slot, root,
-# view, the view's byte offset in its root), slot None where the root is no interface slot
+# further output root but a CONSTANT); `placeholders` and `results`, per placeholder i of the original captured function
+# and output spec o, (slot, root, view, the view's byte offset in its root), slot None where the root is no interface
+# slot, all None where the placeholder has no physical root; `logical` (compilation-only) each original captured
+# function placeholder's compiled input Root (ConstructedMachine.inputs by Root.name, the placeholder's target), None
+# where the assembled body has no such placeholder (an unused one its specialization omitted)
 @dataclasses.dataclass
 class Body:
     key: object
@@ -249,6 +252,7 @@ class Body:
     slots: tuple = ()
     placeholders: tuple = ()
     results: tuple = ()
+    logical: tuple = ()
 
 
 # compiler/mesh_compiler/schedule.py declare_program's and solve_program's `bindings`: call j's
@@ -539,8 +543,9 @@ class Target:
                     slots.setdefault(leaf.root, len(slots))
         body.slots = tuple(slots)
         body.placeholders, body.results = (tuple((slots.get(r.root), r.root, r.value, placed_at(r.value))
-                                                 if r.root is not None else (None, None, None, 0) for r in records)
-                                           for records in (body.inputs, body.outputs))
+                                                 if r is not None and r.root is not None else (None, None, None, 0)
+                                                 for r in records)
+                                           for records in (body.logical, body.outputs))
 
     # compiler/mesh_compiler/schedule.py Prepared.copies, remap and bind; metal-microbench metal_ir.h
     # metal_ir_value_external, metal_ir_value_planned and metal_ir_append; compiler/mesh_compiler/operations.py _copy
@@ -1027,8 +1032,8 @@ class Target:
             for root in body.state:
                 bound(("generator", analysis.calls[j]), ("generator", analysis.calls[j]), 0,
                       (j, self.root_of(j, root.root)))
-            for root, reference in zip(body.inputs, captured.calls[node].inputs):
-                if root.root is not None and root.role == metal.CONSTANT:
+            for root, reference in zip(body.logical, captured.calls[node].inputs, strict=True):
+                if root is not None and root.root is not None and root.role == metal.CONSTANT:
                     constants.append((j, self.root_of(j, root.root), reference.target))
         produced = {leaf: (j, o) for j, node in enumerate(analysis.nodes)
                     for o, leaf in enumerate(captured.calls[node].outputs) if isinstance(leaf, torch.fx.Node)}
@@ -1486,6 +1491,14 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
     target.targets = targets
     libs = libraries()
     M, _, (_, device), _ = libs
+    # each body's Body.logical: its compiled inputs at their original captured function placeholders (Root.name the
+    # placeholder's target, as schedule.declare_program's binding_of reads them), the rest None
+    for body in bodies:
+        names = [n.target for n in captured.functions[body.key].graph_module.graph.nodes if n.op == "placeholder"]
+        logical = [None] * len(names)
+        for root in body.inputs:
+            logical[names.index(root.name)] = root
+        body.logical = tuple(logical)
     for k in (k for k, body in enumerate(bodies) if body.machine is not None):
         target.interface(k, libs)
     bindings = target.bindings(captured, analysis)
