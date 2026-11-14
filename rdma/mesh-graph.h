@@ -26,6 +26,34 @@ int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)
 int mesh_graph_unfold(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                       const void *context, uint32_t root,
                       int (*visit)(void *consumer, uint32_t vertex, size_t k, uint32_t parent), void *consumer);
+/* one owned search of rows (first, head): count visited vertices, preorder[0 .. count) in discovery (depth-first) or
+   visit (breadth-first) order, postorder[0 .. count) in finishing order (depth-first; NULL breadth-first), parent[v]
+   and entry[v] the tree parent and row entry that reached v (UINT32_MAX and SIZE_MAX for a root or an unvisited
+   vertex), place[v] v's index in preorder (UINT32_MAX unvisited); freed by mesh_graph_search_free */
+struct mesh_graph_search { uint32_t vertices, count; uint32_t *preorder, *postorder, *parent, *place; size_t *entry; };
+/* T. H. Cormen et al., 3rd ed., §22.3 and §22.4, Lemma 22.11: depth-first search over rows (first, head) from
+   root[0 .. roots) in that order, each row's entries in order (in reverse order where `reverse`), each reachable vertex
+   visited once; EDEADLK on a back edge (a cycle), EINVAL on a vertex out of range */
+int mesh_graph_search(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                      const void *context, uint32_t roots, const uint32_t *root, int reverse,
+                      struct mesh_graph_search **made);
+/* T. H. Cormen et al., 3rd ed., §22.2: breadth-first search over rows (first, head) from start[0 .. starts), each start
+   and then each row entry in order, a vertex entering once; EINVAL on a vertex out of range */
+int mesh_graph_breadth(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                       const void *context, uint32_t starts, const uint32_t *start, struct mesh_graph_search **made);
+void mesh_graph_search_free(struct mesh_graph_search *made);
+/* rows held as an array: ((const uint32_t *)context)[k] */
+uint32_t mesh_graph_row_head(const void *context, size_t k);
+/* rows of a retained relation (context its struct mesh_graph_relation_data, first its row_first): edge[row_edge[k]].to */
+uint32_t mesh_graph_relation_head(const void *context, size_t k);
+/* A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988: over rows (first, head) whose heads all precede
+   their row (`following` 0) or all follow it (`following` 1) in vertex order, bit u of reached[v * words + u / 64] set
+   where a path of rows leads from v to u, words = (vertices + 63) / 64; EINVAL where a head is on the other side of its
+   row; freed by mesh_graph_closure_free */
+struct mesh_graph_closure { uint32_t vertices; size_t words; uint64_t *reached; };
+int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                       const void *context, int following, struct mesh_graph_closure **made);
+void mesh_graph_closure_free(struct mesh_graph_closure *made);
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth);
 /* Y. J. Chu and T. H. Liu, Scientia Sinica 14, 1965; J. Edmonds, J. Res. Nat. Bur. Standards 71B, 1967 */
 int mesh_graph_arborescence(uint32_t N, uint32_t root, uint32_t E, const uint32_t *from, const uint32_t *to,
@@ -245,6 +273,47 @@ int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct m
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1 */
 int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edges, const uint32_t *from, const uint32_t *to,
                         struct mesh_graph_dependence **made, size_t *count);
+/* design/compilation-composition-change-request.md items 6, 6.4 and 7, "Retain the value/effect/transfer cause of an
+   edge": one retained relation, reference counted. A root borrows the caller's views (and their pairs) and
+   conflicts unchanged under `owner`, adopted on success and released by release(owner) with the last reference
+   (NULL release: the caller keeps them alive). Its edges are the distinct (from, to), from != to, of the conflicts,
+   sorted, delay 0; edge e's causes are conflict[member[first[e] .. first[e + 1])], the original records (a self
+   conflict is retained and belongs to no edge). row_first/row_edge index the edges by `from` (outgoing) and
+   in_first/in_edge by `to` (incoming): row_edge[row_first[v] .. row_first[v + 1]) are v's. A derived relation
+   retains its parent and adopts its operand's owner: mesh_graph_relation_quotient is mesh_graph_quotient's relation
+   over classes, edge e from every parent edge source[source_first[e] .. source_first[e + 1])] between its two
+   classes (edges inside one class stay in the parent); mesh_graph_relation_contract is mesh_graph_contract's,
+   edge e's sources the parent edges of the least-delay walk mesh_graph_lags selected, in walk order. A derived
+   relation's view and conflict arrays are the root's, and its members compose its sources' members; class_of (a
+   quotient's) and kept (a contraction's) are its operand as given, over the parent's vertices, NULL otherwise. Data is
+   borrowed until the relation is freed. mesh_graph_relation_synchronization is mesh_graph_synchronization's mask
+   over the relation's edges, computed once. EINVAL for an endpoint or class out of range */
+struct mesh_graph_relation;
+struct mesh_graph_relation_data {
+  uint32_t vertices;
+  size_t views, conflicts, edges;
+  const struct mesh_graph_view *view;
+  const struct mesh_graph_conflict *conflict;
+  const struct mesh_graph_dependence *edge;
+  const size_t *first, *member;
+  const size_t *row_first, *row_edge;
+  const size_t *in_first, *in_edge;
+  const struct mesh_graph_relation *parent;
+  const size_t *source_first, *source;
+  const uint32_t *class_of;
+  const unsigned char *kept;
+};
+void mesh_graph_relation_retain(struct mesh_graph_relation *);
+void mesh_graph_relation_free(struct mesh_graph_relation *);
+int mesh_graph_relation_create(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t conflicts,
+                               const struct mesh_graph_conflict *conflict, void (*release)(void *), void *owner,
+                               struct mesh_graph_relation **out);
+const struct mesh_graph_relation_data *mesh_graph_relation_data(const struct mesh_graph_relation *);
+int mesh_graph_relation_quotient(struct mesh_graph_relation *parent, uint32_t classes, const uint32_t *class_of,
+                                 void (*release)(void *), void *owner, struct mesh_graph_relation **out);
+int mesh_graph_relation_contract(struct mesh_graph_relation *parent, const unsigned char *kept, void (*release)(void *),
+                                 void *owner, struct mesh_graph_relation **out);
+int mesh_graph_relation_synchronization(struct mesh_graph_relation *, const unsigned char **redundant, size_t *kept);
 enum { MESH_GRAPH_COMPLETION_EVENT = 1 };
 struct mesh_graph_event { uint32_t object, role, argument, padding; uint64_t lookback; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <CommonCrypto/CommonDigest.h>
 /* design/plan-to-bridge-change-request.md R5, Code; HiGHS 1.15.1, highs/interfaces/highs_c_api.h */
 #include <interfaces/highs_c_api.h>
@@ -16,21 +17,161 @@
 #include <isl/space.h>
 #include <isl/val.h>
 
+uint32_t mesh_graph_row_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
+
+uint32_t mesh_graph_relation_head(const void *context, size_t k) {
+  const struct mesh_graph_relation_data *data = context;
+  return data->edge[data->row_edge[k]].to;
+}
+
+void mesh_graph_search_free(struct mesh_graph_search *made) {
+  if (!made) return;
+  free(made->preorder); free(made->postorder); free(made->parent); free(made->place); free(made->entry); free(made);
+}
+
+static struct mesh_graph_search *search_made(uint32_t vertices, int finishing) {
+  const size_t room = (size_t)vertices + 1;
+  struct mesh_graph_search *made = calloc(1, sizeof *made);
+  if (!made) return NULL;
+  made->vertices = vertices;
+  made->preorder = malloc(room * sizeof *made->preorder);
+  made->postorder = finishing ? malloc(room * sizeof *made->postorder) : NULL;
+  made->parent = malloc(room * sizeof *made->parent);
+  made->place = malloc(room * sizeof *made->place);
+  made->entry = malloc(room * sizeof *made->entry);
+  if (!made->preorder || (finishing && !made->postorder) || !made->parent || !made->place || !made->entry) {
+    mesh_graph_search_free(made);
+    return NULL;
+  }
+  for (uint32_t v = 0; v < vertices; v++) { made->parent[v] = made->place[v] = UINT32_MAX; made->entry[v] = SIZE_MAX; }
+  return made;
+}
+
+int mesh_graph_search(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                      const void *context, uint32_t roots, const uint32_t *root, int reverse,
+                      struct mesh_graph_search **made) {
+  *made = NULL;
+  struct mesh_graph_search *s = search_made(vertices, 1);
+  size_t *next = malloc(((size_t)vertices + 1) * sizeof *next);
+  unsigned char *finished = calloc((size_t)vertices + 1, 1);
+  int status = s && next && finished ? 0 : ENOMEM;
+  uint32_t done = 0;
+  for (uint32_t r = 0; !status && r < roots; r++) {
+    uint32_t v = root[r];
+    if (v >= vertices) { status = EINVAL; break; }
+    if (s->place[v] != UINT32_MAX) continue;
+    s->place[v] = s->count; s->preorder[s->count++] = v; next[v] = 0;
+    while (!status && v != UINT32_MAX) {
+      if (next[v] == first[v + 1] - first[v]) { finished[v] = 1; s->postorder[done++] = v; v = s->parent[v]; continue; }
+      const size_t k = reverse ? first[v + 1] - 1 - next[v]++ : first[v] + next[v]++;
+      const uint32_t w = head(context, k);
+      if (w >= vertices) status = EINVAL;
+      else if (s->place[w] == UINT32_MAX) {
+        s->parent[w] = v; s->entry[w] = k; s->place[w] = s->count; s->preorder[s->count++] = w; next[w] = 0; v = w;
+      } else if (!finished[w]) status = EDEADLK;
+    }
+  }
+  free(next); free(finished);
+  if (status) { mesh_graph_search_free(s); return status; }
+  *made = s;
+  return 0;
+}
+
+int mesh_graph_breadth(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                       const void *context, uint32_t starts, const uint32_t *start, struct mesh_graph_search **made) {
+  *made = NULL;
+  struct mesh_graph_search *s = search_made(vertices, 0);
+  int status = s ? 0 : ENOMEM;
+  for (uint32_t r = 0; !status && r < starts; r++) {
+    const uint32_t v = start[r];
+    if (v >= vertices) status = EINVAL;
+    else if (s->place[v] == UINT32_MAX) { s->place[v] = s->count; s->preorder[s->count++] = v; }
+  }
+  for (uint32_t at = 0; !status && at < s->count; at++) {
+    const uint32_t v = s->preorder[at];
+    for (size_t k = first[v]; !status && k < first[v + 1]; k++) {
+      const uint32_t w = head(context, k);
+      if (w >= vertices) status = EINVAL;
+      else if (s->place[w] == UINT32_MAX) {
+        s->parent[w] = v; s->entry[w] = k; s->place[w] = s->count; s->preorder[s->count++] = w;
+      }
+    }
+  }
+  if (status) { mesh_graph_search_free(s); return status; }
+  *made = s;
+  return 0;
+}
+
+void mesh_graph_closure_free(struct mesh_graph_closure *made) {
+  if (!made) return;
+  free(made->reached); free(made);
+}
+
+static int closure_descending(const void *a, const void *b) {
+  const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+  return (x < y) - (x > y);
+}
+
+static int closure_ascending(const void *a, const void *b) { return closure_descending(b, a); }
+
+int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                       const void *context, int following, struct mesh_graph_closure **made) {
+  *made = NULL;
+  const size_t words = ((size_t)vertices + 63) / 64;
+  size_t most = 0;
+  for (uint32_t v = 0; v < vertices; v++) if (first[v + 1] - first[v] > most) most = first[v + 1] - first[v];
+  struct mesh_graph_closure *c = calloc(1, sizeof *c);
+  uint32_t *heads = malloc((most + 1) * sizeof *heads);
+  int status = c && heads && !(words && (size_t)vertices > SIZE_MAX / sizeof(uint64_t) / words) ? 0 : ENOMEM;
+  if (!status) {
+    c->vertices = vertices; c->words = words;
+    c->reached = calloc((size_t)vertices * words + 1, sizeof *c->reached);
+    if (!c->reached) status = ENOMEM;
+  }
+  for (uint32_t at = 0; !status && at < vertices; at++) {
+    const uint32_t v = following ? vertices - 1 - at : at;
+    size_t n = 0;
+    for (size_t k = first[v]; k < first[v + 1]; k++) heads[n++] = head(context, k);
+    qsort(heads, n, sizeof *heads, following ? closure_ascending : closure_descending);
+    uint64_t *row = c->reached + (size_t)v * words;
+    for (size_t i = 0; !status && i < n; i++) {
+      const uint32_t u = heads[i];
+      if (following ? u <= v || u >= vertices : u >= v) status = EINVAL;
+      else if (!(row[u / 64] >> (u % 64) & 1)) {
+        const uint64_t *from = c->reached + (size_t)u * words;
+        for (size_t w = 0; w < words; w++) row[w] |= from[w];
+        row[u / 64] |= UINT64_C(1) << (u % 64);
+      }
+    }
+  }
+  free(heads);
+  if (status) { mesh_graph_closure_free(c); return status; }
+  *made = c;
+  return 0;
+}
+
+/* the breadth-first search of mesh_graph_breadth over both directions of each edge, row v's entries in edge order and
+   side order, as the edges were scanned; parent[from] is from */
 uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
                           const void *context, uint32_t from, uint32_t *order, unsigned char *reached, uint32_t *parent) {
   for (uint32_t v = 0; v < vertices; v++) { reached[v] = 0; if (parent) parent[v] = UINT32_MAX; }
-  uint32_t count = 1;
-  order[0] = from; reached[from] = 1;
-  if (parent) parent[from] = from;
-  for (uint32_t head = 0; head < count; head++)
+  size_t *first = calloc((size_t)vertices + 2, sizeof *first);
+  uint32_t *head = malloc(2 * (size_t)edges * sizeof *head + sizeof *head);
+  struct mesh_graph_search *s = NULL;
+  uint32_t count = 0;
+  if (first && head) {
+    for (uint32_t e = 0; e < edges; e++) for (uint32_t side = 0; side < 2; side++) first[end(context, e, side) + 2]++;
+    for (uint32_t v = 0; v < vertices; v++) first[v + 2] += first[v + 1];
     for (uint32_t e = 0; e < edges; e++)
-      for (uint32_t side = 0; side < 2; side++) {
-        const uint32_t other = end(context, e, 1 - side);
-        if (end(context, e, side) == order[head] && !reached[other]) {
-          reached[other] = 1; order[count++] = other;
-          if (parent) parent[other] = order[head];
-        }
-      }
+      for (uint32_t side = 0; side < 2; side++) head[first[end(context, e, side) + 1]++] = end(context, e, 1 - side);
+  }
+  if (first && head && !mesh_graph_breadth(vertices, first, mesh_graph_row_head, head, 1, &from, &s)) {
+    for (count = 0; count < s->count; count++) {
+      order[count] = s->preorder[count]; reached[order[count]] = 1;
+      if (parent) parent[order[count]] = order[count] == from ? from : s->parent[order[count]];
+    }
+  }
+  mesh_graph_search_free(s); free(first); free(head);
   return count;
 }
 
@@ -52,22 +193,10 @@ int mesh_graph_preorder(uint32_t vertices, const size_t *first, uint32_t (*head)
                         const void *context, uint32_t root,
                         int (*visit)(void *consumer, uint32_t vertex, uint32_t parent), void *consumer) {
   if (root >= vertices) return EINVAL;
-  uint32_t *parent = malloc(((size_t)vertices + 1) * sizeof *parent);
-  uint32_t *order = malloc(((size_t)vertices + 1) * sizeof *order);
-  size_t *next = malloc(((size_t)vertices + 1) * sizeof *next);
-  unsigned char *color = calloc((size_t)vertices + 1, 1);
-  int status = !parent || !order || !next || !color ? ENOMEM : 0;
-  uint32_t count = 0;
-  if (!status) parent[root] = UINT32_MAX;
-  for (uint32_t v = root; !status && v != UINT32_MAX;) {
-    if (!color[v]) { color[v] = 1; next[v] = first[v]; order[count++] = v; }
-    if (next[v] == first[v + 1]) { color[v] = 2; v = parent[v]; continue; }
-    const uint32_t w = head(context, next[v]++);
-    if (color[w] == 1) status = EDEADLK;
-    else if (!color[w]) { parent[w] = v; v = w; }
-  }
-  for (uint32_t k = 0; !status && k < count; k++) status = visit(consumer, order[k], parent[order[k]]);
-  free(parent); free(order); free(next); free(color);
+  struct mesh_graph_search *s;
+  int status = mesh_graph_search(vertices, first, head, context, 1, &root, 0, &s);
+  for (uint32_t k = 0; !status && k < s->count; k++) status = visit(consumer, s->preorder[k], s->parent[s->preorder[k]]);
+  mesh_graph_search_free(s);
   return status;
 }
 /* T. H. Cormen et al., 3rd ed., §22.3 without the visited set; A. V. Aho, M. S. Lam, R. Sethi and J. D. Ullman,
@@ -640,9 +769,10 @@ static int lags_before(const void *context, uint32_t a, uint32_t b) {
   return distance[a] < distance[b] || (distance[a] == distance[b] && a < b);
 }
 static size_t lags_relax(uint32_t *heap, uint32_t *place, uint64_t *distance, size_t count, uint32_t v, uint64_t at,
-                         uint64_t weight) {
+                         uint64_t weight, size_t *via, size_t k) {
   if (weight == UINT64_MAX || at > UINT64_MAX - 1 - weight || at + weight >= distance[v]) return count;
   distance[v] = at + weight;
+  if (via) via[v] = k;
   if (place[v] == UINT32_MAX) {
     heap[count] = v;
     heap_up(heap, place, lags_before, distance, count);
@@ -654,9 +784,11 @@ static size_t lags_relax(uint32_t *heap, uint32_t *place, uint64_t *distance, si
 /* E. W. Dijkstra, Numerische Mathematik 1, 1959, problem 2: lags[s * targets + x] the least sum of lags over a walk of
    at least one edge from source[s] to target[x], UINT64_MAX where there is none; an edge of lag UINT64_MAX is absent,
    and a walk's sum is kept below UINT64_MAX */
-int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
-                    uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
-                    const uint32_t *source,uint32_t targets,const uint32_t *target,uint64_t *lags) {
+/* via[s * vertices + v], where given: the edge position k whose relaxation set v's least lag from source[s], the
+   selected walk's last edge into v */
+static int lags_walks(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                      uint64_t (*lag)(const void *context, size_t k), const void *context, uint32_t sources,
+                      const uint32_t *source, uint32_t targets, const uint32_t *target, uint64_t *lags, size_t *via) {
   const size_t edges = first[vertices];
   if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
   uint32_t *heads = malloc((edges + 1) * sizeof *heads);
@@ -671,21 +803,26 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
   for (uint32_t s = 0; !result && distinct && s < sources; s++) {
     for (uint32_t v = 0; v < vertices; v++) { distance[v] = UINT64_MAX; place[v] = UINT32_MAX; }
     const uint32_t from = source[s];
-    size_t count = 0;
+    size_t count = 0, *walk = via ? via + (size_t)s * vertices : NULL;
     for (size_t k = first[from]; k < first[from + 1]; k++)
-      count = lags_relax(heap, place, distance, count, heads[k], 0, weights[k]);
+      count = lags_relax(heap, place, distance, count, heads[k], 0, weights[k], walk, k);
     for (uint32_t left = distinct; count;) {
       const uint32_t at = heap[0];
       place[at] = UINT32_MAX;
       if (--count) { heap[0] = heap[count]; heap_down(heap, place, lags_before, distance, count, 0); }
       if (wanted[at] && !--left) break;
       for (size_t k = first[at]; k < first[at + 1]; k++)
-        count = lags_relax(heap, place, distance, count, heads[k], distance[at], weights[k]);
+        count = lags_relax(heap, place, distance, count, heads[k], distance[at], weights[k], walk, k);
     }
     for (uint32_t x = 0; x < targets; x++) lags[(size_t)s * targets + x] = distance[target[x]];
   }
   free(heads); free(weights); free(distance); free(heap); free(place); free(wanted);
   return result;
+}
+int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
+                    uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
+                    const uint32_t *source,uint32_t targets,const uint32_t *target,uint64_t *lags) {
+  return lags_walks(vertices, first, head, lag, context, sources, source, targets, target, lags, NULL);
 }
 
 /* design/compilation-composition-change-request.md item 6.2: vertex contraction by mesh_graph_lags over the graph with
@@ -705,34 +842,54 @@ static uint64_t contract_lag(const void *context, size_t k) {
   const struct contract_graph *g = context;
   return g->edge[g->order[k]].delay;
 }
+/* mesh_graph_contract's one solve: kept vertex v a source and, as vertices + v, a target; with `walks`, each source's
+   selected walks (lags_walks) */
+struct contract_solved { uint32_t keeps; size_t *first, *order, *via; uint32_t *source, *target; uint64_t *lags; };
+static void contract_free(struct contract_solved *c) {
+  free(c->first); free(c->order); free(c->via); free(c->source); free(c->target); free(c->lags);
+}
+static int contract_solve(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
+                          const unsigned char *kept, int walks, struct contract_solved *c) {
+  memset(c, 0, sizeof *c);
+  for (size_t e = 0; e < edges; e++) if (edge[e].from >= vertices || edge[e].to >= vertices) return EINVAL;
+  if (vertices >= UINT32_MAX / 2 || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  for (uint32_t v = 0; v < vertices; v++) c->keeps += kept[v] != 0;
+  const uint32_t keeps = c->keeps;
+  if ((size_t)keeps * keeps >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
+  if (walks && keeps && 2 * (size_t)vertices >= SIZE_MAX / sizeof(size_t) / keeps) return ENOMEM;
+  c->first = malloc((2 * (size_t)vertices + 1) * sizeof *c->first); c->order = malloc((edges + 1) * sizeof *c->order);
+  c->source = malloc(((size_t)keeps + 1) * sizeof *c->source); c->target = malloc(((size_t)keeps + 1) * sizeof *c->target);
+  c->lags = malloc(((size_t)keeps * keeps + 1) * sizeof *c->lags);
+  if (walks) c->via = malloc(((size_t)keeps * 2 * vertices + 1) * sizeof *c->via);
+  int result = c->first && c->order && c->source && c->target && c->lags && (!walks || c->via) ? 0 : ENOMEM;
+  for (uint32_t v = 0, k = 0; !result && v < vertices; v++)
+    if (kept[v]) { c->source[k] = v; c->target[k++] = vertices + v; }
+  const struct contract_graph g = {edge, c->order, kept, vertices};
+  if (!result) {
+    mesh_graph_rows(2 * vertices, edges, contract_tail, edge, c->first, c->order);
+    if (keeps) result = lags_walks(2 * vertices, c->first, contract_head, contract_lag, &g, keeps, c->source, keeps,
+                                   c->target, c->lags, c->via);
+  }
+  if (result) contract_free(c);
+  return result;
+}
 int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
                         const unsigned char *kept, struct mesh_graph_dependence **contracted, size_t *made) {
   *contracted = NULL; *made = 0;
-  for (size_t e = 0; e < edges; e++) if (edge[e].from >= vertices || edge[e].to >= vertices) return EINVAL;
-  if (vertices >= UINT32_MAX / 2 || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
-  uint32_t keeps = 0;
-  for (uint32_t v = 0; v < vertices; v++) keeps += kept[v] != 0;
-  if ((size_t)keeps * keeps >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
-  size_t *first = malloc((2 * (size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
-  uint32_t *source = malloc(((size_t)keeps + 1) * sizeof *source), *target = malloc(((size_t)keeps + 1) * sizeof *target);
-  uint64_t *lags = malloc(((size_t)keeps * keeps + 1) * sizeof *lags);
-  int result = first && order && source && target && lags ? 0 : ENOMEM;
-  for (uint32_t v = 0, k = 0; !result && v < vertices; v++)
-    if (kept[v]) { source[k] = v; target[k++] = vertices + v; }
-  const struct contract_graph g = {edge, order, kept, vertices};
-  if (!result) {
-    mesh_graph_rows(2 * vertices, edges, contract_tail, edge, first, order);
-    if (keeps) result = mesh_graph_lags(2 * vertices, first, contract_head, contract_lag, &g, keeps, source, keeps, target, lags);
-  }
+  struct contract_solved c;
+  int result = contract_solve(vertices, edges, edge, kept, 0, &c);
+  if (result) return result;
+  const uint32_t keeps = c.keeps;
   size_t count = 0, at = 0;
-  for (size_t p = 0; !result && p < (size_t)keeps * keeps; p++) count += lags[p] != UINT64_MAX;
-  if (!result && count >= SIZE_MAX / sizeof(struct mesh_graph_dependence)) result = ENOMEM;
+  for (size_t p = 0; p < (size_t)keeps * keeps; p++) count += c.lags[p] != UINT64_MAX;
+  if (count >= SIZE_MAX / sizeof(struct mesh_graph_dependence)) result = ENOMEM;
   struct mesh_graph_dependence *relation = result ? NULL : malloc((count + 1) * sizeof *relation);
   if (!result && !relation) result = ENOMEM;
   for (size_t p = 0; !result && p < (size_t)keeps * keeps; p++)
-    if (lags[p] != UINT64_MAX) relation[at++] = (struct mesh_graph_dependence){source[p / keeps], source[p % keeps], lags[p]};
+    if (c.lags[p] != UINT64_MAX)
+      relation[at++] = (struct mesh_graph_dependence){c.source[p / keeps], c.source[p % keeps], c.lags[p]};
   if (!result) { *contracted = relation; *made = count; relation = NULL; }
-  free(relation); free(first); free(order); free(source); free(target); free(lags);
+  free(relation); contract_free(&c);
   return result;
 }
 /* design/algorithm-sources.md#relations-over-copies-and-classes; M. Lam, PLDI 1988, §2.3 */
@@ -758,30 +915,316 @@ int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct m
 }
 /* design/algorithm-sources.md#relations-over-copies-and-classes;
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1 */
+struct quotient_pair { uint64_t key; size_t edge; };
 static int quotient_before(const void *a, const void *b) {
-  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-  return (x > y) - (x < y);
+  const struct quotient_pair *x = a, *y = b;
+  if (x->key != y->key) return x->key < y->key ? -1 : 1;
+  return (x->edge > y->edge) - (x->edge < y->edge);
 }
+/* mesh_graph_quotient's one solve: each edge between two classes, (class of from, class of to) and the edge, sorted */
+static int quotient_solve(uint32_t vertices, const uint32_t *class_of, size_t edges,
+                          uint32_t (*tail)(const void *context, size_t e), uint32_t (*head)(const void *context, size_t e),
+                          const void *context, struct quotient_pair **made, size_t *pairs) {
+  *made = NULL; *pairs = 0;
+  for (size_t e = 0; e < edges; e++) if (tail(context, e) >= vertices || head(context, e) >= vertices) return EINVAL;
+  if (edges >= SIZE_MAX / sizeof(struct quotient_pair)) return ENOMEM;
+  struct quotient_pair *pair = malloc((edges + 1) * sizeof *pair);
+  if (!pair) return ENOMEM;
+  size_t n = 0;
+  for (size_t e = 0; e < edges; e++) {
+    const uint32_t a = class_of[tail(context, e)], b = class_of[head(context, e)];
+    if (a != b) pair[n++] = (struct quotient_pair){(uint64_t)a << 32 | b, e};
+  }
+  if (n) qsort(pair, n, sizeof *pair, quotient_before);
+  *made = pair; *pairs = n;
+  return 0;
+}
+struct quotient_arrays { const uint32_t *from, *to; };
+static uint32_t quotient_tail(const void *context, size_t e) { return ((const struct quotient_arrays *)context)->from[e]; }
+static uint32_t quotient_head(const void *context, size_t e) { return ((const struct quotient_arrays *)context)->to[e]; }
 int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edges, const uint32_t *from, const uint32_t *to,
                         struct mesh_graph_dependence **made, size_t *count) {
   *made = NULL; *count = 0;
-  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
-  if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
-  uint64_t *pair = malloc((edges + 1) * sizeof *pair);
-  if (!pair) return ENOMEM;
-  size_t pairs = 0, kept = 0;
-  for (size_t e = 0; e < edges; e++)
-    if (class_of[from[e]] != class_of[to[e]]) pair[pairs++] = (uint64_t)class_of[from[e]] << 32 | class_of[to[e]];
-  if (pairs) qsort(pair, pairs, sizeof *pair, quotient_before);
+  const struct quotient_arrays arrays = {from, to};
+  struct quotient_pair *pair;
+  size_t pairs, kept = 0;
+  int result = quotient_solve(vertices, class_of, edges, quotient_tail, quotient_head, &arrays, &pair, &pairs);
+  if (result) return result;
   for (size_t k = 0; k < pairs; k++)
-    if (!kept || pair[k] != pair[kept - 1]) pair[kept++] = pair[k];
+    if (!kept || pair[k].key != pair[kept - 1].key) pair[kept++] = pair[k];
   struct mesh_graph_dependence *relation =
       kept < SIZE_MAX / sizeof(struct mesh_graph_dependence) ? malloc((kept + 1) * sizeof *relation) : NULL;
   if (!relation) { free(pair); return ENOMEM; }
-  for (size_t k = 0; k < kept; k++) relation[k] = (struct mesh_graph_dependence){(uint32_t)(pair[k] >> 32), (uint32_t)pair[k], 0};
+  for (size_t k = 0; k < kept; k++)
+    relation[k] = (struct mesh_graph_dependence){(uint32_t)(pair[k].key >> 32), (uint32_t)pair[k].key, 0};
   free(pair);
   *made = relation; *count = kept;
   return 0;
+}
+
+static int synchronization_solve(uint32_t vertices, size_t edges, uint32_t (*tail)(const void *context, size_t e),
+                                 uint32_t (*head)(const void *context, size_t e), const void *context,
+                                 unsigned char *redundant, size_t *kept);
+/* design/compilation-composition-change-request.md items 6, 6.4 and 7: mesh-graph.h struct mesh_graph_relation */
+struct mesh_graph_relation {
+  size_t references;
+  struct mesh_graph_relation_data data;
+  void (*release)(void *);
+  void *owner;
+  struct mesh_graph_relation *parent;
+  struct mesh_graph_dependence *edge;
+  size_t *first, *member, *row_first, *row_edge, *in_first, *in_edge, *source_first, *source;
+  pthread_mutex_t lock;
+  int synchronized;
+  unsigned char *redundant;
+  size_t kept;
+};
+static struct mesh_graph_relation *relation_new(void) {
+  struct mesh_graph_relation *r = calloc(1, sizeof *r);
+  if (!r) return NULL;
+  if (pthread_mutex_init(&r->lock, NULL)) { free(r); return NULL; }
+  r->references = 1;
+  return r;
+}
+static void relation_drop(struct mesh_graph_relation *r) {
+  free(r->edge); free(r->first); free(r->member); free(r->row_first); free(r->row_edge); free(r->in_first);
+  free(r->in_edge); free(r->source_first); free(r->source); free(r->redundant);
+  pthread_mutex_destroy(&r->lock);
+  free(r);
+}
+void mesh_graph_relation_retain(struct mesh_graph_relation *r) { __atomic_fetch_add(&r->references, 1, __ATOMIC_RELAXED); }
+void mesh_graph_relation_free(struct mesh_graph_relation *r) {
+  while (r && __atomic_fetch_sub(&r->references, 1, __ATOMIC_ACQ_REL) == 1) {
+    struct mesh_graph_relation *parent = r->parent;
+    void (*release)(void *) = r->release;
+    void *owner = r->owner;
+    relation_drop(r);
+    if (release) release(owner);
+    r = parent;
+  }
+}
+const struct mesh_graph_relation_data *mesh_graph_relation_data(const struct mesh_graph_relation *r) { return &r->data; }
+/* the edges (sorted by from, then to) by tail and by head, the same edge identities */
+static int relation_rows(struct mesh_graph_relation *r) {
+  const uint32_t vertices = r->data.vertices;
+  const size_t edges = r->data.edges;
+  r->row_first = malloc(((size_t)vertices + 1) * sizeof *r->row_first);
+  r->row_edge = malloc((edges + 1) * sizeof *r->row_edge);
+  r->in_first = calloc((size_t)vertices + 1, sizeof *r->in_first);
+  r->in_edge = malloc((edges + 1) * sizeof *r->in_edge);
+  if (!r->row_first || !r->row_edge || !r->in_first || !r->in_edge) return ENOMEM;
+  for (size_t e = 0, v = 0; v <= vertices; v++) {
+    while (e < edges && r->edge[e].from < v) e++;
+    r->row_first[v] = e;
+  }
+  for (size_t e = 0; e < edges; e++) { r->row_edge[e] = e; r->in_first[r->edge[e].to + 1]++; }
+  for (uint32_t v = 0; v < vertices; v++) r->in_first[v + 1] += r->in_first[v];
+  size_t *at = malloc(((size_t)vertices + 1) * sizeof *at);
+  if (!at) return ENOMEM;
+  memcpy(at, r->in_first, ((size_t)vertices + 1) * sizeof *at);
+  for (size_t e = 0; e < edges; e++) r->in_edge[at[r->edge[e].to]++] = e;
+  free(at);
+  r->data.row_first = r->row_first; r->data.row_edge = r->row_edge;
+  r->data.in_first = r->in_first; r->data.in_edge = r->in_edge;
+  return 0;
+}
+/* a derived edge's members: its source edges' members, in source order */
+static int relation_compose(struct mesh_graph_relation *r) {
+  const struct mesh_graph_relation_data *up = &r->parent->data;
+  const size_t edges = r->data.edges;
+  size_t total = 0;
+  for (size_t k = 0; k < r->source_first[edges]; k++) {
+    const size_t e = r->source[k], n = up->first[e + 1] - up->first[e];
+    if (n > SIZE_MAX / sizeof(size_t) - 1 - total) return ENOMEM;
+    total += n;
+  }
+  r->first = malloc((edges + 1) * sizeof *r->first);
+  r->member = malloc((total + 1) * sizeof *r->member);
+  if (!r->first || !r->member) return ENOMEM;
+  size_t at = 0;
+  for (size_t e = 0; e < edges; e++) {
+    r->first[e] = at;
+    for (size_t k = r->source_first[e]; k < r->source_first[e + 1]; k++)
+      for (size_t m = up->first[r->source[k]]; m < up->first[r->source[k] + 1]; m++) r->member[at++] = up->member[m];
+  }
+  r->first[edges] = at;
+  r->data.first = r->first; r->data.member = r->member;
+  return 0;
+}
+static void relation_derived(struct mesh_graph_relation *r, struct mesh_graph_relation *parent, uint32_t vertices,
+                             size_t edges) {
+  r->parent = parent;
+  r->data.vertices = vertices;
+  r->data.views = parent->data.views; r->data.view = parent->data.view;
+  r->data.conflicts = parent->data.conflicts; r->data.conflict = parent->data.conflict;
+  r->data.edges = edges; r->data.edge = r->edge;
+  r->data.parent = parent;
+  r->data.source_first = r->source_first; r->data.source = r->source;
+}
+struct relation_key { uint32_t from, to; size_t index; };
+static int relation_key_before(const void *a, const void *b) {
+  const struct relation_key *x = a, *y = b;
+  if (x->from != y->from) return x->from < y->from ? -1 : 1;
+  if (x->to != y->to) return x->to < y->to ? -1 : 1;
+  return (x->index > y->index) - (x->index < y->index);
+}
+int mesh_graph_relation_create(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t conflicts,
+                               const struct mesh_graph_conflict *conflict, void (*release)(void *), void *owner,
+                               struct mesh_graph_relation **out) {
+  *out = NULL;
+  for (size_t k = 0; k < conflicts; k++) if (conflict[k].from >= vertices || conflict[k].to >= vertices) return EINVAL;
+  if (conflicts >= SIZE_MAX / sizeof(struct relation_key) - 1) return ENOMEM;
+  struct mesh_graph_relation *r = relation_new();
+  struct relation_key *key = malloc((conflicts + 1) * sizeof *key);
+  int result = r && key ? 0 : ENOMEM;
+  size_t n = 0, edges = 0;
+  for (size_t k = 0; !result && k < conflicts; k++)
+    if (conflict[k].from != conflict[k].to) key[n++] = (struct relation_key){conflict[k].from, conflict[k].to, k};
+  if (!result && n) qsort(key, n, sizeof *key, relation_key_before);
+  if (!result) {
+    r->edge = malloc((n + 1) * sizeof *r->edge);
+    r->first = malloc((n + 2) * sizeof *r->first);
+    r->member = malloc((n + 1) * sizeof *r->member);
+    if (!r->edge || !r->first || !r->member) result = ENOMEM;
+  }
+  for (size_t i = 0; !result && i < n; i++) {
+    if (!i || key[i].from != key[i - 1].from || key[i].to != key[i - 1].to) {
+      r->first[edges] = i;
+      r->edge[edges++] = (struct mesh_graph_dependence){key[i].from, key[i].to, 0};
+    }
+    r->member[i] = key[i].index;
+  }
+  free(key);
+  if (!result) {
+    r->first[edges] = n;
+    r->data.vertices = vertices; r->data.views = views; r->data.view = view;
+    r->data.conflicts = conflicts; r->data.conflict = conflict;
+    r->data.edges = edges; r->data.edge = r->edge; r->data.first = r->first; r->data.member = r->member;
+    result = relation_rows(r);
+  }
+  if (result) { if (r) relation_drop(r); return result; }
+  r->release = release; r->owner = owner;
+  *out = r;
+  return 0;
+}
+static uint32_t relation_tail(const void *context, size_t e) {
+  return ((const struct mesh_graph_dependence *)context)[e].from;
+}
+static uint32_t relation_head(const void *context, size_t e) {
+  return ((const struct mesh_graph_dependence *)context)[e].to;
+}
+int mesh_graph_relation_quotient(struct mesh_graph_relation *parent, uint32_t classes, const uint32_t *class_of,
+                                 void (*release)(void *), void *owner, struct mesh_graph_relation **out) {
+  *out = NULL;
+  const struct mesh_graph_relation_data *up = &parent->data;
+  for (uint32_t v = 0; v < up->vertices; v++) if (class_of[v] >= classes) return EINVAL;
+  struct quotient_pair *pair;
+  size_t pairs, edges = 0;
+  int result = quotient_solve(up->vertices, class_of, up->edges, relation_tail, relation_head, up->edge, &pair, &pairs);
+  if (result) return result;
+  struct mesh_graph_relation *r = relation_new();
+  if (!r) result = ENOMEM;
+  if (!result) {
+    r->edge = malloc((pairs + 1) * sizeof *r->edge);
+    r->source_first = malloc((pairs + 2) * sizeof *r->source_first);
+    r->source = malloc((pairs + 1) * sizeof *r->source);
+    if (!r->edge || !r->source_first || !r->source) result = ENOMEM;
+  }
+  for (size_t i = 0; !result && i < pairs; i++) {
+    if (!i || pair[i].key != pair[i - 1].key) {
+      r->source_first[edges] = i;
+      r->edge[edges++] = (struct mesh_graph_dependence){(uint32_t)(pair[i].key >> 32), (uint32_t)pair[i].key, 0};
+    }
+    r->source[i] = pair[i].edge;
+  }
+  free(pair);
+  if (!result) {
+    r->source_first[edges] = pairs;
+    relation_derived(r, parent, classes, edges);
+    r->data.class_of = class_of;
+    result = relation_compose(r);
+    if (!result) result = relation_rows(r);
+  }
+  if (result) { if (r) { r->parent = NULL; relation_drop(r); } return result; }
+  mesh_graph_relation_retain(parent);
+  r->release = release; r->owner = owner;
+  *out = r;
+  return 0;
+}
+int mesh_graph_relation_contract(struct mesh_graph_relation *parent, const unsigned char *kept, void (*release)(void *),
+                                 void *owner, struct mesh_graph_relation **out) {
+  *out = NULL;
+  const struct mesh_graph_relation_data *up = &parent->data;
+  struct contract_solved c;
+  int result = contract_solve(up->vertices, up->edges, up->edge, kept, 1, &c);
+  if (result) return result;
+  const uint32_t keeps = c.keeps, vertices = 2 * up->vertices;
+  size_t edges = 0, walked = 0;
+  for (size_t q = 0; q < (size_t)keeps * keeps; q++) {
+    if (c.lags[q] == UINT64_MAX) continue;
+    edges++;
+    const size_t *walk = c.via + (q / keeps) * vertices;
+    for (uint32_t v = c.target[q % keeps];; walked++) {
+      const uint32_t tail = up->edge[c.order[walk[v]]].from;
+      if (tail == c.source[q / keeps]) { walked++; break; }
+      v = tail;
+    }
+  }
+  struct mesh_graph_relation *r = relation_new();
+  if (!r) result = ENOMEM;
+  if (!result) {
+    r->edge = malloc((edges + 1) * sizeof *r->edge);
+    r->source_first = malloc((edges + 1) * sizeof *r->source_first);
+    r->source = malloc((walked + 1) * sizeof *r->source);
+    if (!r->edge || !r->source_first || !r->source) result = ENOMEM;
+  }
+  size_t e = 0, at = 0;
+  for (size_t q = 0; !result && q < (size_t)keeps * keeps; q++) {
+    if (c.lags[q] == UINT64_MAX) continue;
+    r->source_first[e] = at;
+    r->edge[e++] = (struct mesh_graph_dependence){c.source[q / keeps], c.source[q % keeps], c.lags[q]};
+    const size_t *walk = c.via + (q / keeps) * vertices, begin = at;
+    for (uint32_t v = c.target[q % keeps];;) {
+      const size_t parentEdge = c.order[walk[v]];
+      r->source[at++] = parentEdge;
+      const uint32_t tail = up->edge[parentEdge].from;
+      if (tail == c.source[q / keeps]) break;
+      v = tail;
+    }
+    for (size_t i = begin, j = at - 1; i < j; i++, j--) {
+      const size_t swapped = r->source[i];
+      r->source[i] = r->source[j];
+      r->source[j] = swapped;
+    }
+  }
+  contract_free(&c);
+  if (!result) {
+    r->source_first[edges] = at;
+    relation_derived(r, parent, up->vertices, edges);
+    r->data.kept = kept;
+    result = relation_compose(r);
+    if (!result) result = relation_rows(r);
+  }
+  if (result) { if (r) { r->parent = NULL; relation_drop(r); } return result; }
+  mesh_graph_relation_retain(parent);
+  r->release = release; r->owner = owner;
+  *out = r;
+  return 0;
+}
+int mesh_graph_relation_synchronization(struct mesh_graph_relation *r, const unsigned char **redundant, size_t *kept) {
+  pthread_mutex_lock(&r->lock);
+  int result = 0;
+  if (!r->synchronized) {
+    unsigned char *mask = malloc(r->data.edges + 1);
+    result = mask ? synchronization_solve(r->data.vertices, r->data.edges, relation_tail, relation_head, r->edge, mask,
+                                          &r->kept)
+                  : ENOMEM;
+    if (!result) { r->redundant = mask; r->synchronized = 1; }
+    else free(mask);
+  }
+  if (!result) { *redundant = r->redundant; *kept = r->kept; }
+  pthread_mutex_unlock(&r->lock);
+  return result;
 }
 
 /* design/plan-to-bridge-change-request.md R2; design/disjoint-pages-change-request.md, A3 and C3.3 */
@@ -1859,9 +2302,15 @@ static void redundant_offer(struct redundant_search *s, uint32_t y, uint64_t at,
     redundant_push(s, at, y, first);
   }
 }
-int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
-                         const unsigned char *synchronization, unsigned char *redundant) {
-  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices || from[e] == to[e]) return EINVAL;
+/* mesh_graph_redundant's one solve over edges read through tail, head and delay (synchronization NULL: every edge a
+   candidate), shared by its flat-array callers and the retained relation */
+static int redundant_solve(uint32_t vertices, size_t edges, uint32_t (*tail)(const void *context, size_t e),
+                           uint32_t (*head)(const void *context, size_t e), uint64_t (*delay)(const void *context, size_t e),
+                           const void *context, const unsigned char *synchronization, unsigned char *redundant) {
+  for (size_t e = 0; e < edges; e++) {
+    const uint32_t a = tail(context, e), b = head(context, e);
+    if (a >= vertices || b >= vertices || a == b) return EINVAL;
+  }
   if (vertices == UINT32_MAX || edges >= SIZE_MAX / (4 * sizeof(struct redundant_entry))) return ENOMEM;
   const size_t n = (size_t)vertices + 1;
   size_t *first = malloc(n * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
@@ -1871,20 +2320,22 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
   unsigned char *done = malloc(2 * n);
   int result = first && order && pair && s.best && s.first && s.heap && done ? 0 : ENOMEM;
   size_t synchronizations = 0;
-  for (size_t e = 0; !result && e < edges; e++) if (synchronization[e]) pair[synchronizations++] = (uint64_t)from[e] << 32 | to[e];
+  for (size_t e = 0; !result && e < edges; e++)
+    if (!synchronization || synchronization[e]) pair[synchronizations++] = (uint64_t)tail(context, e) << 32 | head(context, e);
   if (!result && synchronizations) qsort(pair, synchronizations, sizeof *pair, completion_edge_before);
   for (size_t k = 1; !result && k < synchronizations; k++) if (pair[k] == pair[k - 1]) result = EINVAL;
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    mesh_graph_rows(vertices, edges, tail, context, first, order);
     for (size_t e = 0; e < edges; e++) redundant[e] = 0;
   }
   for (uint32_t u = 0; !result && u < vertices; u++) {
     int any = 0;
-    for (size_t k = first[u]; k < first[u + 1]; k++) any |= synchronization[order[k]] != 0;
+    for (size_t k = first[u]; k < first[u + 1]; k++) any |= !synchronization || synchronization[order[k]] != 0;
     if (!any) continue;
     for (size_t v = 0; v < 2 * (size_t)vertices; v++) { s.best[v] = UINT64_MAX; s.first[v] = SIZE_MAX; done[v] = 0; }
     s.count = 0;
-    for (size_t k = first[u]; k < first[u + 1]; k++) redundant_offer(&s, to[order[k]], delay[order[k]], order[k]);
+    for (size_t k = first[u]; k < first[u + 1]; k++)
+      redundant_offer(&s, head(context, order[k]), delay(context, order[k]), order[k]);
     while (s.count) {
       const struct redundant_entry x = redundant_pop(&s);
       const size_t at = 2 * (size_t)x.vertex;
@@ -1892,35 +2343,50 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
                       : s.best[at + 1] == x.at && s.first[at + 1] == x.first && !done[at + 1] ? 1 : -1;
       if (label < 0) continue;
       done[at + (size_t)label] = 1;
-      for (size_t k = first[x.vertex]; k < first[x.vertex + 1]; k++)
-        if (delay[order[k]] <= UINT64_MAX - x.at) redundant_offer(&s, to[order[k]], x.at + delay[order[k]], x.first);
+      for (size_t k = first[x.vertex]; k < first[x.vertex + 1]; k++) {
+        const uint64_t lag = delay(context, order[k]);
+        if (lag <= UINT64_MAX - x.at) redundant_offer(&s, head(context, order[k]), x.at + lag, x.first);
+      }
     }
     for (size_t k = first[u]; k < first[u + 1]; k++) {
-      const size_t e = order[k], at = 2 * (size_t)to[e];
-      if (synchronization[e]) redundant[e] = (s.first[at] == e ? s.best[at + 1] : s.best[at]) <= delay[e];
+      const size_t e = order[k], at = 2 * (size_t)head(context, e);
+      if (!synchronization || synchronization[e])
+        redundant[e] = (s.first[at] == e ? s.best[at + 1] : s.best[at]) <= delay(context, e);
     }
   }
   free(first); free(order); free(pair); free(s.best); free(s.first); free(s.heap); free(done);
   return result;
 }
+struct redundant_arrays { const uint32_t *from, *to; const uint64_t *delay; };
+static uint32_t redundant_tail(const void *context, size_t e) { return ((const struct redundant_arrays *)context)->from[e]; }
+static uint32_t redundant_head(const void *context, size_t e) { return ((const struct redundant_arrays *)context)->to[e]; }
+static uint64_t redundant_delay(const void *context, size_t e) {
+  const struct redundant_arrays *x = context;
+  return x->delay ? x->delay[e] : 0;
+}
+int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
+                         const unsigned char *synchronization, unsigned char *redundant) {
+  const struct redundant_arrays arrays = {from, to, delay};
+  return redundant_solve(vertices, edges, redundant_tail, redundant_head, redundant_delay, &arrays, synchronization,
+                         redundant);
+}
 
 /* design/torch-source-lowering-change-request.md item 3; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans.
-   Signal Processing 45(6), 1997, §7, Fig. 4 */
-int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
-                               unsigned char *redundant, size_t *kept) {
-  if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
-  uint64_t *delay = calloc(edges + 1, sizeof *delay);
-  unsigned char *synchronization = malloc(edges + 1);
-  int result = delay && synchronization ? 0 : ENOMEM;
-  if (!result) {
-    memset(synchronization, 1, edges + 1);
-    result = mesh_graph_redundant(vertices, edges, from, to, delay, synchronization, redundant);
-  }
+   Signal Processing 45(6), 1997, §7, Fig. 4: every edge a candidate, at zero delays */
+static uint64_t synchronization_delay(const void *context, size_t e) { (void)context; (void)e; return 0; }
+static int synchronization_solve(uint32_t vertices, size_t edges, uint32_t (*tail)(const void *context, size_t e),
+                                 uint32_t (*head)(const void *context, size_t e), const void *context,
+                                 unsigned char *redundant, size_t *kept) {
+  const int result = redundant_solve(vertices, edges, tail, head, synchronization_delay, context, NULL, redundant);
   size_t made = 0;
   for (size_t e = 0; !result && e < edges; e++) made += !redundant[e];
   if (!result) *kept = made;
-  free(delay); free(synchronization);
   return result;
+}
+int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+                               unsigned char *redundant, size_t *kept) {
+  const struct redundant_arrays arrays = {from, to, NULL};
+  return synchronization_solve(vertices, edges, redundant_tail, redundant_head, &arrays, redundant, kept);
 }
 
 /* design/torch-source-lowering-change-request.md item 3; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
