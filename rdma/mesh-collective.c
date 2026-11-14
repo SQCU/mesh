@@ -798,7 +798,7 @@ static int plan_rows(struct plan *plans,uint32_t count,const struct hdr *m,const
   for(uint32_t r=0;r<program->nroots;r++){
     const struct mesh_section v=program->roots[r].section;
     for(uint32_t c=0;program->roots[r].run && c<v.count;c++)for(uint32_t k=0;k<v.stride;k++)
-      page[v.first+(size_t)c*v.stride+k]=plan_page(x,block,program->root_item[r]+c,k);
+      page[v.first+(size_t)c*v.stride+k]=plan_page(x,block,x->run,x->at[program->root_item[r]+c]+k);
   }
   unsigned char *seen=calloc((size_t)mesh_blocks(m)+1,1);
   if(!seen)return ENOMEM;

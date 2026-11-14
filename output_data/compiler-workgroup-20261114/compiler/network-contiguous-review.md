@@ -1,0 +1,9 @@
+# Existing contiguous allocation operand
+
+Source-only review for the actual native flat-buffer requirement. No allocator or planner algorithm change is proposed by this record.
+
+An intrinsic declared function Value may use run1. plan_function (mesh-collective.c1867) validates run and wire independently and accepts their combination. plan_block680–687 places all run1 function copies in the single joint arena; a named/wire value selects space1 and retains plan_location's original declaration/lifetime. plan_sets1700/1720 excludes these values from routed-set page sharing. plan_items530 makes the entire run arena one PLAN_ALONE item. plan_place's plan_alone callback has no edges, so mesh_graph_chains1695 assigns consecutive colors to every block of that item. plan_frame782 maps each function copy through x.run and its x.at record offset. Thus the copy is contiguous while its declared section and transport remain the same owner (materialization2746).
+
+The producer may set that existing operand only for an actual constructed raw-buffer requirement. Generic paged inputs continue to consume their actual frame table. This does not justify changing every declared wire to run1 or treating run0 as unallocated.
+
+Independent joint-root mismatch found during the review: plan_block697 records root_item as an index into x.at, but plan_rows801 passes root_item+c as the plan_item index to plan_page. Function run1 uses the correct pair x.run / x.at[item+c]+k. The joint root's original record must use that same projection. A global search found no intervening conversion of root_item into a plan-item index. Root co-review confirmed the domain mismatch. SAME979 corrected plan_rows to x.run / x.at[root_item+c]+k, matching plan_frame and the local joint planner. Supervisor strict compilation of the affected unit with the actual Makefile flags passed with empty diagnostics; no shared build or target run is claimed here.

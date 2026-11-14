@@ -1,0 +1,8 @@
+{
+  "source": "rdma/mesh-collective.c",
+  "sha256": "d16d38fdffe5bb11ea48645063d26e65c39e9b6eb8a2acaaec2210ff0a1ec655",
+  "strict_exit": 0,
+  "strict_diagnostics_bytes": 0,
+  "shared_build": false,
+  "target_run": false
+}
