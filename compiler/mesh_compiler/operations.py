@@ -1880,7 +1880,7 @@ def _unpacked_lu(target, given, outs):
     return ops
 
 
-ASSERTIONS = (A._assert_async, A._assert_scalar, A._assert_tensor_metadata,
+ASSERTIONS = (A._assert_async, A._functional_assert_async, A._assert_scalar, A._assert_tensor_metadata,
               A.sym_constrain_range, A.sym_constrain_range_for_size)
 
 
@@ -2259,8 +2259,12 @@ def _matrix_exponential(a, max_squarings):
     result = torch.linalg.solve_ex(v - u, u + v).result
     result = MATRIX_EXP_SQUARES(result, count, max_squarings)
     over = count > max_squarings
-    A._assert_async.msg(over.logical_not(), 'linalg.matrix_exp')
-    return torch.where(over[..., None, None], math.nan, result)
+    # JAX jax/_src/scipy/linalg.py expm, `_nan` where n_squarings > max_squarings; then the operator's runtime error,
+    # torch 2.14.0 torch/_export/passes/functionalize_side_effectful_ops_pass.py: _assert_async.msg as
+    # _functional_assert_async.msg, its `dep_token` the result, so the error follows the result's write, and the
+    # operator's result the assertion's (torch/_meta_registrations.py functional_assert_async_meta: `return dep_token`)
+    result = torch.where(over[..., None, None], math.nan, result)
+    return A._functional_assert_async.msg(over.logical_not(), 'linalg.matrix_exp', result)
 
 
 # JAX jax/_src/tpu/linalg/qdwh.py _qdwh: the static coefficient schedule from eps (l the lower singular value bound,
@@ -6846,6 +6850,14 @@ def _instruction(local, args, kwargs, prototype, page, generator, outs=None):
                                                                                                     written)
     if _aliases(local):
         return _call(local, args, kwargs), []
+    # torch 2.14.0 torch/_meta_registrations.py functional_assert_async_meta, `return dep_token`: a functional
+    # assertion's result is its dependence token's value, after its check's structured operations (_asserted); a
+    # destination operand holds that value, written before the check
+    if local.target is A._functional_assert_async.msg:
+        token = {**dict(zip(_names(local), args)), **kwargs}['dep_token']
+        if outs is None:
+            return token, _lowering(local, page, generator)(args, kwargs, [token])
+        return outs[0], _copy(outs[0], token) + _lowering(local, page, generator)(args, kwargs, outs)
     if outs is not None:
         return outs[0] if len(outs) == 1 else tuple(outs), _lowering(local, page, generator)(args, kwargs, outs)
     outs, spec = _made(prototype, local)

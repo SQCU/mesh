@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "<stdin>", line 15, in <module>
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 24, in compile_module
+    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 90, in compile_captured
+    constructed[key] = construct(
+                       ^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 207, in construct
+    dests[node] = placed(node.meta["out"])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 196, in placed
+    if byname[name] not in dests and byname[name] not in roots:
+       ~~~~~~^^^^^^
+KeyError: 'out'
