@@ -1848,11 +1848,12 @@ static int plan_function(struct plan *p,const struct mesh_function *function,con
   const uint32_t count=function->count,given=function->values,dependences=function->dependences;
   if((count && (!declared || !weights)) || (given && !values) || (dependences && !dependence))return EINVAL;
   /* design/disjoint-pages-change-request.md D.3.3: a value of no bytes an absent, alias or constant slot, its ValueID
-     kept, with no storage */
+     kept, with no storage; a zeroed value (`state`) is never a wire: zeroed INVARIANT state, or zeroed EXECUTION
+     metadata each execution copy of which is zeroed where solved (metal-microbench metal_transport.mm Arrivals) */
   for(uint32_t j=0;j<given;j++){
     const struct mesh_value *v=values+j;
     if(v->kind>MESH_EXECUTION || v->wire>1 || v->state>1 || v->run>1 ||
-       (v->state && (v->wire || v->kind!=MESH_INVARIANT)) ||
+       (v->state && v->wire) ||
        (v->lag && (v->kind!=MESH_EXECUTION || v->state)))return EINVAL;
     if(plan_blocks(m,v->section.bytes)>=UINT32_MAX/m->block)return ENOMEM;
   }

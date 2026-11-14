@@ -414,12 +414,14 @@ def _compiler():
         P, U, Q = C.c_void_p, mesh.U, mesh.Q
         for name, result, arguments in (
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
-                ('metal_ir_operations', U, [P]),
+                ('metal_ir_append', C.c_int, [P, P, C.POINTER(U), C.c_size_t, C.c_char_p, C.c_size_t]),
+                ('metal_ir_values', U, [P]), ('metal_ir_operations', U, [P]),
                 ('metal_ir_archive_load', P, [P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
-                ('metal_ir_value_layout', U, [P, U, C.POINTER(Term), C.c_size_t, C.POINTER(C.c_int64)]),
+                ('metal_ir_value_layout', U, [P, U, C.POINTER(Term), U, C.POINTER(C.c_int64)]),
+                ('metal_ir_value_shape', U, [P, U, C.POINTER(Q), U]),
                 ('metal_ir_value_external', C.c_int, [P, U, U]),
                 ('metal_ir_storages', C.c_size_t, [P, C.POINTER(C.POINTER(Storage))]),
                 ('metal_ir_value_placed', None, [P, U, P, C.POINTER(Q), Q, Q, U]),
@@ -509,10 +511,12 @@ def _execution_error(replay, status, message):
 
 # metal-microbench metal_ir.h metal_ir_value, metal_ir_generic, metal_ir_states, metal_ir_check, metal_ir_lapack,
 # metal_ir_sort and the region builder: construction's typed records (compiler/mesh_compiler/operations.py) encoded as
-# one C program, each storage root one value with its role, each view a value over it
+# one C program, each storage root one value with its role, each view a value over it; `program` an existing program
+# to encode into (metal_ir_append's destination), else a new one
 class _Builder:
-    def __init__(self, lib, owners, role, row, identity, constants=None):
-        self.lib, self.p, self.owners, self.role, self.row = lib, lib.metal_ir_program_new(), owners, role, row
+    def __init__(self, lib, owners, role, row, identity, constants=None, program=None):
+        self.lib, self.owners, self.role, self.row = lib, owners, role, row
+        self.p = lib.metal_ir_program_new() if program is None else program
         self.values, self.roots, self.roles, self.planned, self.builtins = {}, {}, {}, {}, {}
         self.constants = {} if constants is None else constants
         self.base = self.identity = identity
@@ -537,6 +541,11 @@ class _Builder:
             self.attach(v, self.constants.get(key, base))
         self.roots[key], self.roles[key] = v, role
         return v
+
+    # a storage root the program already has (a metal_ir_append result's storage root, a root declared before): `t`'s
+    # storage is ValueID `root` of role `role`, so value(t) makes t's view over it and root(t) declares nothing
+    def bound(self, t, root, role):
+        self.roots[_key(t)], self.roles[_key(t)] = root, role
 
     # metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE: a storage root whose role its caller states (an exported program's
     # InputKind, a result, a received channel), with the initial contents `data` where the role is CONSTANT, and its
