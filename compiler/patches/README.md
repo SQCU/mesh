@@ -2,6 +2,56 @@
 
 Style: [Google developer documentation style guide, highlights](https://developers.google.com/style/highlights).
 
+## `torch-export-user-input-gradients.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/export/exported_program.py`,
+`_decompose_and_get_gm_with_new_signature_constants`. This is the joint-loss branch that `run_decompositions` takes
+after `torch.export.experimental._export_forward_backward`.
+
+### What it changes
+
+That branch builds one `OutputSpec` per gradient output. It looks up the gradient's source in `specs[source]`, the
+original `InputSpec` of that input.
+
+- For a parameter, the target is `spec.target`, the parameter's FQN.
+- For a user input, the unpatched line sets the target to `source`. That is the traced name (for example `arg2_1`),
+  which is not the program's input name.
+- The patch sets it to `spec.arg.name`, the original input's name (for example `x`). The same function renames the new
+  placeholders back to those original names. So `GRADIENT_TO_USER_INPUT`'s target becomes the input placeholder's name,
+  and `backward_signature.gradients_to_user_inputs` names the program's own input.
+
+`compiler/mesh_compiler/export.py` (`read`, `returned`, `capture`) keys `TrainingResult.inputs` by that target. It has
+no name parser and no fallback.
+
+### Target
+
+| Item | Value |
+|---|---|
+| Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied 2026-11-14 by the supervisor with fuzz 0, after inspecting the hunk's context in the installed file |
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/export/exported_program.py` | before `bb4908767a26f84fbdc0d84a3413d4818cf7f88e34ae450a29f537f8fa165fff`, after `bf8418070373473faddea7a535962c2e9626a9493f98d67a0c7d1c17ed56d691` |
+
+### Apply, check, reverse
+
+From the repository root:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+shasum -a 256 $SITE/torch/export/exported_program.py
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-export-user-input-gradients.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-export-user-input-gradients.patch
+shasum -a 256 $SITE/torch/export/exported_program.py
+```
+
+- The first `shasum` must print the "before" hash in the table below, and the second the "after" hash.
+- To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-export-user-input-gradients.patch`.
+- This is a pure Python source, so no rebuild is needed. The patch adds no import hook or `sitecustomize`.
+
+### Check after applying
+
+Run `/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/observe/fake_export.py`. Its joint-loss case prints a
+`GRADIENT_TO_USER_INPUT` role whose target is the module's input name, and a `TrainingResult` `out_spec` keyed by it.
+
 ## `torch-inductor-alias-mutations.patch`
 
 Mechanism: installed torch 2.14.0 (`torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90`) Inductor

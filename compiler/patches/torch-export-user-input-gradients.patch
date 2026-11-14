@@ -1,0 +1,11 @@
+--- a/torch/export/exported_program.py
++++ b/torch/export/exported_program.py
+@@ -787,7 +787,7 @@
+                 target = spec.target
+             elif spec.kind == InputKind.USER_INPUT:
+                 kind = OutputKind.GRADIENT_TO_USER_INPUT
+-                target = source
++                target = spec.arg.name
+             else:
+                 raise AssertionError(f"Unknown input kind: {spec.kind}")
+             output_specs.append(
