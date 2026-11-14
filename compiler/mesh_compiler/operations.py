@@ -2399,7 +2399,9 @@ class _Repeat:
 # output's (value, kind). A complex operand is its real pairs (torch.view_as_real), each part a constant component
 # row (_pair): its value a (re, im) pair, its loops the matrix's alone, an extracted one one slot read with its
 # component coordinate; each such operand the record's `component_views` entry (its _emit offsets projected through
-# them, _on_block)
+# them, _on_block). An output of picks None is a scatter destination (metal_ir.h metal_ir_scatter): one emitted
+# output, a complex one its whole real pairs (the scatter's coordinates carrying the component), its yield not
+# stored. A scatter's output ordinal is the emitted one: a mapped complex output emits two, any other one
 def _record(sizes, outs, ins, fn, iterators=None, combiner=None):
     r, n, inputs, values, views = _Region(), len(sizes), [], [], []
     for x, picks in ins:
@@ -2417,11 +2419,12 @@ def _record(sizes, outs, ins, fn, iterators=None, combiner=None):
     outputs, yields, kinds, combiners = [], [], [], []
     for (o, picks), (v, kind), combined in zip(outs, fn(r, values), combiner or [ASSIGN] * len(outs)):
         held = torch.view_as_real(o) if o.is_complex() else o
-        for c in (0, 1) if o.is_complex() else (None,):
-            views += [(o, len(inputs) + len(outputs))] if c is not None else []
+        for c in (0, 1) if o.is_complex() and picks is not None else (None,):
+            views += [(o, len(inputs) + len(outputs))] if o.is_complex() else []
             outputs.append((held, None if picks is None else _rows(n, picks) + (_rows(n, [{None: c}]) if c is not None
                                                                                  else ())))
-            yields.append(_convert(r, v if c is None else _part(r, kind, v, c), kind, _class(held)))
+            value = v if c is None else _part(r, kind, v, c)
+            yields.append(_convert(r, value[0] if isinstance(value, tuple) else value, kind, _class(held)))
             kinds.append(kind)
             combiners.append(combined)
     r.done(*yields)

@@ -1,0 +1,12 @@
+{
+  "mesh_commit": "bc2cb8794f3401bbeddc9f3ce3b0f8b6e0524469",
+  "files": {
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "d3a76c37bf067315c7f564ffde9951a23091b2559109d49bfcad57d9b4617d73",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/decompose.py": "c9b7c4a9a383dbcdfeef469b8e5248bf5480af2166bc65dca534d115dcfd63f7",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/metal.py": "5c5316c4ba468152e2c061c078e0ff54f4429a63b68fa5ee6b7ed828963ec50e",
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "d6257c8770900d2d3bee3a40f6f225ea5d8469369d7c4b3aff2079db96536742",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "be1a351559d4347cf1c600c954fb2ed602fd294cdff6121234cef8bd129ba65e",
+    "/Users/mdot/dox/mesh/rdma/libmesh.dylib": "ffeea391d1f193113502e4e762e4c42f3f0befced03181259fb7edb79fd2fdec"
+  }
+}
