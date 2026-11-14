@@ -148,7 +148,8 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         # records are emitted and before construction, from the Builder's actual emissions of them (`leaves`, metal.py
         # Emitted, a repetition's nested leaves included): at each leaf operand that is that source node's own tensor
         # (env, by identity, before Builder.value names typed views), that dimension, and at each operand a leaf's
-        # explicit `source_axes` (operations.py _Generic) gives that tensor's dimension, the operand dimension it names,
+        # explicit `source_axes` (operations.py _Generic) gives that tensor's dimension, the operand dimension it names
+        # (and at each operand its `component_views` declares that tensor's real pairs, that dimension),
         # on that leaf's own returned operation (a _Generic's or _Lapack's: metal_ir_generic and metal_ir_lapack make
         # its one operation of its inputs, then outputs, in order; another leaf exposes no operand ordinal); a
         # reference none of them has, with no operand, on each operation the node's records created (`made`); a
@@ -163,6 +164,8 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                 hits += [(leaf.operation, s, at) for leaf in leaves if isinstance(leaf.record, _Generic)
                          for source, d, s, at in leaf.record.source_axes
                          if tensor is not None and source is tensor and d == dimension]
+                hits += [(leaf.operation, s, dimension) for leaf in leaves if isinstance(leaf.record, _Generic)
+                         for source, s in leaf.record.component_views if tensor is not None and source is tensor]
                 for op, s, at in hits or [(op, NONE, dimension) for op in made]:
                     status = compiler.metal_ir_operation_axis(builder.p, op, s, at, tasks[node][0], full)
                     if status:

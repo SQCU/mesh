@@ -1,0 +1,67 @@
+{
+  "original": [
+    [
+      "aten._linalg_eigh.default",
+      1
+    ],
+    [
+      "<built-in function getitem>",
+      null
+    ],
+    [
+      "<built-in function getitem>",
+      null
+    ]
+  ],
+  "functions": [
+    {
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.complex64', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+      "inputs": 1,
+      "outputs": 6,
+      "numerical_targets": [],
+      "decomposed": 55,
+      "device_decomposed": 55
+    },
+    {
+      "key": "('qdwh_eigh_step', 'p', (2, 2), 'torch.complex64', 10)",
+      "inputs": 6,
+      "outputs": 4,
+      "numerical_targets": [
+        [
+          "mesh.qdwh_eigh_step.default",
+          1
+        ]
+      ],
+      "decomposed": 0,
+      "device_decomposed": 0
+    },
+    {
+      "key": "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.complex64', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'suffix', '_linalg_eigh')",
+      "inputs": 2,
+      "outputs": 2,
+      "numerical_targets": [],
+      "decomposed": 9,
+      "device_decomposed": 9
+    }
+  ],
+  "calls": [
+    "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.complex64', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'prefix', '_linalg_eigh')",
+    "('qdwh_eigh_step', 'p', (2, 2), 'torch.complex64', 10)",
+    "('qdwh_eigh_step', 'p', (2, 2), 'torch.complex64', 10)",
+    "('qdwh_eigh_step', 'p', (2, 2), 'torch.complex64', 10)",
+    "(('function', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.complex64', 'cpu', False, (2, 2), (2, 1), 0, 0),)), 'suffix', '_linalg_eigh')"
+  ],
+  "output_shapes": [
+    [
+      2
+    ],
+    [
+      2,
+      2
+    ]
+  ],
+  "output_dtypes": [
+    "torch.float32",
+    "torch.complex64"
+  ]
+}

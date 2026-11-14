@@ -298,12 +298,16 @@ def _powi(r, a, b, t):
 # metal_ir_loop_extent `extents`, the index of the symbol clipping it or None (its static size); `source_axes`
 # (metal_ir.h metal_ir_operation_axis, compiler/mesh_compiler/lower_metal.py construct) each explicit correspondence its
 # construction used of an original tensor's dimension to one of its operands' (original tensor, its dimension, operand
-# ordinal, inputs first, operand dimension), of a source the record does not read
+# ordinal, inputs first, operand dimension), of a source the record does not read; `component_views` each operand
+# that is a complex tensor's real pairs (torch.view_as_real: its leading dimensions the tensor's, its last the
+# component) as (that complex tensor, operand ordinal, inputs first), a memory view, not a shape correspondence
 class _Generic:
     def __init__(self, sizes, inputs, outputs, body, iterators=None, combiner=None, accumulator=None, start=None,
-                 states=None, combine=None, finalize=None, precision=0, symbols=None, extents=None, source_axes=None):
+                 states=None, combine=None, finalize=None, precision=0, symbols=None, extents=None, source_axes=None,
+                 component_views=None):
         self.sizes, self.inputs, self.outputs, self.body = tuple(sizes), list(inputs), list(outputs), body
         self.source_axes = list(source_axes) if source_axes is not None else []
+        self.component_views = list(component_views) if component_views is not None else []
         self.symbols = list(symbols) if symbols is not None else []
         self.extents = tuple(extents) if extents is not None else (None,) * len(self.sizes)
         self.iterators = tuple(iterators) if iterators is not None else (PARALLEL,) * len(self.sizes)
@@ -317,9 +321,11 @@ class _Generic:
 # design/torch-source-lowering-change-request.md item 6; metal-microbench metal_ir.h metal_ir_symbol and
 # metal_ir_loop_extent: existing structured records over a block of runtime place and size, the records' own formulas
 # unchanged. Each record gains `symbols` (one-element tensor, bound) after its own; `offsets` (operand tensor, {dim:
-# symbol index}), matched by identity with the record's operands, adds that symbol to the operand's row of that
-# dimension (a dynamic slice offset); `clip(record, loop)` the symbol index clipping the loop, or None. A record kind
-# other than _Generic has no runtime extent of its own, so its bounded lowering is unfinished
+# symbol index}), matched by identity with the record's operands or through its `component_views` (an operand that is
+# that tensor's real pairs, its leading dimensions the tensor's), adds that symbol to the operand's row of that
+# dimension (a dynamic slice offset; the component row constant); `clip(record, loop)` the symbol index clipping the
+# loop, or None. A record kind other than _Generic has no runtime extent of its own, so its bounded lowering is
+# unfinished
 def _on_block(records, symbols, offsets=(), clip=lambda record, loop: None):
     made = []
     for g in records:
@@ -328,21 +334,26 @@ def _on_block(records, symbols, offsets=(), clip=lambda record, loop: None):
                                       '(design/torch-source-lowering-change-request.md item 6)' % type(g).__name__)
         base, own = len(g.symbols), len(g.sizes) + len(g.symbols)
 
-        def extended(operands):
+        def extended(operands, first):
             out = []
-            for t, rows in operands:
+            for s, (t, rows) in enumerate(operands, first):
                 if rows is not None:
-                    shifted = next((at for held, at in offsets if held is t), {})
+                    shifted = dict(next((at for held, at in offsets if held is t), {}))
+                    for source, ordinal in g.component_views:
+                        if ordinal == s:
+                            shifted.update(next((at for held, at in offsets if held is source), {}))
                     rows = tuple(tuple(row[:own]) + tuple(int(shifted.get(d) == k) for k in range(len(symbols)))
                                  + (row[own],) for d, row in enumerate(rows))
                 out.append((t, rows))
             return out
-        bounded = _Generic(g.sizes, extended(g.inputs), extended(g.outputs), g.body, g.iterators, g.combiner,
+        bounded = _Generic(g.sizes, extended(g.inputs, 0), extended(g.outputs, len(g.inputs)), g.body, g.iterators,
+                           g.combiner,
                            g.accumulator, g.start, g.states, g.combine, g.finalize, g.precision,
                            [*g.symbols, *symbols],
                            [e if e is not None else None if clip(g, l) is None else base + clip(g, l)
                             for l, e in enumerate(g.extents)])
         bounded.place, bounded.node, bounded.source_axes = g.place, g.node, g.source_axes
+        bounded.component_views = g.component_views
         made.append(bounded)
     return made
 
@@ -2296,7 +2307,15 @@ def _polar(x, max_iterations=10):
 def _qdwh_eigh_state(a, upper=False, site=0):
     n, batch = a.shape[-1], a.shape[:-2]
     keep = torch.ones(n, n, dtype=torch.bool, device=a.device)
-    h = torch.where(keep.triu() if upper else keep.tril(), a, a.mT.conj())
+    mask = keep.triu() if upper else keep.tril()
+    if a.is_complex():
+        # JAX jax/_src/tpu/linalg/eigh.py _eigh_qdwh_impl: the real part reflected through UPLO's triangle, the
+        # imaginary part kept strictly inside it and reflected negated (the diagonal's imaginary part zero)
+        inside = keep.triu(1) if upper else keep.tril(-1)
+        imaginary = torch.where(inside, a.imag, 0)
+        h = torch.complex(torch.where(mask, a.real, a.real.mT), torch.where(mask, imaginary, -imaginary.mT))
+    else:
+        h = torch.where(mask, a, a.mT)
     vectors = torch.eye(n, dtype=a.dtype, device=a.device).expand(*batch, n, n).clone()
     entry = (torch.arange(n + 1, device=a.device)[:, None] == 1) & (torch.arange(2, device=a.device) == 1)
     agenda = torch.where(entry, n, 0).to(torch.int32).expand(*batch, n + 1, 2).clone()
@@ -2344,14 +2363,80 @@ class _Repeat:
 
 
 # one structured record: `outs` and `ins` (tensor, picks) where picks name each dimension's loop (compiler `_rows`;
-# None for the whole picks reads that input by extraction only); fn(r, values) gives each output's (value, kind)
+# None for the whole picks reads that input by extraction only, its value its input slot); fn(r, values) gives each
+# output's (value, kind). A complex operand is its real pairs (torch.view_as_real), each part a constant component
+# row (_pair): its value a (re, im) pair, its loops the matrix's alone, an extracted one one slot read with its
+# component coordinate; each such operand the record's `component_views` entry (its _emit offsets projected through
+# them, _on_block)
 def _record(sizes, outs, ins, fn, iterators=None, combiner=None):
-    r, n = _Region(), len(sizes)
-    made = fn(r, [r.arg(k, x) if picks is not None else None for k, (x, picks) in enumerate(ins)])
-    r.done(*[_convert(r, v, kind, _class(o)) for (v, kind), (o, _) in zip(made, outs)])
-    return [_Generic(sizes, [(x, None if picks is None else _rows(n, picks)) for x, picks in ins],
-                     [(o, None if picks is None else _rows(n, picks)) for o, picks in outs], r, iterators, combiner,
-                     [kind for _, kind in made], precision=REASSOCIATE | CONTRACT if combiner else 0)]
+    r, n, inputs, values, views = _Region(), len(sizes), [], [], []
+    for x, picks in ins:
+        held = torch.view_as_real(x) if x.is_complex() else x
+        if picks is None:
+            values.append(len(inputs))
+            inputs.append((held, None))
+        elif x.is_complex():
+            values.append(tuple(r.arg(len(inputs) + c, held) for c in (0, 1)))
+            inputs += [(held, _rows(n, picks) + _rows(n, [{None: c}])) for c in (0, 1)]
+        else:
+            values.append(r.arg(len(inputs), x))
+            inputs.append((x, _rows(n, picks)))
+        views += [(x, s) for s in range(len(inputs) - (2 if picks is not None else 1), len(inputs)) if x.is_complex()]
+    outputs, yields, kinds, combiners = [], [], [], []
+    for (o, picks), (v, kind), combined in zip(outs, fn(r, values), combiner or [ASSIGN] * len(outs)):
+        held = torch.view_as_real(o) if o.is_complex() else o
+        for c in (0, 1) if o.is_complex() else (None,):
+            views += [(o, len(inputs) + len(outputs))] if c is not None else []
+            outputs.append((held, None if picks is None else _rows(n, picks) + (_rows(n, [{None: c}]) if c is not None
+                                                                                 else ())))
+            yields.append(_convert(r, v if c is None else _part(r, kind, v, c), kind, _class(held)))
+            kinds.append(kind)
+            combiners.append(combined)
+    r.done(*yields)
+    return [_Generic(sizes, inputs, outputs, r, iterators, combiners if combiner else None, kinds,
+                     precision=REASSOCIATE | CONTRACT if combiner else 0, component_views=views)]
+
+
+# a record value: a real handle, or a complex (re, im) pair. Complex arithmetic is _complex_value's on the same
+# region; component c, |z|^2 and a component select are the real formulas
+def _part(r, t, x, c):
+    return x[c] if isinstance(x, tuple) else x if c == 0 else r.const(0, t)
+
+
+def _complex_parts(r, t, x):
+    return x if isinstance(x, tuple) else (x, r.const(0, t))
+
+
+def _valued(r, t, op, x, y):
+    if not isinstance(x, tuple) and not isinstance(y, tuple):
+        return r(op, t, x, y)
+    return _complex_value(r, t, op, _complex_parts(r, t, x), _complex_parts(r, t, y), 1, None)
+
+
+def _plus(r, t, x, y, op='add'):
+    return _valued(r, t, op, x, y)
+
+
+def _times(r, t, x, y):
+    return _valued(r, t, 'mul', x, y)
+
+
+def _conjugate(r, t, x):
+    return _complex_value(r, t, 'conj', x, None, 1, None) if isinstance(x, tuple) else x
+
+
+def _negated(r, t, x):
+    return _complex_value(r, t, 'neg', x, None, 1, None) if isinstance(x, tuple) else r('neg', t, x)
+
+
+def _square(r, t, x):
+    return r('add', t, r('mul', t, x[0], x[0]), r('mul', t, x[1], x[1])) if isinstance(x, tuple) else r('mul', t, x, x)
+
+
+def _chosen(r, t, condition, x, y):
+    if not isinstance(x, tuple) and not isinstance(y, tuple):
+        return r('select', t, condition, x, y)
+    return tuple(r('select', t, condition, _part(r, t, x, c), _part(r, t, y, c)) for c in (0, 1))
 
 
 def _scalars(outs, ins, fn, gathered=()):
@@ -2359,10 +2444,12 @@ def _scalars(outs, ins, fn, gathered=()):
                    [(x, (None,) * x.dim()) for x in ins] + [(x, None) for x in gathered], fn)
 
 
-def _gemm(out, a, a_picks, b, b_picks, sizes):
-    t = _class(out)
-    return _record(sizes, [(out, (0, 1))], [(a, a_picks), (b, b_picks)], lambda r, v: [(r('mul', t, *v), t)],
-                   [PARALLEL, PARALLEL, REDUCTION], [SUM])
+# out = a b over `sizes` (n, m, k), `adjoint` conjugating each flagged operand (its picks name its transpose)
+def _gemm(out, a, a_picks, b, b_picks, sizes, adjoint=(False, False)):
+    t = _class(out.real)
+    return _record(sizes, [(out, (0, 1))], [(a, a_picks), (b, b_picks)], lambda r, v: [(_times(r, t, *[
+        _conjugate(r, t, x) if flag else x for x, flag in zip(v, adjoint)]), t)], [PARALLEL, PARALLEL, REDUCTION],
+        [SUM])
 
 
 # records over runtime extents (_on_block): `loops` per loop position, or `sizes` by static loop size, an extent
@@ -2405,7 +2492,7 @@ def _at(vector, j, bound):
 def _bounded_qr(packed, tau, s, tail, w, ops):
     rows, columns = packed.shape
     for j in range(min(rows, columns)):
-        beta, made = _temporary((), packed.dtype), []
+        beta, made = _temporary((), packed.real.dtype), []
         v = _linalg_reflector(packed[j:, j], tau[j], beta, made)
         _emit(ops, made, sizes={rows - j: _at(s, j, rows), rows - j - 1: _at(tail, j, rows)})
         if j + 1 < columns:
@@ -2414,7 +2501,12 @@ def _bounded_qr(packed, tau, s, tail, w, ops):
             _emit(ops, made, sizes={rows - j: _at(s, j, rows), columns - j - 1: _at(w, j, columns)})
         ops += _copy(packed[j, j], beta)
         if j + 1 < rows:
-            _emit(ops, _copy(packed[j + 1:, j], v[1:, 0]), sizes={rows - j - 1: _at(tail, j, rows)})
+            _emit(ops, _bounded_copy(packed[j + 1:, j], v[1:, 0]), sizes={rows - j - 1: _at(tail, j, rows)})
+
+
+# a copy whose loops are the elements' alone (a complex one through _complex, not its real pairs' component loop)
+def _bounded_copy(out, x):
+    return _complex('copy', out, x) if out.is_complex() else _copy(out, x)
 
 
 def _bounded_q(packed, tau, out, s, tail, width, ops):
@@ -2423,7 +2515,7 @@ def _bounded_q(packed, tau, out, s, tail, width, ops):
         v = _temporary((rows - j, 1), packed.dtype)
         ops += _fill(v[0, 0], 1)
         if rows - j > 1:
-            _emit(ops, _copy(v[1:, 0], packed[j + 1:, j]), sizes={rows - j - 1: _at(tail, j, rows)})
+            _emit(ops, _bounded_copy(v[1:, 0], packed[j + 1:, j]), sizes={rows - j - 1: _at(tail, j, rows)})
         made = []
         _linalg_reflect(out[j:, :], v, tau[j], made)
         _emit(ops, made, sizes={rows - j: _at(s, j, rows), out.shape[-1]: _at(width, j, out.shape[-1])})
@@ -2432,25 +2524,27 @@ def _bounded_q(packed, tau, out, s, tail, width, ops):
 # Reference-LAPACK SRC/dpotf2.f and dtrsm.f over a runtime block of `g` rows: _use_cholesky's step,
 # e u + (a - e) (L^-H L^-1 u^H)^H, L the lower Cholesky factor of c u^H u + I
 def _bounded_halley(u, made, g, a_minus_e, c, e, ops):
-    n, t = u.shape[-1], _class(u)
+    n, t = u.shape[-1], _class(u.real)
     sg = (g, n)
     alive, width, below = (_ramp(g, g, *k, n, ops) for k in ((0, 0, -1), (1, 0, 0), (1, 1, 1)))
     z, lower = _temporary((n, n), u.dtype), _temporary((n, n), u.dtype)
-    _emit(ops, _gemm(z, u, (2, 0), u, (2, 1), (n, n, n)), loops=(sg, sg, sg))
-    _emit(ops, _record((n, n), [(z, (0, 1))], [(z, (0, 1))], lambda r, v: [(r(
-        'add', t, r('mul', t, r.const(c, t), v[0]), r('cast', t, r('eq', BOOL, r.index(0), r.index(1)))), t)]),
+    _emit(ops, _gemm(z, u, (2, 0), u, (2, 1), (n, n, n), adjoint=(True, False)), loops=(sg, sg, sg))
+    _emit(ops, _record((n, n), [(z, (0, 1))], [(z, (0, 1))], lambda r, v: [(_plus(
+        r, t, _times(r, t, r.const(c, t), v[0]), r('cast', t, r('eq', BOOL, r.index(0), r.index(1)))), t)]),
           loops=(sg, sg))
     for j in range(n):
         diagonal = lower[j:j + 1, j]
-        _emit(ops, _record((1,), [(diagonal, (0,))], [(z[j:j + 1, j], (0,))], lambda r, v: [(r('sqrt', t, v[0]), t)]),
-              loops=(_at(alive, j, 1),))
+        _emit(ops, _record((1,), [(diagonal, (0,))], [(z[j:j + 1, j], (0,))],
+                           lambda r, v: [(r('sqrt', t, _part(r, t, v[0], 0)), t)]), loops=(_at(alive, j, 1),))
         if j + 1 < n:
             column, block = lower[j + 1:, j], z[j + 1:, j + 1:]
             _emit(ops, _record((n - j - 1,), [(column, (0,))], [(z[j + 1:, j], (0,)), (diagonal, (None,))],
-                               lambda r, v: [(r('div', t, *v), t)]), loops=(_at(below, j, n),))
+                               lambda r, v: [(_plus(r, t, v[0], _part(r, t, v[1], 0), 'div'), t)]),
+                  loops=(_at(below, j, n),))
             _emit(ops, _record((n - j - 1, n - j - 1), [(block, (0, 1))],
                                [(block, (0, 1)), (column, (0,)), (column, (1,))],
-                               lambda r, v: [(r('sub', t, v[0], r('mul', t, v[1], v[2])), t)]),
+                               lambda r, v: [(_plus(r, t, v[0], _times(r, t, v[1], _conjugate(r, t, v[2])), 'sub'),
+                                              t)]),
                   loops=(_at(below, j, n), _at(below, j, n)))
     solved, w = _temporary((n, n), u.dtype), _temporary((n, n), u.dtype)
     for upper, out, rhs in ((False, solved, u.mT), (True, w, solved)):
@@ -2462,26 +2556,31 @@ def _bounded_halley(u, made, g, a_minus_e, c, e, ops):
                 factor = lower[j + 1:, j] if upper else lower[j, :j]
                 _emit(ops, _record((n, terms), [(dot, (0,))],
                                    [(factor, (1,)), (out[j + 1:] if upper else out[:j], (1, 0))],
-                                   lambda r, v: [(r('mul', t, *v), t)], [PARALLEL, REDUCTION], [SUM]),
+                                   lambda r, v, upper=upper: [(_times(r, t, _conjugate(r, t, v[0]) if upper else v[0],
+                                                                      v[1]), t)], [PARALLEL, REDUCTION], [SUM]),
                       loops=(_at(width, j, n), _at(below, j, n) if upper else None))
                 given.append((dot, (0,)))
-            _emit(ops, _record((n,), [(row, (0,))], given + [(diagonal, (None,))], lambda r, v: [
-                (r('div', t, r('sub', t, v[0], v[1]) if len(v) == 3 else v[0], v[-1]), t)]),
-                  loops=(_at(width, j, n),))
-    _emit(ops, _record((n, n), [(made, (0, 1))], [(u, (0, 1)), (w, (1, 0))], lambda r, v: [(r(
-        'add', t, r('mul', t, r.const(e, t), v[0]), r('mul', t, r.const(a_minus_e, t), v[1])), t)]), loops=(sg, sg))
+
+            def solve(r, v, upper=upper):
+                head = v[0] if upper else _conjugate(r, t, v[0])
+                return [(_plus(r, t, _plus(r, t, head, v[1], 'sub') if len(v) == 3 else head, _part(r, t, v[-1], 0),
+                               'div'), t)]
+            _emit(ops, _record((n,), [(row, (0,))], given + [(diagonal, (None,))], solve), loops=(_at(width, j, n),))
+    _emit(ops, _record((n, n), [(made, (0, 1))], [(u, (0, 1)), (w, (1, 0))], lambda r, v: [(_plus(
+        r, t, _times(r, t, r.const(e, t), v[0]), _times(r, t, r.const(a_minus_e, t), _conjugate(r, t, v[1]))), t)]),
+          loops=(sg, sg))
 
 
 def _squared_distance(a, b, g, ops):
-    t, n = _class(a), a.shape[-1]
-    total = _temporary((1,), a.dtype)
-    _emit(ops, _record((n, n), [(total, (None,))], [(a, (0, 1)), (b, (0, 1))], lambda r, v: [(r(
-        'mul', t, r('sub', t, *v), r('sub', t, *v)), t)], [REDUCTION, REDUCTION], [SUM]), loops=((g, n), (g, n)))
+    t, n = _class(a.real), a.shape[-1]
+    total = _temporary((1,), a.real.dtype)
+    _emit(ops, _record((n, n), [(total, (None,))], [(a, (0, 1)), (b, (0, 1))], lambda r, v: [(_square(
+        r, t, _plus(r, t, *v, 'sub')), t)], [REDUCTION, REDUCTION], [SUM]), loops=((g, n), (g, n)))
     return total
 
 
 def _assigned(out, x, g, ops):
-    t, n = _class(x), x.shape[-1]
+    t, n = _class(x.real), x.shape[-1]
     _emit(ops, _record((n, n), [(out, (0, 1))], [(x, (0, 1))], lambda r, v: [(v[0], t)]), loops=((g, n), (g, n)))
 
 
@@ -2489,32 +2588,34 @@ def _assigned(out, x, g, ops):
 # Halley continuation after the static schedule runs each step at extent e while unconverged, 0 once converged; its
 # convergence result (int32, `converged` of _qdwh's iterate-change test within max_iterations) returned
 def _bounded_polar(x, out, e, ops, max_iterations):
-    n, t, real = x.shape[-1], _class(x), x.dtype
+    n, t, real, dtype = x.shape[-1], _class(x.real), x.real.dtype, x.dtype
     eps = float(torch.finfo(real).eps)
     se = (e, n)
     sums = [_temporary((n,), real) for _ in range(2)]
     for total, picks in zip(sums, ((1, 0), (0, 1))):
-        _emit(ops, _record((n, n), [(total, (0,))], [(x, picks)], lambda r, v: [(r('abs', t, v[0]), t)],
-                           [PARALLEL, REDUCTION], [SUM]), loops=(se, se))
+        _emit(ops, _record((n, n), [(total, (0,))], [(x, picks)], lambda r, v: [(_complex_value(
+            r, t, 'abs', v[0], None, 1, None) if isinstance(v[0], tuple) else r('abs', t, v[0]), t)],
+                           [PARALLEL, REDUCTION], [SUM]),
+              loops=(se, se))
     one, inf = _temporary((), real), _temporary((), real)
     for total, norm in zip(sums, (one, inf)):
         _emit(ops, [_reduction(A.amax, total, [0], norm, t)], loops=(se,))
     scale = _temporary((1,), real)
     ops += _scalars([scale], [one, inf], lambda r, v: [(r('select', t, r('eq', BOOL, v[0], r.const(0, t)), r.const(
         1, t), r('div', t, r.const(1, t), r('mul', t, r('sqrt', t, v[0]), r('sqrt', t, v[1])))), t)])
-    current = _temporary((n, n), real)
+    current = _temporary((n, n), dtype)
     _emit(ops, _record((n, n), [(current, (0, 1))], [(x, (0, 1)), (scale, (None,))],
-                       lambda r, v: [(r('mul', t, *v), t)]), loops=(se, se))
+                       lambda r, v: [(_times(r, t, *v), t)]), loops=(se, se))
     tol_norm, qr_coefs, chol_coefs = _qdwh_coefficients(eps, max_iterations)
     if qr_coefs:
         doubled = _temporary((1,), torch.int32)
         ops += _scalars([doubled], [e], lambda r, v: [(r('mul', I32, v[0], r.const(2, I32)), I32)])
         rows, tail, width, columns = (_ramp(e, e, *k, n, ops) for k in ((2, 1, 0), (2, 1, 1), (1, 1, 1), (1, 0, 0)))
     for a_minus_e_by_sqrt_c, sqrt_c, e_qr in qr_coefs:
-        stacked, tau, q, product = (_temporary((2 * n, n), real), _temporary((n,), real),
-                                    _temporary((2 * n, n), real), _temporary((n, n), real))
+        stacked, tau, q, product = (_temporary((2 * n, n), dtype), _temporary((n,), dtype),
+                                    _temporary((2 * n, n), dtype), _temporary((n, n), dtype))
         _emit(ops, _record((n, n), [(stacked, (0, 1))], [(current, (0, 1))],
-                           lambda r, v, k=sqrt_c: [(r('mul', t, r.const(k, t), v[0]), t)]), loops=(se, se))
+                           lambda r, v, k=sqrt_c: [(_times(r, t, r.const(k, t), v[0]), t)]), loops=(se, se))
         below = stacked[...]
         _emit(ops, _record((n, n), [(below, (0, 1))], [], lambda r, v: [(r('cast', t, r(
             'eq', BOOL, r.index(0), r.index(1))), t)]), loops=(se, se), offsets=[(below, {0: se})])
@@ -2522,11 +2623,11 @@ def _bounded_polar(x, out, e, ops, max_iterations):
         _emit(ops, _linalg_identity(q), loops=((doubled, 2 * n), se))
         _bounded_q(stacked, tau, q, rows, tail, columns, ops)
         lower = q[...]
-        _emit(ops, _gemm(product, q, (0, 2), lower, (1, 2), (n, n, n)), loops=(se, se, se),
+        _emit(ops, _gemm(product, q, (0, 2), lower, (1, 2), (n, n, n), adjoint=(False, True)), loops=(se, se, se),
               offsets=[(lower, {0: se})])
         _emit(ops, _record((n, n), [(current, (0, 1))], [(current, (0, 1)), (product, (0, 1))],
-                           lambda r, v, k=(e_qr, a_minus_e_by_sqrt_c): [(r('add', t, r(
-                               'mul', t, r.const(k[0], t), v[0]), r('mul', t, r.const(k[1], t), v[1])), t)]),
+                           lambda r, v, k=(e_qr, a_minus_e_by_sqrt_c): [(_plus(r, t, _times(
+                               r, t, r.const(k[0], t), v[0]), _times(r, t, r.const(k[1], t), v[1])), t)]),
               loops=(se, se))
     converged = _temporary((1,), torch.int32)
     ops += _fill(converged, 0)
@@ -2538,34 +2639,35 @@ def _bounded_polar(x, out, e, ops, max_iterations):
             g = _temporary((1,), torch.int32)
             ops += _scalars([g], [converged, e], lambda r, v: [(r('select', I32, r('ne', BOOL, v[0], r.const(
                 0, I32)), r.const(0, I32), v[1]), I32)])
-        step = _temporary((n, n), real)
+        step = _temporary((n, n), dtype)
         _bounded_halley(current, step, g, a_minus_e, c, e_chol, ops)
         distance = _squared_distance(step, current, g, ops)
         ops += _scalars([converged], [distance] + [converged] * bool(continued), lambda r, v: [(_convert(r, r(
             'or' if len(v) == 2 else 'and', BOOL, r('le', BOOL, r('sqrt', t, v[0]), r.const(tol_norm, t)),
             r('ne', BOOL, v[1], r.const(0, I32)) if len(v) == 2 else r.const(1, BOOL)), BOOL, I32), I32)])
         _assigned(current, step, g, ops)
-    gram, cubed = _temporary((n, n), real), _temporary((n, n), real)
-    _emit(ops, _gemm(gram, current, (2, 0), current, (2, 1), (n, n, n)), loops=(se, se, se))
+    gram, cubed = _temporary((n, n), dtype), _temporary((n, n), dtype)
+    _emit(ops, _gemm(gram, current, (2, 0), current, (2, 1), (n, n, n), adjoint=(True, False)), loops=(se, se, se))
     _emit(ops, _gemm(cubed, current, (0, 2), gram, (2, 1), (n, n, n)), loops=(se, se, se))
-    _emit(ops, _record((n, n), [(out, (0, 1))], [(current, (0, 1)), (cubed, (0, 1))], lambda r, v: [(r(
-        'sub', t, r('mul', t, r.const(1.5, t), v[0]), r('mul', t, r.const(0.5, t), v[1])), t)]), loops=(se, se))
+    _emit(ops, _record((n, n), [(out, (0, 1))], [(current, (0, 1)), (cubed, (0, 1))], lambda r, v: [(_plus(
+        r, t, _times(r, t, r.const(1.5, t), v[0]), _times(r, t, r.const(0.5, t), v[1]), 'sub'), t)]),
+          loops=(se, se))
     return converged
 
 
 # _projector_subspace's QR over the leading e x rank block of x, complete: Q (e x e, the reflectors applied to the
 # identity) into q and Q^H h Q into made, at extent e (0: no records run)
 def _subspace(x, q, made, h, e, rank, ops):
-    n, real = x.shape[-1], x.dtype
+    n, dtype = x.shape[-1], x.dtype
     se = (e, n)
     rows, tail, width, columns = (_ramp(rank, k[0], *k[1:], n, ops) for k in ((e, 1, 1, 0), (e, 1, 1, 1),
                                                                              (rank, 1, 1, 1), (e, 1, 0, 0)))
-    tau, rotated = _temporary((n,), real), _temporary((n, n), real)
+    tau, rotated = _temporary((n,), dtype), _temporary((n, n), dtype)
     _bounded_qr(x, tau, rows, tail, width, ops)
     _emit(ops, _linalg_identity(q), loops=(se, se))
     _bounded_q(x, tau, q, rows, tail, columns, ops)
     _emit(ops, _gemm(rotated, h, (0, 2), q, (2, 1), (n, n, n)), loops=(se, se, se))
-    _emit(ops, _gemm(made, q, (2, 0), rotated, (2, 1), (n, n, n)), loops=(se, se, se))
+    _emit(ops, _gemm(made, q, (2, 0), rotated, (2, 1), (n, n, n), adjoint=(True, False)), loops=(se, se, se))
 
 
 # one step of _eigh_work's loop_body for one member: pop (offset, b) (row 0's (0, 0) once empty); the popped block;
@@ -2577,7 +2679,7 @@ def _subspace(x, q, made, h, e, rank, ops):
 # int32), `generator` the construction's (its words the Haar restart's Philox key), `member` the batch member's index
 def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, member, max_iterations):
     out_blocks, out_vectors, out_agenda, out_top = made
-    n, real, t = blocks.shape[-1], blocks.dtype, _class(blocks)
+    n, dtype, real, t = blocks.shape[-1], blocks.dtype, blocks.real.dtype, _class(blocks.real)
     eps = float(torch.finfo(real).eps)
     ops = _copy(out_blocks, blocks) + _copy(out_vectors, vectors) + _copy(out_agenda, agenda)
     count = [_temporary((1,), torch.int32) for _ in range(13)]
@@ -2588,12 +2690,13 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
         (r('select', I32, r('lt', BOOL, v[0], r.const(1, I32)), r.const(0, I32), r('sub', I32, v[0], r.const(1, I32))),
          I32)], [agenda])
     sb, se, sd, so = (size, n), (e, n), (d, n), (offset, n - 1)
-    h = _temporary((n, n), real)
-    _emit(ops, _copy(h, blocks), loops=(sb, sb), offsets=[(blocks, {0: so})])
+    h = _temporary((n, n), dtype)
+    _emit(ops, _record((n, n), [(h, (0, 1))], [(blocks, (0, 1))], lambda r, v: [(v[0], t)]), loops=(sb, sb),
+          offsets=[(blocks, {0: so})])
     squares, off_diagonal = _temporary((1,), real), _temporary((1,), real)
     _emit(ops, _record((n, n), [(squares, (None,)), (off_diagonal, (None,))], [(h, (0, 1))], lambda r, v: [
-        (r('mul', t, v[0], v[0]), t),
-        (r('select', t, r('eq', BOOL, r.index(0), r.index(1)), r.const(0, t), r('mul', t, v[0], v[0])), t)],
+        (_square(r, t, v[0]), t),
+        (r('select', t, r('eq', BOOL, r.index(0), r.index(1)), r.const(0, t), _square(r, t, v[0])), t)],
         [REDUCTION, REDUCTION], [SUM, SUM]), loops=(sb, sb))
 
     def terminal(r, v):
@@ -2608,7 +2711,8 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
     _emit(ops, _record((n,), [(first, (0,))], [(h, (0, 0))], lambda r, v: [(v[0], t)]), loops=(sd,),
           offsets=[(first, {0: so})])
     diagonal, ordered, order = _temporary((n,), real), _temporary((n,), real), _temporary((n,), torch.int32)
-    _emit(ops, _record((n,), [(diagonal, (0,))], [(h, (0, 0))], lambda r, v: [(v[0], t)]), loops=(se,))
+    _emit(ops, _record((n,), [(diagonal, (0,))], [(h, (0, 0))], lambda r, v: [(_part(r, t, v[0], 0), t)]),
+          loops=(se,))
     ops.append(_Sort(diagonal, 0, n, False, ordered, order, extent=e))
     _emit(ops, _record((n,), [(cnt, (None,))], [(diagonal, (0,))], lambda r, v: [
         (_convert(r, r('not', BOOL, r('isnan', BOOL, v[0])), BOOL, I32), I32)], [REDUCTION], [SUM]), loops=(se,))
@@ -2622,23 +2726,23 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
         pair = [r('extract', t, r('div', I32, last, r.const(2, I32)), integer=1), r('extract', t, high, integer=1)]
         return [(r('mul', t, r('add', t, *pair), r.const(0.5, t)), t)]
     ops += _scalars([sigma], [cnt], median, [ordered])
-    shifted, u, swap = _temporary((n, n), real), _temporary((n, n), real), _temporary((1,), torch.int32)
+    shifted, u, swap = _temporary((n, n), dtype), _temporary((n, n), dtype), _temporary((1,), torch.int32)
 
     # QDWH-eig steps 1-4 at `shift` over extent g: U, the polar factor of H - shift I, with ||U||_F^2 and trace U
     def attempt(shift, g):
         sg = (g, n)
-        _emit(ops, _record((n, n), [(shifted, (0, 1))], [(h, (0, 1)), (shift, (None,))], lambda r, v: [(r(
-            'sub', t, v[0], r('select', t, r('eq', BOOL, r.index(0), r.index(1)), v[1], r.const(0, t))), t)]),
+        _emit(ops, _record((n, n), [(shifted, (0, 1))], [(h, (0, 1)), (shift, (None,))], lambda r, v: [(_plus(
+            r, t, v[0], r('select', t, r('eq', BOOL, r.index(0), r.index(1)), v[1], r.const(0, t)), 'sub'), t)]),
               loops=(sg, sg))
         _bounded_polar(shifted, u, g, ops, max_iterations)
         return unitary(g, ops)
 
-    # ||U||_F^2 and trace U over extent g
+    # ||U||_F^2 and trace U (its real part) over extent g
     def unitary(g, made):
         sg, sums = (g, n), (_temporary((1,), real), _temporary((1,), real))
         _emit(made, _record((n, n), [(sums[0], (None,)), (sums[1], (None,))], [(u, (0, 1))], lambda r, v: [
-            (r('mul', t, v[0], v[0]), t),
-            (r('select', t, r('eq', BOOL, r.index(0), r.index(1)), v[0], r.const(0, t)), t)],
+            (_square(r, t, v[0]), t),
+            (r('select', t, r('eq', BOOL, r.index(0), r.index(1)), _part(r, t, v[0], 0), r.const(0, t)), t)],
             [REDUCTION, REDUCTION], [SUM, SUM]), loops=(sg, sg))
         return sums
 
@@ -2665,8 +2769,8 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
     # which section 5.2's nearly diagonal test has ended) both sides are positive; zero work unless the median split
     # gives neither side
     sr = (retried, n)
-    _emit(ops, _record((n,), [(total, (None,))], [(h, (0, 0))], lambda r, v: [(v[0], t)], [REDUCTION], [SUM]),
-          loops=(sr,))
+    _emit(ops, _record((n,), [(total, (None,))], [(h, (0, 0))], lambda r, v: [(_part(r, t, v[0], 0), t)], [REDUCTION],
+                       [SUM]), loops=(sr,))
     mean = _temporary((1,), real)
     ops += _scalars([mean], [total, retried], lambda r, v: [(r('div', t, v[0], r('cast', t, v[1])), t)])
     at_mean = attempt(mean, retried)
@@ -2692,26 +2796,32 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
         return [(x, I32) for x in partition(r, b, off, *chosen)[0]]
     state = [minus, plus, rank, rest, at_minus, at_plus, offset_plus, swap]
     ops += _scalars(state, [e, *at_median, *at_mean, failed, offset], ranks)
-    projector = _temporary((n, n), real)
+    projector = _temporary((n, n), dtype)
 
     # C, the projector of the side split: (U + I) / 2 where `swap`, else (I - U) / 2, over extent g
+    def projected(r, v):
+        unit = r('cast', t, r('eq', BOOL, r.index(0), r.index(1)))
+        return [(_times(r, t, r.const(0.5, t), _chosen(r, t, r('ne', BOOL, v[1], r.const(0, I32)), _plus(
+            r, t, v[0], unit), _plus(r, t, unit, v[0], 'sub'))), t)]
+
     def project(g, made):
-        _emit(made, _record((n, n), [(projector, (0, 1))], [(u, (0, 1)), (swap, (None,))], lambda r, v: [(r(
-            'mul', t, r.const(0.5, t), r('select', t, r('ne', BOOL, v[1], r.const(0, I32)),
-                                         r('add', t, v[0], r('cast', t, r('eq', BOOL, r.index(0), r.index(1)))),
-                                         r('sub', t, r('cast', t, r('eq', BOOL, r.index(0), r.index(1))), v[0]))),
-            t)]), loops=((g, n), (g, n)))
+        _emit(made, _record((n, n), [(projector, (0, 1))], [(u, (0, 1)), (swap, (None,))], projected),
+              loops=((g, n), (g, n)))
     project(e, ops)
     norms, ordered_norms, columns = _temporary((n,), real), _temporary((n,), real), _temporary((n,), torch.int32)
-    _emit(ops, _record((n, n), [(norms, (0,))], [(projector, (0, 1))], lambda r, v: [(r('mul', t, v[0], v[0]), t)],
+    _emit(ops, _record((n, n), [(norms, (0,))], [(projector, (0, 1))], lambda r, v: [(_square(r, t, v[0]), t)],
                        [PARALLEL, REDUCTION], [SUM]), loops=(se, se))
     _emit(ops, _record((n,), [(norms, (0,))], [(norms, (0,))], lambda r, v: [(r('neg', t, r('sqrt', t, v[0])), t)]),
           loops=(se,))
     ops.append(_Sort(norms, 0, n, False, ordered_norms, columns, extent=e))
-    x, q, rotated = (_temporary((n, n), real) for _ in range(3))
+    x, q, rotated = (_temporary((n, n), dtype) for _ in range(3))
     sr = (rank, n)
-    _emit(ops, _record((n, n), [(x, (0, 1))], [(columns, (1,)), (projector, None)], lambda r, v: [(r(
-        'extract', t, r.index(0), v[0], integer=1), t)]), loops=(se, sr))
+
+    def gathered(r, v):
+        read = [r('extract', t, r.index(0), v[0], *[r.const(c, I32)] * projector.is_complex(), integer=v[1])
+                for c in ((0, 1) if projector.is_complex() else (0,))]
+        return [(tuple(read) if projector.is_complex() else read[0], t)]
+    _emit(ops, _record((n, n), [(x, (0, 1))], [(columns, (1,)), (projector, None)], gathered), loops=(se, sr))
     # pub13 section 5.1, Algorithm 3, accepting ||E||_F <= 10 u ||H||_F (u = eps / 2, the unit roundoff): a pass is
     # QR of X into [V1 V2] (q), Q^H H Q (rotated) and E = V2^H H V1 (rotated[rank:b, :rank], ||E||_F^2 `error`); the
     # procedure is a pass, then X := C V1 and a pass again while E is above tolerance and strictly below the previous
@@ -2732,7 +2842,7 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
     def iterated(made):
         _subspace(x, q, rotated, h, e, rank, made)
         _emit(made, _record((n, n), [(error, (None,))], [(rotated, (0, 1))],
-                            lambda r, v: [(r('mul', t, v[0], v[0]), t)], [REDUCTION, REDUCTION], [SUM]),
+                            lambda r, v: [(_square(r, t, v[0]), t)], [REDUCTION, REDUCTION], [SUM]),
               loops=((rest, n), sr), offsets=[(rotated, {0: sr})])
 
     def procedure(made):
@@ -2747,33 +2857,38 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
         made.append(_Repeat(repeated, again, (x, q, rotated, error, previous, again)))
         made += _scalars([unaccepted], [error, squares], lambda r, v: [(_convert(r, above(r, v), BOOL, I32), I32)])
     procedure(ops)
-    remedied, refined = [], _temporary((n, n), real)
+    remedied, refined = [], _temporary((n, n), dtype)
     _bounded_polar(u, refined, e, remedied, max_iterations)
     _assigned(u, refined, e, remedied)
     remedied += _scalars(state, [e, offset, *unitary(e, remedied)], lambda r, v: [
         (x, I32) for x in partition(r, *v)[0]])
     project(e, remedied)
     remedied += _scalars([stream], [stream], lambda r, v: [(r('add', I32, v[0], r.const(1, I32)), I32)])
-    gaussian, rotation, signed, tau = (_temporary((n, n), real), _temporary((n, n), real), _temporary((n, n), real),
-                                       _temporary((n,), real))
+    gaussian, rotation, signed, tau = (_temporary((n, n), dtype), _temporary((n, n), dtype),
+                                       _temporary((n, n), dtype), _temporary((n,), dtype))
+    # F. Mezzadri, arXiv:math-ph/0609050, section 5 (5.12, haar_measure): a complex standard normal's parts each of
+    # variance 1/2 (_random's complex normal: its real pairs, each component its own element)
+    drawn, parts = (torch.view_as_real(gaussian), 2) if gaussian.is_complex() else (gaussian, 1)
     r, inputs = _Region(), []
-    element = r('add', I32, r.const(member * n * n, I32),
-                r('add', I32, r('mul', I32, r.index(0), r.const(n, I32)), r.index(1)))
-    words = _draws(r, gaussian, inputs, generator.site(site), element=element, stream=stream)
-    r.done(_store(r, _normal(r, words), F32, gaussian))
-    _emit(remedied, [_Generic((n, n), inputs, [(gaussian, _same(2))], r)], loops=(se, sr))
+    element = r('add', I32, r.const(member * n * n * parts, I32), _linear(r, drawn.shape))
+    words = _draws(r, drawn, inputs, generator.site(site), element=element, stream=stream)
+    normal = _normal(r, words) if parts == 1 else r('mul', F32, _normal(r, words), r.const(math.sqrt(0.5), F32))
+    r.done(_store(r, normal, F32, drawn))
+    _emit(remedied, [_Generic(drawn.shape, inputs, [(drawn, _same(drawn.dim()))], r)], loops=(se, sr))
     rows, tail, width, columns = (_ramp(rank, k[0], *k[1:], n, remedied) for k in (
         (e, 1, 1, 0), (e, 1, 1, 1), (rank, 1, 1, 1), (rank, 1, 0, 0)))
     _bounded_qr(gaussian, tau, rows, tail, width, remedied)
     _emit(remedied, _linalg_identity(rotation), loops=(se, sr))
     _bounded_q(gaussian, tau, rotation, rows, tail, columns, remedied)
-    _emit(remedied, _record((n, n), [(signed, (0, 1))], [(rotation, (0, 1)), (gaussian, (1, 1))], lambda r, v: [(r(
-        'select', t, r('lt', BOOL, v[1], r.const(0, t)), r('neg', t, v[0]), v[0]), t)]), loops=(se, sr))
+    # Q diag(R)/|diag(R)| (Mezzadri 5.12): the reflector's beta, R's diagonal, real, its phase its sign
+    _emit(remedied, _record((n, n), [(signed, (0, 1))], [(rotation, (0, 1)), (gaussian, (1, 1))], lambda r, v: [(
+        _chosen(r, t, r('lt', BOOL, _part(r, t, v[1], 0), r.const(0, t)), _negated(r, t, v[0]), v[0]), t)]),
+          loops=(se, sr))
     _emit(remedied, _gemm(x, projector, (0, 2), signed, (2, 1), (n, n, n)), loops=(se, sr, se))
     procedure(remedied)
     ops.append(_Repeat(remedied, unaccepted, (x, q, rotated, error, previous, again, unaccepted, u, projector, *state,
                                               stream)))
-    turned = _temporary((n, n), real)
+    turned = _temporary((n, n), dtype)
     _emit(ops, _gemm(turned, vectors, (0, 2), q, (2, 1), (n, n, n)), loops=(None, se, se),
           offsets=[(vectors, {1: so})])
     for width, source, place in ((minus, at_minus, offset), (plus, at_plus, offset_plus)):
@@ -2801,9 +2916,10 @@ def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, memb
     return ops
 
 
-# the step's lowering: each batch member's records (its own agenda and runtime extents), real Hermitian input
+# the step's lowering: each batch member's records (its own agenda and runtime extents), real symmetric or complex
+# Hermitian input
 def _qdwh_eigh_step(outs, blocks, vectors, agenda, top, norm, site, max_iterations=10, generator=None):
-    if blocks.is_complex() or blocks.dtype not in (torch.float32, torch.float64):
+    if blocks.dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
         raise NotImplementedError('linalg.eigh of %s on a non-CPU engine: its bounded QDWH step is unfinished '
                                   '(design/torch-source-lowering-change-request.md item 6)' % blocks.dtype)
     ops = []
@@ -2867,11 +2983,11 @@ QDWH_SVD_CORRECTION = torch.ops.mesh.qdwh_svd_correction.default
 # each member's correction a _Repeat of one QR pass (Reference-LAPACK dgeqr2/dorg2r: _linalg_geqrf,
 # _linalg_householder) under its own condition, cleared by that pass
 def _qdwh_svd_correction(outs, u, s):
-    if u.is_complex() or u.dtype not in (torch.float32, torch.float64):
+    if u.dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
         raise NotImplementedError('linalg.svd of %s on a non-CPU engine: its QDWH correction is unfinished '
                                   '(design/torch-source-lowering-change-request.md item 6)' % u.dtype)
-    (out,), (m, n), t = outs, u.shape[-2:], _class(u)
-    eps, ops = float(torch.finfo(u.dtype).eps), _copy(outs[0], u)
+    (out,), (m, n), t = outs, u.shape[-2:], _class(u.real)
+    eps, ops = float(torch.finfo(u.real.dtype).eps), _copy(outs[0], u)
     for member in itertools.product(*map(range, u.shape[:-2])) if n else ():
         made, flag = out[member], _temporary((1,), torch.int32)
         packed, tau, q = _temporary((m, n), u.dtype), _temporary((n,), u.dtype), _temporary((m, n), u.dtype)
@@ -2879,8 +2995,8 @@ def _qdwh_svd_correction(outs, u, s):
             'extract', t, r.const(n - 1, I32), integer=0), r('mul', t, r.const(n * eps, t), r(
                 'extract', t, r.const(0, I32), integer=0))), BOOL, I32), I32)], [s[member]])
         corrected = _linalg_geqrf(made, packed, tau) + _linalg_householder(packed, tau, q)
-        corrected += _record((m, n), [(made, (0, 1))], [(q, (0, 1)), (packed, (1, 1))], lambda r, v: [(r(
-            'select', t, r('ge', BOOL, v[1], r.const(0, t)), v[0], r('neg', t, v[0])), t)])
+        corrected += _record((m, n), [(made, (0, 1))], [(q, (0, 1)), (packed, (1, 1))], lambda r, v: [(_chosen(
+            r, t, r('ge', BOOL, _part(r, t, v[1], 0), r.const(0, t)), v[0], _negated(r, t, v[0])), t)])
         corrected += _fill(flag, 0)
         ops.append(_Repeat(corrected, flag, (made, flag)))
     return ops

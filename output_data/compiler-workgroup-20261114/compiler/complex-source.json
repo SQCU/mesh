@@ -1,0 +1,20 @@
+{
+  "source_sha256": {
+    "compiler/mesh_compiler/operations.py": "486b227524284070ebc693fa3393709112bd79025dd7064cb5737ce95a0c30b5",
+    "compiler/mesh_compiler/decompose.py": "d1a638949531fdab5ef426d2eb1881ea8d764259b63349f7081007f9146f5826",
+    "compiler/mesh_compiler/export.py": "6dea53e386281d06096c290d8f091b7f7bec7ff09d2978235afa95ed2ad02b11",
+    "compiler/mesh_compiler/devices.py": "4d89dd74017573251e47c4c22691ce7a28955c361699f699b578f41875f9ba17",
+    "compiler/mesh_compiler/driver.py": "cfe4f8ab9a2408700ad4e96d8f0b4396e14e329f8b6506772b5717d9527da3b9",
+    "compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+    "compiler/mesh_compiler/metal.py": "5c5316c4ba468152e2c061c078e0ff54f4429a63b68fa5ee6b7ed828963ec50e",
+    "compiler/mesh_compiler/lower_metal.py": "188f5d7efafbadaccf99a0eb54ee4aa8eb7ff2b0b0f4f51e91c2528bf20dac0a"
+  },
+  "AST": "operations/lower_metal PASS; no duplicate top-level definitions",
+  "source_observation": "complex-source-observation.json PASS; no construction or native invocation yet",
+  "primary_reference_sha256": {
+    "jax-eigh.reference.py": "15499427c1175cd49586008fea5f857dce683c0f8c218292f0b7c00d2b35a8e7",
+    "jax-qdwh.reference.py": "608c2c429c2a81eee5d27081d4d2dfcb743a2daf14744144b4c3218a62ab5cb6",
+    "haar-mezzadri.reference.pdf": "e2767b9a3ad8fa0ed82f643c7fc80b34f4ed8ef7756a6a74e7879719fa3ed050"
+  },
+  "binary_reference": "eigh-parts-binaries.json"
+}
