@@ -778,15 +778,21 @@ class Target:
                 wires = tuple(dict.fromkeys(declared[4] for declared, _ in intrinsic if declared[4] != mesh.ABSENT))
             for record in prepared.ports[j]:
                 staged = record.wire != record.storage
-                if record.direction == mesh.RECEIVE and record.destination == here and not staged and (
-                        record.slot is not None):
+                if record.direction == mesh.RECEIVE and record.destination == here and not staged:
+                    # No rejection filters, even in temporary integration validation: a declared local transfer
+                    # without its required typed root is a compilation error, never an omitted port.
+                    if record.slot is None or record.slot == mesh.ABSENT:
+                        raise ValueError(f"call {j}: receive {record.owner}/{record.transfer} on machine {here} "
+                                         "has no typed input root")
                     received.append(Port(mesh.RECEIVE, record.transfer, record.owner, record.slot, record.extent,
                                          record.at, record.slot, (None, record.wire)))
                 elif record.direction == mesh.SEND and record.source == here:
                     root = prepared.wired.get((j, record.wire)) if staged else record.slot
-                    if root is not None and root != mesh.ABSENT:
-                        sent.append(Port(mesh.SEND, record.transfer, j, root, record.extent, record.at, root,
-                                         (None, record.wire), *released(record.transfer)))
+                    if root is None or root == mesh.ABSENT:
+                        raise ValueError(f"call {j}: send {record.owner}/{record.transfer} on machine {here} "
+                                         f"has no typed {'staging' if staged else 'output'} root")
+                    sent.append(Port(mesh.SEND, record.transfer, j, root, record.extent, record.at, root,
+                                     (None, record.wire), *released(record.transfer)))
             by, landed = {(record.owner, record.transfer): record for record in prepared.ports[j]}, set()
             wired = {wire: root for _, _, _, wire, root, _ in row.copies}
             for copy in (copy for copy in prepared.copies if copy.call == j and copy.kind == "land"
