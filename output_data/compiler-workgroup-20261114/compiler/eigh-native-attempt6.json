@@ -1,0 +1,41 @@
+{
+  "client": "unchanged 4x4 float32 Hermitian/MPS; eigh-native-command.md",
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "result": {
+    "stage": "result",
+    "eigenvalue_error": 7.602423994039025e-08,
+    "residual": 1.6533549577446407e-07,
+    "orthogonality": 5.186526389344204e-07,
+    "values": [
+      0.2547187805175781,
+      1.8227168321609497,
+      3.17728328704834,
+      4.74528169631958
+    ],
+    "reference_values": [
+      0.254718759825861,
+      1.8227170808871087,
+      3.1772829191128906,
+      4.74528124017414
+    ],
+    "finite": true
+  },
+  "actual_native_rows": 37,
+  "original_calls": 9,
+  "native_reload": "37 rows restored; no relation solved",
+  "source_fix": "metal5b7fa388 canonical dispatch-part boundary retained for GPU transitions",
+  "build": "eigh-parts-source.json/eigh-parts-binaries.json/eigh-parts-abi.json",
+  "diagnostic_hooks": false,
+  "scope": "This finite real Hermitian case passed. No complex/nonHermitian/SVD/pinv/lstsq/ANE accuracy, repeat iteration-count, dynamic cost or performance claim.",
+  "logs": {
+    "eigh-native-6.stdout": {
+      "sha256": "5afd965ee16028885150eea73726ad8405adf3b33f78d8e0b985c5bad8df9b15",
+      "bytes": 101572
+    },
+    "eigh-native-6.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  }
+}
