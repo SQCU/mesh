@@ -15,8 +15,9 @@ from torch.utils import _pytree as pytree
 from .devices import on_devices
 from .ir import RETURNED, Exported, shape, views
 from .ir import given as ir_given
-from .operations import (QDWH_EIGH_STEP, _eigen_geev, _least_squares_svd, _lstsq_driver, _matrix_exponential,
-                         _operands, _pseudoinverse, _qdwh_eigh_result, _qdwh_eigh_state, _singular_qdwh)
+from .operations import (LSTSQ_FIXED, QDWH_EIGH_STEP, _eigen_geev, _least_squares_svd, _lstsq_driver,
+                         _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_result, _qdwh_eigh_state,
+                         _singular_qdwh)
 from .placement import insert_send_recv
 from .schedule import carried
 
@@ -179,8 +180,13 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
         return lambda *args, **kwargs: _singular_qdwh(**_operands(node.target, args, kwargs), shapes=shapes,
                                                       max_iterations=max_iterations)
 
+    # operations.LSTSQ_FIXED: the same formulation's solution, rank and singular_values, no residuals produced
     def least_squares(node):
         shapes = [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
+        if node.target is LSTSQ_FIXED:
+            solution, rank, singular = shapes
+            return lambda *args, **kwargs: (lambda made: (made[0], made[2], made[3]))(_least_squares_svd(
+                **_operands(node.target, args, kwargs), shapes=(solution, None, rank, singular)))
         return lambda *args, **kwargs: _least_squares_svd(**_operands(node.target, args, kwargs), shapes=shapes)
 
     def svd_driver(node):
@@ -228,7 +234,7 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
 EIGH, COPY = A._linalg_eigh.default, A.copy.default
 PINV = tuple(getattr(A.linalg_pinv, overload) for overload in A.linalg_pinv.overloads())
 SVD = tuple(getattr(A._linalg_svd, overload) for overload in A._linalg_svd.overloads())
-LSTSQ = tuple(getattr(A.linalg_lstsq, overload) for overload in A.linalg_lstsq.overloads())
+LSTSQ = (*(getattr(A.linalg_lstsq, overload) for overload in A.linalg_lstsq.overloads()), LSTSQ_FIXED)
 EIG = tuple(getattr(packet, overload) for packet in (A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals)
             for overload in packet.overloads())
 # the Step's inputs: the state, the input's norm and its source draw site (operations.QDWH_EIGH_STEP); the prefix's

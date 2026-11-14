@@ -1,0 +1,9 @@
+{
+  "hashes": {
+    "compiler/mesh_compiler/operations.py": "cf01d11b0dd77237671d870e8ea3cad4575034b0a99508e74b490dad8ec78dda",
+    "compiler/mesh_compiler/decompose.py": "e672ffb62fa720049fb049056aa7284a8ef85a26d8a32a73e31f64eb95a8ad06",
+    "compiler/patches/torch-lstsq-fixed-results.patch": "254bc1f4a40f65175fafc8dcf3b3b4bd6ed98b94a1629e77b6aa54d2c9b5d5a8"
+  },
+  "ast": "PASS",
+  "source_only": true
+}

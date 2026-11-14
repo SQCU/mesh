@@ -2031,8 +2031,7 @@ def _geqrf_metadata(self):
             self.new_empty((*self.shape[:-2], min(m, n))))
 
 
-@torch.library.register_fake('aten::linalg_lstsq')
-def _lstsq_metadata(self, b, rcond=None, *, driver=None):
+def _lstsq_shapes(self, b, driver):
     torch._check(self.dim() >= 2 and b.dim() >= 1,
                  lambda: 'torch.linalg.lstsq: input must have at least 2 dimensions and other at least 1')
     torch._check(0 <= self.dim() - b.dim() <= 1,
@@ -2049,18 +2048,76 @@ def _lstsq_metadata(self, b, rcond=None, *, driver=None):
     m, n = self.shape[-2:]
     torch._check(m == rhs.shape[-2], lambda: 'torch.linalg.lstsq: input and other row sizes must match')
     batch = torch.broadcast_shapes(self.shape[:-2], rhs.shape[:-2])
-    nrhs = rhs.shape[-1]
+    return selected, vector, m, n, batch, rhs.shape[-1]
+
+
+# the results whose shapes the data does not decide: solution, rank and singular_values, as PyTorch gives each driver's
+def _lstsq_fixed(self, shapes):
+    selected, vector, m, n, batch, nrhs = shapes
     solution = self.new_empty((*batch, nrhs, max(m, n))).transpose(-2, -1)[..., :n, :]
     if vector:
         solution = solution.squeeze(-1)
-    residual = self.real.new_empty((*batch, nrhs) if m > n and (selected == 'gels' or n == 0 and selected != 'gelsy')
-                                   else (0,))
-    if m > n > 0 and selected in ('gelsd', 'gelss'):
-        from torch._subclasses.fake_tensor import DynamicOutputShapeException
-        raise DynamicOutputShapeException(A.linalg_lstsq.default)
     rank = self.new_empty(self.shape[:-2] if selected != 'gels' else (0,), dtype=torch.int64)
     singular = self.real.new_empty((*self.shape[:-2], min(m, n)) if selected in ('gelsd', 'gelss') else (0,))
+    return solution, rank, singular
+
+
+@torch.library.register_fake('aten::linalg_lstsq')
+def _lstsq_metadata(self, b, rcond=None, *, driver=None):
+    shapes = _lstsq_shapes(self, b, driver)
+    (selected, _, m, n, batch, nrhs), (solution, rank, singular) = shapes, _lstsq_fixed(self, shapes)
+    residual = self.real.new_empty((*batch, nrhs) if m > n and (selected == 'gels' or n == 0 and selected != 'gelsy')
+                                   else (0,))
+    # PyTorch v2.14.0 BatchLinearAlgebra.cpp linalg_lstsq_out_info, gelsd and gelss with m > n > 0: the residuals
+    # computed only where every rank is n. An empty batch's every rank is n, so (*batch, nrhs); unbatched with nrhs 0
+    # they are (0,) whatever the rank (nrhs or 0 long); otherwise their shape is the data's (unbatched nrhs or 0 long,
+    # batched (*batch, nrhs) or (0,))
+    if m > n > 0 and selected in ('gelsd', 'gelss') and batch and not math.prod(batch):
+        residual = self.real.new_empty((*batch, nrhs))
+    elif m > n > 0 and selected in ('gelsd', 'gelss') and (batch or nrhs):
+        from torch._subclasses.fake_tensor import DynamicOutputShapeException
+        raise DynamicOutputShapeException(A.linalg_lstsq.default)
     return solution, residual, rank, singular
+
+
+# PyTorch 2.14 torch.linalg.lstsq, residuals: "computed if m > n and every matrix in A is full rank; otherwise, it's an
+# empty tensor": for m > n > 0 under gelsd and gelss their shape is the data's (unbatched nrhs or 0 long, batched
+# (*batch, nrhs) or (0,)). torch.linalg.lstsq's results a source selects among solution, rank and singular_values alone
+# (compiler/patches/torch-lstsq-fixed-results.patch, its Dynamo product and strict export selection) are this one
+# operator's, lowered by the same drivers (_least_squares, _least_squares_svd)
+torch.library.define('mesh::linalg_lstsq_fixed', '(Tensor self, Tensor b, float? rcond=None, *, str? driver=None) -> '
+                                                 '(Tensor solution, Tensor rank, Tensor singular_values)')
+
+
+@torch.library.register_fake('mesh::linalg_lstsq_fixed')
+def _lstsq_fixed_metadata(self, b, rcond=None, *, driver=None):
+    return _lstsq_fixed(self, _lstsq_shapes(self, b, driver))
+
+
+LSTSQ_FIXED = torch.ops.mesh.linalg_lstsq_fixed.default
+
+
+# PyTorch 08187d9e0fba026dc8217405802ab5381dc88d90 (v2.14.0) torch/csrc/autograd/FunctionsManual.cpp 4009-4063,
+# linalg_lstsq_backward(gX_, gL, A, B_, X_, grad_input_mask): its solution branch takes the default pinvA =
+# at::linalg_pinv(A), A's gradient pinv_backward(gX.matmul(B.mH()), pinvA, A) and B's pinvA.mH().matmul(gX). Here no
+# residuals are produced (gL undefined), so the gradient is that branch: the vector-Jacobian product of
+# (A, B) -> linalg_pinv(A) @ B through linalg_pinv's own derivative (pinv_backward). tools/autograd/derivatives.yaml
+# 958-962, linalg_lstsq output_differentiability [True, True, False, False]: rank and singular_values are not
+# differentiable
+def _lstsq_fixed_context(ctx, inputs, keyword_only_inputs, output):
+    ctx.save_for_backward(inputs[0], inputs[1])
+    ctx.mark_non_differentiable(output[1], output[2])
+
+
+def _lstsq_fixed_backward(ctx, solution, rank, singular):
+    a, b = ctx.saved_tensors
+    vector = _linalg_vector_rhs(a, b)
+    _, pullback = torch.func.vjp(lambda a, b: torch.linalg.pinv(a) @ (b.unsqueeze(-1) if vector else b), a, b)
+    a_grad, b_grad = pullback(solution.unsqueeze(-1) if vector else solution)
+    return a_grad, b_grad, None
+
+
+torch.library.register_autograd('mesh::linalg_lstsq_fixed', _lstsq_fixed_backward, setup_context=_lstsq_fixed_context)
 
 
 # design/torch-source-lowering-change-request.md item 5; metal-microbench metal_ir.h metal_ir_lapack
@@ -3357,11 +3414,17 @@ def _least_squares(target, given, outs):
         _linalg_least_unscale(out, numerator, denominator, ops)
         if raw is not None:
             ops += _elementwise('div', raw, raw, denominator[..., None, None])
-    if residual.numel():
+    if residual is not None and residual.numel():
         magnitude = _temporary(raw.shape, raw.real.dtype)
         ops += _elementwise('abs', magnitude, raw) + _elementwise('mul', magnitude, magnitude, magnitude)
         ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [residual])
     return ops
+
+
+# mesh::linalg_lstsq_fixed (LSTSQ_FIXED): the same driver's solution, rank and singular_values, no residuals produced
+def _least_squares_fixed(target, given, outs):
+    solution, rank, singular = outs
+    return _least_squares(target, given, (solution, None, rank, singular))
 
 
 # Reference-LAPACK SRC/dgelss.f 385-435, 509-521 and 737-768, dgelsd.f 379-431 and 621-645, dlalsd.f 235-276 and
@@ -3370,11 +3433,12 @@ def _least_squares(target, given, outs):
 def _least_squares_svd(self, b, rcond=None, driver=None, shapes=()):
     a, (m, n) = self, self.shape[-2:]
     rhs = b.unsqueeze(-1) if _linalg_vector_rhs(a, b) else b
-    (solution, _), (residual, real), (rank, _), (singular, _) = shapes
+    (solution, _), produced, (rank, _), (singular, real) = shapes
+    residual = produced and produced[0]
     if not min(m, n):
         raw = (rhs.abs() * rhs.abs()).sum(-2)
-        return (a.new_zeros(solution), raw.expand(residual).clone() if math.prod(residual) else
-                a.new_empty(residual, dtype=real), a.new_zeros(rank, dtype=torch.int64),
+        return (a.new_zeros(solution), None if residual is None else raw.expand(residual).clone()
+                if math.prod(residual) else a.new_empty(residual, dtype=real), a.new_zeros(rank, dtype=torch.int64),
                 a.new_zeros(singular, dtype=real))
     limits = torch.finfo(real)
     rcond = limits.eps * max(m, n) if rcond is None else rcond
@@ -3388,7 +3452,7 @@ def _least_squares_svd(self, b, rcond=None, driver=None, shapes=()):
         keep = s > (limits.eps / 2 if rcond <= 0 or rcond >= 1 else rcond) * s.amax(-1, keepdim=True)
     inverse = torch.where(keep, 1 / torch.where(keep, s, 1), 0)
     made = LSTSQ_UNSCALE(torch.matmul(vh.mH, inverse.unsqueeze(-1) * torch.matmul(u.mH, right)), a_scale, b_scale)
-    return (made.reshape(solution), a.new_empty(residual, dtype=real), keep.sum(-1),
+    return (made.reshape(solution), None if residual is None else a.new_empty(residual, dtype=real), keep.sum(-1),
             s / a_scale.unsqueeze(-1))
 
 
@@ -7423,7 +7487,7 @@ SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWI
            **dict.fromkeys((A.mm, A.bmm, A.matmul, A.linear, A.addmm), _product), A.einsum: _summation,
            **dict.fromkeys(FACTORIZATIONS, _factorized),
            A._linalg_det: _determinant, A._linalg_slogdet: _determinant,
-           A.linalg_lu: _unpacked_lu, A.linalg_lstsq: _least_squares,
+           A.linalg_lu: _unpacked_lu, A.linalg_lstsq: _least_squares, LSTSQ_FIXED.overloadpacket: _least_squares_fixed,
            A._linalg_svd: _singular, A._linalg_eigh: _eigen_hermitian,
            **dict.fromkeys((A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals), _eigen),
            A._linalg_check_errors: _checked,
