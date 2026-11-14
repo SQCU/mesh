@@ -1,0 +1,18 @@
+{
+  "source_commit": "38f6711223838bf115bd97b0635289d8fefc5e01",
+  "source": "metal_neural.mm",
+  "source_sha256": "9f39c4486c70fd4e52a11ff9b1617c040da2b5a61ec3eb0b9ca1b05be5b7d53a",
+  "session": "e48f4bc7-7cef-4afd-ae50-fc1b4618fa73",
+  "model": "claude-opus-5-5",
+  "source_scope": "runtime internal MIL shapes; fixed external NeuralIO and public ABI unchanged",
+  "strict_exit": 0,
+  "strict_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "session_log_sha256": "e407e9cd287eb6f90cf61cb18dab0e1731dee87f8501af987c78cf545bce2d34",
+  "shared_build": false,
+  "target_run": false,
+  "limits": [
+    "coupled-state reduction with any runtime domain rejected",
+    "runtime ARGMIN/ARGMAX/ASSIGN reduction empty result not connected",
+    "ANE placement, dynamic-shape support and proportional work unmeasured"
+  ]
+}
