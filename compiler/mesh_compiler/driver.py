@@ -7,7 +7,7 @@ import torch
 from torch.export.graph_signature import OutputKind
 
 from . import native
-from .decompose import decompose
+from .decompose import decompose, outline
 from .devices import ENGINES, HOST, on_devices
 from .export import called, calls
 from .ir import Scheduled
@@ -41,7 +41,9 @@ def compile_program(program, args, functions, processors, placement, cost=unit_c
 # any schedule; a plan's context acquired where a function's transfer crosses machines or an analysis port
 # (schedule.py CallPort) with a source machine has a consumer machine other than it; the
 # compilation machine chosen once (the plan's node map entry Planning.nodes[Planning.here], else `machine`, else the
-# processors' one machine) and the seed's words sampled once; each function decomposed for its targets, scheduled
+# processors' one machine) and the seed's words sampled once; a non-CPU eigh's function outlined into its prefix,
+# 2n - 1 calls of its QDWH step and its suffix (decompose.py outline) after placement and before the call analysis;
+# each function decomposed for its targets, scheduled
 # with its source declarations (every machine's body kept, by group), and its body on the compilation machine, where
 # it has one, constructed once with every original processor's selected target and device and each output's role (a
 # buffer mutation's by the placeholder torch.export's state names it under); ONE completed native target of those
@@ -61,6 +63,7 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
         graph = on_devices(placed, processors)
         staged[key] = (placed, output_processor, channels, graph, carried(graph.meta["transfers"], machines),
                        [node.meta["stated"] for node in placed.graph.nodes if node.op == "placeholder"])
+    captured, staged = outline(captured, staged, targets, processors, machines)
     placements = {key: (stage[5], stage[1]) for key, stage in staged.items()}
     output_processor = placement(captured.exported.graph_module.graph.output_node())
     analysis = analyse(captured, placements, machines, output_processor)

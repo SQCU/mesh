@@ -1,0 +1,15 @@
+# QDWH source producer checkpoint
+
+This checkpoint connects the existing captured-program compiler to a real Hermitian QDWH-eig source decomposition. It is source-ready, not a completed numerical validation.
+
+After explicit placement, a non-CPU `aten._linalg_eigh` is replaced by prefix/state construction, one reusable shape-specialized agenda Step, and suffix ordering/reconstruction. Original call identities, input/result roles and bindings remain in the same CapturedProgram and enter the existing joint analysis/planner. CPU placement retains its existing LAPACK lowering. The Step's six inputs carry blocks, vectors, agenda, top, norm and source RNG site. The original global site declaration pass assigns the site before placement; the shared Step key does not bake in a particular source site.
+
+The source split uses one canonical graph adjacency/reach result over original FX Nodes and retained SEND→arrival pairs. The actual relation/search owner stays with concrete prefix/suffix graphs; input partition landing geometry and Work source references use the existing substitution maps. No per-query graph reconstruction or Python reachability implementation remains.
+
+The structured numerical owner expresses active block/QR dimensions through the existing typed symbols and loop extents. A Step performs one agenda pop. Its initial subspace procedure runs once; actual error improvement controls the inner Repeat. Above-tolerance stagnation enters the cited polar-refinement/Haar-restart remedy loop, then retries the same procedure. Accepted results flow to child writes and agenda push. The 2n−1 call bound applies only to successful positive-child splits, not finite-precision retries. There is no n−1 clamp, prior-partition fallback, CPU fallback or new numerical backend.
+
+The paired encoder is mesh `6a444b84`: nested structured records become the actual typed operation interval and Repeat region, with complete leaf emission/Work correspondence. The paired native v37 control, dispatch order, Actor completion, publication and archive implementation is still active. Placement17's source projection keeps original child storage intervals and extends back-edge-live domains in the same allocation; its current contract is `numerical-region-placement.status.md`.
+
+Validation at this checkpoint: AST passes for operations/decompose/export/driver; worker pyflakes checks pass apart from the pre-existing unused `real` in operations; diff whitespace check passes. No v37 build, spectral invocation, accuracy result or transported repeat observation is claimed. Complex Hermitian, SVD/pinv/lstsq compositions and non-Hermitian coverage remain unfinished. A refined split that violates the source positive-child premise remains an explicit numerical case to resolve from actual output evidence.
+
+Source references: `design/torch-source-lowering-change-request.md` 5/6; Nakatsukasa–Higham 2013 §5.1 Algorithm 3 and §5.2/5.4; JAX `eigh.py` agenda/spectrum split and `qdwh.py` coefficient/continuation owner. `numerical-repeat.status.md` records the current source operands in detail. Original malformed legacy source paths are untouched.

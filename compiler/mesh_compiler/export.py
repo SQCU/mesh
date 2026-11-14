@@ -19,6 +19,9 @@ from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, writt
 
 WITH_EFFECTS = torch.ops.higher_order.with_effects
 COPY = torch.ops.aten.copy.default
+# pub13 section 5.1 case (i): an eigh outlined on a non-CPU engine (compiler/mesh_compiler/decompose.py outline) draws
+# its Haar restarts at its own source site, carried to its QDWH steps as data (operations.QDWH_EIGH_STEP `site`)
+DRAWING = (torch.ops.aten._linalg_eigh.default,)
 
 
 # design/unequal-shards-change-request.md item 8; torch 2.14.0 torch/export/experimental/__init__.py
@@ -303,13 +306,64 @@ def capture(module, args, functions, options, root):
     graph.set_codegen(torch.fx.graph.CodeGen())
     module.recompile()
     # torch 2.14.0 torchgen/model.py Tag nondeterministic_seeded (OpOverload.tags); J. K. Salmon et al., SC 2011, §3.1:
-    # each seeded source operation's draw site, one source namespace numbered from 1 over the captured functions in
-    # their order and each one's graph order, once before placement
+    # each seeded source operation's draw site, and each source eigh's (DRAWING), one source namespace numbered from 1
+    # over the captured functions in their order and each one's graph order, once before placement
     sites = itertools.count(1)
     for function in interpreter.exported.values():
         for node in function.graph_module.graph.nodes:
-            if node.op == "call_function" and torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ()):
+            if node.op == "call_function" and (torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())
+                                               or node.target in DRAWING):
                 node.meta["site"] = next(sites)
     exported = Exported(module, state, tokens, [node.name for node in inputs],
                         [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds)
     return CapturedProgram(exported, interpreter.exported, bound)
+
+
+# design/aot-compilation-change-request.md A10; compiler/mesh_compiler/decompose.py outline: every call of function
+# `key` replaced, in place in the program's call graph, by the calls of `parts` in order, each (key, Exported, inputs,
+# results): an input ("call", i) the original call's input i or ("part", p, o) part p's output o; `results` {output o:
+# the original call's output k}, whose outer node (its value, its readers, a mutation's role) becomes part output o,
+# every other output a new outer node of a fresh fake value of the capture's mode (no storage of any other); the
+# program's other calls, functions and outer graph kept
+def substitute(captured, key, parts):
+    graph = captured.exported.graph_module.graph
+    functions = {k: f for k, f in captured.functions.items() if k != key}
+    functions.update((k, exported) for k, exported, _, _ in parts)
+    calls = {}
+    for node, call in captured.calls.items():
+        if call.function != key:
+            calls[node] = call
+            continue
+        leaves = [leaf.meta["val"] for leaf in call.inputs + call.outputs
+                  if isinstance(leaf, torch.fx.Node) and isinstance(leaf.meta.get("val"), torch.Tensor)]
+        fake, made, at = detect_fake_mode(leaves), [], node.prev
+        for k, exported, inputs, results in parts:
+            arguments = [call.inputs[source[1]] if source[0] == "call" else made[source[1]][source[2]]
+                         for source in inputs]
+            with graph.inserting_after(at):
+                there = graph.node_copy(node, lambda n: n)
+            there.args, there.kwargs = tuple(arguments), {}
+            there.meta.update(function=k)
+            at, outputs = there, []
+            values = exported.graph_module.graph.output_node().args[0]
+            for o, value in enumerate(values):
+                if o in results:
+                    leaf = call.outputs[results[o]]
+                    leaf.args = (there, o)
+                    at.append(leaf)
+                else:
+                    with graph.inserting_after(at):
+                        leaf = graph.call_function(operator.getitem, (there, o))
+                    prototype = value.meta["val"] if isinstance(value, torch.fx.Node) else value
+                    if isinstance(prototype, torch.Tensor):
+                        with fake:
+                            prototype = torch.empty_strided(prototype.shape, prototype.stride(),
+                                                            dtype=prototype.dtype, device=prototype.device)
+                    leaf.meta["val"] = prototype
+                at = leaf
+                outputs.append(leaf)
+            calls[there] = Call(k, arguments, outputs)
+            made.append(outputs)
+        graph.erase_node(node)
+    captured.exported.graph_module.recompile()
+    return CapturedProgram(captured.exported, functions, calls)

@@ -314,6 +314,39 @@ class _Generic:
         self.place, self.node = GPU, 0
 
 
+# design/torch-source-lowering-change-request.md item 6; metal-microbench metal_ir.h metal_ir_symbol and
+# metal_ir_loop_extent: existing structured records over a block of runtime place and size, the records' own formulas
+# unchanged. Each record gains `symbols` (one-element tensor, bound) after its own; `offsets` (operand tensor, {dim:
+# symbol index}), matched by identity with the record's operands, adds that symbol to the operand's row of that
+# dimension (a dynamic slice offset); `clip(record, loop)` the symbol index clipping the loop, or None. A record kind
+# other than _Generic has no runtime extent of its own, so its bounded lowering is unfinished
+def _on_block(records, symbols, offsets=(), clip=lambda record, loop: None):
+    made = []
+    for g in records:
+        if not isinstance(g, _Generic):
+            raise NotImplementedError('%s over a runtime block: its bounded lowering is unfinished '
+                                      '(design/torch-source-lowering-change-request.md item 6)' % type(g).__name__)
+        base, own = len(g.symbols), len(g.sizes) + len(g.symbols)
+
+        def extended(operands):
+            out = []
+            for t, rows in operands:
+                if rows is not None:
+                    shifted = next((at for held, at in offsets if held is t), {})
+                    rows = tuple(tuple(row[:own]) + tuple(int(shifted.get(d) == k) for k in range(len(symbols)))
+                                 + (row[own],) for d, row in enumerate(rows))
+                out.append((t, rows))
+            return out
+        bounded = _Generic(g.sizes, extended(g.inputs), extended(g.outputs), g.body, g.iterators, g.combiner,
+                           g.accumulator, g.start, g.states, g.combine, g.finalize, g.precision,
+                           [*g.symbols, *symbols],
+                           [e if e is not None else None if clip(g, l) is None else base + clip(g, l)
+                            for l, e in enumerate(g.extents)])
+        bounded.place, bounded.node, bounded.source_axes = g.place, g.node, g.source_axes
+        made.append(bounded)
+    return made
+
+
 def _rows(dims, picks):
     made = []
     for pick in picks:
@@ -2193,19 +2226,10 @@ def _matrix_exponential(a, max_squarings):
     return torch.where(over[..., None, None], math.nan, result)
 
 
-# design/torch-source-lowering-change-request.md item 6; JAX jax/_src/tpu/linalg/qdwh.py, qdwh, _qdwh, _use_qr and
-# _use_cholesky
-def _polar(x, max_iterations=10):
-    batch, real = x.shape[:-2], x.real.dtype
-    m, n = x.shape[-2:]
-    eps = float(torch.finfo(real).eps)
-    magnitude = x.abs()
-    one_norm, inf_norm = magnitude.sum(-2).amax(-1), magnitude.sum(-1).amax(-1)
-    alpha_inverse = torch.where(one_norm == 0, 1, one_norm.rsqrt() * inf_norm.rsqrt())
-    current = x * alpha_inverse[..., None, None]
-    identity = torch.eye(n, dtype=x.dtype, device=x.device)
+# JAX jax/_src/tpu/linalg/qdwh.py _qdwh: the static coefficient schedule from eps (l the lower singular value bound,
+# CHOLESKY_CUTOFF 100), and the convergence tolerance cbrt(10 eps / 2)
+def _qdwh_coefficients(eps, max_iterations):
     l, tol_l = eps, 10.0 * eps / 2.0
-    tol_norm = tol_l ** (1 / 3)
     qr_coefs, chol_coefs = [], []
     while l + tol_l < 1 and len(qr_coefs) + len(chol_coefs) < max_iterations:
         l2 = l * l
@@ -2220,6 +2244,21 @@ def _polar(x, max_iterations=10):
             qr_coefs.append(((a - e) / c ** (1 / 2), c ** (1 / 2), e))
         else:
             chol_coefs.append((a - e, c, e))
+    return tol_l ** (1 / 3), qr_coefs, chol_coefs
+
+
+# design/torch-source-lowering-change-request.md item 6; JAX jax/_src/tpu/linalg/qdwh.py, qdwh, _qdwh, _use_qr and
+# _use_cholesky
+def _polar(x, max_iterations=10):
+    batch, real = x.shape[:-2], x.real.dtype
+    m, n = x.shape[-2:]
+    eps = float(torch.finfo(real).eps)
+    magnitude = x.abs()
+    one_norm, inf_norm = magnitude.sum(-2).amax(-1), magnitude.sum(-1).amax(-1)
+    alpha_inverse = torch.where(one_norm == 0, 1, one_norm.rsqrt() * inf_norm.rsqrt())
+    current = x * alpha_inverse[..., None, None]
+    identity = torch.eye(n, dtype=x.dtype, device=x.device)
+    tol_norm, qr_coefs, chol_coefs = _qdwh_coefficients(eps, max_iterations)
     for a_minus_e_by_sqrt_c, sqrt_c, e in qr_coefs:
         q = torch.linalg.qr(torch.cat([sqrt_c * current, identity.expand(*batch, n, n)], -2)).Q
         current = e * current + a_minus_e_by_sqrt_c * torch.matmul(q[..., :m, :], q[..., m:, :].mH)
@@ -2253,6 +2292,55 @@ def _polar(x, max_iterations=10):
     return u, (product + product.mH) / 2, converged
 
 
+# design/torch-source-lowering-change-request.md item 6; JAX jax/_src/tpu/linalg/eigh.py _eigh_work, split_spectrum
+# and _projector_subspace, and jax/_src/tpu/linalg/qdwh.py _qdwh, _use_qr and _use_cholesky; Y. Nakatsukasa and N. J.
+# Higham, SIAM J. Sci. Comput. 35(3), 2013, sections 5.1 to 5.4: QDWH-eigh with termination_size 1, its recursion
+# JAX's explicit agenda. Per batch member the state is `blocks` (the ragged stack of Hermitian blocks, each
+# left-aligned at its row offset), `vectors` (the isometries, initially the identity), `agenda` ((n + 1) x 2 int32:
+# row 0 the empty entry (0, 0), rows 1..top the pushed (offset, size)), `top` and the input's Frobenius norm. The
+# state before the first step (the UPLO triangle reflected; `site` the eigh's source draw site, carried to every step
+# as a one-element int32 tensor) and the result after the last (the first column's
+# eigenvalues ascending, their vectors' columns in that order): the prefix and suffix formulations
+# compiler/mesh_compiler/decompose.py outline traces
+def _qdwh_eigh_state(a, upper=False, site=0):
+    n, batch = a.shape[-1], a.shape[:-2]
+    keep = torch.ones(n, n, dtype=torch.bool, device=a.device)
+    h = torch.where(keep.triu() if upper else keep.tril(), a, a.mT.conj())
+    vectors = torch.eye(n, dtype=a.dtype, device=a.device).expand(*batch, n, n).clone()
+    entry = (torch.arange(n + 1, device=a.device)[:, None] == 1) & (torch.arange(2, device=a.device) == 1)
+    agenda = torch.where(entry, n, 0).to(torch.int32).expand(*batch, n + 1, 2).clone()
+    top = torch.ones(*batch, 1, dtype=torch.int32, device=a.device)
+    magnitude = h.abs()
+    return (h, vectors, agenda, top, (magnitude * magnitude).sum((-2, -1)).sqrt()[..., None],
+            torch.full((1,), site, dtype=torch.int32, device=a.device))
+
+
+# eigh's sort_eigenvalues (jnp.argsort, stable, NaN last; `empty` the vectors' shape without compute_v), after the
+# outlined 2n - 1 steps (each split's children of positive size, pub13 section 5.2: n leaves, n - 1 splits)
+def _qdwh_eigh_result(blocks, vectors, empty=None):
+    values = blocks[..., :, 0]
+    values, order = torch.sort(values.real if values.is_complex() else values, stable=True, dim=-1)
+    if empty is not None:
+        return values, vectors.new_empty(empty)
+    return values, vectors.gather(-1, order[..., None, :].expand(vectors.shape))
+
+
+# the outlined step's operator (compiler/mesh_compiler/decompose.py outline): the state after one pop. Its one kernel is
+# its fake/meta shape rule (torch.library.register_fake: the state's shapes, no values); its numerical semantics are
+# its lowering's alone (_qdwh_eigh_step, through _lowering), so it has no eager kernel. `site` the eigh's source draw
+# site (compiler/mesh_compiler/export.py capture), one-element int32, the Haar restart's Philox site
+torch.library.define('mesh::qdwh_eigh_step', '(Tensor blocks, Tensor vectors, Tensor agenda, Tensor top, '
+                     'Tensor norm, Tensor site, int max_iterations=10) -> (Tensor, Tensor, Tensor, Tensor)')
+
+
+@torch.library.register_fake('mesh::qdwh_eigh_step')
+def _qdwh_eigh_step_shapes(blocks, vectors, agenda, top, norm, site, max_iterations=10):
+    return tuple(torch.empty_like(x) for x in (blocks, vectors, agenda, top))
+
+
+QDWH_EIGH_STEP = torch.ops.mesh.qdwh_eigh_step.default
+
+
 # pub13 section 5.1, Algorithm 3 (metal-microbench metal_ir.h metal_ir_repeat): one source numerical repetition, a
 # while loop. `records` one pass in order (structured records, a nested _Repeat among them); before every pass,
 # the first included, the one-element int32 `condition` (written by the records before this one, then by each pass)
@@ -2263,6 +2351,475 @@ class _Repeat:
         self.records, self.condition, self.carried = list(records), condition, tuple(carried)
         self.place, self.node = GPU, 0
 
+
+# one structured record: `outs` and `ins` (tensor, picks) where picks name each dimension's loop (compiler `_rows`;
+# None for the whole picks reads that input by extraction only); fn(r, values) gives each output's (value, kind)
+def _record(sizes, outs, ins, fn, iterators=None, combiner=None):
+    r, n = _Region(), len(sizes)
+    made = fn(r, [r.arg(k, x) if picks is not None else None for k, (x, picks) in enumerate(ins)])
+    r.done(*[_convert(r, v, kind, _class(o)) for (v, kind), (o, _) in zip(made, outs)])
+    return [_Generic(sizes, [(x, None if picks is None else _rows(n, picks)) for x, picks in ins],
+                     [(o, None if picks is None else _rows(n, picks)) for o, picks in outs], r, iterators, combiner,
+                     [kind for _, kind in made], precision=REASSOCIATE | CONTRACT if combiner else 0)]
+
+
+def _scalars(outs, ins, fn, gathered=()):
+    return _record((1,), [(o, (None,) * o.dim()) for o in outs],
+                   [(x, (None,) * x.dim()) for x in ins] + [(x, None) for x in gathered], fn)
+
+
+def _gemm(out, a, a_picks, b, b_picks, sizes):
+    t = _class(out)
+    return _record(sizes, [(out, (0, 1))], [(a, a_picks), (b, b_picks)], lambda r, v: [(r('mul', t, *v), t)],
+                   [PARALLEL, PARALLEL, REDUCTION], [SUM])
+
+
+# records over runtime extents (_on_block): `loops` per loop position, or `sizes` by static loop size, an extent
+# (one-element int32 tensor, bound) or None; `offsets` (operand, {dim: extent}) a symbol added to that dimension
+def _emit(ops, records, loops=(), sizes=None, offsets=()):
+    symbols, index = [], {}
+
+    def symbol(s):
+        if id(s[0]) not in index:
+            index[id(s[0])] = len(symbols)
+            symbols.append(s)
+        return index[id(s[0])]
+    clips = {l: symbol(s) for l, s in enumerate(loops) if s is not None}
+    sized = {n: symbol(s) for n, s in (sizes or {}).items() if s is not None}
+    moved = [(t, {d: symbol(s) for d, s in dims.items()}) for t, dims in offsets]
+    ops += _on_block(records, symbols, moved,
+                     lambda g, l: sized.get(g.sizes[l]) if sizes is not None else clips.get(l))
+
+
+# per column j < n of a bounded factorization: (j < limit) ? max(scale length - step j - shift, 0) : 0
+def _ramp(limit, length, scale, step, shift, n, ops):
+    out = _temporary((n,), torch.int32)
+
+    def fn(r, v):
+        j, zero = r.index(0), r.const(0, I32)
+        left = r('sub', I32, r('mul', I32, v[1], r.const(scale, I32)),
+                 r('add', I32, r('mul', I32, j, r.const(step, I32)), r.const(shift, I32)))
+        left = r('select', I32, r('lt', BOOL, left, zero), zero, left)
+        return [(r('select', I32, r('lt', BOOL, j, v[0]), left, zero), I32)]
+    ops += _record((n,), [(out, (0,))], [(limit, (None,)), (length, (None,))], fn)
+    return out
+
+
+def _at(vector, j, bound):
+    return vector[j:j + 1], bound
+
+
+# Reference-LAPACK SRC/dgeqr2.f and dorg2r.f over a runtime block (_linalg_reflector, _linalg_reflect): column j's
+# length s[j], its tail t[j] and the columns right of it it updates w[j], each zero past the reflected columns
+def _bounded_qr(packed, tau, s, tail, w, ops):
+    rows, columns = packed.shape
+    for j in range(min(rows, columns)):
+        beta, made = _temporary((), packed.dtype), []
+        v = _linalg_reflector(packed[j:, j], tau[j], beta, made)
+        _emit(ops, made, sizes={rows - j: _at(s, j, rows), rows - j - 1: _at(tail, j, rows)})
+        if j + 1 < columns:
+            made = []
+            _linalg_reflect(packed[j:, j + 1:], v, tau[j], made, adjoint=True)
+            _emit(ops, made, sizes={rows - j: _at(s, j, rows), columns - j - 1: _at(w, j, columns)})
+        ops += _copy(packed[j, j], beta)
+        if j + 1 < rows:
+            _emit(ops, _copy(packed[j + 1:, j], v[1:, 0]), sizes={rows - j - 1: _at(tail, j, rows)})
+
+
+def _bounded_q(packed, tau, out, s, tail, width, ops):
+    rows, columns = packed.shape
+    for j in reversed(range(min(rows, columns))):
+        v = _temporary((rows - j, 1), packed.dtype)
+        ops += _fill(v[0, 0], 1)
+        if rows - j > 1:
+            _emit(ops, _copy(v[1:, 0], packed[j + 1:, j]), sizes={rows - j - 1: _at(tail, j, rows)})
+        made = []
+        _linalg_reflect(out[j:, :], v, tau[j], made)
+        _emit(ops, made, sizes={rows - j: _at(s, j, rows), out.shape[-1]: _at(width, j, out.shape[-1])})
+
+
+# Reference-LAPACK SRC/dpotf2.f and dtrsm.f over a runtime block of `g` rows: _use_cholesky's step,
+# e u + (a - e) (L^-H L^-1 u^H)^H, L the lower Cholesky factor of c u^H u + I
+def _bounded_halley(u, made, g, a_minus_e, c, e, ops):
+    n, t = u.shape[-1], _class(u)
+    sg = (g, n)
+    alive, width, below = (_ramp(g, g, *k, n, ops) for k in ((0, 0, -1), (1, 0, 0), (1, 1, 1)))
+    z, lower = _temporary((n, n), u.dtype), _temporary((n, n), u.dtype)
+    _emit(ops, _gemm(z, u, (2, 0), u, (2, 1), (n, n, n)), loops=(sg, sg, sg))
+    _emit(ops, _record((n, n), [(z, (0, 1))], [(z, (0, 1))], lambda r, v: [(r(
+        'add', t, r('mul', t, r.const(c, t), v[0]), r('cast', t, r('eq', BOOL, r.index(0), r.index(1)))), t)]),
+          loops=(sg, sg))
+    for j in range(n):
+        diagonal = lower[j:j + 1, j]
+        _emit(ops, _record((1,), [(diagonal, (0,))], [(z[j:j + 1, j], (0,))], lambda r, v: [(r('sqrt', t, v[0]), t)]),
+              loops=(_at(alive, j, 1),))
+        if j + 1 < n:
+            column, block = lower[j + 1:, j], z[j + 1:, j + 1:]
+            _emit(ops, _record((n - j - 1,), [(column, (0,))], [(z[j + 1:, j], (0,)), (diagonal, (None,))],
+                               lambda r, v: [(r('div', t, *v), t)]), loops=(_at(below, j, n),))
+            _emit(ops, _record((n - j - 1, n - j - 1), [(block, (0, 1))],
+                               [(block, (0, 1)), (column, (0,)), (column, (1,))],
+                               lambda r, v: [(r('sub', t, v[0], r('mul', t, v[1], v[2])), t)]),
+                  loops=(_at(below, j, n), _at(below, j, n)))
+    solved, w = _temporary((n, n), u.dtype), _temporary((n, n), u.dtype)
+    for upper, out, rhs in ((False, solved, u.mT), (True, w, solved)):
+        for j in reversed(range(n)) if upper else range(n):
+            row, diagonal, terms = out[j], lower[j:j + 1, j], n - j - 1 if upper else j
+            given = [(rhs[j], (0,))]
+            if terms:
+                dot = _temporary((n,), u.dtype)
+                factor = lower[j + 1:, j] if upper else lower[j, :j]
+                _emit(ops, _record((n, terms), [(dot, (0,))],
+                                   [(factor, (1,)), (out[j + 1:] if upper else out[:j], (1, 0))],
+                                   lambda r, v: [(r('mul', t, *v), t)], [PARALLEL, REDUCTION], [SUM]),
+                      loops=(_at(width, j, n), _at(below, j, n) if upper else None))
+                given.append((dot, (0,)))
+            _emit(ops, _record((n,), [(row, (0,))], given + [(diagonal, (None,))], lambda r, v: [
+                (r('div', t, r('sub', t, v[0], v[1]) if len(v) == 3 else v[0], v[-1]), t)]),
+                  loops=(_at(width, j, n),))
+    _emit(ops, _record((n, n), [(made, (0, 1))], [(u, (0, 1)), (w, (1, 0))], lambda r, v: [(r(
+        'add', t, r('mul', t, r.const(e, t), v[0]), r('mul', t, r.const(a_minus_e, t), v[1])), t)]), loops=(sg, sg))
+
+
+def _squared_distance(a, b, g, ops):
+    t, n = _class(a), a.shape[-1]
+    total = _temporary((1,), a.dtype)
+    _emit(ops, _record((n, n), [(total, (None,))], [(a, (0, 1)), (b, (0, 1))], lambda r, v: [(r(
+        'mul', t, r('sub', t, *v), r('sub', t, *v)), t)], [REDUCTION, REDUCTION], [SUM]), loops=((g, n), (g, n)))
+    return total
+
+
+def _assigned(out, x, g, ops):
+    t, n = _class(x), x.shape[-1]
+    _emit(ops, _record((n, n), [(out, (0, 1))], [(x, (0, 1))], lambda r, v: [(v[0], t)]), loops=((g, n), (g, n)))
+
+
+# _qdwh over the leading e x e block of x (dynamic_shape (e, e)): its polar factor into out's leading block; the
+# Halley continuation after the static schedule runs each step at extent e while unconverged, 0 once converged; its
+# convergence result (int32, `converged` of _qdwh's iterate-change test within max_iterations) returned
+def _bounded_polar(x, out, e, ops, max_iterations):
+    n, t, real = x.shape[-1], _class(x), x.dtype
+    eps = float(torch.finfo(real).eps)
+    se = (e, n)
+    sums = [_temporary((n,), real) for _ in range(2)]
+    for total, picks in zip(sums, ((1, 0), (0, 1))):
+        _emit(ops, _record((n, n), [(total, (0,))], [(x, picks)], lambda r, v: [(r('abs', t, v[0]), t)],
+                           [PARALLEL, REDUCTION], [SUM]), loops=(se, se))
+    one, inf = _temporary((), real), _temporary((), real)
+    for total, norm in zip(sums, (one, inf)):
+        _emit(ops, [_reduction(A.amax, total, [0], norm, t)], loops=(se,))
+    scale = _temporary((1,), real)
+    ops += _scalars([scale], [one, inf], lambda r, v: [(r('select', t, r('eq', BOOL, v[0], r.const(0, t)), r.const(
+        1, t), r('div', t, r.const(1, t), r('mul', t, r('sqrt', t, v[0]), r('sqrt', t, v[1])))), t)])
+    current = _temporary((n, n), real)
+    _emit(ops, _record((n, n), [(current, (0, 1))], [(x, (0, 1)), (scale, (None,))],
+                       lambda r, v: [(r('mul', t, *v), t)]), loops=(se, se))
+    tol_norm, qr_coefs, chol_coefs = _qdwh_coefficients(eps, max_iterations)
+    if qr_coefs:
+        doubled = _temporary((1,), torch.int32)
+        ops += _scalars([doubled], [e], lambda r, v: [(r('mul', I32, v[0], r.const(2, I32)), I32)])
+        rows, tail, width, columns = (_ramp(e, e, *k, n, ops) for k in ((2, 1, 0), (2, 1, 1), (1, 1, 1), (1, 0, 0)))
+    for a_minus_e_by_sqrt_c, sqrt_c, e_qr in qr_coefs:
+        stacked, tau, q, product = (_temporary((2 * n, n), real), _temporary((n,), real),
+                                    _temporary((2 * n, n), real), _temporary((n, n), real))
+        _emit(ops, _record((n, n), [(stacked, (0, 1))], [(current, (0, 1))],
+                           lambda r, v, k=sqrt_c: [(r('mul', t, r.const(k, t), v[0]), t)]), loops=(se, se))
+        below = stacked[...]
+        _emit(ops, _record((n, n), [(below, (0, 1))], [], lambda r, v: [(r('cast', t, r(
+            'eq', BOOL, r.index(0), r.index(1))), t)]), loops=(se, se), offsets=[(below, {0: se})])
+        _bounded_qr(stacked, tau, rows, tail, width, ops)
+        _emit(ops, _linalg_identity(q), loops=((doubled, 2 * n), se))
+        _bounded_q(stacked, tau, q, rows, tail, columns, ops)
+        lower = q[...]
+        _emit(ops, _gemm(product, q, (0, 2), lower, (1, 2), (n, n, n)), loops=(se, se, se),
+              offsets=[(lower, {0: se})])
+        _emit(ops, _record((n, n), [(current, (0, 1))], [(current, (0, 1)), (product, (0, 1))],
+                           lambda r, v, k=(e_qr, a_minus_e_by_sqrt_c): [(r('add', t, r(
+                               'mul', t, r.const(k[0], t), v[0]), r('mul', t, r.const(k[1], t), v[1])), t)]),
+              loops=(se, se))
+    converged = _temporary((1,), torch.int32)
+    ops += _fill(converged, 0)
+    steps = [(params, None) for params in chol_coefs] + \
+        [((3 - 1 / 3, 3, 1 / 3), True)] * (max_iterations - len(qr_coefs) - len(chol_coefs))
+    for (a_minus_e, c, e_chol), continued in steps:
+        g = e
+        if continued:
+            g = _temporary((1,), torch.int32)
+            ops += _scalars([g], [converged, e], lambda r, v: [(r('select', I32, r('ne', BOOL, v[0], r.const(
+                0, I32)), r.const(0, I32), v[1]), I32)])
+        step = _temporary((n, n), real)
+        _bounded_halley(current, step, g, a_minus_e, c, e_chol, ops)
+        distance = _squared_distance(step, current, g, ops)
+        ops += _scalars([converged], [distance] + [converged] * bool(continued), lambda r, v: [(_convert(r, r(
+            'or' if len(v) == 2 else 'and', BOOL, r('le', BOOL, r('sqrt', t, v[0]), r.const(tol_norm, t)),
+            r('ne', BOOL, v[1], r.const(0, I32)) if len(v) == 2 else r.const(1, BOOL)), BOOL, I32), I32)])
+        _assigned(current, step, g, ops)
+    gram, cubed = _temporary((n, n), real), _temporary((n, n), real)
+    _emit(ops, _gemm(gram, current, (2, 0), current, (2, 1), (n, n, n)), loops=(se, se, se))
+    _emit(ops, _gemm(cubed, current, (0, 2), gram, (2, 1), (n, n, n)), loops=(se, se, se))
+    _emit(ops, _record((n, n), [(out, (0, 1))], [(current, (0, 1)), (cubed, (0, 1))], lambda r, v: [(r(
+        'sub', t, r('mul', t, r.const(1.5, t), v[0]), r('mul', t, r.const(0.5, t), v[1])), t)]), loops=(se, se))
+    return converged
+
+
+# _projector_subspace's QR over the leading e x rank block of x, complete: Q (e x e, the reflectors applied to the
+# identity) into q and Q^H h Q into made, at extent e (0: no records run)
+def _subspace(x, q, made, h, e, rank, ops):
+    n, real = x.shape[-1], x.dtype
+    se = (e, n)
+    rows, tail, width, columns = (_ramp(rank, k[0], *k[1:], n, ops) for k in ((e, 1, 1, 0), (e, 1, 1, 1),
+                                                                             (rank, 1, 1, 1), (e, 1, 0, 0)))
+    tau, rotated = _temporary((n,), real), _temporary((n, n), real)
+    _bounded_qr(x, tau, rows, tail, width, ops)
+    _emit(ops, _linalg_identity(q), loops=(se, se))
+    _bounded_q(x, tau, q, rows, tail, columns, ops)
+    _emit(ops, _gemm(rotated, h, (0, 2), q, (2, 1), (n, n, n)), loops=(se, se, se))
+    _emit(ops, _gemm(made, q, (2, 0), rotated, (2, 1), (n, n, n)), loops=(se, se, se))
+
+
+# one step of _eigh_work's loop_body for one member: pop (offset, b) (row 0's (0, 0) once empty); the popped block;
+# nearly diagonal (off-diagonal norm <= 5 eps norm), tiny (norm < eps H0_norm) or b <= 1 its diagonal into the first
+# column, else split_spectrum at the diagonal's nanmedian: the polar factor U of H - sigma I, the side dimensions of
+# pub13 section 5.4 (the mean's shift where neither is positive), Algorithm 3's subspace iteration on the projector of
+# the side split with its section 5.1 remedies (a _Repeat, until acceptance), H_minus, H_plus, V0 V_minus and V0 V_plus
+# written at their offsets, and the children, each of positive size, pushed. `site` the eigh's draw site (one-element
+# int32), `generator` the construction's (its words the Haar restart's Philox key), `member` the batch member's index
+def _qdwh_member(made, blocks, vectors, agenda, top, norm, site, generator, member, max_iterations):
+    out_blocks, out_vectors, out_agenda, out_top = made
+    n, real, t = blocks.shape[-1], blocks.dtype, _class(blocks)
+    eps = float(torch.finfo(real).eps)
+    ops = _copy(out_blocks, blocks) + _copy(out_vectors, vectors) + _copy(out_agenda, agenda)
+    count = [_temporary((1,), torch.int32) for _ in range(13)]
+    offset, size, below, e, d, cnt, minus, plus, rank, rest, at_minus, at_plus, offset_plus = count
+    ops += _scalars([offset, size, below], [top], lambda r, v: [
+        (r('extract', I32, v[0], r.const(0, I32), integer=1), I32),
+        (r('extract', I32, v[0], r.const(1, I32), integer=1), I32),
+        (r('select', I32, r('lt', BOOL, v[0], r.const(1, I32)), r.const(0, I32), r('sub', I32, v[0], r.const(1, I32))),
+         I32)], [agenda])
+    sb, se, sd, so = (size, n), (e, n), (d, n), (offset, n - 1)
+    h = _temporary((n, n), real)
+    _emit(ops, _copy(h, blocks), loops=(sb, sb), offsets=[(blocks, {0: so})])
+    squares, off_diagonal = _temporary((1,), real), _temporary((1,), real)
+    _emit(ops, _record((n, n), [(squares, (None,)), (off_diagonal, (None,))], [(h, (0, 1))], lambda r, v: [
+        (r('mul', t, v[0], v[0]), t),
+        (r('select', t, r('eq', BOOL, r.index(0), r.index(1)), r.const(0, t), r('mul', t, v[0], v[0])), t)],
+        [REDUCTION, REDUCTION], [SUM, SUM]), loops=(sb, sb))
+
+    def terminal(r, v):
+        b, total, off, h0 = v
+        frobenius = r('sqrt', t, total)
+        nearly = r('le', BOOL, r('sqrt', t, off), r('mul', t, r.const(5 * eps, t), frobenius))
+        tiny = r('lt', BOOL, frobenius, r('mul', t, r.const(eps, t), h0))
+        stop = r('or', BOOL, r('or', BOOL, nearly, tiny), r('le', BOOL, b, r.const(1, I32)))
+        return [(r('select', I32, stop, r.const(0, I32), b), I32), (r('select', I32, stop, b, r.const(0, I32)), I32)]
+    ops += _scalars([e, d], [size, squares, off_diagonal, norm], terminal)
+    first = out_blocks[:, 0]
+    _emit(ops, _record((n,), [(first, (0,))], [(h, (0, 0))], lambda r, v: [(v[0], t)]), loops=(sd,),
+          offsets=[(first, {0: so})])
+    diagonal, ordered, order = _temporary((n,), real), _temporary((n,), real), _temporary((n,), torch.int32)
+    _emit(ops, _record((n,), [(diagonal, (0,))], [(h, (0, 0))], lambda r, v: [(v[0], t)]), loops=(se,))
+    ops.append(_Sort(diagonal, 0, n, False, ordered, order, extent=e))
+    _emit(ops, _record((n,), [(cnt, (None,))], [(diagonal, (0,))], lambda r, v: [
+        (_convert(r, r('not', BOOL, r('isnan', BOOL, v[0])), BOOL, I32), I32)], [REDUCTION], [SUM]), loops=(se,))
+    sigma = _temporary((1,), real)
+
+    def median(r, v):
+        last = r('sub', I32, v[0], r.const(1, I32))
+        last = r('select', I32, r('lt', BOOL, last, r.const(0, I32)), r.const(0, I32), last)
+        high = r('div', I32, v[0], r.const(2, I32))
+        high = r('select', I32, r('gt', BOOL, high, last), last, high)
+        pair = [r('extract', t, r('div', I32, last, r.const(2, I32)), integer=1), r('extract', t, high, integer=1)]
+        return [(r('mul', t, r('add', t, *pair), r.const(0.5, t)), t)]
+    ops += _scalars([sigma], [cnt], median, [ordered])
+    shifted, u, swap = _temporary((n, n), real), _temporary((n, n), real), _temporary((1,), torch.int32)
+
+    # QDWH-eig steps 1-4 at `shift` over extent g: U, the polar factor of H - shift I, with ||U||_F^2 and trace U
+    def attempt(shift, g):
+        sg = (g, n)
+        _emit(ops, _record((n, n), [(shifted, (0, 1))], [(h, (0, 1)), (shift, (None,))], lambda r, v: [(r(
+            'sub', t, v[0], r('select', t, r('eq', BOOL, r.index(0), r.index(1)), v[1], r.const(0, t))), t)]),
+              loops=(sg, sg))
+        _bounded_polar(shifted, u, g, ops, max_iterations)
+        return unitary(g, ops)
+
+    # ||U||_F^2 and trace U over extent g
+    def unitary(g, made):
+        sg, sums = (g, n), (_temporary((1,), real), _temporary((1,), real))
+        _emit(made, _record((n, n), [(sums[0], (None,)), (sums[1], (None,))], [(u, (0, 1))], lambda r, v: [
+            (r('mul', t, v[0], v[0]), t),
+            (r('select', t, r('eq', BOOL, r.index(0), r.index(1)), v[0], r.const(0, t)), t)],
+            [REDUCTION, REDUCTION], [SUM, SUM]), loops=(sg, sg))
+        return sums
+
+    # pub13 section 5.4: at an exactly singular shift U is the partial isometry, C+ = (U + I) / 2 and C- = (I - U) / 2
+    # have eigenvalues 1, 0.5 and 0, and the subspace for C's 1 and 0.5 is the invariant subspace of the nonnegative
+    # (C+) or nonpositive (C-) eigenvalues of A - sigma I. With S = ||U||_F^2 and T = trace U over the b x b block,
+    # trace and ||.||_F^2 of C+- give those dimensions exactly (3 trace - 2 ||C||_F^2): b + (T - S) / 2 and
+    # b - (T + S) / 2, rounded; a side giving both children positive dimension (section 5.2) splits
+    def dimensions(r, b, total, trace):
+        size, zero, half = r('cast', t, b), r.const(0, I32), r.const(0.5, t)
+        made = [r('cast', I32, r('round', t, r(op, t, size, r('mul', t, half, r(inner, t, trace, total)))))
+                for op, inner in (('add', 'sub'), ('sub', 'add'))]
+        return made + [r('and', BOOL, r('lt', BOOL, zero, k), r('lt', BOOL, k, b)) for k in made]
+    at_median = attempt(sigma, e)
+    failed, retried, total = _temporary((1,), torch.int32), _temporary((1,), torch.int32), _temporary((1,), real)
+
+    def unsplit(r, v):
+        _, _, plus_valid, minus_valid = dimensions(r, *v)
+        stop = r('not', BOOL, r('or', BOOL, plus_valid, minus_valid))
+        return [(_convert(r, stop, BOOL, I32), I32), (r('select', I32, stop, v[0], r.const(0, I32)), I32)]
+    ops += _scalars([failed, retried], [e, *at_median], unsplit)
+    # pub13 section 5.1, case (ii)'s remedy, inside the split: "choose a different sigma and rerun steps 1-4". At the
+    # mean of the diagonal (the trace's, strictly between the extreme eigenvalues of a block not a multiple of I,
+    # which section 5.2's nearly diagonal test has ended) both sides are positive; zero work unless the median split
+    # gives neither side
+    sr = (retried, n)
+    _emit(ops, _record((n,), [(total, (None,))], [(h, (0, 0))], lambda r, v: [(v[0], t)], [REDUCTION], [SUM]),
+          loops=(sr,))
+    mean = _temporary((1,), real)
+    ops += _scalars([mean], [total, retried], lambda r, v: [(r('div', t, v[0], r('cast', t, v[1])), t)])
+    at_mean = attempt(mean, retried)
+
+    # the side split by subspace iteration: the valid one, the smaller where both (JAX's rank_plus < rank_minus), its
+    # dimension `rank`; V_minus's columns of Q and their count (`minus`), V_plus's (`plus`), their offsets and
+    # `offset_plus`, and `swap` (the side C+)
+    def partition(r, b, off, total, trace):
+        nonnegative, nonpositive, plus_valid, minus_valid = dimensions(r, b, total, trace)
+        swapped = r('and', BOOL, plus_valid, r('or', BOOL, r('not', BOOL, minus_valid),
+                                               r('lt', BOOL, nonnegative, nonpositive)))
+        smaller = r('select', I32, swapped, nonnegative, nonpositive)
+        lower = r('select', I32, swapped, r('sub', I32, b, nonnegative), nonpositive)
+        zero = r.const(0, I32)
+        return [lower, r('sub', I32, b, lower), smaller, r('sub', I32, b, smaller),
+                r('select', I32, swapped, smaller, zero), r('select', I32, swapped, zero, smaller),
+                r('add', I32, off, lower), _convert(r, swapped, BOOL, I32)], r('or', BOOL, plus_valid, minus_valid)
+
+    def ranks(r, v):
+        b, total, trace, again, again_trace, retry, off = v
+        chosen = [r('select', t, r('ne', BOOL, retry, r.const(0, I32)), x, y) for x, y in ((again, total),
+                                                                                         (again_trace, trace))]
+        return [(x, I32) for x in partition(r, b, off, *chosen)[0]]
+    state = [minus, plus, rank, rest, at_minus, at_plus, offset_plus, swap]
+    ops += _scalars(state, [e, *at_median, *at_mean, failed, offset], ranks)
+    projector = _temporary((n, n), real)
+
+    # C, the projector of the side split: (U + I) / 2 where `swap`, else (I - U) / 2, over extent g
+    def project(g, made):
+        _emit(made, _record((n, n), [(projector, (0, 1))], [(u, (0, 1)), (swap, (None,))], lambda r, v: [(r(
+            'mul', t, r.const(0.5, t), r('select', t, r('ne', BOOL, v[1], r.const(0, I32)),
+                                         r('add', t, v[0], r('cast', t, r('eq', BOOL, r.index(0), r.index(1)))),
+                                         r('sub', t, r('cast', t, r('eq', BOOL, r.index(0), r.index(1))), v[0]))),
+            t)]), loops=((g, n), (g, n)))
+    project(e, ops)
+    norms, ordered_norms, columns = _temporary((n,), real), _temporary((n,), real), _temporary((n,), torch.int32)
+    _emit(ops, _record((n, n), [(norms, (0,))], [(projector, (0, 1))], lambda r, v: [(r('mul', t, v[0], v[0]), t)],
+                       [PARALLEL, REDUCTION], [SUM]), loops=(se, se))
+    _emit(ops, _record((n,), [(norms, (0,))], [(norms, (0,))], lambda r, v: [(r('neg', t, r('sqrt', t, v[0])), t)]),
+          loops=(se,))
+    ops.append(_Sort(norms, 0, n, False, ordered_norms, columns, extent=e))
+    x, q, rotated = (_temporary((n, n), real) for _ in range(3))
+    sr = (rank, n)
+    _emit(ops, _record((n, n), [(x, (0, 1))], [(columns, (1,)), (projector, None)], lambda r, v: [(r(
+        'extract', t, r.index(0), v[0], integer=1), t)]), loops=(se, sr))
+    # pub13 section 5.1, Algorithm 3, accepting ||E||_F <= 10 u ||H||_F (u = eps / 2, the unit roundoff): a pass is
+    # QR of X into [V1 V2] (q), Q^H H Q (rotated) and E = V2^H H V1 (rotated[rank:b, :rank], ||E||_F^2 `error`); the
+    # procedure is a pass, then X := C V1 and a pass again while E is above tolerance and strictly below the previous
+    # pass's (else stagnated, "further subspace iteration does not further reduce ||E||_F"), then `unaccepted`, E
+    # still above tolerance. It runs once on X0; while unaccepted, the split applies both cited remedies, (ii) the
+    # polar factor of U again (the QDWH owner, its max_iterations) with its sides' dimensions, partition and C rebuilt
+    # from it, and (i) X := C W1, W1 the first `rank` columns of a Haar orthogonal W (the QR of a standard normal
+    # b x rank matrix, each column signed by its R diagonal; its Philox draws at the eigh's site, stream the restart
+    # count), and runs the procedure again: one agenda pop
+    tolerance = 10 * eps / 2
+    error, previous = _temporary((1,), real), _temporary((1,), real)
+    again, unaccepted, stream = (_temporary((1,), torch.int32) for _ in range(3))
+    ops += _fill(stream, 0)
+
+    def above(r, v):
+        return r('gt', BOOL, r('sqrt', t, v[0]), r('mul', t, r.const(tolerance, t), r('sqrt', t, v[1])))
+
+    def iterated(made):
+        _subspace(x, q, rotated, h, e, rank, made)
+        _emit(made, _record((n, n), [(error, (None,))], [(rotated, (0, 1))],
+                            lambda r, v: [(r('mul', t, v[0], v[0]), t)], [REDUCTION, REDUCTION], [SUM]),
+              loops=((rest, n), sr), offsets=[(rotated, {0: sr})])
+
+    def procedure(made):
+        iterated(made)
+        made += _scalars([again, previous], [error, squares], lambda r, v: [
+            (_convert(r, above(r, v), BOOL, I32), I32), (v[0], t)])
+        repeated = []
+        _emit(repeated, _gemm(x, projector, (0, 2), q, (2, 1), (n, n, n)), loops=(se, sr, se))
+        iterated(repeated)
+        repeated += _scalars([again, previous], [error, squares, previous], lambda r, v: [
+            (_convert(r, r('and', BOOL, above(r, v), r('lt', BOOL, v[0], v[2])), BOOL, I32), I32), (v[0], t)])
+        made.append(_Repeat(repeated, again, (x, q, rotated, error, previous, again)))
+        made += _scalars([unaccepted], [error, squares], lambda r, v: [(_convert(r, above(r, v), BOOL, I32), I32)])
+    procedure(ops)
+    remedied, refined = [], _temporary((n, n), real)
+    _bounded_polar(u, refined, e, remedied, max_iterations)
+    _assigned(u, refined, e, remedied)
+    remedied += _scalars(state, [e, offset, *unitary(e, remedied)], lambda r, v: [
+        (x, I32) for x in partition(r, *v)[0]])
+    project(e, remedied)
+    remedied += _scalars([stream], [stream], lambda r, v: [(r('add', I32, v[0], r.const(1, I32)), I32)])
+    gaussian, rotation, signed, tau = (_temporary((n, n), real), _temporary((n, n), real), _temporary((n, n), real),
+                                       _temporary((n,), real))
+    r, inputs = _Region(), []
+    element = r('add', I32, r.const(member * n * n, I32),
+                r('add', I32, r('mul', I32, r.index(0), r.const(n, I32)), r.index(1)))
+    words = _draws(r, gaussian, inputs, generator.site(site), element=element, stream=stream)
+    r.done(_store(r, _normal(r, words), F32, gaussian))
+    _emit(remedied, [_Generic((n, n), inputs, [(gaussian, _same(2))], r)], loops=(se, sr))
+    rows, tail, width, columns = (_ramp(rank, k[0], *k[1:], n, remedied) for k in (
+        (e, 1, 1, 0), (e, 1, 1, 1), (rank, 1, 1, 1), (rank, 1, 0, 0)))
+    _bounded_qr(gaussian, tau, rows, tail, width, remedied)
+    _emit(remedied, _linalg_identity(rotation), loops=(se, sr))
+    _bounded_q(gaussian, tau, rotation, rows, tail, columns, remedied)
+    _emit(remedied, _record((n, n), [(signed, (0, 1))], [(rotation, (0, 1)), (gaussian, (1, 1))], lambda r, v: [(r(
+        'select', t, r('lt', BOOL, v[1], r.const(0, t)), r('neg', t, v[0]), v[0]), t)]), loops=(se, sr))
+    _emit(remedied, _gemm(x, projector, (0, 2), signed, (2, 1), (n, n, n)), loops=(se, sr, se))
+    procedure(remedied)
+    ops.append(_Repeat(remedied, unaccepted, (x, q, rotated, error, previous, again, unaccepted, u, projector, *state,
+                                              stream)))
+    turned = _temporary((n, n), real)
+    _emit(ops, _gemm(turned, vectors, (0, 2), q, (2, 1), (n, n, n)), loops=(None, se, se),
+          offsets=[(vectors, {1: so})])
+    for width, source, place in ((minus, at_minus, offset), (plus, at_plus, offset_plus)):
+        sw, ss, sp = (width, n), (source, n - 1), (place, n - 1)
+        moved = rotated[...]
+        _emit(ops, _record((n, n), [(out_blocks, (0, 1))], [(moved, (0, 1))], lambda r, v: [(v[0], t)]),
+              loops=(sw, sw), offsets=[(out_blocks, {0: sp}), (moved, {0: ss, 1: ss})])
+        taken = turned[...]
+        _emit(ops, _record((n, n), [(out_vectors, (0, 1))], [(taken, (0, 1))], lambda r, v: [(v[0], t)]),
+              loops=(None, sw), offsets=[(out_vectors, {1: sp}), (taken, {1: ss})])
+
+    def push(r, v):
+        height, off, low, high, later = v
+        zero, one = r.const(0, I32), r.const(1, I32)
+        first, second = r('gt', BOOL, low, zero), r('gt', BOOL, high, zero)
+        at = r('add', I32, height, one)
+        then = r('add', I32, at, _convert(r, first, BOOL, I32))
+        for where, column, value, kept in ((at, zero, off, first), (at, one, low, first), (then, zero, later, second),
+                                           (then, one, high, second)):
+            r.scatter(0, [where, column], value, kept)
+        return [(high, I32), (r('add', I32, height, r('add', I32, _convert(r, first, BOOL, I32),
+                                                          _convert(r, second, BOOL, I32))), I32)]
+    ops += _record((1,), [(out_agenda, None), (out_top, (None,))],
+                   [(x, (None,)) for x in (below, offset, minus, plus, offset_plus)], push)
+    return ops
+
+
+# the step's lowering: each batch member's records (its own agenda and runtime extents), real Hermitian input
+def _qdwh_eigh_step(outs, blocks, vectors, agenda, top, norm, site, max_iterations=10, generator=None):
+    if blocks.is_complex() or blocks.dtype not in (torch.float32, torch.float64):
+        raise NotImplementedError('linalg.eigh of %s on a non-CPU engine: its bounded QDWH step is unfinished '
+                                  '(design/torch-source-lowering-change-request.md item 6)' % blocks.dtype)
+    ops = []
+    for member, m in enumerate(itertools.product(*map(range, blocks.shape[:-2]))):
+        ops += _qdwh_member([o[m] for o in outs], blocks[m], vectors[m], agenda[m], top[m], norm[m], site, generator,
+                            member, max_iterations)
+    return ops
 
 
 # G. H. Golub and C. F. Van Loan, Matrix Computations, 3rd ed., section 8.4, Algorithms 8.4.1 and 8.4.3;
@@ -4216,14 +4773,29 @@ def _philox(r, counter, key):
 
 
 # the draws of operation `out`'s elements: the generator's words as inputs (their constant maps), the element's row-major
-# index the counter's first word
-def _draws(r, out, inputs, drawn, loops=None, element=None):
+# index the counter's first word; the site (a source identity, or a one-element int32 tensor carrying it) the third,
+# the stream (0, or a one-element int32 tensor: a numerical procedure's own draw count) the fourth
+def _draws(r, out, inputs, drawn, loops=None, element=None, stream=0):
     state, site = drawn
+    dims = out.dim() if loops is None else loops
     for word in range(3):
-        inputs.append((state, _rows(out.dim() if loops is None else loops, [{None: word}])))
+        inputs.append((state, _rows(dims, [{None: word}])))
     k0, k1, execution = [r('bitcast', U32, r.arg(len(inputs) - 3 + word, state)) for word in range(3)]
     element = r('bitcast', U32, _linear(r, out.shape) if element is None else element)
-    return _philox(r, (element, execution, r.const(site, U32), r.const(0, U32)), (k0, k1))
+
+    def word(value):
+        if not isinstance(value, torch.Tensor):
+            return r.const(value, U32)
+        inputs.append((value, _rows(dims, [None] * value.dim())))
+        return r('bitcast', U32, r.arg(len(inputs) - 1, value))
+    return _philox(r, (element, execution, word(site), word(stream)), (k0, k1))
+
+
+# G. E. P. Box and M. E. Muller, Ann. Math. Statist. 29(2), 1958: a standard normal draw of two Philox words
+def _normal(r, words):
+    first = r('add', F32, _uniform(r, words[0]), r.const(2.0 ** -24, F32))
+    radius = r('sqrt', F32, r('mul', F32, r.const(-2, F32), r('log', F32, first)))
+    return r('mul', F32, radius, r('cos', F32, r('mul', F32, r.const(2 * math.pi, F32), _uniform(r, words[1]))))
 
 
 def _uniform(r, word):
@@ -4259,9 +4831,7 @@ def _random(target, given, outs, generator, site=None):
     words = _draws(r, out, inputs, generator.site(site))
     u = _uniform(r, words[0])
     if packet in NORMAL:
-        first = r('add', F32, u, r.const(2.0 ** -24, F32))
-        radius = r('sqrt', F32, r('mul', F32, r.const(-2, F32), r('log', F32, first)))
-        made = r('mul', F32, radius, r('cos', F32, r('mul', F32, r.const(2 * math.pi, F32), _uniform(r, words[1]))))
+        made = _normal(r, words)
         made = made if scale == 1 else r('mul', F32, made, r.const(scale, F32))
         if packet is torch.ops.prims.normal:
             made = r('add', F32, r.const(float(given['mean']), F32), r('mul', F32, r.const(float(given['std']), F32), made))
@@ -4576,6 +5146,9 @@ def _lowering(local, page, generator=None):
                                                           generator, local.site)
     if local.target is striped:
         return lambda args, kwargs, outs: _striped(outs[0], *args)
+    if local.target is QDWH_EIGH_STEP:
+        return lambda args, kwargs, outs: _qdwh_eigh_step(outs, **_operands(local.target, args, kwargs),
+                                                          generator=generator)
     if packet in (A._linalg_det, A._linalg_slogdet):
         metadata = _given(local, _names(local))['A'].meta['val']
         transpose = metadata.is_contiguous() and not metadata.is_complex()
