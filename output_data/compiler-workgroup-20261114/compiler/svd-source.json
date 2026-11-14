@@ -1,0 +1,17 @@
+{
+  "source_sha256": {
+    "compiler/mesh_compiler/operations.py": "61c81c2355688b859f753495f697c2220499f7c564b7458de622a5d841c54cc4",
+    "compiler/mesh_compiler/decompose.py": "b4ba411065f356aea0974749256c3918077c6921cdb0caa89816b539c67defe5",
+    "compiler/mesh_compiler/devices.py": "4d89dd74017573251e47c4c22691ce7a28955c361699f699b578f41875f9ba17",
+    "compiler/mesh_compiler/export.py": "ac1aae92e6882a33cf22fc1f59e709229036ffcf32bdff84d8b786455597b91e",
+    "compiler/mesh_compiler/driver.py": "cfe4f8ab9a2408700ad4e96d8f0b4396e14e329f8b6506772b5717d9527da3b9",
+    "compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+    "compiler/mesh_compiler/metal.py": "5c5316c4ba468152e2c061c078e0ff54f4429a63b68fa5ee6b7ed828963ec50e",
+    "compiler/mesh_compiler/lower_metal.py": "0d0c82eeb8f9b02321174eedafc18c0f61e802e492b40ab608c7e967a6d132b4"
+  },
+  "binary_reference": "eigh-parts-binaries.json",
+  "AST": "operations/decompose/export PASS",
+  "framework_stage": "svd-source-observation.json",
+  "native_invocation": "Stopped before emission/invocation: call0 typed ValueID16 bound to distinct source roots18/19; output alias producer correction pending.",
+  "changed_source_during_attempt": []
+}

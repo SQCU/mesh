@@ -2813,6 +2813,79 @@ def _qdwh_eigh_step(outs, blocks, vectors, agenda, top, norm, site, max_iteratio
     return ops
 
 
+# JAX jax/_src/tpu/linalg/svd.py svd and _svd_tall_and_square_input; pub13
+# sections 4 and 5.5; torch 2.14.0 aten _linalg_svd (A, full_matrices, compute_uv, driver) -> (U, S, Vh), `shapes`
+# its outputs' (shape, dtype), an empty input's U and Vh the identity where full (linalg_svd_out)
+def _singular_qdwh(A, full_matrices=False, compute_uv=True, driver=None, shapes=(), max_iterations=10):
+    a, (m, n) = A, A.shape[-2:]
+    if not a.numel():
+        return tuple(torch.eye(shape[-1], dtype=dtype, device=a.device).expand(shape).clone()
+                     if compute_uv and full_matrices and k != 1 and shape[-1] and shape[-1] == shape[-2]
+                     else a.new_zeros(shape, dtype=dtype) for k, (shape, dtype) in enumerate(shapes))
+    flip = m < n
+    if flip:
+        a, (m, n) = a.mH, (n, m)
+    q = null = None
+    if full_matrices and m > n:
+        complete, reduced = torch.linalg.qr(a, mode='complete')
+        q, null, a = complete[..., :n], complete[..., n:], reduced[..., :n, :]
+    elif m > 1.15 * n:
+        q, a = torch.linalg.qr(a)
+    u_p, h, _ = _polar(a, max_iterations)
+    if not compute_uv:
+        s_out = torch.sort(torch.linalg.eigvalsh(h).clamp(min=0), stable=True, dim=-1, descending=True).values
+        return A.new_empty(shapes[0][0], dtype=shapes[0][1]), s_out, A.new_empty(shapes[2][0], dtype=shapes[2][1])
+    s, v = torch.linalg.eigh(h)
+    s_out, order = torch.sort(s.clamp(min=0), stable=True, dim=-1, descending=True)
+    v_out = v.gather(-1, order[..., None, :].expand(v.shape))
+    u_out = QDWH_SVD_CORRECTION(torch.matmul(u_p, v_out), s_out)
+    if q is not None:
+        u_out = torch.matmul(q, u_out)
+    if null is not None:
+        u_out = torch.cat([u_out, null], -1)
+    finite = torch.isfinite(a).all(-1).all(-1)
+    u_out = torch.where(finite[..., None, None], u_out, math.nan)
+    s_out = torch.where(finite[..., None], s_out, math.nan)
+    v_out = torch.where(finite[..., None, None], v_out, math.nan)
+    return (v_out, s_out, u_out.mH) if flip else (u_out, s_out, v_out.mH)
+
+
+# JAX jax/_src/tpu/linalg/svd.py 104-118 (pub13 section 5.5): u_out's correction where s_out[-1] <= n eps s_out[0], the reduced
+# QR's Q, each column signed by its R diagonal (jnp.where(diag(r) >= 0, 1, -1)); a fake-only operator (its shape rule
+# alone), lowered by _qdwh_svd_correction
+torch.library.define('mesh::qdwh_svd_correction', '(Tensor u, Tensor s) -> Tensor')
+
+
+@torch.library.register_fake('mesh::qdwh_svd_correction')
+def _qdwh_svd_correction_shape(u, s):
+    return torch.empty_like(u)
+
+
+QDWH_SVD_CORRECTION = torch.ops.mesh.qdwh_svd_correction.default
+
+
+# each member's correction a _Repeat of one QR pass (Reference-LAPACK dgeqr2/dorg2r: _linalg_geqrf,
+# _linalg_householder) under its own condition, cleared by that pass
+def _qdwh_svd_correction(outs, u, s):
+    if u.is_complex() or u.dtype not in (torch.float32, torch.float64):
+        raise NotImplementedError('linalg.svd of %s on a non-CPU engine: its QDWH correction is unfinished '
+                                  '(design/torch-source-lowering-change-request.md item 6)' % u.dtype)
+    (out,), (m, n), t = outs, u.shape[-2:], _class(u)
+    eps, ops = float(torch.finfo(u.dtype).eps), _copy(outs[0], u)
+    for member in itertools.product(*map(range, u.shape[:-2])) if n else ():
+        made, flag = out[member], _temporary((1,), torch.int32)
+        packed, tau, q = _temporary((m, n), u.dtype), _temporary((n,), u.dtype), _temporary((m, n), u.dtype)
+        ops += _scalars([flag], [], lambda r, v: [(_convert(r, r('le', BOOL, r(
+            'extract', t, r.const(n - 1, I32), integer=0), r('mul', t, r.const(n * eps, t), r(
+                'extract', t, r.const(0, I32), integer=0))), BOOL, I32), I32)], [s[member]])
+        corrected = _linalg_geqrf(made, packed, tau) + _linalg_householder(packed, tau, q)
+        corrected += _record((m, n), [(made, (0, 1))], [(q, (0, 1)), (packed, (1, 1))], lambda r, v: [(r(
+            'select', t, r('ge', BOOL, v[1], r.const(0, t)), v[0], r('neg', t, v[0])), t)])
+        corrected += _fill(flag, 0)
+        ops.append(_Repeat(corrected, flag, (made, flag)))
+    return ops
+
+
 # G. H. Golub and C. F. Van Loan, Matrix Computations, 3rd ed., section 8.4, Algorithms 8.4.1 and 8.4.3;
 # Z. Drmac and K. Veselic, LAPACK Working Note 196, sections 2 and 3; Reference-LAPACK SRC/dgesvj.f
 def _linalg_active(app, aqq, magnitude, tolerance, ops):
@@ -5137,6 +5210,8 @@ def _lowering(local, page, generator=None):
                                                           generator, local.site)
     if local.target is striped:
         return lambda args, kwargs, outs: _striped(outs[0], *args)
+    if local.target is QDWH_SVD_CORRECTION:
+        return lambda args, kwargs, outs: _qdwh_svd_correction(outs, **_operands(local.target, args, kwargs))
     if local.target is QDWH_EIGH_STEP:
         return lambda args, kwargs, outs: _qdwh_eigh_step(outs, **_operands(local.target, args, kwargs),
                                                           generator=generator)

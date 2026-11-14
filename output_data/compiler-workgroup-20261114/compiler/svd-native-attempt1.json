@@ -1,0 +1,17 @@
+{
+  "client": "torch.linalg.svd(full_matrices=True), float32 [[1,2],[2,4],[3,6]], one MPS processor; compile_module\u2192Program",
+  "exit_code": 1,
+  "last_stage": "joint solve binding correspondence; no native emission/invocation",
+  "error": "call 0 ValueID 16 is bound to roots 18 and 19",
+  "source_fact": "svd-output-aliases.json shows prototype outputs7/8 share36B at offsets0/6; substituted Call outputs have independent24B/12B at offset0. Finite-predicate output views9/11/13 also lose shared storage.",
+  "logs": {
+    "svd-native-1.stdout": {
+      "bytes": 87,
+      "sha256": "c040038708d3366f1c1c88d3576429e5753a98926007fe2717d7caf085ea0096"
+    },
+    "svd-native-1.stderr": {
+      "bytes": 1193,
+      "sha256": "c84b1bec2b3f29f5d8aab8c1ce6280ef10614d72e9c9f444a79e199320f1b6bf"
+    }
+  }
+}

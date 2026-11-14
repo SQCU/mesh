@@ -16,7 +16,7 @@ from .devices import on_devices
 from .ir import RETURNED, Exported, shape, views
 from .ir import given as ir_given
 from .operations import (QDWH_EIGH_STEP, _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_result,
-                         _qdwh_eigh_state)
+                         _qdwh_eigh_state, _singular_qdwh)
 from .placement import insert_send_recv
 from .schedule import carried
 
@@ -86,12 +86,12 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
 # map's keys the graph's nodes, its values the source's), whose uses (the graph's outputs among them), work axes and
 # input parts take the formulation's result; the nodes whose uses or operands changed (the original's operands, its
 # expanded nodes and its uses) are given to ir.views, which makes their view and destination metadata again
-def _expanded(graph_module, targets, formulations):
+def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
     table = dict(torch.export.default_decompositions().items())
     graph = graph_module.graph
     sources = graph_module.meta.setdefault("decomposed", {})
     changed = []
-    for node in [n for n in graph.nodes if n.op == "call_function" and n.target in formulations]:
+    for node in [n for n in graph.nodes if n.op == "call_function" and n.target in formulations and chosen(n)]:
         formulation = formulations[node.target](node)
         flat, spec = pytree.tree_flatten((node.args, node.kwargs))
         held = [k for k, item in enumerate(flat) if isinstance(item, torch.fx.Node)]
@@ -117,13 +117,22 @@ def _expanded(graph_module, targets, formulations):
             if "device" in generated.kwargs:
                 generated.kwargs = {**generated.kwargs, "device": device}
             sources[generated] = origin
-        users = list(node.users)
+        # a tuple result (torch.fx: the node's users its getitems): each getitem's image its output's result node
+        replaced = {g: result[g.args[1]] for g in node.users} if isinstance(result, (tuple, list)) else {node: result}
+        users = [user for old in replaced for user in old.users]
         _axes_onto(node, result, {})
+        for old, image in replaced.items():
+            if old is not node:
+                _axes_onto(old, image, {})
         for user in users:
-            _axes_moved(user, {node: result})
+            _axes_moved(user, replaced)
         if "input_parts" in graph_module.meta:
-            graph_module.meta["input_parts"] = _parts_moved(graph_module.meta["input_parts"], {node: result})
-        node.replace_all_uses_with(result)
+            graph_module.meta["input_parts"] = _parts_moved(graph_module.meta["input_parts"], replaced)
+        for old, image in replaced.items():
+            old.replace_all_uses_with(image)
+            if old is not node:
+                sources.pop(old, None)
+                graph.erase_node(old)
         graph.erase_node(node)
         changed += [flat[k] for k in held] + made + users
     views(changed)
@@ -144,8 +153,9 @@ def _expanded(graph_module, targets, formulations):
 # processors and its own transfers (renumbered), and is put on its devices (devices.on_devices) as the driver's staged
 # loop does. `staged` the driver's staged records by function key, `processors` and `machines` its maps. First each
 # function's pinv nodes (every overload, on every processor) expand into operations._pseudoinverse, its tolerance dtype
-# the selected device's (float32 on MPS, float64 else), and the function's placed graph is staged again, so a
-# Hermitian pinv's eigh is outlined below (a CPU one keeps its LAPACK driver)
+# the selected device's (float32 on MPS, float64 else), then its non-CPU _linalg_svd nodes (a pinv's among them) into
+# operations._singular_qdwh (QDWH-SVD, `max_iterations` its QDWH bound), and the function's placed graph is staged
+# again, so their eigh nodes are outlined below (a CPU pinv's or svd's keeps its LAPACK driver)
 def outline(captured, staged, targets, processors, machines, *, max_iterations=10):
     from .export import substitute
     staged, pending = dict(staged), list(captured.functions)
@@ -153,10 +163,18 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
     def pseudoinverse(node):
         dtype = torch.float32 if targets[node.meta["processor"]][1].type in ("mps", "metal") else torch.float64
         return lambda *args, **kwargs: _pseudoinverse(**_operands(node.target, args, kwargs), tolerance_dtype=dtype)
+
+    def singular(node):
+        shapes = [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
+        return lambda *args, **kwargs: _singular_qdwh(**_operands(node.target, args, kwargs), shapes=shapes,
+                                                      max_iterations=max_iterations)
     for key in pending:
         placed = staged[key][0]
-        if any(n.op == "call_function" and n.target in PINV for n in placed.graph.nodes):
+        found = {n.target for n in placed.graph.nodes if n.op == "call_function"}
+        if found & {*PINV, *SVD}:
             _expanded(placed, targets, dict.fromkeys(PINV, pseudoinverse))
+            _expanded(placed, targets, dict.fromkeys(SVD, singular),
+                      lambda node: targets[node.meta["processor"]][0] != "cpu")
             placed.meta["invariant"] = _invariant(placed)
             staged[key] = _staged(placed, processors, machines)
     while pending:
@@ -179,6 +197,7 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
 
 EIGH, COPY = A._linalg_eigh.default, A.copy.default
 PINV = tuple(getattr(A.linalg_pinv, overload) for overload in A.linalg_pinv.overloads())
+SVD = tuple(getattr(A._linalg_svd, overload) for overload in A._linalg_svd.overloads())
 # the Step's inputs: the state, the input's norm and its source draw site (operations.QDWH_EIGH_STEP); the prefix's
 # first outputs, each Step call the previous call's state and the prefix's norm and site
 STEP_INPUTS = ("blocks", "vectors", "agenda", "top", "norm", "site")
