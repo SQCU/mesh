@@ -1,0 +1,126 @@
+{
+  "scope": "Unchanged 4x4 float32 MPS Hermitian compile_module after synthetic-marker aggregation",
+  "source": {
+    "mesh": "b8394752549b9f1faa9d92f2dc5ef3c77217bca8",
+    "native": "68ef1ce604b665d48afc25134318c5811b53c88b"
+  },
+  "exit_code": 138,
+  "pid": 26395,
+  "capture_time": "2026-11-14 07:13:49.8391 -0800",
+  "stage": "Native program lowering after preparation dependence construction",
+  "prepared_rows": 9,
+  "replay_rows": 9,
+  "invoke_reached": false,
+  "preparation": "prepared self-timed program 30 calls 30 positions 1 residues 1 phases 28 plan order edges 29 kept of the unrolled dependences 15 fence waits 14 program-thread waits 0 send-completion waits 0 left to the plan's start 21 start waits",
+  "query": {
+    "views": 53613,
+    "outer_index": 15813,
+    "a": {
+      "view_index": 664,
+      "key": 1,
+      "offset": 4674798016,
+      "element": 4,
+      "dimensions": 1,
+      "vertex": 1,
+      "write": 1,
+      "pairs": [
+        7,
+        4
+      ]
+    },
+    "b": {
+      "view_index": 34823,
+      "key": 1,
+      "offset": 4674798016,
+      "element": 4,
+      "dimensions": 0,
+      "vertex": 18,
+      "write": 1,
+      "pairs": []
+    },
+    "read_error": "success"
+  },
+  "query_observed_elapsed_seconds": 122,
+  "exception": {
+    "codes": "0x0000000000000002, 0x00000012c6cf1ff8",
+    "rawCodes": [
+      2,
+      80644874232
+    ],
+    "type": "EXC_BAD_ACCESS",
+    "signal": "SIGBUS",
+    "subtype": "KERN_PROTECTION_FAILURE at 0x00000012c6cf1ff8"
+  },
+  "termination": {
+    "flags": 0,
+    "code": 10,
+    "namespace": "SIGNAL",
+    "indicator": "Bus error: 10",
+    "byProc": "exc handler",
+    "byPid": 26395
+  },
+  "frames": [
+    {
+      "image": "libmetal_ir.dylib",
+      "image_offset": 594792,
+      "symbol": "metal_ir::(anonymous namespace)::LowerProgram(NativeProgram const&, metal_ir::NativeBinary&, char*, unsigned long)",
+      "symbol_offset": 34536
+    },
+    {
+      "image": "libmetal_ir.dylib",
+      "image_offset": 560008,
+      "symbol": "metal_ir_native_compile",
+      "symbol_offset": 64
+    },
+    {
+      "image": "libmetal_recording.dylib",
+      "image_offset": 41088,
+      "symbol": "MetalProgramMake",
+      "symbol_offset": 10412
+    },
+    {
+      "image": "libmetal_recording.dylib",
+      "image_offset": 30592,
+      "symbol": "MetalRecorderProgram",
+      "symbol_offset": 32
+    },
+    {
+      "image": "python",
+      "image_offset": 3866704,
+      "symbol": "ffi_call_SYSV",
+      "symbol_offset": 80
+    },
+    {
+      "image": "python",
+      "image_offset": 3855824,
+      "symbol": "ffi_call_int",
+      "symbol_offset": 1484
+    },
+    {
+      "image": "python",
+      "image_offset": 2409080,
+      "symbol": "_ctypes_callproc",
+      "symbol_offset": 1056
+    },
+    {
+      "image": "python",
+      "image_offset": 2405740,
+      "symbol": "PyCFuncPtr_call",
+      "symbol_offset": 196
+    }
+  ],
+  "fault_registers": {
+    "x8": 46285135872,
+    "x9": 11,
+    "x10": 4294967295,
+    "x25": 10
+  },
+  "source_finding": "The faulting observing() load indexes program.bindings with UINT32_MAX from site10 (kind11 NATIVE_ALIAS_BARRIER), whose unitOf entry is1. MetalNativeWaits directly appends sites and marks at two paths but omits unitOf; both paths must use the existing MetalNativeSiteWhen owner.",
+  "crash_report": "/Users/mdot/Library/Logs/DiagnosticReports/python3.12-2026-11-14-071350.ips",
+  "crash_sha256": "ad0f1392c47ec65cc0cf4ca585643092ef67a741a5669072f855116e7e39cd18",
+  "evidence": {
+    "eigh-native-4.stdout": "1d89f9d8b3bb30985d064eddca30b2d1a9c2b348be343bb7e8fe6214c5ab5315",
+    "eigh-native-4.stderr": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+    "eigh-native-4.query.txt": "9abc3c852f3393820f7d05c866838b2901edc6b8967ac626b2993f836ac68898"
+  }
+}
