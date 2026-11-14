@@ -42,7 +42,8 @@ def planning():
 
 # rdma/mesh-collective.h mesh_plan_load; rdma/mesh-dataflow.h mesh_retire, mesh_view_values;
 # design/disjoint-pages-change-request.md C3.3; design/plan-to-bridge-change-request.md R1;
-# design/problems-of-14b9a757-change-request.md item 3; compiler/mesh_compiler/schedule.py carried, planned declared
+# design/problems-of-14b9a757-change-request.md item 3; compiler/mesh_compiler/schedule.py carried, planned declared;
+# design/compilation-composition-change-request.md item 7; torch 2.14 frombuffer, Tensor.view(dtype), as_strided
 class Published:
     def __init__(self, plan, carried, group, here):
         self.source, self.context = plan, C.addressof(CONTEXT)
@@ -63,6 +64,9 @@ class Published:
         mesh.LIB.mesh_view_values(C.byref(CONTEXT), self.function, 1, first, offset, C.byref(view))
         self.copies = [[(view.address + offset[at], section.bytes) for at in range(first[value], first[value + 1])]
                        for value, section in enumerate(sections)]
+        self.roots = {(value, copy): torch.frombuffer((C.c_byte * size).from_address(address), dtype=torch.uint8)
+                      for value in dict.fromkeys(declared[4] for declared in plan.declared) if value != mesh.ABSENT
+                      for copy, (address, size) in enumerate(self.copies[value])}
         layouts = {channel: (dtype, shape) for channel, _, _, dtype, shape, _ in carried}
         self.views, self.distinct = {}, {}
         for transfer, (channel, (source, *_, value, sent, landed)) in enumerate(zip(plan.channels, plan.declared)):
@@ -71,8 +75,7 @@ class Published:
             dtype, shape = layouts[channel]
             start, element, pairs = sent if source == here else landed
             strides = [stride // element for _, stride in pairs]
-            flat = [torch.frombuffer((C.c_byte * size).from_address(address), dtype=dtype)
-                    for address, size in self.copies[value]]
+            flat = [self.roots[value, copy].view(dtype) for copy in range(len(self.copies[value]))]
             self.views[transfer] = tuple(pages.as_strided(shape, strides, start // element) for pages in flat)
             self.distinct[transfer] = tuple(pages.as_strided([size for size, _ in pairs], strides, start // element)
                                             for pages in flat)
