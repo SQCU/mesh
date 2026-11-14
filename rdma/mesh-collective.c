@@ -187,10 +187,8 @@ static uint32_t plan_tree_parent(const void *context,size_t v){
 }
 static void plan_tree_up(void *consumer,uint32_t at,uint32_t step){ if(step==1)*(uint32_t *)consumer=at; }
 static uint64_t plan_quantum(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
-static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){
-  const uint64_t quantum=plan_quantum(m);
-  return (bytes+quantum-1)/quantum;
-}
+static uint64_t plan_quanta(uint64_t bytes,uint64_t quantum){ return (bytes+quantum-1)/quantum; }
+static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){ return plan_quanta(bytes,plan_quantum(m)); }
 /* L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, ACAPS Technical Memo 33, §2.2;
    design/plan-to-bridge-change-request.md R2 */
 static uint32_t plan_copies(const struct plan *p,uint32_t j){
@@ -580,7 +578,7 @@ static int plan_intersect(const void *context,size_t a,size_t b){
    tensorflow/lite/delegates/gpu/common/memory_management/greedy_by_size_assignment.cc:68-143 and
    tensorflow/lite/arena_planner.h:141-149; GaijinEntertainment/DagorEngine 2baf1947,
    prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/heapLayout.h:19 */
-static int plan_block(struct plan *plans,uint32_t count,const struct hdr *m,const uint64_t *operations,
+static int plan_block(struct plan *plans,uint32_t count,uint64_t quantum,const uint64_t *operations,
                       struct plan_placement *x){
   size_t records=0;
   for(uint32_t f=0;f<count;f++)for(uint32_t j=0;j<plans[f].givens;j++)
@@ -608,25 +606,27 @@ static int plan_block(struct plan *plans,uint32_t count,const struct hdr *m,cons
     }
   }
   const struct plan_arcs arcs={start,end,function};
-  const uint64_t quantum=plan_quantum(m);
   if(!status)status=mesh_graph_greedy_by_size(records,size,plan_intersect,&arcs,quantum,offset,&total);
   for(size_t r=0;!status && r<records;r++)x->at[r]=offset[r]/quantum;
-  if(!status)x->blocks=plan_blocks(m,total);
+  if(!status)x->blocks=plan_quanta(total,quantum);
   free(size);free(start);free(end);free(offset);free(function);
   return status;
+}
+/* a function's operations: one past the last its execution values span, at least 1 */
+static uint64_t plan_operations(const struct plan *p){
+  uint64_t operations=1;
+  for(uint32_t j=0;j<p->givens;j++){
+    const struct mesh_value *v=p->given+j;
+    if(v->kind==MESH_EXECUTION && (uint64_t)v->end+1>operations)operations=(uint64_t)v->end+1;
+  }
+  return operations;
 }
 static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct plan_placement *x){
   *x=(struct plan_placement){0};
   uint64_t *operations=malloc(((size_t)count+1)*sizeof *operations);
   if(!operations)return ENOMEM;
-  for(uint32_t f=0;f<count;f++){
-    operations[f]=1;
-    for(uint32_t j=0;j<plans[f].givens;j++){
-      const struct mesh_value *v=plans[f].given+j;
-      if(v->kind==MESH_EXECUTION && (uint64_t)v->end+1>operations[f])operations[f]=(uint64_t)v->end+1;
-    }
-  }
-  const int blocked=plan_block(plans,count,m,operations,x);
+  for(uint32_t f=0;f<count;f++)operations[f]=plan_operations(plans+f);
+  const int blocked=plan_block(plans,count,plan_quantum(m),operations,x);
   if(blocked){free(operations);return blocked;}
   plan_items(plans,count,m,x,1);
   plan_items(plans,count,m,x,0);
@@ -1952,6 +1952,131 @@ static int plan_extents(const struct plan *plans,uint32_t count,struct mesh_plan
   return status;
 }
 
+/* design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: the horizon and the locations of the
+   values the host writes, Bff of the host -> device edges of the calls' compiled parts in program order from their
+   t(v), with each call's own dependences between its parts (mesh_graph_buffer_bound) */
+static int plan_horizon(struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
+                        uint32_t *horizon){
+  *horizon=1;
+  uint64_t actors=0,dependences=0;
+  for(uint32_t j=0;j<ncalls;j++){
+    const struct mesh_function *f=functions+calls[j];
+    if(f->parts && (!f->host || !f->work))return EINVAL;
+    if(f->edges && !f->edge)return EINVAL;
+    for(uint32_t e=0;e<f->edges;e++)if(f->edge[e].from>=2*(uint64_t)f->parts || f->edge[e].to>=2*(uint64_t)f->parts)return EINVAL;
+    actors+=f->parts?f->parts:1;dependences+=f->edges;
+  }
+  if(actors>=UINT32_MAX/4 || dependences>=SIZE_MAX/sizeof(struct mesh_graph_dependence))return ENOMEM;
+  const uint32_t A=(uint32_t)actors;
+  double *host=calloc((size_t)A+1,sizeof *host),*work=calloc((size_t)A+1,sizeof *work);
+  uint64_t *bff=malloc(((size_t)A+1)*sizeof *bff),*lagged=calloc((size_t)count+1,sizeof *lagged);
+  uint32_t *of=malloc(((size_t)A+1)*sizeof *of);
+  struct mesh_graph_dependence *edge=malloc(((size_t)dependences+1)*sizeof *edge);
+  int bounded=host && work && bff && lagged && of && edge?0:ENOMEM;
+  uint32_t base=0;
+  size_t made=0;
+  for(uint32_t j=0;!bounded && j<ncalls;j++){
+    const struct mesh_function *f=functions+calls[j];
+    const uint32_t parts=f->parts?f->parts:1;
+    for(uint32_t q=0;q<parts;q++){
+      if(f->parts){host[base+q]=f->host[q];work[base+q]=f->work[q];}
+      of[base+q]=calls[j];
+    }
+    for(uint32_t e=0;e<f->edges;e++){
+      const uint32_t x=f->edge[e].from,y=f->edge[e].to;
+      edge[made++]=(struct mesh_graph_dependence){x<parts?base+x:A+base+x-parts,y<parts?base+y:A+base+y-parts,
+                                                  f->edge[e].delay};
+    }
+    base+=parts;
+  }
+  if(!bounded)bounded=mesh_graph_buffer_bound(A,host,work,made,edge,bff);
+  for(uint32_t q=0;!bounded && q<A;q++){
+    if(bff[q]>=UINT32_MAX)bounded=ENOMEM;
+    else{
+      if(bff[q]>*horizon)*horizon=(uint32_t)bff[q];
+      if(bff[q]>lagged[of[q]])lagged[of[q]]=bff[q];
+    }
+  }
+  for(uint32_t f=0;!bounded && f<count;f++)
+    for(uint32_t j=0;j<functions[f].values;j++)if(functions[f].value[j].lag)functions[f].value[j].lag=(uint32_t)lagged[f];
+  free(host);free(work);free(bff);free(lagged);free(of);free(edge);
+  return bounded;
+}
+
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/torch-capture-change-request.md item 6:
+   one lowered machine function's own storage, no transfer: plan_horizon's horizon and lags, plan_unroll's copies, each
+   run value's copies placed by plan_block in the caller's arena (offsets plan_block's quanta of `quantum` bytes) */
+int mesh_plan_local(struct mesh_function *function,uint64_t quantum,struct mesh_local *out){
+  if(!out)return EINVAL;
+  *out=(struct mesh_local){0};
+  if(!function || !quantum || (function->values && !function->value))return EINVAL;
+  const uint32_t call=0;
+  uint32_t horizon;
+  int status=plan_horizon(function,1,&call,1,&horizon);
+  if(status)return status;
+  struct plan p={.given=function->value,.givens=function->values,.horizon=horizon,.calls=1};
+  struct plan_placement x={0};
+  p.named=calloc((size_t)p.givens+1,sizeof *p.named);
+  p.item=malloc(((size_t)p.givens+1)*sizeof *p.item);
+  status=p.named && p.item?plan_unroll(&p):ENOMEM;
+  const uint64_t operations=plan_operations(&p);
+  if(!status)status=plan_block(&p,1,quantum,&operations,&x);
+  size_t offsets=0,room[5],conflicts=0;
+  struct mesh_graph_view *view=NULL;
+  struct mesh_graph_conflict *conflict=NULL;
+  for(uint32_t j=0;!status && j<p.givens;j++)if(p.given[j].run)offsets+=plan_copies(&p,j);
+  if(!status && (plan_room(p.givens,sizeof *out->first,room) || plan_room(offsets,sizeof *out->offset,room+1) ||
+                 plan_room(function->edges,sizeof *out->planned.order,room+2) ||
+                 plan_room(function->edges,sizeof *out->planned.cause,room+3) ||
+                 plan_room(offsets,sizeof *view,room+4)))status=ENOMEM;
+  if(!status){
+    out->first=malloc(room[0]);out->offset=malloc(room[1]);out->planned.call=malloc(sizeof *out->planned.call);
+    out->planned.order=malloc(room[2]);out->planned.cause=malloc(room[3]);view=malloc(room[4]);
+    if(!out->first || !out->offset || !out->planned.call || !out->planned.order || !out->planned.cause || !view)
+      status=ENOMEM;
+  }
+  /* design/torch-capture-change-request.md item 6: each run copy's assigned bytes one view of the arena, a value
+     sharing where one of its copies meets another copy (mesh_graph_conflicts_views, distinct witnesses) */
+  if(!status){
+    size_t at=0;
+    for(uint32_t j=0;j<p.givens;j++){
+      struct mesh_value *v=function->value+j;
+      out->first[j]=at;
+      v->section.count=plan_copies(&p,j);v->shares=0;
+      for(uint32_t c=0;v->run && c<v->section.count;c++,at++){
+        out->offset[at]=x.at[p.item[j]+c]*quantum;
+        view[at]=(struct mesh_graph_view){.view={.offset=out->offset[at],.element=v->section.bytes},.vertex=j,
+                                          .write=1};
+      }
+    }
+    out->first[p.givens]=at;
+    status=mesh_graph_conflicts_views(offsets,view,0,NULL,NULL,&conflict,&conflicts);
+    for(size_t k=0;!status && k<conflicts;k++)
+      if(conflict[k].from_view!=conflict[k].to_view){
+        function->value[view[conflict[k].from_view].vertex].shares=1;
+        function->value[view[conflict[k].to_view].vertex].shares=1;
+      }
+  }
+  free(view);free(conflict);
+  if(!status){
+    out->values=p.givens;out->offsets=offsets;out->bytes=x.blocks*quantum;
+    out->planned.calls=1;out->planned.horizon=horizon;out->planned.orders=function->edges;
+    out->planned.call[0]=(struct mesh_planned_call){.every=1,.parts=function->parts};
+    for(uint32_t e=0;e<function->edges;e++){
+      out->planned.cause[e]=(struct mesh_planned_cause){MESH_PLANNED_PART,UINT32_MAX};
+      out->planned.order[e]=function->edge[e];
+    }
+  }
+  free(p.named);free(p.item);free(x.at);
+  if(status)mesh_local_free(out);
+  return status;
+}
+void mesh_local_free(struct mesh_local *out){
+  mesh_planned_free(&out->planned);
+  free(out->first);free(out->offset);
+  *out=(struct mesh_local){0};
+}
+
 /* design/aot-compilation-change-request.md A7 to A10, appendix item 6;
    design/plan-to-bridge-change-request.md R3 to R5; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2;
    P. E. McKenney and J. D. Slingwine, PDCS 1998 */
@@ -1973,55 +2098,9 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,struct me
     return ordered;
   }
   struct hdr *m=context->M;
-  /* design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: the horizon and the locations of the
-     values the host writes, Bff of the host -> device edges of the calls' compiled parts in program order from their
-     t(v), with each call's own dependences between its parts (mesh_graph_buffer_bound) */
-  uint32_t horizon=1;
-  {
-    uint64_t actors=0,dependences=0;
-    for(uint32_t j=0;j<ncalls;j++){
-      const struct mesh_function *f=functions+calls[j];
-      if(f->parts && (!f->host || !f->work))return EINVAL;
-      if(f->edges && !f->edge)return EINVAL;
-      for(uint32_t e=0;e<f->edges;e++)if(f->edge[e].from>=2*(uint64_t)f->parts || f->edge[e].to>=2*(uint64_t)f->parts)return EINVAL;
-      actors+=f->parts?f->parts:1;dependences+=f->edges;
-    }
-    if(actors>=UINT32_MAX/4 || dependences>=SIZE_MAX/sizeof(struct mesh_graph_dependence))return ENOMEM;
-    const uint32_t A=(uint32_t)actors;
-    double *host=calloc((size_t)A+1,sizeof *host),*work=calloc((size_t)A+1,sizeof *work);
-    uint64_t *bff=malloc(((size_t)A+1)*sizeof *bff),*lagged=calloc((size_t)count+1,sizeof *lagged);
-    uint32_t *of=malloc(((size_t)A+1)*sizeof *of);
-    struct mesh_graph_dependence *edge=malloc(((size_t)dependences+1)*sizeof *edge);
-    int bounded=host && work && bff && lagged && of && edge?0:ENOMEM;
-    uint32_t base=0;
-    size_t made=0;
-    for(uint32_t j=0;!bounded && j<ncalls;j++){
-      const struct mesh_function *f=functions+calls[j];
-      const uint32_t parts=f->parts?f->parts:1;
-      for(uint32_t q=0;q<parts;q++){
-        if(f->parts){host[base+q]=f->host[q];work[base+q]=f->work[q];}
-        of[base+q]=calls[j];
-      }
-      for(uint32_t e=0;e<f->edges;e++){
-        const uint32_t x=f->edge[e].from,y=f->edge[e].to;
-        edge[made++]=(struct mesh_graph_dependence){x<parts?base+x:A+base+x-parts,y<parts?base+y:A+base+y-parts,
-                                                    f->edge[e].delay};
-      }
-      base+=parts;
-    }
-    if(!bounded)bounded=mesh_graph_buffer_bound(A,host,work,made,edge,bff);
-    for(uint32_t q=0;!bounded && q<A;q++){
-      if(bff[q]>=UINT32_MAX)bounded=ENOMEM;
-      else{
-        if(bff[q]>horizon)horizon=(uint32_t)bff[q];
-        if(bff[q]>lagged[of[q]])lagged[of[q]]=bff[q];
-      }
-    }
-    for(uint32_t f=0;!bounded && f<count;f++)
-      for(uint32_t j=0;j<functions[f].values;j++)if(functions[f].value[j].lag)functions[f].value[j].lag=(uint32_t)lagged[f];
-    free(host);free(work);free(bff);free(lagged);free(of);free(edge);
-    if(bounded)return bounded;
-  }
+  uint32_t horizon;
+  const int bounded=plan_horizon(functions,count,calls,ncalls,&horizon);
+  if(bounded)return bounded;
   struct plan *plans=calloc(count,sizeof *plans);
   size_t *row=malloc(((size_t)count+1)*sizeof *row),*order=malloc(((size_t)ncalls+1)*sizeof *order),*rows_by=NULL,
          *listed=NULL;

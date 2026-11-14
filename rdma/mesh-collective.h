@@ -117,6 +117,23 @@ int mesh_plan_load(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh
   const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
   const uint32_t *chains,uint64_t deadline,const void *bytes,size_t length,struct mesh_planned *);
 void mesh_planned_free(struct mesh_planned *);
+/* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/torch-capture-change-request.md item 6;
+   design/aot-compilation-change-request.md, appendix item 2: one lowered machine function's own storage, no transfer.
+   `function` its parts (host, work, edge: its compiled actors) and its values (each value's section.bytes, begin,
+   end, kind, lag and run: run 1 a root this function's storage holds, run 0 one the caller holds), `quantum` the
+   alignment of every placed copy. `planned` one call {plan 0, lead 0, function 0, ordinal 0, every 1, the function's
+   parts, waits 0}, the horizon of its parts' Bff, the function's own edges as MESH_PLANNED_PART orders on part
+   vertices from 0, no signature; `bytes` the arena the caller allocates, offset[first[v], first[v + 1]) value v's
+   copies' byte offsets in it (none where run is 0). Each value's section.count is set to its copies (its bytes and
+   pages untouched) and its shares to 1 where one of its copies' assigned bytes meets another copy's */
+struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
+                    uint64_t *offset; };
+_Static_assert(sizeof(struct mesh_local)==136 && offsetof(struct mesh_local,bytes)==96 &&
+               offsetof(struct mesh_local,values)==104 && offsetof(struct mesh_local,offsets)==112 &&
+               offsetof(struct mesh_local,first)==120 && offsetof(struct mesh_local,offset)==128,
+               "mesh_local: rdma/mesh.py Local");
+int mesh_plan_local(struct mesh_function *function,uint64_t quantum,struct mesh_local *out);
+void mesh_local_free(struct mesh_local *out);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

@@ -145,6 +145,12 @@ class Planned(C.Structure):
                 ('extent', C.POINTER(mesh_graph.Access))]
 
 
+# mesh-collective.h struct mesh_local, mesh_plan_local
+class Local(C.Structure):
+    _fields_ = [('planned', Planned), ('bytes', Q), ('values', Z), ('offsets', Z), ('first', C.POINTER(Z)),
+                ('offset', C.POINTER(Q))]
+
+
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
 (ORDER_FLOW, ORDER_CONFLICT, PLANNED_PROGRAM, PLANNED_SUBMIT, PLANNED_OUTSTANDING, PLANNED_CHAIN, PLANNED_TRANSFER,
  PLANNED_PART) = range(8)
@@ -278,6 +284,8 @@ for name, result, arguments in (
         ('mesh_plan_load', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
                                      C.POINTER(U), Q, C.c_void_p, Z, C.POINTER(Planned)]),
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
+        ('mesh_plan_local', C.c_int, [C.POINTER(Function), Q, C.POINTER(Local)]),
+        ('mesh_local_free', None, [C.POINTER(Local)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, Q]),

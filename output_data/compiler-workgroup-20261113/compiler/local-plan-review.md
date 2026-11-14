@@ -1,0 +1,7 @@
+# Lowered local-plan result review
+
+Actual input is one composed machine function's compiled actors/dependences and ValueID-indexed storage bytes/lifetimes/kind/run operands. `mesh_plan_local` returns one owned actual call/part relation, Bff horizon, arena extent and every value/copy offset; no bridge graph/signature is fabricated. Caller-supplied roots/constants/wire backings have run0 and no arena offsets. Existing section.count and shares carry actual copy count and assigned spatial reuse.
+
+Source review: Bff block factored unchanged into plan_horizon and consumed by both native paths. Existing plan_operations, plan_copies/plan_location and plan_block/mesh_graph_greedy_by_size own lifetime and placement. Local does not call source scheduling, topology or BSL solving. Assigned-copy sharing is one exact canonical view-conflict result, using distinct witness pairs; no array proportional to arena byte extent. All borrowed result pointers remain valid until mesh_local_free.
+
+SAME Opus5.5 schedule sessiondc4b988b private strict C/ObjC and ctypes size/offset checks pass (Local136, fields96/104/112/120/128). No actual local function planning/emission was run at this checkpoint. New native Target/recorder consumes signatureNULL and part vertexbase0; frontend late orchestration must lower before this single plan. These consumer/runtime obligations remain open. Typed Storage alignment correction is adjacent source work and receives its own coherent Metal/ctypes/archive gate; no invented page alignment.
