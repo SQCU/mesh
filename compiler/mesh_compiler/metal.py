@@ -500,6 +500,7 @@ def _compiler():
                 ('metal_ir_symbol', U, [P, U, U, Q]), ('metal_ir_loop_extent', None, [P, U, U, U]),
                 ('metal_ir_check', U, [P, U, U, Q]),
                 ('metal_ir_check_message', None, [P, U, C.c_char_p]),
+                ('metal_ir_check_dep_token', None, [P, U, U]),
                 ('metal_ir_lapack', U, [P, C.POINTER(Lapack), U, C.POINTER(Q), U, C.POINTER(U), U, C.POINTER(U),
                                         C.POINTER(Matrix), C.POINTER(Expr), U, C.POINTER(Term), Q]),
                 ('metal_ir_sort', U, [P, U, U, Q, U, U, U, U, U, Q]),
@@ -719,6 +720,8 @@ class _Builder:
             operation = self.lib.metal_ir_check(self.p, self.value(g.info), g.code, self.identity)
             if g.message:
                 self.lib.metal_ir_check_message(self.p, operation, g.message.encode())
+            if g.dep_token is not None:
+                self.lib.metal_ir_check_dep_token(self.p, operation, self.value(_stored(g.dep_token)))
             return operation
         if isinstance(g, _Lapack):
             if g.place != CPU:
