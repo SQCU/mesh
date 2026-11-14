@@ -1,0 +1,18 @@
+{
+  "captured": "2026-11-14T07:57:37.259792+00:00",
+  "files": {
+    "/Users/mdot/dox/mesh/rdma/mesh-graph.h": "7fe5e57ee6d6a0e766b0c6bb8a28aeabdfd64280e38dcfb4cac2c0adc6c8f41f",
+    "/Users/mdot/dox/mesh/rdma/mesh-graph.c": "0755a3e82f84a4fc9e1a1c019b6551a38316e6cd3d763d20c4b1e48ce8b8edfa",
+    "/Users/mdot/dox/mesh/rdma/mesh-collective.h": "233e8bad97507e59a8be4391aa56f9ee1fd7cae30d23c287607dc933e973a349",
+    "/Users/mdot/dox/mesh/rdma/mesh-collective.c": "93418874ad6e6a294ac78d665e65307922058e1bf7293e2b1d593dbcffda8cd2",
+    "/Users/mdot/dox/mesh/rdma/mesh.py": "34ad8ccbf87687c15abb9e442524df08a1b0af59323b45517cb40b62c55b50c2",
+    "/Users/mdot/dox/mesh/rdma/mesh_graph.py": "c885ef7be54134f5ea791fef48b785f49dd58669f9860b094fc679415cea1946",
+    "/Users/mdot/metal-microbench/metal_ir.h": "ff22051bddbe87deecab0c197154174105a09cc3291b1d2d6b874dc2e4067d92",
+    "/Users/mdot/metal-microbench/metal_ir.mm": "cf6832c61e9ac9921e015284d7a2151eac9fd6ceac6201be23d081549a80adb1",
+    "/Users/mdot/metal-microbench/metal_archive.mm": "fede4aef3a34014acf6b6fb8fb832f77ff56e6d6fabc28ac7c2cc6fc0fa9da7e",
+    "/Users/mdot/metal-microbench/metal_recording.h": "b75c1bdda5e8f32636c88550fd85d845982a2d34c3a20186af9665b43cc8d897",
+    "/Users/mdot/metal-microbench/metal_recording.m": "895bf04a037900821a6efa686b521f2d8ed4f989e12b487499324b73877f753a",
+    "/Users/mdot/metal-microbench/tools/native_bench.m": "815041fdf2bbc1af05beed9ecaa039971062204a251cf771f85b260ada002f54",
+    "/Users/mdot/metal-microbench/tools/e2b_replay.m": "db40aba4354dcb664655c416060505026adb3f1ee750938b7bfeb5d209311bcb"
+  }
+}
