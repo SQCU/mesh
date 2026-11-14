@@ -1,0 +1,56 @@
+{
+  "/Users/mdot/dox/mesh": {
+    "head": "e9b8772b13cda8d66f1ff511539949a77d0bdc7f",
+    "sha256": {
+      "rdma/mesh-collective.c": "2379b44d80e15629e0e18c18a55fbc26ee270635d107d52e993c78fdb4026350",
+      "rdma/mesh-collective.h": "0d74b5a5a2b8fa436dab1a5de2a4079feb013e0c7c05cc24c446511c546a9fde",
+      "rdma/mesh-dataflow.c": "7a1f768b6a97866b4e0a415071f1970395a4f0f6cbef2dc6f7a6e0abe69fc2aa",
+      "rdma/mesh-dataflow.h": "c60c40be42e3b7cdd18419c84311d26721ca243765bd6a456ac08a5cc89cbc10",
+      "rdma/mesh-call.c": "b73f650ce518138f4c70db6570c8d438ca1d26b29fb267a8728ef2f73f6a4152",
+      "rdma/mesh-graph.c": "753746d9e3c133484b7d76da2a4655052ee2523b6f34b40e105ea79bc74ef172",
+      "rdma/mesh-graph.h": "ca68f0dd3799fc4f7ac44d3637859c106d71571438cd1b69141f48c02e964cd4",
+      "rdma/mesh-metal.h": "5cf8853fe92bedfd5f7ebe024f2fa64817cc16a4242361c65105a81901f4d34a",
+      "rdma/mesh-metal.m": "318c78b668d91de3998da7455bb4a73a230fea06e5312d242fb278c551204f1b",
+      "rdma/mesh.h": "a770c02456acd094a87998a8e80d7fff564cae379cbf4d3e60fb9a04ade94357",
+      "rdma/mesh-holders.h": "bb714329b34ac4984754b23a05f93f7188159114583ceb55dabfd8fc58c72ab3",
+      "rdma/Makefile": "de0d06b940c9a3a8cdad87d1d6437845e7753450dcb027cebbe112ac727a33cf",
+      "rdma/mesh_graph.py": "958a8e225958bae8d0561987d958be5bee3fd9f13858e42fe26b27f63440b02e",
+      "compiler/mesh_compiler/metal.py": "1f951e0e61c0fd1dd004b22c265d12861ee32914bab0d63d07f31856cafd3c9b",
+      "compiler/mesh_compiler/native.py": "634538207f4dffcd066a1989121b6d618ba2da94d4dc638759be0b3b77df5aac",
+      "compiler/mesh_compiler/lower_metal.py": "004c97456cddb45f134432a4b7d1814ae91219cfca40dffb4f92c815a3e8bb80",
+      "compiler/mesh_compiler/shares.py": "acbf47873b6d3074fd383f9cea70ca93d3e2c15c83e4b0ad025b6d771f750a89",
+      "examples/engines.py": "7183e250d252871f3c73a0d76cc4d3b93f3cc2d45db2b60deca3acf0cb2725ea"
+    },
+    "head_after_build": "7e74000cc0c8502817f47ef6ad20a23bd70f5aa3"
+  },
+  "/Users/mdot/metal-microbench": {
+    "head": "5f41ecd2c620ca30b72450d7cdb61cf01de9a518",
+    "sha256": {
+      "metal_ir.h": "01f33f94309bfd5338f84938f68f935c76f0a876aff42eedecda22941688a043",
+      "metal_ir.mm": "d513ba87e160fd940219967dfdadac9e4f56f4c0972f6d75ae9afed74cf2b44b",
+      "metal_clone.h": "05e8c696ef9c0671ff96f6f1d053f4562aded8f0b6180a3552aecbb6abb5f2e8",
+      "metal_clone.mm": "8f6bbe8d513e273ca0756770811bdffb913712971195bada31e2c8ef667dceae",
+      "metal_transform.mm": "5967831d97ae1bad30ada1d2c8060db7592d360cd82f02e06460d96f8067fdba",
+      "metal_lower.h": "f43492c428d89c36777fd1f9414979c0143d8d806414d9900246568b69e9f7f7",
+      "metal_lower.mm": "166472364d6c33f55708a91e161e8bb5476aa541cf9e17199613f326767878b3",
+      "metal_native.h": "4b45c998706cd4f8ca033e1c92c06c33adc205868544868f90545b544ea847b4",
+      "metal_native.mm": "0506290a08c7d860d54539578a033ed7f17b2811d2a580c937a564c53ab43e8d",
+      "metal_transport.mm": "e6dd742832e53449969441b5751eef78d5ad3d60ec82ebd0b1a8b52b73cee1cb",
+      "metal_neural.mm": "739bc6d30c86740ceb5442090cb4c8580c29e6298aa8468554a3b68a2f0d80d4",
+      "metal_archive.mm": "5513e8805bbd673afea885eb31ff0c96301712a51b657d43a9ccef30ec3dbf4f",
+      "metal_program.h": "8244ee15f1b78a9e33f4e7fe4bdb2c4a90b3ba5a1df6d30e4d6d1ec5dc560916",
+      "metal_recording.h": "a0736034e85fae6f84a6de856d9dd410037b0ed85c85917566463188c7d0d661",
+      "metal_capture.h": "30a21e50bc9f386e897fdcc2b95442bb3b462ea5a5f43a8b8188fb964cfe8d5e",
+      "metal_capture.m": "ce6d4a59d2328bd19c1dd7c95bd45448932f54c46ed43871574d4705d9623a4a",
+      "metal_program.m": "f1f0622010bdb00496484a605cb0dc59181cd97b8133586044b9f73797b7e918",
+      "tools/native_bench.m": "1730b01b46db9ba078003c5718918f05ebc4693b054580c362a0250266969922",
+      "tools/e2b_replay.m": "4e7f7a9e5f471bfa8ae55cbeaee57b328ca1cd8acc169de287f508f8f5f89619",
+      "Makefile": "0b2267ff132e06b01d5430ff8c6fc25ce8a69c86c9d4a3be7057827d29b3bd96",
+      "provider/litert_mesh.cc": "49f08a9a0df1f06511dbf6191ffba41d75ce88e07353907dd4090dcc53b08922"
+    },
+    "head_after_build": "5f41ecd2c620ca30b72450d7cdb61cf01de9a518"
+  },
+  "changed_during_build": [
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py"
+  ]
+}
