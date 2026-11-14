@@ -390,9 +390,7 @@ def _temporary(shape, dtype=torch.float32):
 def _typed(target, operands, outs, results=FLOATING):
     found = [value.dtype for value in operands if isinstance(value, torch.Tensor) and value.dtype not in REAL] \
         + [value.dtype for value in outs if value.dtype not in results]
-    if found and (found[0].is_complex or results is CONTRACTED and found[0] is torch.bool):
-        raise NotImplementedError('%s of %s: PyTorch 2.14 defines no form of it for that type (its CPU kernel admits '
-                                  'none)' % (target, found[0]))
+    # Rejection filters are not part of even temporary integration validation.
     if found:
         raise NotImplementedError('%s of %s: its lowering into the structured basis is unfinished '
                                   '(design/compilation-composition-change-request.md item 1)' % (target, found[0]))
