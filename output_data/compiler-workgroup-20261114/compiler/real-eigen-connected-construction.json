@@ -1,0 +1,89 @@
+[
+  {
+    "dtype": "torch.float32",
+    "outputs": [
+      [
+        [
+          3
+        ],
+        "torch.complex64",
+        [
+          1
+        ]
+      ],
+      [
+        [
+          3,
+          3
+        ],
+        "torch.complex64",
+        [
+          1,
+          3
+        ]
+      ]
+    ],
+    "records": [
+      283,
+      13
+    ]
+  },
+  {
+    "dtype": "torch.float64",
+    "outputs": [
+      [
+        [
+          3
+        ],
+        "torch.complex128",
+        [
+          1
+        ]
+      ],
+      [
+        [
+          3,
+          3
+        ],
+        "torch.complex128",
+        [
+          1,
+          3
+        ]
+      ]
+    ],
+    "records": [
+      283,
+      13
+    ]
+  },
+  {
+    "dtype": "torch.complex64",
+    "outputs": [
+      [
+        [
+          3
+        ],
+        "torch.complex64",
+        [
+          1
+        ]
+      ],
+      [
+        [
+          3,
+          3
+        ],
+        "torch.complex64",
+        [
+          1,
+          3
+        ]
+      ]
+    ],
+    "records": [
+      257,
+      12
+    ]
+  }
+]

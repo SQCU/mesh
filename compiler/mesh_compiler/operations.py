@@ -3509,13 +3509,14 @@ def _swapped(first, second, extent, ops):
                        lambda r, v: [(v[1], t), (v[0], t)]), loops=(extent,), offsets=_offsets(x, x_at) + _offsets(y, y_at))
 
 
-# Reference-LAPACK SRC/zgebal.f (JOB = 'B', lines 225-418) on one complex square member h, in place. Its outputs:
+# Reference-LAPACK SRC/zgebal.f and dgebal.f (JOB = 'B', lines 225-418) on one square member h, complex or real (CABS1
+# and the moduli of a real entry are its |x|; DNRM2 and DZNRM2 the same scaled norm), in place. Its outputs:
 # `scale` (real), the SCALE factors of rows ILO..IHI; `perm` (int32), SCALE's interchange indices outside them; `ilo`
 # and `ihi` (one-element int32). `held` holds the caller's temporaries that its repetitions carry. Each DO loop is its
 # n static positions (an inactive one of extent 0) and each DO WHILE a _Repeat. K, L, I and J are the source's 1-based
 # values. Each interchange is a ZSWAP of the actual two columns and two rows. The 363-367 NaN exit (INFO = -3) ends the
 # routine, leaving ILO and IHI unassigned as the source does
-def _zgebal(h, scale, perm, ilo, ihi, ops, held=()):
+def _gebal(h, scale, perm, ilo, ihi, ops, held=()):
     n, t, real = h.shape[-1], _class(h.real), h.real.dtype
     limits = torch.finfo(real)
     sfmin1 = limits.tiny / limits.eps
@@ -3755,13 +3756,13 @@ def _reflected(block, v, tau, rows, cols, ops, left=True, adjoint=False):
 
 
 # Reference-LAPACK SRC/zgehrd.f 249-254 and 295-299 (TAU outside ILO..IHI-1 zero; the unblocked code from I = ILO) and
-# zgehd2.f 190-207 on one complex square member h in place, then (z given) zunghr.f 198-232 with zung2r's reflector
-# sequence into z. For each static column I = 1..n-1, active where ILO <= I <= IHI-1 (else every extent 0):
+# zgehd2.f 190-207 (dgehrd.f, dgehd2.f and dorghr.f alike, the real reflector its own conjugate) on one square member
+# h, complex or real, in place, then (z given) zunghr.f 198-232 with zung2r's reflector sequence into z. For each static column I = 1..n-1, active where ILO <= I <= IHI-1 (else every extent 0):
 # ZLARFG(IHI-I, A(I+1,I), A(I+2,I)) by _linalg_reflector clipped to the reflector's IHI-I entries and its tail; H(I)
 # from the right to A(1:IHI, I+1:IHI), then H(I)^H from the left to A(I+1:IHI, I+1:N); beta into A(I+1,I) and
 # v(2:) into A(I+2:IHI,I). Q = H(ILO) ... H(IHI-1) from the identity, each H(I) (reverse order) to rows and columns
 # I+1..IHI. Returns TAU (its first n - 1 entries); ILO and IHI one-element int32, the source's 1-based values
-def _zgehd2(h, z, ilo, ihi, ops):
+def _gehd2(h, z, ilo, ihi, ops):
     n, dtype, real = h.shape[-1], h.dtype, h.real.dtype
     t = _class(h.real)
     tau = _temporary((max(n - 1, 0),), dtype)
@@ -3940,6 +3941,149 @@ def _dlanv2(r, t, a, b, c, d, limits):
     rt1i = sel(r('eq', BOOL, c_, zero), zero, mul(r('sqrt', t, r('abs', t, b_)), r('sqrt', t, r('abs', t, c_))))
     rt2i = sel(r('eq', BOOL, c_, zero), zero, neg(rt1i))
     return a_, b_, c_, d_, a_, rt1i, d_, rt2i, cs_, sn_
+
+
+# Reference-LAPACK SRC/dlaln2.f 276-601 with LTRANS = false, CA = 1, D1 = D2 = 1, in one region of real kind t: the
+# NA x NA (1 or 2, static) system (A - (WR + i WI)) X = SCALE B, NW = 1 (real WR) or 2 (complex WR + i WI). `a` is
+# (A11,) or (A11, A12, A21, A22) and `b` (and the returned X) B(1,1), B(2,1) [NA = 2], then B(1,2), B(2,2) [NW = 2],
+# of region values; returns (X, SCALE, XNORM). SMINI = max(SMIN, 2 SAFMIN), the complete pivoting of CRV/CIV by the
+# source's IPIVOT, RSWAP and ZSWAP tables, the SMINI replacements and every SCALE/BNORM/BBND/XNORM overflow test;
+# DLADIV is the existing complex division (Smith's)
+def _dlaln2(r, t, na, nw, smin, a, b, wr, wi, limits):
+    def k(value):
+        return r.const(value, t)
+
+    def sel(test, x, y):
+        return r('select', t, test, x, y)
+
+    def mul(x, y):
+        return r('mul', t, x, y)
+
+    def add(x, y):
+        return r('add', t, x, y)
+
+    def sub(x, y):
+        return r('sub', t, x, y)
+
+    def absolute(x):
+        return r('abs', t, x)
+
+    def bigger(x, y):
+        return sel(r('ge', BOOL, x, y), x, y)
+
+    def divided(x, y):
+        return _complex_value(r, t, 'div', x, y, 1, None)
+    smlnum = 2 * limits.tiny
+    bignum = 1 / smlnum
+    one, zero = k(1), k(0)
+    smini = bigger(smin, k(smlnum))
+
+    def bounded(norm, size):
+        return sel(_all(r, [r('lt', BOOL, size, one), r('gt', BOOL, norm, one), r('gt', BOOL, norm, mul(
+            k(bignum), size))]), r('div', t, one, norm), one)
+    if na == 1:
+        csr = sub(a[0], wr)
+        if nw == 1:
+            small = r('lt', BOOL, absolute(csr), smini)
+            cnorm = sel(small, smini, absolute(csr))
+            csr = sel(small, smini, csr)
+            scale = bounded(absolute(b[0]), cnorm)
+            x = r('div', t, mul(b[0], scale), csr)
+            return (x,), scale, absolute(x)
+        csi = r('neg', t, wi)
+        cnorm = add(absolute(csr), absolute(csi))
+        small = r('lt', BOOL, cnorm, smini)
+        csr, csi, cnorm = sel(small, smini, csr), sel(small, zero, csi), sel(small, smini, cnorm)
+        scale = bounded(add(absolute(b[0]), absolute(b[1])), cnorm)
+        xr, xi = divided((mul(scale, b[0]), mul(scale, b[1])), (csr, csi))
+        return (xr, xi), scale, add(absolute(xr), absolute(xi))
+    a11, a12, a21, a22 = a
+    crv = [sub(a11, wr), a21, a12, sub(a22, wr)]
+    civ = [r('neg', t, wi), zero, zero, r('neg', t, wi)] if nw == 2 else [zero] * 4
+    cmax, ic = zero, r.const(0, I32)
+    for j in range(4):
+        size = absolute(crv[j]) if nw == 1 else add(absolute(crv[j]), absolute(civ[j]))
+        larger = r('gt', BOOL, size, cmax)
+        cmax, ic = sel(larger, size, cmax), r('select', I32, larger, r.const(j + 1, I32), ic)
+    pivot = {1: (1, 2, 3, 4), 2: (2, 1, 4, 3), 3: (3, 4, 1, 2), 4: (4, 3, 2, 1)}
+
+    def picked(values, row):
+        made = values[pivot[4][row] - 1]
+        for column in (3, 2, 1):
+            made = sel(r('eq', BOOL, ic, r.const(column, I32)), values[pivot[column][row] - 1], made)
+        return made
+    rswap = r('or', BOOL, r('eq', BOOL, ic, r.const(2, I32)), r('eq', BOOL, ic, r.const(4, I32)))
+    zswap = r('or', BOOL, r('eq', BOOL, ic, r.const(3, I32)), r('eq', BOOL, ic, r.const(4, I32)))
+    identity = r('lt', BOOL, cmax, smini)
+    if nw == 1:
+        b11, b21 = b
+        bnorm = bigger(absolute(b11), absolute(b21))
+        held = bounded(bnorm, smini)
+        temp = r('div', t, held, smini)
+        plain = ((mul(temp, b11), mul(temp, b21)), held, mul(temp, bnorm))
+        ur11, cr21, ur12, cr22 = (picked(crv, row) for row in range(4))
+        ur11r = r('div', t, one, ur11)
+        lr21 = mul(ur11r, cr21)
+        ur22 = sub(cr22, mul(ur12, lr21))
+        ur22 = sel(r('lt', BOOL, absolute(ur22), smini), smini, ur22)
+        br1, br2 = sel(rswap, b21, b11), sel(rswap, b11, b21)
+        br2 = sub(br2, mul(lr21, br1))
+        bbnd = bigger(absolute(mul(br1, mul(ur22, ur11r))), absolute(br2))
+        scale = sel(_all(r, [r('gt', BOOL, bbnd, one), r('lt', BOOL, absolute(ur22), one), r(
+            'ge', BOOL, bbnd, mul(k(bignum), absolute(ur22)))]), r('div', t, one, bbnd), one)
+        xr2 = r('div', t, mul(br2, scale), ur22)
+        xr1 = sub(mul(mul(scale, br1), ur11r), mul(xr2, mul(ur11r, ur12)))
+        x = [sel(zswap, xr2, xr1), sel(zswap, xr1, xr2)]
+        xnorm = bigger(absolute(xr1), absolute(xr2))
+    else:
+        b11, b21, b12, b22 = b
+        bnorm = bigger(add(absolute(b11), absolute(b12)), add(absolute(b21), absolute(b22)))
+        held = bounded(bnorm, smini)
+        temp = r('div', t, held, smini)
+        plain = (tuple(mul(temp, v) for v in b), held, mul(temp, bnorm))
+        ur11, cr21, ur12, cr22 = (picked(crv, row) for row in range(4))
+        ui11, ci21, ui12, ci22 = (picked(civ, row) for row in range(4))
+        wide = r('gt', BOOL, absolute(ur11), absolute(ui11))
+        ratio = sel(wide, r('div', t, ui11, ur11), r('div', t, ur11, ui11))
+        grown = add(one, mul(ratio, ratio))
+        ur11r_a = sel(wide, r('div', t, one, mul(ur11, grown)), r('neg', t, mul(ratio, r('div', t, k(-1), mul(
+            ui11, grown)))))
+        ui11r_a = sel(wide, r('neg', t, mul(ratio, r('div', t, one, mul(ur11, grown)))), r('div', t, k(-1), mul(
+            ui11, grown)))
+        offreal = r('or', BOOL, r('eq', BOOL, ic, r.const(1, I32)), r('eq', BOOL, ic, r.const(4, I32)))
+        ur11r = sel(offreal, ur11r_a, r('div', t, one, ur11))
+        ui11r = sel(offreal, ui11r_a, zero)
+        lr21 = sel(offreal, mul(cr21, ur11r), mul(cr21, ur11r))
+        li21 = sel(offreal, mul(cr21, ui11r), mul(ci21, ur11r))
+        ur12s = mul(ur12, ur11r)
+        ui12s = sel(offreal, mul(ur12, ui11r), mul(ui12, ur11r))
+        ur22 = sel(offreal, sub(cr22, mul(ur12, lr21)), add(sub(cr22, mul(ur12, lr21)), mul(ui12, li21)))
+        ui22 = sel(offreal, sub(ci22, mul(ur12, li21)), sub(r('neg', t, mul(ur12, li21)), mul(ui12, lr21)))
+        u22abs = add(absolute(ur22), absolute(ui22))
+        small = r('lt', BOOL, u22abs, smini)
+        ur22, ui22 = sel(small, smini, ur22), sel(small, zero, ui22)
+        br1, br2 = sel(rswap, b21, b11), sel(rswap, b11, b21)
+        bi1, bi2 = sel(rswap, b22, b12), sel(rswap, b12, b22)
+        br2 = add(sub(br2, mul(lr21, br1)), mul(li21, bi1))
+        bi2 = sub(sub(bi2, mul(li21, br1)), mul(lr21, bi1))
+        bbnd = bigger(mul(add(absolute(br1), absolute(bi1)), mul(u22abs, add(absolute(ur11r), absolute(ui11r)))),
+                      add(absolute(br2), absolute(bi2)))
+        rescaled = _all(r, [r('gt', BOOL, bbnd, one), r('lt', BOOL, u22abs, one), r(
+            'ge', BOOL, bbnd, mul(k(bignum), u22abs))])
+        scale = sel(rescaled, r('div', t, one, bbnd), one)
+        br1, bi1, br2, bi2 = (sel(rescaled, mul(scale, v), v) for v in (br1, bi1, br2, bi2))
+        xr2, xi2 = divided((br2, bi2), (ur22, ui22))
+        xr1 = add(sub(sub(mul(ur11r, br1), mul(ui11r, bi1)), mul(ur12s, xr2)), mul(ui12s, xi2))
+        xi1 = sub(sub(add(mul(ui11r, br1), mul(ur11r, bi1)), mul(ui12s, xr2)), mul(ur12s, xi2))
+        x = [sel(zswap, xr2, xr1), sel(zswap, xr1, xr2), sel(zswap, xi2, xi1), sel(zswap, xi1, xi2)]
+        xnorm = bigger(add(absolute(xr1), absolute(xi1)), add(absolute(xr2), absolute(xi2)))
+    further = _all(r, [r('gt', BOOL, xnorm, one), r('gt', BOOL, cmax, one), r(
+        'gt', BOOL, xnorm, r('div', t, k(bignum), cmax))])
+    temp = r('div', t, cmax, k(bignum))
+    x = [sel(further, mul(temp, v), v) for v in x]
+    xnorm, scale = sel(further, mul(temp, xnorm), xnorm), sel(further, mul(temp, scale), scale)
+    return (tuple(sel(identity, p, v) for p, v in zip(plain[0], x)), sel(identity, plain[1], scale),
+            sel(identity, plain[2], xnorm))
 
 
 # Reference-LAPACK SRC/zlarfg.f 144-211 with N = 2, in one region: ALPHA and X (complex record values) to (ALPHA on
@@ -4708,6 +4852,198 @@ def _dlahqr(h, z, wr, wi, ilo, ihi, info, ops, held=()):
     ops.append(_Repeat(passes, more, carried))
 
 
+# Reference-LAPACK SRC/dtrevc.f 342-519 and 521-702 (SIDE = 'R', HOWMNY = 'B'): h the real quasi-triangular Schur form
+# (read only), z the Schur vectors, vr the packed right eigenvectors Z X (a real eigenvalue's column; a pair's
+# columns KI-1 and KI its real and imaginary parts), each scaled by 1 / its largest |x| (a pair's |Re| + |Im|). Column
+# KI is real (IP = 0), the pair's second (T(KI,KI-1) /= 0, IP = -1) or its first (T(KI+1,KI) /= 0, skipped as the
+# source's IP = 1); xr and xi (n x n) hold each KI's WORK(1+N:) and WORK(1+N2:) by column, and all the solves run
+# together in the source's block order J = KI-1 (KI-2 for a pair)..1, the static rounds J = n-1..1, each a 1 x 1
+# block or the 2 x 2 block ending at J (T(J,J-1) /= 0), J the first row of a 2 x 2 skipped
+def _dtrevc(h, z, vr, ops):
+    n, t, real = h.shape[-1], _class(h), h.dtype
+    if not n:
+        return
+    limits = torch.finfo(real)
+    ulp = limits.eps
+    smlnum = limits.tiny * (n / ulp)
+    bignum = (1 - ulp) / smlnum
+    wrk, wik, smin, cnorm, s1, s2, scl, car, cai, c11, c21, c12, c22, emax = (_temporary((n,), real) for _ in range(14))
+    realc, bottom, top, act, moved = (_temporary((n,), torch.int32) for _ in range(5))
+    need, e1, e2, u1, u2 = (_temporary((1,), torch.int32) for _ in range(5))
+    xr, xi, packed = _temporary((n, n), real), _temporary((n, n), real), _temporary((n, n), real)
+
+    def k(r, value):
+        return r.const(value, t)
+
+    def i32(r, value):
+        return r.const(value, I32)
+
+    def flag(r, test):
+        return _convert(r, test, BOOL, I32)
+
+    def at(r, slot, row, column):
+        return r('extract', t, _bounded(r, row, n)[1], _bounded(r, column, n)[1], integer=slot)
+
+    def absolute(r, x):
+        return r('abs', t, x)
+
+    def nonzero(r, x):
+        return r('ne', BOOL, x, i32(r, 0))
+
+    # 342-357 and 372-400: T(KI,KI), WI = sqrt|T(KI,KI-1)| sqrt|T(KI-1,KI)| (a pair), SMIN = max(ULP (|WR| + |WI|),
+    # SMLNUM), the column's kind, and a pair's initial solve WORK(KI-1+N) and WORK(KI+N2) (529-535)
+    def kinds(r, v):
+        diagonal, slot = v
+        c = r.index(0)
+        sub, sup = at(r, slot, c, r('sub', I32, c, i32(r, 1))), at(r, slot, r('sub', I32, c, i32(r, 1)), c)
+        following = at(r, slot, r('add', I32, c, i32(r, 1)), c)
+        second = r('and', BOOL, r('ge', BOOL, c, i32(r, 1)), r('ne', BOOL, sub, k(r, 0)))
+        first = _all(r, [r('le', BOOL, c, i32(r, n - 2)), r('ne', BOOL, following, k(r, 0)), r('not', BOOL, second)])
+        wi = r('select', t, second, r('mul', t, r('sqrt', t, absolute(r, sub)), r('sqrt', t, absolute(r, sup))),
+               k(r, 0))
+        size = r('mul', t, k(r, ulp), r('add', t, absolute(r, diagonal), absolute(r, wi)))
+        wide = r('ge', BOOL, absolute(r, sup), absolute(r, sub))
+        return [(diagonal, t), (wi, t), (r('select', t, r('ge', BOOL, size, k(r, smlnum)), size, k(r, smlnum)), t),
+                (flag(r, r('and', BOOL, r('not', BOOL, second), r('not', BOOL, first))), I32), (flag(r, second), I32),
+                (flag(r, first), I32), (r('select', t, wide, k(r, 1), r('div', t, r('neg', t, wi), sub)), t),
+                (r('select', t, wide, r('div', t, wi, sup), k(r, 1)), t)]
+    ops += _record((n,), [(x, (0,)) for x in (wrk, wik, smin, realc, bottom, top, s1, s2)],
+                   [(h, (0, 0)), (h, None)], kinds)
+    ops += _record((n, n), [(cnorm, (0,))], [(h, (1, 0))], lambda r, v: [(r('select', t, r(
+        'lt', BOOL, r.index(1), r.index(0)), absolute(r, v[0]), k(r, 0)), t)], [PARALLEL, REDUCTION], [SUM])
+
+    # 406-412 and 536-544: the right-hand sides, a real KI's X = (-T(1:KI-1,KI), 1), a pair's (-WORK(KI-1+N)
+    # T(1:KI-2,KI-1), WORK(KI-1+N), 0) and (-WORK(KI+N2) T(1:KI-2,KI), 0, WORK(KI+N2)); zero elsewhere
+    def sides(r, v):
+        isreal, second, first, last, slot = v
+        row, c = r.index(0), r.index(1)
+        one, zero = k(r, 1), k(r, 0)
+        cm = r('sub', I32, c, i32(r, 1))
+        real_x = r('select', t, r('lt', BOOL, row, c), r('neg', t, at(r, slot, row, c)), r(
+            'select', t, r('eq', BOOL, row, c), one, zero))
+        pair_r = r('select', t, r('lt', BOOL, row, cm), r('neg', t, r('mul', t, first, at(r, slot, row, cm))), r(
+            'select', t, r('eq', BOOL, row, cm), first, zero))
+        pair_i = r('select', t, r('lt', BOOL, row, cm), r('neg', t, r('mul', t, last, at(r, slot, row, c))), r(
+            'select', t, r('eq', BOOL, row, c), last, zero))
+        pair = nonzero(r, second)
+        return [(r('select', t, pair, pair_r, r('select', t, nonzero(r, isreal), real_x, zero)), t),
+                (r('select', t, pair, pair_i, zero), t)]
+    ops += _record((n, n), [(xr, (0, 1)), (xi, (0, 1))], [(realc, (1,)), (bottom, (1,)), (s1, (1,)), (s2, (1,)),
+                                                        (h, None)], sides)
+
+    # one round's 1 x 1 or 2 x 2 solve per column (DLALN2), then 443-448 (474-480, 575-581, 611-621): where XNORM > 1
+    # and WORK(J) (max(WORK(J-1), WORK(J))) > BIGNUM / XNORM, X by 1 / XNORM (the complex 2 x 2 by REC = 1 / XNORM)
+    # and SCALE likewise; a column takes part where real, or a pair with J <= KI-2
+    def solved(r, v, na):
+        rows = 2 * na
+        xs, a, (wr_, wi_, bound, isreal, second), norms = v[:rows], v[rows:rows + na * na], v[rows + na * na:
+                                                                                            rows + na * na + 5], v[-na:]
+        pair = nonzero(r, second)
+        active = r('or', BOOL, nonzero(r, isreal), r('and', BOOL, pair, r('ge', BOOL, r.index(0), i32(r, 1))))
+        real_x, real_s, real_n = _dlaln2(r, t, na, 1, bound, a, xs[:na], wr_, k(r, 0), limits)
+        pair_x, pair_s, pair_n = _dlaln2(r, t, na, 2, bound, a, xs, wr_, wi_, limits)
+        x = [r('select', t, pair, p, q) for p, q in zip(pair_x, list(real_x) + list(xs[na:]))]
+        scale, xnorm = r('select', t, pair, pair_s, real_s), r('select', t, pair, pair_n, real_n)
+        beta = norms[0] if na == 1 else r('select', t, r('ge', BOOL, norms[0], norms[1]), norms[0], norms[1])
+        over = r('and', BOOL, r('gt', BOOL, xnorm, k(r, 1)), r('gt', BOOL, beta, r('div', t, k(r, bignum), xnorm)))
+        if na == 1:
+            x = [r('select', t, over, r('div', t, e, xnorm), e) for e in x]
+            scale = r('select', t, over, r('div', t, scale, xnorm), scale)
+        else:
+            rec = r('div', t, k(r, 1), xnorm)
+            x = [r('select', t, over, r('select', t, pair, r('mul', t, e, rec), r('div', t, e, xnorm)), e) for e in x]
+            scale = r('select', t, over, r('select', t, pair, r('mul', t, scale, rec), r('div', t, scale, xnorm)),
+                      scale)
+        x = [r('select', t, active, e, old) for e, old in zip(x, xs)]
+        scale = r('select', t, active, scale, k(r, 1))
+        coefficients = [r('select', t, active, r('neg', t, e), k(r, 0)) for e in x]
+        return [(e, t) for e in x] + [(scale, t)] + [(e, t) for e in coefficients] + [
+            (flag(r, r('and', BOOL, active, r('ne', BOOL, scale, k(r, 1)))), I32), (flag(r, active), I32)]
+
+    # 452-459, 484-494, 585-597, 625-643: X by SCALE (DSCAL), then the rows above the block by DAXPY with -X
+    def updated(r, v, blocks):
+        xv, iv, *rest = v
+        tcols, (factor, *coefficients, used) = rest[:blocks], rest[blocks:]
+        made = []
+        for value, own in ((xv, coefficients[:blocks]), (iv, coefficients[blocks:])):
+            y = r('mul', t, value, factor)
+            for coefficient, entry in zip(own, tcols):
+                y = r('add', t, y, r('mul', t, coefficient, entry))
+            made.append(r('select', t, nonzero(r, used), y, value))
+        return [(e, t) for e in made]
+
+    def rescaled(r, v):
+        xv, iv, factor, used = v
+        inside = r('and', BOOL, nonzero(r, used), r('lt', BOOL, r.index(0), r('add', I32, r.index(1), i32(r, 1))))
+        return [(r('select', t, inside, r('mul', t, e, factor), e), t) for e in (xv, iv)]
+    for j in range(n - 1, 0, -1):
+        width = n - j
+        given = [(h[j - 1:j, j - 2], (None,))] if j >= 2 else []
+
+        def blocks(r, v, j=j):
+            two = r('ne', BOOL, v[0], k(r, 0)) if j >= 2 else r.const(0, BOOL)
+            skip = r('ne', BOOL, v[-1], k(r, 0))
+            single = r('and', BOOL, r('not', BOOL, two), r('not', BOOL, skip))
+            double = r('and', BOOL, two, r('not', BOOL, skip))
+            return [(r('select', I32, single, i32(r, width), i32(r, 0)), I32),
+                    (r('select', I32, double, i32(r, width), i32(r, 0)), I32),
+                    (r('select', I32, single, i32(r, j - 1), i32(r, 0)), I32),
+                    (r('select', I32, double, i32(r, max(j - 2, 0)), i32(r, 0)), I32)]
+        ops += _record((1,), [(x, (None,)) for x in (e1, e2, u1, u2)], given + [(h[j:j + 1, j - 1], (None,))], blocks)
+        ops += _record((width,), [(act[j:], (0,)), (moved[j:], (0,))], [], lambda r, v: [(i32(r, 0), I32)] * 2)
+        per = [(x[j:], (0,)) for x in (wrk, wik, smin, realc, bottom)]
+        outs = [(xr[j - 1, j:], (0,)), (xi[j - 1, j:], (0,)), (scl[j:], (0,)), (car[j:], (0,)), (cai[j:], (0,)),
+                (moved[j:], (0,)), (act[j:], (0,))]
+        _emit(ops, _record((width,), outs, [(xr[j - 1, j:], (0,)), (xi[j - 1, j:], (0,)), (h[j - 1:j, j - 1], (None,))]
+                           + per + [(cnorm[j - 1:j], (None,))], lambda r, v: solved(r, v, 1)), loops=((e1, width),))
+        if j >= 2:
+            outs = [(xr[j - 2, j:], (0,)), (xr[j - 1, j:], (0,)), (xi[j - 2, j:], (0,)), (xi[j - 1, j:], (0,)),
+                    (scl[j:], (0,))] + [(x[j:], (0,)) for x in (c11, c21, c12, c22, moved, act)]
+            entries = [(h[j - 2 + p:j - 1 + p, j - 2 + q], (None,)) for p, q in ((0, 0), (0, 1), (1, 0), (1, 1))]
+            _emit(ops, _record((width,), outs, [(xr[j - 2, j:], (0,)), (xr[j - 1, j:], (0,)), (xi[j - 2, j:], (0,)),
+                                                (xi[j - 1, j:], (0,))] + entries + per + [
+                (cnorm[j - 2:j - 1], (None,)), (cnorm[j - 1:j], (None,))], lambda r, v: solved(r, v, 2)),
+                  loops=((e2, width),))
+        if j >= 2:
+            block = [xr[:j - 1, j:], xi[:j - 1, j:]]
+            _emit(ops, _record((j - 1, width), [(x, (0, 1)) for x in block], [(x, (0, 1)) for x in block] + [
+                (h[:j - 1, j - 1], (0,))] + [(x[j:], (1,)) for x in (scl, car, cai, act)],
+                lambda r, v: updated(r, v, 1)), loops=((u1, j - 1), None))
+        if j >= 3:
+            block = [xr[:j - 2, j:], xi[:j - 2, j:]]
+            _emit(ops, _record((j - 2, width), [(x, (0, 1)) for x in block], [(x, (0, 1)) for x in block] + [
+                (h[:j - 2, j - 2], (0,)), (h[:j - 2, j - 1], (0,))] + [(x[j:], (1,)) for x in (scl, c11, c21, c12, c22,
+                                                                                               act)],
+                lambda r, v: updated(r, v, 2)), loops=((u2, j - 2), None))
+        ops += _record_extreme((width,), need, (None,), [(moved[j:], (0,))], lambda r, v, j=j: [(r(
+            'select', I32, nonzero(r, v[0]), i32(r, n - j), i32(r, 0)), I32)], [REDUCTION])
+        block = [xr[j:, j:], xi[j:, j:]]
+        _emit(ops, _record((n - j, width), [(x, (0, 1)) for x in block], [(x, (0, 1)) for x in block] + [
+            (scl[j:], (1,)), (moved[j:], (1,))], rescaled), loops=((need, n - j), None))
+
+    # 510-518 and 668-690: VR = Z X with each pair's columns KI-1 (real part) and KI (imaginary part), then each
+    # column by 1 / EMAX, the largest |VR(K,KI)| (a pair's |VR(K,KI-1)| + |VR(K,KI)|)
+    def assembled(r, v):
+        xv, iv, first, second, slot = v
+        following = at(r, slot, r.index(0), r('add', I32, r.index(1), i32(r, 1)))
+        return [(r('select', t, nonzero(r, first), following, r('select', t, nonzero(r, second), iv, xv)), t)]
+    ops += _record((n, n), [(packed, (0, 1))], [(xr, (0, 1)), (xi, (0, 1)), (top, (1,)), (bottom, (1,)), (xr, None)],
+                   assembled)
+    ops += _gemm(vr, z, (0, 2), packed, (2, 1), (n, n, n))
+
+    def largest(r, v):
+        value, first, second, slot = v
+        partner = r('select', I32, nonzero(r, first), r('add', I32, r.index(0), i32(r, 1)), r(
+            'sub', I32, r.index(0), i32(r, 1)))
+        paired = r('or', BOOL, nonzero(r, first), nonzero(r, second))
+        return [(r('select', t, paired, r('add', t, absolute(r, value), absolute(r, at(r, slot, r.index(1), partner))),
+                   absolute(r, value)), t)]
+    ops += _record_extreme((n, n), emax, (0,), [(vr, (1, 0)), (top, (0,)), (bottom, (0,)), (vr, None)], largest,
+                           [PARALLEL, REDUCTION])
+    ops += _record((n, n), [(vr, (0, 1))], [(vr, (0, 1)), (emax, (1,))], lambda r, v: [(r(
+        'mul', t, v[0], r('div', t, k(r, 1), v[1])), t)])
+
+
 # Reference-LAPACK SRC/ztrevc.f 323-409 (SIDE = 'R', HOWMNY = 'B') with zlatrs.f 324-1025 (UPLO = 'U', TRANS = 'N',
 # DIAG = 'N', NORMIN = 'Y'): h the upper triangular Schur form (read only, its diagonal the source's original T(K,K)),
 # z the Schur vectors, vr the eigenvectors Z X, each column scaled to largest CABS1 1. Column KI of x (n x n) is
@@ -4942,25 +5278,28 @@ def _ztrevc(h, z, vr, ops):
         r, t, v[0], r('div', t, c(r, 1), v[1])), t)])
 
 
-# Reference-LAPACK SRC/zgeev.f (JOBVL = 'N', JOBVR = 'V' or 'N') as a fake-only operator (its shape rule alone),
-# lowered by _zgeev: the eigenvalues (*batch, n) contiguous and the right eigenvectors (*batch, n, n) column-major
-# (PyTorch v2.14.0 meta linalg_eig's non-CUDA layout), or (0,) where `vectors` is false
-torch.library.define('mesh::zgeev', '(Tensor a, bool vectors) -> (Tensor, Tensor)')
+# Reference-LAPACK SRC/zgeev.f and dgeev.f (JOBVL = 'N', JOBVR = 'V' or 'N') as a fake-only operator (its shape rule
+# alone), lowered by _geev: the eigenvalues (*batch, n) contiguous and the right eigenvectors (*batch, n, n)
+# column-major (PyTorch v2.14.0 meta linalg_eig's non-CUDA layout), or (0,) where `vectors` is false, both of a's
+# complex dtype (a real input's complex counterpart, linalg_eig's toComplexType)
+torch.library.define('mesh::geev', '(Tensor a, bool vectors) -> (Tensor, Tensor)')
 
 
-@torch.library.register_fake('mesh::zgeev')
-def _zgeev_shapes(a, vectors):
+@torch.library.register_fake('mesh::geev')
+def _geev_shapes(a, vectors):
     batch, n = a.shape[:-2], a.shape[-1]
-    return a.new_empty((*batch, n)), a.new_empty((*batch, n, n)).mT if vectors else a.new_empty((0,))
+    dtype = a.dtype if a.is_complex() else {torch.float32: torch.complex64, torch.float64: torch.complex128}[a.dtype]
+    return (a.new_empty((*batch, n), dtype=dtype),
+            a.new_empty((*batch, n, n), dtype=dtype).mT if vectors else a.new_empty((0,), dtype=dtype))
 
 
-ZGEEV = torch.ops.mesh.zgeev.default
+GEEV_EIGEN = torch.ops.mesh.geev.default
 
 
 # torch 2.14.0 linalg_eig (A) -> (eigenvalues, eigenvectors) and _linalg_eigvals / linalg_eigvals (A) -> eigenvalues
-# of a complex input on a non-CPU engine (compiler/mesh_compiler/decompose.py outline): ZGEEV's results
+# on a non-CPU engine (compiler/mesh_compiler/decompose.py outline): GEEV_EIGEN's results
 def _eigen_geev(self, vectors):
-    values, made = ZGEEV(self, vectors)
+    values, made = GEEV_EIGEN(self, vectors)
     return (values, made) if vectors else values
 
 
@@ -4970,13 +5309,18 @@ def _eigen_geev(self, vectors):
 # ZLAHQR); where INFO = 0 and with vectors ZTREVC, ZGEBAK('B', 'R') and each column's Euclidean normalization with
 # its first largest squared modulus made real; then W's undo scaling (W(INFO+1:N), and W(1:ILO-1) where INFO > 0).
 # ZLASCL (zlascl.f) takes MUL = CTO / CFROM in its first pass for these operands (CFROM and CTO finite and nonzero
-# within the SMLNUM/BIGNUM range). The INFO of each member reaches the existing linalg.eig _Check
-def _zgeev(outs, a, vectors):
+# within the SMLNUM/BIGNUM range). The INFO of each member reaches the existing linalg.eig _Check. A real input
+# (dgeev.f) takes DLAHQR's WR/WI, DTREVC's packed vectors and DGEBAK, its results linalg_eig's complex ones (PyTorch
+# v2.14.0 BatchLinearAlgebra.cpp linalg_eig_make_complex_eigenvectors: where WI(j) > 0, VR(:,j) + i VR(:,j+1) and
+# its conjugate at j+1); dgeev's 470-503 normalization (1 / DLAPY2 of the pair's DNRM2s, then DLARTG/DROT making the
+# largest VR(K,j)^2 + VR(K,j+1)^2 entry real) is that complex column's normalization, the phase only for a pair
+def _geev(outs, a, vectors):
     values, made = outs
     batch, n = a.shape[:-2], a.shape[-1]
     if not n or not a.numel():
         return []
     dtype, real, t = a.dtype, a.real.dtype, _class(a.real)
+    whole = a.is_complex()
     limits = torch.finfo(real)
     smlnum = math.sqrt(limits.tiny) / limits.eps
     bignum, ovfl = 1 / smlnum, limits.max
@@ -4990,13 +5334,15 @@ def _zgeev(outs, a, vectors):
         return r.const(value, I32)
     for member in itertools.product(*map(range, batch)):
         source, own = a[member], info[member]
-        h, w = _temporary((n, n), dtype), _temporary((n,), dtype)
+        h = _temporary((n, n), dtype)
+        eigen = [_temporary((n,), dtype)] if whole else [_temporary((n,), real), _temporary((n,), real)]
         z, vr = (_temporary((n, n), dtype), _temporary((n, n), dtype)) if vectors else (None, None)
+        assembled = [_temporary((n, n), values.dtype), _temporary((n,), torch.int32)] if vectors and not whole else []
         scale, anrm, mul, undo = _temporary((n,), real), *(_temporary((1,), real) for _ in range(3))
         perm, ilo, ihi, scalea, proceed, wanted = _temporary((n,), torch.int32), \
             *(_temporary((1,), torch.int32) for _ in range(5))
-        carried = (h, w, *((z, vr) if vectors else ()), scale, anrm, mul, undo, perm, ilo, ihi, scalea, proceed,
-                   wanted, info)
+        carried = (h, *eigen, *((z, vr) if vectors else ()), *assembled, scale, anrm, mul, undo, perm, ilo, ihi, scalea,
+                   proceed, wanted, info)
 
         # 332-350: ANRM, INFO = -4, SCALEA and CSCALE, MUL = CSCALE / ANRM and its undo ANRM / CSCALE
         ops += _record_extreme((n, n), anrm, (None,), [(source, (0, 1))], lambda r, v: [(_modulus(r, t, v[0]), t)],
@@ -5018,27 +5364,49 @@ def _zgeev(outs, a, vectors):
         body = []
         body += _record((n, n), [(h, (0, 1))], [(source, (0, 1)), (scalea, (None,)), (mul, (None,))], lambda r, v: [(
             _chosen(r, t, r('ne', BOOL, v[1], k(r, 0)), _real_scaled(r, t, v[0], v[2]), v[0]), t)])
-        _zgebal(h, scale, perm, ilo, ihi, body, held=carried)
-        _zgehd2(h, z, ilo, ihi, body)
+        _gebal(h, scale, perm, ilo, ihi, body, held=carried)
+        _gehd2(h, z, ilo, ihi, body)
 
-        # zhseqr.f 415-419: the eigenvalues ZGEBAL isolated, H's diagonal outside ILO..IHI
+        # zhseqr.f / dhseqr.f 415-419: the eigenvalues ZGEBAL isolated, H's diagonal outside ILO..IHI (WI zero)
         def isolated(r, v):
-            x, diagonal, low, high = v
+            *xs, diagonal, low, high = v
             p = r('add', I32, r.index(0), k(r, 1))
             outside = r('or', BOOL, r('lt', BOOL, p, low), r('gt', BOOL, p, high))
-            return [(_chosen(r, t, outside, diagonal, x), t)]
-        body += _record((n,), [(w, (0,))], [(w, (0,)), (h, (0, 0)), (ilo, (None,)), (ihi, (None,))], isolated)
-        _zlahqr(h, z, w, ilo, ihi, own, body, held=carried)
+            return [(_chosen(r, t, outside, x, old), t) for x, old in zip((diagonal, c(r, 0)), xs)]
+        body += _record((n,), [(x, (0,)) for x in eigen], [(x, (0,)) for x in eigen] + [
+            (h, (0, 0)), (ilo, (None,)), (ihi, (None,))], isolated)
+        if whole:
+            _zlahqr(h, z, eigen[0], ilo, ihi, own, body, held=carried)
+        else:
+            _dlahqr(h, z, eigen[0], eigen[1], ilo, ihi, own, body, held=carried)
 
-        # 438-504: where INFO = 0, ZTREVC, ZGEBAK and the normalization
+        # 438-504: where INFO = 0, ZTREVC (DTREVC), ZGEBAK (DGEBAK) and the normalization
         if vectors:
             body += _scalars([wanted], [own], lambda r, v: [(_convert(r, r('eq', BOOL, v[0], k(r, 0)), BOOL, I32),
                                                              I32)])
             inner = []
-            _ztrevc(h, z, vr, inner)
-            _zgebak(vr, scale, perm, ilo, ihi, inner)
-            _zgeev_normalized(vr, inner)
-            inner += _copy(made[member], vr)
+            (_ztrevc if whole else _dtrevc)(h, z, vr, inner)
+            _gebak(vr, scale, perm, ilo, ihi, inner)
+            if whole:
+                _geev_normalized(vr, inner)
+                inner += _copy(made[member], vr)
+            else:
+                vc, pairs = assembled
+
+                def complexed(r, v):
+                    value, wi, slot = v
+                    first, second = r('gt', BOOL, wi, c(r, 0)), r('lt', BOOL, wi, c(r, 0))
+                    after = r('extract', t, r.index(0), _bounded(r, r('add', I32, r.index(1), k(r, 1)), n)[1],
+                              integer=slot)
+                    before = r('extract', t, r.index(0), _bounded(r, r('sub', I32, r.index(1), k(r, 1)), n)[1],
+                               integer=slot)
+                    return [((r('select', t, second, before, value), r('select', t, first, after, r(
+                        'select', t, second, r('neg', t, value), c(r, 0)))), t)]
+                inner += _record((n, n), [(vc, (0, 1))], [(vr, (0, 1)), (eigen[1], (1,)), (vr, None)], complexed)
+                inner += _record((n,), [(pairs, (0,))], [(eigen[1], (0,))], lambda r, v: [(_convert(r, r(
+                    'ne', BOOL, v[0], c(r, 0)), BOOL, I32), I32)])
+                _geev_normalized(vc, inner, pairs)
+                inner += _copy(made[member], vc)
             inner += _fill(wanted, 0)
             body.append(_Repeat(inner, wanted, carried))
 
@@ -5050,17 +5418,19 @@ def _zgeev(outs, a, vectors):
                 'or', BOOL, r('ge', BOOL, p, r('add', I32, failure, k(r, 1))), r(
                     'and', BOOL, r('gt', BOOL, failure, k(r, 0)), r('le', BOOL, p, r('sub', I32, low, k(r, 1)))))])
             return [(_chosen(r, t, hit, _real_scaled(r, t, x, factor), x), t)]
-        body += _record((n,), [(w, (0,))], [(w, (0,)), (scalea, (None,)), (ilo, (None,)), (own, (None,)),
-                                             (undo, (None,))], unscaled)
-        body += _copy(values[member], w)
+        for x in eigen:
+            body += _record((n,), [(x, (0,))], [(x, (0,)), (scalea, (None,)), (ilo, (None,)), (own, (None,)),
+                                                 (undo, (None,))], unscaled)
+        body += _copy(values[member], eigen[0]) if whole else _complex('complex', values[member], *eigen)
         body += _fill(proceed, 0)
         ops.append(_Repeat(body, proceed, carried))
     return ops + [_Check(info, 3, 'linalg.eig')]
 
 
-# zgebak.f 205-261 (JOB = 'B', SIDE = 'R', M = N) on v in place: rows ILO..IHI by SCALE(I) where ILO /= IHI, then
-# for II = 1..N outside ILO..IHI (I = ILO - II below ILO), rows I and K = SCALE(I) (`perm`) interchanged in that order
-def _zgebak(v, scale, perm, ilo, ihi, ops):
+# zgebak.f / dgebak.f 205-261 (JOB = 'B', SIDE = 'R', M = N) on v (complex or real) in place: rows ILO..IHI by
+# SCALE(I) where ILO /= IHI, then for II = 1..N outside ILO..IHI (I = ILO - II below ILO), rows I and K = SCALE(I)
+# (`perm`) interchanged in that order
+def _gebak(v, scale, perm, ilo, ihi, ops):
     n, t = v.shape[-1], _class(v.real)
     span, base = _temporary((1,), torch.int32), _temporary((1,), torch.int32)
     ops += _scalars([span, base], [ilo, ihi], lambda r, x: [(r('select', I32, r('ne', BOOL, x[0], x[1]), r(
@@ -5090,8 +5460,10 @@ def _zgebak(v, scale, perm, ilo, ihi, ops):
 
 
 # zgeev.f 492-503: each column by 1 / DZNRM2 (_linalg_lengths' scaled norm), then by TMP = conj(v_K) / sqrt(RW_K) at
-# K = IDAMAX(RW), the first largest RW = Re^2 + Im^2, and v_K's imaginary part set to zero
-def _zgeev_normalized(v, ops):
+# K = IDAMAX(RW), the first largest RW = Re^2 + Im^2, and v_K's imaginary part set to zero; `phased` (int32 by
+# column) where given limits that phase to its nonzero columns (dgeev.f 470-490: a real eigenvalue's column scaled
+# alone, a pair's DLARTG/DROT the same rotation of its complex column)
+def _geev_normalized(v, ops, phased=None):
     n, t, real = v.shape[-1], _class(v.real), v.real.dtype
     norms, squares, largest = _temporary((n,), real), _temporary((n, n), real), _temporary((n,), real)
     first, phase = _temporary((n,), torch.int32), _temporary((n,), v.dtype)
@@ -5104,16 +5476,20 @@ def _zgeev_normalized(v, ops):
         'select', I32, r('eq', BOOL, x[0], x[1]), r.index(1), r.const(n, I32)), I32)], [PARALLEL, REDUCTION],
         larger=False)
 
-    def phased(r, x):
+    def rotation(r, x):
         at, vs, rs = x
         row = _bounded(r, at, n)[1]
         entry = _entry(r, t, vs, v, row, r.index(0))
         return [(_divided_by(r, t, _conjugate(r, t, entry), r('sqrt', t, _entry(r, t, rs, squares, row, r.index(0)))),
                  t)]
-    ops += _record((n,), [(phase, (0,))], [(first, (0,)), (v, None), (squares, None)], phased)
-    ops += _record((n, n), [(v, (0, 1))], [(v, (0, 1)), (phase, (1,)), (first, (1,))], lambda r, x: [(_chosen(
-        r, t, r('eq', BOOL, r.index(0), x[2]), (_part(r, t, _times(r, t, x[1], x[0]), 0), r.const(0, t)),
-        _times(r, t, x[1], x[0])), t)])
+    ops += _record((n,), [(phase, (0,))], [(first, (0,)), (v, None), (squares, None)], rotation)
+
+    def turned(r, x):
+        made = _chosen(r, t, r('eq', BOOL, r.index(0), x[2]), (_part(r, t, _times(r, t, x[1], x[0]), 0), r.const(
+            0, t)), _times(r, t, x[1], x[0]))
+        return [(made if phased is None else _chosen(r, t, r('ne', BOOL, x[3], r.const(0, I32)), made, x[0]), t)]
+    ops += _record((n, n), [(v, (0, 1))], [(v, (0, 1)), (phase, (1,)), (first, (1,))] + (
+        [(phased, (1,))] if phased is not None else []), turned)
 
 
 # a complex record value divided by a real one, each component (Fortran's complex / real)
@@ -7144,8 +7520,8 @@ def _lowering(local, page, generator=None):
         return lambda args, kwargs, outs: _lstsq_unscale(outs, **_operands(local.target, args, kwargs))
     if local.target is QDWH_SVD_CORRECTION:
         return lambda args, kwargs, outs: _qdwh_svd_correction(outs, **_operands(local.target, args, kwargs))
-    if local.target is ZGEEV:
-        return lambda args, kwargs, outs: _zgeev(outs, **_operands(local.target, args, kwargs))
+    if local.target is GEEV_EIGEN:
+        return lambda args, kwargs, outs: _geev(outs, **_operands(local.target, args, kwargs))
     if local.target is QDWH_EIGH_STEP:
         return lambda args, kwargs, outs: _qdwh_eigh_step(outs, **_operands(local.target, args, kwargs),
                                                           generator=generator)

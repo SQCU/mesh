@@ -188,19 +188,19 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
         return targets[node.meta["processor"]][0] != "cpu" and _lstsq_driver(
             read["self"].meta["val"], read.get("driver")) in ("gelsd", "gelss")
 
-    # Reference-LAPACK zgeev.f through operations.ZGEEV: a complex eig or eigvals placed on a non-CPU engine (a CPU
-    # one, and a real input, keep operations._eigen)
+    # Reference-LAPACK zgeev.f and dgeev.f through operations.GEEV_EIGEN: an eig or eigvals placed on a non-CPU engine,
+    # complex or real input (a CPU one keeps operations._eigen)
     def eigen(node):
         wanted = node.target.overloadpacket is A.linalg_eig
         return lambda *args, **kwargs: _eigen_geev(**_operands(node.target, args, kwargs), vectors=wanted)
 
-    def complex_placed(node):
-        return targets[node.meta["processor"]][0] != "cpu" and ir_given(node)[1]["self"].meta["val"].is_complex()
+    def off_cpu(node):
+        return targets[node.meta["processor"]][0] != "cpu"
     for key in pending:
         placed = staged[key][0]
         found = {n.target for n in placed.graph.nodes if n.op == "call_function"}
         if found & {*PINV, *SVD, *LSTSQ, *EIG}:
-            _expanded(placed, targets, dict.fromkeys(EIG, eigen), complex_placed)
+            _expanded(placed, targets, dict.fromkeys(EIG, eigen), off_cpu)
             _expanded(placed, targets, dict.fromkeys(LSTSQ, least_squares), svd_driver)
             _expanded(placed, targets, dict.fromkeys(PINV, pseudoinverse))
             _expanded(placed, targets, dict.fromkeys(SVD, singular),
