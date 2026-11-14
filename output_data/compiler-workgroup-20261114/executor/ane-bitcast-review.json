@@ -1,0 +1,51 @@
+{
+  "actual_construct_status": 22,
+  "diagnostic_exit": 0,
+  "source_library_hashes_unchanged": true,
+  "source_owner": "operations._draws: three generator I32 words, linear element index, source-site and retry-stream words; _philox consumes the resulting U32 bits",
+  "operand_semantics": "Six exact I32-to-U32 reinterpretations, not numerical conversion; the same generated region also requires U32 AND/XOR/logical shifts and modulo-word arithmetic. Current MIL U32-to-I32 representation and existing signed comparison/division paths need coherent semantics; a bitcast-only numeric Cast is not a correction.",
+  "boundary": "Construction failed before metal_ir_lower, native Program construction and invocation.",
+  "limitations": [
+    "Outer FX owning node was not retained by this nested-repeat diagnostic; only source node ordinal0 and actual operation interval1147:1148 are observed.",
+    "No public fusion-owner getter; erased records were inspected but not attributed as fused without evidence.",
+    "No Neural Engine execution, placement or precision claim."
+  ],
+  "artifacts": {
+    "ane-bitcast-snapshot.json": {
+      "sha256": "53e8876cf9c683da7a3bf321991c89a1d8c937e7d3091f2b52476d4a5328933f",
+      "bytes": 3364
+    },
+    "ane-bitcast-snapshot.py": {
+      "sha256": "4c0149335a25926990e8b25a66695a51d327639e575e816a23d93165fe1d988c",
+      "bytes": 6791
+    },
+    "ane-bitcast-snapshot-run.sh": {
+      "sha256": "2d3ed0e716029bbc18c2b908887101e17136a678da437223cce0d5d4a61c451c",
+      "bytes": 1461
+    },
+    "ane-bitcast-snapshot.stdout": {
+      "sha256": "65c73238067a913111f26d4c9cdf606e25e2d6b8ff74041dc166f87b73c1b0fa",
+      "bytes": 20
+    },
+    "ane-bitcast-snapshot.stderr": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "ane-bitcast-snapshot.before.sha256": {
+      "sha256": "dbd56b3bca82af56d32e4097058528de91ad6825a158b26160ea671fe30f1307",
+      "bytes": 1875
+    },
+    "ane-bitcast-snapshot.after.sha256": {
+      "sha256": "dbd56b3bca82af56d32e4097058528de91ad6825a158b26160ea671fe30f1307",
+      "bytes": 1875
+    },
+    "ane-bitcast-snapshot.heads": {
+      "sha256": "8cf1370c8834148cadba25c50aef9b4a26e4dcf574c3a5823846370e0f6f45ab",
+      "bytes": 82
+    },
+    "ane-bitcast-snapshot.exit": {
+      "sha256": "345f6555cc5641d5a055e89b89c960dff88ade13c254050f14f48c206c1de107",
+      "bytes": 17
+    }
+  }
+}

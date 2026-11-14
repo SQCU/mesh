@@ -1,0 +1,221 @@
+{
+ "construction_succeeded": false,
+ "status": 22,
+ "error": "ANE operation 1147: region builtin bitcast has no MIL operation",
+ "failed_operation": 1147,
+ "construct_program": 33364912128,
+ "source_program": 33364912128,
+ "operations": 1377,
+ "failed_info": {
+  "identity": 0,
+  "place": "ANE",
+  "erased": 0,
+  "kind": 0
+ },
+ "erased_operations": [
+  31,
+  37,
+  38,
+  42,
+  61,
+  67,
+  68,
+  72,
+  104,
+  110,
+  111,
+  115,
+  134,
+  140,
+  141,
+  145,
+  356,
+  362,
+  363,
+  367,
+  386,
+  392,
+  393,
+  397,
+  429,
+  435,
+  436,
+  440,
+  459,
+  465,
+  466,
+  470,
+  678,
+  684,
+  685,
+  689,
+  708,
+  714,
+  715,
+  753,
+  759,
+  760,
+  764,
+  783,
+  789,
+  790,
+  837,
+  843,
+  844,
+  848,
+  867,
+  873,
+  874,
+  878,
+  910,
+  916,
+  917,
+  921,
+  940,
+  946,
+  947,
+  951,
+  1154,
+  1160,
+  1161,
+  1165,
+  1184,
+  1190,
+  1191,
+  1226,
+  1232,
+  1233,
+  1237,
+  1256,
+  1262,
+  1263,
+  1301,
+  1307,
+  1308,
+  1312,
+  1331,
+  1337,
+  1338
+ ],
+ "owner": {
+  "interval": [
+   1147,
+   1148
+  ],
+  "returned": 1147,
+  "class": "_Generic",
+  "place": "ANE",
+  "node": 0,
+  "caller": "repeat",
+  "owner": null,
+  "inputs": [
+   {
+    "dtype": "torch.int32",
+    "shape": [
+     4
+    ]
+   },
+   {
+    "dtype": "torch.int32",
+    "shape": [
+     4
+    ]
+   },
+   {
+    "dtype": "torch.int32",
+    "shape": [
+     4
+    ]
+   },
+   {
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ]
+   },
+   {
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ]
+   }
+  ],
+  "outputs": [
+   {
+    "dtype": "torch.float32",
+    "shape": [
+     2,
+     2
+    ]
+   }
+  ],
+  "bitcasts": [
+   {
+    "region": "g.body",
+    "index": 14,
+    "record": "('bitcast', 8, 13)",
+    "destination": "U32",
+    "source_index": 13,
+    "source_kind": "I32",
+    "source_code": "('parameter', 0)",
+    "source_operand_codes": {}
+   },
+   {
+    "region": "g.body",
+    "index": 16,
+    "record": "('bitcast', 8, 15)",
+    "destination": "U32",
+    "source_index": 15,
+    "source_kind": "I32",
+    "source_code": "('parameter', 1)",
+    "source_operand_codes": {}
+   },
+   {
+    "region": "g.body",
+    "index": 18,
+    "record": "('bitcast', 8, 17)",
+    "destination": "U32",
+    "source_index": 17,
+    "source_kind": "I32",
+    "source_code": "('parameter', 2)",
+    "source_operand_codes": {}
+   },
+   {
+    "region": "g.body",
+    "index": 19,
+    "record": "('bitcast', 8, 12)",
+    "destination": "U32",
+    "source_index": 12,
+    "source_kind": "I32",
+    "source_code": "('binary', 13, 0, 11)",
+    "source_operand_codes": {
+     "0": "('literal', 7, 0)",
+     "11": "('binary', 13, 8, 10)"
+    }
+   },
+   {
+    "region": "g.body",
+    "index": 21,
+    "record": "('bitcast', 8, 20)",
+    "destination": "U32",
+    "source_index": 20,
+    "source_kind": "I32",
+    "source_code": "('parameter', 3)",
+    "source_operand_codes": {}
+   },
+   {
+    "region": "g.body",
+    "index": 23,
+    "record": "('bitcast', 8, 22)",
+    "destination": "U32",
+    "source_index": 22,
+    "source_kind": "I32",
+    "source_code": "('parameter', 4)",
+    "source_operand_codes": {}
+   }
+  ]
+ },
+ "erased_records_with_bitcasts": [],
+ "erased_note": "erased after the failed construct; which erased operations were fused into the failed operation is not exposed by a public getter",
+ "exception": "OSError: [Errno 22] construction: ANE operation 1147: region builtin bitcast has no MIL operation"
+}
