@@ -19,8 +19,8 @@ import mesh
 import mesh_graph
 
 # design/compilation-composition-change-request.md items 1 and 7: one target lowerer finishes each scheduled body
-TARGETS = {"cpu": lambda module, constants, effects, start: lower_inductor.lower(module, constants=constants,
-                                                                                 effects=effects, start=start)}
+TARGETS = {"cpu": lambda module, constants, effects, start, extent: lower_inductor.lower(
+    module, constants=constants, effects=effects, start=start, extent=extent)}
 
 
 # rdma/mesh-graph.h struct mesh_graph_signature, mesh_graph_archive_read; rdma/mesh-collective.c plan_signature: the
@@ -74,14 +74,14 @@ def lowered(scheduled):
     mutated = {key for kind, key in scheduled.exported.outputs if kind == OutputKind.BUFFER_MUTATION}
     constants = {name: tensor.detach() for name, (key, tensor) in scheduled.exported.state.items()
                  if key not in mutated}
-    effects = {channel: (transfer, value, plan.sections[value][fields.index("count")],
-                         plan.sections[value][fields.index("bytes")], sent, landed)
+    effects = {channel: (transfer, value, plan.offsets[value], plan.sections[value][fields.index("bytes")], sent,
+                         landed)
                for transfer, (channel, (*_, value, sent, landed)) in enumerate(zip(plan.channels, plan.declared))
                if value != mesh.ABSENT} if plan else {}
     start = started(plan) if plan else None
     return {group: TARGETS[scheduled.engines.get(group, scheduled.devices[group].type)](
                 module, {name: constants[name] for name in scheduled.inputs[group] if name in constants}, effects,
-                start)
+                start, plan.arena_bytes if plan else 0)
             for group, module in scheduled.modules.items() if plan is None or scheduled.machines[group] == plan.machine}
 
 

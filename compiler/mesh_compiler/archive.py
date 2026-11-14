@@ -8,7 +8,7 @@ from torch.export.graph_signature import OutputKind
 from torch.utils import _pytree as pytree
 
 from . import lower_inductor
-from .ir import Exported, Plan, Scheduled, mesh_graph
+from .ir import Exported, Plan, Scheduled
 
 # compiler/mesh_compiler/driver.py TARGETS: the same selection, by the processor's engine or device type
 RESTORED = {"cpu": lower_inductor.restore}
@@ -37,7 +37,6 @@ def save(directory, scheduled):
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
         "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex(),
                                     "signature": scheduled.plan.signature.hex()},
-        "signature": scheduled.signature and bytes(mesh_graph.from_record(scheduled.signature).digest).hex(),
         "targets": {processor: function.saved(directory, processor)
                     for processor, function in scheduled.functions.items()},
         "tokens": exported.tokens,
