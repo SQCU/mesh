@@ -4447,6 +4447,185 @@ def _ztrevc(h, z, vr, ops):
         r, t, v[0], r('div', t, c(r, 1), v[1])), t)])
 
 
+# Reference-LAPACK SRC/zgeev.f (JOBVL = 'N', JOBVR = 'V' or 'N') as a fake-only operator (its shape rule alone),
+# lowered by _zgeev: the eigenvalues (*batch, n) contiguous and the right eigenvectors (*batch, n, n) column-major
+# (PyTorch v2.14.0 meta linalg_eig's non-CUDA layout), or (0,) where `vectors` is false
+torch.library.define('mesh::zgeev', '(Tensor a, bool vectors) -> (Tensor, Tensor)')
+
+
+@torch.library.register_fake('mesh::zgeev')
+def _zgeev_shapes(a, vectors):
+    batch, n = a.shape[:-2], a.shape[-1]
+    return a.new_empty((*batch, n)), a.new_empty((*batch, n, n)).mT if vectors else a.new_empty((0,))
+
+
+ZGEEV = torch.ops.mesh.zgeev.default
+
+
+# torch 2.14.0 linalg_eig (A) -> (eigenvalues, eigenvectors) and _linalg_eigvals / linalg_eigvals (A) -> eigenvalues
+# of a complex input on a non-CPU engine (compiler/mesh_compiler/decompose.py outline): ZGEEV's results
+def _eigen_geev(self, vectors):
+    values, made = ZGEEV(self, vectors)
+    return (values, made) if vectors else values
+
+
+# zgeev.f 319-517 for each batch member: ANRM = ZLANGE('M') (the largest modulus), INFO = -4 where it is NaN or above
+# overflow (and nothing else runs); A scaled into [SMLNUM, BIGNUM] (SMLNUM = sqrt(SAFMIN) / EPS) by ZLASCL; ZGEBAL;
+# ZGEHRD (ZGEHD2) and, with vectors, ZUNGHR into Z; ZHSEQR (W(1:ILO-1) and W(IHI+1:N) from H's diagonal, then
+# ZLAHQR); where INFO = 0 and with vectors ZTREVC, ZGEBAK('B', 'R') and each column's Euclidean normalization with
+# its first largest squared modulus made real; then W's undo scaling (W(INFO+1:N), and W(1:ILO-1) where INFO > 0).
+# ZLASCL (zlascl.f) takes MUL = CTO / CFROM in its first pass for these operands (CFROM and CTO finite and nonzero
+# within the SMLNUM/BIGNUM range). The INFO of each member reaches the existing linalg.eig _Check
+def _zgeev(outs, a, vectors):
+    values, made = outs
+    batch, n = a.shape[:-2], a.shape[-1]
+    if not n or not a.numel():
+        return []
+    dtype, real, t = a.dtype, a.real.dtype, _class(a.real)
+    limits = torch.finfo(real)
+    smlnum = math.sqrt(limits.tiny) / limits.eps
+    bignum, ovfl = 1 / smlnum, limits.max
+    info = _temporary((*batch, 1), torch.int32)
+    ops = []
+
+    def c(r, value):
+        return r.const(value, t)
+
+    def k(r, value):
+        return r.const(value, I32)
+    for member in itertools.product(*map(range, batch)):
+        source, own = a[member], info[member]
+        h, w = _temporary((n, n), dtype), _temporary((n,), dtype)
+        z, vr = (_temporary((n, n), dtype), _temporary((n, n), dtype)) if vectors else (None, None)
+        scale, anrm, mul, undo = _temporary((n,), real), *(_temporary((1,), real) for _ in range(3))
+        perm, ilo, ihi, scalea, proceed, wanted = _temporary((n,), torch.int32), \
+            *(_temporary((1,), torch.int32) for _ in range(5))
+        carried = (h, w, *((z, vr) if vectors else ()), scale, anrm, mul, undo, perm, ilo, ihi, scalea, proceed,
+                   wanted, info)
+
+        # 332-350: ANRM, INFO = -4, SCALEA and CSCALE, MUL = CSCALE / ANRM and its undo ANRM / CSCALE
+        ops += _record_extreme((n, n), anrm, (None,), [(source, (0, 1))], lambda r, v: [(_modulus(r, t, v[0]), t)],
+                               [REDUCTION, REDUCTION])
+
+        def scaled(r, v):
+            norm = v[0]
+            bad = r('or', BOOL, r('isnan', BOOL, norm), r('gt', BOOL, norm, c(r, ovfl)))
+            low = r('and', BOOL, r('gt', BOOL, norm, c(r, 0)), r('lt', BOOL, norm, c(r, smlnum)))
+            high = r('gt', BOOL, norm, c(r, bignum))
+            target = r('select', t, low, c(r, smlnum), c(r, bignum))
+            safe = r('select', t, r('or', BOOL, low, high), norm, c(r, 1))
+            return [(r('select', I32, bad, k(r, -4), k(r, 0)), I32),
+                    (_convert(r, r('and', BOOL, r('not', BOOL, bad), r('or', BOOL, low, high)), BOOL, I32), I32),
+                    (_convert(r, r('not', BOOL, bad), BOOL, I32), I32),
+                    (r('div', t, target, safe), t), (r('div', t, safe, target), t)]
+        ops += _scalars([own, scalea, proceed, mul, undo], [anrm], scaled)
+
+        body = []
+        body += _record((n, n), [(h, (0, 1))], [(source, (0, 1)), (scalea, (None,)), (mul, (None,))], lambda r, v: [(
+            _chosen(r, t, r('ne', BOOL, v[1], k(r, 0)), _real_scaled(r, t, v[0], v[2]), v[0]), t)])
+        _zgebal(h, scale, perm, ilo, ihi, body, held=carried)
+        _zgehd2(h, z, ilo, ihi, body)
+
+        # zhseqr.f 415-419: the eigenvalues ZGEBAL isolated, H's diagonal outside ILO..IHI
+        def isolated(r, v):
+            x, diagonal, low, high = v
+            p = r('add', I32, r.index(0), k(r, 1))
+            outside = r('or', BOOL, r('lt', BOOL, p, low), r('gt', BOOL, p, high))
+            return [(_chosen(r, t, outside, diagonal, x), t)]
+        body += _record((n,), [(w, (0,))], [(w, (0,)), (h, (0, 0)), (ilo, (None,)), (ihi, (None,))], isolated)
+        _zlahqr(h, z, w, ilo, ihi, own, body, held=carried)
+
+        # 438-504: where INFO = 0, ZTREVC, ZGEBAK and the normalization
+        if vectors:
+            body += _scalars([wanted], [own], lambda r, v: [(_convert(r, r('eq', BOOL, v[0], k(r, 0)), BOOL, I32),
+                                                             I32)])
+            inner = []
+            _ztrevc(h, z, vr, inner)
+            _zgebak(vr, scale, perm, ilo, ihi, inner)
+            _zgeev_normalized(vr, inner)
+            inner += _copy(made[member], vr)
+            inner += _fill(wanted, 0)
+            body.append(_Repeat(inner, wanted, carried))
+
+        # 508-517: W(INFO+1:N) by ANRM / CSCALE, and W(1:ILO-1) where INFO > 0, where SCALEA
+        def unscaled(r, v):
+            x, flagged, low, failure, factor = v
+            p = r('add', I32, r.index(0), k(r, 1))
+            hit = _all(r, [r('ne', BOOL, flagged, k(r, 0)), r('ge', BOOL, failure, k(r, 0)), r(
+                'or', BOOL, r('ge', BOOL, p, r('add', I32, failure, k(r, 1))), r(
+                    'and', BOOL, r('gt', BOOL, failure, k(r, 0)), r('le', BOOL, p, r('sub', I32, low, k(r, 1)))))])
+            return [(_chosen(r, t, hit, _real_scaled(r, t, x, factor), x), t)]
+        body += _record((n,), [(w, (0,))], [(w, (0,)), (scalea, (None,)), (ilo, (None,)), (own, (None,)),
+                                             (undo, (None,))], unscaled)
+        body += _copy(values[member], w)
+        body += _fill(proceed, 0)
+        ops.append(_Repeat(body, proceed, carried))
+    return ops + [_Check(info, 3, 'linalg.eig')]
+
+
+# zgebak.f 205-261 (JOB = 'B', SIDE = 'R', M = N) on v in place: rows ILO..IHI by SCALE(I) where ILO /= IHI, then
+# for II = 1..N outside ILO..IHI (I = ILO - II below ILO), rows I and K = SCALE(I) (`perm`) interchanged in that order
+def _zgebak(v, scale, perm, ilo, ihi, ops):
+    n, t = v.shape[-1], _class(v.real)
+    span, base = _temporary((1,), torch.int32), _temporary((1,), torch.int32)
+    ops += _scalars([span, base], [ilo, ihi], lambda r, x: [(r('select', I32, r('ne', BOOL, x[0], x[1]), r(
+        'add', I32, r('sub', I32, x[1], x[0]), r.const(1, I32)), r.const(0, I32)), I32),
+        (r('sub', I32, x[0], r.const(1, I32)), I32)])
+    rows, factors = v[...], scale[...]
+    _emit(ops, _record((n, n), [(rows, (0, 1))], [(rows, (0, 1)), (factors, (0,))], lambda r, x: [(_real_scaled(
+        r, t, x[0], x[1]), t)]), loops=((span, n), None), offsets=[(rows, {0: (base, n - 1)}),
+                                                                   (factors, {0: (base, n - 1)})])
+    first, second, extent = (_temporary((n,), torch.int32) for _ in range(3))
+
+    def order(r, x):
+        low, high, slot = x
+        one = r.const(1, I32)
+        ii = r('add', I32, r.index(0), one)
+        inside = r('and', BOOL, r('ge', BOOL, ii, low), r('le', BOOL, ii, high))
+        at = r('select', I32, r('lt', BOOL, ii, low), r('sub', I32, low, ii), ii)
+        kk = _entry(r, I32, slot, perm, _bounded(r, r('sub', I32, at, one), n)[1])
+        active = r('and', BOOL, r('not', BOOL, inside), r('ne', BOOL, kk, at))
+        return [(_bounded(r, r('sub', I32, at, one), n)[1], I32), (_bounded(r, r('sub', I32, kk, one), n)[1], I32),
+                (r('select', I32, active, r.const(n, I32), r.const(0, I32)), I32)]
+    ops += _record((n,), [(first, (0,)), (second, (0,)), (extent, (0,))], [(ilo, (None,)), (ihi, (None,)),
+                                                                            (perm, None)], order)
+    for ii in range(n):
+        _swapped((v[...], (None, 0), {0: (first[ii:ii + 1], n - 1)}),
+                 (v[...], (None, 0), {0: (second[ii:ii + 1], n - 1)}), (extent[ii:ii + 1], n), ops)
+
+
+# zgeev.f 492-503: each column by 1 / DZNRM2 (_linalg_lengths' scaled norm), then by TMP = conj(v_K) / sqrt(RW_K) at
+# K = IDAMAX(RW), the first largest RW = Re^2 + Im^2, and v_K's imaginary part set to zero
+def _zgeev_normalized(v, ops):
+    n, t, real = v.shape[-1], _class(v.real), v.real.dtype
+    norms, squares, largest = _temporary((n,), real), _temporary((n, n), real), _temporary((n,), real)
+    first, phase = _temporary((n,), torch.int32), _temporary((n,), v.dtype)
+    _linalg_lengths(v, norms, ops, normalize=False)
+    ops += _record((n, n), [(v, (0, 1))], [(v, (0, 1)), (norms, (1,))], lambda r, x: [(_real_scaled(
+        r, t, x[0], r('div', t, r.const(1, t), x[1])), t)])
+    ops += _record((n, n), [(squares, (0, 1))], [(v, (0, 1))], lambda r, x: [(_square(r, t, x[0]), t)])
+    ops += _record_extreme((n, n), largest, (0,), [(squares, (1, 0))], lambda r, x: [(x[0], t)], [PARALLEL, REDUCTION])
+    ops += _record_extreme((n, n), first, (0,), [(squares, (1, 0)), (largest, (0,))], lambda r, x: [(r(
+        'select', I32, r('eq', BOOL, x[0], x[1]), r.index(1), r.const(n, I32)), I32)], [PARALLEL, REDUCTION],
+        larger=False)
+
+    def phased(r, x):
+        at, vs, rs = x
+        row = _bounded(r, at, n)[1]
+        entry = _entry(r, t, vs, v, row, r.index(0))
+        return [(_divided_by(r, t, _conjugate(r, t, entry), r('sqrt', t, _entry(r, t, rs, squares, row, r.index(0)))),
+                 t)]
+    ops += _record((n,), [(phase, (0,))], [(first, (0,)), (v, None), (squares, None)], phased)
+    ops += _record((n, n), [(v, (0, 1))], [(v, (0, 1)), (phase, (1,)), (first, (1,))], lambda r, x: [(_chosen(
+        r, t, r('eq', BOOL, r.index(0), x[2]), (_part(r, t, _times(r, t, x[1], x[0]), 0), r.const(0, t)),
+        _times(r, t, x[1], x[0])), t)])
+
+
+# a complex record value divided by a real one, each component (Fortran's complex / real)
+def _divided_by(r, t, x, s):
+    return tuple(r('div', t, p, s) for p in _complex_parts(r, t, x))
+
+
 # an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
 def _bounded(r, at, size):
     zero, last = r.const(0, I32), r.const(size - 1, I32)
@@ -6467,6 +6646,8 @@ def _lowering(local, page, generator=None):
         return lambda args, kwargs, outs: _lstsq_unscale(outs, **_operands(local.target, args, kwargs))
     if local.target is QDWH_SVD_CORRECTION:
         return lambda args, kwargs, outs: _qdwh_svd_correction(outs, **_operands(local.target, args, kwargs))
+    if local.target is ZGEEV:
+        return lambda args, kwargs, outs: _zgeev(outs, **_operands(local.target, args, kwargs))
     if local.target is QDWH_EIGH_STEP:
         return lambda args, kwargs, outs: _qdwh_eigh_step(outs, **_operands(local.target, args, kwargs),
                                                           generator=generator)

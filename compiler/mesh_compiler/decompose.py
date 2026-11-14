@@ -15,8 +15,8 @@ from torch.utils import _pytree as pytree
 from .devices import on_devices
 from .ir import RETURNED, Exported, shape, views
 from .ir import given as ir_given
-from .operations import (QDWH_EIGH_STEP, _least_squares_svd, _lstsq_driver, _matrix_exponential, _operands,
-                         _pseudoinverse, _qdwh_eigh_result, _qdwh_eigh_state, _singular_qdwh)
+from .operations import (QDWH_EIGH_STEP, _eigen_geev, _least_squares_svd, _lstsq_driver, _matrix_exponential,
+                         _operands, _pseudoinverse, _qdwh_eigh_result, _qdwh_eigh_state, _singular_qdwh)
 from .placement import insert_send_recv
 from .schedule import carried
 
@@ -178,10 +178,20 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
         read = ir_given(node)[1]
         return targets[node.meta["processor"]][0] != "cpu" and _lstsq_driver(
             read["self"].meta["val"], read.get("driver")) in ("gelsd", "gelss")
+
+    # Reference-LAPACK zgeev.f through operations.ZGEEV: a complex eig or eigvals placed on a non-CPU engine (a CPU
+    # one, and a real input, keep operations._eigen)
+    def eigen(node):
+        wanted = node.target.overloadpacket is A.linalg_eig
+        return lambda *args, **kwargs: _eigen_geev(**_operands(node.target, args, kwargs), vectors=wanted)
+
+    def complex_placed(node):
+        return targets[node.meta["processor"]][0] != "cpu" and ir_given(node)[1]["self"].meta["val"].is_complex()
     for key in pending:
         placed = staged[key][0]
         found = {n.target for n in placed.graph.nodes if n.op == "call_function"}
-        if found & {*PINV, *SVD, *LSTSQ}:
+        if found & {*PINV, *SVD, *LSTSQ, *EIG}:
+            _expanded(placed, targets, dict.fromkeys(EIG, eigen), complex_placed)
             _expanded(placed, targets, dict.fromkeys(LSTSQ, least_squares), svd_driver)
             _expanded(placed, targets, dict.fromkeys(PINV, pseudoinverse))
             _expanded(placed, targets, dict.fromkeys(SVD, singular),
@@ -210,6 +220,8 @@ EIGH, COPY = A._linalg_eigh.default, A.copy.default
 PINV = tuple(getattr(A.linalg_pinv, overload) for overload in A.linalg_pinv.overloads())
 SVD = tuple(getattr(A._linalg_svd, overload) for overload in A._linalg_svd.overloads())
 LSTSQ = tuple(getattr(A.linalg_lstsq, overload) for overload in A.linalg_lstsq.overloads())
+EIG = tuple(getattr(packet, overload) for packet in (A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals)
+            for overload in packet.overloads())
 # the Step's inputs: the state, the input's norm and its source draw site (operations.QDWH_EIGH_STEP); the prefix's
 # first outputs, each Step call the previous call's state and the prefix's norm and site
 STEP_INPUTS = ("blocks", "vectors", "agenda", "top", "norm", "site")

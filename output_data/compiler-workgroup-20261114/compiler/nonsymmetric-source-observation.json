@@ -1,0 +1,77 @@
+{
+  "ast": "pass",
+  "duplicate_definitions": 0,
+  "output_shapes": [
+    [
+      3
+    ],
+    [
+      3,
+      3
+    ]
+  ],
+  "output_strides": [
+    [
+      1
+    ],
+    [
+      1,
+      3
+    ]
+  ],
+  "emitted": {
+    "records": 4,
+    "children": [
+      {
+        "records": 110,
+        "children": [
+          {
+            "records": 14,
+            "children": []
+          },
+          {
+            "records": 14,
+            "children": []
+          },
+          {
+            "records": 47,
+            "children": [
+              {
+                "records": 1,
+                "children": []
+              },
+              {
+                "records": 1,
+                "children": []
+              },
+              {
+                "records": 1,
+                "children": []
+              },
+              {
+                "records": 1,
+                "children": []
+              },
+              {
+                "records": 1,
+                "children": []
+              },
+              {
+                "records": 1,
+                "children": []
+              }
+            ]
+          },
+          {
+            "records": 25,
+            "children": []
+          },
+          {
+            "records": 49,
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}
