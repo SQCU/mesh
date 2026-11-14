@@ -1,0 +1,35 @@
+[
+  {
+    "op": "bitwise_and",
+    "dtype": "torch.bool",
+    "instructions": [
+      {
+        "instruction": "binary",
+        "operator": 0,
+        "kind": 0
+      }
+    ]
+  },
+  {
+    "op": "bitwise_not",
+    "dtype": "torch.bool",
+    "instructions": [
+      {
+        "instruction": "unary",
+        "operator": 4,
+        "kind": 0
+      }
+    ]
+  },
+  {
+    "op": "bitwise_and",
+    "dtype": "torch.int32",
+    "instructions": [
+      {
+        "instruction": "binary",
+        "operator": 0,
+        "kind": 7
+      }
+    ]
+  }
+]

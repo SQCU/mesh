@@ -554,7 +554,10 @@ def _elementwise(op, out, a, b=None, c=None, alpha=1):
                                              isinstance(x, (bool, int)) for x in given if x is not None)
     if integral and not isinstance(alpha, (bool, int)):
         raise NotImplementedError('elementwise %s into %s of a scalar no integer holds' % (op, out.dtype))
-    t = _compute(out.dtype, *[x.dtype for x in tensors]) if integral else \
+    boolean_bits = op in ('bitwise_and', 'bitwise_or', 'bitwise_xor', 'bitwise_not') and out.dtype is torch.bool \
+        and all(x.dtype is torch.bool if isinstance(x, torch.Tensor) else isinstance(x, bool)
+                for x in given if x is not None)
+    t = BOOL if boolean_bits else _compute(out.dtype, *[x.dtype for x in tensors]) if integral else \
         _compute(out.dtype, *[x.dtype for x in tensors], torch.float32)
     r, inputs, values = _Region(), [], []
     for x in given:
