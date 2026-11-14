@@ -3,6 +3,7 @@
 import argparse
 import inspect
 import json
+import math
 import os
 import pathlib
 import re
@@ -99,7 +100,8 @@ def segment(node):
 # the program `execute` runs (its `loss`, as compile_module's): `--times`' supplied costs (shares.supplied), else its
 # completed form's executed units at the stated shares (shares.measured); the reports (and the stages' cycles and
 # inner receive edges) on stderr, a unit or stage without a cost stopping; with --solve their shares (shares.solved, an
-# external receive's collective time `--comm` a byte of its whole value) in whole `heads` (placement.counts), else each
+# external receive's collective time `--comm` a byte of its whole value) in whole `heads` (placement.counts, each rank
+# between 0 and floor(heads * its `--upper`), the solve's own capacity in whole heads), else each
 # part of `--units` adjusted to `--upper` (shares.shifted) by its ranks' loads over the same summed rows, every other
 # part at its current share (shares.state)
 def chosen(model, inputs, placement, args, heads, loss=None):
@@ -133,7 +135,9 @@ def chosen(model, inputs, placement, args, heads, loss=None):
 
     if args.solve:
         solved = shares.solved(staged, segment, costs, comm, args.upper)
-        return {part: counts(heads, ratios, len(processors)) for part, ratios in solved.items()}
+        most = [math.floor(heads * share) for share in args.upper]
+        return {part: counts(heads, ratios, len(processors), [0] * len(processors), most)
+                for part, ratios in solved.items()}
     rows, current = shares.summed(costs), shares.state(staged, segment, tuple(processors), args.units)
     return {part: shares.shifted(given, args.upper, shares.load(rows, current, part))
             for part, given in args.units.items()}

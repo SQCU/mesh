@@ -58,7 +58,11 @@ class Stripes(str):
     extent = shards = None
 
 
-def counts(extent, units, shards):
+# design/unequal-shards-change-request.md item 1; S. Zhang et al., HAP, EuroSys 2024, section 5.1: fractional `units`
+# rounded to the nearest sizes, then the least rounding-error +/-1 adjustment until they sum to `extent`; with integer
+# `lower` and `upper` (one each shard; item 14's capacity), the nearest sizes first within them and only adjustments that
+# stay within them, ValueError where no sizes within them sum to `extent`
+def counts(extent, units, shards, lower=None, upper=None):
     if units == STRIPED:
         sizes = Stripes(STRIPED)
         sizes.extent, sizes.shards = extent, shards
@@ -68,11 +72,18 @@ def counts(extent, units, shards):
         return Sizes(max(0, min(chunk, extent - chunk * j)) for j in range(shards))
     if len(units) == shards + 1:
         return Sizes(high - low for low, high in itertools.pairwise(units))
+    low = [-math.inf] * shards if lower is None else list(lower)
+    high = [math.inf] * shards if upper is None else list(upper)
+    if len(low) != shards or len(high) != shards:
+        raise ValueError(f"{shards} shards with bounds {lower} and {upper}")
+    if any(a > b for a, b in zip(low, high)) or sum(low) > extent or sum(high) < extent:
+        raise ValueError(f"no sizes within {lower} and {upper} sum to {extent}")
     exact = [extent * unit / sum(units) for unit in units]
-    sizes = [round(size) for size in exact]
+    sizes = [min(max(round(size), a), b) for size, a, b in zip(exact, low, high)]
     while sum(sizes) != extent:
         step = 1 if sum(sizes) < extent else -1
-        sizes[min(range(shards), key=lambda j: abs(sizes[j] + step - exact[j]))] += step
+        within = [j for j in range(shards) if low[j] <= sizes[j] + step <= high[j]]
+        sizes[min(within, key=lambda j: abs(sizes[j] + step - exact[j]))] += step
     return sized(sizes, tuple(units))
 
 
