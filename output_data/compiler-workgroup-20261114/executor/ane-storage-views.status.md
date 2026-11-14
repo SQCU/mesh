@@ -63,8 +63,8 @@ data included, or `.zeroed` names the root, the class is initialized:
 - there is no MIL copy, repack, clamp or shift. The former Current branch that copied `Contents(root)` into a MIL
   constant is removed.
 
-**Internal (whole class).** A class is internal if `Internal(p, root, kernel)` already holds, or if all three hold: the
-kernel writes it, `outside(root)` is false, and it has no declared initializer.
+**Internal (whole class).** A class is internal only when it has no declared initializer, and either
+`Internal(p, root, kernel)` already holds or the kernel writes it with `outside(root)` false.
 - **Marking:** every original Value of that root, and the appended flat view, get `internal = kernel`, once, in
   `Classes`. Artifact's later `Realize` therefore excludes its backing.
 - **No output decision:** the former per-output `!outside(value)` internal loop in LowerNeural is removed, so no
