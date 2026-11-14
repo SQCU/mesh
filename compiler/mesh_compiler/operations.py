@@ -921,7 +921,8 @@ def _complex_value(r, t, op, z, w, alpha, exponent):
         return z[0], w[0]
     if op == 'copy':
         return z
-    raise NotImplementedError('%s of complex operands: PyTorch defines no complex form of it' % op)
+    raise NotImplementedError('%s of complex operands: its structured complex lowering is unfinished '
+                              '(design/compilation-composition-change-request.md item 1)' % op)
 
 COMPLEX = {A.polar: 'polar', A.complex: 'complex', A.angle: 'angle', A.conj_physical: 'conj',
            A._conj_physical: 'conj'}
@@ -6204,9 +6205,9 @@ def _complex_fold(packet, x, out, dims, keepdim):
 def _extreme(target, given, outs):
     packet, x = target.overloadpacket, given['self']
     _typed(target, [x], outs[-1:] if packet in (A.argmax, A.argmin) else outs[:1], REAL)
-    if packet in (A.argmax, A.argmin) and x.dtype is torch.bool:
-        raise NotImplementedError('%s of torch.bool: PyTorch 2.14 defines no bool form of it ("does not support bool '
-                                  'input")' % target)
+    # Rejection filters are not part of even temporary integration validation.
+    # A bool argmax or argmin takes the body below (its I32 0/1 values, _ordered's ties); torch 2.14.0
+    # torch/_meta_registrations.py argmax_argmin_meta checks only its dimension and empty reduction
     larger, dim = packet in (A.argmax, A.max), given.get('dim')
     if not x.dim():
         x = x.view(1)
