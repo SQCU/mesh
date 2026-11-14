@@ -43,9 +43,11 @@ def placement(processors):
 
 def main():
     args = parallel.arguments('A chain of all-reduces of a sharded value, with optional numerical work between them.')
+    torch.manual_seed(0)
     model = Chain(Crossing()).to(dtype=torch.float16).eval()
-    inputs = tuple(torch.zeros(len(args.nodes), HIDDEN, dtype=torch.float16) for _ in range(2))
-    return parallel.execute(model, inputs, placement, args)
+    inputs = (torch.zeros(len(args.nodes), HIDDEN, dtype=torch.float16),
+              torch.randn(len(args.nodes), HIDDEN, dtype=torch.float16) / 4)
+    return parallel.execute(model, inputs, placement, args, functions={'work'})
 
 
 if __name__ == '__main__':

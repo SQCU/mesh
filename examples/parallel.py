@@ -16,7 +16,7 @@ sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
 import mesh_graph
 from mesh_compiler import shares
-from mesh_compiler.driver import compile_module, compiled
+from mesh_compiler.driver import compile_module, compile_program, compiled
 from mesh_compiler.ir import TrainingResult
 from mesh_compiler.placement import counts
 from mesh_compiler.runtime import Program
@@ -183,10 +183,12 @@ class Eager(torch.nn.Module):
                               dict(zip(names, gradients[:len(names)])), dict(zip(leaves, gradients[len(names):])))
 
 
-def execute(model, inputs, placement, args, loss=None, **told):
+def execute(model, inputs, placement, args, loss=None, functions=None, **told):
     processors = stated(args)
     options = {} if loss is None else {'loss': loss}
-    scheduled = compiled(compile_module(model, inputs, processors, placement(tuple(processors)), **options))
+    placed = placement(tuple(processors))
+    scheduled = compiled(compile_module(model, inputs, processors, placed, **options) if functions is None else
+                         compile_program(model, inputs, functions, processors, placed, **options))
     program = Program(scheduled)
     result = program(*inputs)
     report = {'channels': [{'function': k, 'channels': scheduled.channels[body.key]}

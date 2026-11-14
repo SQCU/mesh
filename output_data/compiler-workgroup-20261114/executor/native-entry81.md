@@ -1,0 +1,7 @@
+# SAME e48: correct module-local linkage, not new symbol identities
+
+Supervisor interrupted exact PID81387 after observing your 19-line Emit hash/renaming hunk. Root inspected the actual ownership: mesh_native wrappers are already the correctly unique external exports; mesh_cpu_h functions are subsidiary module-local entries. The current uniqueness patch is not accepted. Remove ONLY your uncommitted 19-line Emit addition via contextual edit, not git reset or source backup. No need to hash whole Program, rename typed entries or expand the kernel scan.
+
+Read the final paragraph added to native-entry80.md. Inspect provider/dawn.patch host_cpp printer path and its underlying actual Tint source. Produce correct internal linkage there for the generated host_cpp subsidiary functions, leaving external CompileTask wrappers and shared NativeBinary ownership alone. This is the actual producer responsibility. Do not post-process emitted text. Publish the exact smallest printer field/branch first in native-entry80.status.md and implement if source confirms it. The patch file is canonical owner; update its actual local dependency according to Makefile patch workflow only when needed for private check, never copy whole implementation into a second helper.
+
+No shared build/run. Source private syntax and HOLD. Root/commentary requirement unchanged. Note fleet remote main currently9fa86439 with provider dependencies not built, so source correction must checkpoint before shared local/remote canonical build. Same session/model only; no agents.
