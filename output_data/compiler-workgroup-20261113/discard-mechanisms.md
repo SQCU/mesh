@@ -119,3 +119,16 @@ The next canonical build is coordinated around the new native result interfaces.
 The previous successful E2B/native-bench build covered Local136, Storage24 and
 native v30; it supplies no execution or performance evidence for these subsequent
 uncommitted graph and invocation changes.
+
+The next canonical E2B/native-bench build passed. The reviewed working checkpoints
+are mesh `26861434` (shared traversal and retained relation producer), metal
+`09a604f1` (native parameter search consumer), and metal `4db95f8d` (original
+geometry ownership, full witnesses, and shared function-graph traversal). Mesh
+`7753bdcf` and `87906007` connect local plan persistence and the machine caller;
+metal `8cd3eab2` connects native external arguments. Remaining work at this gate:
+Python closure must consume the same retained graph; recorder Actors/Prepare
+must consume relation views; original source witnesses must seed the native
+geometry results; function-graph results must survive related queries; native
+relation archive load must relocate the retained projection instead of rebuilding
+it. These are active paired consumer assignments. Build success does not close
+them or establish runtime/performance equivalence.
