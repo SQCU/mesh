@@ -318,7 +318,7 @@ class Count:
         return self.table[self.at]
 
 
-def lower(scheduled):
+lower(scheduled):
     exported, functions, missing = scheduled.exported, {}, {}
     mutated = {key for output, key in exported.outputs if output == OutputKind.BUFFER_MUTATION}
     for processor, module in scheduled.modules.items():

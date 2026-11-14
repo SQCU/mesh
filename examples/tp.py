@@ -118,7 +118,7 @@ class Timed(torch.fx.Interpreter):
 
 # design/unequal-shards-change-request.md item 7; compiler/mesh_compiler/schedule.py assemble, members;
 # compiler/mesh_compiler/runtime.py Arguments
-def taken(fixed, inputs):
+taken(fixed, inputs):
     prepared = Arguments(fixed)
     module = fixed.modules[prepared.entry]
     times = {p: {} for p in module.meta['members']}

@@ -7615,7 +7615,7 @@ def _expanded(selection, owned, reader, addresses, base):
 # reader's executions select them, _expanded; a realized value's own copies), its step word and transport view, its
 # replay and compiled CPU entries the row (MetalCall `call` = j + 1) of the one native program, prepared with the
 # plan's results (mesh-collective.h struct mesh_planned) and retained by it until retirement
-def _replays(programs, context, irs, planned, values, addresses, base, buffer, bound, owned, made, steps, every):
+_replays(programs, context, irs, planned, values, addresses, base, buffer, bound, owned, made, steps, every):
     lib, recorder, error = programs['lib'], programs['recorder'], C.create_string_buffer(4096)
     compiler = programs['compiler']
     queue, rows, selection = OBJECT(recorder, _SEL(b'queue')), [], {'every': every, 'rated': programs['rated']}
@@ -8179,7 +8179,7 @@ class _Export(torch.fx.Interpreter):
         return record.result
 
 
-def _bound(context, state, retained, deadline):
+_bound(context, state, retained, deadline):
     calls, every, given = retained['calls'], retained['every'], retained['given']
     nodes, page, irs, programs = retained['nodes'], retained['page'], retained['irs'], retained['programs']
     steps, arrays, actors, analysed = retained['steps'], retained['arrays'], retained['actors'], retained['analysed']
@@ -8351,7 +8351,7 @@ def _compared(retained, signed):
 # Two quantities, two owners: A10's outstanding bound, the width of each function's calls in the one traced block
 # (_analyse); the executions in flight, item 2's Bff(e) that mesh_plan derives from each Function's t(v) (planned.horizon,
 # the native program's lag through MetalProgramHorizon, sizing its copies and input waits); neither given
-def program(block, *example_inputs):
+program(block, *example_inputs):
     tracer = Tracer()
     graph = tracer.trace(block)
     gm = torch.fx.GraphModule(tracer.root, graph)
@@ -8731,7 +8731,7 @@ def _restore_programs(data, owned):
             'state_data': state_data, 'saved': saved, 'saved_plan': plan}
 
 
-def load(path):
+load(path):
     with open(path, 'rb') as stream:
         data = stream.read()
     context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0, 'horizon': 1,
@@ -8764,7 +8764,7 @@ def load(path):
     return _runner(context, state, make)
 
 
-def _runner(context, state, make):
+_runner(context, state, make):
     def timed(work):
         if state['timeout'] is not None:
             raise OSError(errno.ETIMEDOUT, 'the program\'s run ended at its first ETIMEDOUT (R-7): %s'
