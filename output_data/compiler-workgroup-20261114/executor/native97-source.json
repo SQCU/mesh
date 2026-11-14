@@ -1,0 +1,12 @@
+{
+  "head": "c8618419fe355d42e670bfddceb9ab57046111a4",
+  "sha256": {
+    "/Users/mdot/metal-microbench/metal_capture.m": "4ff92d979668544c20cf669fdd1ad0e121e57c865e4fa36b7dded99f8345933b",
+    "/Users/mdot/metal-microbench/metal_recording.h": "08acd01d5b294339a5ecd2779e289b1cdae8562cacc0a02fcf092725da0e4b8a",
+    "/Users/mdot/metal-microbench/metal_program.m": "b0c333e8a40200d195a81c42aa8a3caf38e2a3667361ba080f03a2058ba89f0a",
+    "/Users/mdot/metal-microbench/metal_program.h": "d2519d0ba0bb947ce6dbd6ef821ed53caddb7703d350bf1c1039066ff3066683"
+  },
+  "changed": [],
+  "exit_code": 0,
+  "seconds": 1.525260916998377
+}

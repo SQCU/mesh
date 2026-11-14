@@ -1,0 +1,324 @@
+{
+  "source": {
+    "mesh": "159352a30caf1bc22360a1264b8f46a60a638e17",
+    "metal": "f86854a31776aa42ee9c0c42f13ace93be21c63b"
+  },
+  "group": 11141149,
+  "builds": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "aa0230",
+        "wall_time_seconds": 7.875e-06,
+        "exit_code": 0,
+        "original_token_count": 242,
+        "output": "{\"heads\": {\"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\", \"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\"}, \"targets\": [\".build/libmesh_metal.dylib\", \".build/libmetal_ir.dylib\", \".build/libmetal_recording.dylib\", \".build/native_bench\"], \"changed\": [], \"exit_code\": 0, \"seconds\": 23.401179167005466, \"binaries\": {\"/Users/mdot/mesh/rdma/libmesh.dylib\": \"48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d\", \"/Users/mdot/metal-microbench/.build/libmesh_metal.dylib\": \"e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db\", \"/Users/mdot/metal-microbench/.build/libmetal_ir.dylib\": \"5298aca1584e3eeba8295edba1be41f87a26cfcc829085a7bd67fcb89d4cd906\", \"/Users/mdot/metal-microbench/.build/libmetal_recording.dylib\": \"6c17ce1dedce3e094c5158278300ea592ec4db53d1a91b3e2c90b3d1a0a32a68\", \"/Users/mdot/metal-microbench/.build/native_bench\": \"d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449\"}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "3edade",
+        "wall_time_seconds": 8.417e-06,
+        "exit_code": 0,
+        "original_token_count": 242,
+        "output": "{\"heads\": {\"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\", \"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\"}, \"targets\": [\".build/libmesh_metal.dylib\", \".build/libmetal_ir.dylib\", \".build/libmetal_recording.dylib\", \".build/native_bench\"], \"changed\": [], \"exit_code\": 0, \"seconds\": 23.395018958952278, \"binaries\": {\"/Users/mdot/mesh/rdma/libmesh.dylib\": \"48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d\", \"/Users/mdot/metal-microbench/.build/libmesh_metal.dylib\": \"e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db\", \"/Users/mdot/metal-microbench/.build/libmetal_ir.dylib\": \"5298aca1584e3eeba8295edba1be41f87a26cfcc829085a7bd67fcb89d4cd906\", \"/Users/mdot/metal-microbench/.build/libmetal_recording.dylib\": \"6c17ce1dedce3e094c5158278300ea592ec4db53d1a91b3e2c90b3d1a0a32a68\", \"/Users/mdot/metal-microbench/.build/native_bench\": \"d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449\"}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "cf5a29",
+        "wall_time_seconds": 6.708e-06,
+        "exit_code": 0,
+        "original_token_count": 242,
+        "output": "{\"heads\": {\"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\", \"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\"}, \"targets\": [\".build/libmesh_metal.dylib\", \".build/libmetal_ir.dylib\", \".build/libmetal_recording.dylib\", \".build/native_bench\"], \"changed\": [], \"exit_code\": 0, \"seconds\": 23.440562166972086, \"binaries\": {\"/Users/mdot/mesh/rdma/libmesh.dylib\": \"48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d\", \"/Users/mdot/metal-microbench/.build/libmesh_metal.dylib\": \"e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db\", \"/Users/mdot/metal-microbench/.build/libmetal_ir.dylib\": \"5298aca1584e3eeba8295edba1be41f87a26cfcc829085a7bd67fcb89d4cd906\", \"/Users/mdot/metal-microbench/.build/libmetal_recording.dylib\": \"6c17ce1dedce3e094c5158278300ea592ec4db53d1a91b3e2c90b3d1a0a32a68\", \"/Users/mdot/metal-microbench/.build/native_bench\": \"d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449\"}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "642acb",
+        "wall_time_seconds": 6.334e-06,
+        "exit_code": 0,
+        "original_token_count": 242,
+        "output": "{\"heads\": {\"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\", \"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\"}, \"targets\": [\".build/libmesh_metal.dylib\", \".build/libmetal_ir.dylib\", \".build/libmetal_recording.dylib\", \".build/native_bench\"], \"changed\": [], \"exit_code\": 0, \"seconds\": 23.398976459007827, \"binaries\": {\"/Users/mdot/mesh/rdma/libmesh.dylib\": \"48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d\", \"/Users/mdot/metal-microbench/.build/libmesh_metal.dylib\": \"e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db\", \"/Users/mdot/metal-microbench/.build/libmetal_ir.dylib\": \"5298aca1584e3eeba8295edba1be41f87a26cfcc829085a7bd67fcb89d4cd906\", \"/Users/mdot/metal-microbench/.build/libmetal_recording.dylib\": \"6c17ce1dedce3e094c5158278300ea592ec4db53d1a91b3e2c90b3d1a0a32a68\", \"/Users/mdot/metal-microbench/.build/native_bench\": \"d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449\"}}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "e4c87f",
+        "wall_time_seconds": 6.417e-06,
+        "exit_code": 0,
+        "original_token_count": 242,
+        "output": "{\"heads\": {\"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\", \"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\"}, \"targets\": [\".build/libmesh_metal.dylib\", \".build/libmetal_ir.dylib\", \".build/libmetal_recording.dylib\", \".build/native_bench\"], \"changed\": [], \"exit_code\": 0, \"seconds\": 23.453967457986437, \"binaries\": {\"/Users/mdot/mesh/rdma/libmesh.dylib\": \"128c64542bae08be8f795148681b1ccd150871afdcaacd9f8687ddd55235f263\", \"/Users/mdot/metal-microbench/.build/libmesh_metal.dylib\": \"b1f0b0cf3949ea83554e243733645b0a1789ed936c48daa93bbe370edcf0ec4f\", \"/Users/mdot/metal-microbench/.build/libmetal_ir.dylib\": \"e1e90c48b3895493401bca73f4f518fbcaec61d52991f3aedc7583223dfbb19d\", \"/Users/mdot/metal-microbench/.build/libmetal_recording.dylib\": \"9408d5a41b22d41b20b14c87df49aa99fd888f7e4cc1da081ef50897a6766a0e\", \"/Users/mdot/metal-microbench/.build/native_bench\": \"417fe88f352fdc92c713fc945885b578193ddb353309b32607e6818995dd8c27\"}}\n"
+      }
+    }
+  ],
+  "abi": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "618c09",
+        "wall_time_seconds": 0.832197083,
+        "exit_code": 0,
+        "original_token_count": 78,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5, \"erase\": true, \"state_wrapper\": true}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "c0fc67",
+        "wall_time_seconds": 0.839674583,
+        "exit_code": 0,
+        "original_token_count": 78,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5, \"erase\": true, \"state_wrapper\": true}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "1a48e8",
+        "wall_time_seconds": 0.844364125,
+        "exit_code": 0,
+        "original_token_count": 78,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5, \"erase\": true, \"state_wrapper\": true}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "7a496f",
+        "wall_time_seconds": 0.765499208,
+        "exit_code": 0,
+        "original_token_count": 78,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5, \"erase\": true, \"state_wrapper\": true}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "975738",
+        "wall_time_seconds": 1.0006725,
+        "session_id": 9181,
+        "original_token_count": 78,
+        "output": "{\"ValueInfo\": 120, \"RepeatRegion\": 40, \"Function\": 168, \"Planned\": 152, \"Local\": 376, \"Signature\": 416, \"symbols\": {\"metal_ir_value_physical\": true, \"metal_ir_source_relation\": true, \"metal_ir_repeat\": true, \"metal_ir_value_paged\": true}, \"mesh_view_program_arguments\": 5, \"erase\": true, \"state_wrapper\": true}\n"
+      }
+    }
+  ],
+  "results": [
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-3-ts",
+        "chunk_id": "e398a4",
+        "wall_time_seconds": 1.2083e-05,
+        "exit_code": 1,
+        "original_token_count": 103,
+        "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 45186, \"returncode\": -11, \"seconds\": 1.3275251250015572, \"changed\": []}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "m5ult2-ts",
+        "chunk_id": "608653",
+        "wall_time_seconds": 5.667e-06,
+        "exit_code": 1,
+        "original_token_count": 103,
+        "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 15292, \"returncode\": -11, \"seconds\": 1.2932954169809818, \"changed\": []}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-ts",
+        "chunk_id": "40c857",
+        "wall_time_seconds": 1.2125e-05,
+        "exit_code": 1,
+        "original_token_count": 103,
+        "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 17130, \"returncode\": -11, \"seconds\": 1.2972449590452015, \"changed\": []}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "mdots-Mac-Studio-2-ts",
+        "chunk_id": "0e08d2",
+        "wall_time_seconds": 4.625e-06,
+        "exit_code": 1,
+        "original_token_count": 103,
+        "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 44895, \"returncode\": -11, \"seconds\": 1.2981897079880582, \"changed\": []}\n"
+      }
+    },
+    {
+      "status": "fulfilled",
+      "value": {
+        "peer": "Ms-Mac-mini-ts",
+        "chunk_id": "3356a2",
+        "wall_time_seconds": 4.5e-06,
+        "exit_code": 1,
+        "original_token_count": 103,
+        "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 44003, \"returncode\": -11, \"seconds\": 1.2651311251102015, \"changed\": []}\n"
+      }
+    }
+  ],
+  "diagnostic": {
+    "group": 11141150,
+    "results": [
+      {
+        "status": "fulfilled",
+        "value": {
+          "peer": "mdots-Mac-Studio-3-ts",
+          "chunk_id": "b9d92f",
+          "wall_time_seconds": 5.375e-06,
+          "exit_code": 1,
+          "original_token_count": 103,
+          "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 55327, \"returncode\": -11, \"seconds\": 1.3012587089906447, \"changed\": []}\n"
+        }
+      },
+      {
+        "status": "fulfilled",
+        "value": {
+          "peer": "m5ult2-ts",
+          "chunk_id": "39da8b",
+          "wall_time_seconds": 1.541e-06,
+          "exit_code": 1,
+          "original_token_count": 103,
+          "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 22383, \"returncode\": -11, \"seconds\": 1.2599486249964684, \"changed\": []}\n"
+        }
+      },
+      {
+        "status": "fulfilled",
+        "value": {
+          "peer": "mdots-Mac-Studio-ts",
+          "chunk_id": "e52c5f",
+          "wall_time_seconds": 3.375e-06,
+          "exit_code": 1,
+          "original_token_count": 103,
+          "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 24196, \"returncode\": -11, \"seconds\": 1.2769542079186067, \"changed\": []}\n"
+        }
+      },
+      {
+        "status": "fulfilled",
+        "value": {
+          "peer": "mdots-Mac-Studio-2-ts",
+          "chunk_id": "69f296",
+          "wall_time_seconds": 2.333e-06,
+          "exit_code": 1,
+          "original_token_count": 103,
+          "output": "{\"command\": [\"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 55277, \"returncode\": -11, \"seconds\": 1.2716948749875883, \"changed\": []}\n"
+        }
+      },
+      {
+        "status": "fulfilled",
+        "value": {
+          "peer": "Ms-Mac-mini-ts",
+          "chunk_id": "dd6183",
+          "wall_time_seconds": 3.167e-06,
+          "exit_code": 1,
+          "original_token_count": 273,
+          "output": "{\"command\": [\"/usr/bin/lldb\", \"--no-lldbinit\", \"--batch\", \"-o\", \"settings set target.disable-aslr false\", \"-o\", \"settings set target.env-vars TORCH_DEVICE_BACKEND_AUTOLOAD=0 DYLD_INSERT_LIBRARIES=/Users/mdot/metal-microbench/.build/libmetal_recording.dylib DYLD_LIBRARY_PATH=/Users/mdot/metal-microbench/.build:/Users/mdot/mesh/rdma PYTHONPATH=/Users/mdot/mesh/compiler:/Users/mdot/mesh/rdma:/Users/mdot/mesh/examples MESH_GROUP=11141150 MESH_PROGRAM=0,1,2,3,4 HIDDEN=8 CROSSINGS=2 OVERLAP=1\", \"-o\", \"run\", \"-k\", \"thread backtrace all\", \"-k\", \"register read\", \"-k\", \"disassemble --frame\", \"-k\", \"image list -o -f\", \"-k\", \"process handle SIGSEGV -s false -n true -p true\", \"-k\", \"continue\", \"--\", \"/Users/mdot/.venv-mesh-uv/bin/python\", \"-u\", \"examples/crossing.py\", \"--nodes\", \"371057962\", \"455770905\", \"521750041\", \"597453729\", \"1974797816\", \"--device\", \"mps\"], \"heads\": {\"/Users/mdot/mesh\": \"159352a30caf1bc22360a1264b8f46a60a638e17\", \"/Users/mdot/metal-microbench\": \"f86854a31776aa42ee9c0c42f13ace93be21c63b\"}, \"pid\": 49101, \"returncode\": 1, \"seconds\": 6.4539830420399085, \"changed\": []}\n"
+        }
+      }
+    ],
+    "reason": "Mini LLDB denied launch before target; privileged harmless owned sleep attach also denied. No debugger or service settings changed.",
+    "logs": {
+      "distributed/Ms-Mac-mini-ts-crossing-6-diag-result.json": {
+        "sha256": "320d2c8c1c5a69e32c1b5d2cbcf62d2616266ea59366dc2eea94addae25adcad",
+        "bytes": 2789
+      },
+      "distributed/Ms-Mac-mini-ts-crossing-6-diag.stderr": {
+        "sha256": "b640ecd63cac03150cd29fe3a8dd2168efa2b1ee2190b4a3542edf032d5aa1d1",
+        "bytes": 122
+      },
+      "distributed/Ms-Mac-mini-ts-crossing-6-diag.stdout": {
+        "sha256": "242acccaaaf16414598934690d896294d807eb87a2f9e1be1bb709499a53553d",
+        "bytes": 733
+      }
+    }
+  },
+  "outcome": "No numerical result. All five original current clients SIGSEGV during replay preparation. OS report creation failed due log limit; source inspection continues.",
+  "logs": {
+    "distributed/Ms-Mac-mini-ts-crossing-5-report.log": {
+      "sha256": "79b95f24306a5c3a649207787882736fbf659f161f6b815d5bd345b6ac91b3d8",
+      "bytes": 50582
+    },
+    "distributed/Ms-Mac-mini-ts-crossing-5-result.json": {
+      "sha256": "7af9ea52dfe57fac04fb3a16ffc8bf4451fd5ed23afd872bbdc40ac598ed4d79",
+      "bytes": 2020
+    },
+    "distributed/Ms-Mac-mini-ts-crossing-5-system.log": {
+      "sha256": "b20e13ab3a498bc771061c3495565c1b3662b9085a291d8320cb109d508236fa",
+      "bytes": 13912
+    },
+    "distributed/Ms-Mac-mini-ts-crossing-5.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/Ms-Mac-mini-ts-crossing-5.stdout": {
+      "sha256": "8d666d59a7dcf7d2ff5844aa60628f9f3211a25152b9f81270af61ec921ce65c",
+      "bytes": 741
+    },
+    "distributed/m5ult2-ts-crossing-5-result.json": {
+      "sha256": "4cbc7394e1082ea2bf7e28e507e1c22fe7d836c0cbbad0c68f0f580bcc644df3",
+      "bytes": 2020
+    },
+    "distributed/m5ult2-ts-crossing-5.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/m5ult2-ts-crossing-5.stdout": {
+      "sha256": "070c9a35117df11c11de07427b98b21376217dcd7b662a78a74b9cdbe1dcb4a3",
+      "bytes": 741
+    },
+    "distributed/mdots-Mac-Studio-2-ts-crossing-5-result.json": {
+      "sha256": "1052ea685b0f6278f3cb5d9badbfed02cefbee2526e38f955835b553f9ad12ff",
+      "bytes": 2020
+    },
+    "distributed/mdots-Mac-Studio-2-ts-crossing-5.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/mdots-Mac-Studio-2-ts-crossing-5.stdout": {
+      "sha256": "570d4a8298fea3c8ff6b23a0160cc73932f365e770d607bae4b7c7bd095d0041",
+      "bytes": 741
+    },
+    "distributed/mdots-Mac-Studio-3-ts-crossing-5-result.json": {
+      "sha256": "e70c794982b78861c58c553f1ddb36b36c0db17f94a5e811b5569aaf80edea9b",
+      "bytes": 2020
+    },
+    "distributed/mdots-Mac-Studio-3-ts-crossing-5.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/mdots-Mac-Studio-3-ts-crossing-5.stdout": {
+      "sha256": "99372b72c59fdf2f4080e01f9ee5a5b08360033d5a7019f0fe9f67c25808bcab",
+      "bytes": 431
+    },
+    "distributed/mdots-Mac-Studio-ts-crossing-5-result.json": {
+      "sha256": "4c5aa32b318c61c041e74fd21623e79600119594f6e6698b732aa4a4631b4ce4",
+      "bytes": 2020
+    },
+    "distributed/mdots-Mac-Studio-ts-crossing-5.stderr": {
+      "sha256": "62d82a0ff12bff2aaf045fc6a45e693a24f699ace07bdbefbcf5209f7279faaf",
+      "bytes": 286
+    },
+    "distributed/mdots-Mac-Studio-ts-crossing-5.stdout": {
+      "sha256": "497b5d920ec4efd4747b2254fd4d20f9cfd86ebf6e3c3e6f0bf8f58c68a77e5d",
+      "bytes": 741
+    }
+  }
+}
