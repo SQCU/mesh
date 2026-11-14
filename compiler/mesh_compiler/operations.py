@@ -6721,17 +6721,19 @@ def seeded(seed):
 
 # a constructed program's generator: its caller's STATE words, each draw site its source identity (compiler/
 # mesh_compiler/export.py read `site`) where supplied, else numbered in construction order from 1, `sites` the count of
-# the construction's draws, and their advance once an execution after the program's draws
+# the construction's draws, and their advance once an execution after the program's draws; `counter` the execution
+# word's own view (word 2 of `state`), the advance's operand (design/compilation-composition-change-request.md items 6
+# and 7: compiler/mesh_compiler/schedule.py analyse's read and write view of the body's state)
 class Generator:
     def __init__(self, state):
-        self.state, self.sites = state, 0
+        self.state, self.sites, self.counter = state, 0, state.narrow(0, 2, 1)
 
     def site(self, identity=None):
         self.sites += 1
         return self.state, self.sites if identity is None else identity
 
     def stepped(self):
-        return [_stepped(self.state)] if self.sites else []
+        return [_stepped(self.counter)] if self.sites else []
 
 
 def _mulhilo(r, a, m):
@@ -6862,11 +6864,12 @@ def _rrelu(target, given, outs, generator, site=None):
     return [_Generic(out.shape, inputs, [(out, same), (kept, same)], r)]
 
 
-# the generator's advance: its execution word incremented once an execution, after the program's draws
-def _stepped(state):
+# the generator's advance: its execution word (Generator.counter, one word at the constant row 0) incremented once an
+# execution, after the program's draws
+def _stepped(counter):
     r = _Region()
-    r.done(r('add', I32, r.arg(0, state), r.const(1, I32)))
-    return _Generic((1,), [(state, _rows(1, [{None: 2}]))], [(state, _rows(1, [{None: 2}]))], r)
+    r.done(r('add', I32, r.arg(0, counter), r.const(1, I32)))
+    return _Generic((1,), [(counter, _rows(1, [None]))], [(counter, _rows(1, [None]))], r)
 
 
 # the inclusive count of the true elements of `mask` at each of its row-major positions, by the tree scan (_blelloch)
