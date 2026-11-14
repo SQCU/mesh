@@ -35,7 +35,8 @@ def save(directory, scheduled):
         "invariant": scheduled.invariant,
         "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                     for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
-        "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex()},
+        "plan": scheduled.plan and {**dataclasses.asdict(scheduled.plan), "record": scheduled.plan.record.hex(),
+                                    "signature": scheduled.plan.signature.hex()},
         "signature": scheduled.signature and bytes(mesh_graph.from_record(scheduled.signature).digest).hex(),
         "targets": {processor: function.saved(directory, processor)
                     for processor, function in scheduled.functions.items()},
@@ -60,7 +61,10 @@ def load(directory):
                      saved, directory) for processor, saved in about["targets"].items()}
     carried = [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
                for channel, sender, receiver, dtype, shape, stride in about["carried"]]
-    plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"])})
+    plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"]),
+                                     "signature": bytes.fromhex(about["plan"]["signature"]),
+                                     "nodes": tuple(about["plan"]["nodes"]),
+                                     "offsets": tuple(map(tuple, about["plan"]["offsets"]))})
     record = directory / "signature.record"
     return Scheduled(exported, {}, devices, about["machines"], about["output_processor"], about["channels"],
                      about["inputs"], about["feedforward"], carried, about["engines"], plan,
