@@ -2253,6 +2253,18 @@ def _polar(x, max_iterations=10):
     return u, (product + product.mH) / 2, converged
 
 
+# pub13 section 5.1, Algorithm 3 (metal-microbench metal_ir.h metal_ir_repeat): one source numerical repetition, a
+# while loop. `records` one pass in order (structured records, a nested _Repeat among them); before every pass,
+# the first included, the one-element int32 `condition` (written by the records before this one, then by each pass)
+# nonzero runs it; `carried` the TEMPORARY tensors a pass reads that an earlier pass or the records before wrote, and
+# those read after the repetition. No iteration bound: the pass's own condition ends it
+class _Repeat:
+    def __init__(self, records, condition, carried):
+        self.records, self.condition, self.carried = list(records), condition, tuple(carried)
+        self.place, self.node = GPU, 0
+
+
+
 # G. H. Golub and C. F. Van Loan, Matrix Computations, 3rd ed., section 8.4, Algorithms 8.4.1 and 8.4.3;
 # Z. Drmac and K. Veselic, LAPACK Working Note 196, sections 2 and 3; Reference-LAPACK SRC/dgesvj.f
 def _linalg_active(app, aqq, magnitude, tolerance, ops):
@@ -4464,6 +4476,8 @@ def _concatenated(target, given, outs):
 def _placed(ops, place, node):
     for g in ops:
         g.place, g.node = place, node
+        if isinstance(g, _Repeat):
+            _placed(g.records, place, node)
 
 
 # design/torch-source-lowering-change-request.md item 1; design/compilation-composition-change-request.md, "Complete

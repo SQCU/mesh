@@ -84,6 +84,11 @@ class ConstructedMachine:
     initial_words: tuple = ()
     # compiler/mesh_compiler/schedule.py assemble `input_parts`: each original placeholder position's InputParts here
     input_parts: dict = dataclasses.field(default_factory=dict)
+    # compiler/mesh_compiler/metal.py _Builder.emitted and .repeated: each leaf record's actual emission (Emitted: the
+    # record, its operation, its created interval) and each registered repetition (Repeated: its metal_ir_repeats
+    # region, never an operation, and its pass's interval), in emission order
+    emitted: tuple = ()
+    repeated: tuple = ()
 
     def __post_init__(self):
         self.freed = weakref.finalize(self, self.compiler.metal_ir_program_free, self.program)
@@ -136,26 +141,32 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         named = {node.target: node for node in nodes if node.op == "placeholder"}
         byname = {node.name: node for node in nodes}
         env, records, owners, inputs, landing, sending, held, grouped = {}, [], [], [], [], [], {}, {}
-        dests, advance, axes = {}, None, {}
+        dests, advance, associated = {}, None, []
 
         # metal-microbench metal_ir.h metal_ir_operation_axis: each of a numerical node's work axes
-        # (compiler/mesh_compiler/placement.py `work_axes`: source node, dimension, original full extent) at each operand
-        # of its records `ops` that is that source node's own tensor (env, by identity, before Builder.value names typed
-        # views), that dimension, and at each operand a record's explicit `source_axes` (operations.py _Generic) gives
-        # that tensor's dimension, the operand dimension it names; by record index from `first`: a _Generic's or
-        # _Lapack's (metal.py _Builder.generic: metal_ir_generic and metal_ir_lapack make the one operation of its
-        # inputs, then outputs, in order), another record exposing no operand ordinal; a reference none of them has,
-        # with no operand, on each record
-        def associate(node, ops, first):
+        # (compiler/mesh_compiler/placement.py `work_axes`: source node, dimension, original full extent), after its
+        # records are emitted and before construction, from the Builder's actual emissions of them (`leaves`, metal.py
+        # Emitted, a repetition's nested leaves included): at each leaf operand that is that source node's own tensor
+        # (env, by identity, before Builder.value names typed views), that dimension, and at each operand a leaf's
+        # explicit `source_axes` (operations.py _Generic) gives that tensor's dimension, the operand dimension it names,
+        # on that leaf's own returned operation (a _Generic's or _Lapack's: metal_ir_generic and metal_ir_lapack make
+        # its one operation of its inputs, then outputs, in order; another leaf exposes no operand ordinal); a
+        # reference none of them has, with no operand, on each operation the node's records created (`made`); a
+        # repetition's region is no operation and takes none
+        def associate(node, leaves, made):
             for reference, dimension, full in node.meta.get("work_axes", ()):
                 tensor = env.get(module.meta["copied"].get(reference))
-                hits = [(i, s, dimension) for i, g in enumerate(ops) if isinstance(g, (_Generic, _Lapack))
-                        for s, (t, _) in enumerate([*g.inputs, *g.outputs]) if tensor is not None and t is tensor]
-                hits += [(i, s, at) for i, g in enumerate(ops) if isinstance(g, _Generic)
-                         for source, d, s, at in g.source_axes
+                hits = [(leaf.operation, s, dimension) for leaf in leaves
+                        if isinstance(leaf.record, (_Generic, _Lapack))
+                        for s, (t, _) in enumerate([*leaf.record.inputs, *leaf.record.outputs])
+                        if tensor is not None and t is tensor]
+                hits += [(leaf.operation, s, at) for leaf in leaves if isinstance(leaf.record, _Generic)
+                         for source, d, s, at in leaf.record.source_axes
                          if tensor is not None and source is tensor and d == dimension]
-                for i, s, at in hits or [(i, NONE, dimension) for i in range(len(ops))]:
-                    axes.setdefault(first + i, []).append((s, at, tasks[node][0], full))
+                for op, s, at in hits or [(op, NONE, dimension) for op in made]:
+                    status = compiler.metal_ir_operation_axis(builder.p, op, s, at, tasks[node][0], full)
+                    if status:
+                        raise OSError(status, "the work axis of operation %d operand %d" % (op, s))
 
         def place(node):
             return PLACES[targets[node.meta["processor"]][0]]
@@ -237,7 +248,7 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                 env[node], ops = _instruction(local, args, kwargs, node.meta.get("val"), page, generator,
                                                 [dests[node]] if node in dests else None)
                 _placed(ops, place(node), tasks[node][0])
-                associate(node, ops, len(records))
+                associated.append(node)
                 records += ops
                 owners += [(tasks[node], None, None, node)] * len(ops)
                 if generator is not None and generator.sites > drew:
@@ -288,18 +299,15 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             stepped = generator.stepped()
             _placed(stepped, advance, len(module.meta["order"]))
         # metal-microbench metal_ir.h metal_ir_operations: each record's whole interval of created operation IDs (a
-        # constructor such as metal_ir_sort expands into several), its returned ID where it created none
-        operations, advanced, writes, stores, emitted = {}, [], {}, {}, {}
-        for index, (owner, g) in enumerate(zip(owners + [None] * len(stepped), records + stepped)):
-            before = compiler.metal_ir_operations(builder.p)
+        # constructor such as metal_ir_sort expands into several, a repetition's its pass's nested ones), its returned
+        # ID where it created none and returned one (a repetition returns none: no operation); each node's leaves
+        # (metal.py _Builder.emitted, the slice its records emitted)
+        operations, advanced, writes, stores, emitted, leaves = {}, [], {}, {}, {}, {}
+        for owner, g in zip(owners + [None] * len(stepped), records + stepped):
+            before, first = compiler.metal_ir_operations(builder.p), len(builder.emitted)
             op = builder.generic(g)
-            made = list(range(before, compiler.metal_ir_operations(builder.p))) or [op]
-            # `associate`'s: an operand's on the record's own operation, one with no operand on each created
-            for operand_index, dimension, task, full in axes.get(index, ()):
-                for at in made if operand_index == NONE else (op,):
-                    status = compiler.metal_ir_operation_axis(builder.p, at, operand_index, dimension, task, full)
-                    if status:
-                        raise OSError(status, "the work axis of operation %d operand %d" % (at, operand_index))
+            made = list(range(before, compiler.metal_ir_operations(builder.p))) or (
+                [op] if op is not None and op != NONE else [])
             if owner is None:
                 advanced += made
                 continue
@@ -308,10 +316,13 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                 operations.setdefault(task, []).extend(made)
             if node is not None:
                 emitted.setdefault(node, []).extend(made)
+                leaves.setdefault(node, []).extend(builder.emitted[first:])
             if write is not None:
                 writes.setdefault(write, []).extend(made)
             if store is not None:
                 stores.setdefault(store, []).extend(made)
+        for node in associated:
+            associate(node, leaves.get(node, ()), emitted.get(node, ()))
         source, copied = module.meta["relation"], module.meta["copied"]
         builder.identity = builder.base
 
@@ -369,4 +380,5 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                               {k: tuple(ops) for k, ops in stores.items()}, source, vertices, accesses, given, writers,
                               builder.base, binding, {k: tuple(sorted(ops)) for k, ops in decomposed.items()},
                               initial_words=tuple(word & 0xFFFFFFFF for word in generator.state.tolist()) if state
-                              else (), input_parts=input_parts)
+                              else (), input_parts=input_parts, emitted=tuple(builder.emitted),
+                              repeated=tuple(builder.repeated))

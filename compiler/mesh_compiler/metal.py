@@ -3,6 +3,7 @@
 # rdma/mesh-metal.h), the Objective-C/Metal resource primitives, borrowed buffers, archive byte ownership, the run's
 # waits, and the typed C encoder of construction's records (_Builder), whose numerical records and tables are
 # compiler/mesh_compiler/operations.py's
+import collections
 import ctypes as C
 import ctypes.util
 import errno
@@ -13,7 +14,7 @@ import time
 
 import torch
 
-from .operations import CPU, GPU, KINDS, SCALAR, _Check, _Lapack, _Sort, _Words, _bits, _key, _rows, _stored
+from .operations import CPU, GPU, KINDS, SCALAR, _Check, _Lapack, _Repeat, _Sort, _Words, _bits, _key, _rows, _stored
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -315,6 +316,41 @@ class Dispatch(C.Structure):
                                             'fill')] + [('groups', mesh.U * 3), ('threads', mesh.U * 3)]
 
 
+# metal_ir.h struct metal_ir_repeat_region (metal_ir_repeats): one numerical repeat region, its operation interval
+# [first, end), condition, enclosing `parent`, carried roots metal_ir_repeat_carried()[carried .. + carried_count),
+# and as produced by metal_ir_lower its test dispatch and inclusive metal_ir_order span; 40 bytes
+class RepeatRegion(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('first', 'end', 'condition', 'parent', 'carried', 'carried_count', 'test',
+                                            'order_first', 'order_last', 'padding')]
+
+
+# metal_ir.h metal_ir_repeat, metal_ir_repeats, metal_ir_repeat_carried and metal_ir_dispatch_repeats: bound on their
+# first use (`lib` the compiler library), so a program without a repetition never resolves them
+REPEATS = []
+
+
+def _repeats(lib):
+    if not REPEATS:
+        P, U, count = C.c_void_p, mesh.U, C.POINTER(C.c_size_t)
+        for name, result, arguments in (('metal_ir_repeat', U, [P, U, U, U, U, C.POINTER(U)]),
+                                        ('metal_ir_repeats', C.POINTER(RepeatRegion), [P, count]),
+                                        ('metal_ir_repeat_carried', C.POINTER(U), [P, count]),
+                                        ('metal_ir_dispatch_repeats', C.POINTER(U), [P, count])):
+            function = getattr(lib, name)
+            function.restype, function.argtypes = result, arguments
+        REPEATS.append(lib)
+    return REPEATS[0]
+
+
+# metal_ir.h metal_ir_operations: one structured record's actual emission by _Builder.generic: `record` the record
+# itself (compiler/mesh_compiler/operations.py, the source owner), `operation` its returned operation ID, [first, end)
+# the operations it created (metal_ir_sort several)
+Emitted = collections.namedtuple("Emitted", "record operation first end")
+# metal_ir.h metal_ir_repeat: one registered repetition: `record` the operations.py _Repeat, `region` its
+# metal_ir_repeats index (never an operation), [first, end) its pass's operation interval, nested ones included
+Repeated = collections.namedtuple("Repeated", "record region first end")
+
+
 # dlfcn.h dladdr; metal-microbench metal_recording.h: the recorder (libmetal_recording) and the checkout it was built
 # in, whose .build holds libmetal_ir and libmesh_metal
 RECORDER = []
@@ -527,13 +563,15 @@ def _execution_error(replay, status, message):
 
 
 # metal-microbench metal_ir.h metal_ir_value, metal_ir_generic, metal_ir_states, metal_ir_check, metal_ir_lapack,
-# metal_ir_sort and the region builder: construction's typed records (compiler/mesh_compiler/operations.py) encoded as
-# one C program, each storage root one value with its role, each view a value over it; `program` an existing program
-# to encode into (metal_ir_append's destination), else a new one
+# metal_ir_sort, metal_ir_repeat and the region builder: construction's typed records (compiler/mesh_compiler/
+# operations.py) encoded as one C program, each storage root one value with its role, each view a value over it;
+# `program` an existing program to encode into (metal_ir_append's destination), else a new one; `emitted` each leaf
+# record's actual emission (Emitted) and `repeated` each registered repetition (Repeated), in emission order
 class _Builder:
     def __init__(self, lib, owners, role, row, identity, constants=None, program=None):
         self.lib, self.owners, self.role, self.row = lib, owners, role, row
         self.p = lib.metal_ir_program_new() if program is None else program
+        self.emitted, self.repeated = [], []
         self.values, self.roots, self.roles, self.planned, self.builtins = {}, {}, {}, {}, {}
         self.constants = {} if constants is None else constants
         self.base = self.identity = identity
@@ -649,9 +687,33 @@ class _Builder:
                 raise NotImplementedError('a region\'s %s of %s: not an instruction of the IR (metal_ir.h, UINT32_MAX)'
                                           % (' '.join(str(x) for x in record[:2]), KINDS.get(region.kinds[len(h) - 1])))
 
+    # one record: a repetition (operations.py _Repeat) through `repeat`, None (a repetition is no operation); a leaf
+    # record encoded (`encoded`), its actual emission kept (Emitted: the record, its returned operation and the
+    # interval metal_ir_operations gives around it), its operation returned
+    def generic(self, g):
+        if isinstance(g, _Repeat):
+            return self.repeat(g)
+        first = self.lib.metal_ir_operations(self.p)
+        operation = self.encoded(g)
+        self.emitted.append(Emitted(g, operation, first, self.lib.metal_ir_operations(self.p)))
+        return operation
+
+    # metal_ir.h metal_ir_repeat: one pass's records emitted in order through `generic` (a nested repetition's own
+    # region registered first), then the pass's whole operation interval registered once with its condition's ValueID
+    # (a one-element int32 view) and its carried tensors' storage roots; the region (Repeated) kept beside the leaves'
+    # emissions, never as an operation
+    def repeat(self, g):
+        first = self.lib.metal_ir_operations(self.p)
+        for record in g.records:
+            self.generic(record)
+        end, carried = self.lib.metal_ir_operations(self.p), [self.root(t) for t in g.carried]
+        region = _repeats(self.lib).metal_ir_repeat(self.p, first, end, self.value(g.condition), len(carried),
+                                                     _array(mesh.U, carried))
+        self.repeated.append(Repeated(g, region, first, end))
+
     # metal_ir.h `identity`: the producer's identity of an operation and of the values it first names, (function,
     # call ordinal, FX node position) of the call's graph, kept through every transformation (metal_ir_operation_info)
-    def generic(self, g):
+    def encoded(self, g):
         if isinstance(g, _Check):
             self.identity = self.base | g.node
             operation = self.lib.metal_ir_check(self.p, self.value(g.info), g.code, self.identity)
