@@ -27,8 +27,11 @@ uses the exact upstream int/float/str type/value/NaN checks; mismatches raise be
 native invocation. No tensor/range/SymInt checker, None policy or guard registry
 was added. State and tensor alias owners remain unchanged.
 
-The single minimally adapted variadic/default Difference caller and public archive
-retry is next, followed by one changed scale on that same restored Program. The
-new literal/runtime observation is pending; previous two attempts stopped before
-native invocation with unchanged source/library hashes. Metal36761cf9 preserves
-the exact command and failures.
+The same variadic/default Difference caller and public save/drop/load passed on
+395f8672: errors0/0, exact restored Signature/spec, and restored scale3 raises the
+expected RuntimeError before native invocation. Exit0/stderr0,3.74s; source/library
+hashes stable, native one-row reload without relation solve. Metal602da941 retains
+the command/result/manifests. Actual native.py was uncommitted Bound draft SHA256
+f6f7d498c9243c8a608e3b5821d73fd3fe4ea00023bfe095e7048bef23629279, not merely
+logical-slot base97d69ebc; later Bound source is not covered. Earlier failures are
+preserved in Metal36761cf9. No further frontend target is queued.
