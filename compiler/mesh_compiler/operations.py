@@ -295,11 +295,15 @@ def _powi(r, a, b, t):
 # only by metal_ir_extract), per output its combiner, starting value and accumulator kind, coupled REGION states (kind,
 # identity) with their combine and finalize regions, and the permitted numerical transformations; metal_ir_symbol's
 # `symbols` (one-element tensor, bound) in order, symbol k the rows' dimension len(sizes) + k, and per loop its
-# metal_ir_loop_extent `extents`, the index of the symbol clipping it or None (its static size)
+# metal_ir_loop_extent `extents`, the index of the symbol clipping it or None (its static size); `source_axes`
+# (metal_ir.h metal_ir_operation_axis, compiler/mesh_compiler/lower_metal.py construct) each explicit correspondence its
+# construction used of an original tensor's dimension to one of its operands' (original tensor, its dimension, operand
+# ordinal, inputs first, operand dimension), of a source the record does not read
 class _Generic:
     def __init__(self, sizes, inputs, outputs, body, iterators=None, combiner=None, accumulator=None, start=None,
-                 states=None, combine=None, finalize=None, precision=0, symbols=None, extents=None):
+                 states=None, combine=None, finalize=None, precision=0, symbols=None, extents=None, source_axes=None):
         self.sizes, self.inputs, self.outputs, self.body = tuple(sizes), list(inputs), list(outputs), body
+        self.source_axes = list(source_axes) if source_axes is not None else []
         self.symbols = list(symbols) if symbols is not None else []
         self.extents = tuple(extents) if extents is not None else (None,) * len(self.sizes)
         self.iterators = tuple(iterators) if iterators is not None else (PARALLEL,) * len(self.sizes)
@@ -3038,8 +3042,13 @@ FILLS = {A.full: 'fill_value', A.full_like: 'fill_value', A.new_full: 'fill_valu
          A.fill: 'value', A.zeros: 0, A.zeros_like: 0, A.new_zeros: 0, A.zero: 0, A.ones: 1, A.ones_like: 1,
          A.new_ones: 1}
 EMPTY = (A.empty, A.empty_like, A.new_empty, A.empty_strided, A.empty_permuted)
+# PyTorch 2.14 documentation, torch.full_like, torch.zeros_like, torch.ones_like ("the same size as input"),
+# Tensor.fill_ and Tensor.zero_: the result's shape its `self`'s, which no element reads
+LIKE = (A.full_like, A.zeros_like, A.ones_like, A.fill, A.zero)
 
 
+# a LIKE factory's records each with `self`'s dimension d at dimension d of its output operand that is `out` (its
+# ordinal after the record's inputs; `source_axes`)
 def _factory(target, given, outs):
     packet, (out,) = target.overloadpacket, outs
     if packet in EMPTY:
@@ -3047,7 +3056,12 @@ def _factory(target, given, outs):
     if packet is A.arange:
         return _fill(out, given.get('start', 0), given.get('step', 1))
     value = given[FILLS[packet]] if isinstance(FILLS[packet], str) else FILLS[packet]
-    return _assign(out, value)
+    made = _assign(out, value)
+    if packet in LIKE:
+        for g in made:
+            g.source_axes += [(given['self'], d, len(g.inputs) + j, d) for j, (t, _) in enumerate(g.outputs)
+                              if t is out for d in range(out.dim())]
+    return made
 
 
 # design/homomorphism-sources-2026-11-08.md; L. Meertens, Algorithmics, CWI Monographs 1, 1986, "Inserted-in", (i);
@@ -3069,18 +3083,20 @@ REDUCTIONS = {A.sum: 0, A.mean: 1, A.amax: 2, A.amin: 3}
 
 
 # the loops of a reduction of x over `dims` (its free dimensions PARALLEL first, then the reduced), x's map and the
-# kept result's
-def _reducing(x, dims):
+# result's: the reduced shape's, or (`keepdim`, PyTorch 2.14 documentation, torch.sum `keepdim`) the original output's,
+# each reduced dimension of extent 1 at the constant row 0 and each free one at its loop
+def _reducing(x, dims, keepdim=False):
     free = [d for d in range(x.dim()) if d not in dims]
     domain = free + list(dims)
+    kept = [None if d in dims else domain.index(d) for d in range(x.dim())] if keepdim else range(len(free))
     return ([x.shape[d] for d in domain], [PARALLEL] * len(free) + [REDUCTION] * len(dims),
-            _rows(len(domain), [domain.index(d) for d in range(x.dim())]), _rows(len(domain), range(len(free))))
+            _rows(len(domain), [domain.index(d) for d in range(x.dim())]), _rows(len(domain), kept))
 
 
-def _reduction(packet, x, dims, kept, t, start=IDENTITY):
+def _reduction(packet, x, dims, kept, t, start=IDENTITY, keepdim=False):
     r = _Region()
     r.done(_load(r, 0, x, t))
-    loops, iterators, xmap, omap = _reducing(x, dims)
+    loops, iterators, xmap, omap = _reducing(x, dims, keepdim)
     if packet in (A.sum, A.mean):
         return _Generic(loops, [(x, xmap)], [(kept, omap)], r, iterators, [SUM], [t], [start], precision=REASSOCIATE)
     states = [(t, _identity(packet, x.dtype))]
@@ -3100,8 +3116,7 @@ def _reduced(target, given, outs):
     _typed(target, [x], outs, REAL)
     dims, t = _dims(given, x), _compute(out.dtype, x.dtype)
     acc = _temporary(out.shape, STORED[t]) if packet is A.mean else out
-    kept = acc.squeeze(tuple(dims)) if given.get('keepdim') and dims else acc
-    made = [_reduction(packet, x, dims, kept, t)]
+    made = [_reduction(packet, x, dims, acc, t, keepdim=bool(given.get('keepdim')) and bool(dims))]
     if packet is not A.mean:
         return made
     total = math.prod(x.shape[d] for d in dims)
@@ -3123,13 +3138,12 @@ def _fold(target, given, outs):
     _typed(target, [x], outs, REAL)
     dims = _dims(given, x)
     t = BOOL if packet is not A.prod else _compute(out.dtype, x.dtype)
-    kept = out.squeeze(tuple(dims)) if given.get('keepdim') and dims else out
-    loops, iterators, xmap, omap = _reducing(x, dims)
+    loops, iterators, xmap, omap = _reducing(x, dims, bool(given.get('keepdim')) and bool(dims))
     r = _Region()
     r.done(_load(r, 0, x, t))
     states = [(t, 1 if packet is not A.any else 0)]
     name = 'mul' if packet is A.prod else 'or' if packet is A.any else 'and'
-    return [_Generic(loops, [(x, xmap)], [(kept, omap)], r, iterators, [REGION], [t], None, states,
+    return [_Generic(loops, [(x, xmap)], [(out, omap)], r, iterators, [REGION], [t], None, states,
                      _joined(states, lambda c, a, b: [c(name, t, a[0], b[0])]), _identities(states), REASSOCIATE)]
 
 
@@ -3137,19 +3151,18 @@ def _fold(target, given, outs):
 # the (re, im) states under the complex product, each element read at both components by constant rows; a truth an
 # element with either component nonzero
 def _complex_fold(packet, x, out, dims, keepdim):
-    kept = out.squeeze(tuple(dims)) if keepdim and dims else out
-    loops, iterators, xmap, omap = _reducing(x, dims)
+    loops, iterators, xmap, omap = _reducing(x, dims, bool(keepdim) and bool(dims))
     t, inputs, r = F64 if x.dtype is torch.complex128 else F32, [], _Region()
     re, im = _pair(r, inputs, x, xmap, len(loops), t)
     if packet is not A.prod:
         r.done(r('or', BOOL, r('ne', BOOL, re, r.const(0, t)), r('ne', BOOL, im, r.const(0, t))))
         states = [(BOOL, int(packet is A.all))]
         name = 'or' if packet is A.any else 'and'
-        return [_Generic(loops, inputs, [(kept, omap)], r, iterators, [REGION], [BOOL], None, states,
+        return [_Generic(loops, inputs, [(out, omap)], r, iterators, [REGION], [BOOL], None, states,
                          _joined(states, lambda c, a, b: [c(name, BOOL, a[0], b[0])]), _identities(states), REASSOCIATE)]
     r.done(re, im)
     states = [(t, 1), (t, 0)]
-    made = torch.view_as_real(kept)
+    made = torch.view_as_real(out)
     return [_Generic(loops, inputs, [(made[..., 0], omap), (made[..., 1], omap)], r, iterators, [REGION] * 2, [t, t],
                      None, states, _joined(states, lambda c, a, b: list(_complex_value(c, t, 'mul', a, b, 1, None))),
                      _identities(states), REASSOCIATE)]

@@ -141,16 +141,21 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         # metal-microbench metal_ir.h metal_ir_operation_axis: each of a numerical node's work axes
         # (compiler/mesh_compiler/placement.py `work_axes`: source node, dimension, original full extent) at each operand
         # of its records `ops` that is that source node's own tensor (env, by identity, before Builder.value names typed
-        # views), by record index from `first`: a _Generic's or _Lapack's (metal.py _Builder.generic: metal_ir_generic
-        # and metal_ir_lapack make the one operation of its inputs, then outputs, in order), another record exposing no
-        # operand ordinal; a reference none of them has, with no operand, on each record
+        # views), that dimension, and at each operand a record's explicit `source_axes` (operations.py _Generic) gives
+        # that tensor's dimension, the operand dimension it names; by record index from `first`: a _Generic's or
+        # _Lapack's (metal.py _Builder.generic: metal_ir_generic and metal_ir_lapack make the one operation of its
+        # inputs, then outputs, in order), another record exposing no operand ordinal; a reference none of them has,
+        # with no operand, on each record
         def associate(node, ops, first):
             for reference, dimension, full in node.meta.get("work_axes", ()):
                 tensor = env.get(module.meta["copied"].get(reference))
-                hits = [(i, s) for i, g in enumerate(ops) if isinstance(g, (_Generic, _Lapack))
+                hits = [(i, s, dimension) for i, g in enumerate(ops) if isinstance(g, (_Generic, _Lapack))
                         for s, (t, _) in enumerate([*g.inputs, *g.outputs]) if tensor is not None and t is tensor]
-                for i, s in hits or [(i, NONE) for i in range(len(ops))]:
-                    axes.setdefault(first + i, []).append((s, dimension, tasks[node][0], full))
+                hits += [(i, s, at) for i, g in enumerate(ops) if isinstance(g, _Generic)
+                         for source, d, s, at in g.source_axes
+                         if tensor is not None and source is tensor and d == dimension]
+                for i, s, at in hits or [(i, NONE, dimension) for i in range(len(ops))]:
+                    axes.setdefault(first + i, []).append((s, at, tasks[node][0], full))
 
         def place(node):
             return PLACES[targets[node.meta["processor"]][0]]
