@@ -1,8 +1,9 @@
 # design/data-flow.md; design/aot-compilation-change-request.md A8 to A10 and appendix item 6: the archive of one
 # completed machine program (its native target, joint result and recipe), with the captured program's per-function
 # records as explicit typed records indexed by function ordinal (the completed target's body order, CallAnalysis.keys);
-# a captured function's key, which may be a callable, is compilation-only and is not saved
-import dataclasses
+# a captured function's key, which may be a callable, is compilation-only and is not saved. Scheduled.plan is the one
+# target's joint owner's own result (compiler/mesh_compiler/native.py Target.plan, saved and loaded with that owner),
+# kept in no record of its own here
 import json
 import pathlib
 
@@ -11,8 +12,7 @@ from torch.export.graph_signature import InputKind, OutputKind
 from torch.utils import _pytree as pytree
 
 from . import native
-from .ir import Exported, Plan, Scheduled
-from .native import mesh
+from .ir import Exported, Scheduled
 
 
 def tuples(value):
@@ -39,10 +39,6 @@ def save(directory, scheduled):
                      "transfers": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
                                    for channel, sender, receiver, dtype, shape, stride in transfers]}
                     for key, transfers in scheduled.carried.items()],
-        "plan": scheduled.plan and {
-            **{field.name: getattr(scheduled.plan, field.name) for field in dataclasses.fields(scheduled.plan)},
-            "record": scheduled.plan.record.hex(), "signature": scheduled.plan.signature.hex(),
-            "dependences": [[getattr(d, "from"), d.to, d.lag, d.kinds] for d in scheduled.plan.dependences]},
         "targets": {processor: function.saved(directory, processor)
                     for processor, function in scheduled.functions.items()},
         "state_kinds": {name: kind.name for name, kind in exported.state_kinds.items()},
@@ -65,22 +61,14 @@ def load(directory):
                         {name: InputKind[kind] for name, kind in about["state_kinds"].items()})
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     functions = {processor: native.restore(saved, directory) for processor, saved in about["targets"].items()}
+    (target,) = functions.values()
     carried = {record["function"]: [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
                                             for channel, sender, receiver, dtype, shape, stride in record["transfers"]]
                for record in about["carried"]}
-    plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"]),
-                                     "signature": bytes.fromhex(about["plan"]["signature"]),
-                                     "dependences": (mesh.Dependence * len(about["plan"]["dependences"]))(
-                                         *[mesh.Dependence(*record) for record in about["plan"]["dependences"]]),
-                                     "nodes": tuple(about["plan"]["nodes"]),
-                                     "offsets": tuple(map(tuple, about["plan"]["offsets"])),
-                                     "publications": tuple(map(tuple, about["plan"]["publications"])),
-                                     "places": [(processor, root, tuple(version))
-                                                for processor, root, version in about["plan"]["places"]]})
     record = directory / "signature.record"
     channels = {record["function"]: record["channels"] for record in about["channels"]}
     return Scheduled(exported, {}, devices, about["machines"], about["output_processor"], channels,
-                     about["inputs"], about["feedforward"], carried, about["engines"], plan,
+                     about["inputs"], about["feedforward"], carried, about["engines"], target.plan,
                      signature=record.read_bytes() if record.exists() else None, stored=about["stored"],
                      invariant={record["function"]: tuples(record["records"]) for record in about["invariant"]},
                      functions=functions)

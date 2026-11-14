@@ -155,15 +155,20 @@ class Arena:
 
 # rdma/mesh-collective.h mesh_plan; rdma/mesh-dataflow.h mesh_view_values: a program with declared transfers at
 # compilation, on its joint result under the Planning context (its Planned, context and mapped view with that view's
-# first/offset arrays, as schedule.solved returns them), the copies read in place; the run-time owner is
-# bridge.Published
+# first/offset arrays, as schedule.solved returns them), the copies read in place; `mapping` the mapped bytes' lifetime
+# owner, the joint result's native owner (schedule.Solved owner, never this wrapper or the Target), held by the arena's
+# backing (torch.frombuffer keeps that object, so every view of the arena does) and by its buffer; the run-time owner
+# is bridge.Published
 class Mapped:
     def __init__(self, target):
         joint = target.solution
         self.target, self.function, self.planned, self.context = target, joint.functions, joint.planned, joint.context
-        self.base, view = C.cast(joint.offsets.items, C.c_void_p).value, joint.view
-        self.arena = torch.frombuffer((C.c_byte * view.bytes).from_address(view.address), dtype=torch.uint8) if (
-            view.bytes) else torch.empty(0, dtype=torch.uint8)
+        self.base, view, self.mapping = C.cast(joint.offsets.items, C.c_void_p).value, joint.view, joint.owner
+        backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None
+        if backing is not None:
+            backing.mapping = joint.owner
+        self.arena = torch.frombuffer(backing, dtype=torch.uint8) if backing is not None else torch.empty(
+            0, dtype=torch.uint8)
 
     def bound(self, owned, M):
         return planned_buffer(self, owned, M)
@@ -178,10 +183,11 @@ class Mapped:
         return self.target.stepped(self, r)
 
 
-# compiler/mesh_compiler/metal.py _placed_buffer: a plan owner's mapped arena as the one Metal buffer every placement
-# takes
+# compiler/mesh_compiler/metal.py _placed_buffer (metal_recording.h MetalBufferBorrow, its release callback): a plan
+# owner's mapped arena as the one Metal buffer every placement takes, the buffer holding that arena's lifetime owner
+# (`mapping`: bridge.Published's _Mapping, Mapped's joint result owner) until it is released
 def planned_buffer(owner, owned, M):
-    buffer = M._placed_buffer(mesh.View(owner.arena.data_ptr(), owner.arena.numel()))
+    buffer = M._placed_buffer(mesh.View(owner.arena.data_ptr(), owner.arena.numel()), owner.mapping)
     owned(lambda: M.PUT(buffer, M.SELECTOR[b"release"]))
     return buffer
 
@@ -210,7 +216,7 @@ class Body:
     results: tuple = ()
 
 
-# placement.status.md section 3 and joint-artifact.status.md section 00, schedule.solve_program's `bindings`: call j's
+# compiler/mesh_compiler/schedule.py declare_program's and solve_program's `bindings`: call j's
 # function and, per placeholder i and output spec o, the body's interface slot, root and view ValueIDs, the view's byte
 # offset in its root, and the original Call.inputs[i] / Call.outputs[o] Node or literal it binds
 @dataclasses.dataclass(frozen=True)
@@ -235,9 +241,11 @@ class Binding:
 # native program: `call` its index in the captured calls, `function` its body, `ordinal` its ordinal among that
 # function's `every` calls in the block, `planned` its Planned.call index; `instance` its call instance (the
 # Function[] index planned.call[planned].function, plan_calls[call]), whose lowered program the row emits; `marks`
-# that call's own declared ports: `received` (ValueID, instance, plan value, declared mesh_metal_range), `sent`
-# (ValueID, declared mesh_metal_release), `sending` {transfer: ValueID}, `transfers` receives then sends, `placed`
-# (ValueID, instance, plan value), one per wire
+# that call's own declared ports (its Ports), each by the logical identity of its row, (owner call, transfer):
+# `received` (ValueID, its section's plan value (instance, ValueID), declared mesh_metal_range, which holds its owner
+# and transfer), `sent` (ValueID, owner call, declared mesh_metal_release), `sending` {(owner call, transfer):
+# ValueID}, `transfers` (owner call, transfer), receives then sends, `placed` (ValueID, instance, plan value), one per
+# wire
 @dataclasses.dataclass
 class Row:
     call: int
@@ -248,6 +256,24 @@ class Row:
     instance: int = 0
     marks: dict = dataclasses.field(default_factory=lambda: {"received": [], "sent": [], "sending": {},
                                                              "transfers": [], "placed": []})
+
+
+# One port of a call's instance on this machine, from the declaration owner (compiler/mesh_compiler/schedule.py
+# declare_program, its Prepared; rdma/mesh-metal.h mesh_metal_range_declare): `direction` mesh.RECEIVE or mesh.SEND,
+# `transfer` its row in owner call `owner`'s combined declared array (Prepared.declared[owner]), `root` the instance's
+# typed root, `bytes` the backing extent of the plan value it lands in (an intrinsic wire's: its declared value's bytes,
+# Declarations.values; never a view's payload), landing at byte `at` of that root's storage, `value` the ValueID its
+# sending lifetime binds, `section` the plan value (instance, ValueID) whose section the range is prepared at
+@dataclasses.dataclass(frozen=True)
+class Port:
+    direction: int
+    transfer: int
+    owner: int
+    root: int
+    bytes: int
+    at: int
+    value: int
+    section: tuple
 
 
 # metal-microbench metal_ir.h metal_ir_value_external; metal_recording.h struct MetalArgument: one actual outer backing
@@ -264,16 +290,19 @@ class Operand:
 
 # The completed machine program: its compiled functions (`bodies`, in the call analysis's function order), its calls
 # (`rows`, one MetalRecorderProgram row each, in its call order), its callable operands (`operands`, in ordinal order),
-# its flat outer outputs (`outputs`: (row, the frontend's Output) of a call's result, (None, Output) of an outer
-# placeholder's position or a literal, in exported.outputs order), each row's planned inter-call roots (`joined`: (root
-# ValueID, joint root s, byte delta, the call's every)), each body's ValueID count and whether its step follows
-# (`counts`, `steps`), its bodies' generators' initial words (`generators`: (body, ConstructedMachine.initial_words)),
-# each row's CONSTANT roots' outer constants (`constants`: (row, root ValueID, the outer placeholder's name)), each
-# outer output a remote call produces (`ports`: (output position, call, output spec), its leaf None: the output owner's
-# transfer port, frontend974's joint output port operand, binds it); `node`
+# its flat outer outputs (`outputs`: (row, the frontend's Output) of a call's result produced here; (("root", the
+# shared program root's source record (schedule.Solved root_sources), the byte of that root the bound backing's byte 0
+# is), Output with the leaf's metadata in that root) of a result a call on another machine produces, the supplied
+# owner root; (None, Output) of an outer placeholder's position or a literal; in exported.outputs order), each row's
+# planned inter-call roots (`joined`: (root ValueID, joint root s, byte delta, the call's every)), each instance's
+# ValueID count and whether its step follows (`counts`, `steps`), its bodies' generators' initial words
+# (`generators`: (body, ConstructedMachine.initial_words)), each row's CONSTANT roots' outer constants (`constants`:
+# (row, root ValueID, the outer placeholder's name)); `node`
 # the program's machine (its map index, the plan's node map's with a plan, the source machine's without); `solution` the
-# joint result (compiler/mesh_compiler/schedule.py solve_program), `plan` a transported machine's solved Plan,
-# `artifact` the one MetalProgramSave of every row, `signature` its MetalProgramSignatureNode record
+# joint result (compiler/mesh_compiler/schedule.py solve_program, holding its declaration owner Prepared; saved once,
+# loaded by loaded_program), `plan` that joint owner's network result (Solved.plan: None for a local result), the one
+# Scheduled.plan references, `artifact` the one MetalProgramSave of every row, `signature` its
+# MetalProgramSignatureNode record
 @dataclasses.dataclass
 class Target:
     bodies: tuple
@@ -286,7 +315,6 @@ class Target:
     steps: tuple = ()
     generators: tuple = ()
     constants: tuple = ()
-    ports: tuple = ()
     node: int = None
     solution: object = None
     plan: object = None
@@ -343,6 +371,10 @@ class Target:
                 mesh.check(transport.mesh_metal_transport_create(C.byref(context), C.byref(planned), gpu,
                                                                  C.byref(wires)))
                 owned(lambda wires=wires: transport.mesh_metal_transport_destroy(C.byref(wires)))
+                # rdma/mesh-metal.h: one transport view of every planned call's plan; each record prepared from the
+                # plan of the call whose transfer it names (a range from its declared owner, a release and a
+                # sending lifetime from their marks' owner call), never the emitting row's by default; the program's
+                # status word its own call's plan (mesh_metal_status_prepare: a capture's own call)
                 for value, function, index, declared in marks["received"]:
                     landed = M.Range.from_buffer_copy(declared)
                     field = (mesh.U * max(landed.partitions, 1))()
@@ -350,18 +382,19 @@ class Target:
                         C.byref(context), C.byref(wires), C.byref(planned),
                         owner.function[function].value[index].section, field, landed.partitions, C.byref(landed)))
                     compiler.metal_ir_value_received(program, value, C.byref(landed))
-                for value, declared in marks["sent"]:
+                for value, sender, declared in marks["sent"]:
                     release = M.Release.from_buffer_copy(declared)
                     mesh.check(transport.mesh_metal_release_prepare(C.byref(context), C.byref(wires),
-                                                                    C.byref(planned), call, C.byref(release)))
+                                                                    C.byref(planned), sender, C.byref(release)))
                     compiler.metal_ir_value_sent(program, value, C.byref(release))
-                for transfer in marks["transfers"]:
+                for sender, transfer in marks["transfers"]:
                     sending = M.Sending()
                     mesh.check(transport.mesh_metal_sending_prepare(C.byref(context), C.byref(wires),
-                                                                    C.byref(planned), call, transfer,
+                                                                    C.byref(planned), sender, transfer,
                                                                     C.byref(sending)))
                     if sending.sent.sends:
-                        compiler.metal_ir_value_sending(program, marks["sending"][transfer], C.byref(sending))
+                        compiler.metal_ir_value_sending(program, marks["sending"][sender, transfer],
+                                                        C.byref(sending))
                 mesh.check(transport.mesh_metal_status_prepare(C.byref(context), C.byref(wires),
                                                                planned.call[call].plan, C.byref(word)))
                 compiler.metal_ir_transport(program, word.value)
@@ -421,72 +454,111 @@ class Target:
                                                  if r.root is not None else (None, None, None, 0) for r in records)
                                            for records in (body.inputs, body.outputs))
 
-    # metal-microbench metal_ir.h metal_ir_value_external and metal_ir_construct: each numerical body's interface and
-    # its slots marked external (the callable table capability), then its one numerical construction (Verify,
-    # Transform, kernels, mappings and created temporaries), the template every call of its function specializes
-    def constructed(self, libs):
+    # compiler/mesh_compiler/schedule.py declare_program (its Prepared, read once): each original call's Ports on this
+    # machine, `call_ports[j]` (its Ports, receives first, and its intrinsic wires' typed roots, the rows' values), ((),
+    # ()) for a call whose function has no body here: each intrinsic row t of Prepared.declared[j] whose channel
+    # (declarations[key].channels[t]) this body receives or sends (ConstructedMachine.received, .sent), owner j, its
+    # range the wire's whole declared value (Declarations.values) at byte 0. A cross-call PortRecord (Prepared.ports[j])
+    # is not declared: its range's backing extent and byte (rdma/mesh-metal.h mesh_metal_range_prepare: partitions
+    # equal to the landing section's stride), as distinct from its view's payload bytes, and the release identity of a
+    # root with several rows (metal_ir.h metal_ir_value_sends: one release per value) are the declaration owner's
+    # fields, not in PortRecord
+    def ported(self, prepared, declarations, analysis, plan_calls):
+        self.call_ports = []
+        for j, row in enumerate(self.rows):
+            body = self.bodies[row.function]
+            built, f = body.machine, plan_calls[j]
+            if built is None:
+                self.call_ports.append(((), ()))
+                continue
+            intrinsic = tuple(zip(prepared.declared[j], declarations[analysis.keys[row.function]].channels))
+            ports = tuple(Port(direction, t, j, ends[channel].root, body.declared[channel][2], 0, declared[4],
+                               (f, ends[channel].root))
+                          for direction, ends in ((mesh.RECEIVE, built.received), (mesh.SEND, built.sent))
+                          for t, (declared, channel) in enumerate(intrinsic) if channel in ends)
+            wires = tuple(dict.fromkeys(declared[4] for declared, _ in intrinsic if declared[4] != mesh.ABSENT))
+            self.call_ports.append((ports, wires))
+
+    # metal-microbench metal_ir.h metal_ir_value_external, metal_ir_value_planned, metal_ir_specialize and
+    # metal_ir_construct; metal_ir.mm ExternallyVisible and Storages (Value.placed): each numerical body's slots marked
+    # external (the callable table capability); its calls grouped by their construction facts (each call's intrinsic
+    # wires, its planned roots: a sent wire is a TEMPORARY root; its other port roots are interface roots, visible by
+    # their roles); each group's program given its first call's wires' planned identity (plan value (plan_calls[j],
+    # root), rebound on each instance) and constructed once, the body's own program the first group's and, made before
+    # its construction, a construction-ready copy of it each further group's; `templates[j]` call j's constructed
+    # program, None where its function has no body on this node; the copies released with `owned`
+    def constructed(self, plan_calls, libs, owned):
         M, compiler, (_, device), _ = libs
-        error = C.create_string_buffer(ROOM)
+        error, templates = C.create_string_buffer(ROOM), [None] * len(self.rows)
         for k, body in ((k, body) for k, body in enumerate(self.bodies) if body.machine is not None):
-            self.interface(k, libs)
-            program = body.machine.program
+            program, groups = body.machine.program, {}
             for slot, root in enumerate(body.slots):
                 mesh.check(compiler.metal_ir_value_external(program, root, slot))
+            for j in (j for j, row in enumerate(self.rows) if row.function == k):
+                groups.setdefault(self.call_ports[j][1], []).append(j)
+            programs = [program]
+            for _ in range(len(groups) - 1):
+                copy = made(compiler.metal_ir_specialize(program, error, ROOM), error, "a construction class")
+                owned(lambda copy=copy: compiler.metal_ir_program_free(copy))
+                programs.append(copy)
             gpu = device()
             try:
-                checked(compiler.metal_ir_construct(program, gpu, error, ROOM), error, "construction")
+                for constructing, (wires, calls) in zip(programs, groups.items()):
+                    for root in wires:
+                        compiler.metal_ir_value_planned(constructing, root, plan_calls[calls[0]], root, 0)
+                    checked(compiler.metal_ir_construct(constructing, gpu, error, ROOM), error, "construction")
+                    for j in calls:
+                        templates[j] = constructing
             finally:
                 M.PUT(gpu, M.SELECTOR[b"release"])
+        self.templates = templates
 
     # metal-microbench metal_ir.h metal_ir_specialize, metal_ir_value_receives, metal_ir_value_sends,
     # metal_ir_value_planned and metal_ir_lower; rdma/mesh-metal.h mesh_metal_range_declare: each original call's
-    # instance (`instances`, released with `owned`), its function's template specialized, THAT call's own ports
-    # declared (its received ranges landing for itself, owner and call j, among `plan_calls`, the calls as the plan
-    # takes them; `context` the compile owner's, read for its page geometry), each wire's plan value (instance
-    # plan_calls[j], ValueID the wire's root), then its structural lowering (transport, checks, step, the arrays the
-    # plan reads); a call whose function has no body on this node has no instance
+    # instance (`instances`, released with `owned`), its group's constructed program specialized, THAT call's Ports
+    # declared (each received range of transfer `transfer` of its owner call landing for call j, among `plan_calls`,
+    # the calls as the plan takes them; `context` the compile owner's, read for its page geometry; each sent range's
+    # release), each intrinsic wire's plan value (instance plan_calls[j], ValueID the wire's root), then its
+    # structural lowering (transport, checks, step, the arrays the plan reads); a call whose function has no body on
+    # this node has no instance
     def instanced(self, context, plan_calls, libs, owned):
         M, compiler, _, transport = libs
         error, listed = C.create_string_buffer(ROOM), (mesh.U * max(len(plan_calls), 1))(*plan_calls)
         instances = []
-        for j, row in enumerate(self.rows):
-            body = self.bodies[row.function]
-            if body.machine is None:
+        for j, (row, template) in enumerate(zip(self.rows, self.templates)):
+            if template is None:
                 instances.append(None)
                 continue
-            instance = made(compiler.metal_ir_specialize(body.machine.program, error, ROOM), error, "specialization")
+            instance = made(compiler.metal_ir_specialize(template, error, ROOM), error, "specialization")
             owned(lambda instance=instance: compiler.metal_ir_program_free(instance))
-            built, declared, f = body.machine, body.declared, plan_calls[j]
-            receives = sorted((declared[channel][0], channel) for channel in built.received if channel in declared)
-            sends = sorted((declared[channel][0], channel) for channel in built.sent if channel in declared)
+            (ports, wires), f = self.call_ports[j], plan_calls[j]
             marks = {"received": [], "sent": [], "sending": {}, "transfers": [], "placed": []}
-            for transfer, channel in receives:
-                root, (_, _, size, *_) = built.received[channel].root, declared[channel]
-                landed = M.Range()
-                mesh.check(transport.mesh_metal_range_declare(mesh.Context.from_address(context), listed,
-                                                              len(plan_calls), j, j, transfer, size, 0,
-                                                              C.byref(landed)))
-                compiler.metal_ir_value_receives(instance, root, C.byref(landed))
-                marks["received"].append((root, f, root, bytes(landed)))
-            for transfer, channel in sends:
-                root, release = built.sent[channel].root, M.Release(transfer=transfer)
-                compiler.metal_ir_value_sends(instance, root, C.byref(release))
-                marks["sent"].append((root, bytes(release)))
-            for transfer, channel in receives + sends:
-                marks["transfers"].append(transfer)
-                marks["sending"][transfer] = built.wires[declared[channel][1]].root
-            for _, wire in sorted(built.wires.items()):
-                compiler.metal_ir_value_planned(instance, wire.root, f, wire.root, 0)
-                marks["placed"].append((wire.root, f, wire.root))
+            for port in ports:
+                if port.direction == mesh.RECEIVE:
+                    landed = M.Range()
+                    mesh.check(transport.mesh_metal_range_declare(mesh.Context.from_address(context), listed,
+                                                                  len(plan_calls), j, port.owner, port.transfer,
+                                                                  port.bytes, port.at, C.byref(landed)))
+                    compiler.metal_ir_value_receives(instance, port.root, C.byref(landed))
+                    marks["received"].append((port.root, *port.section, bytes(landed)))
+                else:
+                    release = M.Release(transfer=port.transfer)
+                    compiler.metal_ir_value_sends(instance, port.root, C.byref(release))
+                    marks["sent"].append((port.root, port.owner, bytes(release)))
+                marks["transfers"].append((port.owner, port.transfer))
+                marks["sending"][port.owner, port.transfer] = port.value
+            for root in wires:
+                compiler.metal_ir_value_planned(instance, root, f, root, 0)
+                marks["placed"].append((root, f, root))
             checked(compiler.metal_ir_lower(instance, error, ROOM), error, "lowering")
             row.marks = marks
             instances.append(instance)
         self.instances = instances
 
-    # placement.status.md section 3: each lowered call instance's mesh.Function (its actual Storages, its function's
-    # interface and explicit roots run 0, its step appended; its retained MetalRecorderActors parts and relation, freed
-    # with the target), in instance order, an instance of a function with no body on this node zero-local (no values,
-    # parts or edges), and the largest placed alignment
+    # rdma/mesh-collective.h struct mesh_function, mesh_plan_local: each lowered call instance's mesh.Function (its
+    # actual Storages, its function's interface and explicit roots run 0, its step appended; its retained
+    # MetalRecorderActors parts and relation, freed with the target), in instance order, an instance of a function
+    # with no body on this node zero-local (no values, parts or edges), and the largest placed alignment
     def functions(self, libs):
         lib, held, quantum, counts, steps = libs[2][0], [], 1, [], []
         functions = (mesh.Function * len(self.instances))()
@@ -521,7 +593,12 @@ class Target:
     # s's copies (`joined`); otherwise its storage's root_sources[s] record: ("input", outer flat placeholder position),
     # an operand whose root byte 0 lies delta past that placeholder's byte offset in s, or ("result", s, bytes,
     # device), an operand of s's one allocation; each body's generator state a ("generator", body) operand; each
-    # CONSTANT root its outer constant's name (`constants`, from the call's original input); and the outer outputs
+    # CONSTANT root its outer constant's name (`constants`, from the call's original input); and the outer outputs, a
+    # call's result produced on another machine its storage s, the caller-owned root it is returned in
+    # (CallAnalysis.results; root_sources[s], an outer input's root byte 0 the placeholder's byte offset in s). That
+    # root is not the wire it arrives in: its writer, a copy from the landed wire on that producing call's row, is a
+    # typed program not yet constructed (the declaration owner's PortRecord holds no outer output position or
+    # wire-to-result endpoint), so the row stays NULL and nothing writes the root
     def resolved(self, captured, analysis, joint):
         from .lower_metal import Output
         from .operations import _metadata
@@ -556,7 +633,7 @@ class Target:
                     constants.append((j, root.root, reference.target))
         produced = {leaf: (j, o) for j, node in enumerate(analysis.nodes)
                     for o, leaf in enumerate(captured.calls[node].outputs) if isinstance(leaf, torch.fx.Node)}
-        outputs, ports = [], []
+        stored, outputs = {leaf: s for _, _, leaf, s in analysis.results}, []
         for leaf, (kind, _) in zip(captured.exported.graph_module.graph.output_node().args[0],
                                    captured.exported.outputs, strict=True):
             if leaf in produced:
@@ -565,14 +642,18 @@ class Target:
                 if body.machine is not None:
                     outputs.append((j, body.outputs[o]))
                 else:
-                    outputs.append((j, None))
-                    ports.append((len(outputs) - 1, j, o))
+                    source, start = joint.root_sources[stored[leaf]], 0
+                    if source[0] == "input":
+                        value = outer[source[1]].meta["val"]
+                        start = value.storage_offset() * value.element_size()
+                    outputs.append((("root", source, start),
+                                    Output(None, None, None, _metadata(leaf.meta["val"]), kind, None)))
             elif isinstance(leaf, torch.fx.Node):
                 outputs.append((None, Output(outer.index(leaf), None, None, _metadata(leaf.meta["val"]), kind, None)))
             else:
                 outputs.append((None, Output(None, None, leaf, None, kind, None)))
         self.operands, self.joined, self.outputs = tuple(operands), tuple(map(tuple, joined)), tuple(outputs)
-        self.constants, self.ports = tuple(constants), tuple(ports)
+        self.constants = tuple(constants)
 
     # design/compilation-composition-change-request.md, 6's stage D, and design/aot-compilation-change-request.md
     # appendix item 6: the already-lowered call instances themselves, each its operands' ordinals set; after
@@ -674,15 +755,15 @@ class Target:
                 "rows": [{**{field.name: getattr(row, field.name) for field in dataclasses.fields(row)
                              if field.name != "marks"},
                           "marks": {"received": [(v, f, i, d.hex()) for v, f, i, d in row.marks["received"]],
-                                    "sent": [(v, d.hex()) for v, d in row.marks["sent"]],
-                                    "sending": [[t, v] for t, v in row.marks["sending"].items()],
-                                    "transfers": row.marks["transfers"], "placed": row.marks["placed"]}}
+                                    "sent": [(v, o, d.hex()) for v, o, d in row.marks["sent"]],
+                                    "sending": [[o, t, v] for (o, t), v in row.marks["sending"].items()],
+                                    "transfers": [list(entry) for entry in row.marks["transfers"]],
+                                    "placed": row.marks["placed"]}}
                          for row in self.rows],
-                "operands": [{"source": [*operand.source[:3], str(operand.source[3])] if operand.source[0] == "result"
-                              else list(operand.source), "offset": operand.offset,
+                "operands": [{"source": source_saved(operand.source), "offset": operand.offset,
                               "occurrences": [list(at) for at in operand.occurrences]} for operand in self.operands],
-                "outputs": [[r, leaf and leaf_saved(leaf)] for r, leaf in self.outputs],
-                "ports": [list(port) for port in self.ports],
+                "outputs": [[["root", source_saved(r[1]), r[2]] if isinstance(r, tuple) else r,
+                             leaf and leaf_saved(leaf)] for r, leaf in self.outputs],
                 "joined": [[list(entry) for entry in row] for row in self.joined], "counts": list(self.counts),
                 "steps": list(self.steps), "generators": [[k, list(words)] for k, words in self.generators],
                 "constants": [list(entry) for entry in self.constants],
@@ -694,6 +775,16 @@ class Target:
         (directory / name).write_bytes(self.artifact)
         (directory / f"{key}.joint").write_bytes(self.solution.saved())
         return {"artifact": name, "joint": f"{key}.joint", "signature": self.signature.hex(), "recipe": self.recipe()}
+
+
+# a joint root's source record (schedule.Solved root_sources, Operand.source) as a saved record, a result's device by
+# its name, and restored
+def source_saved(source):
+    return [*source[:3], str(source[3])] if source[0] == "result" else list(source)
+
+
+def source_restored(saved):
+    return (*saved[:3], torch.device(saved[3])) if saved[0] == "result" else tuple(saved)
 
 
 # compiler/mesh_compiler/lower_metal.py Output (frontend-owned) as a saved record: its root, value and literal, its
@@ -753,24 +844,30 @@ class Bound:
         tensor = given[operand.source[1]] if operand.source[0] == "input" else allocated[operand.source[1]]
         return self.operand(tensor, operand.offset, a in self.gpu, borrowed)
 
+    # outer output (r, leaf): an outer placeholder's or a literal (r None); a supplied owner root's (r ("root", its
+    # source record, the root byte its backing's byte 0 is), the leaf's metadata in that root); a call's literal; a
+    # CONSTANT root's own handle; or a call's root through its operand's backing
     def result(self, r, leaf, given, allocated):
         if r is None:
             return leaf.literal if leaf.root is None else given[leaf.root]
-        if leaf.root is None:
+        if not isinstance(r, tuple) and leaf.root is None:
             return leaf.literal
         shape, stride, offset, dtype, _, _ = leaf.metadata
-        if (r, leaf.root) in self.fixed:
-            tensor, start = self.fixed[r, leaf.root], 0
+        if isinstance(r, tuple):
+            source, at = r[1], r[2]
+        elif (r, leaf.root) in self.fixed:
+            tensor = self.fixed[r, leaf.root]
+            return torch.empty(0, dtype=dtype, device=tensor.device).set_(tensor.untyped_storage(), offset, shape,
+                                                                          stride)
         else:
-            a = self.argued[r, leaf.root]
-            operand = self.target.operands[a]
-            if operand.source[0] == "result":
-                return allocated[operand.source[1]].view(dtype).as_strided(shape, stride,
-                                                                           offset - operand.offset // dtype.itemsize)
-            tensor = given[operand.source[1]]
-            start = tensor.storage_offset() * tensor.element_size() - operand.offset
+            operand = self.target.operands[self.argued[r, leaf.root]]
+            source, at = operand.source, operand.offset
+        if source[0] == "result":
+            return allocated[source[1]].view(dtype).as_strided(shape, stride, offset - at // dtype.itemsize)
+        tensor = given[source[1]]
         return torch.empty(0, dtype=dtype, device=tensor.device).set_(
-            tensor.untyped_storage(), start // dtype.itemsize + offset, shape, stride)
+            tensor.untyped_storage(), (tensor.storage_offset() * tensor.element_size() - at) // dtype.itemsize + offset,
+            shape, stride)
 
     # the one invocation through `run`: metal_recording.h MetalProgramRunArguments (the native program's entry) or
     # MetalProgramRunObserved (its observation entry), with the same operands, results, lifetimes and end
@@ -778,10 +875,10 @@ class Bound:
         M, _, (lib, _), _ = self.libs
         error, execution, operands = C.create_string_buffer(ROOM), self.executions, self.target.operands
         allocated = {}
-        for operand in operands:
-            if operand.source[0] == "result" and operand.source[1] not in allocated:
-                allocated[operand.source[1]] = torch.empty(operand.source[2], dtype=torch.uint8,
-                                                           device=operand.source[3])
+        for source in (*(operand.source for operand in operands), *(r[1] for r, _ in self.target.outputs
+                                                                     if isinstance(r, tuple))):
+            if source[0] == "result" and source[1] not in allocated:
+                allocated[source[1]] = torch.empty(source[2], dtype=torch.uint8, device=source[3])
         borrowed = {}
 
         def ended():
@@ -831,7 +928,8 @@ class Bound:
 
 
 # The saved artifact, its joint result (compiler/mesh_compiler/schedule.py loaded_program: loaded, never planned
-# again) and its typed recipe, as the frontend's Root and Output records; no construction is retained
+# again; the target's `plan` that owner's own, None for a local result) and its typed recipe, as the frontend's Root and
+# Output records; no construction is retained
 def restore(saved, directory):
     from .lower_metal import Root
     from .schedule import loaded_program
@@ -846,33 +944,37 @@ def restore(saved, directory):
         for k, body in enumerate(recipe["bodies"]))
     rows = tuple(Row(**{**row, "marks": {
         "received": [(v, f, i, bytes.fromhex(d)) for v, f, i, d in row["marks"]["received"]],
-        "sent": [(v, bytes.fromhex(d)) for v, d in row["marks"]["sent"]],
-        "sending": dict(map(tuple, row["marks"]["sending"])), "transfers": row["marks"]["transfers"],
+        "sent": [(v, o, bytes.fromhex(d)) for v, o, d in row["marks"]["sent"]],
+        "sending": {(o, t): v for o, t, v in row["marks"]["sending"]},
+        "transfers": [tuple(entry) for entry in row["marks"]["transfers"]],
         "placed": [tuple(entry) for entry in row["marks"]["placed"]]}}) for row in recipe["rows"])
-    operands = tuple(Operand((*operand["source"][:3], torch.device(operand["source"][3]))
-                             if operand["source"][0] == "result" else tuple(operand["source"]), operand["offset"],
+    operands = tuple(Operand(source_restored(operand["source"]), operand["offset"],
                              tuple(map(tuple, operand["occurrences"]))) for operand in recipe["operands"])
+    joint = loaded_program((directory / saved["joint"]).read_bytes())
     return Target(bodies, rows, pytree.treespec_loads(recipe["spec"]),
-                  tuple((r, leaf and leaf_restored(leaf)) for r, leaf in recipe["outputs"]), operands,
+                  tuple((("root", source_restored(r[1]), r[2]) if isinstance(r, list) else r,
+                         leaf and leaf_restored(leaf)) for r, leaf in recipe["outputs"]), operands,
                   tuple(tuple(map(tuple, row)) for row in recipe["joined"]), tuple(recipe["counts"]),
                   tuple(recipe["steps"]), tuple((k, tuple(words)) for k, words in recipe["generators"]),
-                  tuple(map(tuple, recipe["constants"])), tuple(map(tuple, recipe["ports"])), recipe["node"],
-                  loaded_program((directory / saved["joint"]).read_bytes()), artifact=artifact,
+                  tuple(map(tuple, recipe["constants"])), recipe["node"], joint, joint.plan, artifact=artifact,
                   signature=bytes.fromhex(saved["signature"]))
 
 
 # design/aot-compilation-change-request.md A10 and appendix item 6; design/compilation-composition-change-request.md
-# items 3, 4, 6 and 7; metal-microbench metal_ir.h metal_ir_construct, metal_ir_specialize and metal_ir_lower: the
-# captured program's one native machine program over every call of analysis.keys/calls. Each function with a body
-# on this node (`machines[key]`; one without keeps its rows, with no numerical program) constructed once with its
-# interface slots; each original call one instance (`plan_calls[j]`, here one per call), its function's template
-# specialized, THAT call's ports declared and structurally lowered; every instance's actual Actors and Storages and
-# every call's original bindings in ONE joint solve (schedule.solve_program over `analysis`, `plan_calls`, the
-# `declarations` and the wires' roots); then those lowered instances emitted, each with its operands' ordinals and the
-# joint result's placements, as one finalized, signed and saved native program, the instances released after.
-# `node` the program's machine (Target.node), `planning` the bridge's context where calls transfer
+# items 3, 4, 6 and 7; metal-microbench metal_ir.h metal_ir_construct, metal_ir_specialize and metal_ir_lower;
+# compiler/mesh_compiler/schedule.py declare_program and solve_program: the captured program's one native machine
+# program over every call of analysis.keys/calls. Each function with a body on this node (`machines[key]`; one without
+# keeps its rows, with no numerical program) gives its interface; every call's original bindings, the `declarations`
+# and the wires' roots go once to the declaration owner (declare_program, its Prepared), whose ports and rows give each
+# call its Ports here; each body constructed once per group of its calls' construction facts; each original call one
+# instance (`plan_calls[j]`, here one per call), its group's program specialized, THAT call's Ports declared and
+# structurally lowered; every instance's actual Actors and Storages in ONE joint solve over the same owner; then those
+# lowered instances emitted, each with its operands' ordinals and the joint result's placements, as one finalized,
+# signed and saved native program, the instances and construction copies released after. `node` the program's machine
+# (Target.node: the plan's node map index under `planning`, the bridge's context where calls transfer; else the
+# machine)
 def compile_program(captured, machines, declarations, analysis, node, planning=None):
-    from .schedule import solve_program
+    from .schedule import declare_program, solve_program
 
     def built(machine):
         return ((tuple(machine.inputs), tuple(machine.outputs), tuple(machine.state), dict(machine.operations),
@@ -886,15 +988,20 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
                                      if body.state))
     libs = libraries()
     M, _, (_, device), _ = libs
+    for k in (k for k, body in enumerate(bodies) if body.machine is not None):
+        target.interface(k, libs)
+    bindings = target.bindings(captured, analysis)
+    prepared = declare_program(analysis, bindings, declarations,
+                               {key: {value: wire.root for value, wire in machine.wires.items()}
+                                for key, machine in machines.items()}, planning)
+    target.ported(prepared, declarations, analysis, plan_calls)
     with Owned() as instances:
-        target.constructed(libs)
+        target.constructed(plan_calls, libs, instances)
         target.instanced(C.addressof(planning.context) if planning is not None else None, plan_calls, libs,
                          instances)
         functions, quantum = target.functions(libs)
-        joint = solve_program(analysis, functions, target.bindings(captured, analysis), quantum, planning,
-                              declarations=declarations,
-                              wire_values={key: {value: wire.root for value, wire in machine.wires.items()}
-                                           for key, machine in machines.items()}, plan_calls=plan_calls)
+        joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
+                              declared=prepared)
         target.resolved(captured, analysis, joint)
         target.solution, target.plan = joint, joint.plan if planning is not None else None
         with Owned() as owned:
@@ -903,5 +1010,5 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
             target.compile(Arena(target, owned, M, gpu) if planning is None else Mapped(target))
             owned.finalizer()
         instances.finalizer()
-    target.instances = None
+    target.instances = target.templates = target.call_ports = None
     return target

@@ -32,6 +32,8 @@ METAL_EXTERNAL_GPU = 1
 SOURCE_VALUE, SOURCE_LITERAL, SOURCE_SENT, SOURCE_RECEIVED, SOURCE_EXTERNAL = range(5)
 # metal_recording.h METAL_UNIT_GPU, METAL_UNIT_HOST: an observation unit's kind
 METAL_UNIT_GPU, METAL_UNIT_HOST = 0, 1
+# metal_ir.h METAL_IR_WORK_ITERATION .. METAL_IR_WORK_TUNED: a retained Work term's kind (struct metal_ir_work_term)
+WORK_ITERATION, WORK_POINT, WORK_COMBINE, WORK_MERGE, WORK_FRAGMENT, WORK_TUNED = range(6)
 
 
 # objc/message.h objc_msgSend; MTLResource.h -device; NSObject -retain and -release
@@ -268,6 +270,26 @@ class ExternalUse(C.Structure):
     _fields_ = [('argument', mesh.U), ('row', mesh.U), ('value', mesh.U), ('uses', mesh.U)]
 
 
+# metal_ir.h struct metal_ir_work_axis, struct metal_ir_work_extent and struct metal_ir_work_term (metal_ir_work_terms,
+# metal_ir_value_axis): a source association (source task, original full extent, typed value and dimension); a term
+# domain's extent (its compiled bound, its loop, its source associations axes[axis .. axis + axes)); one retained
+# arithmetic Work term of numeric kernel member (kernel, member, phase), `coefficient` times the product of
+# factors[first .. first + factors), its source operations origins[origin .. origin + origins); 24, 24 and
+# sizeof(mesh_graph_work) + 48 bytes
+class WorkAxis(C.Structure):
+    _fields_ = [('task', mesh.Q), ('full', mesh.Q), ('value', mesh.U), ('dimension', mesh.U)]
+
+
+class WorkExtent(C.Structure):
+    _fields_ = [('extent', mesh.Q), ('loop', mesh.U), ('axis', mesh.U), ('axes', mesh.U), ('padding', mesh.U)]
+
+
+class WorkTerm(C.Structure):
+    _fields_ = [('coefficient', mesh_graph.Work), ('kernel', mesh.U), ('member', mesh.U), ('phase', mesh.U),
+                ('operation', mesh.U), ('kind', mesh.U), ('domain', mesh.U), ('extents', mesh.U), ('first', mesh.U),
+                ('factors', mesh.U), ('origin', mesh.U), ('origins', mesh.U), ('padding', mesh.U)]
+
+
 # dlfcn.h dladdr; metal-microbench metal_recording.h: the recorder (libmetal_recording) and the checkout it was built
 # in, whose .build holds libmetal_ir and libmesh_metal
 RECORDER = []
@@ -425,6 +447,11 @@ def _compiler():
                 ('metal_ir_scatter', None, [P, U, U, U, C.POINTER(U), U, U]),
                 ('metal_ir_yield', None, [P, U, U, C.POINTER(U)]),
                 ('metal_ir_construct', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_work_terms', C.c_int, [P, C.POINTER(C.c_size_t), C.POINTER(C.POINTER(WorkTerm)),
+                                                  C.POINTER(C.POINTER(Expr)), C.POINTER(C.POINTER(Term)),
+                                                  C.POINTER(C.POINTER(WorkExtent)), C.POINTER(C.POINTER(WorkAxis)),
+                                                  C.POINTER(C.POINTER(U))]),
+                ('metal_ir_value_axis', C.c_int, [P, U, U, Q, Q]),
                 ('metal_ir_lower', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_specialize', P, [P, C.c_char_p, C.c_size_t]),
