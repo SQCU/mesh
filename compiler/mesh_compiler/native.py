@@ -327,7 +327,8 @@ class Operand:
 # restored, loaded_program's local Solved or a network result's SavedNetwork, its saved bytes), saved once, read by no
 # preparation (each preparation owner holds its own prepared Solved); `plan` that owner's network result (its own
 # `.plan`: None for a local result), the one Scheduled.plan references; `artifact` the one MetalProgramSave of every
-# row, `signature` its MetalProgramSignatureNode record (the one Scheduled.signature is); `program` the network program
+# row, `signature` its MetalProgramSignatureNode signature's complete solved archive (rdma/mesh_graph.py archive; the
+# one bytes owner, which Scheduled.signature is); `program` the network program
 # (Planning.program, the mesh_program_save/load mask), None for a local result
 @dataclasses.dataclass
 class Target:
@@ -956,7 +957,7 @@ class Target:
             checked(lib.MetalProgramSignatureNode(native, self.node, 1, C.byref(executions), C.byref(signature), error,
                                                   ROOM), error, "signature")
             try:
-                self.signature = mesh_graph.record(signature)
+                self.signature = mesh_graph.archive(signature)
             finally:
                 mesh_graph.free(signature)
             self.artifact = M._saved_bytes(lib.MetalProgramSave, native, None, 0)
@@ -971,10 +972,10 @@ class Target:
     # target itself unchanged, so independently prepared Bounds coexist, with no lowering, solve, finalization or
     # compilation; constants: {placeholder name: tensor} for the bodies' CONSTANT roots, attached as
     # compiler/mesh_compiler/metal.py _Builder.attach attached them and held as those roots' handles, by (row, root);
-    # rdma/mesh_graph.py from_record and free, metal_recording.h MetalProgramSignatureBind: the target's saved signature
-    # record parsed once and bound to the loaded native program's own rows (its per-row structure verified, its loaded
-    # programs retained by the signature's scope owner), freed with this preparation, the
-    # Bound's `signature`
+    # rdma/mesh_graph.py from_archive and free, metal_recording.h MetalProgramSignatureBind: the target's saved complete
+    # signature archive read once (mesh_graph_archive_read) and bound to the loaded native program's own rows (its
+    # per-row structure verified, its loaded programs retained by the signature's scope owner), freed with this
+    # preparation, the Bound's `signature`
     def prepare(self, published, constants):
         libs = libraries()
         M, compiler, (lib, device), _ = libs
@@ -1005,7 +1006,7 @@ class Target:
             native = made(lib.MetalProgramLoad(recorder, calls, len(calls), C.byref(owner.planned), archive, error,
                                                ROOM), error, "the loaded program's calls")
             owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
-            signature = mesh_graph.from_record(self.signature)
+            signature = mesh_graph.from_archive(self.signature)
             owned(lambda: mesh_graph.free(signature))
             checked(lib.MetalProgramSignatureBind(native, self.node, C.byref(signature), error, ROOM), error,
                     "the loaded signature")
@@ -1056,7 +1057,8 @@ class Target:
 
     # the artifact; the joint owner as it saves itself (compiler/mesh_compiler/schedule.py: a local Solved through
     # mesh_local_save, a network one through mesh_program_save, a restored SavedNetwork its original bytes), its kind
-    # ("local", or "network" with its program) named in the companion record; the signature record and the recipe
+    # ("local", or "network" with its program) named in the companion record; the signature archive (one hex field) and
+    # the recipe
     def saved(self, directory, key):
         directory, name = pathlib.Path(directory), f"{key}.native"
         (directory / name).write_bytes(self.artifact)

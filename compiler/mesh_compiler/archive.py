@@ -2,7 +2,7 @@
 # completed machine program (its native target, joint result and recipe), with the captured program's per-function
 # records as explicit typed records indexed by function ordinal (the completed target's body order, CallAnalysis.keys);
 # a captured function's key, which may be a callable, is compilation-only and is not saved. Scheduled.plan is the one
-# target's joint owner's own result and Scheduled.signature that target's signature record
+# target's joint owner's own result and Scheduled.signature that target's complete signature archive
 # (compiler/mesh_compiler/native.py Target.plan and Target.signature, saved and restored with the target;
 # compiler/mesh_compiler/driver.py compiled), kept in no record of their own here
 import json
