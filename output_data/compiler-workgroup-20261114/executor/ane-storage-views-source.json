@@ -1,0 +1,17 @@
+{
+  "metal_commit": "7f7ed436",
+  "session": "e48f4bc7-7cef-4afd-ae50-fc1b4618fa73",
+  "model": "claude-opus-5-5",
+  "strict_exit": 0,
+  "shared_build": false,
+  "target_run": false,
+  "hashes": {
+    "/Users/mdot/metal-microbench/metal_neural.mm": "d649ff3f42305f5810221a0c2adaa6315775d28979019c79417a157d1724e085",
+    "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261114/executor/native.resume77.jsonl": "239ae58d684e17dd2a70697e529a4f9d612ca8f257e0592ae772ca658b3fbd81",
+    "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261114/executor/native.resume77b.jsonl": "95c28316f4f1d3487d6878f3b662ab3361e46a0b2a4d16f5ccfd3e456701bdac",
+    "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261114/executor/native.resume77c.jsonl": "64a31ccf12d3158195102dfe932455f33c1d57b2cf88ab48dcb8672865b0d40f",
+    "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261114/executor/native.resume78.jsonl": "9a3977b7605a5d704b1bb5d05c7c90b7481d8fb97d9ffb01074fa95a18a5ca9f",
+    "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261114/executor/ane-storage-views-syntax.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "poisoned_recording_unchanged": true
+}
