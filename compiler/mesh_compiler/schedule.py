@@ -1060,7 +1060,7 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
         channel, (m, logical) = intrinsic.channels[t], intrinsic.endpoints[t][side]
         (group, made), (vertex, occurrences) = held_by[key, channel, direction], origin[key]
         root, occurrence = (made.sent if direction == mesh.SEND else made.received)[channel], occurrences[channel][side]
-        landing = made.landings.get(channel) if direction == mesh.RECEIVE else None
+        landing = made.landings.get(channel)
         storage, delta = binding_of(j, key, made, (root if landing is None else landing[0]).root)
         direct = storage is not None and analysis.root_sources[storage] is None
         root = landing[0] if landing is not None and direct else root
@@ -1070,17 +1070,17 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
                 ).nbytes()
         else:
             backing = typed_view(made, root.root)[1].bytes
-        return EndpointRecord(j, t, direction, intrinsic.nodes[m], occurrence.meta.get("processor"), made, group,
+        return EndpointRecord(j, t, direction, intrinsic.nodes[m], occurrence.meta["processor"], made, group,
                               channel, occurrence, vertex[occurrence], root, logical, view, backing, storage, delta,
                               landing is not None and not direct)
 
     def shared(e):
-        return e is not None and e.storage is not None and not e.staged and analysis.root_sources[e.storage] is None
+        return e is not None and e.storage is not None and analysis.root_sources[e.storage] is None
     declared, weights, dependences, found, identities, extents, costs, located = [], [], [], [], [], [], [], []
     for j in range(J):
         key = analysis.keys[analysis.calls[j]]
-        intrinsic = (declarations or {}).get(key)
-        rows = intrinsic.declared if intrinsic is not None else []
+        intrinsic = declarations[key]
+        rows = intrinsic.declared
         # each intrinsic transfer's sender and receiver endpoints, projected before its row: from and to their typed
         # views on every participant alike, value, root and extent this node's endpoint's
         ends = [tuple(endpoint(j, key, intrinsic, t, side, direction) for side, direction in
@@ -1092,10 +1092,10 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
                           sender.view, receiver.view)
                          for (source, destination, identity, kind, *_), (sender, receiver), e
                          in zip(rows, ends, local)])
-        weights.append([tuple(weight) for weight in (intrinsic.weights if intrinsic is not None else [])])
+        weights.append([tuple(weight) for weight in intrinsic.weights])
         extents.append([0 if e is None else e.backing for e in local])
         costs.append(["declared"] * len(rows))
-        dependences.append(list(intrinsic.dependences) if intrinsic is not None else [])
+        dependences.append(list(intrinsic.dependences))
         identities.append({None: 1 + max((row[2] for row in rows), default=-1)})
     # a transferred caller-owned (run 0) source storage is staged in a genuine run 1 wire root, one per (owner,
     # storage), its extent the full source storage, its rows' views the original ones (at the source's byte `at`)
@@ -1154,21 +1154,18 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
                        (mesh.Weight * max(len(weighted), 1))(*[mesh.Weight(*weight) for weight in weighted]), held))
     # mesh-collective.h mesh_declared_group: each owner's combined rows grouped once on this node (planning.here), the
     # demands and releases mesh_plan_program consumes and every port record carries
-    grouped = []
-    for (rows, weighted, _), listed in zip(arrays, declared):
+    grouped = [None] * J
+    for j, ((rows, weighted, _), listed) in enumerate(zip(arrays, declared) if planning is not None else ()):
         n = len(listed)
-        made = None if planning is None else mesh.Grouped(demand=(mesh.Demand * max(n, 1))(),
-                                                          demand_of=(mesh.U * max(n, 1))(),
-                                                          release_of=(mesh.U * max(n, 1))())
-        if made is not None:
-            mesh.check(mesh.LIB.mesh_declared_group(rows, weighted, n, len(planning.nodes), planning.here,
-                                                    C.byref(made)))
-        grouped.append(made)
+        grouped[j] = mesh.Grouped(demand=(mesh.Demand * max(n, 1))(), demand_of=(mesh.U * max(n, 1))(),
+                                  release_of=(mesh.U * max(n, 1))())
+        mesh.check(mesh.LIB.mesh_declared_group(rows, weighted, n, len(planning.nodes), planning.here,
+                                                C.byref(grouped[j])))
     ports = [[] for _ in range(J)]
     for j, slot, direction, record in found:
         made, t = grouped[record["owner"]], record["transfer"]
-        release = mesh.ABSENT if made is None else made.release_of[t]
-        ports[j].append(PortRecord(slot, direction, **record, demand=None if made is None else made.demand_of[t],
+        release = made.release_of[t]
+        ports[j].append(PortRecord(slot, direction, **record, demand=made.demand_of[t],
                                    release=None if release == mesh.ABSENT else release))
     return Prepared(analysis, tuple(bindings), tuple(resolved.items()), tuple(sorted(used)), analysis.root_sources,
                     tuple(map(tuple, ports)), tuple(map(tuple, declared)), tuple(map(tuple, weights)),
@@ -1212,9 +1209,6 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
     for s in range(S):
         use_first[s + 1] += use_first[s]
     grouped = (mesh.Grouped * max(K, 1))()
-    for j, made in enumerate(declared.grouped):
-        if made is not None:
-            grouped[plan_calls[j]] = made
     # mesh-collective.h struct mesh_function declared, weights, count, dependence, dependences and outstanding: each
     # network instance plan_calls[j] its call's prepared rows (Prepared.arrays[j], borrowed: the native Declared and
     # Weight arrays as remapped and bound, the rows its grouping was made over), their intrinsic dependences
@@ -1223,6 +1217,7 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
     dependence = []
     for j, f in enumerate(plan_calls if planning is not None else ()):
         rows, weighted, _ = declared.arrays[j]
+        grouped[f] = declared.grouped[j]
         dependence.append((mesh.Dependence * max(len(declared.dependences[j]), 1))(*declared.dependences[j]))
         functions[f].declared, functions[f].weights, functions[f].count = rows, weighted, len(declared.declared[j])
         functions[f].dependence, functions[f].dependences = dependence[-1], len(declared.dependences[j])
