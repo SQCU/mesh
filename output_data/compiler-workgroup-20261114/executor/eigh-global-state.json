@@ -1,0 +1,3894 @@
+{
+ "argv": [
+  "/tmp/archive-worker/diag/eigh_global_state.py",
+  "/Users/mdot/dox/mesh/output_data/compiler-workgroup-20261114/executor/eigh-global-state.json"
+ ],
+ "pid": 89751,
+ "hashes": {
+  "/tmp/archive-worker/diag/eigh_global_state.py": "346bad271feaa1aabf7511ef912c31a78b6a7952a425d333ed4869d7353b2878",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "6d92107bab8cb8c514621f7254390d77758c2475ddb0c650043ed6bd3dbfcc2c",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/metal.py": "5c5316c4ba468152e2c061c078e0ff54f4429a63b68fa5ee6b7ed828963ec50e",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/schedule.py": "24c0409173b372fb723f4c8e460e25b94499ce15f19730e4c8b6d4c3f130293e",
+  "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py": "0d0c82eeb8f9b02321174eedafc18c0f61e802e492b40ab608c7e967a6d132b4",
+  "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "d6257c8770900d2d3bee3a40f6f225ea5d8469369d7c4b3aff2079db96536742",
+  "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "cbdf90da5b8f15206cd7e85f6335bc3ff6c9da345c0631e608823b423272945d",
+  "/Users/mdot/dox/mesh/rdma/libmesh.dylib": "ffeea391d1f193113502e4e762e4c42f3f0befced03181259fb7edb79fd2fdec"
+ },
+ "result": {
+  "stage": "result",
+  "eigenvalue_error": 0.3628804865188151,
+  "residual": 0.6454972243679028,
+  "orthogonality": 0.0,
+  "values": [
+   0.0,
+   0.0,
+   1.0,
+   4.0
+  ],
+  "reference_values": [
+   0.254718759825861,
+   1.8227170808871087,
+   3.1772829191128906,
+   4.74528124017414
+  ],
+  "finite": true
+ },
+ "vectors": [
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ],
+  [
+   0.0,
+   0.0,
+   1.0,
+   0.0
+  ],
+  [
+   1.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  [
+   0.0,
+   1.0,
+   0.0,
+   0.0
+  ]
+ ],
+ "pin": {
+  "row": 1,
+  "call": 1,
+  "function": 1,
+  "instance": 1,
+  "plan_calls": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8
+  ],
+  "plan_call_1": 1,
+  "members": 1,
+  "labels": {
+   "offset": {
+    "name": "offset",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 9,
+    "views": [
+     23
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 23,
+    "original_root": 22,
+    "final_view": 23,
+    "final_root": 22,
+    "root_of": 22,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "size": {
+    "name": "size",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 4,
+    "views": [
+     25
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 25,
+    "original_root": 24,
+    "final_view": 25,
+    "final_root": 24,
+    "root_of": 24,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "below": {
+    "name": "below",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 2,
+    "views": [
+     27
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 27,
+    "original_root": 26,
+    "final_view": 27,
+    "final_root": 26,
+    "root_of": 26,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "e": {
+    "name": "e",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 160,
+    "views": [
+     35
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 35,
+    "original_root": 34,
+    "final_view": 35,
+    "final_root": 34,
+    "root_of": 34,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "d": {
+    "name": "d",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 2,
+    "views": [
+     37
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 37,
+    "original_root": 36,
+    "final_view": 37,
+    "final_root": 36,
+    "root_of": 36,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "h": {
+    "name": "h",
+    "dtype": "torch.float32",
+    "shape": [
+     4,
+     4
+    ],
+    "value_calls": 11,
+    "views": [
+     29
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 29,
+    "original_root": 28,
+    "final_view": 29,
+    "final_root": 28,
+    "root_of": 28,
+    "view_geometry": {
+     "shape": [
+      4,
+      4
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       4,
+       1,
+       0
+      ],
+      [
+       1,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "squares": {
+    "name": "squares",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 8,
+    "views": [
+     31
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 31,
+    "original_root": 30,
+    "final_view": 31,
+    "final_root": 30,
+    "root_of": 30,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "off_diagonal": {
+    "name": "off_diagonal",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 2,
+    "views": [
+     33
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 33,
+    "original_root": 32,
+    "final_view": 33,
+    "final_root": 32,
+    "root_of": 32,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "minus": {
+    "name": "minus",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 5,
+    "views": [
+     2254
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2254,
+    "original_root": 2253,
+    "final_view": 2254,
+    "final_root": 2253,
+    "root_of": 2253,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "plus": {
+    "name": "plus",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 5,
+    "views": [
+     2256
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2256,
+    "original_root": 2255,
+    "final_view": 2256,
+    "final_root": 2255,
+    "root_of": 2255,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "rank": {
+    "name": "rank",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 39,
+    "views": [
+     2258
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2258,
+    "original_root": 2257,
+    "final_view": 2258,
+    "final_root": 2257,
+    "root_of": 2257,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "rest": {
+    "name": "rest",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 6,
+    "views": [
+     2260
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2260,
+    "original_root": 2259,
+    "final_view": 2260,
+    "final_root": 2259,
+    "root_of": 2259,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "u": {
+    "name": "u",
+    "dtype": "torch.float32",
+    "shape": [
+     4,
+     4
+    ],
+    "value_calls": 11,
+    "views": [
+     1147
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 1147,
+    "original_root": 1146,
+    "final_view": 1147,
+    "final_root": 1146,
+    "root_of": 1146,
+    "view_geometry": {
+     "shape": [
+      4,
+      4
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       4,
+       1,
+       0
+      ],
+      [
+       1,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "rotated": {
+    "name": "rotated",
+    "dtype": "torch.float32",
+    "shape": [
+     4,
+     4
+    ],
+    "value_calls": 8,
+    "views": [
+     2525
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2525,
+    "original_root": 2524,
+    "final_view": 2525,
+    "final_root": 2524,
+    "root_of": 2524,
+    "view_geometry": {
+     "shape": [
+      4,
+      4
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       4,
+       1,
+       0
+      ],
+      [
+       1,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "error": {
+    "name": "error",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 10,
+    "views": [
+     2527
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2527,
+    "original_root": 2526,
+    "final_view": 2527,
+    "final_root": 2526,
+    "root_of": 2526,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "previous": {
+    "name": "previous",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 6,
+    "views": [
+     2531
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2531,
+    "original_root": 2530,
+    "final_view": 2531,
+    "final_root": 2530,
+    "root_of": 2530,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "again": {
+    "name": "again",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 6,
+    "views": [
+     2529
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2529,
+    "original_root": 2528,
+    "final_view": 2529,
+    "final_root": 2528,
+    "root_of": 2528,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "unaccepted": {
+    "name": "unaccepted",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 3,
+    "views": [
+     2751
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2751,
+    "original_root": 2750,
+    "final_view": 2751,
+    "final_root": 2750,
+    "root_of": 2750,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "failed": {
+    "name": "failed",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 2,
+    "views": [
+     1153
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 1153,
+    "original_root": 1152,
+    "final_view": 1153,
+    "final_root": 1152,
+    "root_of": 1152,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "retried": {
+    "name": "retried",
+    "dtype": "torch.int32",
+    "shape": [
+     1
+    ],
+    "value_calls": 60,
+    "views": [
+     1155
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 1155,
+    "original_root": 1154,
+    "final_view": 1155,
+    "final_root": 1154,
+    "root_of": 1154,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "at_median[0]": {
+    "name": "at_median[0]",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 3,
+    "views": [
+     1149
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 1149,
+    "original_root": 1148,
+    "final_view": 1149,
+    "final_root": 1148,
+    "root_of": 1148,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "at_median[1]": {
+    "name": "at_median[1]",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 3,
+    "views": [
+     1151
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 1151,
+    "original_root": 1150,
+    "final_view": 1151,
+    "final_root": 1150,
+    "root_of": 1150,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "at_mean[0]": {
+    "name": "at_mean[0]",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 2,
+    "views": [
+     2250
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2250,
+    "original_root": 2249,
+    "final_view": 2250,
+    "final_root": 2249,
+    "root_of": 2249,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   },
+   "at_mean[1]": {
+    "name": "at_mean[1]",
+    "dtype": "torch.float32",
+    "shape": [
+     1
+    ],
+    "value_calls": 2,
+    "views": [
+     2252
+    ],
+    "builder_programs": [
+     45359952384
+    ],
+    "template": 45359952384,
+    "builder_is_row_body": true,
+    "original_view": 2252,
+    "original_root": 2251,
+    "final_view": 2252,
+    "final_root": 2251,
+    "root_of": 2251,
+    "view_geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  "roots": [
+   {
+    "root": 22,
+    "names": [
+     "offset"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 22,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 0,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 24,
+    "names": [
+     "size"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 24,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 0,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 0,
+     "begin": 0,
+     "end": 61,
+     "alignment": 1
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 0,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 0,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 0,
+     "shares": 0,
+     "padding1": 0
+    },
+    "unpinned": "bytes 0 or run 0 (internal; not realized)",
+    "pinned": false
+   },
+   {
+    "root": 26,
+    "names": [
+     "below"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 26,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 0,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 34,
+    "names": [
+     "e"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 34,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 0,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 36,
+    "names": [
+     "d"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 36,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 0,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 0,
+     "begin": 0,
+     "end": 61,
+     "alignment": 1
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 0,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 0,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 0,
+     "shares": 0,
+     "padding1": 0
+    },
+    "unpinned": "bytes 0 or run 0 (internal; not realized)",
+    "pinned": false
+   },
+   {
+    "root": 28,
+    "names": [
+     "h"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 28,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 64,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      16
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 64,
+     "begin": 0,
+     "end": 60,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 64,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 64,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 64,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 64,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 30,
+    "names": [
+     "squares"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 30,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 0,
+     "end": 60,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 32,
+    "names": [
+     "off_diagonal"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 32,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 0,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 0,
+     "begin": 0,
+     "end": 61,
+     "alignment": 1
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 0,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 0,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 0,
+     "shares": 0,
+     "padding1": 0
+    },
+    "unpinned": "bytes 0 or run 0 (internal; not realized)",
+    "pinned": false
+   },
+   {
+    "root": 2253,
+    "names": [
+     "minus"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 2253,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 24,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2255,
+    "names": [
+     "plus"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 2255,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 24,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2257,
+    "names": [
+     "rank"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 2257,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 24,
+     "end": 60,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2259,
+    "names": [
+     "rest"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 2259,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 24,
+     "end": 60,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 24,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 1146,
+    "names": [
+     "u"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 1146,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 64,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      16
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 64,
+     "begin": 12,
+     "end": 60,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 64,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 64,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 64,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 64,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2524,
+    "names": [
+     "rotated"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 2524,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 64,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      16
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 64,
+     "begin": 28,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 64,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 64,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 64,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 64,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2526,
+    "names": [
+     "error"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 2526,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 28,
+     "end": 60,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2530,
+    "names": [
+     "previous"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 2530,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 28,
+     "end": 60,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 60,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2528,
+    "names": [
+     "again"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 2528,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 28,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 28,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2750,
+    "names": [
+     "unaccepted"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 2750,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 34,
+     "end": 61,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 34,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 34,
+     "end": 61,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 1152,
+    "names": [
+     "failed"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 1152,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 12,
+     "end": 24,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 1154,
+    "names": [
+     "retried"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 7,
+     "storage": 1154,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 12,
+     "end": 24,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 1148,
+    "names": [
+     "at_median[0]"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 1148,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 12,
+     "end": 24,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 1150,
+    "names": [
+     "at_median[1]"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 1150,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 4,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 4,
+     "begin": 12,
+     "end": 24,
+     "alignment": 4
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "after": {
+     "bytes": 4,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 4,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 0,
+     "wire": 0,
+     "state": 0,
+     "begin": 12,
+     "end": 24,
+     "lag": 0,
+     "run": 1,
+     "shares": 0,
+     "padding1": 0
+    },
+    "pinned": true
+   },
+   {
+    "root": 2249,
+    "names": [
+     "at_mean[0]"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 2249,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 0,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 0,
+     "begin": 0,
+     "end": 61,
+     "alignment": 1
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 0,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 0,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 0,
+     "shares": 0,
+     "padding1": 0
+    },
+    "unpinned": "bytes 0 or run 0 (internal; not realized)",
+    "pinned": false
+   },
+   {
+    "root": 2251,
+    "names": [
+     "at_mean[1]"
+    ],
+    "value_info": {
+     "role": 2,
+     "scalar": 13,
+     "storage": 2251,
+     "function": 4294967295,
+     "index": 4294967295,
+     "word": 0,
+     "of": 4294967295,
+     "range": 0,
+     "received": 0,
+     "sent": 0,
+     "zeroed": 0,
+     "sendings": 0,
+     "identity": 0,
+     "bytes": 0,
+     "offset": 0,
+     "at": 0,
+     "data_bytes": 0,
+     "data": null,
+     "buffer": null,
+     "page_bytes": 0,
+     "pages": 0,
+     "source": 4294967295
+    },
+    "geometry": {
+     "shape": [
+      1
+     ],
+     "offset": 0,
+     "terms": [
+      [
+       0,
+       1,
+       1,
+       0
+      ]
+     ]
+    },
+    "storage": {
+     "bytes": 0,
+     "begin": 0,
+     "end": 61,
+     "alignment": 1
+    },
+    "explicit": false,
+    "joint": false,
+    "before": {
+     "bytes": 0,
+     "section": {
+      "first": 0,
+      "pages": 0,
+      "bytes": 0,
+      "count": 0,
+      "stride": 0
+     },
+     "kind": 1,
+     "wire": 0,
+     "state": 0,
+     "begin": 0,
+     "end": 61,
+     "lag": 0,
+     "run": 0,
+     "shares": 0,
+     "padding1": 0
+    },
+    "unpinned": "bytes 0 or run 0 (internal; not realized)",
+    "pinned": false
+   }
+  ],
+  "pinned_roots": [
+   22,
+   26,
+   28,
+   30,
+   34,
+   1146,
+   1148,
+   1150,
+   1152,
+   1154,
+   2253,
+   2255,
+   2257,
+   2259,
+   2524,
+   2526,
+   2528,
+   2530,
+   2750
+  ]
+ },
+ "capture_errors": [],
+ "reads": [
+  {
+   "root": 22,
+   "names": [
+    "offset"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6632
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0
+   ],
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  {
+   "root": 24,
+   "names": [
+    "size"
+   ],
+   "pinned": false,
+   "unavailable": "bytes 0 or run 0 (internal; not realized)"
+  },
+  {
+   "root": 26,
+   "names": [
+    "below"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6640
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0
+   ],
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  {
+   "root": 34,
+   "names": [
+    "e"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6656
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    4
+   ],
+   "sha256": "fb5e512425fc9449316ec95969ebe71e2d576dbab833d61e2a5b9330fd70ee02"
+  },
+  {
+   "root": 36,
+   "names": [
+    "d"
+   ],
+   "pinned": false,
+   "unavailable": "bytes 0 or run 0 (internal; not realized)"
+  },
+  {
+   "root": 28,
+   "names": [
+    "h"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    512
+   ],
+   "chosen_copy": 0,
+   "extent": 64,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     16
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    4.0,
+    1.0,
+    0.0,
+    0.0,
+    1.0,
+    3.0,
+    1.0,
+    0.0,
+    0.0,
+    1.0,
+    2.0,
+    1.0,
+    0.0,
+    0.0,
+    1.0,
+    1.0
+   ],
+   "sha256": "e864360dad2c7715fe61f9cd21034271129934f1f4c007027d71b685f0430169"
+  },
+  {
+   "root": 30,
+   "names": [
+    "squares"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6648
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    36.0
+   ],
+   "sha256": "71890599777e547636c4e24d27455013e087059f2f4119f80c82384adb3921d1"
+  },
+  {
+   "root": 32,
+   "names": [
+    "off_diagonal"
+   ],
+   "pinned": false,
+   "unavailable": "bytes 0 or run 0 (internal; not realized)"
+  },
+  {
+   "root": 2253,
+   "names": [
+    "minus"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6696
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    2
+   ],
+   "sha256": "26b25d457597a7b0463f9620f666dd10aa2c4373a505967c7c8d70922a2d6ece"
+  },
+  {
+   "root": 2255,
+   "names": [
+    "plus"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6704
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    2
+   ],
+   "sha256": "26b25d457597a7b0463f9620f666dd10aa2c4373a505967c7c8d70922a2d6ece"
+  },
+  {
+   "root": 2257,
+   "names": [
+    "rank"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6712
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    2
+   ],
+   "sha256": "26b25d457597a7b0463f9620f666dd10aa2c4373a505967c7c8d70922a2d6ece"
+  },
+  {
+   "root": 2259,
+   "names": [
+    "rest"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6720
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    2
+   ],
+   "sha256": "26b25d457597a7b0463f9620f666dd10aa2c4373a505967c7c8d70922a2d6ece"
+  },
+  {
+   "root": 1146,
+   "names": [
+    "u"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    832
+   ],
+   "chosen_copy": 0,
+   "extent": 64,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     16
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0.8226318359375,
+    0.3984169661998749,
+    -0.3375096917152405,
+    -0.22500655055046082,
+    0.3984168767929077,
+    0.08670513331890106,
+    0.8484299182891846,
+    0.33750978112220764,
+    -0.33750975131988525,
+    0.8484299182891846,
+    -0.08670517802238464,
+    0.3984169363975525,
+    -0.2250065803527832,
+    0.33750975131988525,
+    0.39841699600219727,
+    -0.8226318359375
+   ],
+   "sha256": "6b0e1888b7ada337cb92807511174ae8bcc9a0e01a99e636eabaf7be04dc3804"
+  },
+  {
+   "root": 2524,
+   "names": [
+    "rotated"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    896
+   ],
+   "chosen_copy": 0,
+   "extent": 64,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     16
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    1.6124005317687988,
+    0.53436279296875,
+    6.456043166735981e-08,
+    6.79758027644084e-09,
+    0.5343627333641052,
+    0.4650357663631439,
+    7.418229870381765e-07,
+    1.5986450989657897e-06,
+    1.204875843541231e-07,
+    7.895575890870532e-07,
+    3.2664735317230225,
+    -0.36317354440689087,
+    -3.407894411111556e-08,
+    1.59727687787381e-06,
+    -0.3631735146045685,
+    4.65609073638916
+   ],
+   "sha256": "9477eab84bcb2d12e44dc6ad4e073cff86852dcb68f52d8de55d92f6de89f083"
+  },
+  {
+   "root": 2526,
+   "names": [
+    "error"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6728
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    3.1903733127558453e-12
+   ],
+   "sha256": "e0718dfcd0689d8ae4d60cbbb1de7436ae45310775b2938d85314d08cf67889d"
+  },
+  {
+   "root": 2530,
+   "names": [
+    "previous"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6744
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    3.1903733127558453e-12
+   ],
+   "sha256": "e0718dfcd0689d8ae4d60cbbb1de7436ae45310775b2938d85314d08cf67889d"
+  },
+  {
+   "root": 2528,
+   "names": [
+    "again"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6736
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0
+   ],
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  {
+   "root": 2750,
+   "names": [
+    "unaccepted"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6752
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0
+   ],
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  {
+   "root": 1152,
+   "names": [
+    "failed"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6680
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0
+   ],
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  {
+   "root": 1154,
+   "names": [
+    "retried"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6688
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.int32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0
+   ],
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  {
+   "root": 1148,
+   "names": [
+    "at_median[0]"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6664
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    4.0
+   ],
+   "sha256": "4f4b9b7d8b86633e2824e2f439819357b0cd010ab410ea1a691b12c5f94e91e0"
+  },
+  {
+   "root": 1150,
+   "names": [
+    "at_median[1]"
+   ],
+   "pinned": true,
+   "target_is_scheduled": true,
+   "planned_call": {
+    "function": 1,
+    "ordinal": 0,
+    "every": 1
+   },
+   "invocation_execution_before": 0,
+   "row_execution": 0,
+   "copies": [
+    6672
+   ],
+   "chosen_copy": 0,
+   "extent": 4,
+   "dtype": "torch.float32",
+   "geometry": {
+    "shape": [
+     1
+    ],
+    "offset": 0,
+    "terms": [
+     [
+      0,
+      1,
+      1,
+      0
+     ]
+    ]
+   },
+   "elements": [
+    0.0
+   ],
+   "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  {
+   "root": 2249,
+   "names": [
+    "at_mean[0]"
+   ],
+   "pinned": false,
+   "unavailable": "bytes 0 or run 0 (internal; not realized)"
+  },
+  {
+   "root": 2251,
+   "names": [
+    "at_mean[1]"
+   ],
+   "pinned": false,
+   "unavailable": "bytes 0 or run 0 (internal; not realized)"
+  }
+ ]
+}
