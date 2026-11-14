@@ -1,0 +1,7 @@
+# Numerical checks after logical-access construction changed
+
+Canonical native build fb55c77b and mapper/joint-root build including7057885e passed executor ABI checks. The unchanged ordinary tall batched Least caller then passed public compile_module, 34-row native archive restoration without relation solving, and invocation (PID38537, exit0, empty stderr). Exact ranks[2,1]; relative solution errors[2.4749481791158465e-08,3.9736429850260414e-08]; singular errors[1.5391152724464332e-07,5.3237706593483106e-08], finite. Source, installed Torch patch and binary hashes stayed unchanged. lstsq-fixed-native-3-source.json records the canonical environment. Attempt2 stopped before compiler import because its launcher omitted that environment; its raw failure remains recorded.
+
+The unchanged requested-ANE2x2 Hermitian caller crossed the earlier bounded-sort scalar preparation boundary and stopped in typed construction: `ANE operation 336: region builtin round has no MIL operation`. PID40029 exited1; no Program or numerical invocation occurred. Its source and binary hashes stayed unchanged (ane-native-attempt5.json). This is an unfinished MIL builtin consumer, not evidence of hardware inability or permission to substitute another requested processor.
+
+No new numerical fixture, tolerance, rejection policy, or production code was introduced by these observations. Current schedule.py endpoint work was coherent and held; these local clients have no intrinsic network transfers and do not validate that unfinished handoff.

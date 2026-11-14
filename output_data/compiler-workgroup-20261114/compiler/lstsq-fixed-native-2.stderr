@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/__init__.py", line 3484, in _import_device_backends
+    entrypoint()
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch_mesh/__init__.py", line 25, in _autoload
+    from . import backend  # noqa: F401
+    ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch_mesh/backend.py", line 31, in <module>
+    from . import _stream, empty  # _stream's kernels for torch's functional collectives on MPS register as it loads
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ImportError: dlopen(/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch_mesh/_stream.cpython-312-darwin.so, 0x0002): Library not loaded: @rpath/libnccl-mesh.dylib
+  Referenced from: <65DCDAC4-AC14-3D3E-A232-A15E6AD99AE3> /Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch_mesh/_stream.cpython-312-darwin.so
+  Reason: tried: '/Users/mdot/.cache/mesh-checkouts/mesh/current/rdma/libnccl-mesh.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/mdot/.cache/mesh-checkouts/mesh/current/rdma/libnccl-mesh.dylib' (no such file), '/Users/mdot/.cache/mesh-checkouts/mesh/current/rdma/libnccl-mesh.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/mdot/.cache/mesh-checkouts/mesh/current/rdma/libnccl-mesh.dylib' (no such file), '/Users/mdot/.local/share/uv/python/cpython-3.12.14-macos-aarch64-none/lib/libnccl-mesh.dylib' (no such file), '/Users/mdot/.local/share/uv/python/cpython-3.12.14-macos-aarch64-none/lib/libnccl-mesh.dylib' (no such file)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/tmp/mesh-lstsq-fixed-observation.py", line 1, in <module>
+    import hashlib, json, pathlib, torch
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/__init__.py", line 3529, in <module>
+    _import_device_backends()
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/__init__.py", line 3486, in _import_device_backends
+    raise RuntimeError(
+RuntimeError: Failed to load the backend extension: mesh. You can disable extension auto-loading with TORCH_DEVICE_BACKEND_AUTOLOAD=0.
