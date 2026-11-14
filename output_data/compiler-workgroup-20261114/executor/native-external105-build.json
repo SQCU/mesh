@@ -1,0 +1,34 @@
+{
+  "source_commit": "1a2c5ade",
+  "build": {
+    "exit": 0,
+    "targets": [
+      ".build/libmetal_ir.dylib",
+      ".build/libmetal_recording.dylib",
+      ".build/libmesh_metal.dylib",
+      ".build/native_bench",
+      ".build/e2b_replay"
+    ],
+    "log": "output_data/compiler-workgroup-20261114/executor/native-external105-build.log",
+    "log_sha256": "59df6f4eaeda20ffde14c324c3dc23680478ac82fb115c136288434a38ee6f86"
+  },
+  "private_strict": {
+    "file": "metal_program.m",
+    "exit": 0,
+    "flags": "-std=c11 -fblocks -O2 -Wall -Wextra -Werror -fsyntax-only -I . -I /Users/mdot/dox/mesh/rdma"
+  },
+  "sha256": {
+    ".build/libmetal_ir.dylib": "feadfd0199bd3bb73ac5b3dcd5ef954024c2c6d9797ad12b4765b62bc02e52b7",
+    ".build/libmetal_recording.dylib": "ab67784d351426f0b0031ddb6994760795e52fb3ec3e25c3d49d08c1d8caebb2",
+    ".build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303",
+    ".build/native_bench": "f0c5c32dd1deb907387bdb6c013d92608d2afa1921765989ad7013e156cf0c7e",
+    ".build/e2b_replay": "e27b6e6a53fce3ffc87fa009a572be7382097adcae0696b9da6d61417cd50cf4"
+  },
+  "required_symbols": {
+    "MetalRecorderState": true,
+    "MetalRecorderProgram": true,
+    "MetalProgramIssued": true,
+    "MetalProgramEnd": true
+  },
+  "scope": "Redundant argument table query removed; existing table producer retains error ownership. No ABI/schema change; no numerical or fleet rerun."
+}
