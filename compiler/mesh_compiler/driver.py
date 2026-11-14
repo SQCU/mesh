@@ -89,7 +89,7 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
                 wires=declared[key].wires(), output_roles=roles if entry == groups[produced] else (),
                 generator=Generator(words), machines=_machines())
     target = native.compile_program(captured, constructed, declared, analysis,
-                                    planning.here if planning is not None else machine, planning)
+                                    planning.here if planning is not None else machine, planning, targets=targets)
     used = list(dict.fromkeys(g for body in modules.values() for g in body))
     return Scheduled(captured.exported, modules, {g: devices[g] for g in used}, {g: machines[g] for g in used},
                      groups[output_processor],

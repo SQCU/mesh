@@ -17,6 +17,39 @@ A = torch.ops.aten
 # the metadata compiler/mesh_compiler/ir.py views makes, made again over the expanded nodes; and the traced value's own
 VIEWED = ("view", "out", "to", "invariant")
 TRACED = ("val", "tensor_meta")
+# compiler/mesh_compiler/placement.py `work_axes`: a shard's (FX value, dimension, original full extent) triples, the
+# values its own graph's nodes, mapped through every replacement below
+AXES = ("work_axes",)
+
+
+# `node`'s work axes, each reference its image under `mapping`: within one graph (`within`) a reference `mapping`
+# does not move is that same node, still the graph's; into another graph every reference has its image there (the
+# part's own copy, placeholder or result, compiler/mesh_compiler/decompose.py _Part), each full extent kept
+def _axes_moved(node, mapping, within=True):
+    if "work_axes" in node.meta:
+        node.meta["work_axes"] = tuple((mapping.get(value, value) if within else mapping[value], dimension, full)
+                                       for value, dimension, full in node.meta["work_axes"])
+
+
+# `source`'s work axes onto each tensor node of `result`, its replacement: the source's own output that node, its
+# operands their images (`mapping`; within one graph `within`, an unmoved operand itself)
+def _axes_onto(source, result, mapping, within=True):
+    if "work_axes" not in source.meta:
+        return
+    for made in [n for n in pytree.tree_leaves(result) if isinstance(n, torch.fx.Node)
+                 and isinstance(n.meta.get("val"), torch.Tensor)]:
+        made.meta["work_axes"] = source.meta["work_axes"]
+        _axes_moved(made, {**mapping, source: made}, within)
+
+
+# compiler/mesh_compiler/placement.py place `input_parts`: each placeholder's (processor, partition Node, landing
+# geometry) pieces, each partition its image under `mapping` (within one graph an unmoved partition itself), each
+# landing geometry (the source view's storage offset, shape and stride in the placeholder; None for a non-tensor) kept
+def _parts_moved(parts, mapping, within=True):
+    return {mapping.get(node, node) if within else mapping[node]:
+            tuple((processor, mapping.get(part, part) if within else mapping[part], geometry)
+                  for processor, part, geometry in pieces)
+            for node, pieces in parts.items()}
 
 
 # `targets` each processor's (engine, device) (compiler/mesh_compiler/driver.py), the engine of a node's own processor
@@ -57,7 +90,7 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
         with graph.inserting_before(node):
             result = graph.graph_copy(traced.graph, copied)
         made = [copied[n] for n in traced.graph.nodes if n.op not in ("placeholder", "output")]
-        kept = {key: value for key, value in node.meta.items() if key not in TRACED + VIEWED}
+        kept = {key: value for key, value in node.meta.items() if key not in TRACED + VIEWED + AXES}
         device = targets[node.meta["processor"]][1]
         for generated in made:
             generated.meta.update(kept)
@@ -65,6 +98,11 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
                 generated.kwargs = {**generated.kwargs, "device": device}
             sources[generated] = node
         users = list(node.users)
+        _axes_onto(node, result, {})
+        for user in users:
+            _axes_moved(user, {node: result})
+        if "input_parts" in graph_module.meta:
+            graph_module.meta["input_parts"] = _parts_moved(graph_module.meta["input_parts"], {node: result})
         node.replace_all_uses_with(result)
         graph.erase_node(node)
         changed += [flat[k] for k in held] + made + users
