@@ -5,7 +5,7 @@ import os
 import torch
 import torch.nn.functional as F
 
-from tp import arguments, chosen, execute, megatron
+from parallel import arguments, chosen, execute, megatron
 
 
 DIM, HEADS, FF_MULT, LAYERS, BATCH, SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in
@@ -91,7 +91,7 @@ class Inference(torch.nn.Module):
         return 30 * torch.tanh(logits / 30)
 
 
-# tp.py megatron
+# parallel.py megatron
 def placement(processors, units={}):
     return megatron(processors, ('queryproj', 'keyproj', 'valueproj', 'denseproj_in', 'denseproj_gate'),
                     ('attnoutproj', 'denseproj_out'), units)

@@ -275,7 +275,7 @@ class ExternalUse(C.Structure):
 
 
 # metal_ir.h struct metal_ir_work_axis, struct metal_ir_work_extent and struct metal_ir_work_term (metal_ir_work_terms,
-# metal_ir_value_axis): a source association (source task, original full extent, typed value and dimension); a term
+# metal_ir_operation_axis): a source association (source task, original full extent, typed value and dimension); a term
 # domain's extent (its compiled bound, its loop, its source associations axes[axis .. axis + axes)); one retained
 # arithmetic Work term of numeric kernel member (kernel, member, phase), `coefficient` times the product of
 # factors[first .. first + factors), its source operations origins[origin .. origin + origins); 24, 24 and
@@ -292,6 +292,20 @@ class WorkTerm(C.Structure):
     _fields_ = [('coefficient', mesh_graph.Work), ('kernel', mesh.U), ('member', mesh.U), ('phase', mesh.U),
                 ('operation', mesh.U), ('kind', mesh.U), ('domain', mesh.U), ('extents', mesh.U), ('first', mesh.U),
                 ('factors', mesh.U), ('origin', mesh.U), ('origins', mesh.U), ('padding', mesh.U)]
+
+
+# metal_ir.h struct metal_ir_work_association (metal_ir_work_associations): one source association of a surviving
+# operation (task, full; containing operation, original operation and operand ordinal, typed value and dimension, its
+# Unit loop, NONE for none); 40 bytes
+class WorkAssociation(C.Structure):
+    _fields_ = [('task', mesh.Q), ('full', mesh.Q)] + [(name, mesh.U) for name in (
+        'operation', 'source', 'operand', 'value', 'dimension', 'loop')]
+
+
+# metal_ir.h struct metal_ir_numeric (metal_ir_dispatch_numerics): a dispatch's numeric kernel, member range [first,
+# last) and later phase (kernel NONE: no numerical term); 16 bytes
+class Numeric(C.Structure):
+    _fields_ = [('kernel', mesh.U), ('first', mesh.U), ('last', mesh.U), ('later', mesh.U)]
 
 
 # metal_ir.h struct metal_ir_dispatch (metal_ir_dispatches): one dispatch of a program, its kind and kernel; 80 bytes
@@ -467,8 +481,10 @@ def _compiler():
                                                   C.POINTER(C.POINTER(Expr)), C.POINTER(C.POINTER(Term)),
                                                   C.POINTER(C.POINTER(WorkExtent)), C.POINTER(C.POINTER(WorkAxis)),
                                                   C.POINTER(C.POINTER(U))]),
-                ('metal_ir_value_axis', C.c_int, [P, U, U, Q, Q]),
+                ('metal_ir_operation_axis', C.c_int, [P, U, U, U, Q, Q]),
+                ('metal_ir_work_associations', C.POINTER(WorkAssociation), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_dispatches', U, [P, C.POINTER(C.POINTER(Dispatch))]),
+                ('metal_ir_dispatch_numerics', C.POINTER(Numeric), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_kernel_devices', None, [P, U, U * 3]),
                 ('metal_ir_lower', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]),

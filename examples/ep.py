@@ -5,7 +5,7 @@ import os
 import torch
 import torch.nn.functional as F
 
-from tp import arguments, execute
+from parallel import arguments, execute
 
 
 DIM, FFN, EXPERTS, TOP_K, TOKENS = (int(os.environ.get(k, v)) for k, v in

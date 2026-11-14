@@ -5,7 +5,7 @@ import os
 import torch
 import torch.nn.functional as F
 
-from tp import Attention, DIM, arguments, execute
+from parallel import Attention, DIM, arguments, execute
 
 
 SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in (('SEQ', 8192), ('VOCAB', 8192)))

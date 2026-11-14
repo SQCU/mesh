@@ -607,8 +607,9 @@ def meshed(graph, node, held, replaced):
         given = [column[k] for column in columns]
         arguments = iter(given)
         shard = graph.node_copy(node, lambda n: next(arguments))
-        # metal-microbench metal_ir.h metal_ir_value_axis: (FX value, dimension, original full extent) per mesh
-        # dimension d, of the aligned values the shard reads along d and of its own output
+        # metal-microbench metal_ir.h metal_ir_operation_axis (compiler/mesh_compiler/lower_metal.py construct): (FX
+        # value, dimension, original full extent) per mesh dimension d, of the aligned values the shard reads along d
+        # and of its own output
         shard.meta["work_axes"] = (
             *((n, row.index(d), shapes[i][row.index(d)]) for i, (n, row) in enumerate(zip(given, rows)) for d in dims
               if d in row),
@@ -750,8 +751,9 @@ def partitioned(graph, node, held, want, replaced, whole):
                      for n, row in zip(local, rows)]
             arguments = iter(local)
         shard = graph.node_copy(node, lambda n: next(arguments))
-        # metal-microbench metal_ir.h metal_ir_value_axis: (FX value, dimension, original full extent) of each value
-        # the shard reads along `along`, and of its own output where `along` is an output dimension
+        # metal-microbench metal_ir.h metal_ir_operation_axis (compiler/mesh_compiler/lower_metal.py construct): (FX
+        # value, dimension, original full extent) of each value the shard reads along `along`, and of its own output
+        # where `along` is an output dimension
         shard.meta["work_axes"] = (
             *((n, row.index(along), shapes[i][row.index(along)]) for i, (n, row) in enumerate(zip(local, rows))
               if along in row),

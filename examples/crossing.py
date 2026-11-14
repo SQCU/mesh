@@ -4,7 +4,7 @@ import os
 
 import torch
 
-import tp
+import parallel
 
 
 HIDDEN = int(os.environ.get('HIDDEN', '1536'))
@@ -42,10 +42,10 @@ def placement(processors):
 
 
 def main():
-    args = tp.arguments('A chain of all-reduces of a sharded value, with optional numerical work between them.')
+    args = parallel.arguments('A chain of all-reduces of a sharded value, with optional numerical work between them.')
     model = Chain(Crossing()).to(dtype=torch.float16).eval()
     inputs = tuple(torch.zeros(len(args.nodes), HIDDEN, dtype=torch.float16) for _ in range(2))
-    return tp.execute(model, inputs, placement, args)
+    return parallel.execute(model, inputs, placement, args)
 
 
 if __name__ == '__main__':

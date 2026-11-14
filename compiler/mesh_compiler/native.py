@@ -1090,18 +1090,53 @@ def leaf_restored(saved):
                   OutputKind[saved[4]], saved[5])
 
 
+# metal-microbench metal_ir.h metal_ir_work_terms, metal_ir_work_associations and metal_ir_dispatch_numerics: one loaded
+# row program's retained Work (`count` terms and their factors, atoms, extents, axes and origins; its `associated`
+# source associations, `associations`) and each of its dispatches' numeric scope (`numerics`, index-aligned with
+# metal_ir_dispatches, `dispatches` of them), the tables borrowed from `program` (its handle, for identity), kept valid
+# by `owner`, Target.prepare's Owned of the loaded programs (Bound.owned)
+@dataclasses.dataclass(frozen=True)
+class Work:
+    owner: object
+    program: object
+    count: int
+    terms: object
+    factors: object
+    atoms: object
+    extents: object
+    axes: object
+    origins: object
+    numerics: object
+    dispatches: int
+    associations: object
+    associated: int
+
+
+def borrowed(compiler, program, owner):
+    count, dispatches, associated = C.c_size_t(), C.c_size_t(), C.c_size_t()
+    tables = (C.POINTER(metal.WorkTerm)(), C.POINTER(metal.Expr)(), C.POINTER(metal.Term)(),
+              C.POINTER(metal.WorkExtent)(), C.POINTER(metal.WorkAxis)(), C.POINTER(mesh.U)())
+    status = compiler.metal_ir_work_terms(program, C.byref(count), *(C.byref(table) for table in tables))
+    if status:
+        raise OSError(status, "the retained Work of a loaded row program")
+    numerics = compiler.metal_ir_dispatch_numerics(program, C.byref(dispatches))
+    associations = compiler.metal_ir_work_associations(program, C.byref(associated))
+    return Work(owner, program, count.value, *tables, numerics, dispatches.value, associations, associated.value)
+
+
 # A prepared native program on its owner. A call binds its operands at the native program's fixed occurrences (each
 # input or state backing the caller's storage; each fresh output root a result allocation of this call, which the
 # program writes directly), runs one execution of every row, waits for its end, and returns its outputs as views of
 # those backings or of a CONSTANT root's own handle (`fixed`, {(row, root): its tensor}). `uses` the program's
 # borrowed MetalProgramExternals view (pointer, count), kept with the program that owns it; `gpu` the ordinals of the
 # operands it uses on the GPU, read once; `argued` {(row, root): operand ordinal}; `programs` each row's loaded program
-# (Target.prepare's, None for a row without one), owned with `owned`
+# (Target.prepare's, None for a row without one), owned with `owned`; `work` each such row's Work (read by observe
+# once); `signature` its loaded signature (mesh_graph.Signature) bound to this native program, freed with `owned`
 class Bound:
     def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses, programs, signature):
         self.target, self.owner, self.program, self.ended, self.generator = target, owner, program, ended, generator
         self.fixed, self.owned, self.libs, self.executions, self.uses = fixed, owned, libs, 0, uses
-        self.programs = programs
+        self.programs, self.work = programs, None
         self.signature = signature
         self.argued = {at: a for a, operand in enumerate(target.operands) for at in operand.occurrences}
         self.gpu = frozenset(use.argument for use in uses[0][:uses[1]] if use.uses & METAL_EXTERNAL_GPU)
@@ -1215,8 +1250,11 @@ class Bound:
     # design/unequal-shards-change-request.md items 6, 7 and 14; design/aot-compilation-change-request.md A3: the
     # outputs and each compiled unit executed in this invocation (metal_recording.h MetalProgramRunObserved,
     # MetalProgramUnits and MetalProgramObserved, bound by compiler/mesh_compiler/metal.py), with its last executed
-    # residue's members and source identities
+    # residue's members and source identities; `work` each loaded row's borrowed Work, read once
     def observe(self, *given):
+        if self.work is None:
+            self.work = tuple(None if program is None else borrowed(self.libs[1], program, self.owned)
+                              for program in self.programs)
         lib, error = self.libs[2][0], C.create_string_buffer(ROOM)
         run, units, read = lib.MetalProgramRunObserved, lib.MetalProgramUnits, lib.MetalProgramObserved
         outputs = self.invoked(run, given)

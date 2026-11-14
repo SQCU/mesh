@@ -19,8 +19,8 @@ from .ir import RECV, SEND, written
 from .lower_inductor import copies
 from .metal import (CONSTANT, INPUT, NONE, OUTPUT, RELEASE, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED,
                     SOURCE_SENT, SOURCE_VALUE, STATE, TEMPORARY, SourceOperand, _Builder, _compiler)
-from .operations import (ANE, CPU, GPU, _copy, _held, _instruction, _key, _local_call, _metadata, _placed, _same_view,
-                         _stored)
+from .operations import (ANE, CPU, GPU, _Generic, _Lapack, _copy, _held, _instruction, _key, _local_call, _metadata,
+                         _placed, _same_view, _stored)
 
 Root = collections.namedtuple("Root", "name kind role root value")
 Output = collections.namedtuple("Output", "root value literal metadata kind written")
@@ -136,7 +136,21 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         named = {node.target: node for node in nodes if node.op == "placeholder"}
         byname = {node.name: node for node in nodes}
         env, records, owners, inputs, landing, sending, held, grouped = {}, [], [], [], [], [], {}, {}
-        dests, advance = {}, None
+        dests, advance, axes = {}, None, {}
+
+        # metal-microbench metal_ir.h metal_ir_operation_axis: each of a numerical node's work axes
+        # (compiler/mesh_compiler/placement.py `work_axes`: source node, dimension, original full extent) at each operand
+        # of its records `ops` that is that source node's own tensor (env, by identity, before Builder.value names typed
+        # views), by record index from `first`: a _Generic's or _Lapack's (metal.py _Builder.generic: metal_ir_generic
+        # and metal_ir_lapack make the one operation of its inputs, then outputs, in order), another record exposing no
+        # operand ordinal; a reference none of them has, with no operand, on each record
+        def associate(node, ops, first):
+            for reference, dimension, full in node.meta.get("work_axes", ()):
+                tensor = env.get(module.meta["copied"].get(reference))
+                hits = [(i, s) for i, g in enumerate(ops) if isinstance(g, (_Generic, _Lapack))
+                        for s, (t, _) in enumerate([*g.inputs, *g.outputs]) if tensor is not None and t is tensor]
+                for i, s in hits or [(i, NONE) for i in range(len(ops))]:
+                    axes.setdefault(first + i, []).append((s, dimension, tasks[node][0], full))
 
         def place(node):
             return PLACES[targets[node.meta["processor"]][0]]
@@ -218,6 +232,7 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                 env[node], ops = _instruction(local, args, kwargs, node.meta.get("val"), page, generator,
                                                 [dests[node]] if node in dests else None)
                 _placed(ops, place(node), tasks[node][0])
+                associate(node, ops, len(records))
                 records += ops
                 owners += [(tasks[node], None, None, node)] * len(ops)
                 if generator is not None and generator.sites > drew:
@@ -270,10 +285,16 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
         # metal-microbench metal_ir.h metal_ir_operations: each record's whole interval of created operation IDs (a
         # constructor such as metal_ir_sort expands into several), its returned ID where it created none
         operations, advanced, writes, stores, emitted = {}, [], {}, {}, {}
-        for owner, g in zip(owners + [None] * len(stepped), records + stepped):
+        for index, (owner, g) in enumerate(zip(owners + [None] * len(stepped), records + stepped)):
             before = compiler.metal_ir_operations(builder.p)
             op = builder.generic(g)
             made = list(range(before, compiler.metal_ir_operations(builder.p))) or [op]
+            # `associate`'s: an operand's on the record's own operation, one with no operand on each created
+            for operand, dimension, task, full in axes.get(index, ()):
+                for at in made if operand == NONE else (op,):
+                    status = compiler.metal_ir_operation_axis(builder.p, at, operand, dimension, task, full)
+                    if status:
+                        raise OSError(status, "the work axis of operation %d operand %d" % (at, operand))
             if owner is None:
                 advanced += made
                 continue
@@ -311,15 +332,6 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                                                  landed(whole, geometry))
                                        for processor, whole, part, geometry in parts)
                        for position, parts in module.meta.get("input_parts", {}).items()}
-
-        # metal-microbench metal_ir.h metal_ir_value_axis, before metal_ir_construct: each shard's work axes
-        # (compiler/mesh_compiler/placement.py `work_axes`, source nodes, as `typed` takes them) at their typed views,
-        # the shard's task and the original full extent
-        for node in nodes:
-            for reference, dimension, full in node.meta.get("work_axes", ()):
-                status = compiler.metal_ir_value_axis(builder.p, typed(reference)[1], dimension, tasks[node][0], full)
-                if status:
-                    raise OSError(status, "the work axis of %s" % node.name)
 
         vertices = tuple(tuple(emitted.get(node, ())) for node in module.meta["vertices"])
         accesses = tuple(typed(node) for node, _ in source.accesses)
