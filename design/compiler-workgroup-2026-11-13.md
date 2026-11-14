@@ -180,3 +180,32 @@ Environment observation from the preceding review: `TORCH_DEVICE_BACKEND_AUTOLOA
 installed Torch plugin while invoking the existing compiler client. This is per-process environment setup,
 not a compiler restriction. Runtime Metal compilation uses the API; absence of the `metal` command-line tool
 does not establish that it cannot compile. Check actual build and client paths before declaring a blocker.
+
+## Immediate graph algorithm consolidation and result retention
+
+The operator, continuing this workgroup:
+
+> is 'dropping' information from a serializable data tructure evidence of inlining of a graph algorithm where the data structure is a graph? consider eliminating all inlining of all graph algorithms by placing all graph algorithms in a single header module related to graphs to handle this. (this has already begun in this codebase)
+
+> we should also consider that, effectively, there are no semantically valid reasons to 'drop data' from computation results which are already present by wit of being solved, and can be accessed zero-copy by view from existing paged memory, and that consolidating inlined code (and removing redundant inlined code) is in effect a blanket prohibition on the behavior involved in subagent claudes attempting to 'remove' data from interfaces
+
+> " Those callers are centralized only partway." then this must happen immediately
+
+This continues composition requirements 3 and 6; it does not introduce a new graph framework. The immediate
+assignment is to consolidate the remaining graph algorithms into the existing `rdma/mesh-graph.h` module and its
+implementation. Python and native callers use that owner's results. The Python graph module currently contains
+algorithm bodies as well as bindings; replacing only their call sites is incomplete. Directed/undirected semantics,
+edge causes, node identities and transformation correspondence remain part of the producer/consumer review.
+
+Retain solved results and their ownership through actual consumers. Bindings expose views with that ownership;
+they do not reduce a result to selected fields, free it, then reconstruct it for another consumer. Calls that
+analyze the same graph share its retained representation and correspondence. Domain-specific operand construction
+and numerical emission remain with their producers; graph traversal, ordering, closure and contraction do not
+acquire additional implementations there. This changes the interfaces and their callers together, including
+deleting displaced algorithm bodies.
+
+The current source-relation omission is noncompliance with an existing requirement, not a newly discovered
+requirement: composition lines 312–314 have required the value/effect/transfer relation of each edge since
+`9df08de71` (10 November). Root's earlier wording and review did not make that distinction adequately. Specific
+worker drafts replacing relations with operation-number comparisons or task-to-task all-to-all expansion were
+rejected. These observations establish defects and review corrections, not intent.

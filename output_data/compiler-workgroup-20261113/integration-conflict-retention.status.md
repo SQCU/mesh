@@ -62,11 +62,7 @@ asked the same pairs again while neither operation's effects had changed.
   this is legitimate scratch disposal. The vector `Conflict` stays for it.
 - **`p.conflicts`.** The dispatch relation is solved once after `Lower` and is already retained. `Changed` clearing
   it during lowering is changed-input invalidation.
-- **`workCache`.** Clearing it in `Changed` does lose unrelated functions' `Work` results between fusions,
-  through `Time` → `Actor` → `OperationFacts`. But `Work` recurses through `UserCall` targets, and retained
-  LiteRT bodies have cloned callees (`metal_clone.mm` 113 `Callee`). Erasing only a changed operation's own
-  functions could leave a caller's stale entry if a shared callee is mutated. Exact invalidation needs the
-  function mutation and sharing relation. Root required that, and I have not built it, so clear-all stays.
+- **`workCache`.** Superseded by the work-retention section below.
 
 ## Exact source edits (mine only)
 
@@ -106,6 +102,87 @@ are in `/tmp/integration-evidence/syntax-*.log`.
 
 - No library was built and no numerical client was run. Root holds the shared build window, and the existing E2B
   client needs `/mesh0`. Syntax evidence says nothing about behavior or time.
-- A pair's first decision now makes one solver call for each from-access with undecided partners. A single old
-  restricted query made one call. Later questions about the pair, from any function and in either restriction,
-  make no solver call. The net count depends on how often pairs are re-asked; it was not measured.
+- First decisions are now batched (work-retention section): one solver call for each distinct set of undecided
+  partners, not one for each from-access. The net call count against the old per-query calls has not been
+  measured.
+
+## Work retention (`integration-work-retention.md`)
+
+Committed so far: the conflict checkpoint, metal-microbench `2b2cfb38`. Uncommitted and mine: two hunks in
+`metal_ir.mm`, `Changed` and `Decided`. Evidence is syntax only.
+
+### The mutation owners, from the source
+
+`Work(p, f, gpu)` is cached per region-module `ir::Function*` and recurses into `UserCall` targets. These are every
+in-place rewrite of a function body that it could observe:
+
+| Owner | Function rewritten in place | Followed by |
+|---|---|---|
+| `Transform` start, `metal_transform.mm` `Simplify` (`Fold`, `Prune`) | each operation's `region`, `combine`, `finalize` | No `Work` query has run yet in this compilation. `Work` is reached only through `Time`, the dispatch `Actor`, and `metal_lower.mm` lowering, all after this point. |
+| `Fuse(..., true)` | consumer C's `region` (`SetParams`, spliced body); a new `prologue[slot]` | `Changed(p, consumer)` |
+| `Epilogue` | producer P's `region` (`SetParams`, body); `epilogue[j]` replaced, the prior one discarded | `Changed(p, producer)` |
+| `Inline` | consumers through `Fuse`; P is then erased and its functions discarded | `Changed(p, producer)` before `Discard` |
+| new `pre`/`post` functions | `Simplify` before they are installed | not yet reachable when rewritten |
+| `metal_ir.mm` `Binary64(Kernel &)` | a kernel's emitted module, not the region module | not a `workCache` key |
+
+Not owners:
+- `Fuse(..., false)` returns before any edit.
+- `ZeroPoints` edits no function.
+- `Discard` destroys only the functions of an erased operation, which no live function calls.
+
+**Sharing.** Region-module `UserCall`s come from three places, and none of their targets is ever rewritten:
+- `metal_clone.mm` `Callee`, which clones a source callee once, complete.
+- `Splice` within one module (`x.same`), which keeps the original callee.
+- `LogicalRead`, which calls a logical-load function built once, complete, at creation.
+
+An operation's own functions are never `UserCall` targets: a producer's body is spliced into its consumer, not
+called. So when an operation changes, the only invalid `Work` entries are those of its own functions. Their callers
+have no entries, because none exist.
+
+**Replaced versus in place.**
+- A function rewritten in place has its entry erased by its operation's `Changed`.
+- A replaced or discarded function keeps an entry that is never looked up again: no live operation or caller
+  references it, and Tint does not reuse function objects in a module. Examples are Epilogue's prior epilogue and
+  the erased reader's region, which is nulled before `Changed(p, reader)`.
+- `metal_ir_specialize` shares the region module and its function pointers, so its copied `workCache` keys name
+  the same unchanged functions.
+
+### Edit
+
+- `Changed(p, op)` erases from both `workCache` maps the entries of `op.region`, `op.combine`, `op.finalize`,
+  `op.prologue[*]` and `op.epilogue[*]`, instead of clearing them. Every other completed `Work` result is
+  retained.
+- `Decided`: undecided partners are collected exactly for each from-access (sorted, unique). From-accesses with
+  the same partner set are then grouped into one `mesh_graph_dependences_views` call. Its cross pairs are exactly
+  those undecided pairs, so no decided pair re-enters the solver. Record mapping: `from_view` indexes the group's
+  from-accesses, and `to_view - froms.size()` indexes its partners.
+
+### Checks
+
+The canonical `.build/libmetal_ir.dylib` compile flags with `-fsyntax-only`: `metal_ir.mm` and `metal_transform.mm`
+exit 0 with no diagnostics (logs in `/tmp/integration-evidence/`).
+
+### Remaining
+
+- Build and client comparison. The inbox has not announced a coordinated build window, so neither
+  `libmetal_ir.dylib` nor any client has been built or run. Once it opens, compile an existing E2B phase program
+  (`.build/e2b_replay` on a prepared directory, from its existing inputs) before and after `2b2cfb38` plus these
+  two hunks. Compare the lowering result for equality and the compile time. No counter or harness has been added.
+- Staging. Next to my `Decided` hunk, the working tree also carries another worker's move of `Renumber`, and
+  `metal_transform.mm` carries 34 lines that are not mine. Stage only the `Changed` and `Decided` hunks above.
+
+### Root review and subsequent build
+
+Root reviewed the actual function mutation/sharing argument and the retained canonical hazard outputs. Conflict
+retention is checkpointed in metal `2b2cfb38`, with root's selected-hunk index placement error corrected in
+`49b10ee4`; the working source was never changed by that staging correction. Unaffected Work retention and
+unknown-pair batching are the subsequent connected source unit. Compiler supervisor's canonical
+`make .build/e2b_replay .build/native_bench` completed successfully with the source present, followed by fresh
+actual imports and Program create/storage/free (Local 136 bytes, Storage 24 bytes). Evidence logs are
+`compiler/local-construction-metal-build.log` and `compiler/local-construction-abi.log` in this workgroup.
+No numerical or performance comparison is claimed by that build/import evidence.
+
+The operator's subsequent single graph-module/result-view instruction adds an immediate ownership review of
+this representation too: canonical graph results must stay owned and accessible through their consumers. A
+Program-level projection of hazard kinds is not an excuse to introduce a second graph-result owner or discard
+its original relation/correspondence. That consolidation is coordinated with the native graph-owner migration.

@@ -35,3 +35,14 @@ existing relation interface. For an unknown-meet batch containing previously kno
 canonical solver isn't repeatedly retesting those known pairs (the intended removal, not just a cache around
 calls). The chosen exact key must include every geometric operand with its signedness intact. No hash-only
 identity or guessed alias key. Continue implementation with these narrow corrections.
+
+Latest operator turn: "consider eliminating all inlining of all graph algorithms by placing all graph algorithms
+in a single header module related to graphs to handle this. (this has already begun in this codebase)"
+The owner is existing mesh-graph.h/.c, with bindings; do not introduce graph closure/reachability/topology in the
+work-cache correction. Domain-specific IR inspection is an operand producer, not a reason to duplicate graph
+algorithms. Return needed correspondence through the graph API; merely moving a lossy helper is not enough.
+
+BUILD WINDOW: finish current source edit and strict syntax check, then HOLD all source writes and report READY
+in status. Compiler supervisor is preparing canonical Storage24/local API/native argument-buffer rebuild. Root
+will explicitly resume after it completes. Current conflict checkpoint2b2cfb38 was corrected in49b10ee4 because
+root's selected-hunk staging moved index insertions; actual worktree was always correct, no worker source reverted.
