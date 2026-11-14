@@ -1,0 +1,54 @@
+{
+  "client": "complex-native-command.md",
+  "source": "0aff6858",
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "result": {
+    "stage": "result",
+    "eigenvalue_error": 4.373662305057432e-08,
+    "residual": 5.9464500636380277e-08,
+    "orthogonality": 7.79240947243184e-08,
+    "finite": true,
+    "values": [
+      0.8074175119400024,
+      6.192582130432129
+    ],
+    "reference_values": [
+      0.8074175964327477,
+      6.192582403567252
+    ],
+    "vectors_real": [
+      [
+        -0.8823508024215698,
+        0.21045522391796112
+      ],
+      [
+        0.21045522391796112,
+        0.8823508024215698
+      ]
+    ],
+    "vectors_imag": [
+      [
+        -1.576988539753188e-09,
+        -0.42091044783592224
+      ],
+      [
+        0.42091044783592224,
+        2.1307910991197332e-10
+      ]
+    ]
+  },
+  "native_reload": "17 rows restored; no relation solved",
+  "manifest": "complex-source.json",
+  "logs": {
+    "complex-native-1.stdout": {
+      "bytes": 34515,
+      "sha256": "dad06b07949324137e2d98a65e21a73ea4a605bd439d235ca1678bf066f486e0"
+    },
+    "complex-native-1.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "scope": "One complex64 2\u00d72 lower-triangle Hermitian MPS case with ignored imaginary diagonal; no complex128/ANE/degenerate-retry/complex-SVD/pinv/lstsq/performance claim"
+}

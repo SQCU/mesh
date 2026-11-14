@@ -16,5 +16,8 @@
     "jax-qdwh.reference.py": "608c2c429c2a81eee5d27081d4d2dfcb743a2daf14744144b4c3218a62ab5cb6",
     "haar-mezzadri.reference.pdf": "e2767b9a3ad8fa0ed82f643c7fc80b34f4ed8ef7756a6a74e7879719fa3ed050"
   },
-  "binary_reference": "eigh-parts-binaries.json"
+  "binary_reference": "eigh-parts-binaries.json",
+  "changed_source_during_run": [],
+  "changed_binaries": [],
+  "native_invocation": "PASS: compile_module\u2192Program\u2192reload\u2192invoke, 17 rows restored/no relation solved"
 }
