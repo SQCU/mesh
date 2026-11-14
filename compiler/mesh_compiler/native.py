@@ -459,11 +459,12 @@ class Target:
             owned.finalizer()
         return self
 
-    # metal-microbench metal_ir.h metal_ir_archive_load, metal_ir_archive_program, metal_ir_archive_solved and
-    # metal_ir_loaded; metal_recording.h MetalProgramLoad: the completed artifact relocated onto its run-time owner
-    # (bridge.Published, or None: a new arena of the retained local solution), with no lowering, solve, finalization or
-    # compilation; constants: {placeholder name: tensor} for its CONSTANT roots, attached as rdma/mesh_compile.py
-    # _Builder.attach attached them and held as those roots' handles
+    # metal-microbench metal_ir.h metal_ir_archive_load (rdma/mesh_compile.py _archive_loaded: the archive borrows and,
+    # loaded, owns the artifact's own bytes), metal_ir_archive_program and metal_ir_loaded; metal_recording.h
+    # MetalProgramLoad (given the archive handle, which it retains): the completed artifact relocated onto its run-time
+    # owner (bridge.Published, or None: a new arena of the retained local solution), with no lowering, solve,
+    # finalization or compilation; constants: {placeholder name: tensor} for its CONSTANT roots, attached as
+    # rdma/mesh_compile.py _Builder.attach attached them and held as those roots' handles
     def prepare(self, published, constants, row=0):
         libs = libraries()
         M, compiler, (lib, device), _ = libs
@@ -472,8 +473,7 @@ class Target:
         with owned:
             gpu = device()
             owned(lambda: M.PUT(gpu, M.SELECTOR[b"release"]))
-            archive = made(compiler.metal_ir_archive_load(self.artifact, len(self.artifact), gpu, error, ROOM), error,
-                           "the saved program")
+            archive = M._archive_loaded(compiler, self.artifact, gpu, error)
             owned(lambda: compiler.metal_ir_archive_free(archive))
             program = compiler.metal_ir_archive_program(archive, 0)
             owned(lambda: compiler.metal_ir_program_free(program))
@@ -490,9 +490,8 @@ class Target:
                                                  M.RELEASE())
             owner = published if published is not None else Arena(self.solution, owned, M, gpu)
             recorder, calls = self.placed(owned, libs, gpu, owner, program, row, False)
-            native = made(lib.MetalProgramLoad(recorder, calls, 1, C.byref(owner.planned),
-                                               compiler.metal_ir_archive_solved(archive), error, ROOM), error,
-                          "the loaded program's calls")
+            native = made(lib.MetalProgramLoad(recorder, calls, 1, C.byref(owner.planned), archive, error, ROOM),
+                          error, "the loaded program's calls")
             owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
             ended = made(M.OBJECT(gpu, M._SEL(b"newSharedEvent")), error, "the program's event", errno.ENOMEM)
             owned(lambda: M.PUT(ended, M.SELECTOR[b"release"]))

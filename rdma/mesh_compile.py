@@ -7282,7 +7282,7 @@ def _compiler():
         P, U, Q = C.c_void_p, mesh.U, mesh.Q
         for name, result, arguments in (
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
-                ('metal_ir_archive_load', P, [P, C.c_size_t, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_archive_load', P, [P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_solved', P, [P]),
                 ('metal_ir_archive_records', C.POINTER(Span), [P, C.POINTER(U)]),
                 ('metal_ir_archive_free', None, [P]),
@@ -7570,7 +7570,7 @@ def _finalized(programs, context, irs, planned, values, owned):
                                                        C.byref(word)))
         compiler.metal_ir_transport(p, word.value)
         row['status'] = word.value
-        status = compiler.metal_ir_loaded(p, error, len(error)) if 'solved' in programs else \
+        status = compiler.metal_ir_loaded(p, error, len(error)) if 'archive' in programs else \
             compiler.metal_ir_finalize(p, error, len(error))
         if status:
             raise OSError(errno.EINVAL, 'call %s of compiled function %d: its emission: %s'
@@ -7641,8 +7641,8 @@ def _replays(programs, context, irs, planned, values, addresses, base, buffer, b
                                  for row, r in enumerate(rows)])
     # metal_recording.h MetalRecorderProgram
     arguments = (recorder, calls, len(calls), C.byref(planned))
-    program = _owned(owned, lib.MetalProgramLoad(*arguments, programs['solved'], error, len(error))
-                     if 'solved' in programs else lib.MetalRecorderProgram(*arguments, error, len(error)))
+    program = _owned(owned, lib.MetalProgramLoad(*arguments, programs['archive'], error, len(error))
+                     if 'archive' in programs else lib.MetalRecorderProgram(*arguments, error, len(error)))
     if not program:
         raise OSError(errno.EINVAL, 'the program\'s calls: %s' % error.value.decode())
     # metal_recording.h MetalProgramHorizon
@@ -8615,6 +8615,26 @@ def _save_program(context, state, path):
                            'a compiled mesh program', 'w')
 
 
+# metal_ir.h metal_ir_archive_load, metal_ir_archive_free; CPython C API Py_IncRef, Py_DecRef (Reference Counting);
+# ctypes, Callback functions: the archive of `data`, an immutable bytes object whose own buffer it borrows (no copy;
+# CPython 3.12 bytes keep it 8-byte aligned at the object's 32nd byte). One strong reference is taken for the archive,
+# which adopts it on success and drops it through _RELEASED_BYTES (a ctypes callback, which holds the GIL while it
+# runs) once the archive and every relation it lent are freed; on failure the reference is the caller's and is dropped
+# here. The caller's own reference to the archive is released with metal_ir_archive_free
+_INCREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_IncRef', C.pythonapi))
+_DECREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_DecRef', C.pythonapi))
+_RELEASED_BYTES = RELEASE(_DECREF)
+
+
+def _archive_loaded(compiler, data, device, error):
+    _INCREF(id(data))
+    archive = compiler.metal_ir_archive_load(data, len(data), device, _RELEASED_BYTES, id(data), error, len(error))
+    if not archive:
+        _DECREF(id(data))
+        raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
+    return archive
+
+
 def _restore_programs(data, owned):
     lib, made = _recorder()
     compiler, error, device = _compiler(), C.create_string_buffer(4096), made()
@@ -8622,9 +8642,7 @@ def _restore_programs(data, owned):
     PUT(device, SELECTOR[b'release'])
     if not recorder:
         raise OSError(errno.ENODEV, error.value.decode())
-    archive = compiler.metal_ir_archive_load(data, len(data), device, error, len(error))
-    if not archive:
-        raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
+    archive = _archive_loaded(compiler, data, device, error)
     owned[archive] = lambda: compiler.metal_ir_archive_free(archive)
     count = mesh.U()
     record = compiler.metal_ir_archive_records(archive, C.byref(count))
@@ -8675,7 +8693,7 @@ def _restore_programs(data, owned):
         rows.append(row)
     return {'lib': lib, 'compiler': compiler, 'device': device, 'recorder': recorder, 'rows': rows,
             'rated': {k: {v for v, _ in inputs.values()} for k, (_, inputs, _) in enumerate(saved['irs'])},
-            'solved': compiler.metal_ir_archive_solved(archive), 'signature': saved['signature'],
+            'archive': archive, 'signature': saved['signature'],
             'state_data': state_data, 'saved': saved, 'saved_plan': plan}
 
 
