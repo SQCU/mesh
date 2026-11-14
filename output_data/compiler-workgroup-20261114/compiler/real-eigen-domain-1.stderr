@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "<stdin>", line 36, in <module>
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/runtime.py", line 50, in __call__
+    results = self.function(*self.prepare(args, kwargs))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 1266, in __call__
+    return self.invoked(self.libs[2][0].MetalProgramRunArguments, given)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py", line 1255, in invoked
+    raise M._execution_error({"lib": lib, "program": self.program}, status,
+torch._C._LinAlgError: execution 1 of the program: operation 1: check 3, batch 0, info -4: linalg.eig
