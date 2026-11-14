@@ -1,0 +1,1183 @@
+{
+ "program_fields": {
+  "root": 652,
+  "values": 4524,
+  "aliases": [
+   {
+    "value": 652,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     16
+    ],
+    "offset": 0,
+    "layout_terms": 1,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   },
+   {
+    "value": 653,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     4
+    ],
+    "offset": 0,
+    "layout_terms": 1,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   },
+   {
+    "value": 656,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     1,
+     4
+    ],
+    "offset": 0,
+    "layout_terms": 2,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   },
+   {
+    "value": 660,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     4
+    ],
+    "offset": 4,
+    "layout_terms": 1,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   },
+   {
+    "value": 662,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     2,
+     4
+    ],
+    "offset": 0,
+    "layout_terms": 2,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   },
+   {
+    "value": 666,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     4
+    ],
+    "offset": 8,
+    "layout_terms": 1,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   },
+   {
+    "value": 668,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     3,
+     4
+    ],
+    "offset": 0,
+    "layout_terms": 2,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   },
+   {
+    "value": 672,
+    "role": 2,
+    "scalar": 13,
+    "storage": 652,
+    "shape": [
+     4
+    ],
+    "offset": 12,
+    "layout_terms": 1,
+    "internal": 7,
+    "function": 4294967295,
+    "word": 0,
+    "placed": 0,
+    "external": 0,
+    "source": 4294967295,
+    "realized": 0
+   }
+  ],
+  "operations": [
+   {
+    "operation": 368,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "output",
+      "ordinal": 0,
+      "value": 653
+     }
+    ]
+   },
+   {
+    "operation": 369,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "input",
+      "ordinal": 1,
+      "value": 656
+     }
+    ]
+   },
+   {
+    "operation": 370,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "output",
+      "ordinal": 0,
+      "value": 660
+     }
+    ]
+   },
+   {
+    "operation": 371,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "input",
+      "ordinal": 1,
+      "value": 662
+     }
+    ]
+   },
+   {
+    "operation": 372,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "output",
+      "ordinal": 0,
+      "value": 666
+     }
+    ]
+   },
+   {
+    "operation": 373,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "input",
+      "ordinal": 1,
+      "value": 668
+     }
+    ]
+   },
+   {
+    "operation": 374,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "output",
+      "ordinal": 0,
+      "value": 672
+     }
+    ]
+   },
+   {
+    "operation": 375,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "input",
+      "ordinal": 0,
+      "value": 672
+     }
+    ]
+   },
+   {
+    "operation": 377,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     7
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "input",
+      "ordinal": 0,
+      "value": 666
+     }
+    ]
+   },
+   {
+    "operation": 379,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     8
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "input",
+      "ordinal": 0,
+      "value": 660
+     }
+    ]
+   },
+   {
+    "operation": 381,
+    "kind": 0,
+    "place": 0,
+    "erased": 0,
+    "repeat": 4294967295,
+    "identity": 0,
+    "lapack": 4294967295,
+    "implemented": [
+     8
+    ],
+    "absorbed": [],
+    "roles": [
+     {
+      "as": "input",
+      "ordinal": 0,
+      "value": 653
+     }
+    ]
+   }
+  ],
+  "absorbing": [],
+  "kernels_naming_root": [
+   {
+    "kernel": 7,
+    "kind": 0,
+    "repeat": 4294967295,
+    "original": 4294967295,
+    "subject": 4294967295,
+    "numeric": 7,
+    "members": [
+     0,
+     61
+    ],
+    "operations": [
+     317,
+     318,
+     319,
+     320,
+     321,
+     322,
+     323,
+     324,
+     325,
+     326,
+     327,
+     328,
+     329,
+     330,
+     331,
+     332,
+     333,
+     334,
+     335,
+     336,
+     337,
+     338,
+     339,
+     340,
+     341,
+     342,
+     343,
+     344,
+     345,
+     346,
+     347,
+     348,
+     349,
+     350,
+     351,
+     352,
+     353,
+     354,
+     355,
+     356,
+     357,
+     358,
+     359,
+     360,
+     361,
+     362,
+     363,
+     364,
+     365,
+     366,
+     367,
+     368,
+     369,
+     370,
+     371,
+     372,
+     373,
+     374,
+     375,
+     376,
+     377
+    ],
+    "host_entries": 0,
+    "locals": [
+     {
+      "value": 538,
+      "extent": 16
+     },
+     {
+      "value": 542,
+      "extent": 4
+     },
+     {
+      "value": 544,
+      "extent": 4
+     },
+     {
+      "value": 546,
+      "extent": 4
+     },
+     {
+      "value": 576,
+      "extent": 16
+     },
+     {
+      "value": 581,
+      "extent": 4
+     },
+     {
+      "value": 588,
+      "extent": 4
+     },
+     {
+      "value": 595,
+      "extent": 4
+     },
+     {
+      "value": 603,
+      "extent": 4
+     },
+     {
+      "value": 607,
+      "extent": 4
+     },
+     {
+      "value": 611,
+      "extent": 4
+     },
+     {
+      "value": 617,
+      "extent": 1
+     },
+     {
+      "value": 619,
+      "extent": 4
+     },
+     {
+      "value": 657,
+      "extent": 4
+     },
+     {
+      "value": 663,
+      "extent": 4
+     },
+     {
+      "value": 652,
+      "extent": 16
+     },
+     {
+      "value": 669,
+      "extent": 4
+     },
+     {
+      "value": 676,
+      "extent": 4
+     }
+    ],
+    "bindings": [
+     {
+      "index": 0,
+      "slot": 0,
+      "value": 34,
+      "access": 1,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 34
+     },
+     {
+      "index": 1,
+      "slot": 1,
+      "value": 496,
+      "access": 1,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 496
+     },
+     {
+      "index": 2,
+      "slot": 2,
+      "value": 67,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 67
+     },
+     {
+      "index": 3,
+      "slot": 3,
+      "value": 540,
+      "access": 2,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 540
+     },
+     {
+      "index": 4,
+      "slot": 4,
+      "value": 548,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 548
+     },
+     {
+      "index": 5,
+      "slot": 5,
+      "value": 551,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 551
+     },
+     {
+      "index": 6,
+      "slot": 6,
+      "value": 600,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 600
+     },
+     {
+      "index": 7,
+      "slot": 7,
+      "value": 615,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 615
+     },
+     {
+      "index": 8,
+      "slot": 8,
+      "value": 621,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 621
+     },
+     {
+      "index": 9,
+      "slot": 9,
+      "value": 623,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 623
+     },
+     {
+      "index": 10,
+      "slot": 10,
+      "value": 625,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 625
+     },
+     {
+      "index": 11,
+      "slot": 11,
+      "value": 628,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 628
+     },
+     {
+      "index": 12,
+      "slot": 12,
+      "value": 673,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 673
+     }
+    ],
+    "embedded": [],
+    "added_naming_root": []
+   },
+   {
+    "kernel": 8,
+    "kind": 0,
+    "repeat": 4294967295,
+    "original": 4294967295,
+    "subject": 4294967295,
+    "numeric": 8,
+    "members": [
+     0,
+     45
+    ],
+    "operations": [
+     378,
+     379,
+     380,
+     381,
+     382,
+     383,
+     384,
+     385,
+     386,
+     387,
+     388,
+     389,
+     390,
+     391,
+     392,
+     393,
+     394,
+     395,
+     396,
+     397,
+     398,
+     399,
+     400,
+     401,
+     402,
+     403,
+     404,
+     405,
+     406,
+     407,
+     408,
+     409,
+     410,
+     411,
+     412,
+     413,
+     414,
+     415,
+     416,
+     417,
+     418,
+     419,
+     420,
+     421,
+     422
+    ],
+    "host_entries": 0,
+    "locals": [
+     {
+      "value": 680,
+      "extent": 4
+     },
+     {
+      "value": 684,
+      "extent": 4
+     },
+     {
+      "value": 690,
+      "extent": 1
+     },
+     {
+      "value": 692,
+      "extent": 1
+     },
+     {
+      "value": 694,
+      "extent": 4
+     },
+     {
+      "value": 696,
+      "extent": 4
+     },
+     {
+      "value": 698,
+      "extent": 4
+     },
+     {
+      "value": 727,
+      "extent": 16
+     },
+     {
+      "value": 732,
+      "extent": 4
+     },
+     {
+      "value": 738,
+      "extent": 4
+     },
+     {
+      "value": 744,
+      "extent": 4
+     },
+     {
+      "value": 751,
+      "extent": 4
+     },
+     {
+      "value": 755,
+      "extent": 4
+     },
+     {
+      "value": 759,
+      "extent": 4
+     },
+     {
+      "value": 765,
+      "extent": 1
+     }
+    ],
+    "bindings": [
+     {
+      "index": 0,
+      "slot": 0,
+      "value": 621,
+      "access": 1,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 621
+     },
+     {
+      "index": 1,
+      "slot": 1,
+      "value": 623,
+      "access": 1,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 623
+     },
+     {
+      "index": 2,
+      "slot": 2,
+      "value": 628,
+      "access": 1,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 628
+     },
+     {
+      "index": 3,
+      "slot": 3,
+      "value": 673,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 673
+     },
+     {
+      "index": 4,
+      "slot": 4,
+      "value": 652,
+      "access": 1,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 652
+     },
+     {
+      "index": 5,
+      "slot": 5,
+      "value": 34,
+      "access": 1,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 34
+     },
+     {
+      "index": 6,
+      "slot": 6,
+      "value": 67,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 67
+     },
+     {
+      "index": 7,
+      "slot": 7,
+      "value": 688,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 688
+     },
+     {
+      "index": 8,
+      "slot": 8,
+      "value": 540,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 540
+     },
+     {
+      "index": 9,
+      "slot": 9,
+      "value": 700,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 700
+     },
+     {
+      "index": 10,
+      "slot": 10,
+      "value": 703,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 703
+     },
+     {
+      "index": 11,
+      "slot": 11,
+      "value": 748,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 748
+     },
+     {
+      "index": 12,
+      "slot": 12,
+      "value": 763,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 763
+     },
+     {
+      "index": 13,
+      "slot": 13,
+      "value": 767,
+      "access": 3,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 767
+     },
+     {
+      "index": 14,
+      "slot": 14,
+      "value": 769,
+      "access": 2,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 769
+     },
+     {
+      "index": 15,
+      "slot": 15,
+      "value": 771,
+      "access": 2,
+      "bytes": 0,
+      "offset": 0,
+      "var": true,
+      "root": 771
+     }
+    ],
+    "embedded": [],
+    "added_naming_root": []
+   }
+  ],
+  "dispatch": 8,
+  "dispatch_kernel": 8
+ },
+ "error": "Command 8 binds value 652 at 4, which the plan did not place",
+ "row": 1,
+ "rows": 9,
+ "call": 1,
+ "function": 1,
+ "instance": 1,
+ "planned": 1,
+ "composite": false,
+ "copies": [],
+ "value_info": {
+  "role": 2,
+  "scalar": 13,
+  "storage": 652,
+  "function": 4294967295,
+  "index": 4294967295,
+  "word": 0,
+  "of": 4294967295,
+  "range": 0,
+  "received": 0,
+  "sent": 0,
+  "zeroed": 0,
+  "sendings": 0,
+  "identity": 0,
+  "bytes": 0,
+  "offset": 0,
+  "at": 0,
+  "data_bytes": 0,
+  "data": null,
+  "buffer": null,
+  "page_bytes": 0,
+  "pages": 0,
+  "source": 4294967295
+ },
+ "argument": 4294967295,
+ "storage": {
+  "bytes": 0,
+  "begin": 0,
+  "end": 8,
+  "alignment": 4
+ },
+ "storages": 4524,
+ "values": 4524,
+ "row_values_by_row": [
+  64,
+  4524,
+  4524,
+  4524,
+  4524,
+  4524,
+  4524,
+  4524,
+  16
+ ],
+ "row_storages_by_row": [
+  64,
+  4524,
+  4524,
+  4524,
+  4524,
+  4524,
+  4524,
+  4524,
+  16
+ ],
+ "placement_status": 2,
+ "placement": {
+  "buffer": null,
+  "copies": 0
+ },
+ "bindings_naming_root": [
+  {
+   "dispatch": 8,
+   "kind": 0,
+   "index": 4,
+   "slot": 4,
+   "value": 652,
+   "access": 1,
+   "table": 0,
+   "offset": 0,
+   "bytes": 0,
+   "value_role": 2,
+   "value_word": 0
+  }
+ ],
+ "dispatch8": {
+  "kind": 0,
+  "kernel": 8,
+  "binding": 184,
+  "bindings": 16,
+  "effect": 1289,
+  "effects": 106,
+  "source": 379,
+  "sources": 45,
+  "allocation": 8,
+  "allocations": 1,
+  "arguments": 4294967295,
+  "later": 4294967295,
+  "flags": 0,
+  "fill": 0,
+  "groups": [
+   1,
+   1,
+   1
+  ],
+  "threads": [
+   32,
+   1,
+   1
+  ]
+ },
+ "dispatch8_slot4": {
+  "slot": 4,
+  "value": 652,
+  "access": 1,
+  "table": 0,
+  "offset": 0,
+  "bytes": 0
+ },
+ "dispatch8_repeat": 4294967295,
+ "dispatches": 62,
+ "repeats": [
+  {
+   "first": 1332,
+   "end": 1479,
+   "condition": 2529,
+   "parent": 4294967295,
+   "carried": 0,
+   "carried_count": 6,
+   "test": 29,
+   "order_first": 29,
+   "order_last": 33,
+   "padding": 0
+  },
+  {
+   "first": 2351,
+   "end": 2498,
+   "condition": 2529,
+   "parent": 2,
+   "carried": 6,
+   "carried_count": 6,
+   "test": 55,
+   "order_first": 55,
+   "order_last": 59,
+   "padding": 0
+  },
+  {
+   "first": 1480,
+   "end": 2499,
+   "condition": 2751,
+   "parent": 4294967295,
+   "carried": 12,
+   "carried_count": 18,
+   "test": 35,
+   "order_first": 35,
+   "order_last": 60,
+   "padding": 0
+  }
+ ],
+ "repeat_carried": [
+  2283,
+  2478,
+  2524,
+  2526,
+  2530,
+  2528,
+  2283,
+  2478,
+  2524,
+  2526,
+  2530,
+  2528,
+  2283,
+  2478,
+  2524,
+  2526,
+  2530,
+  2528,
+  2750,
+  1146,
+  2269,
+  2253,
+  2255,
+  2257,
+  2259,
+  2261,
+  2263,
+  2265,
+  2267,
+  2285
+ ],
+ "explicit": false,
+ "body_slot": null,
+ "body_inputs_roots": [
+  0,
+  2,
+  4,
+  6,
+  8,
+  10
+ ],
+ "body_outputs_roots": [
+  12,
+  14,
+  16,
+  18
+ ],
+ "body_state_roots": [
+  20
+ ],
+ "source_slots_naming_root": [],
+ "joint_bindings_naming_root": [],
+ "joined": [],
+ "joined_count": 10,
+ "marks_placed": [],
+ "operand_occurrences": [],
+ "function_values": 4524,
+ "counts": 4524,
+ "steps": false,
+ "function_value": {
+  "run": 0,
+  "bytes": 0,
+  "count": 1,
+  "shares": 0,
+  "state": 0,
+  "kind": 1,
+  "begin": 0,
+  "end": 8
+ },
+ "copies_span": 0,
+ "step_value": null,
+ "step_state": 4294967295
+}

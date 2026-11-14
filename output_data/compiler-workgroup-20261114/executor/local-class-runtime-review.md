@@ -1,0 +1,9 @@
+# Local storage class correction: ordinary client and outer archive
+
+Native source metal 430a9fe1; mesh caller source 56435fa4. Compiler build/source/binary/ABI evidence is `../compiler/eigh-local-ownership-{source,binaries,abi}.json` and `eigh-local-ownership-build.log`. Matching build exit 0, source hashes unchanged; Repeat40, Signature416, Function168, Planned152, Local376 and ValueInfo120 verified.
+
+The existing `examples/engines.py` client used ROWS=2, K=32, N=48, LAYERS=1, OP=ffn, ENGINES=cpu with `--nodes 0 --device cpu`, canonical `/Users/mdot/.venv-mesh-uv/bin/python`, live recorder dylib and existing compiler/rdma/examples paths. It completed with reported error 0. Its signature remained `56c07ef0f51c1db72e5843362869573c37083e3d5d80dacac4476d1a4fc48836`. Capture reports 54 values/36744 bytes, one native entry and no GPU commands. No timing comparison is claimed.
+
+The same existing Engines model was saved through `archive.save`, released, loaded through `archive.load`, and invoked on two distinct inputs, x and x+0.125. Relative maximum errors were 0 and 6.902263703523204e-05. The first result remained unchanged after the second invocation; inputs and outputs had distinct backing storage. The full saved signature was equal and the retained Bound signature digest matched. The artifact measured 200997 bytes. The client reports numerical errors without an asserted tolerance, so the exact nonzero second error is retained.
+
+Raw observations: `local-class-cpu.json`, `local-class-cpu.stderr`, `local-class-archive.json`, `local-class-archive.stderr`. Each .json file contains the result line followed by native diagnostics. These are the ordinary regression and ownership observations after the proof correction, not evidence that the pending repeated GPU eigensolver has executed correctly. The same 4×4 MPS retry belongs to the compiler supervisor and runs after this pair.
