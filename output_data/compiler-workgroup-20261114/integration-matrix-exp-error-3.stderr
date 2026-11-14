@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "<stdin>", line 15, in <module>
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 24, in compile_module
+    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 92, in compile_captured
+    constructions[key, group] = construct(
+                                ^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 255, in construct
+    env[node], ops = _instruction(local, args, kwargs, node.meta.get("val"), page, generator,
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py", line 7595, in _instruction
+    return outs[0] if len(outs) == 1 else tuple(outs), _lowering(local, page, generator)(args, kwargs, outs)
+                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py", line 7517, in _lowering
+    if local.target is QDWH_SVD_CORRECTION:
+                       ^^^^^
+NameError: name 'ZGEEV' is not defined. Did you mean: 'GEEV'?

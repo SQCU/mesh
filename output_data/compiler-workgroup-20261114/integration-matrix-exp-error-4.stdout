@@ -1,0 +1,25 @@
+{"stage": "imports", "source_before": {"compiler/mesh_compiler/operations.py": "53cbbb8c2aa7c19a396e1401c58ed1e97d49e376599f37ac8820ba7bea3cc92f", "compiler/mesh_compiler/export.py": "e726cd16fb3f2c073d76737fd0a9ea3896aba9dc395bd32cf19b7330ff1f9a99", "compiler/mesh_compiler/driver.py": "7e1dd75ba45866382e49ef0f952650917303ab255151fe99f1b04f3dff2524b2", "compiler/mesh_compiler/schedule.py": "059bf31b607740a9d09e014cd91e2d232fb5e194920ee72ecaa506625a1be951", "compiler/mesh_compiler/lower_metal.py": "c16038d42792563e44b4513122e16aedb8111a7fc41b6a3192a096954d6058d9", "compiler/mesh_compiler/metal.py": "3bd5818513b019e24a1c86f5c89d64d57e0d74bbdfe6342d7a1d2b68e4213631"}, "source_after": {"compiler/mesh_compiler/operations.py": "53cbbb8c2aa7c19a396e1401c58ed1e97d49e376599f37ac8820ba7bea3cc92f", "compiler/mesh_compiler/export.py": "e726cd16fb3f2c073d76737fd0a9ea3896aba9dc395bd32cf19b7330ff1f9a99", "compiler/mesh_compiler/driver.py": "7e1dd75ba45866382e49ef0f952650917303ab255151fe99f1b04f3dff2524b2", "compiler/mesh_compiler/schedule.py": "059bf31b607740a9d09e014cd91e2d232fb5e194920ee72ecaa506625a1be951", "compiler/mesh_compiler/lower_metal.py": "c16038d42792563e44b4513122e16aedb8111a7fc41b6a3192a096954d6058d9", "compiler/mesh_compiler/metal.py": "3bd5818513b019e24a1c86f5c89d64d57e0d74bbdfe6342d7a1d2b68e4213631"}, "binaries": {"/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "61b1c20fdcc1db44be9614ca11bc29a063f2c54c68bb98a677efabd1ea6b5044", "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "be1a351559d4347cf1c600c954fb2ed602fd294cdff6121234cef8bd129ba65e", "rdma/libmesh.dylib": "ffeea391d1f193113502e4e762e4c42f3f0befced03181259fb7edb79fd2fdec"}}
+{"stage": "compile", "count": 17.0}
+prepared retained order 6 dispatches 4 commands 2 native entries 0 later passes
+prepared dataflow 206 values 364 bytes 6 schedule positions; 0 crossings longest local stretch 6
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source dbed8a76168a2a153df472cd5700856a94b7cfce28c6afe65abb674e58bc0fe1
+prepared kernel 1 synchronization 21 0 0 0 source 3949afb3bb64f103a8eb736cd7a2950adc732c09fe1696a480724b568bbed823
+prepared kernel 3 synchronization 3 0 0 0 source a46da4842db166222062d70942788574e1a6237447fa85985a108523fb226882
+prepared kernel 4 synchronization 0 0 0 0 source ef19362395fbadfeaf7df29520ceb9e88cdfaddee98e6190d386dd0c3cb9ee4b
+prepared dependencies 4 barriers 4 commands
+prepared self-timed program 4 calls 4 positions 1 residues 1 phases 1 plan order edges 3 kept of the unrolled dependences 1 fence waits 2 program-thread waits 0 send-completion waits 0 left to the plan's start 3 start waits
+{"stage": "prepare"}
+prepared retained order 6 dispatches 4 commands 2 native entries 0 later passes
+prepared dataflow 206 values 364 bytes 6 schedule positions; 0 crossings longest local stretch 6
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source dbed8a76168a2a153df472cd5700856a94b7cfce28c6afe65abb674e58bc0fe1
+prepared kernel 1 synchronization 21 0 0 0 source 3949afb3bb64f103a8eb736cd7a2950adc732c09fe1696a480724b568bbed823
+prepared kernel 3 synchronization 3 0 0 0 source a46da4842db166222062d70942788574e1a6237447fa85985a108523fb226882
+prepared kernel 4 synchronization 0 0 0 0 source ef19362395fbadfeaf7df29520ceb9e88cdfaddee98e6190d386dd0c3cb9ee4b
+prepared dependencies 4 barriers 4 commands
+prepared self-timed program 4 calls 4 positions restored (no relation solved)
+{"stage": "invoke"}
+{"stage": "error", "type": "RuntimeError", "message": "execution 0 of the program: operation 72: check 4, batch 0, info 1: linalg.matrix_exp", "first_out": [[NaN, NaN], [NaN, NaN]], "first_all_nan": true}
+{"stage": "next_call"}
+{"stage": "next_result", "relative_error": 3.365406924352477e-08, "aliases_out": true, "result": [[0.9814597964286804, 0.32268089056015015], [-0.16134044528007507, 1.626821517944336]]}

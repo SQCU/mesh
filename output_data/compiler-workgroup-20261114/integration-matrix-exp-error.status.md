@@ -1,5 +1,10 @@
 # Matrix exponential error/result handoff: status
 
+Historical worker and intermediate review checkpoints follow. The completed
+native pairing and actual caller observation on 14 November are recorded in
+`integration-matrix-exp-error-review.md`; the outstanding steps below describe
+their respective intermediate source states.
+
 Integration worker, session `59368744-da56-491a-871a-1be809c0cc93`, `claude-opus-5-5`. **Correction 2: contract
 published, Python side implemented, HOLD for executor/native pairing** (see the last section, which needs one
 native call and its `metal.py` binding).
