@@ -65,6 +65,10 @@ class Exported:
     # export's AOT forward metadata (ViewAndMutationMeta), each AOT input's (InputKind, state target or user input
     # position), each AOT input's and output's prototype value
     aliases: tuple = None
+    # Python inspect Signature.bind and BoundArguments; torch/utils/_pytree.py tree_structure: an outer captured
+    # program's call interface, the inspect.Signature of exactly its compiled slot parameters (export.capture) and the
+    # TreeSpec of their bound values in parameter order (one child a parameter); None for a function's own export
+    interface: tuple = None
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

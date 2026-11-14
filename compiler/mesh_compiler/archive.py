@@ -5,6 +5,7 @@
 # target's joint owner's own result and Scheduled.signature that target's complete signature archive
 # (compiler/mesh_compiler/native.py Target.plan and Target.signature, saved and restored with the target;
 # compiler/mesh_compiler/driver.py compiled), kept in no record of their own here
+import inspect
 import json
 import pathlib
 
@@ -25,7 +26,10 @@ def save(directory, scheduled):
     directory.mkdir(parents=True, exist_ok=True)
     exported, (target,) = scheduled.exported, scheduled.functions.values()
     ordinal = {body.key: k for k, body in enumerate(target.bodies)}
-    torch.save({name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()}, directory / "state.pt")
+    signature, spec = exported.interface
+    torch.save({"state": {name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()},
+                "defaults": {name: parameter.default for name, parameter in signature.parameters.items()
+                             if parameter.default is not inspect.Parameter.empty}}, directory / "state.pt")
     (directory / "scheduled.json").write_text(json.dumps({
         "output_processor": scheduled.output_processor,
         "processors": {processor: str(device) for processor, device in scheduled.devices.items()},
@@ -47,17 +51,24 @@ def save(directory, scheduled):
         "user_inputs": exported.user_inputs,
         "outputs": [[kind.name, key] for kind, key in exported.outputs],
         "out_spec": pytree.treespec_dumps(exported.out_spec),
+        "interface": {"parameters": [[name, parameter.kind.name] for name, parameter in signature.parameters.items()],
+                      "spec": pytree.treespec_dumps(spec)},
     }))
 
 
 def load(directory):
     directory = pathlib.Path(directory)
     about = json.loads((directory / "scheduled.json").read_text())
-    state = torch.load(directory / "state.pt", map_location="cpu", weights_only=True)
+    payload = torch.load(directory / "state.pt", map_location="cpu", weights_only=True)
+    state, defaults = payload["state"], payload["defaults"]
     outputs = [(OutputKind[kind], key) for kind, key in about["outputs"]]
+    signature = inspect.Signature([inspect.Parameter(name, getattr(inspect.Parameter, kind),
+                                                     default=defaults.get(name, inspect.Parameter.empty))
+                                   for name, kind in about["interface"]["parameters"]])
     exported = Exported(None, state, about["tokens"], about["user_inputs"], outputs,
                         pytree.treespec_loads(about["out_spec"]),
-                        {name: InputKind[kind] for name, kind in about["state_kinds"].items()})
+                        {name: InputKind[kind] for name, kind in about["state_kinds"].items()},
+                        interface=(signature, pytree.treespec_loads(about["interface"]["spec"])))
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     functions = {processor: native.restore(saved, directory) for processor, saved in about["targets"].items()}
     (target,) = functions.values()

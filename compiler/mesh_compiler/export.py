@@ -339,28 +339,33 @@ class Captured(torch.fx.Interpreter):
         return super().call_function(target, args, kwargs)
 
 
-# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/fx/_symbolic_trace.py PH: the program's call
-# graph, its placeholders its flat argument leaves
+# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/fx/_symbolic_trace.py PH and
+# Tracer.create_args_for_root (a placeholder for every forward parameter); Python inspect Signature.bind and
+# BoundArguments.apply_defaults: the program's call graph, its placeholders the flat leaves of every forward
+# parameter's bound value, an omitted default's its default
 def calls(program, args, functions, **export_options):
-    parameters = inspect.signature(program.forward).parameters
+    bound = inspect.signature(program.forward).bind(*args)
+    bound.apply_defaults()
     graph = Calls(functions).trace(program, concrete_args={
-        name: pytree.tree_map(lambda _: PH, value) for name, value in zip(parameters, args)})
+        name: pytree.tree_map(lambda _: PH, value) for name, value in bound.arguments.items()})
     # rejection filters are forbidden: a traced node of no capture owner raises here, never dropped from the program
     for node in graph.nodes:
         if node.op not in ("placeholder", "get_attr", "call_module", "call_function", "output"):
             raise NotImplementedError(f"{node.name} runs between the program's compiled calls; every function of a "
                                       "program is captured")
-    return capture(torch.fx.GraphModule(program, graph), args, functions, export_options, program)
+    return capture(torch.fx.GraphModule(program, graph), bound, functions, export_options, program)
 
 
-# design/aot-compilation-change-request.md A1: a module compiled alone, its program one call of it
+# design/aot-compilation-change-request.md A1: a module compiled alone, its program one call of it; its omitted
+# defaults specialized inside that call's export, not outer slots
 def called(module, args, **export_options):
     root, graph = torch.nn.Module(), torch.fx.Graph()
     root.function = module
     leaves, spec = pytree.tree_flatten(args)
     graph.output(graph.call_module("function", tuple(pytree.tree_unflatten(
         [graph.placeholder(f"arg_{k}") for k in range(len(leaves))], spec))))
-    return capture(torch.fx.GraphModule(root, graph), args, {"function"}, export_options, module)
+    return capture(torch.fx.GraphModule(root, graph), inspect.signature(module.forward).bind(*args), {"function"},
+                   export_options, module)
 
 
 # design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/export/graph_signature.py InputKind and
@@ -373,10 +378,16 @@ def called(module, args, **export_options):
 # in `root` (else its attribute target) and its role there (PARAMETER, BUFFER, else CONSTANT_TENSOR, its real tensor
 # kept), unless that fake is already held, so a written attribute is a BUFFER_MUTATION; the program's outputs its
 # token chain, each written state or argument with its role and target, and each leaf of its actual result (the calls'
-# own results, a training call's TrainingResult among them) a USER_OUTPUT, under that result's structure
-def capture(module, args, functions, options, root):
+# own results, a training call's TrainingResult among them) a USER_OUTPUT, under that result's structure; its user
+# leaves those of `bound` (Python inspect BoundArguments of `root.forward`), and its call interface (Exported.interface)
+# the Signature of exactly the bound parameters (their own Parameter objects, kinds and defaults) and the TreeSpec of
+# the bound values in parameter order
+def capture(module, bound, functions, options, root):
     fake = FakeTensorMode(shape_env=ShapeEnv(tracked_fakes=[]), static_shapes=True, allow_non_fake_inputs=True)
-    leaves = [fake.from_tensor(leaf) if isinstance(leaf, torch.Tensor) else leaf for leaf in pytree.tree_leaves(args)]
+    values = tuple(bound.arguments.values())
+    interface = (inspect.Signature([bound.signature.parameters[name] for name in bound.arguments]),
+                 pytree.tree_structure(values))
+    leaves = [fake.from_tensor(leaf) if isinstance(leaf, torch.Tensor) else leaf for leaf in pytree.tree_leaves(values)]
     graph, interpreter = module.graph, Captured(module, functions, options, fake)
     outcome = graph.process_outputs(interpreter.run(*leaves, enable_io_processing=False))
     named = {id(tensor): name for name, tensor in reversed([*root.named_parameters(remove_duplicate=False),
@@ -460,7 +471,8 @@ def capture(module, args, functions, options, root):
                                                or getattr(node.target, "overloadpacket", None) in DRAWING):
                 node.meta["site"] = next(sites)
     exported = Exported(module, state, tokens, [node.name for node in inputs],
-                        [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds)
+                        [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds,
+                        interface=interface)
     return CapturedProgram(exported, interpreter.exported, bound)
 
 

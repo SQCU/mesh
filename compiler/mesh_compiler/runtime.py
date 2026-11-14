@@ -8,12 +8,17 @@ from . import bridge
 from .ir import RETURNED
 
 
-# torch 2.14.0 torch/export/graph_signature.py InputKind; torch/utils/_pytree.py tree_flatten: each placeholder's actual
-# state or user handle, as given (its device the explicit graph copies govern), aliases kept
+# torch 2.14.0 torch/export/graph_signature.py InputKind; Python inspect Signature.bind and BoundArguments
+# apply_defaults; torch/utils/_pytree.py TreeSpec.flatten_up_to; compiler/mesh_compiler/ir.py Exported.interface: each
+# placeholder's actual state or user handle, as given (its device the explicit graph copies govern), aliases kept, the
+# call's arguments bound by the captured slot Signature (its own errors for a missing, unexpected or wrong-kind
+# argument), its defaults applied, and their user leaves the retained TreeSpec's children of the bound values in its
+# structure and key order (its own arity and context errors)
 class Arguments:
     def __init__(self, scheduled, entry=None):
         self.entry = scheduled.output_processor if entry is None else entry
         self.exported = scheduled.exported
+        self.signature, self.spec = self.exported.interface
         self.live = {name: tensor for name, (_, tensor) in self.exported.state.items()
                      if self.exported.state_kinds[name] in (InputKind.PARAMETER, InputKind.BUFFER)}
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items() if name not in self.live}
@@ -34,7 +39,9 @@ class Arguments:
     def prepare(self, args, kwargs):
         for name, tensor in self.live.items():
             self.bind(name, tensor.detach())
-        flat, _ = pytree.tree_flatten((args, kwargs))
+        bound = self.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        flat = self.spec.flatten_up_to(tuple(bound.arguments.values()))
         for name, value in zip(self.exported.user_inputs, flat, strict=True):
             self.bind(name, value)
         return self.arguments
