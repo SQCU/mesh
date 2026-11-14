@@ -58,8 +58,12 @@ struct mesh_function { const struct mesh_declared *declared; const struct mesh_w
                        uint64_t outstanding,plan; const double *host,*work; const struct mesh_graph_dependence *edge;
                        uint32_t parts,edges; const struct mesh_task *task; const struct mesh_graph_dependence *before;
                        const uint32_t *sender,*receiver; double *completion; uint32_t tasks,resources,befores,padding2;
-                       uint32_t *order; };
-_Static_assert(sizeof(struct mesh_function)==160 && offsetof(struct mesh_function,count)==32 &&
+                       uint32_t *order; struct mesh_graph_relation *relation; };
+/* `relation` (design/compilation-composition-change-request.md items 3, 6.4 and 7): the compiled parts' relation (the
+   Actor quotient), borrowed; edge and edges are its data.edge and data.edges; NULL for a function whose edges are a
+   flat operand */
+_Static_assert(sizeof(struct mesh_function)==168 && offsetof(struct mesh_function,relation)==160 &&
+               offsetof(struct mesh_function,count)==32 &&
                offsetof(struct mesh_function,outstanding)==48 && offsetof(struct mesh_function,plan)==56 &&
                offsetof(struct mesh_function,host)==64 && offsetof(struct mesh_function,parts)==88 &&
                offsetof(struct mesh_function,task)==96 && offsetof(struct mesh_function,completion)==128 &&
@@ -97,10 +101,12 @@ struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signatur
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
                       struct mesh_planned_cause *cause; uint64_t horizon;
                       uint32_t functions; size_t extents,*first; struct mesh_planned_transfer *transfer;
-                      struct mesh_graph_access *extent; };
+                      struct mesh_graph_access *extent; void *owned; };
+/* `owned`: a loaded result's own memory and its archive's owner (mesh_plan_load, mesh_local_load), released by
+   mesh_planned_free; NULL for a planned result */
 _Static_assert(sizeof(struct mesh_planned_call)==40 && offsetof(struct mesh_planned_call,function)==16 &&
-               offsetof(struct mesh_planned_call,waits)==32 &&
-               sizeof(struct mesh_planned)==96 && offsetof(struct mesh_planned,calls)==24 &&
+               offsetof(struct mesh_planned_call,waits)==32 && offsetof(struct mesh_planned,owned)==96 &&
+               sizeof(struct mesh_planned)==104 && offsetof(struct mesh_planned,calls)==24 &&
                offsetof(struct mesh_planned,orders)==32 && offsetof(struct mesh_planned,cause)==40 &&
                offsetof(struct mesh_planned,horizon)==48 && offsetof(struct mesh_planned,functions)==56 &&
                offsetof(struct mesh_planned,extents)==64 && offsetof(struct mesh_planned,first)==72 &&
@@ -115,7 +121,12 @@ int mesh_plan_save(struct mesh_ctx *,uint64_t program,const struct mesh_function
   const uint32_t *chains,const struct mesh_planned *,void **bytes,size_t *length);
 int mesh_plan_load(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *,uint32_t count,
   const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
-  const uint32_t *chains,uint64_t deadline,const void *bytes,size_t length,struct mesh_planned *);
+  const uint32_t *chains,uint64_t deadline,const void *bytes,size_t length,void (*release)(void *),void *owner,
+  struct mesh_planned *);
+/* mesh_plan_load's archive (8-byte aligned `bytes`, EINVAL otherwise) restores each function's compiled parts (host,
+   work, and their relation or flat edges) into functions[f] before its inputs are checked, as views of `bytes`, with
+   the result's order, cause and extents; on success the result adopts `owner` (release(owner) once the result, freed
+   by mesh_planned_free, and every loaded relation are released), on failure the caller keeps it */
 void mesh_planned_free(struct mesh_planned *);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/torch-capture-change-request.md item 6;
    design/aot-compilation-change-request.md, appendix item 2: one lowered machine function's own storage, no transfer.
@@ -127,20 +138,23 @@ void mesh_planned_free(struct mesh_planned *);
    copies' byte offsets in it (none where run is 0). Each value's section.count is set to its copies (its bytes and
    pages untouched) and its shares to 1 where one of its copies' assigned bytes meets another copy's */
 struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
-                    uint64_t *offset; void *owned; };
-_Static_assert(sizeof(struct mesh_local)==144 && offsetof(struct mesh_local,bytes)==96 &&
-               offsetof(struct mesh_local,values)==104 && offsetof(struct mesh_local,offsets)==112 &&
-               offsetof(struct mesh_local,first)==120 && offsetof(struct mesh_local,offset)==128 &&
-               offsetof(struct mesh_local,owned)==136,"mesh_local: rdma/mesh.py Local");
+                    uint64_t *offset; };
+_Static_assert(sizeof(struct mesh_local)==144 && offsetof(struct mesh_local,bytes)==104 &&
+               offsetof(struct mesh_local,values)==112 && offsetof(struct mesh_local,offsets)==120 &&
+               offsetof(struct mesh_local,first)==128 && offsetof(struct mesh_local,offset)==136,
+               "mesh_local: rdma/mesh.py Local");
 int mesh_plan_local(struct mesh_function *function,uint64_t quantum,struct mesh_local *out);
 void mesh_local_free(struct mesh_local *out);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7: the local plan's result and the function it
-   was planned from (its value table, its parts' host, work and edges, its parts, edges, outstanding and plan), saved
-   in one archive (*bytes the caller's, released with free) and loaded without planning again: `function`'s arrays
-   then in local->owned, released by mesh_local_free with the result (mesh_plan_local leaves owned NULL, the caller's
-   function its own) */
+   was planned from (its value table, outstanding and plan, and its compiled parts as mesh_plan_save keeps them: host,
+   work and their relation, or flat edges where it has none), saved in one archive (*bytes the caller's, released with
+   free) and loaded without planning again. `bytes` (8-byte aligned, EINVAL otherwise) are borrowed: the loaded
+   function's value table, host, work, edges and relation and the result's arrays are views of them; on success the
+   result adopts `owner` (release(owner) once the result, freed by mesh_local_free, and the loaded relation are both
+   released), on failure the caller keeps it and the result and function are zeroed */
 int mesh_local_save(const struct mesh_function *function,const struct mesh_local *local,void **bytes,size_t *length);
-int mesh_local_load(const void *bytes,size_t length,struct mesh_function *function,struct mesh_local *local);
+int mesh_local_load(const void *bytes,size_t length,void (*release)(void *),void *owner,struct mesh_function *function,
+                    struct mesh_local *local);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

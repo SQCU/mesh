@@ -29,8 +29,15 @@ int mesh_graph_unfold(uint32_t vertices, const size_t *first, uint32_t (*head)(c
 /* one owned search of rows (first, head): count visited vertices, preorder[0 .. count) in discovery (depth-first) or
    visit (breadth-first) order, postorder[0 .. count) in finishing order (depth-first; NULL breadth-first), parent[v]
    and entry[v] the tree parent and row entry that reached v (UINT32_MAX and SIZE_MAX for a root or an unvisited
-   vertex), place[v] v's index in preorder (UINT32_MAX unvisited); freed by mesh_graph_search_free */
-struct mesh_graph_search { uint32_t vertices, count; uint32_t *preorder, *postorder, *parent, *place; size_t *entry; };
+   vertex), place[v] v's index in preorder (UINT32_MAX unvisited), end[v] the exclusive end in preorder of v's
+   depth-first subtree, preorder[place[v] .. end[v]) (UINT32_MAX unvisited; NULL breadth-first); freed by
+   mesh_graph_search_free */
+struct mesh_graph_search {
+  uint32_t vertices, count;
+  uint32_t *preorder, *postorder, *parent, *place;
+  size_t *entry;
+  uint32_t *end;
+};
 /* T. H. Cormen et al., 3rd ed., §22.3 and §22.4, Lemma 22.11: depth-first search over rows (first, head) from
    root[0 .. roots) in that order, each row's entries in order (in reverse order where `reverse`), each reachable vertex
    visited once; EDEADLK on a back edge (a cycle), EINVAL on a vertex out of range */
@@ -38,22 +45,41 @@ int mesh_graph_search(uint32_t vertices, const size_t *first, uint32_t (*head)(c
                       const void *context, uint32_t roots, const uint32_t *root, int reverse,
                       struct mesh_graph_search **made);
 /* T. H. Cormen et al., 3rd ed., §22.2: breadth-first search over rows (first, head) from start[0 .. starts), each start
-   and then each row entry in order, a vertex entering once; EINVAL on a vertex out of range */
+   and then each row entry in order, a vertex entering once; EINVAL on a vertex out of range. mesh_graph_breadth_masked
+   is the same search where active[v] (NULL: every vertex) is nonzero, the row of a vertex v with active[v] == 0 not
+   followed (v itself still visited) */
 int mesh_graph_breadth(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                        const void *context, uint32_t starts, const uint32_t *start, struct mesh_graph_search **made);
+int mesh_graph_breadth_masked(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                              const void *context, uint32_t starts, const uint32_t *start, const unsigned char *active,
+                              struct mesh_graph_search **made);
+/* nonzero where vertex `vertex` is in the depth-first subtree of `ancestor` (place[ancestor] <= place[vertex] <
+   end[ancestor], a vertex in its own subtree); 0 for a breadth-first search (end NULL) or a vertex out of range or
+   unvisited */
+int mesh_graph_ancestor(const struct mesh_graph_search *search, uint32_t ancestor, uint32_t vertex);
 void mesh_graph_search_free(struct mesh_graph_search *made);
 /* rows held as an array: ((const uint32_t *)context)[k] */
 uint32_t mesh_graph_row_head(const void *context, size_t k);
 /* rows of a retained relation (context its struct mesh_graph_relation_data, first its row_first): edge[row_edge[k]].to */
 uint32_t mesh_graph_relation_head(const void *context, size_t k);
+/* incoming rows of a retained relation (context its struct mesh_graph_relation_data, first its in_first):
+   edge[in_edge[k]].from */
+uint32_t mesh_graph_relation_incoming_head(const void *context, size_t k);
 /* A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988: over rows (first, head), the vertices processed
    in the order order[0], order[step], ..., order[(vertices - 1) * step] (each vertex once; a search's postorder over the
    same rows, or its reverse with step -1 from the last element), every head before its row in that order: bit u of
    reached[v * words + u / 64] set where a path of rows leads from v to u, words = (vertices + 63) / 64; EINVAL where the
-   order is not a permutation of the vertices or a head is not before its row; freed by mesh_graph_closure_free */
+   order is not a permutation of the vertices or a head is not before its row; freed by mesh_graph_closure_free.
+   mesh_graph_closure_labels is the same pass over the same rows and order with `columns` label columns, words =
+   (columns + 63) / 64: for v with active[v] nonzero (NULL: every vertex) reached[v] is the union over the heads u of
+   its row of reached[u] and bit label[u] (UINT32_MAX: none), the row of an inactive v not followed (reached[v] empty);
+   EINVAL also for a label at or past `columns` other than UINT32_MAX */
 struct mesh_graph_closure { uint32_t vertices; size_t words; uint64_t *reached; };
 int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                        const void *context, const uint32_t *order, ptrdiff_t step, struct mesh_graph_closure **made);
+int mesh_graph_closure_labels(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                              const void *context, const uint32_t *order, ptrdiff_t step, const unsigned char *active,
+                              uint32_t columns, const uint32_t *label, struct mesh_graph_closure **made);
 void mesh_graph_closure_free(struct mesh_graph_closure *made);
 /* T. H. Cormen et al., Introduction to Algorithms, 3rd ed., §24.2, DAG-SHORTEST-PATHS with max for min; S. Zhang et al.,
    HAP, EuroSys 2024, §3.2: over a retained relation's prerequisite rows (incoming: in_first/in_edge, a row's heads the
@@ -140,6 +166,18 @@ int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const
 /* design/joint-compilation.md §3, row 8 */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place);
+/* a view of directed rows for the order algorithms: vertices 0 .. vertices - 1; vertex v's entries k = 0 ..
+   degree(context, v) - 1, entry k's head head(context, v, k), UINT32_MAX for an entry outside the view (the caller's
+   restriction of retained rows: a cut, a permutation, an orientation); no rows are copied */
+struct mesh_graph_rows_view {
+  uint32_t vertices;
+  const void *context;
+  size_t (*degree)(const void *context, uint32_t v);
+  uint32_t (*head)(const void *context, uint32_t v, size_t k);
+};
+/* mesh_graph_heap_order over a rows view: the same heap (priority, then index); EINVAL for a head out of range or a
+   cycle */
+int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place);
 /* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
    Res. 22(3), 1997, §2; design/integration-finishing-change-request.md item 2 */
 int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from, const uint32_t *to,
@@ -248,6 +286,9 @@ int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *
 int mesh_graph_schedule(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level,
                         uint32_t *place);
 int mesh_graph_levels(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level);
+/* mesh_graph_levels over a rows view: level[v] the longest path to v; EDEADLK for an entry whose head is not after its
+   vertex, EINVAL for a head out of range */
+int mesh_graph_levels_view(const struct mesh_graph_rows_view *rows, uint32_t *level);
 /* design/synchronization-signature-change-request.md items 1, 2, 4 and 6; S. S. Bhattacharyya, S. Sriram and E. A. Lee,
    IEEE Trans. Signal Processing 45(6), 1997, §4.1, §5.1 and §7, Fig. 4; E. A. Lee and D. G. Messerschmitt, IEEE Trans.
    Computers C-36(1), 1987; M. Lam, PLDI 1988; L. Lamport, CACM 21(7), 1978 */

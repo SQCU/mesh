@@ -24,9 +24,15 @@ uint32_t mesh_graph_relation_head(const void *context, size_t k) {
   return data->edge[data->row_edge[k]].to;
 }
 
+uint32_t mesh_graph_relation_incoming_head(const void *context, size_t k) {
+  const struct mesh_graph_relation_data *data = context;
+  return data->edge[data->in_edge[k]].from;
+}
+
 void mesh_graph_search_free(struct mesh_graph_search *made) {
   if (!made) return;
-  free(made->preorder); free(made->postorder); free(made->parent); free(made->place); free(made->entry); free(made);
+  free(made->preorder); free(made->postorder); free(made->parent); free(made->place); free(made->entry);
+  free(made->end); free(made);
 }
 
 static struct mesh_graph_search *search_made(uint32_t vertices, int finishing) {
@@ -39,11 +45,16 @@ static struct mesh_graph_search *search_made(uint32_t vertices, int finishing) {
   made->parent = malloc(room * sizeof *made->parent);
   made->place = malloc(room * sizeof *made->place);
   made->entry = malloc(room * sizeof *made->entry);
-  if (!made->preorder || (finishing && !made->postorder) || !made->parent || !made->place || !made->entry) {
+  made->end = finishing ? malloc(room * sizeof *made->end) : NULL;
+  if (!made->preorder || (finishing && (!made->postorder || !made->end)) || !made->parent || !made->place ||
+      !made->entry) {
     mesh_graph_search_free(made);
     return NULL;
   }
-  for (uint32_t v = 0; v < vertices; v++) { made->parent[v] = made->place[v] = UINT32_MAX; made->entry[v] = SIZE_MAX; }
+  for (uint32_t v = 0; v < vertices; v++) {
+    made->parent[v] = made->place[v] = UINT32_MAX; made->entry[v] = SIZE_MAX;
+    if (finishing) made->end[v] = UINT32_MAX;
+  }
   return made;
 }
 
@@ -62,7 +73,10 @@ int mesh_graph_search(uint32_t vertices, const size_t *first, uint32_t (*head)(c
     if (s->place[v] != UINT32_MAX) continue;
     s->place[v] = s->count; s->preorder[s->count++] = v; next[v] = 0;
     while (!status && v != UINT32_MAX) {
-      if (next[v] == first[v + 1] - first[v]) { finished[v] = 1; s->postorder[done++] = v; v = s->parent[v]; continue; }
+      if (next[v] == first[v + 1] - first[v]) {
+        finished[v] = 1; s->postorder[done++] = v; s->end[v] = s->count; v = s->parent[v];
+        continue;
+      }
       const size_t k = reverse ? first[v + 1] - 1 - next[v]++ : first[v] + next[v]++;
       const uint32_t w = head(context, k);
       if (w >= vertices) status = EINVAL;
@@ -77,8 +91,20 @@ int mesh_graph_search(uint32_t vertices, const size_t *first, uint32_t (*head)(c
   return 0;
 }
 
+int mesh_graph_ancestor(const struct mesh_graph_search *search, uint32_t ancestor, uint32_t vertex) {
+  return search->end && ancestor < search->vertices && vertex < search->vertices &&
+         search->place[ancestor] != UINT32_MAX && search->place[vertex] != UINT32_MAX &&
+         search->place[ancestor] <= search->place[vertex] && search->place[vertex] < search->end[ancestor];
+}
+
 int mesh_graph_breadth(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                        const void *context, uint32_t starts, const uint32_t *start, struct mesh_graph_search **made) {
+  return mesh_graph_breadth_masked(vertices, first, head, context, starts, start, NULL, made);
+}
+
+int mesh_graph_breadth_masked(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                              const void *context, uint32_t starts, const uint32_t *start, const unsigned char *active,
+                              struct mesh_graph_search **made) {
   *made = NULL;
   struct mesh_graph_search *s = search_made(vertices, 0);
   int status = s ? 0 : ENOMEM;
@@ -89,7 +115,7 @@ int mesh_graph_breadth(uint32_t vertices, const size_t *first, uint32_t (*head)(
   }
   for (uint32_t at = 0; !status && at < s->count; at++) {
     const uint32_t v = s->preorder[at];
-    for (size_t k = first[v]; !status && k < first[v + 1]; k++) {
+    for (size_t k = first[v]; !status && (!active || active[v]) && k < first[v + 1]; k++) {
       const uint32_t w = head(context, k);
       if (w >= vertices) status = EINVAL;
       else if (s->place[w] == UINT32_MAX) {
@@ -112,10 +138,13 @@ static int closure_descending(const void *a, const void *b) {
   return (x < y) - (x > y);
 }
 
-int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
-                       const void *context, const uint32_t *order, ptrdiff_t step, struct mesh_graph_closure **made) {
+/* the closure rows of mesh_graph_closure (label NULL: column u for head u, every row followed, a head whose bit is
+   already set skipped) and mesh_graph_closure_labels (column label[u], each head's row merged) */
+static int closure_rows(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                        const void *context, const uint32_t *order, ptrdiff_t step, const unsigned char *active,
+                        uint32_t columns, const uint32_t *label, struct mesh_graph_closure **made) {
   *made = NULL;
-  const size_t words = ((size_t)vertices + 63) / 64;
+  const size_t words = ((size_t)columns + 63) / 64;
   size_t most = 0;
   for (uint32_t v = 0; v < vertices; v++) if (first[v + 1] - first[v] > most) most = first[v + 1] - first[v];
   struct mesh_graph_closure *c = calloc(1, sizeof *c);
@@ -135,7 +164,7 @@ int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(
   for (uint32_t i = 0; !status && i < vertices; i++) {
     const uint32_t v = order[(ptrdiff_t)i * step];
     size_t n = 0;
-    for (size_t k = first[v]; !status && k < first[v + 1]; k++) {
+    for (size_t k = first[v]; !status && (!active || active[v]) && k < first[v + 1]; k++) {
       const uint32_t u = head(context, k);
       if (u >= vertices || rank[u] >= i) status = EINVAL;
       else heads[n++] = rank[u];
@@ -143,11 +172,12 @@ int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(
     qsort(heads, n, sizeof *heads, closure_descending);
     uint64_t *row = c->reached + (size_t)v * words;
     for (size_t j = 0; !status && j < n; j++) {
-      const uint32_t u = order[(ptrdiff_t)heads[j] * step];
-      if (!(row[u / 64] >> (u % 64) & 1)) {
+      const uint32_t u = order[(ptrdiff_t)heads[j] * step], column = label ? label[u] : u;
+      if (column != UINT32_MAX && column >= columns) status = EINVAL;
+      else if (label || !(row[u / 64] >> (u % 64) & 1)) {
         const uint64_t *from = c->reached + (size_t)u * words;
         for (size_t w = 0; w < words; w++) row[w] |= from[w];
-        row[u / 64] |= UINT64_C(1) << (u % 64);
+        if (column != UINT32_MAX) row[column / 64] |= UINT64_C(1) << (column % 64);
       }
     }
   }
@@ -155,6 +185,17 @@ int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(
   if (status) { mesh_graph_closure_free(c); return status; }
   *made = c;
   return 0;
+}
+
+int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                       const void *context, const uint32_t *order, ptrdiff_t step, struct mesh_graph_closure **made) {
+  return closure_rows(vertices, first, head, context, order, step, NULL, vertices, NULL, made);
+}
+
+int mesh_graph_closure_labels(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
+                              const void *context, const uint32_t *order, ptrdiff_t step, const unsigned char *active,
+                              uint32_t columns, const uint32_t *label, struct mesh_graph_closure **made) {
+  return closure_rows(vertices, first, head, context, order, step, active, columns, label, made);
 }
 
 int mesh_graph_longest(const struct mesh_graph_relation *relation, int incoming, const uint32_t *order, ptrdiff_t step,
@@ -2029,19 +2070,21 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
 }
 /* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; design/plan-to-bridge-change-request.md R5; F. B. Schneider,
    ACM Comput. Surv. 1990 */
-int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
-                          const uint32_t *to, uint32_t *place) {
-  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
-  if (edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
-  size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
+int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place) {
+  const uint32_t vertices = rows->vertices;
   size_t *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
   uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap);
   uint32_t *position = malloc(((size_t)vertices + 1) * sizeof *position);
-  int result = !first || !order || !indegree || !heap || !position ? ENOMEM : 0;
+  int result = !indegree || !heap || !position ? ENOMEM : 0;
+  for (uint32_t v = 0; !result && v < vertices; v++) { indegree[v] = 0; position[v] = UINT32_MAX; place[v] = UINT32_MAX; }
+  for (uint32_t v = 0; !result && v < vertices; v++)
+    for (size_t k = 0, n = rows->degree(rows->context, v); !result && k < n; k++) {
+      const uint32_t head = rows->head(rows->context, v, k);
+      if (head == UINT32_MAX) continue;
+      if (head >= vertices) result = EINVAL;
+      else indegree[head]++;
+    }
   if (!result) {
-    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
-    for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; position[v] = UINT32_MAX; place[v] = UINT32_MAX; }
-    for (size_t e = 0; e < edges; e++) indegree[to[e]]++;
     size_t count = 0;
     for (uint32_t v = 0; v < vertices; v++)
       if (!indegree[v]) { heap[count] = v; heap_up(heap, position, order_before, priority, count); count++; }
@@ -2051,14 +2094,43 @@ int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edge
       position[v] = UINT32_MAX;
       if (--count) { heap[0] = heap[count]; heap_down(heap, position, order_before, priority, count, 0); }
       place[v] = placed++;
-      for (size_t k = first[v]; k < first[v + 1]; k++) {
-        const uint32_t head = to[order[k]];
-        if (!--indegree[head]) { heap[count] = head; heap_up(heap, position, order_before, priority, count); count++; }
+      for (size_t k = 0, n = rows->degree(rows->context, v); k < n; k++) {
+        const uint32_t head = rows->head(rows->context, v, k);
+        if (head != UINT32_MAX && !--indegree[head]) {
+          heap[count] = head; heap_up(heap, position, order_before, priority, count); count++;
+        }
       }
     }
     if (placed < vertices) result = EINVAL;
   }
-  free(first); free(order); free(indegree); free(heap); free(position);
+  free(indegree); free(heap); free(position);
+  return result;
+}
+
+/* a flat edge list's rows by `from` (mesh_graph_rows): vertex v's entries the edges order[first[v] .. first[v + 1]) */
+struct flat_rows { const size_t *first, *order; const uint32_t *to; };
+static size_t flat_degree(const void *context, uint32_t v) {
+  const struct flat_rows *r = context;
+  return r->first[v + 1] - r->first[v];
+}
+static uint32_t flat_head(const void *context, uint32_t v, size_t k) {
+  const struct flat_rows *r = context;
+  return r->to[r->order[r->first[v] + k]];
+}
+
+int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
+                          const uint32_t *to, uint32_t *place) {
+  for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
+  if (edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
+  int result = !first || !order ? ENOMEM : 0;
+  if (!result) {
+    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    const struct flat_rows flat = {first, order, to};
+    const struct mesh_graph_rows_view rows = {vertices, &flat, flat_degree, flat_head};
+    result = mesh_graph_heap_order_view(&rows, priority, place);
+  }
+  free(first); free(order);
   return result;
 }
 
@@ -2718,19 +2790,29 @@ int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *
 }
 
 /* design/torch-source-lowering-change-request.md item 3; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
+int mesh_graph_levels_view(const struct mesh_graph_rows_view *rows, uint32_t *level) {
+  for (uint32_t v = 0; v < rows->vertices; v++) level[v] = 0;
+  for (uint32_t v = 0; v < rows->vertices; v++)
+    for (size_t k = 0, n = rows->degree(rows->context, v); k < n; k++) {
+      const uint32_t head = rows->head(rows->context, v, k);
+      if (head == UINT32_MAX) continue;
+      if (head >= rows->vertices) return EINVAL;
+      if (head <= v) return EDEADLK;
+      if (level[v] + 1 > level[head]) level[head] = level[v] + 1;
+    }
+  return 0;
+}
+
 int mesh_graph_levels(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, uint32_t *level) {
   for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
   if (vertices == UINT32_MAX || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
   size_t *first = malloc(((size_t)vertices + 1) * sizeof *first), *order = malloc((edges + 1) * sizeof *order);
   int result = first && order ? 0 : ENOMEM;
-  if (!result) mesh_graph_rows(vertices, edges, depth_head, to, first, order);
-  for (uint32_t v = 0; !result && v < vertices; v++) {
-    level[v] = 0;
-    for (size_t k = first[v]; !result && k < first[v + 1]; k++) {
-      const uint32_t u = from[order[k]];
-      if (u >= v) result = EDEADLK;
-      else if (level[u] + 1 > level[v]) level[v] = level[u] + 1;
-    }
+  if (!result) {
+    mesh_graph_rows(vertices, edges, depth_head, from, first, order);
+    const struct flat_rows flat = {first, order, to};
+    const struct mesh_graph_rows_view rows = {vertices, &flat, flat_degree, flat_head};
+    result = mesh_graph_levels_view(&rows, level);
   }
   free(first); free(order);
   return result;
