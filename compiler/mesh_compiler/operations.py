@@ -3405,6 +3405,310 @@ def _lstsq_unscale(outs, x, a_scale, b_scale):
     return ops
 
 
+# a _record whose one real output is the REGION extremum of its value over its REDUCTION loops (_reduction's states,
+# join and finalize): the largest (`larger`) or the smallest, NaN propagating for a floating kind
+def _record_extreme(sizes, out, picks, ins, fn, iterators, larger=True):
+    (g,) = _record(sizes, [(out, picks)], ins, fn, iterators)
+    kind = g.accumulator[0]
+    limit = (-math.inf if larger else math.inf) if _floating(kind) else \
+        torch.iinfo(torch.int32).min if larger else torch.iinfo(torch.int32).max
+    g.states = [(kind, limit)]
+    g.combiner, g.start, g.precision = [REGION], [IDENTITY], REASSOCIATE
+    g.combine = _joined(g.states, lambda c, a, b: [_extremum(c, a[0], b[0], kind, larger)])
+    g.finalize = _identities(g.states)
+    return [g]
+
+
+# Reference-LAPACK CABS1 (|Re| + |Im|), ABS of a complex (the scaled modulus), ZDSCAL's per-component real scaling and
+# a nonzero entry, of a record value
+def _cabs1(r, t, x):
+    return r('add', t, r('abs', t, _part(r, t, x, 0)), r('abs', t, _part(r, t, x, 1)))
+
+
+def _modulus(r, t, x):
+    return _complex_value(r, t, 'abs', x, None, 1, None) if isinstance(x, tuple) else r('abs', t, x)
+
+
+def _real_scaled(r, t, x, a):
+    return tuple(r('mul', t, p, a) for p in x) if isinstance(x, tuple) else r('mul', t, x, a)
+
+
+def _nonzero(r, t, x):
+    return r('or', BOOL, r('ne', BOOL, _part(r, t, x, 0), r.const(0, t)), r('ne', BOOL, _part(r, t, x, 1), r.const(0, t)))
+
+
+def _offsets(view, at):
+    return [(view, at)] if at else []
+
+
+# a gathered (extracted) input's element at `at` (one int32 index a dimension), its input slot `slot`: a complex one's
+# (re, im) by its real pairs' component coordinate
+def _entry(r, t, slot, x, *at):
+    if x.is_complex():
+        return tuple(r('extract', t, *at, r.const(c, I32), integer=slot) for c in (0, 1))
+    return r('extract', t, *at, integer=slot)
+
+
+# DZNRM2 of the first extent[0] entries of `vector` (its row `at` offset, {0: (offset, bound)}): its largest modulus
+# and the sum of squares of the moduli over it (_linalg_lengths: the norm sqrt(sum) * largest), one-element reals
+def _clipped_norm(vector, extent, at, ops):
+    n, t, real = vector.shape[0], _class(vector.real), vector.real.dtype
+    largest, total = _temporary((1,), real), _temporary((1,), real)
+    view = vector[...]
+    _emit(ops, _record_extreme((n,), largest, (None,), [(view, (0,))], lambda r, v: [(_modulus(r, t, v[0]), t)],
+                               [REDUCTION]), loops=(extent,), offsets=_offsets(view, at))
+
+    def squared(r, v):
+        safe = r('select', t, r('eq', BOOL, v[1], r.const(0, t)), r.const(1, t), v[1])
+        q = r('div', t, _modulus(r, t, v[0]), safe)
+        return [(r('mul', t, q, q), t)]
+    view = vector[...]
+    _emit(ops, _record((n,), [(total, (None,))], [(view, (0,)), (largest, (None,))], squared, [REDUCTION], [SUM]),
+          loops=(extent,), offsets=_offsets(view, at))
+    return largest, total
+
+
+# IZAMAX over the same clipped range: the first index (from the range's start) of the largest CABS1, one-element int32
+def _first_largest(vector, extent, at, ops):
+    n, t, real = vector.shape[0], _class(vector.real), vector.real.dtype
+    largest, first = _temporary((1,), real), _temporary((1,), torch.int32)
+    view = vector[...]
+    _emit(ops, _record_extreme((n,), largest, (None,), [(view, (0,))], lambda r, v: [(_cabs1(r, t, v[0]), t)],
+                               [REDUCTION]), loops=(extent,), offsets=_offsets(view, at))
+    view = vector[...]
+    _emit(ops, _record_extreme((n,), first, (None,), [(view, (0,)), (largest, (None,))], lambda r, v: [(r(
+        'select', I32, r('eq', BOOL, _cabs1(r, t, v[0]), v[1]), r.index(0), r.const(n, I32)), I32)], [REDUCTION],
+        larger=False), loops=(extent,), offsets=_offsets(view, at))
+    return first
+
+
+# ZSWAP of two vectors in place over loop length n: `first` and `second` (view, picks, its offsets), extent[0] entries
+def _swapped(first, second, extent, ops):
+    (x, x_picks, x_at), (y, y_picks, y_at) = first, second
+    t, n = _class(x.real), x.shape[-1]
+    _emit(ops, _record((n,), [(x, x_picks), (y, y_picks)], [(x, x_picks), (y, y_picks)],
+                       lambda r, v: [(v[1], t), (v[0], t)]), loops=(extent,), offsets=_offsets(x, x_at) + _offsets(y, y_at))
+
+
+# Reference-LAPACK SRC/zgebal.f (JOB = 'B', lines 225-418) on one complex square member h, in place. Its outputs:
+# `scale` (real), the SCALE factors of rows ILO..IHI; `perm` (int32), SCALE's interchange indices outside them; `ilo`
+# and `ihi` (one-element int32). `held` holds the caller's temporaries that its repetitions carry. Each DO loop is its
+# n static positions (an inactive one of extent 0) and each DO WHILE a _Repeat. K, L, I and J are the source's 1-based
+# values. Each interchange is a ZSWAP of the actual two columns and two rows. The 363-367 NaN exit (INFO = -3) ends the
+# routine, leaving ILO and IHI unassigned as the source does
+def _zgebal(h, scale, perm, ilo, ihi, ops, held=()):
+    n, t, real = h.shape[-1], _class(h.real), h.real.dtype
+    limits = torch.finfo(real)
+    sfmin1 = limits.tiny / limits.eps
+    sfmax1, sfmin2 = 1 / sfmin1, sfmin1 * 2.0
+    sfmax2 = 1 / sfmin2
+    if not n:
+        ops += _fill(ilo, 1) + _fill(ihi, 0)
+        return
+    k, l, noconv, done, halted, sweep, origin, kz, ks, lz, count, ecol, erow, live, more = \
+        (_temporary((1,), torch.int32) for _ in range(15))
+    c, rr, ca, ra, f, g, s = (_temporary((1,), real) for _ in range(7))
+    reach, en, ec, er = (_temporary((n,), torch.int32) for _ in range(4))
+    carried = (*held, h, scale, perm, ilo, ihi, k, l, noconv, done, halted, sweep, origin, kz, ks, lz, count, ecol,
+               erow, live, more, c, rr, ca, ra, f, g, s, reach, en, ec, er)
+
+    def ints(*values):
+        return lambda r, v: [(r.const(x, I32), I32) for x in values]
+
+    def flag(r, x):
+        return _convert(r, x, BOOL, I32)
+
+    def nonzero(r, x):
+        return r('ne', BOOL, x, r.const(0, I32))
+    ops += _scalars([k, l, noconv, done, halted, sweep, kz], [], ints(1, n, 1, 0, 0, 1, 0))
+
+    # 242-286: rows isolating an eigenvalue pushed down, I = L..1 (its count fixed at entry, L0 `origin`)
+    passes = _scalars([noconv, origin, reach[n - 1:n]], [l, done], lambda r, v: [
+        (r.const(0, I32), I32), (v[0], I32), (r('select', I32, r('and', BOOL, r('le', BOOL, r.const(n, I32), v[0]), r(
+            'not', BOOL, nonzero(r, v[1]))), v[0], r.const(0, I32)), I32)])
+    for i in range(n, 0, -1):
+        line = h[i - 1]
+        _emit(passes, _record((n,), [(count, (None,))], [(line, (0,))], lambda r, v, i=i: [(flag(r, r(
+            'and', BOOL, r('ne', BOOL, r.index(0), r.const(i - 1, I32)), _nonzero(r, t, v[0]))), I32)], [REDUCTION],
+            [SUM]), loops=(_at(reach, i - 1, n),))
+
+        def row(r, v, i=i):
+            found, at, kk, conv, fin, start, ext = v
+            zero, one = r.const(0, I32), r.const(1, I32)
+            can = r('and', BOOL, r('gt', BOOL, ext, zero), r('eq', BOOL, found, zero))
+            r.scatter(0, [r('sub', I32, at, one)], r.const(i, I32), can)
+            moved = r('and', BOOL, can, r('ne', BOOL, at, r.const(i, I32)))
+            last = r('and', BOOL, can, r('eq', BOOL, at, one))
+            after = r('select', I32, r('and', BOOL, can, r('not', BOOL, last)), r('sub', I32, at, one), at)
+            finished = r('or', BOOL, nonzero(r, fin), last)
+            made = [(r.const(i, I32), I32), (after, I32), (flag(r, r('or', BOOL, nonzero(r, conv), can)), I32),
+                    (flag(r, finished), I32), (r('select', I32, moved, at, zero), I32),
+                    (r('select', I32, moved, r('sub', I32, r.const(n + 1, I32), kk), zero), I32),
+                    (r('sub', I32, at, one), I32), (r('sub', I32, kk, one), I32)]
+            if i > 1:
+                made.append((r('select', I32, r('and', BOOL, r('le', BOOL, r.const(i - 1, I32), start), r(
+                    'not', BOOL, finished)), after, zero), I32))
+            return made
+        passes += _record((1,), [(perm, None)] + [(x, (None,)) for x in (l, noconv, done, ecol, erow, lz, kz)]
+                          + ([(reach[i - 2:i - 1], (None,))] if i > 1 else []),
+                          [(x, (None,)) for x in (count, l, k, noconv, done, origin, reach[i - 1:i])], row)
+        column, other = h[:, i - 1], h[...]
+        _swapped((column, (0,), None), (other, (0, None), {1: (lz, n - 1)}), (ecol, n), passes)
+        line, other = h[i - 1], h[...]
+        _swapped((line, (0,), {0: (kz, n - 1)}), (other, (None, 0), {0: (lz, n - 1), 1: (kz, n - 1)}), (erow, n),
+                 passes)
+    passes += _scalars([sweep], [noconv, done], lambda r, v: [(flag(r, r('and', BOOL, nonzero(r, v[0]), r(
+        'not', BOOL, nonzero(r, v[1])))), I32)])
+    ops.append(_Repeat(passes, sweep, carried))
+
+    # 288-317: columns isolating an eigenvalue pushed left, J = K..L (K0 `origin`), unless the rows' search returned
+    ops += _scalars([noconv, sweep], [done], lambda r, v: [(flag(r, r('not', BOOL, nonzero(r, v[0]))), I32)] * 2)
+    passes = _scalars([noconv, origin, reach[0:1], kz], [k, l], lambda r, v: [
+        (r.const(0, I32), I32), (v[0], I32), (r('select', I32, r('and', BOOL, r('le', BOOL, v[0], r.const(1, I32)), r(
+            'ge', BOOL, v[1], r.const(1, I32))), r('add', I32, r('sub', I32, v[1], v[0]), r.const(1, I32)), r.const(
+                0, I32)), I32), (r('sub', I32, v[0], r.const(1, I32)), I32)])
+    for j in range(1, n + 1):
+        column = h[:, j - 1]
+        _emit(passes, _record((n,), [(count, (None,))], [(column, (0,)), (kz, (None,))], lambda r, v, j=j: [(flag(
+            r, r('and', BOOL, r('ne', BOOL, r('add', I32, r.index(0), v[1]), r.const(j - 1, I32)), _nonzero(
+                r, t, v[0]))), I32)], [REDUCTION], [SUM]), loops=(_at(reach, j - 1, n),),
+              offsets=[(column, {0: (kz, n - 1)})])
+
+        def left(r, v, j=j):
+            found, kk, at, conv, start, ext = v
+            zero, one = r.const(0, I32), r.const(1, I32)
+            can = r('and', BOOL, r('gt', BOOL, ext, zero), r('eq', BOOL, found, zero))
+            r.scatter(0, [r('sub', I32, kk, one)], r.const(j, I32), can)
+            moved = r('and', BOOL, can, r('ne', BOOL, kk, r.const(j, I32)))
+            after = r('select', I32, can, r('add', I32, kk, one), kk)
+            made = [(r.const(j, I32), I32), (after, I32), (flag(r, r('or', BOOL, nonzero(r, conv), can)), I32),
+                    (r('select', I32, moved, at, zero), I32),
+                    (r('select', I32, moved, r('sub', I32, r.const(n + 1, I32), kk), zero), I32),
+                    (r('sub', I32, kk, one), I32), (r('sub', I32, after, one), I32)]
+            if j < n:
+                within = r('and', BOOL, r('le', BOOL, start, r.const(j + 1, I32)), r('ge', BOOL, at, r.const(j + 1, I32)))
+                made.append((r('select', I32, within, r('add', I32, r('sub', I32, at, after), one), zero), I32))
+            return made
+        passes += _record((1,), [(perm, None)] + [(x, (None,)) for x in (k, noconv, ecol, erow, ks, kz)]
+                          + ([(reach[j:j + 1], (None,))] if j < n else []),
+                          [(x, (None,)) for x in (count, k, l, noconv, origin, reach[j - 1:j])], left)
+        column, other = h[:, j - 1], h[...]
+        _swapped((column, (0,), None), (other, (0, None), {1: (ks, n - 1)}), (ecol, n), passes)
+        line, other = h[j - 1], h[...]
+        _swapped((line, (0,), {0: (ks, n - 1)}), (other, (None, 0), {0: (ks, n - 1), 1: (ks, n - 1)}), (erow, n),
+                 passes)
+    passes += _scalars([sweep], [noconv], lambda r, v: [(v[0], I32)])
+    ops.append(_Repeat(passes, sweep, carried))
+
+    # 321-325: SCALE(K..L) = 1; the scaled positions K <= I <= L, each one's extents for C and R (L - K + 1), CA (L)
+    # and RA (N - K + 1)
+    ops += _scalars([count, kz], [k, l, done], lambda r, v: [(r('select', I32, nonzero(r, v[2]), r.const(0, I32), r(
+        'add', I32, r('sub', I32, v[1], v[0]), r.const(1, I32))), I32), (r('sub', I32, v[0], r.const(1, I32)), I32)])
+    unit = scale[...]
+    _emit(ops, _record((n,), [(unit, (0,))], [], lambda r, v: [(r.const(1, t), t)]), loops=((count, n),),
+          offsets=[(unit, {0: (kz, n - 1)})])
+
+    def extents(r, v):
+        kk, at, fin = v
+        p = r('add', I32, r.index(0), r.const(1, I32))
+        inside = _all(r, [r('not', BOOL, nonzero(r, fin)), r('le', BOOL, kk, p), r('le', BOOL, p, at)])
+        zero = r.const(0, I32)
+        return [(r('select', I32, inside, x, zero), I32) for x in (
+            r('add', I32, r('sub', I32, at, kk), r.const(1, I32)), at, r('sub', I32, r.const(n + 1, I32), kk))]
+    ops += _record((n,), [(en, (0,)), (ec, (0,)), (er, (0,))], [(k, (None,)), (l, (None,)), (done, (None,))], extents)
+
+    # 344-413: the norm-reducing iteration while NOCONV
+    ops += _scalars([noconv, sweep], [done], lambda r, v: [(flag(r, r('not', BOOL, nonzero(r, v[0]))), I32)] * 2)
+    passes = _scalars([noconv], [], ints(0))
+
+    def tested(r, conv, ff, cc, cca, rrr, gg, rra, first):
+        test = [nonzero(r, conv)]
+        if first:
+            test += [r('lt', BOOL, cc, gg), r('lt', BOOL, ff, r.const(sfmax2, t)), r('lt', BOOL, cc, r.const(sfmax2, t)),
+                     r('lt', BOOL, cca, r.const(sfmax2, t)), r('gt', BOOL, rrr, r.const(sfmin2, t)),
+                     r('gt', BOOL, gg, r.const(sfmin2, t)), r('gt', BOOL, rra, r.const(sfmin2, t))]
+        else:
+            test += [r('ge', BOOL, gg, rrr), r('lt', BOOL, rrr, r.const(sfmax2, t)), r('lt', BOOL, rra, r.const(
+                sfmax2, t)), r('gt', BOOL, ff, r.const(sfmin2, t)), r('gt', BOOL, cc, r.const(sfmin2, t)),
+                r('gt', BOOL, gg, r.const(sfmin2, t)), r('gt', BOOL, cca, r.const(sfmin2, t))]
+        return flag(r, _all(r, test))
+    for i in range(1, n + 1):
+        column, line = h[:, i - 1], h[i - 1]
+        c_max, c_sum = _clipped_norm(column, _at(en, i - 1, n), {0: (kz, n - 1)}, passes)
+        r_max, r_sum = _clipped_norm(line, _at(en, i - 1, n), {0: (kz, n - 1)}, passes)
+        ica = _first_largest(column, _at(ec, i - 1, n), None, passes)
+        ira = _first_largest(line, _at(er, i - 1, n), {0: (kz, n - 1)}, passes)
+
+        # 350-371: C, R, CA and RA; a zero C or R (CYCLE) or a NaN (the exit) not live; G = R / SCLFAC, F = 1, S
+        def setup(r, v, i=i):
+            cm, cs, rm, rs, at_c, at_r, kk, ext, stop, slot = v
+            zero = r.const(0, t)
+            cc, rrr = r('mul', t, r('sqrt', t, cs), cm), r('mul', t, r('sqrt', t, rs), rm)
+            cca = _modulus(r, t, _entry(r, t, slot, h, _bounded(r, at_c, n)[1], r.const(i - 1, I32)))
+            rra = _modulus(r, t, _entry(r, t, slot, h, r.const(i - 1, I32), _bounded(r, r('add', I32, at_r, kk), n)[1]))
+            present = _all(r, [r('gt', BOOL, ext, r.const(0, I32)), r('not', BOOL, nonzero(r, stop)),
+                               r('ne', BOOL, cc, zero), r('ne', BOOL, rrr, zero)])
+            nan = r('and', BOOL, present, r('isnan', BOOL, r('add', t, r('add', t, r('add', t, cc, cca), rrr), rra)))
+            alive = flag(r, r('and', BOOL, present, r('not', BOOL, nan)))
+            one, gg = r.const(1, t), r('div', t, rrr, r.const(2, t))
+            return [(cc, t), (rrr, t), (cca, t), (rra, t), (one, t), (gg, t), (r('add', t, cc, rrr), t), (alive, I32),
+                    (flag(r, r('or', BOOL, nonzero(r, stop), nan)), I32),
+                    (tested(r, alive, one, cc, cca, rrr, gg, rra, True), I32)]
+        passes += _scalars([c, rr, ca, ra, f, g, s, live, halted, more],
+                           [c_max, c_sum, r_max, r_sum, ica, ira, kz, en[i - 1:i], halted], setup, [h])
+
+        # 373-381 and 385-393: the two DO WHILE loops, each pass one source iteration by SCLFAC = 2
+        def stepped(first):
+            def step(r, v):
+                ff, cc, cca, rrr, gg, rra, alive = v
+                two = r.const(2, t)
+                up, down = (lambda x: r('mul', t, x, two)), (lambda x: r('div', t, x, two))
+                if first:
+                    made = [up(ff), up(cc), up(cca), down(rrr), down(gg), down(rra)]
+                else:
+                    made = [down(ff), down(cc), down(cca), up(rrr), down(gg), up(rra)]
+                return [(x, t) for x in made] + [(tested(r, alive, *made, first), I32)]
+            return step
+        ops_first = _scalars([f, c, ca, rr, g, ra, more], [f, c, ca, rr, g, ra, live], stepped(True))
+        passes.append(_Repeat(ops_first, more, carried))
+        passes += _scalars([g, more], [f, c, ca, rr, g, ra, live], lambda r, v: [
+            (r('div', t, v[1], r.const(2, t)), t),
+            (tested(r, v[6], v[0], v[1], v[2], v[3], r('div', t, v[1], r.const(2, t)), v[5], False), I32)])
+        ops_second = _scalars([f, c, ca, rr, g, ra, more], [f, c, ca, rr, g, ra, live], stepped(False))
+        passes.append(_Repeat(ops_second, more, carried))
+
+        # 397-409: the balance unless C + R >= FACTOR S or the SCALE bounds; G = 1 / F, SCALE(I) = SCALE(I) F, then
+        # ZDSCAL of row I (columns K..N) by G and of column I (rows 1..L) by F
+        def balanced(r, v):
+            cc, rrr, ss, ff, alive, factor, conv, kk, at = v
+            one, zero = r.const(1, t), r.const(0, I32)
+            small = _all(r, [r('lt', BOOL, ff, one), r('lt', BOOL, factor, one),
+                             r('le', BOOL, r('mul', t, ff, factor), r.const(sfmin1, t))])
+            large = _all(r, [r('gt', BOOL, ff, one), r('gt', BOOL, factor, one),
+                             r('ge', BOOL, factor, r('div', t, r.const(sfmax1, t), ff))])
+            apply = _all(r, [nonzero(r, alive), r('lt', BOOL, r('add', t, cc, rrr), r('mul', t, r.const(0.95, t), ss)),
+                             r('not', BOOL, small), r('not', BOOL, large)])
+            return [(r('select', t, apply, r('mul', t, factor, ff), factor), t), (r('div', t, one, ff), t),
+                    (flag(r, r('or', BOOL, nonzero(r, conv), apply)), I32),
+                    (r('select', I32, apply, r('sub', I32, r.const(n + 1, I32), kk), zero), I32),
+                    (r('select', I32, apply, at, zero), I32)]
+        passes += _scalars([scale[i - 1:i], g, noconv, erow, ecol],
+                           [c, rr, s, f, live, scale[i - 1:i], noconv, k, l], balanced)
+        line = h[i - 1]
+        _emit(passes, _record((n,), [(line, (0,))], [(line, (0,)), (g, (None,))], lambda r, v: [(_real_scaled(
+            r, t, v[0], v[1]), t)]), loops=((erow, n),), offsets=[(line, {0: (kz, n - 1)})])
+        column = h[:, i - 1]
+        _emit(passes, _record((n,), [(column, (0,))], [(column, (0,)), (f, (None,))], lambda r, v: [(_real_scaled(
+            r, t, v[0], v[1]), t)]), loops=((ecol, n),))
+    passes += _scalars([sweep], [noconv, halted], lambda r, v: [(flag(r, r('and', BOOL, nonzero(r, v[0]), r(
+        'not', BOOL, nonzero(r, v[1])))), I32)])
+    ops.append(_Repeat(passes, sweep, carried))
+
+    # 276-279 and 415-416: ILO = IHI = 1 where the rows' search returned, else K and L; unassigned after the exit
+    ops += _scalars([ilo, ihi], [k, l, done, halted, ilo, ihi], lambda r, v: [(r('select', I32, nonzero(r, v[3]), v[
+        4 + d], r('select', I32, nonzero(r, v[2]), r.const(1, I32), v[d])), I32) for d in (0, 1)])
+
+
 # an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
 def _bounded(r, at, size):
     zero, last = r.const(0, I32), r.const(size - 1, I32)
