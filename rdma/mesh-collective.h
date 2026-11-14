@@ -89,6 +89,10 @@ struct mesh_graph_dependence;
 struct mesh_graph_access;
 enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_SUBMIT, MESH_PLANNED_OUTSTANDING,
        MESH_PLANNED_CHAIN, MESH_PLANNED_TRANSFER, MESH_PLANNED_PART };
+/* struct mesh_planned order[q]'s domain by cause[q].kind, in every result (mesh_plan, mesh_plan_local, loaded):
+   MESH_PLANNED_PART call `pair`'s part vertices from 0 (its function's edges); MESH_ORDER_FLOW, MESH_ORDER_CONFLICT
+   and MESH_PLANNED_CHAIN call ordinals; MESH_PLANNED_PROGRAM, _SUBMIT, _OUTSTANDING and _TRANSFER the signature's
+   tasks */
 struct mesh_planned_cause { uint32_t kind,pair; };
 struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,parts,waits,padding; };
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/plan-to-bridge-change-request.md R1, R2

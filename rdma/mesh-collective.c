@@ -1306,17 +1306,21 @@ static int plan_graph(struct plan *plans,const struct mesh_function *functions,u
     planned->call[j]=(struct mesh_planned_call){.lead=p->start_lead,.function=calls[j],.ordinal=place[j],
                                                 .every=p->calls,.parts=functions[calls[j]].parts};
   }
+  /* the orders at this node in their cause's domain (mesh-collective.h struct mesh_planned): FLOW, CONFLICT and
+     CHAIN between call ordinals, the bridge's other kinds between the signature's tasks */
   for(size_t e=0;e<built;e++)
     if(plan_here(key,node,J,n,self,from[e]) && plan_here(key,node,J,n,self,to[e])){
+      const uint32_t k=cause[e].kind;
+      const int calls_of=k==MESH_ORDER_FLOW || k==MESH_ORDER_CONFLICT || k==MESH_PLANNED_CHAIN;
       planned->cause[planned->orders]=cause[e];
-      planned->order[planned->orders++]=(struct mesh_graph_dependence){from[e],to[e],delay[e]};
+      planned->order[planned->orders++]=(struct mesh_graph_dependence){calls_of?call[from[e]]:from[e],
+                                                                       calls_of?call[to[e]]:to[e],delay[e]};
     }
-  for(uint32_t j=0,base=V;j<J;base+=2*functions[calls[j++]].parts){
+  for(uint32_t j=0;j<J;j++){
     const struct mesh_function *f=functions+calls[j];
     for(uint32_t e=0;e<f->edges;e++){
-      planned->cause[planned->orders]=(struct mesh_planned_cause){MESH_PLANNED_PART,UINT32_MAX};
-      planned->order[planned->orders++]=(struct mesh_graph_dependence){base+f->edge[e].from,base+f->edge[e].to,
-                                                                       f->edge[e].delay};
+      planned->cause[planned->orders]=(struct mesh_planned_cause){MESH_PLANNED_PART,j};
+      planned->order[planned->orders++]=f->edge[e];
     }
   }
   double lambda;
