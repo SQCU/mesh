@@ -24,4 +24,4 @@ lengths = torch.linalg.vector_norm(v, dim=0)
 print(json.dumps({'eigenvalue_error': matching, 'residual': float(torch.linalg.norm(aa@v-v*w)/(norm*torch.linalg.norm(v))), 'normalization': float(torch.max(torch.abs(lengths-1))), 'finite': bool(torch.isfinite(w).all() and torch.isfinite(v).all()), 'values_real': w.real.tolist(), 'values_imag': w.imag.tolist(), 'vectors_real': v.real.tolist(), 'vectors_imag': v.imag.tolist()}), flush=True)
 ```
 
-The reference is only an output metric. Raw stdout/stderr, terminal status and source/binary hashes accompany the actual observation when it runs. This document records the next input, not an already completed run.
+The reference is only an output metric. The completed observation, raw stdout/stderr and source/binary hashes are recorded by real-eigen-native-result.json and real-eigen-connected-review.md.

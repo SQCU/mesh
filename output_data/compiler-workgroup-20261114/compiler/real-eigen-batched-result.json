@@ -1,0 +1,48 @@
+{
+  "input_shape": [
+    2,
+    3,
+    3
+  ],
+  "input_stride": [
+    9,
+    1,
+    3
+  ],
+  "input_dtype": "torch.float64",
+  "output_shape": [
+    2,
+    3
+  ],
+  "output_dtype": "torch.complex128",
+  "eigenvalue_errors": [
+    3.675308451366845e-17,
+    0.0
+  ],
+  "finite": true,
+  "real": [
+    [
+      0.5,
+      0.5,
+      2.0
+    ],
+    [
+      1.25,
+      1.25,
+      4.25
+    ]
+  ],
+  "imag": [
+    [
+      1.0,
+      -1.0,
+      0.0
+    ],
+    [
+      2.0,
+      -2.0,
+      0.0
+    ]
+  ],
+  "changed_paths": []
+}
