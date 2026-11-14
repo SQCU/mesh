@@ -4213,6 +4213,240 @@ def _zlahqr(h, z, w, ilo, ihi, info, ops, held=()):
     ops.append(_Repeat(passes, more, carried))
 
 
+# Reference-LAPACK SRC/ztrevc.f 323-409 (SIDE = 'R', HOWMNY = 'B') with zlatrs.f 324-1025 (UPLO = 'U', TRANS = 'N',
+# DIAG = 'N', NORMIN = 'Y'): h the upper triangular Schur form (read only, its diagonal the source's original T(K,K)),
+# z the Schur vectors, vr the eigenvectors Z X, each column scaled to largest CABS1 1. Column KI of x (n x n) is
+# KI's solve (T(1:KI-1,1:KI-1) - T(KI,KI)) X = SCALE (-T(1:KI-1,KI)), its diagonal T(K,K) - T(KI,KI) raised to SMIN
+# where CABS1 is below it; the per-KI state (SMIN, TSCAL, GROW, XBND, SCALE, XMAX) is a vector by KI, and all the
+# solves run together in the source's row order J = KI-1..1 (the static rounds J = n-1..1, column KI taking part
+# where J < KI)
+def _ztrevc(h, z, vr, ops):
+    n, t, real, dtype = h.shape[-1], _class(h.real), h.real.dtype, h.dtype
+    if not n:
+        return
+    limits = torch.finfo(real)
+    unfl, ulp, ovfl = limits.tiny, limits.eps, limits.max
+    smlnum_t, smlnum = unfl * (n / ulp), unfl / ulp
+    bignum = 1 / smlnum
+    tk = _temporary((n,), dtype)
+    smin, cnorm, colmax, tmax, tmax2, tscal, xmax0, grow, xbnd, scale, xmax, s0, rec1, rec2, mx = \
+        (_temporary((n,), real) for _ in range(15))
+    case2, fallback, broken, plain, zero, apply, moved = (_temporary((n,), torch.int32) for _ in range(7))
+    any2, need = _temporary((1,), torch.int32), _temporary((1,), torch.int32)
+    rec2d, cn = _temporary((n, n), real), _temporary((n, n), real)
+    x, za = _temporary((n, n), dtype), _temporary((n,), dtype)
+
+    def c(r, value):
+        return r.const(value, t)
+
+    def k(r, value):
+        return r.const(value, I32)
+
+    def flag(r, test):
+        return _convert(r, test, BOOL, I32)
+
+    def larger(r, a, b):
+        return r('select', t, r('ge', BOOL, a, b), a, b)
+
+    def smaller(r, a, b):
+        return r('select', t, r('le', BOOL, a, b), a, b)
+
+    def cabs2(r, value):
+        return r('add', t, r('abs', t, r('div', t, _part(r, t, value, 0), c(r, 2))),
+                 r('abs', t, r('div', t, _part(r, t, value, 1), c(r, 2))))
+
+    # ztrevc 366-370: T(J,J) - T(KI,KI), set to SMIN where its CABS1 is below SMIN
+    def shifted(r, diagonal, own, bound):
+        d = _plus(r, t, diagonal, own, 'sub')
+        return _chosen(r, t, r('lt', BOOL, _cabs1(r, t, d), bound), (bound, c(r, 0)), d)
+
+    def nonzero(r, value):
+        return r('ne', BOOL, value, k(r, 0))
+
+    def below(r):
+        return r('lt', BOOL, r.index(1), r.index(0))
+
+    # ztrevc 330-340 and 353: T(KI,KI), SMIN = max(ULP CABS1(T(KI,KI)), SMLNUM), CNORM(J) = DZASUM(J-1, T(1,J))
+    ops += _record((n,), [(tk, (0,))], [(h, (0, 0))], lambda r, v: [(v[0], t)])
+    ops += _record((n,), [(smin, (0,))], [(tk, (0,))], lambda r, v: [(larger(r, r('mul', t, c(r, ulp), _cabs1(
+        r, t, v[0])), c(r, smlnum_t)), t)])
+    ops += _record((n, n), [(cnorm, (0,))], [(h, (1, 0))], lambda r, v: [(r('select', t, below(r), _cabs1(
+        r, t, v[0]), c(r, 0)), t)], [PARALLEL, REDUCTION], [SUM])
+
+    # zlatrs 358-431 for each KI (its N = KI-1): TMAX the largest CNORM(1..KI-1); TSCAL 1 where TMAX <= BIGNUM/2,
+    # HALF / (SMLNUM TMAX) where TMAX <= overflow (case 1, CNORM by TSCAL), else (case 2) from TMAX2 the largest
+    # max(|Re|, |Im|) of T(1:KI-2, 2:KI-1)'s strict upper part: 1 / (SMLNUM TMAX2), or (TMAX2 above overflow) the
+    # ZTRSV return
+    ops += _record_extreme((n, n), colmax, (0,), [(h, (1, 0))], lambda r, v: [(r('select', t, below(r), larger(
+        r, r('abs', t, _part(r, t, v[0], 0)), r('abs', t, _part(r, t, v[0], 1))), c(r, 0)), t)],
+        [PARALLEL, REDUCTION])
+    for made, given in ((tmax, cnorm), (tmax2, colmax)):
+        ops += _record_extreme((n, n), made, (0,), [(given, (1,))], lambda r, v: [(r('select', t, below(r), v[0], c(
+            r, 0)), t)], [PARALLEL, REDUCTION])
+
+    def cases(r, v):
+        top, top2 = v
+        first = r('le', BOOL, top, c(r, bignum * 0.5))
+        second = r('and', BOOL, r('not', BOOL, first), r('le', BOOL, top, c(r, ovfl)))
+        third = r('and', BOOL, r('not', BOOL, first), r('not', BOOL, second))
+        valid = r('le', BOOL, top2, c(r, ovfl))
+        made = r('select', t, first, c(r, 1), r('select', t, second, r('div', t, c(r, 0.5), r(
+            'mul', t, c(r, smlnum), top)), r('select', t, valid, r('div', t, c(r, 1), r('mul', t, c(
+                r, smlnum), top2)), c(r, 1))))
+        return [(made, t), (flag(r, r('and', BOOL, third, valid)), I32),
+                (flag(r, r('and', BOOL, third, r('not', BOOL, valid))), I32)]
+    ops += _record((n,), [(tscal, (0,)), (case2, (0,)), (fallback, (0,))], [(tmax, (0,)), (tmax2, (0,))], cases)
+
+    # zlatrs 400-423, case 2: a column norm above overflow recomputed as the sum of (2 TSCAL) CABS2(A(I,J)), each
+    # summand scaled before the summation; its records run only where some KI is case 2 (`any2`)
+    ops += _record_extreme((n,), any2, (None,), [(case2, (0,))], lambda r, v: [(r('select', I32, nonzero(
+        r, v[0]), k(r, n), k(r, 0)), I32)], [REDUCTION])
+    _emit(ops, _record((n, n, n), [(rec2d, (0, 1))], [(h, (2, 0)), (tscal, (1,))], lambda r, v: [(r(
+        'select', t, r('lt', BOOL, r.index(2), r.index(0)), r('mul', t, r('mul', t, c(r, 2), v[1]), cabs2(r, v[0])),
+        c(r, 0)), t)], [PARALLEL, PARALLEL, REDUCTION], [SUM]), loops=(None, (any2, n), None))
+
+    # CNORM(J) as KI's solve reads it: unscaled, by TSCAL (case 1 and case 2's representable norms), or recomputed
+    def normed(r, v):
+        norm, factor, second, recomputed = v
+        scaled = r('mul', t, norm, factor)
+        within = r('select', t, r('le', BOOL, norm, c(r, ovfl)), scaled, recomputed)
+        return [(r('select', t, nonzero(r, second), within, r('select', t, r('eq', BOOL, factor, c(r, 1)), norm,
+                                                                         scaled)), t)]
+    ops += _record((n, n), [(cn, (0, 1))], [(cnorm, (0,)), (tscal, (1,)), (case2, (1,)), (rec2d, (0, 1))], normed)
+
+    # zlatrs 436-440 and 442-504: XMAX = XBND = the largest CABS2(X(J)) of X = -T(1:KI-1,KI); where TSCAL = 1,
+    # GROW = HALF / max(XBND, SMLNUM) and XBND = GROW, then each J = KI-1..1 (round J): GROW <= SMLNUM ends the loop
+    # (GROW kept); XBND = min(XBND, min(1, TJJ) GROW) (0 where TJJ < SMLNUM); GROW = GROW TJJ / (TJJ + CNORM(J))
+    # (0 where TJJ + CNORM(J) < SMLNUM); a completed loop GROW = XBND; TSCAL /= 1 GROW = 0
+    ops += _record_extreme((n, n), xmax0, (0,), [(h, (1, 0))], lambda r, v: [(r('select', t, below(r), cabs2(
+        r, v[0]), c(r, 0)), t)], [PARALLEL, REDUCTION])
+    ops += _record((n,), [(grow, (0,)), (xbnd, (0,)), (broken, (0,))], [(xmax0, (0,))], lambda r, v: [
+        (r('div', t, c(r, 0.5), larger(r, v[0], c(r, smlnum))), t)] * 2 + [(k(r, 0), I32)])
+    for j in range(n - 1, 0, -1):
+        def grown(r, v):
+            g, xb, stopped, factor, own, bound, norm, diagonal = v
+            live = r('and', BOOL, r('eq', BOOL, factor, c(r, 1)), r('not', BOOL, nonzero(r, stopped)))
+            stop = r('and', BOOL, live, r('le', BOOL, g, c(r, smlnum)))
+            step = r('and', BOOL, live, r('not', BOOL, stop))
+            tjj = _cabs1(r, t, shifted(r, diagonal, own, bound))
+            bounded = r('select', t, r('ge', BOOL, tjj, c(r, smlnum)), smaller(r, xb, r('mul', t, smaller(
+                r, c(r, 1), tjj), g)), c(r, 0))
+            total = r('add', t, tjj, norm)
+            growth = r('select', t, r('ge', BOOL, total, c(r, smlnum)), r('mul', t, g, r('div', t, tjj, total)),
+                       c(r, 0))
+            return [(r('select', t, step, growth, g), t), (r('select', t, step, bounded, xb), t),
+                    (flag(r, r('or', BOOL, nonzero(r, stopped), stop)), I32)]
+        ops += _record((n - j,), [(grow[j:], (0,)), (xbnd[j:], (0,)), (broken[j:], (0,))],
+                       [(x_[j:], (0,)) for x_ in (grow, xbnd, broken, tscal, tk, smin)]
+                       + [(cnorm[j - 1:j], (None,)), (h[j - 1:j, j - 1], (None,))], grown)
+
+    # zlatrs 606-627: ZTRSV where GROW TSCAL > SMLNUM (or case 2's return), SCALE = 1; else the careful solve: SCALE
+    # = (BIGNUM/2) / XMAX, X by it and XMAX = BIGNUM where XMAX > BIGNUM/2, else XMAX = 2 XMAX; then X = -T(1:KI-1,
+    # KI) by that SCALE (ztrevc 359-361), zero below
+    def decided(r, v):
+        factor, ztrsv, stopped, g, xb, top = v
+        final = r('select', t, r('ne', BOOL, factor, c(r, 1)), c(r, 0), r('select', t, nonzero(r, stopped), g, xb))
+        safe = r('or', BOOL, nonzero(r, ztrsv), r('gt', BOOL, r('mul', t, final, factor), c(r, smlnum)))
+        big = r('and', BOOL, r('not', BOOL, safe), r('gt', BOOL, top, c(r, bignum * 0.5)))
+        s = r('select', t, big, r('div', t, c(r, bignum * 0.5), top), c(r, 1))
+        return [(flag(r, safe), I32), (s, t), (r('select', t, safe, top, r('select', t, big, c(r, bignum), r(
+            'mul', t, top, c(r, 2)))), t), (s, t)]
+    ops += _record((n,), [(plain, (0,)), (scale, (0,)), (xmax, (0,)), (s0, (0,))],
+                   [(x_, (0,)) for x_ in (tscal, fallback, broken, grow, xbnd, xmax0)], decided)
+    ops += _record((n, n), [(x, (0, 1))], [(h, (0, 1)), (s0, (1,))], lambda r, v: [(_chosen(
+        r, t, r('lt', BOOL, r.index(0), r.index(1)), _real_scaled(r, t, _negated(r, t, v[0]), v[1]),
+        (c(r, 0), c(r, 0))), t)])
+
+    # each round J = n-1..1, columns KI = J+1..n: ZTRSV (X(J) = X(J) / A(J,J) where X(J) /= 0, then X(I) - X(J)
+    # A(I,J)) or zlatrs 632-743: XJ = CABS1(X(J)), TJJS = A(J,J) TSCAL; TJJ > SMLNUM: REC = 1/XJ where TJJ < 1 and
+    # XJ > TJJ BIGNUM; 0 < TJJ <= SMLNUM: REC = TJJ BIGNUM / XJ (then / CNORM(J) where CNORM(J) > 1) where XJ > TJJ
+    # BIGNUM; X by REC, SCALE and XMAX by REC, X(J) = ZLADIV(X(J), TJJS); A(J,J) = 0: X = e_J, SCALE = XMAX = 0;
+    # then by REC = 1/(2 XJ) where XJ > 1 and CNORM(J) > (BIGNUM - XMAX)/XJ, or HALF where XJ CNORM(J) > BIGNUM - XMAX
+    # (SCALE by it); then X(1:J-1) + (-X(J) TSCAL) A(1:J-1,J) and XMAX the largest CABS1 of X(1:J-1)
+    def solved(r, v):
+        xj, diagonal, own, bound, factor, ztrsv, s, top, norm = v
+        one = c(r, 1)
+        d = shifted(r, diagonal, own, bound)
+        present = _nonzero(r, t, xj)
+        direct = _chosen(r, t, present, _complex_value(r, t, 'div', _complex_parts(r, t, xj), d, 1, None), xj)
+        xa = _cabs1(r, t, xj)
+        tjjs = _real_scaled(r, t, d, factor)
+        tjj = _cabs1(r, t, tjjs)
+        large = r('gt', BOOL, tjj, c(r, smlnum))
+        tiny = r('and', BOOL, r('not', BOOL, large), r('gt', BOOL, tjj, c(r, 0)))
+        singular = r('and', BOOL, r('not', BOOL, large), r('not', BOOL, tiny))
+        over = r('gt', BOOL, xa, r('mul', t, tjj, c(r, bignum)))
+        safe_xa = r('select', t, over, xa, one)
+        bounded = r('div', t, r('mul', t, tjj, c(r, bignum)), safe_xa)
+        bounded = r('select', t, r('gt', BOOL, norm, one), r('div', t, bounded, norm), bounded)
+        first = r('select', t, r('and', BOOL, large, r('and', BOOL, r('lt', BOOL, tjj, one), over)),
+                  r('div', t, one, safe_xa), r('select', t, r('and', BOOL, tiny, over), bounded, one))
+        xs = _real_scaled(r, t, xj, first)
+        s1, t1 = r('mul', t, s, first), r('mul', t, top, first)
+        xn = _chosen(r, t, singular, (one, c(r, 0)), _complex_value(r, t, 'div', _complex_parts(r, t, xs), tjjs, 1,
+                                                                   None))
+        xjn = r('select', t, singular, one, _cabs1(r, t, xn))
+        s1, t1 = (r('select', t, singular, c(r, 0), value) for value in (s1, t1))
+        big = r('gt', BOOL, xjn, one)
+        recip = r('div', t, one, r('select', t, big, xjn, one))
+        room = r('sub', t, c(r, bignum), t1)
+        second = r('select', t, r('and', BOOL, big, r('gt', BOOL, norm, r('mul', t, room, recip))),
+                   r('mul', t, recip, c(r, 0.5)),
+                   r('select', t, r('and', BOOL, r('not', BOOL, big), r('gt', BOOL, r('mul', t, xjn, norm), room)),
+                     c(r, 0.5), one))
+        xf = _real_scaled(r, t, xn, second)
+        simple = nonzero(r, ztrsv)
+        moved_ = _all(r, [r('not', BOOL, simple), r('or', BOOL, r('or', BOOL, r('ne', BOOL, first, one), r(
+            'ne', BOOL, second, one)), singular)])
+        return [(_chosen(r, t, simple, direct, xf), t), (r('select', t, simple, s, r('mul', t, s1, second)), t),
+                (r('select', t, simple, top, t1), t), (r('select', t, simple, one, first), t),
+                (r('select', t, simple, one, second), t),
+                (flag(r, r('and', BOOL, r('not', BOOL, simple), singular)), I32),
+                (_chosen(r, t, simple, _negated(r, t, direct), _real_scaled(r, t, _negated(r, t, xf), factor)), t),
+                (flag(r, r('or', BOOL, r('not', BOOL, simple), present)), I32), (flag(r, moved_), I32)]
+
+    def updated(r, v):
+        xi, a, f1, f2, cleared, coefficient, used = v
+        y = _chosen(r, t, nonzero(r, cleared), (c(r, 0), c(r, 0)), _real_scaled(r, t, _real_scaled(r, t, xi, f1), f2))
+        return [(_chosen(r, t, nonzero(r, used), _plus(r, t, y, _times(r, t, coefficient, a)), y), t)]
+
+    def rescaled(r, v):
+        xi, f1, f2, cleared = v
+        y = _chosen(r, t, nonzero(r, cleared), (c(r, 0), c(r, 0)), _real_scaled(r, t, _real_scaled(r, t, xi, f1), f2))
+        return [(_chosen(r, t, r('lt', BOOL, r.index(0), r.index(1)), y, xi), t)]
+    for j in range(n - 1, 0, -1):
+        width = n - j
+        ops += _record((width,), [(x[j - 1, j:], (0,))] + [(x_[j:], (0,)) for x_ in (
+            scale, xmax, rec1, rec2, zero, za, apply, moved)],
+                       [(x[j - 1, j:], (0,)), (h[j - 1:j, j - 1], (None,))] + [(x_[j:], (0,)) for x_ in (
+                           tk, smin, tscal, plain, scale, xmax)] + [(cn[j - 1, j:], (0,))], solved)
+        factors = [(x_[j:], (1,)) for x_ in (rec1, rec2, zero)]
+        if j > 1:
+            block = x[:j - 1, j:]
+            ops += _record((j - 1, width), [(block, (0, 1))], [(block, (0, 1)), (h[:j - 1, j - 1], (0,))] + factors
+                           + [(za[j:], (1,)), (apply[j:], (1,))], updated)
+        if j < n - 1:
+            ops += _record_extreme((width,), need, (None,), [(moved[j:], (0,))], lambda r, v, j=j: [(r(
+                'select', I32, nonzero(r, v[0]), k(r, n - 1 - j), k(r, 0)), I32)], [REDUCTION])
+            block = x[j:n - 1, j:]
+            _emit(ops, _record((n - 1 - j, width), [(block, (0, 1))], [(block, (0, 1))] + factors, rescaled),
+                  loops=((need, n - 1 - j), None))
+        if j > 1:
+            ops += _record_extreme((width, j - 1), xmax[j:], (0,), [(x[:j - 1, j:], (1, 0))], lambda r, v: [(_cabs1(
+                r, t, v[0]), t)], [PARALLEL, REDUCTION])
+
+    # zlatrs 1018 and ztrevc 376 and 355: X(KI,KI) = SCALE (the careful solve's SCALE / TSCAL, ZTRSV's 1; KI = 1: 1);
+    # ztrevc 393-399: VR(:,KI) = Z(:,1:KI-1) X(1:KI-1) + SCALE Z(:,KI), then by 1 / the largest CABS1 of the column
+    ops += _record((n,), [(x, (0, 0))], [(scale, (0,)), (tscal, (0,)), (plain, (0,))], lambda r, v: [(r(
+        'select', t, r('or', BOOL, r('eq', BOOL, r.index(0), k(r, 0)), nonzero(r, v[2])), c(r, 1), r(
+            'div', t, v[0], v[1])), t)])
+    ops += _gemm(vr, z, (0, 2), x, (2, 1), (n, n, n))
+    ops += _record_extreme((n, n), mx, (0,), [(vr, (1, 0))], lambda r, v: [(_cabs1(r, t, v[0]), t)],
+                           [PARALLEL, REDUCTION])
+    ops += _record((n, n), [(vr, (0, 1))], [(vr, (0, 1)), (mx, (1,))], lambda r, v: [(_real_scaled(
+        r, t, v[0], r('div', t, c(r, 1), v[1])), t)])
+
+
 # an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
 def _bounded(r, at, size):
     zero, last = r.const(0, I32), r.const(size - 1, I32)
