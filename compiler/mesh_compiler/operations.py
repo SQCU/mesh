@@ -13,7 +13,7 @@ import sys
 
 import torch
 import torch.utils._pytree as pytree
-from torch._prims_common import corresponding_complex_dtype
+from torch._prims_common import corresponding_complex_dtype, get_computation_dtype
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_code
@@ -2290,12 +2290,22 @@ def _matrix_exp_squares(outs, x, count, limit):
     return ops
 
 
+# torch 2.14.0 torch/linalg/__init__.py matrix_exp ("Supports input of bfloat16, float, double, cfloat and cdouble")
+# and torch/_meta_registrations.py linalg_matrix_exp (checkFloatingOrComplex): the composition below runs in the input's
+# computation dtype (torch/_prims_common get_computation_dtype, aten OpMathType: bfloat16 and float16 in float32,
+# complex32 in complex64, the others as given), and the result is cast back to the input's dtype before the assertion
+# takes it as its dep_token
 def _matrix_exponential(a, max_squarings):
     if not a.numel():
         return torch.empty_like(a)
+    given, a = a.dtype, a.to(get_computation_dtype(a.dtype))
     real = a.real.dtype
+    # Rejection filters are not part of even temporary integration validation.
+    # A computation kind without JAX's theta table has an unfinished formulation; it fails here, at its trace.
     if real not in SQUARING:
-        raise TypeError('linalg.matrix_exp: A.dtype=%s is not supported.' % (a.dtype,))
+        raise NotImplementedError('linalg.matrix_exp of %s computed in %s: its scaling and squaring table is '
+                                  'unfinished (design/torch-source-lowering-change-request.md item 6)'
+                                  % (given, a.dtype))
     maxnorm, conds, degrees = SQUARING[real]
     norm = a.abs().sum(-2).amax(-1)
     count = (norm / maxnorm).log2().floor().clamp(min=0)
@@ -2332,7 +2342,7 @@ def _matrix_exponential(a, max_squarings):
     # torch 2.14.0 torch/_export/passes/functionalize_side_effectful_ops_pass.py: _assert_async.msg as
     # _functional_assert_async.msg, its `dep_token` the result, so the error follows the result's write, and the
     # operator's result the assertion's (torch/_meta_registrations.py functional_assert_async_meta: `return dep_token`)
-    result = torch.where(over[..., None, None], math.nan, result)
+    result = torch.where(over[..., None, None], math.nan, result).to(given)
     return A._functional_assert_async.msg(over.logical_not(), 'linalg.matrix_exp', result)
 
 

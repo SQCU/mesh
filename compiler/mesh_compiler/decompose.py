@@ -218,8 +218,11 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
     while pending:
         key = pending.pop(0)
         placed = staged[key][0]
+        # an eigh whose operand A has no element (a zero matrix extent or an empty batch: its fake value's numel) is
+        # partially evaluated to its canonical empty result: it stays placed, and operations._eigen_hermitian returns
+        # no records for it (before any _Lapack, whatever the processor). Every eigh with elements is outlined
         eigh = next((n for n in placed.graph.nodes if n.op == "call_function" and n.target is EIGH
-                     and targets[n.meta["processor"]][0] != "cpu"), None)
+                     and targets[n.meta["processor"]][0] != "cpu" and ir_given(n)[1]["A"].meta["val"].numel()), None)
         if eigh is None:
             continue
         parts = _outlined(key, captured.functions[key], placed, eigh, max_iterations)

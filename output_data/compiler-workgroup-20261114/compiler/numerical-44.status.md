@@ -1,0 +1,6 @@
+# numerical-44: empty non-CPU eigh keeps its canonical empty result (SAME64), decompose.py only, source HOLD, unstaged
+> "Preserve that canonical empty-result producer instead of entering QDWH outline … both zero matrix extent and empty batch handled" (numerical-44.md)
+- **Change:** `outline`'s eigh selection now also requires `ir_given(n)[1]["A"].meta["val"].numel()`, the node's own source operand. It is zero for a zero matrix extent (n = 0) and for an empty batch.
+- **Effect:** such an eigh is never outlined, so `_outlined`'s `calls = 2n − 1` and the suffix `_qdwh_eigh_result` indexing are never reached for it. The node stays placed, and `operations._eigen_hermitian` (2155) returns [] at `a.numel() == 0`, before any `_Lapack` and regardless of processor. A comment there calls this partial evaluation of the canonical empty result.
+- **Unchanged:** the original node, its result metadata, its getitem views, output composition and source order. Every eigh with elements is still outlined, including a later one after an empty one: `next(...)` passes over the empty node, and the outlined parts are searched again with the same predicate.
+- **Checks:** AST passes and pyflakes is clean for decompose.py. Delta is decompose.py +4/−1. operations.py still holds numerical43's +13/−3, not rewritten. No import, target, build, test or backup.
