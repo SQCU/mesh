@@ -1,5 +1,28 @@
 # Current integration assignment
 
+## Compiler supervisor correction during continuation 6
+
+The canonical owner pass is accepted so far. One concrete transfer multiplicity issue in the downstream rewrite
+must be fixed before readiness: `metal_ir_value_sends` stores ONE `Value.release`, not a list. Calling it for several
+aliased routed Operands on `owner->ir[phase]` overwrites all but the last transfer. The old separate logical Values
+could each carry a release while sharing physical storage; `metal_transport.mm::Obligations` already scans every
+Value of a bound storage and preserves those separate logical release identities. Retain that existing handoff:
+keep one canonical owner/allocation, but give each distinct routed Operand its own logical Value view over that
+owner for receive/send/prepared-range annotations. Use existing `value_like` plus `metal_ir_value_view`; this is
+logical effect identity, not another allocation or policy copy. Existing per-Operand `ir` may serve as the logical
+view when it is not the owner; the owner's own view may remain the physical root. All final planned/placed storage
+remains owner-only. `metal_ir_value_receives`, `received`, `sends`, `sent`, and `sending` must use the corresponding
+logical effect Value so each transfer retains its identity; byte/address/copy selection remains on the owner.
+Do not add rejection guards or merge transfer identities. Read this before declaring source ready.
+
+The same consumer rewrite must keep transfer geometry distinct from allocation span: e2b_ir retains each route's
+`bytes` and mesh_declared.from/to; range_declare must use that route length, not owner->bytes. The owner span is the
+allocation capacity; mesh_plan already checks declared view end <= value.section.bytes. Do not turn the old
+per-Operand byte-equality check into equality of every logical transfer and the entire joined allocation. If a
+source-vs-manifest payload consistency check is retained, compare that route to its exported logical interface
+span, not to the owner span. Use existing metadata; no scalar/layout evaluator or new alias rejection.
+
+
 ## Current storage-consumer correction (continuation 5)
 
 `integration-storage-assignment.md` is the current unit. Codex compiler review has now settled these concrete
