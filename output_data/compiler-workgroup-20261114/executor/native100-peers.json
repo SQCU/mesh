@@ -1,0 +1,211 @@
+{
+  "builds": [
+    {
+      "peer": "mdots-Mac-Studio-3-ts",
+      "heads": {
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c",
+        "/Users/mdot/mesh": "d80b8e71adeef954a025d02b9525edca17f33b80"
+      },
+      "targets": [
+        ".build/libmesh_metal.dylib",
+        ".build/libmetal_ir.dylib",
+        ".build/libmetal_recording.dylib",
+        ".build/native_bench"
+      ],
+      "changed": [],
+      "exit_code": 0,
+      "seconds": 23.46329408400925,
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/native_bench": "d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449"
+      }
+    },
+    {
+      "peer": "m5ult2-ts",
+      "heads": {
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c",
+        "/Users/mdot/mesh": "d80b8e71adeef954a025d02b9525edca17f33b80"
+      },
+      "targets": [
+        ".build/libmesh_metal.dylib",
+        ".build/libmetal_ir.dylib",
+        ".build/libmetal_recording.dylib",
+        ".build/native_bench"
+      ],
+      "changed": [],
+      "exit_code": 0,
+      "seconds": 23.391343042021617,
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/native_bench": "d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449"
+      }
+    },
+    {
+      "peer": "mdots-Mac-Studio-ts",
+      "heads": {
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c",
+        "/Users/mdot/mesh": "d80b8e71adeef954a025d02b9525edca17f33b80"
+      },
+      "targets": [
+        ".build/libmesh_metal.dylib",
+        ".build/libmetal_ir.dylib",
+        ".build/libmetal_recording.dylib",
+        ".build/native_bench"
+      ],
+      "changed": [],
+      "exit_code": 0,
+      "seconds": 23.376510750036687,
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/native_bench": "d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449"
+      }
+    },
+    {
+      "peer": "mdots-Mac-Studio-2-ts",
+      "heads": {
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c",
+        "/Users/mdot/mesh": "d80b8e71adeef954a025d02b9525edca17f33b80"
+      },
+      "targets": [
+        ".build/libmesh_metal.dylib",
+        ".build/libmetal_ir.dylib",
+        ".build/libmetal_recording.dylib",
+        ".build/native_bench"
+      ],
+      "changed": [],
+      "exit_code": 0,
+      "seconds": 23.460381666998728,
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "48bddbe787632d608272d33ab220cc1a028649642c338f0083a6468fcd43858d",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "e9524e3373b13429d130a93a1047f73fe704a36095f568d82763a4da855fc9db",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "2da7bca7c18a1a8658a38c234a10c48262fb73f2f868020de5c8738b4572c6d1",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "86041e2ee45d35fefc0f6091152eadbb726bf1ef4cceff00fa769acdca4b671c",
+        "/Users/mdot/metal-microbench/.build/native_bench": "d9d88c6b87ab44476c6d6a09518f1aa8f56096c657eae5f1a63692c894cc3449"
+      }
+    },
+    {
+      "peer": "Ms-Mac-mini-ts",
+      "heads": {
+        "/Users/mdot/metal-microbench": "e020d64433749889fdb0de7d28b9c27cd0e4918c",
+        "/Users/mdot/mesh": "d80b8e71adeef954a025d02b9525edca17f33b80"
+      },
+      "targets": [
+        ".build/libmesh_metal.dylib",
+        ".build/libmetal_ir.dylib",
+        ".build/libmetal_recording.dylib",
+        ".build/native_bench"
+      ],
+      "changed": [],
+      "exit_code": 0,
+      "seconds": 23.459811458014883,
+      "binaries": {
+        "/Users/mdot/mesh/rdma/libmesh.dylib": "128c64542bae08be8f795148681b1ccd150871afdcaacd9f8687ddd55235f263",
+        "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "b1f0b0cf3949ea83554e243733645b0a1789ed936c48daa93bbe370edcf0ec4f",
+        "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "089f81408551743feab1e69aa8beb37607267a94504b9500bed5bc499ea99fc8",
+        "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "564351af19ec84b2a94024f80693931f75c9817f23bccba12f1ea43b5678ea03",
+        "/Users/mdot/metal-microbench/.build/native_bench": "417fe88f352fdc92c713fc945885b578193ddb353309b32607e6818995dd8c27"
+      }
+    }
+  ],
+  "abi": [
+    {
+      "peer": "mdots-Mac-Studio-3-ts",
+      "ValueInfo": 120,
+      "RepeatRegion": 40,
+      "Function": 168,
+      "Planned": 152,
+      "Local": 376,
+      "Signature": 416,
+      "symbols": {
+        "metal_ir_value_physical": true,
+        "metal_ir_source_relation": true,
+        "metal_ir_repeat": true,
+        "metal_ir_value_paged": true
+      },
+      "mesh_view_program_arguments": 5,
+      "erase": true,
+      "state_wrapper": true
+    },
+    {
+      "peer": "m5ult2-ts",
+      "ValueInfo": 120,
+      "RepeatRegion": 40,
+      "Function": 168,
+      "Planned": 152,
+      "Local": 376,
+      "Signature": 416,
+      "symbols": {
+        "metal_ir_value_physical": true,
+        "metal_ir_source_relation": true,
+        "metal_ir_repeat": true,
+        "metal_ir_value_paged": true
+      },
+      "mesh_view_program_arguments": 5,
+      "erase": true,
+      "state_wrapper": true
+    },
+    {
+      "peer": "mdots-Mac-Studio-ts",
+      "ValueInfo": 120,
+      "RepeatRegion": 40,
+      "Function": 168,
+      "Planned": 152,
+      "Local": 376,
+      "Signature": 416,
+      "symbols": {
+        "metal_ir_value_physical": true,
+        "metal_ir_source_relation": true,
+        "metal_ir_repeat": true,
+        "metal_ir_value_paged": true
+      },
+      "mesh_view_program_arguments": 5,
+      "erase": true,
+      "state_wrapper": true
+    },
+    {
+      "peer": "mdots-Mac-Studio-2-ts",
+      "ValueInfo": 120,
+      "RepeatRegion": 40,
+      "Function": 168,
+      "Planned": 152,
+      "Local": 376,
+      "Signature": 416,
+      "symbols": {
+        "metal_ir_value_physical": true,
+        "metal_ir_source_relation": true,
+        "metal_ir_repeat": true,
+        "metal_ir_value_paged": true
+      },
+      "mesh_view_program_arguments": 5,
+      "erase": true,
+      "state_wrapper": true
+    },
+    {
+      "peer": "Ms-Mac-mini-ts",
+      "ValueInfo": 120,
+      "RepeatRegion": 40,
+      "Function": 168,
+      "Planned": 152,
+      "Local": 376,
+      "Signature": 416,
+      "symbols": {
+        "metal_ir_value_physical": true,
+        "metal_ir_source_relation": true,
+        "metal_ir_repeat": true,
+        "metal_ir_value_paged": true
+      },
+      "mesh_view_program_arguments": 5,
+      "erase": true,
+      "state_wrapper": true
+    }
+  ]
+}
