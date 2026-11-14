@@ -2708,9 +2708,11 @@ def _assigned(out, x, g, ops):
 
 # _qdwh over the leading e x e block of x (dynamic_shape (e, e)): its polar factor into out's leading block; its
 # convergence result (int32, jax-qdwh.reference.py 231 is_converged = not is_not_converged) returned. The Halley
-# continuation is 203-222's while_loop as one _Repeat (metal_ir_repeat): from k = len(qr_coefs) + len(chol_coefs),
-# cond_fun is_not_converged and k < max_iterations, body_fun one get_chol_params(3, 1, 3) step at extent e, its
-# iterate-change test (185, norm > tol_norm) and k + 1; with k already at max_iterations no repetition is emitted
+# continuation, 203-222's while_loop bounded by max_iterations, is compiled as its static copies k = len(qr_coefs) +
+# len(chol_coefs) .. max_iterations - 1, each one get_chol_params(3, 1, 3) step at extent e while is_not_converged and
+# 0 after (no work; the iterate and is_not_converged kept), its test 185's norm > tol_norm. Each copy is queued work;
+# a _Repeat here would add metal-microbench metal_lower.mm 1837-1857's submit and NativeRepeatTest before each pass and
+# metal_program.h 239-250's NativeRepeatComplete shared-event wait at each pass end
 def _bounded_polar(x, out, e, ops, max_iterations):
     n, t, real, dtype = x.shape[-1], _class(x.real), x.real.dtype, x.dtype
     eps = float(torch.finfo(real).eps)
@@ -2757,29 +2759,29 @@ def _bounded_polar(x, out, e, ops, max_iterations):
     unconverged = _temporary((1,), torch.int32)
     ops += _fill(unconverged, 1)
 
-    def halley(params, made):
+    # one step at extent g: a Cholesky step's (g = e) test overwrites is_not_converged; a continuation copy's g is e
+    # while is_not_converged, else 0, and its test holds only where it was still unconverged (an inactive copy's
+    # distance is no value of it, so the prior state is kept)
+    def halley(params, continued):
+        g = e
+        if continued:
+            g = _temporary((1,), torch.int32)
+            ops.extend(_scalars([g], [unconverged, e], lambda r, v: [(r('select', I32, r('ne', BOOL, v[0], r.const(
+                0, I32)), v[1], r.const(0, I32)), I32)]))
         step = _temporary((n, n), dtype)
-        _bounded_halley(current, step, e, *params, made)
-        distance = _squared_distance(step, current, e, made)
-        made += _scalars([unconverged], [distance], lambda r, v: [(_convert(r, r(
-            'gt', BOOL, r('sqrt', t, v[0]), r.const(tol_norm, t)), BOOL, I32), I32)])
-        _assigned(current, step, e, made)
-    for params in chol_coefs:
-        halley(params, ops)
-    start = len(qr_coefs) + len(chol_coefs)
-    if start < max_iterations:
-        count, active = _temporary((1,), torch.int32), _temporary((1,), torch.int32)
-        ops += _fill(count, start)
+        _bounded_halley(current, step, g, *params, ops)
+        distance = _squared_distance(step, current, g, ops)
 
-        def condition(r, v):
-            return [(_convert(r, r('and', BOOL, r('ne', BOOL, v[0], r.const(0, I32)), r('lt', BOOL, v[1], r.const(
-                max_iterations, I32))), BOOL, I32), I32)]
-        ops += _scalars([active], [unconverged, count], condition)
-        body = []
-        halley((3 - 1 / 3, 3, 1 / 3), body)
-        body += _scalars([count], [count], lambda r, v: [(r('add', I32, v[0], r.const(1, I32)), I32)])
-        body += _scalars([active], [unconverged, count], condition)
-        ops.append(_Repeat(body, active, (current, unconverged, count, active, e)))
+        def test(r, v):
+            above = r('gt', BOOL, r('sqrt', t, v[0]), r.const(tol_norm, t))
+            held = r('and', BOOL, r('ne', BOOL, v[1], r.const(0, I32)), above) if continued else above
+            return [(_convert(r, held, BOOL, I32), I32)]
+        ops.extend(_scalars([unconverged], [distance] + [unconverged] * continued, test))
+        _assigned(current, step, g, ops)
+    for params in chol_coefs:
+        halley(params, False)
+    for _ in range(len(qr_coefs) + len(chol_coefs), max_iterations):
+        halley((3 - 1 / 3, 3, 1 / 3), True)
     converged = _temporary((1,), torch.int32)
     ops += _scalars([converged], [unconverged], lambda r, v: [(_convert(r, r('eq', BOOL, v[0], r.const(
         0, I32)), BOOL, I32), I32)])
