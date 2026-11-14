@@ -1092,8 +1092,7 @@ def partition(gm, placement, nodes, page):
     ir.page = page
     for node in ir.order:
         if node.op == 'call_function':
-            ir.locals[node] = Local(node.op, node.target, node.args, {k: v for k, v in node.kwargs.items() if k != 'device'}
-                                    if getattr(node.target, 'overloadpacket', None) is A._to_copy else node.kwargs)
+            ir.locals[node] = _local_call(node)
             operators[node] = _operator(node, ir.locals[node])
         if node.op != 'output':
             ir.sharding[node] = (-1,) * _value(node).dim() if _prototype(node) is not None else None
@@ -1162,6 +1161,13 @@ def partitioned(gm, placement):
 # torch 2.14.0 torch/_export/verifier.py
 def _call(local, args, kwargs):
     return local.target(*args, **kwargs)
+
+
+# torch 2.14.0 torch/fx/node.py Node; torch/_refs/__init__.py _to_copy: an FX call's operator, operands and keywords,
+# its copy's placement the program's (design/compilation-composition-change-request.md item 6)
+def _local_call(node):
+    return Local(node.op, node.target, node.args, {k: v for k, v in node.kwargs.items() if k != 'device'}
+                 if getattr(node.target, 'overloadpacket', None) is A._to_copy else node.kwargs)
 
 
 # design/aot-compilation-change-request.md, appendix item 7; ExecuTorch, "Concepts"; PyTorch, "Meta device"; torch
@@ -5995,7 +6001,7 @@ def _heads(x, group, kv):
     return x.as_strided(shape, stride, x.storage_offset())
 
 
-def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=AttentionOrigin()):
+def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=AttentionOrigin(), generator=None):
     length, size, other, value = q.shape[-2], q.shape[-1], k.shape[-2], v.shape[-1]
     t = _compute(q.dtype, k.dtype, v.dtype, torch.float32)
     qs, ks, vs = _heads(q, group, False), _heads(k, group, True), _heads(v, group, True)
@@ -6011,7 +6017,7 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=Att
     score_storage = _temporary([*shape, min(rows, other)], STORED[t])
     m, s, bm, bs, alpha = [_temporary(shape, STORED[t]) for _ in range(5)]
     acc = _temporary([*shape, value], STORED[t])
-    generator = _generator() if dropout else None
+    drawn = generator.site() if dropout else None
     ops = []
     for j, (lo, hi) in enumerate(blocks):
         count = hi - lo
@@ -6069,7 +6075,7 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=Att
                         r('add', I32, r.index(b + 2), r.const(lo, I32))]
             for index, n in zip(indices, (*logical[:-1], other)):
                 at = r('add', I32, r('mul', I32, at, r.const(n, I32)), index)
-            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, b + 3, at, generator)[0]), r.const(1 - dropout, F32))
+            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, drawn, b + 3, at)[0]), r.const(1 - dropout, F32))
             kept = r('mul', t, weight, r.const(1 / (1 - dropout), t)) if dropout < 1 else r.const(0, t)
             weight = r('select', t, keep, kept, r.const(0, t))
         r.done(r('mul', t, weight, _load(r, 1, vb, t)))
@@ -6091,10 +6097,10 @@ def _attending(given):
             mask.expand(*lead, q.shape[-2], k.shape[-2]) if mask is not None else None), given['is_causal'], scale, group
 
 
-def _attended(target, given, outs, origin=AttentionOrigin()):
+def _attended(target, given, outs, origin=AttentionOrigin(), generator=None):
     _typed(target, [given['query'], given['key'], given['value'], given['attn_mask']], outs)
     operands, causal, scale, group = _attending(given)
-    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), origin)
+    return _attention(*operands, outs[0], causal, scale, group, float(given['dropout_p']), origin, generator)
 
 
 # J. K. Salmon, M. A. Moraes, R. O. Dror and D. E. Shaw, Parallel random numbers: as easy as 1, 2, 3, SC 2011, §3.1 and
@@ -6102,18 +6108,25 @@ def _attended(target, given, outs, origin=AttentionOrigin()):
 # and counter, the key the program's seed, the counter (element, execution, draw site, stream); the generator a STATE
 # value {seed low, seed high, execution, 0} the program advances once an execution
 PHILOX = (0xD2511F53, 0xCD9E8D57, 0x9E3779B9, 0xBB67AE85)
-RANDOM = {'state': None, 'sites': 0, 'stream': 0}
-GENERATORS = set()
 
 
-def _generator():
-    if RANDOM['state'] is None:
-        seed = torch.initial_seed() ^ (RANDOM['stream'] << 32)
-        words = [seed & 0xFFFFFFFF, (seed >> 32) & 0xFFFFFFFF, 0, 0]
-        RANDOM['state'] = torch.tensor([w - (1 << 32) if w >= 1 << 31 else w for w in words], dtype=torch.int32)
-        GENERATORS.add(_key(RANDOM['state']))
-    RANDOM['sites'] += 1
-    return RANDOM['state'], RANDOM['sites']
+def seeded(seed):
+    words = [seed & 0xFFFFFFFF, (seed >> 32) & 0xFFFFFFFF, 0, 0]
+    return torch.tensor([w - (1 << 32) if w >= 1 << 31 else w for w in words], dtype=torch.int32)
+
+
+# a constructed program's generator: its caller's STATE words, each draw site of the construction numbered from 1, and
+# their advance once an execution after the program's draws
+class Generator:
+    def __init__(self, state):
+        self.state, self.sites = state, 0
+
+    def site(self):
+        self.sites += 1
+        return self.state, self.sites
+
+    def stepped(self):
+        return [_stepped(self.state)] if self.sites else []
 
 
 def _mulhilo(r, a, m):
@@ -6143,8 +6156,8 @@ def _philox(r, counter, key):
 
 # the draws of operation `out`'s elements: the generator's words as inputs (their constant maps), the element's row-major
 # index the counter's first word
-def _draws(r, out, inputs, loops=None, element=None, generator=None):
-    state, site = _generator() if generator is None else generator
+def _draws(r, out, inputs, drawn, loops=None, element=None):
+    state, site = drawn
     for word in range(3):
         inputs.append((state, _rows(out.dim() if loops is None else loops, [{None: word}])))
     k0, k1, execution = [r('bitcast', U32, r.arg(len(inputs) - 3 + word, state)) for word in range(3)]
@@ -6163,7 +6176,7 @@ NORMAL = (A.randn, A.randn_like, torch.ops.prims.normal)
 DRAWS = (A.rand, A.rand_like, *NORMAL, A.randint, A.randint_like, A.bernoulli, A.uniform, A.native_dropout)
 
 
-def _random(target, given, outs):
+def _random(target, given, outs, generator):
     packet, out, scale = target.overloadpacket, outs[0], 1
     if out.is_complex() and packet in (A.rand, A.rand_like, *NORMAL, A.uniform):
         out, scale = torch.view_as_real(out), math.sqrt(0.5) if packet in NORMAL else 1
@@ -6176,13 +6189,13 @@ def _random(target, given, outs):
         if train is False:
             r.done(_store(r, v, F32, out), r.const(True, BOOL))
         else:
-            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs)[0]), r.const(1 - p, F32))
+            keep = r('lt', BOOL, _uniform(r, _draws(r, out, inputs, generator.site())[0]), r.const(1 - p, F32))
             scaled = r('mul', F32, v, r.const(1 / (1 - p) if p < 1 else 0, F32))
             r.done(_store(r, r('select', F32, keep, scaled, r.const(0, F32)), F32, out), keep)
         return [_Generic(out.shape, inputs, [(out, _same(out.dim())), (outs[1], _same(out.dim()))], r)]
     if packet is A.bernoulli and given.get('p') is None:
         inputs.append((given['self'], _same(out.dim())))
-    words = _draws(r, out, inputs)
+    words = _draws(r, out, inputs, generator.site())
     u = _uniform(r, words[0])
     if packet in NORMAL:
         first = r('add', F32, u, r.const(2.0 ** -24, F32))
@@ -6212,7 +6225,7 @@ def _random(target, given, outs):
 # activations in convolutional network, arXiv:1505.00853, 2015): training, an element x <= 0 its slope a Philox draw
 # a ~ U(lower, upper), out = a x and noise = a, other elements x and 1; evaluation, the slope (lower + upper) / 2, the
 # noise passed through (torch 2.14.0 aten rrelu_with_noise_functional)
-def _rrelu(target, given, outs):
+def _rrelu(target, given, outs, generator):
     x, noise, lower, upper = given['self'], given['noise'], float(given['lower']), float(given['upper'])
     (out, kept), same = outs, _same(outs[0].dim())
     _typed(target, [x, noise], outs)
@@ -6223,7 +6236,7 @@ def _rrelu(target, given, outs):
         made = r('select', t, r('ge', BOOL, v, r.const(0, t)), v, r('mul', t, v, r.const((lower + upper) / 2, t)))
         r.done(_store(r, made, t, out))
         return [_Generic(out.shape, inputs, [(out, same)], r)] + _copy(kept, noise)
-    drawn = _convert(r, _uniform(r, _draws(r, out, inputs)[0]), F32, t)
+    drawn = _convert(r, _uniform(r, _draws(r, out, inputs, generator.site())[0]), F32, t)
     slope = r('add', t, r.const(lower, t), r('mul', t, drawn, r.const(upper - lower, t)))
     low = r('le', BOOL, v, r.const(0, t))
     r.done(_store(r, r('select', t, low, r('mul', t, v, slope), v), t, out),
@@ -6277,10 +6290,10 @@ def _masked(target, given, outs):
 
 
 # PyTorch 2.14 documentation, torch.randperm: the ranks of n uniform draws, a uniformly random permutation
-def _permuted(target, given, outs):
+def _permuted(target, given, outs, generator):
     (out,) = outs
     keys = _temporary([given['n']])
-    ops = _random(A.rand.default, {'size': [given['n']]}, [keys])
+    ops = _random(A.rand.default, {'size': [given['n']]}, [keys], generator)
     return ops + _ranked(A.sort.default, {'self': keys, 'dim': 0, 'descending': False}, [_temporary([given['n']]), out])
 
 
@@ -6436,6 +6449,8 @@ SOURCES = {mesh_code.fragment.overloadpacket: _fragment, **dict.fromkeys(POINTWI
            A.rrelu_with_noise_functional: _rrelu, A.cummax: _cumulative, A.cummin: _cumulative,
            A.searchsorted: _searched, **dict.fromkeys(SELECTIONS, _selected),
            A.adaptive_max_pool2d: _adaptive_max, A.adaptive_max_pool3d: _adaptive_max, A.histc: _histogram}
+# J. K. Salmon et al., SC 2011, §3.1: the lowerings whose operations draw from the construction's Generator
+DRAWN = frozenset(packet for packet, lower in SOURCES.items() if lower in (_random, _rrelu, _permuted))
 # PyTorch 2.14 documentation, Tensor Views
 VIEWS = {A.as_strided, A.detach, A.diagonal, A.expand, A.expand_as, A.movedim, A.narrow, A.permute, A.select,
          A.squeeze, A.transpose, A.t, A.adjoint, A.real, A.imag, A.view_as_real, A.unflatten, A.unfold, A.unsqueeze,
@@ -6486,11 +6501,15 @@ SYMBOLIC = {operator.add: 'add', operator.sub: 'sub', operator.mul: 'mul', opera
             torch.sym_not: 'logical_not'}
 
 
-def _lowering(local, page):
+def _lowering(local, page, generator=None):
     packet = getattr(local.target, 'overloadpacket', local.target)
     if packet is A.scaled_dot_product_attention:
         origin = local.annotation if isinstance(local.annotation, AttentionOrigin) else AttentionOrigin(0, page)
-        return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kwargs), outs, origin)
+        return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kwargs), outs, origin,
+                                                    generator)
+    if packet in DRAWN:
+        return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs,
+                                                          generator)
     if local.target is striped:
         return lambda args, kwargs, outs: _striped(outs[0], *args)
     if packet in (A._linalg_det, A._linalg_slogdet):
@@ -6671,11 +6690,17 @@ def _key(value):
     return value.untyped_storage()._cdata if value.device.type == 'meta' else value.untyped_storage().data_ptr()
 
 
+# torch 2.14.0 torch/_tensor_docs.py view_as_real: a storage root's element type, a complex one's real pairs
+def _stored(value):
+    base = value.tensor if isinstance(value, _Words) else value
+    return torch.view_as_real(base) if base.is_complex() else base
+
+
 # torch 2.14.0 torch/_tensor_docs.py, view and copy_; design/torch-source-lowering-change-request.md item 1: a call's
 # structured operations over its operands' placed views, its result its own place, a placed view of an operand it
 # writes in place, an alias, or a temporary the compilation realizes
-def _called(ir, key, operands, local, form, placed):
-    lower = _lowering(local, ir.page)
+def _called(ir, key, operands, local, form, placed, generator):
+    lower = _lowering(local, ir.page, generator)
     given = iter(operands)
     args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
     mine = placed(key)
@@ -6691,16 +6716,39 @@ def _called(ir, key, operands, local, form, placed):
         return mine, lower(args, kwargs, [mine])
     if mine is not None:
         return mine, []
+    return _instruction(local, args, kwargs, ir.prototypes[key], ir.page, generator)
+
+
+# torch 2.14.0 torchgen/model.py Annotation.is_write and alias_set (`Tensor(a!)`): the operands a call's results are, each
+# return written in place into the argument of its alias set (an in-place call, copy_, an out= variant), else None
+def _written(local, args, kwargs):
+    if not isinstance(local.target, torch._ops.OpOverload) or not local.target._schema.returns:
+        return None
+    schema, given = local.target._schema, {**dict(zip(_names(local), args)), **kwargs}
+    if not all(r.alias_info is not None and r.alias_info.is_write for r in schema.returns):
+        return None
+    return [next(given[a.name] for a in schema.arguments if a.alias_info is not None and a.alias_info.is_write
+                 and a.alias_info.before_set == r.alias_info.before_set) for r in schema.returns]
+
+
+# torch 2.14.0 torchgen/model.py Annotation (`Tensor(a)`, `Tensor(a!)`): a call writing operands in place is those
+# operands and its structured operations into them; a pure alias is its operand's storage and has no work; any other
+# call's result is a temporary of its prototype's sizes and strides and its structured operations into it
+def _instruction(local, args, kwargs, prototype, page, generator):
+    written = _written(local, args, kwargs)
+    if written is not None:
+        return written[0] if len(written) == 1 else tuple(written), _lowering(local, page, generator)(args, kwargs,
+                                                                                                    written)
     if _aliases(local):
         return _call(local, args, kwargs), []
-    outs, spec = _made(ir, key, local)
-    return pytree.tree_unflatten(outs, spec), lower(args, kwargs, outs)
+    outs, spec = _made(prototype, local)
+    return pytree.tree_unflatten(outs, spec), _lowering(local, page, generator)(args, kwargs, outs)
 
 
-def _made(ir, key, local):
+def _made(prototype, local):
     if isinstance(local.target, torch._ops.OpOverload) and not local.target._schema.returns:
         return [None], pytree.tree_structure(None)
-    made, spec = pytree.tree_flatten(ir.prototypes[key])
+    made, spec = pytree.tree_flatten(prototype)
     return [_held(m) if m is not None else None for m in made], spec
 
 
@@ -6827,7 +6875,7 @@ def _copied(ir, key, operand, source, target):
 
 # N. D. Jones, C. K. Gomard and P. Sestoft, 1993, Definition 4.1: one item of the function's program over its placed
 # stand-ins (`placed`) and the call's input leaves (`given`): its value and its structured operations
-def _specialized(ir, placed, item, operands, ops, given):
+def _specialized(ir, placed, item, operands, ops, given, generator):
     kind, reads, key, operand = item
     value = placed(key)
     if key in ir.attributes:
@@ -6855,15 +6903,16 @@ def _specialized(ir, placed, item, operands, ops, given):
                 masked = _temporary(operands[at].shape, operands[at].dtype)
                 ops += _shard_select(masked, operands[at], dim, starts[q], counts[q])
                 operands[at] = masked
-        value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed)
+        value, made = _called(ir, key, operands, ir.locals[operand], ir.forms.get(key), placed, generator)
         ops += made
     elif kind == 'collective':
         ops += _collected(ir, placed, item, operands)
     return value
 
 
+# torch 2.14.0 torch/random.py initial_seed: the call row's generator, seeded from the process seed and its stream
 def _instantiate(ir, tensors, given, spec, stream=0):
-    RANDOM.update(state=None, sites=0, stream=stream)
+    generator = Generator(seeded(torch.initial_seed() ^ (stream << 32)))
     ops, values = [], {}
     nodes = {node: index for index, node in enumerate(ir.order)}
 
@@ -6887,12 +6936,11 @@ def _instantiate(ir, tensors, given, spec, stream=0):
             result = map_arg(node.args[0], lambda n: read(keys[n]))
             break
         first = len(ops)
-        remember(key, _specialized(ir, placed, item, [read(r) for r in reads], ops, given))
+        remember(key, _specialized(ir, placed, item, [read(r) for r in reads], ops, given, generator))
         _placed(ops[first:], CPU if _device(ir, (key[0], ir.sharding.get(key[0]))) == 'cpu' else GPU,
                 nodes.get(key[0], len(nodes)))
-    if RANDOM['state'] is not None:
-        ops.append(_stepped(RANDOM['state']))
-    return ops, pytree.tree_unflatten(pytree.tree_leaves(result), spec)
+    ops += generator.stepped()
+    return ops, pytree.tree_unflatten(pytree.tree_leaves(result), spec), generator
 
 
 # design/plan-to-bridge-change-request.md R4
@@ -6947,6 +6995,7 @@ def _released(owned):
 def _dropped(context, state):
     if state['mapping'] is not None or state['owned']:
         _retire(context, state)
+    _released(state.get('constructed', {}))
 
 
 # metal-microbench metal_ir.h: one program per call row, built from the call's structured operations over its placed
@@ -6980,14 +7029,11 @@ class _Builder:
         key = _key(t)
         if key in self.roots:
             return self.roots[key]
-        base = t.tensor if isinstance(t, _Words) else t
-        base = torch.view_as_real(base) if base.is_complex() else base
-        numel = base.untyped_storage().nbytes() // base.element_size()
+        base = _stored(t)
         owner = self.owners.get(key)
-        role = CONSTANT if key in self.constants else self.role(owner) if owner is not None else STATE if key in GENERATORS else \
+        role = CONSTANT if key in self.constants else self.role(owner) if owner is not None else \
             CONSTANT if base.device.type != 'meta' else TEMPORARY
-        v = self.lib.metal_ir_value(self.p, role, SCALAR[base.dtype], 1, _array(mesh.Q, [numel]), 1,
-                                    _array(Term, [Term(0, 0, 1, 1, 0)]), 0, self.identity)
+        v = self.whole(base, role, self.identity)
         if owner is not None:
             k, index, _, pages, row = owner
             self.lib.metal_ir_value_planned(self.p, v, k, index, 0)
@@ -6995,14 +7041,33 @@ class _Builder:
                 self.lib.metal_ir_value_paged(self.p, v, row, pages)
             self.planned[v] = owner
         if key in self.constants or owner is None and base.device.type != 'meta':
-            base = self.constants.get(key, base)
-            storage = base.untyped_storage()
-            HOLDERS[id(base)] = base
-            buffer = storage.data_ptr() if base.device.type == 'mps' else None
-            data = OBJECT(buffer, _SEL(b'contents')) if buffer else storage.data_ptr()
-            self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0, id(base), _released_constant)
+            self.attach(v, self.constants.get(key, base))
         self.roots[key], self.roles[key] = v, role
         return v
+
+    # metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE: a storage root whose role its caller states (an exported program's
+    # InputKind, a result, a received channel), with the initial contents `data` where the role is CONSTANT, and its
+    # caller's source identity (metal_ir_value `identity`; 0 none, so no definition is shared by identity alone)
+    def declare(self, t, role, data=None, identity=0):
+        key = _key(t)
+        if key not in self.roots:
+            v = self.whole(_stored(t), role, identity)
+            if data is not None:
+                self.attach(v, _stored(data))
+            self.roots[key], self.roles[key] = v, role
+        return self.roots[key]
+
+    def whole(self, base, role, identity):
+        numel = base.untyped_storage().nbytes() // base.element_size()
+        return self.lib.metal_ir_value(self.p, role, SCALAR[base.dtype], 1, _array(mesh.Q, [numel]), 1,
+                                       _array(Term, [Term(0, 0, 1, 1, 0)]), 0, identity)
+
+    def attach(self, v, base):
+        storage = base.untyped_storage()
+        HOLDERS[id(base)] = base
+        buffer = storage.data_ptr() if base.device.type == 'mps' else None
+        data = OBJECT(buffer, _SEL(b'contents')) if buffer else storage.data_ptr()
+        self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0, id(base), _released_constant)
 
     def value(self, t):
         base, words = (t.tensor, 2) if isinstance(t, _Words) else (t, 1)
@@ -7246,6 +7311,7 @@ def _compiler():
                 ('metal_ir_yield', None, [P, U, U, C.POINTER(U)]),
                 ('metal_ir_lower', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]), ('metal_ir_values', U, [P]),
+                ('metal_ir_specialize', P, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_operations', U, [P]),
                 ('metal_ir_machine', None, [P, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine)]),
                 ):
@@ -7328,7 +7394,7 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
             result = pytree.tree_unflatten(leaves, compiled[k].spec) if any(x is not None for x in leaves) else None
             rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': None})
             return result
-        ops, result = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec, row)
+        ops, result, generator = _instantiate(ir, instance(k, j)[0], inputs, compiled[k].spec, row)
         # docs/provider.md#fragment-coded-weights
         if compiled[k].target is not None:
             for g in ops:
@@ -7338,6 +7404,8 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[GPU]), C.byref(machines[CPU]))
         owned[id(builder)] = lambda p=builder.p: compiler.metal_ir_program_free(p)
+        if generator.sites:
+            builder.declare(generator.state, STATE, data=generator.state)
         for g in ops:
             builder.generic(g)
         receives, sends = _endpoints(ir)
@@ -8273,13 +8341,13 @@ def program(block, *example_inputs):
              for x in example_inputs]
     constants = [None if isinstance(x, torch.Tensor) else x for x in example_inputs]
     context, state = _context(), {'stale': True, 'mapping': None, 'devices': (), 'executions': 0, 'horizon': 1,
-                                  'inputs': [None] * len(given), 'timeout': None, 'replay': None, 'owned': {}}
+                                  'inputs': [None] * len(given), 'timeout': None, 'replay': None, 'owned': {},
+                                  'construction': None, 'constructed': {}}
 
     # design/aot-compilation-change-request.md A1 ("serialized objects we can resume without needing to repeatedly
     # re-compile anything"): the compilation's results at this node (_built), what an artifact retains, and what plan,
     # placement and binding derive from them each time (_bound)
-    def _built():
-        nodes, page = _nodes()
+    def _built(nodes, page):
         irs = [partition(record.gm, operand, nodes, page) for record, operand in zip(compiled, operands)]
         # design/compilation-composition-change-request.md items 1 and 6 (unit 6E); design/aot-compilation-change-
         # request.md A4: a function's results are whole at every node of its map (_partition), so a consumer at a node
@@ -8320,7 +8388,7 @@ def program(block, *example_inputs):
         # design/compilation-composition-change-request.md item 5
         # design/compilation-composition-change-request.md, "Complete replacement workgroup", 6's stages A to C:
         # each call's program declared and lowered, its compiled order's lifetimes the plan's operands
-        programs = _programs(context, irs, compiled, gm, of, constants, holders, state['owned'], calls)
+        programs = _programs(context, irs, compiled, gm, of, constants, holders, state['constructed'], calls)
         own = _lifetimes(programs, irs)
         # metal_ir.h metal_ir_step_placed; the later passes: each function's step word, its rows' plan execution
         # e = b every + ordinal, which the native program writes before row execution e; lag copies
@@ -8333,10 +8401,6 @@ def program(block, *example_inputs):
                                 and programs['compiler'].metal_ir_step_state(row['builder'].p) == NONE):
             steps[k] = len(irs[k].values) + len(own[k])
             own[k].append(mesh.Value(section=mesh.Section(bytes=8), kind=mesh.EXECUTION, lag=1, run=1))
-        arrays = [((mesh.Declared * len(ir.declared))(*ir.declared),
-                   (mesh.Weight * len(ir.weights))(*ir.weights),
-                   (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
-                   (mesh.Dependence * len(ir.dependences))(*ir.dependences)) for ir, mine in zip(irs, own)]
         # design/torch-capture-change-request.md item 2 and its 2026-11-09 appendix: each function's t(v) at this
         # node part by part (_actors), mesh_plan's Bff of their edges the horizon and host copies
         # (mesh-graph.h mesh_graph_actor_time ENODATA: a time over the measured operands alone, a lower bound the
@@ -8345,15 +8409,59 @@ def program(block, *example_inputs):
         state['incomplete'] = sorted(k for k, actor in actors.items() if not actor[5])
         analysed = _analyse(gm, of, compiled, sources, every)
         return {'nodes': nodes, 'page': page, 'irs': irs, 'holders': holders, 'programs': programs, 'steps': steps,
-                'arrays': arrays, 'actors': actors, 'analysed': analysed, 'calls': calls, 'every': every,
+                'own': own, 'actors': actors, 'analysed': analysed, 'calls': calls, 'every': every,
                 'given': given, 'constants': constants, 'capture': (gm, constants), 'returned': produced}
 
+    # design/compilation-composition-change-request.md items 3, 6 and 7; metal-microbench metal_ir.h
+    # metal_ir_specialize: a plan's own instance of the retained construction. mesh_plan writes its values'
+    # sections and lags, the transport its ranges and releases, so each plan takes fresh arrays from the declared
+    # inputs, copies of the declared marks, and each row's specialized program over the lowered one; `nodes` the
+    # current view its binding is identified by
+    def _planned(construction, nodes):
+        programs, compiler, error = construction['programs'], construction['programs']['compiler'], \
+            C.create_string_buffer(4096)
+        rows = []
+        for row in programs['rows']:
+            planned, builder = dict(row), row['builder']
+            if builder is not None:
+                p = compiler.metal_ir_specialize(builder.p, error, len(error))
+                if not p:
+                    raise OSError(errno.EINVAL, 'call %s of compiled function %d: its specialization: %s'
+                                  % (row['node'].name, row['k'], error.value.decode()))
+                state['owned'][id(p)] = lambda p=p: compiler.metal_ir_program_free(p)
+                planned['builder'] = types.SimpleNamespace(p=p, planned=builder.planned,
+                                                           source_values=builder.source_values)
+                planned['marks'] = {'received': [(value, f, v, Range.from_buffer_copy(bytes(declared)))
+                                                 for value, f, v, declared in row['marks']['received']],
+                                    'sent': [(value, Release.from_buffer_copy(bytes(release)))
+                                             for value, release in row['marks']['sent']],
+                                    'sending': row['marks']['sending']}
+            rows.append(planned)
+        arrays = [((mesh.Declared * len(ir.declared))(*ir.declared),
+                   (mesh.Weight * len(ir.weights))(*ir.weights),
+                   (mesh.Value * (len(ir.values) + len(mine)))(*ir.values, *mine),
+                   (mesh.Dependence * len(ir.dependences))(*ir.dependences))
+                  for ir, mine in zip(construction['irs'], construction['own'])]
+        return dict(construction, nodes=nodes, programs=dict(programs, rows=rows), arrays=arrays)
+
+    # the compilation's inputs: the outer closure's captured program and placement, this node's map (its count and
+    # index), its page and the program's membership; a view's serial, sequencer and boot identify a plan only
     def make():
         deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS
         if state['mapping'] is not None or state['owned']:
             _retire(context, state)
         try:
-            state['built'] = _built()
+            nodes, page = _nodes()
+            key = (nodes.count, nodes.self, page, _program())
+            if state['construction'] is None or state['construction']['key'] != key:
+                _released(state['constructed'])
+                state['construction'] = None
+                try:
+                    state['construction'] = dict(_built(nodes, page), key=key)
+                except BaseException:
+                    _released(state['constructed'])
+                    raise
+            state['built'] = _planned(state['construction'], nodes)
             _bound(context, state, state['built'], deadline)
         except BaseException:
             _retire(context, state)

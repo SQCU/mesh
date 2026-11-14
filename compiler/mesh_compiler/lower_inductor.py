@@ -30,25 +30,34 @@ OPTIONS = {"aot_inductor.package": True, "layout_optimization": False, "reorder_
 ATEN = torch.ops.aten
 
 
-# The scheduled body with the caller's immutable constants as buffers of the compiled model, every node keeping its
-# original metadata, and each surviving SEND/RECV as fixed native effect sites (rdma/mesh_aoti.py START, WAIT, SENT,
-# PUBLISH) on its typed view of the one arena input: copy e % copies of its value, at the offset the plan solved
-# (Plan.offsets, a constant table of the model) plus its declared start. Each emitted site is one task of the record:
-# RECV maps to its WAIT and SEND to the PUBLISH of its supplied representative for the scheduled dependences
-# contracted through the numerical nodes (rdma/mesh_graph.py contract); START precedes every site (M. Lam, PLDI 1988,
-# section 2.3). `start` is the plan's retained START object on this machine, or None: the invocation input and START
-# exist exactly when it does. compiler/mesh_compiler/schedule.py assemble, module.meta["writers"]; solved,
-# Plan.publications; rdma/mesh_graph.py dependences_views, postorder, contract, quotient: a copy is a SEND's source node,
-# Plan value, sent view and read-after-write writer causes; a PUBLISH is a supplied representative, after each copy of
-# the same writer causes whose view intersects one of its transfers'; one SENT(c, copies) per completion
-# representative c and its value's copies precedes every copy it intersects; the output follows every emitted operation
-def body(module, constants, tensors, effects, start, extent):
-    import mesh_aoti as native
-    root, graph, held, examples = torch.nn.Module(), torch.fx.Graph(), {}, []
-    tasks, operations, dependences, emitted, views = [], [], [], {}, {}
+# compiler/mesh_compiler/schedule.py assemble, module.meta["dependences"] and ["writers"]; rdma/mesh_graph.py
+# dependences_views, postorder: the static fanout of a scheduled body's planned transfers (`effects` channels). Each
+# distinct (source, Plan value, sent view, read-after-write writers) is one write of its members, the SENDs sharing it;
+# a supplied representative is one publication after the writes it covers; a (completion, copies) wait precedes each
+# write it intersects; `order` is the DAG of nodes, waits, writes and publications in its emitted order. Consumed by
+# body (Inductor) and by compiler/mesh_compiler/lower_metal.py construct (the typed program)
+@dataclasses.dataclass
+class Fanout:
+    sites: list
+    sends: list
+    solved: dict
+    values: list
+    first: dict
+    group: dict
+    groups: list
+    index: dict
+    supplied: dict
+    completion: dict
+    member: dict
+    owner: dict
+    affected: dict
+    exposed: dict
+    order: list
+
+
+def fanout(module, effects):
     nodes = list(module.graph.nodes)
-    sites = [node for node in nodes if channel_of(node) is not None]
-    carried = lambda node: (node.args[0] if node.target is SEND else node).meta["val"]
+    sites = [node for node in nodes if channel_of(node) in effects]
     solved = {value: offsets for _, value, offsets, *_ in effects.values()}
     values = list(dict.fromkeys(effects[channel_of(node)][1] for node in sites))
     first = dict(zip(values, itertools.accumulate((len(solved[value]) for value in values), initial=0)))
@@ -80,7 +89,7 @@ def body(module, constants, tensors, effects, start, extent):
         owner[completion[node]] = supplied[node]
         member.setdefault(index[group[node]], []).append(node)
     completions = {k: [c for c in found if c is not None] for k, found in completions.items()}
-    item = lambda u: ("publish", supplied[u]) if u.target is SEND else ("node", u)
+    item = lambda u: ("publish", supplied[u]) if u in group else ("node", u)
     affected, waits = {}, {}
     for k, (_, value, *_) in enumerate(groups):
         for c in dict.fromkeys(c for i in sorted(overlaps[k]) for c in completions[i]):
@@ -88,7 +97,7 @@ def body(module, constants, tensors, effects, start, extent):
             waits.setdefault(k, []).append((c, len(solved[value])))
     preds, items = {}, []
     for node in (n for n in nodes if n.op not in ("placeholder", "output")):
-        if node.target is not SEND:
+        if node not in group:
             preds[item(node)] = [item(u) for u in dict.fromkeys([*node.all_input_nodes, *before.get(node, ())])
                                  if u.op != "placeholder"]
             items.append(item(node))
@@ -100,7 +109,7 @@ def body(module, constants, tensors, effects, start, extent):
                 preds["sent", key] = []
             preds["write", k] = [("sent", key) for key in waits.get(k, ())] + [item(u) for u in dict.fromkeys([
                 groups[k][0], *(u for n in member[k] for u in before.get(n, ()))]) if u.op != "placeholder" and not (
-                u.target is SEND and supplied[u] in outlets[k])]
+                u in group and supplied[u] in outlets[k])]
             items.append(("write", k))
         if [n for n in sends if supplied[n] == supplied[node]][-1] is node:
             preds[item(node)] = [("write", j) for j in sorted({j for g in units[supplied[node]] for j in overlaps[g]
@@ -111,6 +120,32 @@ def body(module, constants, tensors, effects, start, extent):
         for _, j in preds["publish", s]:
             exposed.setdefault(j, []).append(s)
     order = mesh_graph.postorder(items[::-1], preds.__getitem__)
+    return Fanout(sites, sends, solved, values, first, group, groups, index, supplied, completion, member, owner,
+                  affected, exposed, order)
+
+
+# The scheduled body with the caller's immutable constants as buffers of the compiled model, every node keeping its
+# original metadata, and each surviving SEND/RECV as fixed native effect sites (rdma/mesh_aoti.py START, WAIT, SENT,
+# PUBLISH) on its typed view of the one arena input: copy e % copies of its value, at the offset the plan solved
+# (Plan.offsets, a constant table of the model) plus its declared start. Each emitted site is one task of the record:
+# RECV maps to its WAIT and SEND to the PUBLISH of its supplied representative for the scheduled dependences
+# contracted through the numerical nodes (rdma/mesh_graph.py contract); START precedes every site (M. Lam, PLDI 1988,
+# section 2.3). `start` is the plan's retained START object on this machine, or None: the invocation input and START
+# exist exactly when it does. compiler/mesh_compiler/schedule.py assemble, module.meta["writers"]; solved,
+# Plan.publications; rdma/mesh_graph.py dependences_views, postorder, contract, quotient: a copy is a SEND's source node,
+# Plan value, sent view and read-after-write writer causes; a PUBLISH is a supplied representative, after each copy of
+# the same writer causes whose view intersects one of its transfers'; one SENT(c, copies) per completion
+# representative c and its value's copies precedes every copy it intersects; the output follows every emitted operation
+def body(module, constants, tensors, effects, start, extent):
+    import mesh_aoti as native
+    root, graph, held, examples = torch.nn.Module(), torch.fx.Graph(), {}, []
+    tasks, operations, dependences, emitted, views = [], [], [], {}, {}
+    nodes = list(module.graph.nodes)
+    carried = lambda node: (node.args[0] if node.target is SEND else node).meta["val"]
+    fan = fanout(module, effects)
+    sites, sends, solved, values, first = fan.sites, fan.sends, fan.solved, fan.values, fan.first
+    group, groups, index, supplied, completion = fan.group, fan.groups, fan.index, fan.supplied, fan.completion
+    member, owner, affected, exposed, order = fan.member, fan.owner, fan.affected, fan.exposed, fan.order
     made, published, waited = {}, {}, {}
 
     def site(call, primitive, key, ordinal, *sources):

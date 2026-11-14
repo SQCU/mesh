@@ -281,8 +281,9 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
              (mesh_graph.contract([node not in local for node in functions], edges) if local else edges)]
     identity = {node: (k, resource) for k, (node, (_, resource)) in enumerate(zip(functions, tasks))}
     members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
+    sequence = tuple(identity[node] for node in listed)
     return {group: assemble(group, held, [node for node in listed if node.meta["processor"] in held], nodes, pairs,
-                            transfers, local, identity, writers) for group, held in members.items()}, plan
+                            transfers, local, identity, writers, sequence) for group, held in members.items()}, plan
 
 
 # rdma/mesh-collective.h mesh_plan; design/plan-to-bridge-change-request.md R5
@@ -295,7 +296,7 @@ def ordered(tasks, edges, resources):
 
 # design/compilation-composition-change-request.md items 2, 3 and 6; M. Abadi et al., TensorFlow, arXiv:1603.04467,
 # section 3.2.2: a Send/Receive pair stands only for an edge between devices; compiler/mesh_compiler/ir.py views
-def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers=()):
+def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers=(), sequence=()):
     graph, copied, tasks = torch.fx.Graph(), {}, {}
     for node in nodes:
         if node.op == "placeholder" and any(u.meta["processor"] in members for u in node.users):
@@ -322,7 +323,9 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         (copied[writer], copied[reader]) for writer, reader in writers
         if writer.meta["processor"] in members and reader.meta["processor"] in members], received_strides={
         channel: tuple(sent.args[0].meta["val"].stride()) for channel, (sent, arrival) in transfers.items()
-        if arrival in copied and arrival not in local})
+        if arrival in copied and arrival not in local}, order=sequence, transfers={
+        channel: (copied.get(sent), copied.get(arrival)) for channel, (sent, arrival) in transfers.items()
+        if arrival not in local})
     return module
 
 

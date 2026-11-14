@@ -1,1753 +1,200 @@
-# design/the-compiler.md, order 4; design/torch-source-lowering-change-request.md, items 1 and 3
-import copy
+# design/compilation-composition-change-request.md items 1, 2, 6 and 7; design/compiler-workgroup-2026-11-13.md;
+# ~/schedule-emit/schedule_emit/driver.py and lower_inductor.py lower: a stage takes the scheduled body of one group
+# and returns its target's program, built by the one numerical construction (rdma/mesh_compile.py _instruction,
+# _Builder); output_data/compiler-workgroup-20261113/frontends/litert/typed-target.status.md, the result contract
+import collections
 import ctypes as C
-import math
-import mmap
-import operator
-import os
+import dataclasses
 import pathlib
 import sys
 import weakref
-from dataclasses import dataclass, field
 
 import torch
+from torch.export.graph_signature import InputKind
+from torch.fx.node import map_arg
 from torch.utils import _pytree as pytree
 
-from .ir import RECV, SEND
+from .ir import RECV, SEND, channel_of
+from .lower_inductor import fanout
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
-import mesh_graph
-import mesh_metal4
+import mesh_compile as M
 
-ATEN, LIB = torch.ops.aten, mesh_metal4.LIB
-TYPES = {torch.float32: "float", torch.float16: "half", torch.int64: "long", torch.int32: "int",
-         torch.uint8: "uchar", torch.bool: "bool"}
-NATIVE_TYPES = {**TYPES, torch.float64: "double", torch.int16: "short", torch.int8: "char"}
-ARGUMENT, RECEIVED, RESULT, HELD = "argument", "received", "result", "held"
-COMMIT, WAIT, CHECK = mesh_metal4.COMMIT, mesh_metal4.WAIT, mesh_metal4.CHECK
-QUEUE, THREAD, SENT, ARRIVED, FEEDBACK = "queue", "host", "send", "recv", "<feedback>"
-TILE, SIMDGROUPS, GRAIN, LOCAL, CHAIN = 32, 4, 1024, 16384, 8
-STDLIB = "#include <metal_stdlib>\nusing namespace metal;\n"
-# Apple, Metal Shading Language Specification 4.1, section 2.22.3; MPPTensorOpsMatMul2d.h
-PRIMITIVES = ("#include <metal_tensor>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
-              "using namespace mpp::tensor_ops;\n")
-PIPELINES, HOST = {}, torch.device("cpu")
-# design/compilation-composition-change-request.md, item 1 and Source bindings; Apple, Metal Shading Language
-# Specification 4.1, sections 2.1, 2.2 and 6.5; ISO/IEC 14882:2020 [c.math]; Apple, vecLib cblas_new.h and
-# dispatch/apply.h
-NATIVE = """#include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <dispatch/dispatch.h>
-#define ACCELERATE_NEW_LAPACK 1
-#include <vecLib/cblas_new.h>
-#include <vecLib/lapack.h>
-namespace mesh {
-typedef unsigned int uint;
-typedef unsigned char uchar;
-typedef _Float16 half;
-struct uint3 { uint x, y, z; uint3(uint a, uint b, uint c) : x(a), y(b), z(c) {} };
-template <class T> static inline T max(T a, T b) { return a < b ? b : a; }
-template <class T> static inline T min(T a, T b) { return b < a ? b : a; }
-template <class T> static inline T abs(T a) { return a < 0 ? T(-a) : a; }
-static inline float abs(float a) { return std::fabs(a); }
-static inline double abs(double a) { return std::fabs(a); }
-static inline half abs(half a) { return half(std::fabs(float(a))); }
-#define MESH_UNARY(name) static inline float name(float a) { return std::name(a); } \\
-    static inline double name(double a) { return std::name(a); } \\
-    static inline half name(half a) { return half(std::name(float(a))); }
-#define MESH_BINARY(name) static inline float name(float a, float b) { return std::name(a, b); } \\
-    static inline double name(double a, double b) { return std::name(a, b); } \\
-    static inline half name(half a, half b) { return half(std::name(float(a), float(b))); }
-MESH_UNARY(exp) MESH_UNARY(log) MESH_UNARY(sqrt) MESH_UNARY(sin) MESH_UNARY(cos) MESH_UNARY(tanh) MESH_UNARY(erf)
-MESH_UNARY(floor) MESH_UNARY(ceil) MESH_UNARY(round) MESH_UNARY(trunc)
-MESH_BINARY(pow) MESH_BINARY(fmod)
-template <class T> static inline T rsqrt(T a) { return T(1) / sqrt(a); }
-template <class T> static inline bool isnan(T a) { return a != a; }
-static const float M_SQRT1_2_F = 0.70710678118654752440f;
-struct part { void (*kernel)(void *const *, size_t, size_t); void *const *table; size_t first, last; };
-static void each(void *context, size_t at) {
-    const part *p = (const part *)context + at;
-    p->kernel(p->table, p->first, p->last);
-}
-"""
-# torch/csrc/api/include/torch/mps.h: commit, get_command_buffer, get_dispatch_queue
-TORCH = [C.cast(getattr(C.CDLL(str(pathlib.Path(torch.__file__).parent / "lib/libtorch_cpu.dylib")), name),
-                C.c_void_p).value for name in ("_ZN5torch3mps6commitEv", "_ZN5torch3mps18get_command_bufferEv",
-                                         "_ZN5torch3mps18get_dispatch_queueEv")]
-
-# rdma/mesh-metal4.m
-API = (("commit", "void", "void *, void *, uint32_t, void *const *, uint32_t, void *const *, uint32_t, void *, void *"),
-       ("wait", "int", "void *const *, uint32_t, char *, size_t"), ("view", "void *", "void *, uint64_t"),
-       ("buffer", "void *", "uint64_t"), ("release", "void", "void *"), ("address", "uint64_t", "void *"),
-       ("contents", "void *", "void *"), ("after", "void", "void *, void *, void *, void *"),
-       ("reset", "void", "void *"), ("signal", "void", "void *"), ("await", "void", "void *"))
-CHECKED = {torch.bool: "bool", torch.uint8: "uint8_t", torch.int8: "int8_t", torch.int16: "int16_t",
-           torch.int32: "int32_t", torch.int64: "int64_t", torch.float16: "_Float16", torch.float32: "float",
-           torch.float64: "double"}
-
-POINTWISE = {
-    ATEN.add.Tensor: "({T}({0}) + {T}({1}))", ATEN.add.Scalar: "({T}({0}) + {T}({1}))",
-    ATEN.sub.Tensor: "({T}({0}) - {T}({1}))", ATEN.sub.Scalar: "({T}({0}) - {T}({1}))",
-    ATEN.mul.Tensor: "({T}({0}) * {T}({1}))", ATEN.mul.Scalar: "({T}({0}) * {T}({1}))",
-    ATEN.div.Tensor: "({T}({0}) / {T}({1}))", ATEN.div.Scalar: "({T}({0}) / {T}({1}))",
-    ATEN.eq.Scalar: "({0} == {1})", ATEN.eq.Tensor: "({0} == {1})",
-    ATEN.ne.Scalar: "({0} != {1})", ATEN.ne.Tensor: "({0} != {1})",
-    ATEN.gt.Scalar: "({0} > {1})", ATEN.gt.Tensor: "({0} > {1})",
-    ATEN.lt.Scalar: "({0} < {1})", ATEN.lt.Tensor: "({0} < {1})",
-    ATEN.ge.Scalar: "({0} >= {1})", ATEN.le.Scalar: "({0} <= {1})",
-    ATEN.ge.Tensor: "({0} >= {1})", ATEN.le.Tensor: "({0} <= {1})",
-    ATEN.bitwise_and.Tensor: "{T}({T}({0}) & {T}({1}))", ATEN.bitwise_or.Tensor: "{T}({T}({0}) | {T}({1}))",
-    ATEN.logical_not.default: "(!bool({0}))",
-    ATEN.logical_and.default: "(bool({0}) && bool({1}))", ATEN.logical_or.default: "(bool({0}) || bool({1}))",
-    ATEN.where.self: "(bool({0}) ? {T}({1}) : {T}({2}))",
-    ATEN.neg.default: "(-{T}({0}))", ATEN.abs.default: "abs({T}({0}))",
-    ATEN.exp.default: "exp({T}({0}))", ATEN.log.default: "log({T}({0}))",
-    ATEN.sqrt.default: "sqrt({T}({0}))", ATEN.rsqrt.default: "rsqrt({T}({0}))",
-    ATEN.sin.default: "sin({T}({0}))", ATEN.cos.default: "cos({T}({0}))",
-    ATEN.tanh.default: "tanh({T}({0}))",
-    ATEN.sigmoid.default: "(1 / (1 + exp(-{T}({0}))))",
-    ATEN.relu.default: "max({T}({0}), {T}(0))",
-    ATEN.clone.default: "{0}",
-    ATEN._to_copy.default: "{T}({0})",
-}
-# design/the-compiler.md, order 5; torch/nn/modules/activation.py, GELU
-GELU = "template <typename T> inline T mesh_%s(T x) { return T(0.5f * x * (1 + %s)); }\n"
-# torch 2.15 include/c10/metal/special_math.h, erf; MLX mlx/backend/metal/kernels/erf.h
-ERF = """template <typename T> inline float erf(T x) {
-    float a = float(x), t = abs(a), s = a * a, r = -5.96761703e-4f;
-    if (t > 0.927734375f) {
-        r = fma(fma(-1.72853470e-5f, t, 3.83197126e-4f), s, fma(-3.88396438e-3f, t, 2.42546219e-2f));
-        r = fma(r, t, -1.06777877e-1f);
-        r = fma(r, t, -6.34846687e-1f);
-        r = fma(r, t, -1.28717512e-1f);
-        return copysign(1.0f - exp(fma(r, t, -t)), a);
-    }
-    r = fma(r, s, 4.99119423e-3f);
-    r = fma(r, s, -2.67681349e-2f);
-    r = fma(r, s, 1.12819925e-1f);
-    r = fma(r, s, -3.76125336e-1f);
-    r = fma(r, s, 1.28379166e-1f);
-    return fma(r, a, a);
-}
-"""
-VIEWS = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default, ATEN.permute.default,
-         ATEN.expand.default, ATEN.slice.Tensor, ATEN.select.int, ATEN.unsqueeze.default, ATEN.squeeze.dims,
-         ATEN.squeeze.dim, ATEN.transpose.int, ATEN.alias.default}
-RESHAPES = {ATEN.view.default, ATEN._unsafe_view.default, ATEN.reshape.default}
-# design/compilation-composition-change-request.md:360-362
-ONCE = {ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.flip.default, ATEN.slice_scatter.default,
-        ATEN.scatter.src, ATEN.scatter_add.default}
-FILLED = {ATEN.full.default: True, ATEN.full_like.default: True, ATEN.scalar_tensor.default: True,
-          ATEN.new_full.default: True, ATEN.new_zeros.default: False, ATEN.empty_permuted.default: False}
-REDUCED = {ATEN.sum.dim_IntList: ("0", "a + {x}", "a"), ATEN.mean.dim: ("0", "a + {x}", "a / {n}"),
-           ATEN.amax.default: ("{x}", "max(a, {x})", "a"), ATEN.amin.default: ("{x}", "min(a, {x})", "a"),
-           ATEN.any.dim: ("false", "a || {x}", "a"), ATEN.any.dims: ("false", "a || {x}", "a")}
-# torch 2.15 documentation, torch.remainder
-REMAINDER = ("template <typename T> inline T mesh_%s(T a, T b) {\n    T m = %s;\n"
-             "    return (m != 0 && ((m < 0) != (b < 0))) ? T(m + b) : m;\n}\n")
-WRAP = "inline uint mesh_wrap(long i, long n) { return uint(i < 0 ? i + n : i); }\n"
-WITHIN = "inline uint mesh_within(long i, long n) { return uint(i < 0 ? 0 : i < n ? i : n - 1); }\n"
-# torch 2.15 documentation, torch.clamp
-LEAST = ("template <typename T> inline T mesh_least(T a, T b) { return a < b ? b : a; }\n"
-         "template <typename T> inline T mesh_most(T a, T b) { return b < a ? b : a; }\n")
-WITH_EFFECTS = torch.ops.higher_order.with_effects
-SCATTERED = {ATEN.scatter_add.default: True, ATEN.scatter.src: False, ATEN.scatter.value: False}
-PASSED = {"memory_format", "approximate", "dtype", "layout", "device", "pin_memory", "non_blocking"}
-SCALED = {ATEN.addmm.default: {"beta", "alpha"}, WITH_EFFECTS: {"is_matrix"}, ATEN.avg_pool2d.default: {"padding"}}
+Root = collections.namedtuple("Root", "name kind role root value")
+Output = collections.namedtuple("Output", "root value literal metadata")
+# torch 2.14.0 torch/export/graph_signature.py InputKind; metal-microbench metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE
+KINDS = {InputKind.USER_INPUT: ("user_input", M.INPUT), InputKind.PARAMETER: ("parameter", M.STATE),
+         InputKind.BUFFER: ("buffer", M.STATE), InputKind.CONSTANT_TENSOR: ("constant_tensor", M.CONSTANT)}
+# a storage several placeholders view: its role the most mutable of theirs (state written across calls, then an
+# input varying per call, then constant data)
+AUTHORITY = (M.STATE, M.INPUT, M.CONSTANT)
+# design/the-compiler.md, "A processor is a device of a machine"; metal-microbench metal_ir.h METAL_IR_GPU .. ANE
+PLACES = {"cpu": M.CPU, "mps": M.GPU, "ane": M.ANE}
 
 
-@dataclass
-class View:
-    storage: int
-    dtype: torch.dtype
-    shape: tuple
-    stride: tuple
-    offset: int
+@dataclasses.dataclass(eq=False)
+class Constructed:
+    program: int
+    compiler: object
+    target: str
+    place: int
+    inputs: tuple
+    outputs: tuple
+    spec: object
+    state: tuple
+    received: dict
+    sent: dict
+    wires: dict
+    operations: dict
+    advanced: tuple = ()
+    fanout: object = None
+    writes: dict = dataclasses.field(default_factory=dict)
+    identity: int = 0
 
-    def read(self, bind, index, write=False):
-        terms = [f"{i} * {s}" for i, s, n in zip(index, self.stride, self.shape) if n > 1 and s]
-        return f"{bind(self, write)}[{' + '.join([str(self.offset)] * bool(self.offset) + terms) or '0'}]"
+    def __post_init__(self):
+        self.freed = weakref.finalize(self, self.compiler.metal_ir_program_free, self.program)
 
-
-@dataclass
-class Fused:
-    dtype: torch.dtype
-    shape: tuple
-    expression: object
-    nodes: tuple = ()
-    uses: frozenset = frozenset()
-    free: bool = False
-
-    def read(self, bind, index):
-        bind.note(self)
-        return self.expression(bind, ["0" if n == 1 else i for i, n in zip(index, self.shape)], None)
-
-
-@dataclass
-class Product:
-    left: View
-    right: View
-    dtype: torch.dtype
-    shape: tuple
-    expression: object
-    plain: bool = False
-    nodes: tuple = ()
-    uses: frozenset = frozenset()
+    def close(self):
+        self.freed()
 
 
-@dataclass
-class Storage:
-    kind: str
-    dtype: torch.dtype
-    count: int
-    position: int = None
+# torch 2.14.0 torch/_tensor_docs.py as_strided, untyped_storage; torch/_export/non_strict_utils.py fakify: one meta root
+# a source storage as the export's fake values alias it (every placeholder kind in that one namespace), each
+# placeholder its view with its own shape, strides and offset; a CONSTANT root's initial bytes the exported tensor's
+def placeholders(nodes, kinds, sources):
+    found = {}
+    for node in nodes:
+        value = node.meta.get("val") if node.op == "placeholder" else None
+        if isinstance(value, torch.Tensor):
+            found.setdefault(value.untyped_storage()._cdata, []).append(node)
+    roots = {}
+    for viewed in found.values():
+        roles = {KINDS[kinds.get(node.target, InputKind.USER_INPUT)][1] for node in viewed}
+        role = next(role for role in AUTHORITY if role in roles)
+        first = viewed[0].meta["val"]
+        root = torch.empty(first.untyped_storage().nbytes() // first.element_size(), dtype=first.dtype, device="meta")
+        data = sources[viewed[0].target] if role == M.CONSTANT else None
+        for node in viewed:
+            value = node.meta["val"]
+            base = root if value.dtype == root.dtype else root.view(value.dtype)
+            roots[node] = base.as_strided(value.shape, value.stride(), value.storage_offset()), role, data
+    return roots
 
 
-@dataclass
-class Step:
-    vertex: int
-    nodes: tuple
-    pipeline: int
-    storages: list
-    accesses: list
-    grid: tuple
-    group: tuple
-    groups: bool
+# compiler/mesh_compiler/driver.py lowered, effects: channel -> (declared transfer, its Plan value, the value's solved
+# copy offsets, its byte extent, declared sent view, declared landed view, supplied and completion representatives);
+# compiler/mesh_compiler/lower_inductor.py body, typed: a view (offset, element, (size, byte stride) pairs) of one copy
+# of the Plan value's bytes; J. K. Salmon et al., SC 2011, §3.1: `generator` the machine's one mesh_compile.Generator,
+# its sites numbered across every group it is passed to, its advance in the program built with `advance`
+def construct(module, *, target, kinds, sources, effects=None, generator=None, advance=False, page=0, machines=None):
+    compiler, place = M._compiler(), PLACES[target]
+    builder = M._Builder(compiler, {}, None, 0, 0)
+    try:
+        if machines:
+            compiler.metal_ir_machine(builder.p, C.byref(machines[0]), C.byref(machines[1]))
+        nodes, tasks, effects = list(module.graph.nodes), module.meta["tasks"], effects or {}
+        drew = generator.sites if generator is not None else 0
+        roots, fan = placeholders(nodes, kinds, sources), fanout(module, effects)
+        env, records, owners, inputs, landing, sending, held, written = {}, [], [], [], [], [], {}, {}
 
+        def rooted(t, role, data=None):
+            return builder.declare(t, role, data), builder.value(M._stored(t))
 
-@dataclass
-class Segment:
-    steps: list
-    barriers: list = field(default_factory=list)
-    after: dict = field(default_factory=dict)
-    fence: list = field(default_factory=list)
-    record: list = field(default_factory=list)
-    arrival: bool = False
-    arrived: list = field(default_factory=list)
+        def wire(channel, like, landed):
+            _, value, _, size, sent, arrived, *_ = effects[channel]
+            offset, element, pairs = arrived if landed else sent
+            if value not in held:
+                held[value] = torch.empty(size // like.element_size(), dtype=like.dtype, device="meta")
+            sizes = list(like.shape) if landed else [n for n, _ in pairs]
+            return value, held[value].as_strided(sizes, [stride // element for _, stride in pairs], offset // element)
 
-
-@dataclass
-class Dependence:
-    source: int
-    target: int
-    causes: list
-
-
-class Bound(list):
-    def __init__(self):
-        super().__init__()
-        self.accesses, self.nodes, self.uses = [], [], set()
-
-    def note(self, form):
-        self.nodes += form.nodes
-        self.uses |= form.uses
-
-    def __call__(self, view, write=False):
-        self.accesses.append((view, write))
-        if view.storage not in self:
-            self.append(view.storage)
-        return f"b{self.index(view.storage)}"
-
-
-class NotLowered(NotImplementedError):
-    def __init__(self, text, operators=()):
-        super().__init__(text)
-        self.operators = list(operators)
-
-
-def packed(shape):
-    return tuple(math.prod(shape[d + 1:]) for d in range(len(shape)))
-
-
-def unravel(linear, shape, prefix):
-    names = [f"{prefix}{d}" for d in range(len(shape))]
-    return [f"uint {name} = {linear} / {step} % {n};"
-            for name, n, step in zip(names, shape, packed(shape))], names
-
-
-def reshaped(index, shape, onto):
-    if tuple(shape) == tuple(onto):
-        return index
-    linear = " + ".join(f"{i} * {step}" for i, step in zip(index, packed(shape))) or "0"
-    return [f"(({linear}) / {step} % {n})" for n, step in zip(onto, packed(onto))]
-
-
-def literal(value, wide=False):
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if math.isinf(value):
-        return "INFINITY" if value > 0 else "(-INFINITY)"
-    return "NAN" if math.isnan(value) else f"{value!r}" + "f" * (not wide)
-
-
-def pipeline(source):
-    if source not in PIPELINES:
-        PIPELINES[source] = mesh_metal4.pipeline(source, "k")
-    return PIPELINES[source]
-
-
-SHARED = {"remainder": REMAINDER % ("remainder", "a % b"), "fremainder": REMAINDER % ("fremainder", "fmod(a, b)"),
-          "wrap": WRAP, "within": WITHIN, "least": LEAST, "gelu": GELU % ("gelu", "erf(x * M_SQRT1_2_F)"),
-          "gelu_tanh": GELU % ("gelu_tanh", "tanh(0.7978845608f * (x + 0.044715f * x * x * x))"),
-          **{f"power{n}": f"template <typename T> inline T mesh_power{n}(T a) {{ return {' * '.join('a' * n)}; }}\n"
-             for n in (2, 3, 4)}}
-HELPERS = {"erf": ERF, **SHARED}
-
-
-# torch 2.15 aten/src/ATen/native/native_functions.yaml, the overloads that take `out`
-def outward(target):
-    given = [(a.name, str(a.type)) for a in getattr(target, "_schema", None).arguments] if hasattr(
-        target, "overloadpacket") else None
-    for name in target.overloadpacket.overloads() if given is not None else ():
-        over = getattr(target.overloadpacket, name)
-        taken = [(a.name, str(a.type)) for a in over._schema.arguments]
-        if taken[:-1] == given and taken[-1][0] == "out" and len(over._schema.returns) == 1:
-            yield over
-
-
-def flat(view):
-    return (view.storage, view.dtype, view.shape, view.stride, view.offset)
-
-
-# torch 2.15 documentation, torch.sort
-def precedes(a, b, floating):
-    return f"{a} < {b}" if not floating else f"{a} < {b} || (isnan({b}) && !isnan({a}))"
-
-
-def ahead(a, b, count, floating, descending=False):
-    first, second = (b, a) if descending else (a, b)
-    same = f"{first}0 == {second}0" + f" || (isnan({second}0) && isnan({first}0))" * floating
-    return (f"(({a}1 < {count}) != ({b}1 < {count})) ? ({a}1 < {count}) : "
-            f"(({precedes(f'{first}0', f'{second}0', floating)}) || (({same}) && {a}1 < {b}1))")
-
-
-class Lowering:
-    types, buffers = TYPES, math.inf
-
-    def __init__(self, module, laid, stored=frozenset()):
-        self.laid, self.metal, self.storages, self.forms, self.missing = dict.fromkeys(laid), stored, [], {}, []
-        self.laid.update(laid if isinstance(laid, dict) else {})
-        self.pending, self.program, self.results, self.vertices, self.hosted = [], [], (), [], []
-        handlers = {**dict.fromkeys(POINTWISE, self.pointwise), **dict.fromkeys(VIEWS, self.viewed),
-                    RECV: self.receive, SEND: self.send, operator.getitem: self.part,
-                    **dict.fromkeys(FILLED, self.filled), **dict.fromkeys(REDUCED, self.reduced),
-                    ATEN.arange.start_step: self.range, ATEN.embedding.default: self.embedding,
-                    ATEN.gather.default: self.gather, ATEN.index_select.default: self.index_select,
-                    ATEN.index.Tensor: self.index, ATEN.remainder.Scalar: self.remainder,
-                    ATEN.remainder.Tensor: self.remainder, **dict.fromkeys(SCATTERED, self.scattered),
-                    ATEN.pow.Tensor_Scalar: self.power, ATEN.gelu.default: self.gelu,
-                    ATEN.cat.default: self.concatenated, ATEN.sort.default: self.sort, ATEN.topk.default: self.topk,
-                    ATEN._native_batch_norm_legit_no_training.default: self.batch_norm,
-                    ATEN.max_pool2d_with_indices.default: self.max_pool,
-                    ATEN._softmax.default: self.softmax,
-                    ATEN.native_layer_norm.default: self.layer_norm, ATEN.convolution.default: self.convolution,
-                    ATEN.mm.default: self.product, ATEN.bmm.default: self.product, ATEN.addmm.default: self.product,
-                    ATEN._log_softmax.default: self.softmax, ATEN.cumsum.default: self.cumsum,
-                    ATEN.bitwise_not.default: self.inverted, ATEN.clamp.default: self.clamp,
-                    ATEN.constant_pad_nd.default: self.padded, ATEN.flip.default: self.flip,
-                    ATEN.slice_scatter.default: self.slice_scatter, ATEN.index_put.default: self.index_put,
-                    ATEN.split_with_sizes.default: self.split, ATEN.avg_pool2d.default: self.average_pool,
-                    ATEN._assert_async.msg: self.asserted, WITH_EFFECTS: self.effect, **self.drivers(),
-                    ATEN.empty.memory_format: self.empty, ATEN.copy_.default: self.copied,
-                    ATEN.fill_.Scalar: self.fill}
-        self.inward = {over: target for target in list(handlers) for over in outward(target)}
-        handlers.update(dict.fromkeys(self.inward, self.out))
-        self.destination, self.handlers = None, handlers
-        position, self.unread, self.named = 0, {}, {}
-        for node in module.graph.nodes:
-            self.named[node.name] = node
+        for node in nodes:
             if node.op == "placeholder":
-                self.missing += [f"{node.name} of {v.dtype}" for v in self.untyped(node)]
-                value = node.meta["val"]
-                self.forms[node] = self.strided(value.dtype, value.shape, value.stride(), ARGUMENT, position)
-                position += 1
-            elif node.op == "output" and not self.missing:
-                self.issuing = node
-                self.results = tuple(self.escape(r) if isinstance(r, torch.fx.Node) else r for r in node.args[0])
-                self.flush()
-                self.ordered(self.host(node, [(r, False) for r in self.results if isinstance(r, View)]))
-            elif node.op == "call_function" and (
-                    node.target not in handlers or set(node.kwargs) - PASSED - SCALED.get(
-                        self.inward.get(node.target, node.target), set()) - ({"out"} if node.target in self.inward else set())):
-                self.missing.append(str(node.target))
-            elif node.op == "call_function" and self.untyped(node):
-                self.missing += [f"{node.target} of {v.dtype}" for v in self.untyped(node)]
-            elif node.op == "call_function" and not self.missing:
-                self.issuing, self.using = node, set()
-                self.fit(node)
-                form = handlers[node.target](node)
-                if isinstance(form, (Fused, Product)):
-                    reads = [self.forms[read] for read in node.all_input_nodes]
-                    form.nodes = (*dict.fromkeys(name for read in reads for name in getattr(read, "nodes", ())),
-                                  node.name)
-                    form.uses = frozenset(self.using).union(*(getattr(read, "uses", ()) for read in reads))
-                for read in node.all_input_nodes:
-                    self.unread.pop(read, None)
-                self.forms[node] = form if self.deferred(node, form) else self.settled(form, node)
-                if self.forms[node] is form and isinstance(form, (Fused, Product)):
-                    self.unread[node] = form
-
-    # compiler/mesh_compiler/placement.py views; design/problems-of-14b9a757-change-request.md item 3
-    def empty(self, node):
-        value = node.meta["val"]
-        return self.fresh(value.dtype, tuple(value.shape))
-
-    def placed(self, record):
-        name, offset, sizes, strides = record
-        base = self.forms[self.named[name]]
-        return View(base.storage, base.dtype, tuple(sizes), tuple(strides), base.offset + offset)
-
-    # design/problems-of-14b9a757-change-request.md items 1, 2 and 5; torch 2.15 documentation, torch.Tensor.copy_
-    # and torch.Tensor.fill_
-    def written(self, node, form):
-        target = self.placed(node.meta["out"])
-        self.settle(target)
-        kind, wide = self.types[target.dtype], target.dtype == torch.float64
-        self.store(Fused(target.dtype, target.shape, lambda bind, index, t:
-                         f"{kind}({self.given(bind, form, index, wide)})"), target)
-        return target
-
-    def copied(self, node):
-        return self.written(node, self.reader(node.args[1]))
-
-    def fill(self, node):
-        return self.written(node, node.args[1])
-
-    def out(self, node):
-        target = self.placed(node.meta["out"])
-        self.settle(target)
-        self.destination = target
-        form = self.handlers[self.inward[node.target]](node)
-        self.destination = None
-        if isinstance(form, Product) and target.stride == packed(target.shape):
-            self.multiply(form, target)
-            return target
-        return form if form is target else self.written(node, self.view(form) if isinstance(form, Product) else form)
-
-    def target(self, node):
-        return self.inward.get(node.target, node.target)
-
-    def result(self, value):
-        made, self.destination = self.destination, None
-        return made or self.fresh(value.dtype, value.shape)
-
-    def untyped(self, node):
-        value = node.meta.get("val")
-        values = value if isinstance(value, (tuple, list)) else [value]
-        return [v for v in values if isinstance(v, torch.Tensor) and v.dtype not in self.types]
-
-    def fresh(self, dtype, shape):
-        self.storages.append(Storage(HELD, dtype, math.prod(shape)))
-        return View(len(self.storages) - 1, dtype, tuple(shape), packed(shape), 0)
-
-    def deferred(self, node, form):
-        users = list(node.users)
-        if len(users) != 1 or not isinstance(form, (Fused, Product)):
-            return False
-        if isinstance(form, Product):
-            return users[0].target in RESHAPES or \
-                users[0].target in POINTWISE and tuple(users[0].meta["val"].shape) == form.shape
-        made = users[0].meta.get("val")
-        made = made[0] if isinstance(made, (tuple, list)) else made
-        return users[0].op == "call_function" and (
-            pytree.tree_leaves((users[0].args, users[0].kwargs)).count(node) == 1) and (
-            form.free or users[0].target in ONCE
-            or isinstance(made, torch.Tensor) and made.numel() <= math.prod(form.shape))
-
-    def reads(self, form):
-        bind, index = Bound(), ["0"] * len(form.shape)
-        if isinstance(form, Product):
-            bind(form.left), bind(form.right), form.expression(bind, index, "t")
-        else:
-            form.read(bind, index)
-        return bind
-
-    def fit(self, node):
-        made = node.meta.get("val")
-        count = sum(isinstance(v, torch.Tensor) for v in (made if isinstance(made, (tuple, list)) else [made]))
-        reads = {read: len(self.reads(self.forms[read])) for read in node.all_input_nodes
-                 if isinstance(self.forms.get(read), (View, Fused, Product))}
-        count += sum(reads.values())
-        for read in sorted(reads, key=reads.get, reverse=True):
-            if count <= self.buffers:
-                break
-            count -= reads[read] - 1
-            self.forms[read] = self.view(self.forms[read])
-            self.unread.pop(read, None)
-
-    # rdma/mesh-graph.h mesh_graph_dependences_views
-    def settle(self, target):
-        held = list(self.unread)
-        accesses = [(vertex, view, False) for vertex, node in enumerate(held)
-                    for view, _ in self.reads(self.unread[node]).accesses] + [(len(held), target, True)]
-        for vertex, _ in mesh_graph.dependences_views(len(held) + 1, self.viewed_by(accesses))[0]:
-            self.forms[held[vertex]] = self.view(self.unread.pop(held[vertex]))
-
-    def viewed_by(self, accesses):
-        return [(view.storage, *mesh_graph.strided(view.offset, view.shape, view.stride, view.dtype.itemsize), vertex,
-                 write) for vertex, view, write in accesses if all(view.shape)]
-
-    # design/compilation-composition-change-request.md, Performance correction, "removing unnecessary
-    # materialization"
-    def settled(self, form, node):
-        value = node.meta.get("val")
-        if isinstance(form, Fused) and isinstance(value, torch.Tensor):
-            made = self.strided(form.dtype, form.shape, tuple(value.stride()))
-            if self.storages[made.storage].count == math.prod(form.shape):
-                self.store(form, made)
-                return made
-            self.storages.pop()
-        return self.view(form) if isinstance(form, (Fused, Product)) else form
-
-    # torch 2.15 aten/src/ATen/native/BatchLinearAlgebra.cpp, linalg_solve_ex_out; LAPACK, sgesv, B and A
-    def matrices(self, value):
-        shape, stride = tuple(value.shape), tuple(value.stride())
-        if len(shape) > 1 and stride[:-2] == packed(shape)[:-2] and stride[-2:] in ((shape[-1], 1), (1, shape[-2])):
-            return self.strided(value.dtype, shape, stride)
-        return self.fresh(value.dtype, shape)
-
-    def strided(self, dtype, shape, stride, kind=HELD, position=None):
-        self.storages.append(Storage(kind, dtype, mesh_graph.extent(shape, stride), position))
-        return View(len(self.storages) - 1, dtype, tuple(shape), tuple(stride), 0)
-
-    def view(self, form):
-        if isinstance(form, View):
-            return form
-        made = self.fresh(form.dtype, form.shape)
-        if isinstance(form, Product):
-            self.multiply(form, made)
-        else:
-            self.store(form, made)
-        return made
-
-    def stored(self, node):
-        return self.view(self.forms[node])
-
-    def reader(self, node):
-        form = self.forms[node]
-        return self.view(form) if isinstance(form, Product) else form
-
-    def dispatch(self, bound, lines, grid, group=None, groups=False, head=""):
-        if not math.prod(grid):
-            return
-        nodes = tuple(dict.fromkeys((*bound.nodes, self.issuing.name)))
-        made, group = self.kernel(bound, lines, tuple(grid), group, head)
-        self.pending.append(Step(len(self.vertices), nodes, made, list(bound), bound.accesses, tuple(grid), group,
-                                 groups))
-        self.vertices.append(nodes)
-
-    def copying(self, bind, form, target, linear):
-        lines, names = unravel(linear, form.shape, "i")
-        return lines + [f"{target.read(bind, names, True)} = {form.read(bind, names)};"]
-
-    def store(self, form, target):
-        bind = Bound()
-        self.dispatch(bind, self.copying(bind, form, target, "p.x"), (math.prod(form.shape), 1, 1))
-
-    def multiply(self, form, target):
-        bind, kind = Bound(), self.types[form.dtype]
-        bind.note(form)
-        natural = form.left.shape[:-1] + form.right.shape[-1:]
-        lines, names = unravel("p.x", natural, "i")
-        left, right = (operand.read(bind, at) for operand, at in (
-            (form.left, names[:-1] + ["k"]), (form.right, names[:-2] + ["k", names[-1]])))
-        lines += [f"{self.accumulated(form.dtype)} a = 0;",
-                  f"for (uint k = 0; k < {form.left.shape[-1]}; k++) a += {left} * {right};", f"{kind} t = {kind}(a);",
-                  f"{target.read(bind, names, True)} = {form.expression(bind, reshaped(names, natural, form.shape), 't')};"]
-        self.dispatch(bind, lines, (math.prod(natural), 1, 1))
-
-    def accumulated(self, dtype):
-        return self.types[dtype] if dtype != torch.float16 else "float"
-
-    def matrix(self, node):
-        view = self.view(self.forms[node])
-        (m, n), (sm, sn) = view.shape[-2:], view.stride[-2:]
-        if (n == 1 or sn == 1) and (m == 1 or sm >= n) or (m == 1 or sm == 1) and (n == 1 or sn >= m):
-            return view
-        return self.view(Fused(view.dtype, view.shape, lambda bind, index, t: view.read(bind, index)))
-
-    def product(self, node):
-        value = node.meta["val"]
-        left, right = (self.matrix(a) for a in node.args[-2:])
-        if self.target(node) is not ATEN.addmm.default:
-            return Product(left, right, value.dtype, tuple(value.shape), lambda bind, index, t: t, True)
-        added, beta, alpha = self.reader(node.args[0]), node.kwargs.get("beta", 1), node.kwargs.get("alpha", 1)
-        wide = value.dtype == torch.float64
-
-        def expression(bind, index, t):
-            return f"({literal(beta, wide)} * {self.given(bind, added, index, wide)} + " \
-                   f"{literal(alpha, wide)} * {t})"
-        return Product(left, right, value.dtype, tuple(value.shape), expression)
-
-    def pointwise(self, node, template=None, given=None):
-        value = node.meta["val"]
-        template, kind, shape = template or POINTWISE[self.target(node)], self.types[value.dtype], tuple(value.shape)
-        operands = [self.forms[a] if isinstance(a, torch.fx.Node) else a for a in given or node.args]
-        if self.target(node) is ATEN._to_copy.default and value.dtype == node.args[0].meta["val"].dtype:
-            return operands[0]
-        base = next((o for o in operands if isinstance(o, Product) and o.shape == shape), None)
-        operands = [self.view(o) if isinstance(o, Product) and o is not base else o for o in operands]
-        wide = torch.float64 in {value.dtype, *(o.dtype for o in operands if isinstance(o, (View, Fused, Product)))}
-
-        def expression(bind, index, t):
-            return template.format(*(
-                o.expression(bind, index, t) if o is base else
-                self.given(bind, o, index, wide) for o in operands), T=kind)
-        return Product(base.left, base.right, value.dtype, shape, expression) if base else \
-            Fused(value.dtype, shape, expression)
-
-    def gelu(self, node):
-        self.using |= {"erf", "gelu"} if node.kwargs.get("approximate", "none") == "none" else {"gelu_tanh"}
-        return self.pointwise(node, "mesh_gelu({T}({0}))" if "gelu" in self.using else "mesh_gelu_tanh({T}({0}))")
-
-    def power(self, node):
-        whole = float(node.args[1]).is_integer() and 2 <= node.args[1] <= 4
-        self.using |= {f"power{int(node.args[1])}"} if whole else set()
-        return self.pointwise(node, f"mesh_power{int(node.args[1])}({{T}}({{0}}))" if whole else
-                              "{T}({0})" if node.args[1] == 1 else "pow({T}({0}), {T}({1}))")
-
-    def filled(self, node):
-        value, given = node.meta["val"], node.args[-1] if FILLED[self.target(node)] else 0
-        return Fused(value.dtype, tuple(value.shape),
-                     lambda bind, index, t: f"{self.types[value.dtype]}({literal(given)})", free=True)
-
-    def inverted(self, node):
-        return self.pointwise(node, "(!bool({0}))" if node.meta["val"].dtype == torch.bool else "{T}(~{T}({0}))")
-
-    def clamp(self, node):
-        low, high = (*node.args[1:], None, None)[:2]
-        self.using.add("least")
-        made = "{T}({0})"
-        made = made if low is None else "mesh_least(%s, {T}(%s))" % (made, literal(low))
-        return self.pointwise(node, made if high is None else "mesh_most(%s, {T}(%s))" % (made, literal(high)),
-                              node.args[:1])
-
-    # torch 2.15 documentation, torch.nn.functional.pad, torch.flip and torch.slice_scatter
-    def padded(self, node):
-        value, source = node.meta["val"], self.reader(node.args[0])
-        pads, given = node.args[1], node.args[2] if len(node.args) > 2 else 0
-        before = [0] * (len(source.shape) - len(pads) // 2) + list(pads[-2::-2])
-        kind = self.types[value.dtype]
-        self.using.add("within")
-
-        def expression(bind, index, t):
-            moved = [(f"(long({i}) - {b})", n) for i, b, n in zip(index, before, source.shape)]
-            inside = " && ".join(f"{at} >= 0 && {at} < {n}" for (at, n), size in zip(moved, value.shape)
-                                 if size != n) or "true"
-            found = source.read(bind, [f"mesh_within({at}, {n})" for at, n in moved])
-            return f"(({inside}) ? {kind}({found}) : {kind}({literal(given)}))"
-        return Fused(value.dtype, tuple(value.shape), expression if all(source.shape) else
-                     lambda bind, index, t: f"{kind}({literal(given)})")
-
-    def flip(self, node):
-        value, source = node.meta["val"], self.reader(node.args[0])
-        over = {d % len(source.shape) for d in node.args[1]}
-        return Fused(value.dtype, tuple(value.shape), lambda bind, index, t: source.read(bind, [
-            f"({n - 1} - {i})" if d in over else i for d, (i, n) in enumerate(zip(index, source.shape))]))
-
-    def slice_scatter(self, node):
-        value, source, given = node.meta["val"], self.reader(node.args[0]), self.reader(node.args[1])
-        dim, start, end, step = (*node.args[2:], *(0, None, None, 1)[len(node.args) - 2:])
-        dim = dim % len(source.shape)
-        start, end, step = slice(start, end, step).indices(source.shape[dim])
-        kind = self.types[value.dtype]
-        self.using.add("within")
-
-        def expression(bind, index, t):
-            i = index[dim]
-            at = f"mesh_within((long({i}) - {start}) / {step}, {given.shape[dim]})"
-            return f"(({i} >= {start} && {i} < {end} && ({i} - {start}) % {step} == 0) ? " \
-                   f"{kind}({given.read(bind, index[:dim] + [at] + index[dim + 1:])}) : " \
-                   f"{kind}({source.read(bind, index)}))"
-        return Fused(value.dtype, tuple(value.shape), expression) if all(given.shape) else source
-
-    def split(self, node):
-        source, dim = self.stored(node.args[0]), (node.args[2] if len(node.args) > 2 else 0)
-        dim, made, at = dim % len(source.shape), [], 0
-        for size in node.args[1]:
-            made.append(View(source.storage, source.dtype, source.shape[:dim] + (size,) + source.shape[dim + 1:],
-                             source.stride, source.offset + at * source.stride[dim]))
-            at += size
-        return made
-
-    def cumsum(self, node):
-        value, source = node.meta["val"], self.reader(node.args[0])
-        dim = node.args[1] % len(value.shape)
-        return self.scan(source, None, dim, value.shape[dim], value.dtype, False)[0]
-
-    # torch 2.15 documentation, torch.cumsum; W. D. Hillis and G. L. Steele, Data parallel algorithms, CACM 29(12),
-    # 1986; G. E. Blelloch, Prefix sums and their applications, CMU-CS-90-190, 1990, section 1.5
-    def scan(self, sums, flags, dim, count, dtype, tree):
-        kind, lead = self.types[dtype], sums.shape[:dim] + sums.shape[dim + 1:]
-        along = lambda names, k: names[:dim] + [k] + names[dim:]
-        for reach in [1 << level for level in range((count - 1).bit_length())] if tree else [0]:
-            after, bind = self.fresh(dtype, sums.shape), Bound()
-            lines, names = unravel(f"(p.x / {count})" if reach else "p.x", lead, "r")
-            here = along(names, f"(p.x % {count})" if reach else "k")
-            flag = flags.read(bind, here) if flags else "false"
-            if reach:
-                far = along(names, f"(max(p.x % {count}, {reach}u) - {reach})")
-                lines += [f"bool f = {flag}, joined = !f && p.x % {count} >= {reach};",
-                          f"{kind} v = {sums.read(bind, here)};",
-                          f"{after.read(bind, here, True)} = joined ? {kind}({sums.read(bind, far)} + v) : v;"]
-                if flags:
-                    ended = self.fresh(torch.bool, flags.shape)
-                    lines += [f"{ended.read(bind, here, True)} = f || (joined && {flags.read(bind, far)});"]
-                    flags = ended
+                kind = KINDS[kinds.get(node.target, InputKind.USER_INPUT)][0]
+                if node not in roots:
+                    env[node] = node.meta.get("val")
+                    inputs.append(Root(node.target, kind, None, None, None))
+                    continue
+                env[node], role, data = roots[node]
+                inputs.append(Root(node.target, kind, role, *rooted(env[node], role, data)))
+            elif node.op == "output":
+                leaves, spec = pytree.tree_flatten(node.args[0])
+        for kind, of in fan.order:
+            if kind == "write":
+                first = fan.member[of][0]
+                value, view = wire(channel_of(first), env[fan.groups[of][0]], False)
+                given = env[fan.groups[of][0]]
+                made = M._copy(view, given.as_strided(view.shape, given.stride(), given.storage_offset()))
+                M._placed(made, place, tasks[first][0])
+                records += made
+                owners += [(tasks[first], of)] * len(made)
+                written[of] = value, view
+            elif kind != "node":
+                continue
+            elif of.target is RECV:
+                channel = of.args[0]
+                value, env[of] = wire(channel, of.meta["val"], True) if channel in effects else (
+                    None, M._held(of.meta["val"]))
+                landing.append((channel, value, env[of]))
+            elif of.target is SEND:
+                env[of] = None
+                sending.append((of.args[1], None, env[of.args[0]]))
             else:
-                lines += [f"{kind} a = 0;", f"for (uint k = 0; k < {count}; k++) {{",
-                          f"    a = ({flag} ? {kind}(0) : a) + {kind}({sums.read(bind, here)});",
-                          f"    {after.read(bind, here, True)} = a;", "}"]
-            self.dispatch(bind, lines, (math.prod(lead) * (count if reach else 1), 1, 1))
-            sums = after
-        return sums, flags
-
-    # design/torch-source-lowering-change-request.md, item 5; torch 2.15 torch/_higher_order_ops/effects.py
-    def checked(self, node, read, message, zero):
-        view = self.escape(read)
-        self.flush()
-        self.program.append((CHECK, view, (message, zero), self.host(node, [(view, False)])))
-
-    def asserted(self, node):
-        self.checked(node, node.args[0], node.args[1], False)
-
-    def effect(self, node):
-        token, made, *given = node.args
-        if made is not ATEN._linalg_check_errors.default:
-            self.missing.append(f"with_effects of {made}")
-            return None
-        self.checked(node, given[0], f"{given[1]}: the LAPACK routine's INFO is not zero", True)
-        return [self.forms[token], None]
-
-    def drivers(self):
-        return {}
-
-    # ISO/IEC 14882:2020 [dcl.array]; Apple, Metal Shading Language Specification 4.1, section 2.6
-    def scratch(self, bind, lines, name, dtype, batch, count):
-        if count * dtype.itemsize > LOCAL:
-            return f"({bind(self.fresh(dtype, (batch, count)), True)} + p.x * {count})"
-        lines.append(f"{self.types[dtype]} {name}[{max(count, 1)}];")
-        return name
-
-    def range(self, node):
-        value, (start, _, step) = node.meta["val"], (*node.args, 1)[:3]
-        return Fused(value.dtype, tuple(value.shape), lambda bind, index, t:
-                     f"{self.types[value.dtype]}({literal(start)} + {index[0]} * {literal(step)})", free=True)
-
-    def remainder(self, node):
-        name = "fremainder" if node.meta["val"].dtype.is_floating_point else "remainder"
-        self.using.add(name)
-        return self.pointwise(node, "mesh_" + name + "({T}({0}), {T}({1}))")
-
-    # torch 2.15 documentation, torch.gather, torch.index_select, torch.nn.functional.embedding and Tensor Indexing
-    # API; NumPy User Guide, Indexing on ndarrays, Advanced indexing
-    def take(self, node, source, dims):
-        value = node.meta["val"]
-        self.using.add("wrap")
-
-        return Fused(value.dtype, tuple(value.shape),
-                     lambda bind, index, t: source.read(bind, self.found(bind, index, source.shape, dims)))
-
-    def found(self, bind, index, shape, dims):
-        return [index[places] if chosen is None else "mesh_wrap(long(%s), %d)" % (
-            chosen.read(bind, [index[k] for k in places][-len(chosen.shape) or len(places):]), extent)
-            for extent, (chosen, places) in zip(shape, dims)]
-
-    def embedding(self, node):
-        table, chosen = self.stored(node.args[0]), self.reader(node.args[1])
-        return self.take(node, table, [(chosen, range(len(chosen.shape))), (None, len(chosen.shape))])
-
-    def gather(self, node):
-        source, chosen = self.stored(node.args[0]), self.reader(node.args[2])
-        dim, every = node.args[1] % max(len(source.shape), 1), range(len(source.shape))
-        return self.take(node, source, [(chosen, every) if d == dim else (None, d) for d in every])
-
-    def index_select(self, node):
-        source, chosen = self.stored(node.args[0]), self.reader(node.args[2])
-        dim = node.args[1] % max(len(source.shape), 1)
-        return self.take(node, source, [(chosen, [d]) if d == dim else (None, d) for d in range(len(source.shape))])
-
-    def advanced(self, extents, given):
-        chosen = {d: self.reader(a) for d, a in enumerate(given) if a is not None}
-        shape = torch.broadcast_shapes(*[c.shape for c in chosen.values()])
-        adjacent = list(chosen) == list(range(min(chosen), max(chosen) + 1))
-        start = min(chosen) if adjacent else 0
-        rest = [d for d in range(len(extents)) if d not in chosen]
-        over = range(start, start + len(shape))
-        domain = (*extents[:start], *shape, *(extents[d] for d in rest if d >= start))
-        return domain, [
-            (chosen[d], over) if d in chosen else
-            (None, (d if d < start else d - len(chosen) + len(shape)) if adjacent else len(shape) + rest.index(d))
-            for d in range(len(extents))]
-
-    def index(self, node):
-        source = self.stored(node.args[0])
-        return self.take(node, source, self.advanced(source.shape, node.args[1])[1])
-
-    # torch 2.15 documentation, torch.Tensor.index_put_
-    def index_put(self, node):
-        value, source = node.meta["val"], self.reader(node.args[0])
-        domain, dims = self.advanced(source.shape, node.args[1])
-        self.using.add("wrap")
-        return self.updated(value, source, domain, lambda bind, names, steps: " + ".join(
-            f"long({at}) * {step}" for at, step in zip(self.found(bind, names, source.shape, dims), steps)),
-            self.reader(node.args[2]), len(node.args) > 3 and node.args[3])
-
-    # K. E. Batcher, Sorting networks and their applications, AFIPS Spring Joint Computer Conference, 1968
-    def bitonic(self, fields, rows, padded, before):
-        stage = 2
-        while stage <= padded:
-            step = stage // 2
-            while step:
-                bind = Bound()
-                lines = [f"uint row = p.x / {padded // 2}, q = p.x % {padded // 2};",
-                         f"uint i = ((q & ~{step - 1}u) << 1) | (q & {step - 1}u);",
-                         f"uint j = i ^ {stage - 1 if step == stage // 2 else step}u;"]
-                for k, field in enumerate(fields):
-                    lines += [f"{self.types[field.dtype]} x{k} = {field.read(bind, ['row', 'i'])}, "
-                              f"y{k} = {field.read(bind, ['row', 'j'])};"]
-                lines += [f"if (!({before('x', 'y')})) {{"]
-                lines += [f"    {field.read(bind, ['row', 'i'], True)} = y{k}; {field.read(bind, ['row', 'j'], True)} "
-                          f"= x{k};" for k, field in enumerate(fields)] + ["}"]
-                self.dispatch(bind, lines, (rows * padded // 2, 1, 1))
-                step //= 2
-            stage *= 2
-
-    # torch 2.15 documentation, torch.sort and torch.topk
-    def sorted(self, source, dim, descending):
-        count = source.shape[dim]
-        lead, padded = source.shape[:dim] + source.shape[dim + 1:], 1 << max(count - 1, 0).bit_length()
-        rows = math.prod(lead)
-        values, places = self.fresh(source.dtype, (rows, padded)), self.fresh(torch.int64, (rows, padded))
-        bind = Bound()
-        lines, names = unravel(f"(p.x / {padded})", lead, "r")
-        at = names[:dim] + [f"min(p.x % {padded}, {max(count - 1, 0)}u)"] + names[dim:]
-        lines += [f"{values.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'], True)} = {source.read(bind, at)};",
-                  f"{places.read(bind, [f'(p.x / {padded})', f'(p.x % {padded})'], True)} = p.x % {padded};"]
-        self.dispatch(bind, lines, (rows * padded, 1, 1))
-        self.bitonic([values, places], rows, padded, lambda a, b: ahead(
-            a, b, count, source.dtype.is_floating_point, descending))
-        return self.rows(source, dim, padded, (values, places))
-
-    def rows(self, source, dim, width, made):
-        strides, lead = [0] * len(source.shape), source.shape[:dim] + source.shape[dim + 1:]
-        for d, step in zip([d for d in range(len(source.shape)) if d != dim], packed(lead)):
-            strides[d] = step * width
-        strides[dim] = 1
-        return [View(v.storage, v.dtype, tuple(source.shape), tuple(strides), 0) for v in made]
-
-    def given(self, bind, value, names, wide):
-        return value.read(bind, names[len(names) - len(value.shape):]) if isinstance(value, (View, Fused)) else \
-            literal(value, wide)
-
-    def sort(self, node):
-        source = self.view(self.forms[node.args[0]])
-        dim = (node.args[1] if len(node.args) > 1 else -1) % len(source.shape)
-        return self.sorted(source, dim, bool(node.args[2]) if len(node.args) > 2 else False)
-
-    def topk(self, node):
-        source, k = self.view(self.forms[node.args[0]]), node.args[1]
-        dim = (node.args[2] if len(node.args) > 2 else -1) % len(source.shape)
-        made = self.sorted(source, dim, node.args[3] if len(node.args) > 3 else True)
-        return [View(v.storage, v.dtype, v.shape[:dim] + (k,) + v.shape[dim + 1:], v.stride, 0) for v in made]
-
-    # torch 2.15 documentation, torch.Tensor.scatter_ and torch.Tensor.scatter_add_
-    def scattered(self, node):
-        value, (source, dim, chosen, given) = node.meta["val"], node.args
-        source, chosen = self.reader(source), self.stored(chosen)
-        dim = dim % len(source.shape)
-        return self.updated(value, source, chosen.shape, lambda bind, names, steps: " + ".join(
-            f"long({chosen.read(bind, names) if d == dim else name}) * {step}"
-            for d, (name, step) in enumerate(zip(names, steps))),
-            self.reader(given) if isinstance(given, torch.fx.Node) else given, SCATTERED[self.target(node)])
-
-    def updated(self, value, source, domain, key, given, added):
-        kind = self.types[value.dtype]
-        made, count = self.fresh(value.dtype, value.shape), math.prod(domain)
-        self.store(source, made)
-        if not count:
-            return made
-        padded = 1 << (count - 1).bit_length()
-        keys, places = (self.fresh(torch.int64, (1, padded)) for _ in range(2))
-        bind = Bound()
-        lines, names = unravel(f"min(p.x, {count - 1}u)", domain, "c")
-        target = key(bind, names, made.stride)
-        lines += [f"{keys.read(bind, ['0', 'p.x'], True)} = {target};",
-                  f"{places.read(bind, ['0', 'p.x'], True)} = p.x;"]
-        self.dispatch(bind, lines, (padded, 1, 1))
-        self.bitonic([keys, places], 1, padded, lambda a, b: ahead(a, b, count, False))
-        sums, flags = self.fresh(value.dtype, (padded,)), self.fresh(torch.bool, (padded,))
-        bind = Bound()
-        lines, names = unravel(f"uint({places.read(bind, ['0', 'p.x'])})", domain, "c")
-        x = self.given(bind, given, names, kind == "double")
-        lines += [f"{sums.read(bind, ['p.x'], True)} = {kind}({x});",
-                  f"{flags.read(bind, ['p.x'], True)} = p.x == 0 || "
-                  f"{keys.read(bind, ['0', 'p.x'])} != {keys.read(bind, ['0', 'max(p.x, 1u) - 1'])};"]
-        self.dispatch(bind, lines, (count, 1, 1))
-        sums, flags = self.scan(sums, flags, 0, count, value.dtype, True) if added else (sums, flags)
-        bind = Bound()
-        key = keys.read(bind, ["0", "p.x"])
-        out = f"{bind(made, True)}[{key}]"
-        self.dispatch(bind, [
-            f"if (p.x == {count - 1} || {keys.read(bind, ['0', f'min(p.x + 1, {count - 1}u)'])} != {key})",
-            f"    {out} = {f'{out} + ' * bool(added)}{sums.read(bind, ['p.x'])};"], (count, 1, 1))
-        return made
-
-    # torch 2.15 aten/src/ATen/native/Normalization.cpp, batch_norm_cpu_transform_input_template
-    def batch_norm(self, node):
-        source, weight, bias, mean, variance, _, epsilon = node.args
-        value = node.meta["val"][0]
-        source, weight, bias, mean, variance = (o if o is None else self.reader(o)
-                                                for o in (source, weight, bias, mean, variance))
-        kind, wide = self.types[value.dtype], value.dtype == torch.float64
-
-        def expression(bind, index, t):
-            at = index[1:2]
-            scaled = f"(({source.read(bind, index)} - {mean.read(bind, at)}) / " \
-                     f"sqrt({kind}({variance.read(bind, at)} + {kind}({literal(float(epsilon), wide)}))))"
-            scaled += f" * {weight.read(bind, at)}" * (weight is not None)
-            return f"{kind}({scaled}{f' + {bias.read(bind, at)}' * (bias is not None)})"
-        made = Fused(value.dtype, tuple(value.shape), expression)
-        made.nodes = (node.name,)
-        empty = [Fused(v.dtype, tuple(v.shape), lambda bind, index, t: "0") for v in node.meta["val"][1:]]
-        return [self.view(made), *empty]
-
-    # torch 2.15 aten/src/ATen/native/DilatedMaxPool2d.cpp, max_pool2d_with_indices_single_out_frame
-    def max_pool(self, node):
-        source, kernel, stride, padding, dilation = (*node.args, *([[], [0, 0], [1, 1]][len(node.args) - 2:]))[:5]
-        stride = stride or kernel
-        source, values = self.stored(source), node.meta["val"]
-        used = {u.args[1] for u in node.users}
-        made = [self.fresh(v.dtype, v.shape) if place in used else None for place, v in enumerate(values)]
-        bind, kind = Bound(), self.types[values[0].dtype]
-        lines, names = unravel("p.x", values[0].shape, "o")
-        high, wide = source.shape[-2:]
-        taken = source.read(bind, names[:-2] + ["uint(y)", "uint(x)"])
-        lines += [f"{kind} m = -INFINITY; long at = -1;",
-                  f"for (uint u = 0; u < {kernel[0]}; u++) for (uint v = 0; v < {kernel[1]}; v++) {{",
-                  f"    int y = int({names[-2]} * {stride[0]} + u * {dilation[0]}) - {padding[0]};",
-                  f"    int x = int({names[-1]} * {stride[1]} + v * {dilation[1]}) - {padding[1]};",
-                  f"    if (y < 0 || y >= {high} || x < 0 || x >= {wide}) continue;",
-                  f"    {kind} c = {taken};",
-                  f"    if (at < 0 || c > m || isnan(c)) {{ m = c; at = y * {wide} + x; }}", "}"]
-        lines += [f"{view.read(bind, names, True)} = {found};" for view, found in zip(made, ("m", "at")) if view]
-        self.dispatch(bind, lines, (math.prod(values[0].shape), 1, 1))
-        return made
-
-    # torch 2.15 aten/src/ATen/native/AveragePool2d.cpp, avg_pool2d_out_frame
-    def average_pool(self, node):
-        value, source = node.meta["val"], self.stored(node.args[0])
-        kernel, stride, padding, ceil, padded, divisor = (
-            *node.args[1:], *([], node.kwargs.get("padding", [0, 0]), False, True, None)[len(node.args) - 2:])
-        stride, kind = stride or kernel, self.accumulated(value.dtype)
-        made, bind = self.result(value), Bound()
-        lines, names = unravel("p.x", value.shape, "o")
-        high, wide = source.shape[-2:]
-        lines += [f"int y0 = int({names[-2]} * {stride[0]}) - {padding[0]}, x0 = int({names[-1]} * {stride[1]}) - "
-                  f"{padding[1]};",
-                  f"int y1 = min(y0 + {kernel[0]}, {high + padding[0]}), x1 = min(x0 + {kernel[1]}, "
-                  f"{wide + padding[1]});",
-                  "int all = (y1 - y0) * (x1 - x0);",
-                  f"y0 = max(y0, 0); x0 = max(x0, 0); y1 = min(y1, {high}); x1 = min(x1, {wide});",
-                  f"{kind} a = 0;", "for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++)",
-                  f"    a += {kind}({source.read(bind, names[:-2] + ['uint(y)', 'uint(x)'])});",
-                  f"{made.read(bind, names, True)} = a / {kind}("
-                  f"{divisor or ('all' if padded else '((y1 - y0) * (x1 - x0))')});"]
-        self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
-        return made
-
-    def viewed(self, node):
-        form, shape = self.forms[node.args[0]], tuple(node.meta["val"].shape)
-        if isinstance(form, Product) and node.target in RESHAPES:
-            return Product(form.left, form.right, form.dtype, shape, lambda bind, index, t:
-                           form.expression(bind, reshaped(index, shape, form.shape), t), form.plain)
-        if isinstance(form, Fused) and (node.target in RESHAPES or node.target is ATEN.expand.default
-                                        and shape == form.shape):
-            return Fused(form.dtype, shape,
-                         lambda bind, index, t: form.read(bind, reshaped(index, shape, form.shape)))
-        view = self.view(form)
-        count = self.storages[view.storage].count
-        for attempt in range(2):
-            pages = torch.empty(count, dtype=view.dtype, device="meta")
-            try:
-                made = node.target(pages.as_strided(view.shape, view.stride, view.offset), *node.args[1:],
-                                   **node.kwargs)
-            except RuntimeError:
-                made = None
-            if made is not None and made._base is pages:
-                return View(view.storage, view.dtype, tuple(made.shape), tuple(made.stride()),
-                            made.storage_offset())
-            view = self.view(Fused(view.dtype, view.shape, lambda bind, index, t, held=view: held.read(bind, index)))
-            count = self.storages[view.storage].count
-        raise NotLowered(f"{node.target}: not a view of its operand")
-
-    def part(self, node):
-        return self.forms[node.args[0]][node.args[1]]
-
-    # design/compilation-composition-change-request.md, Performance correction, Fusion and storage; MLIR
-    # mlir/lib/Dialect/Linalg/Transforms/ElementwiseOpFusion.cpp
-    def concatenated(self, node):
-        value = node.meta["val"]
-        dim, kind = (node.args[1] if len(node.args) > 1 else 0) % len(value.shape), self.types[value.dtype]
-        forms = [form for form in map(self.reader, node.args[0]) if len(form.shape) == len(value.shape)]
-        if len(forms) > CHAIN:
-            made, at = self.fresh(value.dtype, value.shape), 0
-            for form in forms:
-                self.store(form, View(made.storage, made.dtype, form.shape, made.stride, at * made.stride[dim]))
-                at += form.shape[dim]
-            return made
-        forms = [form for form in forms if form.shape[dim]]
-
-        def expression(bind, index, t):
-            made, end = None, sum(form.shape[dim] for form in forms)
-            for form in reversed(forms):
-                start = end - form.shape[dim]
-                read = f"{kind}({form.read(bind, index[:dim] + [f'({index[dim]} - {start})'] + index[dim + 1:])})"
-                made, end = read if made is None else f"({index[dim]} < {end} ? {read} : {made})", start
-            return made
-        return Fused(value.dtype, tuple(value.shape), expression if forms and all(value.shape) else
-                     lambda bind, index, t: f"{kind}(0)")
-
-    def softmax(self, node):
-        source = self.stored(node.args[0])
-        dim = node.args[1] % len(source.shape)
-        made = self.fresh(node.meta["val"].dtype, source.shape)
-        bind = Bound()
-        lines, names = unravel("p.x", source.shape[:dim] + source.shape[dim + 1:], "r")
-        index = names[:dim] + ["k"] + names[dim:]
-        out, x = made.read(bind, index, True), source.read(bind, index)
-        loop = f"for (uint k = 0; k < {source.shape[dim]}; k++)"
-        wide = self.accumulated(source.dtype)
-        last = f"{wide}({x}) - m - log(s)" if self.target(node) is ATEN._log_softmax.default else f"exp({wide}({x}) - m) / s"
-        lines += [f"{wide} m = -INFINITY, s = 0;", f"{loop} m = max(m, {wide}({x}));",
-                  f"{loop} s += exp({wide}({x}) - m);", f"{loop} {out} = {last};"]
-        self.dispatch(bind, lines, (math.prod(source.shape) // source.shape[dim], 1, 1))
-        return made
-
-    def reduced(self, node):
-        source, value = self.reader(node.args[0]), node.meta["val"]
-        first, step, last = REDUCED[self.target(node)]
-        over = node.args[1] if len(node.args) > 1 else None
-        over = sorted(d % len(source.shape) for d in ([over] if isinstance(over, int) else
-                                                      over or range(len(source.shape))))
-        kept = [d for d in range(len(source.shape)) if d not in over]
-        made, kind = self.result(value), self.types[value.dtype]
-        bind = Bound()
-        count = math.prod(source.shape[d] for d in over)
-        lines, outer = unravel("p.x", [source.shape[d] for d in kept], "r")
-        within, inner = unravel("j", [source.shape[d] for d in over], "q")
-        index = dict(zip(kept + over, outer + inner))
-        out = made.read(bind, outer if len(value.shape) == len(kept) else
-                        [index[d] if d in kept else "0" for d in range(len(source.shape))], True)
-        x = f"{kind}({source.read(bind, [index[d] for d in range(len(source.shape))])})"
-        lines += [f"uint j = 0; {' '.join(within)}", f"{kind} a = {first.format(x=x)};",
-                  f"for (j = {int(first == '{x}')}; j < {count}; j++) {{ "
-                  f"{' '.join(w.removeprefix('uint ') for w in within)} a = {step.format(x=x)}; }}",
-                  f"{out} = {last.format(n=count)};"]
-        self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
-        return made
-
-    def layer_norm(self, node):
-        source, inner, weight, bias, epsilon = node.args
-        source, values = self.stored(source), node.meta["val"]
-        weight, bias = (o if o is None else self.reader(o) for o in (weight, bias))
-        lead, count = source.shape[:len(source.shape) - len(inner)], math.prod(inner)
-        used = {u.args[1] for u in node.users}
-        made = [self.fresh(v.dtype, v.shape) if place in used else None for place, v in enumerate(values)]
-        bind = Bound()
-        outs = [m and bind(m, True) for m in made]
-        lines, names = unravel("p.x", lead, "r")
-        within, inside = unravel("j", inner, "q")
-        x = source.read(bind, names + inside)
-        loop = f"for (uint j = 0; j < {count}; j++) {{ {' '.join(within)}"
-        wide = self.accumulated(source.dtype)
-        scaled = f"({wide}({x}) - m) * r"
-        scaled += f" * {weight.read(bind, inside)}" * (weight is not None)
-        scaled += f" + {bias.read(bind, inside)}" * (bias is not None)
-        lines += [f"{wide} m = 0, v = 0;", f"{loop} m += {wide}({x}); }}", f"m /= {count};",
-                  f"{loop} {wide} d = {wide}({x}) - m; v += d * d; }}",
-                  f"{wide} r = rsqrt(v / {count} + {wide}({literal(float(epsilon), wide == 'double')}));"]
-        lines += [f"{loop} {outs[0]}[p.x * {count} + j] = {scaled}; }}"] * (0 in used)
-        lines += [f"{outs[1]}[p.x] = m;"] * (1 in used) + [f"{outs[2]}[p.x] = r;"] * (2 in used)
-        self.dispatch(bind, lines, (math.prod(lead), 1, 1))
-        return made
-
-    def convolution(self, node):
-        source, weight, bias, stride, padding, dilation, transposed, _, groups = node.args
-        value = node.meta["val"]
-        if transposed or len(stride) != 2:
-            self.missing.append(f"{node.target} (transposed or not two-dimensional)")
-            return None
-        source, weight = self.stored(source), self.stored(weight)
-        bias = bias if bias is None else self.reader(bias)
-        made = self.result(value)
-        bind = Bound()
-        lines, (n, o, y, x) = unravel("p.x", value.shape, "o")
-        out = made.read(bind, [n, o, y, x], True)
-        _, per, high, wide = weight.shape
-        taken = source.read(bind, [n, f"({o} / {value.shape[1] // groups} * {per} + c)", "uint(y)", "uint(x)"])
-        kind = self.accumulated(value.dtype)
-        lines += [f"{kind} a = {bias.read(bind, [o]) if bias is not None else '0'};",
-                  f"for (uint c = 0; c < {per}; c++) for (uint u = 0; u < {high}; u++) "
-                  f"for (uint v = 0; v < {wide}; v++) {{",
-                  f"    int y = int({y} * {stride[0]} + u * {dilation[0]}) - {padding[0]};",
-                  f"    int x = int({x} * {stride[1]} + v * {dilation[1]}) - {padding[1]};",
-                  f"    if (y >= 0 && y < {source.shape[2]} && x >= 0 && x < {source.shape[3]})" * any(padding),
-                  f"    a += {kind}({taken}) * {kind}({weight.read(bind, [o, 'c', 'u', 'v'])});", "}",
-                  f"{out} = a;"]
-        self.dispatch(bind, lines, (math.prod(value.shape), 1, 1))
-        return made
-
-    def escape(self, node, laid=False):
-        value, held = node.meta["val"], self.view(self.forms[node])
-        view = held
-        if laid and any(n > 1 and a != b for n, a, b in zip(view.shape, view.stride, value.stride())):
-            view = self.strided(view.dtype, view.shape, tuple(value.stride()))
-            self.store(held, view)
-        storage = self.storages[view.storage]
-        storage.kind = RESULT if storage.kind == HELD else storage.kind
-        return view
-
-    def flush(self):
-        if self.pending:
-            self.program.append((COMMIT, Segment(self.pending)))
-            self.pending = []
-
-    def host(self, node, accesses):
-        self.hosted.append((len(self.vertices), accesses))
-        self.vertices.append((node.name,))
-        return len(self.vertices) - 1
-
-    def receive(self, node):
-        self.flush()
-        value = node.meta["val"]
-        view = self.strided(value.dtype, value.shape, self.laid.get(node.args[0]) or value.stride(), RECEIVED)
-        self.program.append((RECV, view.storage, node.args[0], self.host(node, [(view, True)])))
-        return view
-
-    def send(self, node):
-        sent = self.escape(node.args[0], node.args[1] in self.laid)
-        self.flush()
-        self.program.append((SEND, sent, node.args[1], self.host(node, [(sent, False)])))
-
-    # design/torch-source-lowering-change-request.md, item 3; design/compilation-composition-change-request.md, items 2
-    # and 6; design/synchronization-signature-change-request.md, item 1; Bhattacharyya, Sriram and Lee, IEEE
-    # Trans. Signal Processing 45(6), 1997; Apple, MTL4CommandEncoder.h
-    def ordered(self, output):
-        segments = [entry[1] for entry in self.program if entry[0] is COMMIT]
-        supplied = self.read(segments)
-        within = {step.vertex: k for k, segment in enumerate(segments) for step in segment.steps}
-        accesses = [(step.vertex, view, write) for segment in segments for step in segment.steps
-                    for view, write in step.accesses]
-        accesses += [(vertex, view, write) for vertex, views in self.hosted for view, write in views]
-        commit = [within.get(vertex) for vertex in range(len(self.vertices))]
-        edges, causes, redundant = mesh_graph.dependences_supplied(len(self.vertices), self.viewed_by(accesses),
-                                                                   supplied)
-        self.dependences = [Dependence(a, b, causes[a, b]) for a, b in edges]
-        found = {(d.source, d.target): d for d in self.dependences}
-        kept = [edge for edge, covered in zip(edges, redundant) if not covered]
-        barred, fences, waits = mesh_graph.orderings([edge for edge in kept if commit[edge[0]] is not None], commit)
-        arrivals = mesh_graph.arrivals(kept, commit)
-        signalled = {vertex for under in arrivals.values() for vertex in under}
-        for (first, second), under in fences.items():
-            segments[second].after[first] = (segments[first], [found[edge] for edge in under])
-        for k, segment in enumerate(segments):
-            segment.barriers = [step.vertex in barred for step in segment.steps]
-            segment.arrived = sorted(arrivals.get(k, ()))
-        program, waited, task, tasks, operations, arrival = [], set(), {}, [], [], False
-        fenced = {first for first, _ in fences}
-        readers = {reader for _, reader in supplied}
-        for entry in self.program + [(WAIT, None, None, vertex) for vertex in (output, *sorted(readers))]:
-            due = [] if entry[0] is COMMIT else range(len(segments)) if entry[3] in readers else sorted(
-                waits.get(entry[3], {}))
-            due = [first for first in due if first not in waited]
-            waited.update(due)
-            program += [(WAIT, [segments[first] for first in due])] * bool(due) + [entry] * (entry[0] is not WAIT)
-            operations += self.awaited(due, len(tasks))
-            if entry[0] is COMMIT:
-                steps, at = entry[1].steps, within[entry[1].steps[0].vertex]
-                task.update((step.vertex, len(tasks)) for step in steps)
-                entry[1].arrival = not arrival and any(
-                    self.storages[s].kind == ARGUMENT and self.storages[s].position in self.metal
-                    and self.storages[s].count for step in steps for s in step.storages)
-                arrival |= entry[1].arrival
-                operations += self.committed(entry[1], len(tasks), at, at in fenced)
-                tasks.append((self.lane, tuple(dict.fromkeys(name for step in steps for name in step.nodes))))
+                local = M._local_call(of)
+                args, kwargs = map_arg((local.args, local.kwargs), env.__getitem__)
+                env[of], made = M._instruction(local, args, kwargs, of.meta.get("val"), page, generator)
+                M._placed(made, place, tasks[of][0])
+                records += made
+                owners += [(tasks[of], None)] * len(made)
+        sending += [(channel_of(node), *written[fan.index[fan.group[node]]]) for node in fan.sends]
+        received, sent, wires = {}, {}, {}
+        for channel, value, t in landing:
+            received[channel] = Root(channel, "received", M.INPUT, *rooted(t, M.INPUT))
+            if value is not None:
+                wires[value] = Root(value, "wire", M.INPUT, received[channel].root, None)
+        outputs = []
+        for leaf in leaves:
+            value = env[leaf] if isinstance(leaf, torch.fx.Node) else leaf
+            if isinstance(value, torch.Tensor):
+                source = leaf.meta["val"] if isinstance(leaf, torch.fx.Node) else value
+                outputs.append(Output(*rooted(value, M.OUTPUT), None, M._metadata(source)))
             else:
-                task[entry[3]] = len(tasks)
-                operations += [(THREAD, SENT if entry[0] is SEND else ARRIVED, len(tasks), entry[2], 0, 0)] * (
-                    entry[0] in (SEND, RECV))
-                operations += self.signal(len(tasks), entry[3]) * (entry[3] in signalled)
-                tasks.append((THREAD, self.vertices[entry[3]]))
-        self.program, self.signalled = program, signalled
-        self.record = {"tasks": tasks, "operations": operations, "dependences": mesh_graph.quotient(
-            [task[vertex] for vertex in range(len(self.vertices))], [(d.source, d.target) for d in self.dependences])}
-
-    # design/compilation-composition-change-request.md, items 5 and 7
-    def function(self):
-        count, self.handles, self.static, self.retained = len(self.storages), [], [], []
-        begun, ended, entries, sends, receives, issued = self.begun(), self.ended(), [], [], [], []
-        for entry in self.program:
-            if entry[0] is COMMIT:
-                entries.append((COMMIT, self.commit(entry[1])))
-                issued.append(entry[1])
-            elif entry[0] is WAIT:
-                issued = [segment for segment in issued if not any(segment is waited for waited in entry[1])]
-                entries.append((WAIT, self.wait(entry[1], self.outstanding(issued) + ended)))
-            elif entry[0] is RECV:
-                entries.append((mesh_metal4.RECEIVED, self.arrived_at(entry[1], entry[3]), len(receives), entry[1],
-                                self.outstanding(issued)))
-                receives.append((entry[1], entry[2]))
-            elif entry[0] is SEND:
-                entries.append((mesh_metal4.SENT, self.outstanding(issued), len(sends)))
-                sends.append((flat(entry[1]), entry[2]))
-            else:
-                view, (message, zero) = entry[1], entry[2]
-                entries.append((CHECK, self.outstanding(issued), CHECKED[view.dtype], view.storage, view.offset,
-                                view.shape, view.stride, zero, message))
-        source = self.source(mesh_metal4.program(entries, count, begun, ended))
-        given = [(s, st.position, st.position in self.metal) for s, st in enumerate(self.storages)
-                 if st.kind == ARGUMENT]
-        made = [(s, st.dtype, st.count) for s, st in enumerate(self.storages) if st.kind == RESULT and st.count]
-        run = mesh_metal4.Function(
-            mesh_metal4.native(source).run, count, self.handles, self.static, given, [] if self.owning else made,
-            [(s, (dtype, n)) for s, dtype, n in made] if self.owning else [], sends, receives, [],
-            tuple(flat(r) if isinstance(r, View) else r for r in self.results), (SEND, RECV, None), self.retained)
-        run.record, run.program, run.dependences, run.source = self.record, self.program, self.dependences, source
-        for name, value in self.described().items():
-            setattr(run, name, value)
-        return run
+                outputs.append(Output(None, None, value, None))
+        for channel, value, t in sending:
+            root, view = (rooted(t, M.TEMPORARY) if value is not None else (builder.root(t), builder.value(M._stored(t))))
+            role = builder.roles[M._key(t)]
+            sent[channel] = Root(channel, "sent", role, root, view)
+            if value is not None:
+                wires.setdefault(value, Root(value, "wire", role, root, None))
+        state, stepped = (), []
+        if generator is not None and (generator.sites > drew or advance and generator.sites):
+            state = (Root("generator", "generator", M.STATE, *rooted(generator.state, M.STATE)),)
+            if advance:
+                stepped = generator.stepped()
+                M._placed(stepped, place, len(module.meta["order"]))
+        operations, advanced, writes = {}, [], {}
+        for owner, g in zip(owners + [None] * len(stepped), records + stepped):
+            made = builder.generic(g)
+            if owner is None:
+                advanced.append(made)
+                continue
+            task, write = owner
+            operations.setdefault(task, []).append(made)
+            if write is not None:
+                writes.setdefault(write, []).append(made)
+    except BaseException:
+        compiler.metal_ir_program_free(builder.p)
+        raise
+    return Constructed(builder.p, compiler, target, place, tuple(inputs), tuple(outputs), spec, state, received, sent,
+                       wires, {task: tuple(made) for task, made in operations.items()}, tuple(advanced), fan,
+                       {k: tuple(made) for k, made in writes.items()}, builder.base)
 
 
-class Metal(Lowering):
-    # Apple, Metal feature set tables, Implementation limits, "Maximum number of entries in the buffer argument
-    # table, per graphics or kernel function"
-    lane, owning, buffers = QUEUE, True, 31
-
-    # design/synchronization-signature-change-request.md, item 1; rdma/mesh-metal4.m mesh_metal4_commit,
-    # mesh_metal4_wait and mesh_metal4_after
-    def committed(self, segment, task, at, fenced):
-        made = [(QUEUE, "queue_wait", task, ("arrival",), 1, 1)] * segment.arrival
-        made += [(QUEUE, "queue_wait", task, ("arrived", vertex), 1, 1) for vertex in segment.arrived]
-        made += [(QUEUE, "fence_wait", task, ("fence", first), 1, 1) for first in segment.after]
-        made += [(QUEUE, "pass_barrier", task, None, 0, 0)] * sum(segment.barriers)
-        made += [(QUEUE, "fence_update", task, ("fence", at), 1, 1)] * fenced
-        return made + [(QUEUE, "submit", task, None, 0, 1), (QUEUE, "host_signal", task, ("event", at), 1, 1)]
-
-    def signal(self, task, vertex):
-        return [(THREAD, "host_signal", task, ("arrived", vertex), 1, 1)]
-
-    # design/integration-finishing-change-request.md, item 7; rdma/mesh-metal4.m mesh_metal4_commit, its record
-    def read(self, segments):
-        self.hosted.append((len(self.vertices), []))
-        self.vertices.append((FEEDBACK,))
-        return [(segment.steps[-1].vertex, len(self.vertices) - 1) for segment in segments]
-
-    def awaited(self, due, task):
-        return [(THREAD, "host_wait", task, ("event", first), 1, 1) for first in due]
-
-    def kernel(self, bound, lines, grid, group, head):
-        parameters = [f"device {self.types[self.storages[s].dtype]} *b{k} [[buffer({k})]]"
-                      for k, s in enumerate(bound)]
-        parameters += ["uint3 p [[thread_position_in_grid]]", "uint3 g [[threadgroup_position_in_grid]]"]
-        body = "\n    ".join(lines)
-        head += "".join(HELPERS[name] for name in sorted(bound.uses))
-        made = pipeline(f"{STDLIB}{head}kernel void k({', '.join(parameters)}) {{\n    {body}\n}}\n")
-        width = LIB.mesh_metal4_width(made)
-        return made, (width, 1, 1) if group is None else tuple(n * width for n in group[:1]) + tuple(group[1:])
-
-    # Apple, MPPTensorOpsMatMul2d.h:207-294, macOS 26.4 SDK
-    def multiply(self, form, target):
-        if form.dtype not in (torch.float32, torch.float16):
-            return super().multiply(form, target)
-        bind = Bound()
-        bind.note(form)
-        rows, columns = form.left.shape[-2], form.right.shape[-1]
-        batch = form.left.shape[0] if len(form.left.shape) == 3 else 1
-        out = f"({bind(target, True)} + {target.offset})"
-        lines, flags, slices = [], [], []
-        for name, operand, tile in (("A", form.left, "0, g.y * {T}"), ("B", form.right, "g.x * {T}, 0")):
-            (m, n), (sm, sn) = operand.shape[-2:], operand.stride[-2:]
-            turned = not (n == 1 or sn == 1)
-            extents, pitch = ((m, n), sn) if turned else ((n, m), sm)
-            step = operand.stride[0] if len(operand.shape) == 3 else 0
-            lines.append(f"auto {name} = tensor({bind(operand)} + {operand.offset} + g.z * {step}, "
-                         f"dextents<int, 2>({extents[0]}, {extents[1]}), array<int, 2>{{1, {max(pitch, 1)}}});")
-            flags.append("true" if turned else "false")
-            first, second = tile.format(T=TILE).split(", ")
-            slices.append(f"auto m{name} = {name}.slice({second}, {first});" if turned else
-                          f"auto m{name} = {name}.slice({first}, {second});")
-        lines = [f"constexpr auto d = matmul2d_descriptor({TILE}, {TILE}, static_cast<int>(dynamic_extent), "
-                 f"{flags[0]}, {flags[1]});",
-                 f"matmul2d<d, execution_simdgroups<{SIMDGROUPS}>> op;"] + lines + slices
-        lines += [f"auto C = tensor({out} + g.z * {rows * columns}, dextents<int, 2>({columns}, {rows}), "
-                  f"array<int, 2>{{1, {columns}}});",
-                  f"auto mC = C.slice(g.x * {TILE}, g.y * {TILE});"]
-        index = ["g.z"] * (len(form.left.shape) == 3) + ["row", "column"]
-        if form.plain:
-            lines.append("op.run(mA, mB, mC);")
-        else:
-            expression = form.expression(
-                bind, reshaped(index, form.left.shape[:-1] + form.right.shape[-1:], form.shape), "t[i]")
-            lines += ["auto t = op.get_destination_cooperative_tensor<decltype(mA), decltype(mB), "
-                      f"{self.types[form.dtype]}>();",
-                      "for (uint16_t i = 0; i < t.get_capacity(); ++i) if (t.is_valid_element(i)) t[i] = 0;",
-                      "op.run(mA, mB, t);",
-                      "for (uint16_t i = 0; i < t.get_capacity(); ++i) if (t.is_valid_element(i)) {",
-                      "    auto at = t.get_multidimensional_index(i);",
-                      f"    uint row = min(g.y * {TILE} + uint(at[1]), {rows - 1}u);",
-                      f"    uint column = min(g.x * {TILE} + uint(at[0]), {columns - 1}u);",
-                      f"    t[i] = {expression};", "}", "t.store(mC);"]
-        self.dispatch(bind, lines, (-(-columns // TILE), -(-rows // TILE), batch), (SIMDGROUPS, 1, 1), True,
-                      PRIMITIVES)
-
-    def drivers(self):
-        return {ATEN._linalg_solve_ex.default: self.solve, ATEN.linalg_qr.default: self.qr}
-
-    # G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., algorithms 3.4.1 and 3.1.2; LAPACK, sgetf2 and
-    # sgetrs; torch 2.15 documentation, torch.linalg.solve_ex
-    def solve(self, node):
-        values, left, right = node.meta["val"], self.reader(node.args[0]), self.reader(node.args[1])
-        if values[0].dtype != torch.float32 or len(node.args) > 2 or node.kwargs:
-            self.missing.append(f"{node.target} of {values[0].dtype} or with options")
-            return None
-        n, lead = left.shape[-1], left.shape[:-2]
-        vector = len(right.shape) == len(left.shape) - 1
-        k = 1 if vector else right.shape[-1]
-        made = [self.fresh(values[0].dtype, values[0].shape) if vector else self.matrices(values[0]),
-                self.matrices(values[1]), *(self.fresh(v.dtype, v.shape) for v in values[2:])]
-        bind = Bound()
-        lines, names = unravel("p.x", lead, "r")
-        x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
-            (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
-        A, X = (lambda i, j, v=v, steps=steps: f"{v}[({i}) * {steps[0]} + ({j}) * {steps[1]}]"
-                for v, steps in ((a, made[1].stride[-2:]), (x, (1, 0) if vector else made[0].stride[-2:])))
-        swap = lambda at, w: f"for (uint j = 0; j < {w}; j++) {{ float t = {at('c', 'j')}; " \
-                             f"{at('c', 'j')} = {at('at', 'j')}; {at('at', 'j')} = t; }}"
-        lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{A('i', 'j')} = {left.read(bind, names + ['i', 'j'])};",
-                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
-                  f"{X('i', 'j')} = {right.read(bind, names + ['i', 'j'][:len(right.shape) - len(names)])};",
-                  "int failed = 0;", f"for (uint c = 0; c < {n}; c++) {{",
-                  f"    uint at = c; float best = abs({A('c', 'c')});",
-                  f"    for (uint i = c + 1; i < {n}; i++) if (abs({A('i', 'c')}) > best) "
-                  f"{{ best = abs({A('i', 'c')}); at = i; }}",
-                  f"    {pivots}[c] = at + 1;",
-                  "    if (best == 0) { failed = failed ? failed : int(c + 1); continue; }",
-                  f"    if (at != c) {{ {swap(A, n)} {swap(X, k)} }}",
-                  f"    for (uint i = c + 1; i < {n}; i++) {{",
-                  f"        float f = {A('i', 'c')} / {A('c', 'c')}; {A('i', 'c')} = f;",
-                  f"        for (uint j = c + 1; j < {n}; j++) {A('i', 'j')} -= f * {A('c', 'j')};",
-                  f"        for (uint j = 0; j < {k}; j++) {X('i', 'j')} -= f * {X('c', 'j')};", "    }", "}",
-                  f"for (uint q = {n}; q-- > 0;) for (uint j = 0; j < {k}; j++) {{",
-                  f"    float s = {X('q', 'j')};",
-                  f"    for (uint c = q + 1; c < {n}; c++) s -= {A('q', 'c')} * {X('c', 'j')};",
-                  f"    {X('q', 'j')} = s / {A('q', 'q')};", "}", f"{info}[0] = failed;"]
-        self.dispatch(bind, lines, (math.prod(lead), 1, 1))
-        return made
-
-    # G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., algorithms 5.1.1, 5.2.1 and section 5.1.6; LAPACK,
-    # slarfg, slapy2, snrm2, sgeqr2 and sorg2r; torch 2.15 documentation, torch.linalg.qr
-    def qr(self, node):
-        values, source = node.meta["val"], self.reader(node.args[0])
-        (m, n), lead = source.shape[-2:], source.shape[:-2]
-        if values[0].dtype != torch.float32 or len(node.args) > 1 or node.kwargs or m < n:
-            self.missing.append(f"{node.target} of {values[0].dtype}, with a mode or of a wide matrix")
-            return None
-        made = [self.fresh(v.dtype, v.shape) for v in values]
-        bind = Bound()
-        lines, names = unravel("p.x", lead, "r")
-        q, r = (f"({bind(v, True)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
-        tau = self.scratch(bind, lines, "tau", values[0].dtype, math.prod(lead), n)
-        reflect = [f"    for (uint c = j + 1; c < {n}; c++) {{", f"        float w = {q}[j * {n} + c];",
-                   f"        for (uint i = j + 1; i < {m}; i++) w += {q}[i * {n} + j] * {q}[i * {n} + c];",
-                   f"        {q}[j * {n} + c] -= {tau}[j] * w;",
-                   f"        for (uint i = j + 1; i < {m}; i++) {q}[i * {n} + c] -= {tau}[j] * w * {q}[i * {n} + j];",
-                   "    }"]
-        lines += [f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{q}[i * {n} + j] = {source.read(bind, names + ['i', 'j'])};",
-                  f"for (uint j = 0; j < {n}; j++) {{",
-                  f"    float alpha = {q}[j * {n} + j], most = 0, s = 0, beta = alpha;",
-                  f"    for (uint i = j + 1; i < {m}; i++) most = max(most, abs({q}[i * {n} + j]));",
-                  f"    for (uint i = j + 1; i < {m}; i++) {{ float t = {q}[i * {n} + j] / most; s += t * t; }}",
-                  f"    {tau}[j] = 0;", "    if (most != 0) {",
-                  "        float norm = most * sqrt(s), w = max(abs(alpha), norm), z = min(abs(alpha), norm) / w;",
-                  "        beta = -copysign(w * sqrt(1 + z * z), alpha);", f"        {tau}[j] = (beta - alpha) / beta;",
-                  f"        for (uint i = j + 1; i < {m}; i++) {q}[i * {n} + j] /= alpha - beta;", "    }",
-                  f"    {q}[j * {n} + j] = beta;", *reflect, "}",
-                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{r}[i * {n} + j] = i <= j ? {q}[i * {n} + j] : 0;",
-                  f"for (uint j = {n}; j-- > 0;) {{", *reflect,
-                  f"    for (uint i = j + 1; i < {m}; i++) {q}[i * {n} + j] *= -{tau}[j];",
-                  f"    {q}[j * {n} + j] = 1 - {tau}[j];",
-                  f"    for (uint i = 0; i < j; i++) {q}[i * {n} + j] = 0;", "}"]
-        self.dispatch(bind, lines, (math.prod(lead), 1, 1))
-        return made
-
-    def described(self):
-        return {"device": None, "feedback": lambda records=self.records: [
-            (steps, *mesh_metal4.times(record)) for steps, record in records]}
-
-    def handle(self, pointer):
-        self.handles.append(pointer)
-        return f"h[{len(self.storages) + len(self.handles) - 1}]"
-
-    def source(self, program):
-        return mesh_metal4.PROGRAM + program
-
-    def bound(self):
-        return {s for entry in self.program if entry[0] is COMMIT for step in entry[1].steps for s in step.storages
-                if self.storages[s].count}
-
-    def mapped(self, s):
-        size, page = self.storages[s].count * self.storages[s].dtype.itemsize, mmap.PAGESIZE
-        return (f"{{ uint64_t first = a[{s}] / {page} * {page}; h[{s}] = view((void *)first, (a[{s}] + {size} - first "
-                f"+ {page - 1}) / {page} * {page}); g[{s}] = address(h[{s}]) + a[{s}] - first; }}")
-
-    # rdma/mesh-metal4.m mesh_metal4_after, mesh_metal4_view and mesh_metal4_buffer
-    def begun(self):
-        self.stream = None
-        lines = [f"auto {name} = ({result} (*)({arguments}))"
-                 f"{self.handle(C.cast(getattr(LIB, 'mesh_metal4_' + name), C.c_void_p).value)};"
-                 for name, result, arguments in API]
-        held = {s: LIB.mesh_metal4_buffer(max(st.count * st.dtype.itemsize, 1))
-                for s, st in enumerate(self.storages) if st.kind == HELD}
-        self.static += [(s, made, LIB.mesh_metal4_contents(made), LIB.mesh_metal4_address(made))
-                        for s, made in held.items()]
-        stream = LIB.mesh_metal4_stream((C.c_void_p * len(held))(*held.values()), len(held))
-        self.stream, self.records, self.freed = self.handle(stream), [], [*held.values()]
-        self.retained.append(Kept(stream, self.freed))
-        for entry in self.program:
-            for earlier, _ in entry[1].after.values() if entry[0] is COMMIT else ():
-                if not earlier.fence:
-                    self.freed.append(LIB.mesh_metal4_fence())
-                    earlier.fence.append(self.handle(self.freed[-1]))
-        bound = self.bound()
-        self.events = {vertex: self.handle(LIB.mesh_metal4_event()) for vertex in sorted(self.signalled)}
-        self.freed += self.handles[len(self.handles) - len(self.events):]
-        for s, st in enumerate(self.storages):
-            size = st.count * st.dtype.itemsize
-            if st.kind == RESULT and st.count:
-                lines.append(f"h[{s}] = buffer({size}); a[{s}] = (uint64_t)contents(h[{s}]); g[{s}] = address(h[{s}]);")
-            elif st.kind == ARGUMENT and s in bound:
-                lines.append(f"h[{s}] = (void *)a[{s}]; g[{s}] = address(h[{s}]) + o[{s}]; a[{s}] = (uint64_t)contents("
-                             f"h[{s}]) + o[{s}];" if st.position in self.metal else self.mapped(s))
-            elif st.kind == RECEIVED:
-                lines.append(f"h[{s}] = nullptr;")
-        return lines
-
-    def ended(self):
-        bound = self.bound()
-        return [f"reset({self.stream});"] + [
-            f"release(h[{s}]);" for s, st in enumerate(self.storages)
-            if s in bound and (st.kind == RECEIVED or st.kind == ARGUMENT and st.position not in self.metal)]
-
-    def arrived_at(self, s, vertex):
-        return [self.mapped(s)] * (s in self.bound()) + [f"signal({event});" for event in (self.events.get(vertex),)
-                                                         if event]
-
-    def recorded(self, segments):
-        return ", ".join(segment.record[0] for segment in segments)
-
-    def outstanding(self, issued):
-        return [f"{{ void *r[] = {{{self.recorded(issued)}}}; wait(r, {len(issued)}, nullptr, 0); }}"] * bool(issued)
-
-    def wait(self, segments, ended):
-        return [f"void *r[] = {{{self.recorded(segments)}}};",
-                f"if (wait(r, {len(segments)}, f->message, sizeof f->message)) {{",
-                *mesh_metal4.failed("", ended), "}"]
-
-    # rdma/mesh-metal4.m mesh_metal4_commit
-    def commit(self, segment):
-        record = LIB.mesh_metal4_record()
-        segment.record.append(self.handle(record))
-        self.records.append((tuple(step.vertex for step in segment.steps), record))
-        array, viewed = (mesh_metal4.Dispatch * len(segment.steps))(), []
-        lines = [f"after({self.stream}, {', '.join(self.handle(pointer) for pointer in TORCH)});"] * segment.arrival
-        lines += [f"await({self.events[vertex]});" for vertex in segment.arrived]
-        held = {s: address for s, _, _, address in self.static}
-        for made, step, barrier in zip(array, segment.steps, segment.barriers):
-            addresses = (C.c_uint64 * len(step.storages))(*[held.get(s, 0) for s in step.storages])
-            made.pipeline, made.table = step.pipeline, LIB.mesh_metal4_table(len(step.storages))
-            made.address, made.addresses, made.barrier = addresses, len(step.storages), barrier
-            made.groups, made.grid, made.group = step.groups, step.grid, step.group
-            patched = [(slot, s) for slot, s in enumerate(step.storages) if s not in held]
-            at = self.handle(C.addressof(addresses)) if patched else None
-            lines += [f"((uint64_t *)({at}))[{slot}] = g[{s}];" for slot, s in patched]
-            viewed += [s for _, s in patched if self.storages[s].count]
-            self.retained.append(addresses)
-            self.freed.append(made.table)
-        viewed, after = list(dict.fromkeys(viewed)), [earlier.fence[0] for earlier, _ in segment.after.values()]
-        self.retained.append(array)
-        self.freed.append(record)
-        return lines + [
-            f"void *v[] = {{{', '.join(f'h[{s}]' for s in viewed) or 'nullptr'}}}, *w[] = {{{', '.join(after) or 'nullptr'}}};",
-            f"commit({self.stream}, {self.handle(C.addressof(array))}, {len(array)}, v, {len(viewed)}, w, {len(after)}, "
-            f"{segment.fence[0] if segment.fence else 'nullptr'}, {segment.record[0]});"]
-
-
-# design/torch-source-lowering-change-request.md, item 1; design/compilation-composition-change-request.md, items 6
-# and 7
-class Native(Lowering):
-    types, lane, owning = NATIVE_TYPES, THREAD, False
-
-    def committed(self, segment, task, at, fenced):
-        return [(THREAD, "pass_barrier", task, None, 0, 0)] * sum(len(parts) > 1 for parts in self.levels(segment))
-
-    def read(self, segments):
-        return []
-
-    def signal(self, task, vertex):
-        return []
-
-    def awaited(self, due, task):
-        return []
-
-    def drivers(self):
-        return {ATEN._linalg_solve_ex.default: self.solve, ATEN.linalg_qr.default: self.qr}
-
-    # torch 2.15 documentation, torch.Tensor.scatter_ and torch.Tensor.index_put_;
-    # design/compilation-composition-change-request.md, Performance obligation
-    def updated(self, value, source, domain, key, given, added):
-        kind, made, bind = self.types[value.dtype], self.fresh(value.dtype, value.shape), Bound()
-        count, first = math.prod(value.shape), []
-        if self.chunk(count) == count:
-            first = [f"for (uint e = 0; e < {count}; e++) {{", *self.copying(bind, source, made, "e"), "}"]
-        else:
-            self.store(source, made)
-        lines, names = unravel("q", domain, "c")
-        out = f"{bind(made, True)}[{key(bind, names, made.stride)}]"
-        x = self.given(bind, given, names, kind == "double")
-        self.dispatch(bind, [*first, f"for (uint q = 0; q < {math.prod(domain)}; q++) {{", *lines,
-                             f"{out} = {f'{out} + ' * bool(added)}{kind}({x});", "}"], (1, 1, 1))
-        return made
-
-    def chunk(self, count):
-        return count if count < GRAIN else max(1, -(-count // (4 * os.cpu_count())))
-
-    # torch 2.15 documentation, torch.sort; ISO/IEC 14882:2020 [stable.sort]
-    def sorted(self, source, dim, descending):
-        count, lead = source.shape[dim], source.shape[:dim] + source.shape[dim + 1:]
-        rows, kind = math.prod(lead), self.types[source.dtype]
-        values, places = self.fresh(source.dtype, (rows, count)), self.fresh(torch.int64, (rows, count))
-        bind = Bound()
-        lines, names = unravel("p.x", lead, "r")
-        at = lambda k: source.read(bind, names[:dim] + [f"uint({k})"] + names[dim:])
-        first, second = ("b", "a") if descending else ("a", "b")
-        order = precedes(f"x{first}", f"x{second}", source.dtype.is_floating_point)
-        v, w = (f"({bind(made, True)} + p.x * {count})" for made in (values, places))
-        lines += [f"for (long k = 0; k < {count}; k++) {w}[k] = k;",
-                  f"std::stable_sort({w}, {w} + {count}, [&](long a, long b) {{ {kind} xa = {at('a')}, xb = {at('b')}; "
-                  f"return {order}; }});",
-                  f"for (uint k = 0; k < {count}; k++) {v}[k] = {at(f'{w}[k]')};"]
-        self.dispatch(bind, lines, (rows, 1, 1))
-        return self.rows(source, dim, count, (values, places))
-
-    def columns(self, bind, lines, source, held, rows, columns, names):
-        lines += [f"for (uint i = 0; i < {rows}; i++) for (uint j = 0; j < {columns}; j++) "
-                  f"{held}[j * {rows} + i] = {source.read(bind, names + ['i', 'j'][:len(source.shape) - len(names)])};"]
-
-    # design/torch-source-lowering-change-request.md, item 5; LAPACK, sgesv and dgesv; torch 2.15 documentation,
-    # torch.linalg.solve_ex
-    def solve(self, node):
-        values, left, right = node.meta["val"], self.reader(node.args[0]), self.reader(node.args[1])
-        letter = {torch.float32: "s", torch.float64: "d"}.get(values[0].dtype)
-        if letter is None or len(node.args) > 2 or node.kwargs:
-            self.missing.append(f"{node.target} of {values[0].dtype} or with options")
-            return None
-        n, lead = left.shape[-1], left.shape[:-2]
-        vector = len(right.shape) == len(left.shape) - 1
-        k, batch = 1 if vector else right.shape[-1], math.prod(lead)
-        made = [self.fresh(values[0].dtype, values[0].shape) if vector else self.matrices(values[0]),
-                self.matrices(values[1]), *(self.fresh(v.dtype, v.shape) for v in values[2:])]
-        bind = Bound()
-        lines, names = unravel("p.x", lead, "r")
-        x, a, pivots, info = (f"({bind(v, True)} + p.x * {step})" for v, step in (
-            (made[0], n * k), (made[1], n * n), (made[2], n), (made[3], 1)))
-        columns = [n == 1 or view.stride[-2] == 1 for view in made[:2]]
-        b = x if vector or columns[0] else self.scratch(bind, lines, "b", values[0].dtype, batch, n * k)
-        self.columns(bind, lines, left, a, n, n, names)
-        self.columns(bind, lines, right, b, n, k, names)
-        lines += [f"int n = {n}, k = {k};", f"{letter}gesv_(&n, &k, {a}, &n, {pivots}, {b}, &n, {info});"]
-        lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < i; j++) "
-                  f"std::swap({a}[i * {n} + j], {a}[j * {n} + i]);"] * (not columns[1])
-        lines += [f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {k}; j++) "
-                  f"{x}[i * {k} + j] = {b}[j * {n} + i];"] * (b is not x)
-        self.dispatch(bind, lines, (batch, 1, 1))
-        return made
-
-    # LAPACK, sgelqf and sorglq; G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed., section 5.2;
-    # torch 2.15 documentation, torch.linalg.qr
-    def qr(self, node):
-        values, source = node.meta["val"], self.reader(node.args[0])
-        letter = {torch.float32: "s", torch.float64: "d"}.get(values[0].dtype)
-        (m, n), lead = source.shape[-2:], source.shape[:-2]
-        if letter is None or len(node.args) > 1 or node.kwargs or m < n:
-            self.missing.append(f"{node.target} of {values[0].dtype}, with a mode or of a wide matrix")
-            return None
-        batch, room = math.prod(lead), 64 * n
-        made = [self.fresh(v.dtype, v.shape) for v in values]
-        bind = Bound()
-        lines, names = unravel("p.x", lead, "r")
-        q, r = (f"({bind(v, True)} + p.x * {step})" for v, step in ((made[0], m * n), (made[1], n * n)))
-        tau = self.scratch(bind, lines, "tau", values[0].dtype, batch, n)
-        w = self.scratch(bind, lines, "w", values[0].dtype, batch, room)
-        lines += [f"for (uint i = 0; i < {m}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{q}[i * {n} + j] = {source.read(bind, names + ['i', 'j'])};",
-                  f"int m = {m}, n = {n}, room = {room}, info;",
-                  f"{letter}gelqf_(&n, &m, {q}, &n, {tau}, {w}, &room, &info);",
-                  f"for (uint i = 0; i < {n}; i++) for (uint j = 0; j < {n}; j++) "
-                  f"{r}[i * {n} + j] = i <= j ? {q}[i * {n} + j] : 0;",
-                  f"{letter}orglq_(&n, &m, &n, {q}, &n, {tau}, {w}, &room, &info);"]
-        self.dispatch(bind, lines, (batch, 1, 1))
-        return made
-
-    def __init__(self, module, laid, stored=frozenset()):
-        self.kernels = []
-        super().__init__(module, laid, stored)
-
-    def kernel(self, bound, lines, grid, group, head):
-        declared = [f"{kind} *b{k} = ({kind} *)b_[{k}];"
-                    for k, kind in enumerate(self.types[self.storages[s].dtype] for s in bound)]
-        declared += ["for (size_t i_ = first_; i_ < last_; i_++) {",
-                     f"uint3 p = uint3(uint(i_ % {grid[0]}), uint(i_ / {grid[0]} % {grid[1]}), "
-                     f"uint(i_ / {grid[0] * grid[1]}));"]
-        self.kernels.append("static void k%d(void *const *b_, size_t first_, size_t last_) {\n    %s\n    }\n}\n"
-                            % (len(self.kernels), "\n    ".join(declared + list(lines))))
-        return len(self.kernels) - 1, grid
-
-    # Apple, vecLib cblas_new.h, cblas_sgemm and cblas_dgemm
-    def multiply(self, form, target):
-        if form.dtype not in (torch.float32, torch.float64):
-            return super().multiply(form, target)
-        bind, kind = Bound(), self.types[form.dtype]
-        bind.note(form)
-        rows, inner, columns = form.left.shape[-2], form.left.shape[-1], form.right.shape[-1]
-        batched = len(form.left.shape) == 3
-        out, given = f"{bind(target, True)} + {target.offset} + p.x * {rows * columns}", []
-        for operand in (form.left, form.right):
-            (m, n), (sm, sn) = operand.shape[-2:], operand.stride[-2:]
-            turned = not (n == 1 or sn == 1)
-            pitch = sn if turned else sm if m > 1 else n
-            given += ["CblasTrans" if turned else "CblasNoTrans",
-                      f"{bind(operand)} + {operand.offset} + p.x * {operand.stride[0] if batched else 0}",
-                      str(max(pitch, m if turned else n, 1))]
-        lines = [f"cblas_{'s' if form.dtype == torch.float32 else 'd'}gemm(CblasRowMajor, {given[0]}, {given[3]}, "
-                 f"{rows}, {columns}, {inner}, 1, {given[1]}, {given[2]}, {given[4]}, {given[5]}, 0, {out}, "
-                 f"{max(columns, 1)});"]
-        if not form.plain:
-            index = ["p.x"] * batched + ["row", "column"]
-            expression = form.expression(
-                bind, reshaped(index, form.left.shape[:-1] + form.right.shape[-1:], form.shape), "t")
-            lines += [f"for (uint row = 0; row < {rows}; row++) for (uint column = 0; column < {columns}; column++) {{",
-                      f"    {kind} *c = {out} + row * {columns} + column;", f"    {kind} t = *c;",
-                      f"    *c = {expression};", "}"]
-        self.dispatch(bind, lines, (form.left.shape[0] if batched else 1, 1, 1))
-
-    def source(self, program):
-        return NATIVE + "".join(SHARED.values()) + "".join(self.kernels) + "}\n" + mesh_metal4.PROGRAM + program
-
-    def described(self):
-        return {"held": self.held}
-
-    def begun(self):
-        self.held = {s: mmap.mmap(-1, max(st.count * st.dtype.itemsize, 1))
-                     for s, st in enumerate(self.storages) if st.kind == HELD}
-        self.static += [(s, None, C.addressof(C.c_char.from_buffer(pages)), 0) for s, pages in self.held.items()]
-        return []
-
-    def ended(self):
-        return []
-
-    def arrived_at(self, s, vertex):
-        return []
-
-    def outstanding(self, issued):
-        return []
-
-    def wait(self, segments, ended):
-        return []
-
-    # Apple, dispatch/apply.h, dispatch_apply_f
-    def commit(self, segment):
-        slots = [s for step in segment.steps for s in step.storages]
-        lines = [f"void *const t[] = {{{', '.join(f'(void *)a[{s}]' for s in slots) or 'nullptr'}}};"]
-        return lines + [f"{{ const mesh::part p[] = {{{', '.join(parts)}}}; " + (
-            "mesh::each((void *)p, 0); }" if len(parts) == 1 else
-            f"dispatch_apply_f({len(parts)}, DISPATCH_APPLY_AUTO, (void *)p, mesh::each); }}")
-            for parts in self.levels(segment)]
-
-    def levels(self, segment):
-        levels, first = [], 0
-        for step, joined in zip(segment.steps, segment.barriers):
-            count = math.prod(step.grid)
-            chunk = self.chunk(count)
-            levels += [[]] * (joined or not levels)
-            levels[-1] = levels[-1] + [f"{{mesh::k{step.pipeline}, t + {first}, {at}, {min(at + chunk, count)}}}"
-                                       for at in range(0, count, chunk)]
-            first += len(step.storages)
-        return levels
-
-
-class Kept:
-    def __init__(self, stream, retained):
-        weakref.finalize(self, released, stream, retained)
-
-
-def released(stream, retained):
-    for made in (*retained, stream):
-        LIB.mesh_metal4_release(made)
-
-
-def hosted(module, device):
-    module = copy.deepcopy(module)
-    for node in list(module.graph.nodes):
-        if node.target is ATEN._to_copy.default and node.kwargs.get("device") == device:
-            source, value = node.args[0], node.meta["val"]
-            if source.meta["val"].dtype == value.dtype and source.meta["val"].stride() == value.stride():
-                node.replace_all_uses_with(source)
-                module.graph.erase_node(node)
-            else:
-                node.kwargs = {**node.kwargs, "device": HOST}
-                node.meta.pop("custom", None)
-    module.recompile()
-    return module
-
-
-def lower(scheduled):
-    return targeted(scheduled, {"mps": Metal, "cpu": Native})
-
-
-# design/torch-source-lowering-change-request.md item 1; compiler/mesh_compiler/lower_inductor.py lower
-def metal(scheduled):
-    return targeted(scheduled, {"mps": Metal})
-
-
-def targeted(scheduled, targets):
-    functions, missing = {}, {}
-    lowerings = {p: targets[scheduled.devices[p].type] for p in scheduled.modules
-                 if p not in scheduled.engines and scheduled.devices[p].type in targets}
-    metal = [p for p, lowering in lowerings.items() if lowering is Metal]
-    received = {channel for channel, *_ in scheduled.carried} | {
-        node.args[0] for p in lowerings for node in scheduled.modules[p].graph.nodes if node.target is RECV}
-    laid = {node.args[1]: tuple(node.args[0].meta["val"].stride()) for module in scheduled.modules.values()
-            for node in module.graph.nodes if node.target is SEND and node.args[1] in received}
-    for processor, module in scheduled.modules.items():
-        if processor not in lowerings:
-            functions[processor] = hosted(module, scheduled.devices[metal[0]]) if metal else module
-            continue
-        lowering = lowerings[processor](module, laid, frozenset(
-            position for position, device in enumerate(scheduled.stored[processor])
-            if torch.device(device).type == "mps"))
-        if lowering.missing:
-            missing[processor] = sorted(set(lowering.missing))
-        else:
-            functions[processor] = lowering.function()
-    if missing:
-        raise NotLowered("; ".join(f"{processor}: {', '.join(names)}" for processor, names in missing.items()),
-                         sorted(set().union(*missing.values())))
-    return functions
+# output_data/compiler-workgroup-20261113/frontends/litert/typed-target.inbox.md: compiler/mesh_compiler/native.py
+# Target, lower, the paired consumer of the constructed programs and the plan's effects
+def lower(module, *, target, kinds, sources, effects, start, extent, generator=None, advance=False, page=0,
+          machines=None):
+    from . import native
+    return native.lower(construct(module, target=target, kinds=kinds, sources=sources, effects=effects,
+                                  generator=generator, advance=advance, page=page, machines=machines),
+                        effects=effects, start=start, extent=extent)
