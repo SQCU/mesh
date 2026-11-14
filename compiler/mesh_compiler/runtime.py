@@ -1,78 +1,48 @@
-# design/data-flow.md
-from queue import SimpleQueue
-from threading import Thread
-
+# design/data-flow.md; design/compilation-composition-change-request.md item 7; schedule-emit/schedule_emit/runtime.py;
+# design/compiler-archive-assignment-2026-11-13.md: the selected group entry's completed Target, Scheduled.functions
 import torch
 from torch.export.graph_signature import OutputKind
 from torch.utils import _pytree as pytree
 
-from . import ir
+from . import bridge
 
 
-class Program:
-    def __init__(self, scheduled, functions=None):
-        self.exported, self.output_processor = scheduled.exported, scheduled.output_processor
-        self.functions = functions or scheduled.modules
-        self.devices = {processor: getattr(self.functions.get(processor), "device", device)
-                        for processor, device in scheduled.devices.items()}
-        self.feedforward, self.stored = set(scheduled.feedforward), scheduled.stored
-        self.channels, self.executions = [SimpleQueue() for _ in range(scheduled.channels)], []
-        machines = set(scheduled.machines.values())
-        if len(machines) > 1:
-            from . import bridge
-            machine, self.executions = bridge.channels(scheduled, self.channels)
-            machines = {machine}
-        self.storage = self.executions[0].address if self.executions else None
-        machine = machines.pop()
-        inputs = {processor: names for processor, names in scheduled.inputs.items()
-                  if scheduled.machines[processor] == machine}
-        self.caller, others, joined, _ = ir.call(scheduled, machine)
-        self.joined = bool(joined)
+# torch 2.15 torch/export/graph_signature.py InputKind; torch/utils/_pytree.py tree_flatten; Tensor.to
+class Arguments:
+    def __init__(self, scheduled, entry=None):
+        self.entry = scheduled.output_processor if entry is None else entry
+        self.exported, self.device = scheduled.exported, scheduled.devices[self.entry]
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
-        self.arguments = {
-            processor: [state[n].to(self.devices[processor] or self.stored[processor][k]) if n in state else None
-                        for k, n in enumerate(names)]
-            for processor, names in inputs.items()}
+        names = scheduled.inputs[self.entry]
+        self.arguments = [state[name].to(self.device) if name in state else None for name in names]
         self.positions = {}
-        for processor, names in inputs.items():
-            for position, name in enumerate(names):
-                self.positions.setdefault(name, []).append((processor, position))
+        for position, name in enumerate(names):
+            self.positions.setdefault(name, []).append(position)
         self.key_of = {key: name for name, (key, _) in self.exported.state.items()}
-        self.argument_queues = {processor: SimpleQueue() for processor in others}
-        self.finished = SimpleQueue()
-        for processor in self.argument_queues:
-            Thread(target=self.run, args=(processor,), daemon=True).start()
-
-    def run(self, processor):
-        ir.LOCAL.channels, ir.LOCAL.storage = self.channels, self.storage
-        while True:
-            self.functions[processor](*self.argument_queues[processor].get())
-            if self.joined:
-                self.finished.put(processor)
 
     def bind(self, name, value):
-        for processor, position in self.positions.get(name, ()):
-            self.arguments[processor][position] = value.to(self.devices[processor]) if self.devices[processor] else value
+        for position in self.positions.get(name, ()):
+            self.arguments[position] = value.to(self.device)
 
-    def __call__(self, *args, **kwargs):
+    def prepare(self, args, kwargs):
         flat, _ = pytree.tree_flatten((args, kwargs))
         for name, value in zip(self.exported.user_inputs, flat, strict=True):
             self.bind(name, value)
-        for published in self.executions:
-            published.start()
-        for processor, argument_queue in self.argument_queues.items():
-            arguments = self.arguments[processor]
-            argument_queue.put(list(arguments) if processor in self.feedforward else arguments)
-        if self.caller is not None:
-            ir.LOCAL.channels, ir.LOCAL.storage = self.channels, self.storage
-            results = self.functions[self.caller](*self.arguments[self.caller])
-        if self.joined:
-            for _ in self.argument_queues:
-                self.finished.get()
-        for published in self.executions:
-            published.end()
-        if self.caller != self.output_processor:
+        return self.arguments
+
+
+# torch 2.15 torch/export/graph_signature.py OutputKind USER_OUTPUT, BUFFER_MUTATION; torch/utils/_pytree.py
+# tree_unflatten; compiler/mesh_compiler/bridge.py prepare
+class Program(Arguments):
+    def __init__(self, scheduled, entry=None):
+        entry, self.function = bridge.prepare(scheduled, entry)
+        super().__init__(scheduled, entry)
+        self.output_processor = scheduled.output_processor
+
+    def __call__(self, *args, **kwargs):
+        results = self.function(*self.prepare(args, kwargs))
+        if self.entry != self.output_processor:
             return None
         user = []
         for (kind, key), value in zip(self.exported.outputs, results):

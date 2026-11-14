@@ -6,7 +6,6 @@ import os
 import pathlib
 import re
 import sys
-import threading
 import time
 
 import torch
@@ -15,10 +14,10 @@ import torch.nn.functional as F
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
 import mesh_graph
-from mesh_compiler import lower_coreml, lower_metal, shares
+from mesh_compiler import shares
 from mesh_compiler.driver import compile_module, compiled
 from mesh_compiler.placement import counts
-from mesh_compiler.runtime import Program
+from mesh_compiler.runtime import Arguments, Program
 
 
 DIM, HEADS, FFN, LAYERS, BATCH, SEQ = (int(os.environ.get(k, v)) for k, v in
@@ -112,24 +111,19 @@ class Timed(torch.fx.Interpreter):
         if self.device.type == 'mps':
             torch.mps.synchronize()
         if node.op == 'call_function':
-            self.times.setdefault(shares.kind(node), {})[shares.units(node)[0]] = time.perf_counter() - started
+            self.times[node.meta['processor']].setdefault(shares.kind(node), {})[shares.units(node)[0]] = (
+                time.perf_counter() - started)
         return result
 
 
-# design/unequal-shards-change-request.md item 7
+# design/unequal-shards-change-request.md item 7; compiler/mesh_compiler/schedule.py assemble, members;
+# compiler/mesh_compiler/runtime.py Arguments
 def taken(fixed, inputs):
-    times = {p: {} for p in fixed.modules}
-    done = {p: threading.Event() for p in fixed.modules}
-
-    def timed(p):
-        interpreter = Timed(fixed.modules[p], fixed.devices[p], times[p])
-        return lambda *arguments: (interpreter.run(*arguments), done[p].set())[0]
-
-    program = Program(fixed, {p: timed(p) for p in fixed.modules})
-    program(*inputs)
-    for p in program.arguments:
-        done[p].wait()
-    return {p: times[p] for p in program.arguments}
+    prepared = Arguments(fixed)
+    module = fixed.modules[prepared.entry]
+    times = {p: {} for p in module.meta['members']}
+    Timed(module, prepared.device, times).run(*prepared.prepare(inputs, {}))
+    return times
 
 
 # design/unequal-shards-change-request.md items 6, 7 and 14; metal-microbench/output_data/window-20260928/bandwidth.json
@@ -196,9 +190,8 @@ class Eager(torch.nn.Module):
 def execute(model, inputs, placement, args, loss=None, **told):
     processors = stated(args)
     options = {} if loss is None else {'loss': loss}
-    scheduled = compiled(compile_module(model, inputs, processors, placement(tuple(processors)), **options),
-                         (lower_metal.lower, lower_coreml.lower))
-    result = Program(scheduled, scheduled.functions)(*inputs)
+    scheduled = compiled(compile_module(model, inputs, processors, placement(tuple(processors)), **options))
+    result = Program(scheduled)(*inputs)
     report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried),
               'signature': bytes(mesh_graph.from_record(scheduled.signature).digest).hex(), **told}
     if result is not None:

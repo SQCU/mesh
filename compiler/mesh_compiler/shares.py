@@ -9,9 +9,10 @@ sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
 
 
-# S. Zhang et al., HAP, EuroSys 2024, sections 3.2 and 5.2
+# S. Zhang et al., HAP, EuroSys 2024, sections 3.2 and 5.2; compiler/mesh_compiler/schedule.py assemble, source
+# node.meta["processor"] retained through grouping
 def stages(scheduled, segment):
-    nodes = {n: processor for processor, module in scheduled.modules.items() for n in module.graph.nodes
+    nodes = {n: n.meta["processor"] for module in scheduled.modules.values() for n in module.graph.nodes
              if n.op == "call_function"}
     sender = {channel_of(n): n for n in nodes if n.target is SEND}
     group = {n: n.meta.get("of", n) for n in nodes}
