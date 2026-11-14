@@ -519,36 +519,38 @@ def signature_span(made, executions):
 
 # design/compilation-composition-change-request.md item 6.2; mesh-graph.h mesh_graph_contract, mesh_graph_quotient
 LIB.mesh_graph_contract.restype = LIB.mesh_graph_quotient.restype = C.c_int
-LIB.mesh_graph_contract.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_ubyte), C.c_size_t,
-                                    C.POINTER(Dependence), C.POINTER(C.c_size_t)]
+LIB.mesh_graph_contract.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_ubyte),
+                                    C.POINTER(C.POINTER(Dependence)), C.POINTER(C.c_size_t)]
 LIB.mesh_graph_quotient.argtypes = [C.c_uint32, C.POINTER(C.c_uint32), C.c_size_t, C.POINTER(C.c_uint32),
-                                    C.POINTER(C.c_uint32), C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_size_t)]
+                                    C.POINTER(C.c_uint32), C.POINTER(C.POINTER(Dependence)), C.POINTER(C.c_size_t)]
+# ISO/IEC 9899:2018 7.22.3.3: the release of a relation the library allocated
+LIB.free.restype = None
+LIB.free.argtypes = [C.c_void_p]
 
 
 def _relation(call):
-    count = C.c_size_t()
-    status = call(0, None, C.byref(count))
-    if status != errno.ERANGE:
-        _check(status)
-    made = (Dependence * max(count.value, 1))()
-    _check(call(count.value, made, C.byref(count)))
-    return [(e.source, e.sink) for e in made[:count.value]]
+    made, count = C.POINTER(Dependence)(), C.c_size_t()
+    _check(call(C.byref(made), C.byref(count)))
+    try:
+        return [(e.source, e.sink) for e in made[:count.value]]
+    finally:
+        LIB.free(made)
 
 
 def contract(kept, edges):
     edge, count = _array(Dependence, [Dependence(a, b, 0) for a, b in edges])
     marks = (C.c_ubyte * max(len(kept), 1))(*kept)
-    return _relation(lambda room, made, size: LIB.mesh_graph_contract(len(kept), count, edge, marks, room, made, size))
+    return _relation(lambda made, size: LIB.mesh_graph_contract(len(kept), count, edge, marks, made, size))
 
 
 def quotient(class_of, edges):
     tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
     classes = (C.c_uint32 * max(len(class_of), 1))(*class_of)
-    return _relation(lambda room, made, size: LIB.mesh_graph_quotient(len(class_of), classes, tails[1], tails[0],
-                                                                      heads[0], room, made, size))
+    return _relation(lambda made, size: LIB.mesh_graph_quotient(len(class_of), classes, tails[1], tails[0], heads[0],
+                                                                made, size))
 
 
-# mesh-graph.h struct mesh_graph_view (its struct mesh_strided in place) and struct mesh_graph_cause,
+# mesh-graph.h struct mesh_graph_view (its struct mesh_strided in place) and struct mesh_graph_conflict,
 # mesh_graph_dependences_views and mesh_graph_synchronization; design/compilation-composition-change-request.md
 # item 6 and "Compact effects"
 class Viewed(C.Structure):
@@ -556,16 +558,16 @@ class Viewed(C.Structure):
                 ('padding', C.c_uint32), ('pairs', C.POINTER(C.c_uint64)), ('vertex', C.c_uint32), ('write', C.c_uint32)]
 
 
-class Cause(C.Structure):
-    _fields_ = [('key', C.c_uint64), ('kind', C.c_uint32), ('given', C.c_uint32), ('from_view', C.c_size_t),
-                ('to_view', C.c_size_t)]
+class Conflict(C.Structure):
+    _fields_ = [('source', C.c_uint32), ('sink', C.c_uint32), ('kind', C.c_uint32), ('given', C.c_uint32),
+                ('key', C.c_uint64), ('from_view', C.c_size_t), ('to_view', C.c_size_t)]
 
 
 HAZARDS = ('read after write', 'write after read', 'write after write', 'given')
 LIB.mesh_graph_dependences_views.restype = LIB.mesh_graph_synchronization.restype = C.c_int
 LIB.mesh_graph_dependences_views.argtypes = [
-    C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.c_size_t,
-    C.POINTER(C.c_uint32), C.POINTER(C.c_uint32), C.POINTER(Cause), C.POINTER(C.c_size_t)]
+    C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
+    C.POINTER(C.POINTER(Conflict)), C.POINTER(C.c_size_t)]
 LIB.mesh_graph_synchronization.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
                                            C.POINTER(C.c_ubyte), C.POINTER(C.c_size_t)]
 
@@ -605,18 +607,15 @@ def dependences_supplied(vertices, views, supplied):
         made.key, made.offset, made.element, made.dims, made.pairs = key, offset, element, len(pairs), held[-1]
         made.vertex, made.write = vertex, write
     given = [_array(C.c_uint32, [edge[end] for edge in supplied])[0] for end in range(2)]
-    count = C.c_size_t()
-    status = LIB.mesh_graph_dependences_views(len(views), viewed, len(supplied), *given, 0, None, None, None,
-                                              C.byref(count))
-    if status != errno.ERANGE:
-        _check(status)
-    room = max(count.value, 1)
-    tails, heads, causes = (C.c_uint32 * room)(), (C.c_uint32 * room)(), (Cause * room)()
-    _check(LIB.mesh_graph_dependences_views(len(views), viewed, len(supplied), *given, count.value, tails, heads,
-                                            causes, C.byref(count)))
-    found = {}
-    for tail, head, cause in zip(tails[:count.value], heads[:count.value], causes[:count.value]):
-        found.setdefault((tail, head), {})[cause.kind, cause.key, cause.given] = (HAZARDS[cause.kind], cause.key)
+    conflict, count, found = C.POINTER(Conflict)(), C.c_size_t(), {}
+    _check(LIB.mesh_graph_dependences_views(len(views), viewed, len(supplied), *given, C.byref(conflict),
+                                            C.byref(count)))
+    try:
+        for cause in conflict[:count.value]:
+            found.setdefault((cause.source, cause.sink), {})[cause.kind, cause.key, cause.given] = (
+                HAZARDS[cause.kind], cause.key)
+    finally:
+        LIB.free(conflict)
     found = {edge: list(held.values()) for edge, held in found.items()}
     edges, room = list(found), max(len(found), 1)
     redundant, kept = (C.c_ubyte * room)(), C.c_size_t()
@@ -647,14 +646,14 @@ def orderings(edges, commit):
 # M. Lam, PLDI 1988, section 2.3; mesh-graph.h mesh_graph_contract_unrolled
 LIB.mesh_graph_contract_unrolled.restype = C.c_int
 LIB.mesh_graph_contract_unrolled.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_ubyte),
-                                             C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_size_t)]
+                                             C.c_uint32, C.POINTER(C.POINTER(Dependence)), C.POINTER(C.c_size_t)]
 
 
 def unrolled(vertices, edges, copies):
     edge, count = _array(Dependence, [Dependence(a, b, delay) for a, b, delay in edges])
     kept = (C.c_ubyte * max(vertices, 1))(*[1] * vertices)
-    return _relation(lambda room, made, size: LIB.mesh_graph_contract_unrolled(vertices, count, edge, kept, copies,
-                                                                               room, made, size))
+    return _relation(lambda made, size: LIB.mesh_graph_contract_unrolled(vertices, count, edge, kept, copies, made,
+                                                                         size))
 
 
 # design/torch-source-lowering-change-request.md item 3

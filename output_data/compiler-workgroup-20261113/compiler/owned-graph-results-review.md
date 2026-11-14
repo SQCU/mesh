@@ -1,0 +1,9 @@
+# Owned graph results across producer and consumers
+
+The native exact-conflict, contraction, unrolled contraction and quotient entries now return one owned complete vector. Their underlying ISL, shortest-path and projection algorithms are unchanged. The Python wrappers consume the returned vector and release it in finally; public tuple results remain unchanged. The unused interval-only dependence entry and its helpers are deleted. Signature serialization length queries retain the solved object and do not run these algorithms; they remain.
+
+Codex reviewed the producer allocation/adoption/error paths, witness/delay correspondence, Python argument lifetime and allrepo callsites. Executor owns the matching Metal Conflict, recorder relation consumers and owned Actors result through its callers. The new relation output is16bytes versus prior8byte scratch, so supervisor review required checked result-allocation size at the actual new allocation sites.
+
+Claude Opus5.5 session64ddaf6e-3a70-4b6a-9d0b-50691a84c6cd resume9 PID14193 implemented; resume10 PID32589 applied the allocation-size/citation correction. Actual init model verified. Private C objects/header/Python syntax pass. Private old/new-library diagnostic /tmp/owned-graph/equal checked12 finite cases field-for-field: exact strided conflicts and witnesses/GIVEN causes, delayed contraction/unroll, quotient, empty and error cases. Python wrapper results matched native old results; no general equivalence proof is claimed. No bridge or numerical execution was exercised by this graph diagnostic.
+
+This is a source checkpoint. Same-symbol C argument ABI and Python bindings changed together; installed binaries require the coordinated libmesh and Metal rebuild before fresh imports. The paired native extent-result unit also changes Planned and is being completed before that build. Do not interpret mixed-ABI failures as semantic evidence.

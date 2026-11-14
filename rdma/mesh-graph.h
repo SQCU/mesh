@@ -149,13 +149,6 @@ struct mesh_graph_term { uint32_t dim, padding; int64_t coefficient; uint64_t di
 struct mesh_graph_footprint { uint32_t dispatch, binding, exact, first, terms, padding; int64_t start; uint64_t extent; };
 _Static_assert(sizeof(struct mesh_graph_term) == 32 && sizeof(struct mesh_graph_footprint) == 40,
                "metal_ir.h metal_ir_term, metal_ir_footprint");
-/* design/compilation-composition-change-request.md item 6.2: the relation is the supplied edges (supplied_from[e] ->
-   supplied_to[e]) united with the accesses' conflicts (lower vertex first), each pair once, sorted by (from, to); every
-   edge runs forward in the caller's issue numbering (EINVAL for a supplied edge with from >= to: it would wait on work
-   issued after it); ERANGE with *edges the count where it exceeds room. `access` is sorted in place */
-int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, size_t supplied,
-                           const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
-                           uint32_t *to, size_t *edges);
 /* design/plan-to-bridge-change-request.md R1; torch 2.14.0 c10/core/TensorImpl.h, storage_offset_ and
    sizes_and_strides_; MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY: the bytes [offset + sum_d i_d stride_d, + element) for
    every index i_d < size_d, `pairs` {size, stride} a dimension in bytes, outermost first */
@@ -174,32 +167,34 @@ _Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,d
    to_view, `from` < `to`; a conflict's cause its key and hazard (the `from` access before the `to` access:
    READ_AFTER_WRITE, WRITE_AFTER_READ, WRITE_AFTER_WRITE), its witness the two meeting views, from_view `from`'s and
    to_view `to`'s, indices into `view` as given; supplied edge g's (supplied_from[g] < supplied_to[g], EINVAL
-   otherwise) GIVEN with `given` g and both witnesses SIZE_MAX; ERANGE with *edges the count past `room`. A pair of
-   views of one vertex (mesh_graph_conflicts_views) is one record per hazard, READ_AFTER_WRITE's from_view the
-   written view and WRITE_AFTER_READ's the read one. The pure relation is its distinct (from, to) */
+   otherwise) GIVEN with `given` g and both witnesses SIZE_MAX. *conflict holds *count records, the caller's, released
+   with free (NULL and 0 on failure). A pair of views of one vertex (mesh_graph_conflicts_views) is one record per
+   hazard, READ_AFTER_WRITE's from_view the written view and WRITE_AFTER_READ's the read one. The pure relation is its
+   distinct (from, to) */
 struct mesh_graph_view { uint64_t key; struct mesh_strided view; uint32_t vertex, write; };
 _Static_assert(sizeof(struct mesh_graph_view) == 48, "mesh_graph_view");
 enum { MESH_GRAPH_READ_AFTER_WRITE, MESH_GRAPH_WRITE_AFTER_READ, MESH_GRAPH_WRITE_AFTER_WRITE, MESH_GRAPH_GIVEN };
 struct mesh_graph_cause { uint64_t key; uint32_t kind, given; size_t from_view, to_view; };
 _Static_assert(sizeof(struct mesh_graph_cause) == 32 && offsetof(struct mesh_graph_cause, from_view) == 16 &&
-               offsetof(struct mesh_graph_cause, to_view) == 24, "mesh_graph_cause: rdma/mesh_graph.py Cause");
+               offsetof(struct mesh_graph_cause, to_view) == 24, "mesh_graph_cause: metal_ir.h metal_ir_dependences");
 struct mesh_graph_conflict { uint32_t from, to, kind, given; uint64_t key; size_t from_view, to_view; };
 _Static_assert(sizeof(struct mesh_graph_conflict) == 40 && offsetof(struct mesh_graph_conflict, from_view) == 24 &&
-               offsetof(struct mesh_graph_conflict, to_view) == 32, "mesh_graph_conflict");
+               offsetof(struct mesh_graph_conflict, to_view) == 32, "mesh_graph_conflict: rdma/mesh_graph.py Conflict");
 /* design/compilation-composition-change-request.md: retained exact intersections, including self conflicts;
    caller owns *conflict and releases it with free. */
 int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
                                const uint32_t *supplied_from, const uint32_t *supplied_to,
                                struct mesh_graph_conflict **conflict, size_t *count);
 int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
-                                 const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
-                                 uint32_t *to, struct mesh_graph_cause *cause, size_t *edges);
+                                 const uint32_t *supplied_from, const uint32_t *supplied_to,
+                                 struct mesh_graph_conflict **conflict, size_t *count);
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §7, Fig. 4 */
 int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
                          const unsigned char *synchronization, unsigned char *redundant);
 /* design/torch-source-lowering-change-request.md item 3; design/compilation-composition-change-request.md item 6.1:
-   the dependence relation (from, to) is mesh_graph_dependences' result, edge e its identity. redundant[e] marks an
-   edge another path covers (mesh_graph_redundant at zero delays, every edge a candidate); kept counts the others */
+   the dependence relation (from, to) is mesh_graph_dependences_views' distinct (from, to), edge e its identity.
+   redundant[e] marks an edge another path covers (mesh_graph_redundant at zero delays, every edge a candidate); kept
+   counts the others */
 int mesh_graph_synchronization(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
                                unsigned char *redundant, size_t *kept);
 /* design/torch-source-lowering-change-request.md item 3; design/compilation-composition-change-request.md item 6.3:
@@ -237,17 +232,19 @@ _Static_assert(sizeof(struct mesh_graph_processor) == 8 && sizeof(struct mesh_gr
                sizeof(struct mesh_graph_dependence) == 16 && sizeof(struct mesh_graph_operation) == 32 &&
                sizeof(struct mesh_graph_synchronized) == 32, "rdma/mesh_graph.py");
 /* design/algorithm-sources.md#relations-over-copies-and-classes; design/compilation-composition-change-request.md item 6.2;
-   E. W. Dijkstra, Numerische Mathematik 1, 1959 */
+   E. W. Dijkstra, Numerische Mathematik 1, 1959. mesh_graph_contract, mesh_graph_contract_unrolled and
+   mesh_graph_quotient return their relation once: *made (*contracted) holds *count (*made) records, the caller's,
+   released with free (NULL and 0 on failure) */
 int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
-                        const unsigned char *kept, size_t room, struct mesh_graph_dependence *contracted, size_t *made);
+                        const unsigned char *kept, struct mesh_graph_dependence **contracted, size_t *made);
 /* design/algorithm-sources.md#relations-over-copies-and-classes; M. Lam, PLDI 1988, §2.3 */
 int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
-                                 const unsigned char *kept, uint32_t copies, size_t room,
-                                 struct mesh_graph_dependence *contracted, size_t *made);
+                                 const unsigned char *kept, uint32_t copies, struct mesh_graph_dependence **contracted,
+                                 size_t *made);
 /* design/algorithm-sources.md#relations-over-copies-and-classes;
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1 */
 int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edges, const uint32_t *from, const uint32_t *to,
-                        size_t room, struct mesh_graph_dependence *made, size_t *count);
+                        struct mesh_graph_dependence **made, size_t *count);
 enum { MESH_GRAPH_COMPLETION_EVENT = 1 };
 struct mesh_graph_event { uint32_t object, role, argument, padding; uint64_t lookback; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };

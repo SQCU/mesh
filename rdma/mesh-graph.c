@@ -706,7 +706,8 @@ static uint64_t contract_lag(const void *context, size_t k) {
   return g->edge[g->order[k]].delay;
 }
 int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
-                        const unsigned char *kept, size_t room, struct mesh_graph_dependence *contracted, size_t *made) {
+                        const unsigned char *kept, struct mesh_graph_dependence **contracted, size_t *made) {
+  *contracted = NULL; *made = 0;
   for (size_t e = 0; e < edges; e++) if (edge[e].from >= vertices || edge[e].to >= vertices) return EINVAL;
   if (vertices >= UINT32_MAX / 2 || edges >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
   uint32_t keeps = 0;
@@ -723,20 +724,22 @@ int mesh_graph_contract(uint32_t vertices, size_t edges, const struct mesh_graph
     mesh_graph_rows(2 * vertices, edges, contract_tail, edge, first, order);
     if (keeps) result = mesh_graph_lags(2 * vertices, first, contract_head, contract_lag, &g, keeps, source, keeps, target, lags);
   }
-  size_t count = 0;
-  for (size_t p = 0; !result && p < (size_t)keeps * keeps; p++) {
-    if (lags[p] == UINT64_MAX) continue;
-    if (count < room) contracted[count] = (struct mesh_graph_dependence){source[p / keeps], source[p % keeps], lags[p]};
-    count++;
-  }
-  if (!result) { *made = count; if (count > room) result = ERANGE; }
-  free(first); free(order); free(source); free(target); free(lags);
+  size_t count = 0, at = 0;
+  for (size_t p = 0; !result && p < (size_t)keeps * keeps; p++) count += lags[p] != UINT64_MAX;
+  if (!result && count >= SIZE_MAX / sizeof(struct mesh_graph_dependence)) result = ENOMEM;
+  struct mesh_graph_dependence *relation = result ? NULL : malloc((count + 1) * sizeof *relation);
+  if (!result && !relation) result = ENOMEM;
+  for (size_t p = 0; !result && p < (size_t)keeps * keeps; p++)
+    if (lags[p] != UINT64_MAX) relation[at++] = (struct mesh_graph_dependence){source[p / keeps], source[p % keeps], lags[p]};
+  if (!result) { *contracted = relation; *made = count; relation = NULL; }
+  free(relation); free(first); free(order); free(source); free(target); free(lags);
   return result;
 }
 /* design/algorithm-sources.md#relations-over-copies-and-classes; M. Lam, PLDI 1988, §2.3 */
 int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct mesh_graph_dependence *edge,
-                                 const unsigned char *kept, uint32_t copies, size_t room,
-                                 struct mesh_graph_dependence *contracted, size_t *made) {
+                                 const unsigned char *kept, uint32_t copies, struct mesh_graph_dependence **contracted,
+                                 size_t *made) {
+  *contracted = NULL; *made = 0;
   for (size_t e = 0; e < edges; e++) if (edge[e].from >= vertices || edge[e].to >= vertices) return EINVAL;
   if ((uint64_t)vertices * copies >= UINT32_MAX / 2 || (copies && edges >= SIZE_MAX / sizeof *edge / copies)) return ENOMEM;
   size_t count = 0, at = 0;
@@ -749,7 +752,7 @@ int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct m
       unrolled[at++] = (struct mesh_graph_dependence){(uint32_t)(c - edge[e].delay) * vertices + edge[e].from,
                                                       (uint32_t)c * vertices + edge[e].to, 0};
   for (uint32_t c = 0; !result && c < copies; c++) memcpy(keep + (size_t)c * vertices, kept, vertices);
-  if (!result) result = mesh_graph_contract(vertices * copies, count, unrolled, keep, room, contracted, made);
+  if (!result) result = mesh_graph_contract(vertices * copies, count, unrolled, keep, contracted, made);
   free(unrolled); free(keep);
   return result;
 }
@@ -760,7 +763,8 @@ static int quotient_before(const void *a, const void *b) {
   return (x > y) - (x < y);
 }
 int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edges, const uint32_t *from, const uint32_t *to,
-                        size_t room, struct mesh_graph_dependence *made, size_t *count) {
+                        struct mesh_graph_dependence **made, size_t *count) {
+  *made = NULL; *count = 0;
   for (size_t e = 0; e < edges; e++) if (from[e] >= vertices || to[e] >= vertices) return EINVAL;
   if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
   uint64_t *pair = malloc((edges + 1) * sizeof *pair);
@@ -769,14 +773,15 @@ int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edge
   for (size_t e = 0; e < edges; e++)
     if (class_of[from[e]] != class_of[to[e]]) pair[pairs++] = (uint64_t)class_of[from[e]] << 32 | class_of[to[e]];
   if (pairs) qsort(pair, pairs, sizeof *pair, quotient_before);
-  for (size_t k = 0; k < pairs; k++) {
-    if (k && pair[k] == pair[k - 1]) continue;
-    if (kept < room) made[kept] = (struct mesh_graph_dependence){(uint32_t)(pair[k] >> 32), (uint32_t)pair[k], 0};
-    kept++;
-  }
+  for (size_t k = 0; k < pairs; k++)
+    if (!kept || pair[k] != pair[kept - 1]) pair[kept++] = pair[k];
+  struct mesh_graph_dependence *relation =
+      kept < SIZE_MAX / sizeof(struct mesh_graph_dependence) ? malloc((kept + 1) * sizeof *relation) : NULL;
+  if (!relation) { free(pair); return ENOMEM; }
+  for (size_t k = 0; k < kept; k++) relation[k] = (struct mesh_graph_dependence){(uint32_t)(pair[k] >> 32), (uint32_t)pair[k], 0};
   free(pair);
-  *count = kept;
-  return kept > room ? ERANGE : 0;
+  *made = relation; *count = kept;
+  return 0;
 }
 
 /* design/plan-to-bridge-change-request.md R2; design/disjoint-pages-change-request.md, A3 and C3.3 */
@@ -1673,50 +1678,6 @@ int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t ed
   return result;
 }
 
-/* design/torch-source-lowering-change-request.md item 3 */
-static int access_conflict(const struct mesh_graph_access *a, const struct mesh_graph_access *b) {
-  return (a->write || b->write) && !(a->write == 2 && b->write == 2);
-}
-static int access_before(const void *a, const void *b) {
-  const struct mesh_graph_access *x = a, *y = b;
-  if (x->key != y->key) return x->key < y->key ? -1 : 1;
-  if (x->start != y->start) return x->start < y->start ? -1 : 1;
-  return (x->vertex > y->vertex) - (x->vertex < y->vertex);
-}
-int mesh_graph_dependences(size_t accesses, struct mesh_graph_access *access, size_t supplied,
-                           const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
-                           uint32_t *to, size_t *edges) {
-  for (size_t e = 0; e < supplied; e++) if (supplied_from[e] >= supplied_to[e]) return EINVAL;
-  if (supplied >= SIZE_MAX / sizeof(uint64_t) - 64) return ENOMEM;
-  if (accesses) qsort(access, accesses, sizeof *access, access_before);
-  size_t made = 0, held = supplied + 64, count = 0;
-  uint64_t *pair = malloc(held * sizeof *pair);
-  int result = pair ? 0 : ENOMEM;
-  for (size_t e = 0; !result && e < supplied; e++) pair[made++] = (uint64_t)supplied_from[e] << 32 | supplied_to[e];
-  for (size_t i = 0; !result && i < accesses; i++)
-    for (size_t j = i + 1; j < accesses && access[j].key == access[i].key && access[j].start < access[i].end; j++) {
-      if (access[j].vertex == access[i].vertex || !access_conflict(access + i, access + j) || access[j].end <= access[j].start)
-        continue;
-      if (made == held) {
-        const size_t grown = held ? 2 * held : 64;
-        uint64_t *more = grown < SIZE_MAX / sizeof *more ? realloc(pair, grown * sizeof *more) : NULL;
-        if (!more) { result = ENOMEM; break; }
-        pair = more; held = grown;
-      }
-      const uint32_t a = access[i].vertex, b = access[j].vertex;
-      pair[made++] = a < b ? (uint64_t)a << 32 | b : (uint64_t)b << 32 | a;
-    }
-  if (!result && made) qsort(pair, made, sizeof *pair, completion_edge_before);
-  for (size_t k = 0; !result && k < made; k++) {
-    if (k && pair[k] == pair[k - 1]) continue;
-    if (count < room) { from[count] = (uint32_t)(pair[k] >> 32); to[count] = (uint32_t)pair[k]; }
-    count++;
-  }
-  if (!result) { *edges = count; if (count > room) result = ERANGE; }
-  free(pair);
-  return result;
-}
-
 /* S. Verdoolaege, isl: An Integer Set Library for the Polyhedral Model, ICMS 2010, LNCS 6327 (isl 0.27, its exact
    integer arithmetic imath): a view's dimensions [0, dims) at `offset` */
 struct view_part { uint64_t offset, element; const uint64_t *pairs; uint32_t dims; };
@@ -1856,18 +1817,9 @@ int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view,
 }
 
 int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
-                                 const uint32_t *supplied_from, const uint32_t *supplied_to, size_t room, uint32_t *from,
-                                 uint32_t *to, struct mesh_graph_cause *cause, size_t *edges) {
-  struct mesh_graph_conflict *conflict = NULL;
-  int result = view_conflicts(views, view, supplied, supplied_from, supplied_to, 0, &conflict, edges);
-  for (size_t e = 0; !result && e < *edges && e < room; e++) {
-    from[e] = conflict[e].from; to[e] = conflict[e].to;
-    cause[e] = (struct mesh_graph_cause){conflict[e].key, conflict[e].kind, conflict[e].given, conflict[e].from_view,
-                                         conflict[e].to_view};
-  }
-  if (!result && *edges > room) result = ERANGE;
-  free(conflict);
-  return result;
+                                 const uint32_t *supplied_from, const uint32_t *supplied_to,
+                                 struct mesh_graph_conflict **conflict, size_t *count) {
+  return view_conflicts(views, view, supplied, supplied_from, supplied_to, 0, conflict, count);
 }
 
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §5.2, Definition 3, §7,
