@@ -1,0 +1,12 @@
+{
+  "metal_commit": "9fa86439",
+  "strict_exit": 0,
+  "shared_build": false,
+  "target_run": false,
+  "source_hold": true,
+  "sha256": {
+    "/Users/mdot/metal-microbench/metal_ir.mm": "e9e5bae211b0c0d3894392001645dc3dd4707cb6a47c1704f7fd3e6c5636a4c5",
+    "output_data/compiler-workgroup-20261114/executor/native.resume79.jsonl": "ab6ef0ba9542309c7a2f0299bc28da86863c6df3c3007f7a5f380c58707b7ea2",
+    "output_data/compiler-workgroup-20261114/executor/ane-sort-bound79-syntax.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
