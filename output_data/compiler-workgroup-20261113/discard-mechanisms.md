@@ -132,3 +132,41 @@ geometry results; function-graph results must survive related queries; native
 relation archive load must relocate the retained projection instead of rebuilding
 it. These are active paired consumer assignments. Build success does not close
 them or establish runtime/performance equivalence.
+
+## Caller review checkpoint, 14 November UTC
+
+The operator's immediate instruction is: "\"Those callers are centralized only
+partway.\" then this must happen immediately". This checkpoint records evidence
+and unfinished handoffs; it adds no requirements.
+
+- Mesh `9388eb3e` and `355c8399` connect the original query, retained closure order
+  and full graph archive. Subsequent origin/map additions remain active and need
+  a matching rebuild; these commits do not validate that later ABI.
+- Mesh `071378b5` connects source relation and operation/value correspondence to
+  the native constructor, retains source producer and random-site annotations,
+  and removes the unreachable old emitter. Native source now imports exact
+  source witnesses. Pairwise alias correspondence and immutable shared maps are
+  under review. Numerical source-cause discharge remains unfinished: grouping
+  all operations of one source vertex, or inventing root-wide pair obligations,
+  was rejected. Actual operation dependencies must feed the actual fusion caller.
+- Metal `2b507039` and mesh `0574f658` retain recorder and actor result owners
+  through their immediate consumers. Generic archive origin/map persistence and
+  the legacy network actor archive are still being connected.
+- Mesh `d0336fc0` moves event redundancy and class-local source/sink calculation
+  into the shared graph implementation and connects scheduling to those results.
+  Review is following the event result into the actual function/planning consumer;
+  the local graph's existence alone does not close this handoff.
+- Metal `945f0661` and mesh `fc55e40b` replace Target's buffer-copy-count/LCM
+  reconstruction with a direct read of the prepared program's existing warm and
+  period fields. Mesh `04511507` removes unused AOTI wrappers and their explicit
+  build rule after checking their callers; no replacement execution mode was added.
+- The existing CPU FFN client completed with error 0.0 after `448d47c7` corrected
+  a read that accidentally created a STEP value. Its native artifact was reloaded
+  by Target.prepare. This is neither an outer archive.save/load measurement nor
+  evidence for GPU, transport or comparative performance. The next matched build
+  and those specific caller measurements remain assigned to their existing owners.
+
+Corrections are being made in the same Opus 5.5 sessions, with Codex reviewing
+the producer, retained result and consuming call together. Moving an algorithm
+body, retaining an unused field, or passing a build does not by itself establish
+that a caller stopped discarding and reconstructing the result.
