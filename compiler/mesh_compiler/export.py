@@ -24,6 +24,8 @@ from torch.utils import _pytree as pytree
 from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, written
 
 COPY = torch.ops.aten.copy.default
+# torchgen/gen_functionalization_type.py gen_composite_view_copy_kernel: a view_copy operator's registered kernel key
+VIEW_COPY = torch._C.DispatchKey.CompositeExplicitAutogradNonFunctional
 # pub13 section 5.1 case (i): an eigh outlined on a non-CPU engine (compiler/mesh_compiler/decompose.py outline) draws
 # its Haar restarts at its own source site, carried to its QDWH steps as data (operations.QDWH_EIGH_STEP `site`); a
 # pinv, svd or lstsq (each overload) is a draw source too, its expanded svd and eigh keeping its declared site
@@ -96,9 +98,12 @@ def lifted(program, module):
 
 # design/unequal-shards-change-request.md item 8; design/torch-source-lowering-change-request.md item 2; torch 2.14.0
 # torch/export/experimental/__init__.py _export_forward_backward and torch/export/exported_program.py
-# run_decompositions: the program's one normalization, before it is read: each fixed map or scan call expanded
-# (`expand`, each call once, a call the expansion exposes after it), its exposed tensor attributes lifted, then its
-# forward and backward (a loss) and run_decompositions once, and any tensor attribute left lifted
+# run_decompositions and default_decompositions; torch/_ops.py OpOverload has_kernel_for_dispatch_key and _op_dk;
+# torchgen/gen_functionalization_type.py gen_composite_view_copy_kernel: the program's one normalization, before it is
+# read: each fixed map or scan call expanded (`expand`, each call once, a call the expansion exposes after it), its
+# exposed tensor attributes lifted, then its forward and backward (a loss) and run_decompositions once over the default
+# table with each captured view_copy operator (torch.Tag.view_copy) that has a CompositeExplicitAutogradNonFunctional
+# kernel decomposed by that registered kernel (its view, then a clone), and any tensor attribute left lifted
 def export(module, args, loss=None, **export_options):
     program = torch.export.export(module, args, **export_options)
     graph_module = program.graph_module
@@ -109,7 +114,12 @@ def export(module, args, loss=None, **export_options):
     if loss is not None:
         with sdpa_kernel(SDPBackend.MATH):
             program = _export_forward_backward(program, joint_loss_index=loss)
-    return read(lifted(program.run_decompositions(), module))
+    table = torch.export.default_decompositions()
+    for node in program.graph_module.graph.nodes:
+        if (node.op == "call_function" and isinstance(node.target, torch._ops.OpOverload)
+                and torch.Tag.view_copy in node.target.tags and node.target.has_kernel_for_dispatch_key(VIEW_COPY)):
+            table[node.target] = functools.partial(node.target._op_dk, VIEW_COPY)
+    return read(lifted(program.run_decompositions(table), module))
 
 
 def read(program):
