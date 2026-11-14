@@ -136,7 +136,7 @@ def placeholders(nodes, kinds, sources):
 # SEND/RECV an ordinary value, `copied`) its value's (root, view), None where this machine holds none
 def construct(module, *, targets, kinds, sources, wires, output_roles, generator=None, page=0, machines=None):
     compiler = _compiler()
-    builder = _Builder(compiler, {}, None, 0, 0)
+    builder = _Builder(compiler, 0)
     try:
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[0]), C.byref(machines[1]))

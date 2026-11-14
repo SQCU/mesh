@@ -557,11 +557,11 @@ def _execution_error(replay, status, message):
 # `program` an existing program to encode into (metal_ir_append's destination), else a new one; `emitted` each leaf
 # record's actual emission (Emitted) and `repeated` each registered repetition (Repeated), in emission order
 class _Builder:
-    def __init__(self, lib, owners, role, row, identity, constants=None, program=None):
-        self.lib, self.owners, self.role, self.row = lib, owners, role, row
+    def __init__(self, lib, identity, constants=None, program=None):
+        self.lib = lib
         self.p = lib.metal_ir_program_new() if program is None else program
         self.emitted, self.repeated = [], []
-        self.values, self.roots, self.roles, self.planned, self.builtins = {}, {}, {}, {}, {}
+        self.values, self.roots, self.roles, self.builtins = {}, {}, {}, {}
         self.constants = {} if constants is None else constants
         self.base = self.identity = identity
 
@@ -570,18 +570,10 @@ class _Builder:
         if key in self.roots:
             return self.roots[key]
         base = _stored(t)
-        owner = self.owners.get(key)
-        role = CONSTANT if key in self.constants else self.role(owner) if owner is not None else \
-            CONSTANT if base.device.type != 'meta' else TEMPORARY
+        role = CONSTANT if key in self.constants or base.device.type != 'meta' else TEMPORARY
         # metal-microbench metal_ir.h metal_ir_value `identity`, metal_ir.mm metal_ir_append
         v = self.whole(base, role, 0 if role == CONSTANT else self.identity)
-        if owner is not None:
-            k, index, _, pages, row = owner
-            self.lib.metal_ir_value_planned(self.p, v, k, index, 0)
-            if pages:
-                self.lib.metal_ir_value_paged(self.p, v, row, pages)
-            self.planned[v] = owner
-        if key in self.constants or owner is None and base.device.type != 'meta':
+        if role == CONSTANT:
             self.attach(v, self.constants.get(key, base))
         self.roots[key], self.roles[key] = v, role
         return v

@@ -63,8 +63,9 @@ class _Mapping:
 # publication's, relocated and published, the loaded Local adopted by `mapping` (lent its bytes:
 # compiler/mesh_compiler/metal.py _lent) until _retired; `group` its preparation's. `solution` the loaded result
 # (schedule.published_program: Function[], roots, prefixes, offsets) whose views hold `mapping` and the byte offsets;
-# `function`, `planned` and `context` its; `offset` every copy's byte offset in `arena`, one mapping of every run 1
-# copy (mesh_view_program; UINT64_MAX a run 0 copy), at `base`; design/plan-to-bridge-change-request.md R8 and
+# `function`, `planned` and `context` its; `offset` every retained copy's first row's byte offset in `arena` (at
+# `base`) and `pages` each of their rows' (by row - planned.rows.first), `arena` one mapping of every such row
+# (mesh_view_program); native.py framed its paged roots' frame rows; design/plan-to-bridge-change-request.md R8 and
 # design/aot-compilation-change-request.md, appendix item 6: each Published its own mapping and client, retired and
 # released with it alone; torch 2.14 frombuffer
 class Published:
@@ -79,9 +80,10 @@ class Published:
             record, len(record), release, owner, C.byref(made)), lambda status: status == 0))
         mapping.loaded.append(made)
         self.offset, view = (mesh.Q * max(made.offsets, 1))(), mesh.View()
-        mesh.LIB.mesh_view_program(C.byref(mapping.context), C.byref(made), self.offset, C.byref(view))
+        self.pages = (mesh.Q * max(made.planned.rows.count, 1))()
+        mesh.LIB.mesh_view_program(C.byref(mapping.context), C.byref(made), self.offset, self.pages, C.byref(view))
         self.base = C.addressof(self.offset)
-        self.solution = published_program(made, (mapping, self.offset), self.offset, source)
+        self.solution = published_program(made, (mapping, self.offset, self.pages), self.offset, source)
         self.function, self.planned = made.function, made.planned
         backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None
         if backing is not None:
@@ -96,6 +98,10 @@ class Published:
     def span(self, first, index):
         from .native import viewed
         return viewed(first, self.base, index)
+
+    def paged(self, section, every, info):
+        from .native import framed
+        return framed(self.pages, self.planned, section, every, info)
 
 
 # a _Mapping's end: its loaded network result's publication closed (the bridge releases its rows and pages once no
