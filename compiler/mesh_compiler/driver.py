@@ -15,7 +15,7 @@ from .lower_metal import construct
 from .metal import _machines
 from .operations import Generator, seeded
 from .placement import place
-from .schedule import analyse, carried, schedule, unit_cost
+from .schedule import analyse, call_operands, carried, schedule, unit_cost
 
 
 # design/aot-compilation-change-request.md A1: a module compiled alone, the program of its one call
@@ -37,16 +37,19 @@ def compile_program(program, args, functions, processors, placement, cost=unit_c
 # Declarations; compiler/mesh_compiler/lower_metal.py construct; compiler/mesh_compiler/native.py compile_program: one
 # group per machine (its first processor its key); each function, in the captured order, placed and put on its
 # devices, its placement (its placeholders' stated placements in order, its body's output processor) and the
-# program's output processor (the placement of the captured outer output node) given to the one call analysis before
-# any schedule; a plan's context acquired where a function's transfer crosses machines or an analysis port
-# (schedule.py CallPort) with a source machine has a consumer machine other than it; the
+# program's output processor (the placement of the captured outer output node) given to the calls' operands
+# (schedule.py call_operands) before any schedule; a plan's context acquired where a function's transfer crosses
+# machines or an operands port (schedule.py CallPort) with a source machine has a consumer machine other than it; the
 # compilation machine chosen once (the plan's node map entry Planning.nodes[Planning.here], else `machine`, else the
 # processors' one machine) and the seed's words sampled once; a non-CPU eigh's function outlined into its prefix,
 # 2n - 1 calls of its QDWH step and its suffix (decompose.py outline) after placement and before the call analysis;
 # each function decomposed for its targets, scheduled
-# with its source declarations (every machine's body kept, by group), and its body on the compilation machine, where
-# it has one, constructed once with every original processor's selected target and device and each output's role (a
-# buffer mutation's by the placeholder torch.export's state names it under); ONE completed native target of those
+# with its source declarations (every machine's body kept, by group), and each machine's body constructed once,
+# unlowered (lower_metal.py construct: the program's one construction owner, by (function key, group)), with every
+# original processor's selected target and device and each output's role (a buffer mutation's by the placeholder
+# torch.export's state names it under), its generator its own copy of the sampled words, the compilation machine's
+# body alone with this machine's descriptors (metal.py _machines); the one call analysis (schedule.py analyse) of those
+# operands and every construction, which keeps them; ONE completed native target of the compilation machine's
 # constructions by function key and the analysis, its node Planning.here with a context and the machine without
 def compile_captured(captured, processors, placement, cost=unit_cost, planning=None, machine=None):
     engines = {name: d for name, (_, d) in processors.items() if d in ENGINES}
@@ -66,10 +69,10 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
     captured, staged = outline(captured, staged, targets, processors, machines)
     placements = {key: (stage[5], stage[1]) for key, stage in staged.items()}
     output_processor = placement(captured.exported.graph_module.graph.output_node())
-    analysis = analyse(captured, placements, machines, output_processor)
+    operands = call_operands(captured, placements, machines, output_processor)
     if planning is None and (any(all(transfer[4]) for stage in staged.values() for transfer in stage[4]) or any(
             port.source is not None and any(machine != port.source for machine in port.machines)
-            for port in analysis.ports)):
+            for port in operands.ports)):
         from .bridge import planning as acquired
         planning = acquired()
     if planning is not None:
@@ -77,7 +80,7 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
     elif machine is None:
         (machine,) = dict.fromkeys(machines.values())
     entry, words = represented[machine], seeded(torch.initial_seed())
-    constructed, declared, modules = {}, {}, {}
+    constructions, declared, modules = {}, {}, {}
     for key, (placed, produced, channels, graph, between, _) in staged.items():
         exported = captured.functions[key]
         modules[key], declared[key] = schedule(decompose(graph, targets), cost, between, machines, planning=planning,
@@ -85,12 +88,14 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
         placeholder = {target: name for name, (target, _) in exported.state.items()}
         roles = [(kind, placeholder[target] if kind == OutputKind.BUFFER_MUTATION else target)
                  for kind, target in exported.outputs]
-        if entry in modules[key]:
-            constructed[key] = construct(
-                modules[key][entry], targets=targets, kinds=exported.state_kinds,
+        for group, body in modules[key].items():
+            constructions[key, group] = construct(
+                body, targets=targets, kinds=exported.state_kinds,
                 sources={name: tensor.detach() for name, (_, tensor) in exported.state.items()},
-                wires=declared[key].wires(), output_roles=roles if entry == groups[produced] else (),
-                generator=Generator(words), machines=_machines())
+                wires=declared[key].wires(machines[group]), output_roles=roles if group == groups[produced] else (),
+                generator=Generator(words.clone()), machines=_machines() if group == entry else None)
+    analysis = analyse(operands, constructions, declared)
+    constructed = {key: made for (key, group), made in constructions.items() if group == entry}
     target = native.compile_program(captured, constructed, declared, analysis,
                                     planning.here if planning is not None else machine, planning, targets=targets)
     used = list(dict.fromkeys(g for body in modules.values() for g in body))

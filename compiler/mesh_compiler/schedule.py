@@ -190,7 +190,10 @@ def solved(plan, planning, function):
 # rdma/mesh-collective.h struct mesh_function, mesh_plan; design/compilation-composition-change-request.md items 4 and
 # 7: the source declarations of the one plan, before any solve: its declared transfers and their logical wire values,
 # the caller's costs, the transfer dependences and the source tasks in causal postorder; the numerical values,
-# lifetimes and costs are the lowered program's actual results, added by the plan's consumer
+# lifetimes and costs are the lowered program's actual results, added by the plan's consumer. `values` and `places`
+# (and each row's value) this machine's (`machine`, Planning.here's); `endpoints[t]` transfer t's (sender's,
+# receiver's) (machine index into `nodes`, its logical value there), `logical[m]` machine m's (places, values), this
+# machine's the same lists as `values` and `places`
 @dataclasses.dataclass
 class Declarations:
     program: int
@@ -207,12 +210,21 @@ class Declarations:
     receivers: list
     resources: int
     machine: int
+    nodes: tuple = ()
+    endpoints: list = dataclasses.field(default_factory=list)
+    logical: dict = dataclasses.field(default_factory=dict)
 
-    # channel -> (declared transfer, logical wire value, its logical bytes, declared sent view, declared landed view)
-    def wires(self):
-        return {channel: (transfer, value, self.values[value][0], sent, landed)
-                for transfer, (channel, (*_, value, sent, landed)) in enumerate(zip(self.channels, self.declared))
-                if value != mesh.ABSENT}
+    # channel -> (declared transfer, logical wire value, its logical bytes, declared sent view, declared landed view):
+    # this machine's, or (`machine`, compiler/mesh_compiler/driver.py's global construction) that machine's endpoints'
+    def wires(self, machine=None):
+        if machine is None:
+            return {channel: (transfer, value, self.values[value][0], sent, landed)
+                    for transfer, (channel, (*_, value, sent, landed)) in enumerate(zip(self.channels, self.declared))
+                    if value != mesh.ABSENT}
+        k = self.nodes.index(machine) if self.endpoints else None
+        return {channel: (transfer, value, self.logical[m][1][value][0], row[-2], row[-1])
+                for transfer, (channel, row, ends) in enumerate(zip(self.channels, self.declared, self.endpoints))
+                for m, value in ends if m == k}
 
 
 # design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5;
@@ -225,21 +237,29 @@ def declarations(module, transfers, carried, machines, cost, functions, before, 
     here = planning.here if planning is not None else None
     held = set(functions)
     declared, weights, values, places, events, identities, versions = [], [], [], [], [], {}, {}
+    endpoints, logical = [], {} if here is None else {here: (places, values)}
     named = {node.name: node for node in module.graph.nodes}
     for writer, reader in writers:
         versions.setdefault(reader, set()).add(task[writer])
+
+    # an endpoint's logical wire value on machine m: one per writer (its processor, its source record's root, its
+    # version), so a same-version fanout and a receive assembly share it, its extent the root's whole storage's
+    def placed(m, writer):
+        mine, held_values = logical.setdefault(m, ([], []))
+        if writer not in mine:
+            mine.append(writer)
+            held_values.append((extent(named[writer[1]].meta["val"]), mesh.EXECUTION, 1, 0, 0, 0, 0, 1))
+        return mine.index(writer)
     for transfer, (channel, sender, receiver, dtype, shape, stride) in enumerate(carried):
         sent, arrival = transfers[channel]
         source, destination = at[machines[sender]], at[machines[receiver]]
         start = sent.args[0].meta.get("view") or sent.args[0].meta.get("out") or whole(sent.args[0])
         finish, version = arrival.meta.get("to") or whole(arrival), tuple(sorted(versions.get(sent, ())))
-        written, value = relation.producers[sent.args[0]], mesh.ABSENT
-        if here in (source, destination):
-            writer = (sender, start[0], version) if source == here else (receiver, finish[0], ())
-            if writer not in places:
-                places.append(writer)
-                values.append((extent(named[writer[1]].meta["val"]), mesh.EXECUTION, 1, 0, 0, 0, 0, 1))
-            value = places.index(writer)
+        written = relation.producers[sent.args[0]]
+        pair = ((source, placed(source, (sender, start[0], version))),
+                (destination, placed(destination, (receiver, finish[0], ()))))
+        endpoints.append(pair)
+        value = next((v for m, v in pair if m == here), mesh.ABSENT)
         identity = identities.setdefault((sent.meta["collective"], start[0], version), len(identities))
         declared.append((source, destination, identity, arrival.meta["consumer"], value,
                          *(mesh_graph.strided(*record[1:], dtype.itemsize) for record in (start, finish))))
@@ -254,7 +274,7 @@ def declarations(module, transfers, carried, machines, cost, functions, before, 
                         values, places, dependences(events, before), 1, tasks,
                         [edge for edge in edges if edge not in crossing], [sent for sent, _ in ends],
                         [arrival for _, arrival in ends], 1 + max((resource for _, resource in tasks), default=0),
-                        nodes[here] if planning is not None else None)
+                        nodes[here] if planning is not None else None, tuple(nodes), endpoints, logical)
 
 
 # design/torch-source-lowering-change-request.md item 3; design/aot-compilation-change-request.md A6;
@@ -411,8 +431,9 @@ def commutes(function, k):
 # a CapturedProgram's calls analysed. Call j is the original call node nodes[j] of function keys[calls[j]];
 # `storages[s]` storage s's (StorageWeakRef, first holder: the first call's leaf bound to it), s the views' key;
 # `accesses[v]` the relation's view v's (call, operand): ("input", placeholder, leaf), every tensor the call binds to
-# one of its function's placeholders (state and user inputs alike, ir.Call), read, or ("written", output, leaf), the
-# leaf bound to a mutation output's target placeholder, written; `results` each (call, output, leaf, storage) of a
+# one of its function's placeholders (state and user inputs alike, ir.Call), read, ("written", output, leaf), the
+# leaf bound to a mutation output's target placeholder, written, or ("generated", key, write), its body's generator
+# state read and written (`generated[key]`, analyse); `results` each (call, output, leaf, storage) of a
 # call's tensor output, its storage a root whether or not a later call reads it; `root_sources[s]` storage s's
 # caller source (compiler/mesh_compiler/native.py Operand.source): ("input", its outer flat placeholder position),
 # ("result", s, its storage's bytes, its device) of a program result's, None a call's internal planned root; `held`
@@ -420,13 +441,18 @@ def commutes(function, k):
 # `supplied[g]` GIVEN cause g with its role:
 # ("value", producer, consumer, leaf), a commuting chain's member reading its head's receiver and a chain's last
 # consumer following every member, or ("chain", a, b, head), the successive calls of one head's label (the commuting
-# chains, `paths`, and each persistent written storage's calls, an outer input's or state's); `chains[j]` call j's
+# chains, `paths`, and each persistent written storage's calls, an outer input's or state's, or a body's generated
+# state's, `generated`); `chains[j]` call j's
 # head, the least call of its label (mesh_plan `chains`); `relation` the one relation of those views and causes
 # (mesh_graph.dependences_supplied), `graph` it (Graph.from_conflicts), `search` its owned search over incoming rows
 # and `closure` each call's predecessors (Graph.ancestors over that search's postorder); `order_edges` its edges with a
 # view hazard or a value cause, projected as mesh_plan's `orders` and `causes` (ORDER_CONFLICT where a view hazard is
 # among an edge's causes, ORDER_FLOW otherwise) until the planner takes `relation`; `widths[key]` the function's fewest
-# chains covering its calls in `closure` (mesh_graph.closure_chains), `outstanding[key]` their count
+# chains covering its calls in `closure` (mesh_graph.closure_chains), `outstanding[key]` their count; `generated` each
+# generated state's conflict key (past `storages`, no caller storage) to (its body's source ordinal, machine group, state
+# Root, view); `constructions` the program's one construction owner, every (function key, machine group) body's
+# ConstructedMachine (compiler/mesh_compiler/driver.py compile_captured), kept with the analysis with `declarations`,
+# each function's Declarations, whose endpoints those bodies were constructed with
 # design/aot-compilation-change-request.md A2, A4 and A10; design/plan-to-bridge-change-request.md R6: one value
 # crossing a call boundary or the program's: produced by call `owner` at its output spec `output` (None: the caller's
 # outer placeholder at position `output`), bound by call `consumer` at its placeholder `input` (None: the program's
@@ -475,13 +501,42 @@ class CallAnalysis:
     output_processor: object
     output_machine: object
     ports: tuple
+    generated: dict
+    constructions: dict
+    declarations: dict
 
 
-def analyse(captured, placements, machines, output_processor):
+# design/aot-compilation-change-request.md A10; design/compilation-composition-change-request.md items 6 and 7: a
+# CapturedProgram's calls' operands, extracted once before any construction (the driver's planning needs `ports`):
+# `entries[j]` call j's ir.Call, `ordinal` each function key's source ordinal, `storages`, `views` (each
+# (storage, offset, element, pairs, call, write)), `accesses`, `results`, `root_sources`, `held` and `ports` as
+# CallAnalysis's, `existing` the outer placeholders' storages, `produced` each call output leaf's (call, output)
+@dataclasses.dataclass(eq=False)
+class CallOperands:
+    captured: object
+    nodes: tuple
+    keys: tuple
+    entries: list
+    ordinal: dict
+    storages: list
+    views: list
+    accesses: list
+    results: list
+    root_sources: list
+    held: frozenset
+    ports: tuple
+    existing: set
+    produced: dict
+    placements: dict
+    machines: dict
+    output_processor: object
+
+
+def call_operands(captured, placements, machines, output_processor):
     from .placement import flat
     nodes, keys = tuple(captured.calls), tuple(captured.functions)
     entries, ordinal = [captured.calls[node] for node in nodes], {key: f for f, key in enumerate(keys)}
-    J, storage, storages, views, accesses = len(nodes), {}, [], [], []
+    storage, storages, views, accesses = {}, [], [], []
     placeholders = {key: [n.name for n in f.graph_module.graph.nodes if n.op == "placeholder"]
                     for key, f in captured.functions.items()}
 
@@ -553,6 +608,34 @@ def analyse(captured, placements, machines, output_processor):
             ported(a, o, None, k, leaf, machines[placements[entries[a].function][1]], (machines[output_processor],))
         elif leaf in outer_at:
             ported(None, outer_at[leaf], None, k, leaf, None, (machines[output_processor],))
+    return CallOperands(captured, nodes, keys, entries, ordinal, storages, views, accesses, results, root_sources, held,
+                        tuple(ports), existing, produced, placements, machines, output_processor)
+
+
+# the one call analysis (CallAnalysis) of `operands` (call_operands) after every construction, `constructions` every
+# (function key, machine group) body's ConstructedMachine, on every participant the same: their views and, for each
+# body that advances its generator (lower_metal.py ConstructedMachine.generated), its state's read and written view
+# (operations.py Generator.counter) in every call of its function, its own conflict key `generated` past the caller's
+# storages ({key: (source ordinal, machine group, state Root, view)}; the local body's native.py Target binds as
+# ("generator", ordinal)), so calls of one function conflict on each of its bodies' states and distinct states never
+def analyse(operands, constructions, declarations):
+    captured, nodes, keys, entries, produced = (operands.captured, operands.nodes, operands.keys, operands.entries,
+                                                operands.produced)
+    ordinal, storages, J = operands.ordinal, operands.storages, len(nodes)
+    views, accesses, generated = list(operands.views), list(operands.accesses), {}
+    for (key, group), made in constructions.items():
+        if not made.generated:
+            continue
+        root, counter = made.generated
+        s = len(storages) + len(generated)
+        generated[s] = (ordinal[key], group, root, counter)
+        view = mesh_graph.strided(counter.storage_offset(), tuple(counter.shape), tuple(counter.stride()),
+                                  counter.dtype.itemsize)
+        for j, call in enumerate(entries):
+            if call.function == key:
+                for write in (0, 1):
+                    views.append((s, *view, j, write))
+                    accesses.append((j, ("generated", s, write)))
     link, follower = {}, {}
     commuting = functools.cache(lambda key, k: commutes(captured.functions[key], k))
     for b, call in enumerate(entries):
@@ -575,7 +658,8 @@ def analyse(captured, placements, machines, output_processor):
             a = produced[u][0]
             members = step[a] if a in step and step[a][-1] == a else (a,)
             supplied += [("value", m, b, u) for m in members]
-    persistent = {s for s, (ref, _) in enumerate(storages) if ref in existing} & {v[0] for v in views if v[-1]}
+    persistent = ({s for s, (ref, _) in enumerate(storages) if ref in operands.existing} &
+                  {v[0] for v in views if v[-1]}) | set(generated)
     groups = [list(chain) for chain in paths] + [sorted({v[-2] for v in views if v[0] == s}) for s in persistent]
     label = mesh_graph.components(J, [pair for group in groups for a, b in zip(group, group[1:])
                                       for pair in ((a, b), (b, a))])
@@ -596,14 +680,15 @@ def analyse(captured, placements, machines, output_processor):
     widths = {key: mesh_graph.closure_chains(closure, [j for j in range(J) if entries[j].function == key])
               for key in keys}
     return CallAnalysis(nodes, keys, (mesh.U * max(J, 1))(*[ordinal[call.function] for call in entries]), storages,
-                        accesses, results, root_sources, held, supplied, relation, graph, search, closure,
-                        order_edges,
+                        accesses, operands.results, operands.root_sources, operands.held, supplied, relation, graph,
+                        search, closure, order_edges,
                         (mesh.U * max(2 * len(order_edges), 1))(*[x for e in order_edges for x in edges[e]]),
                         (mesh.U * max(len(order_edges), 1))(*[mesh.ORDER_CONFLICT if True in hazards[e] else
                                                               mesh.ORDER_FLOW for e in order_edges]),
                         len(order_edges), (mesh.U * max(J, 1))(*head), paths, widths,
-                        {key: count for key, (count, _) in widths.items()}, placements, machines, output_processor,
-                        machines[output_processor], tuple(ports))
+                        {key: count for key, (count, _) in widths.items()}, operands.placements, operands.machines,
+                        operands.output_processor, operands.machines[operands.output_processor], operands.ports,
+                        generated, constructions, declarations)
 
 
 # mesh-collective.h mesh_plan_local, mesh_local_load: one solved or loaded result, released by mesh_local_free with its

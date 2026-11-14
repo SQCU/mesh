@@ -82,6 +82,10 @@ class ConstructedMachine:
     # compiler/mesh_compiler/operations.py Generator `state`, its words when the program draws: the initial STATE of
     # the generator root, which the native program's operand starts from (uint32 each)
     initial_words: tuple = ()
+    # design/compilation-composition-change-request.md items 6 and 7 (compiler/mesh_compiler/schedule.py analyse):
+    # where the program advances its generator, (its state Root, operations.py Generator.counter: the advance's read and
+    # written view of that state), else ()
+    generated: tuple = ()
     # compiler/mesh_compiler/schedule.py assemble `input_parts`: each original placeholder position's InputParts here
     input_parts: dict = dataclasses.field(default_factory=dict)
     # compiler/mesh_compiler/metal.py _Builder.emitted and .repeated: each leaf record's actual emission (Emitted: the
@@ -383,5 +387,6 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                               {k: tuple(ops) for k, ops in stores.items()}, source, vertices, accesses, given, writers,
                               builder.base, binding, {k: tuple(sorted(ops)) for k, ops in decomposed.items()},
                               initial_words=tuple(word & 0xFFFFFFFF for word in generator.state.tolist()) if state
-                              else (), input_parts=input_parts, emitted=tuple(builder.emitted),
+                              else (), generated=(state[0], generator.counter) if stepped else (),
+                              input_parts=input_parts, emitted=tuple(builder.emitted),
                               repeated=tuple(builder.repeated))
