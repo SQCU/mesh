@@ -1,0 +1,10 @@
+{
+  "compiler/mesh_compiler/operations.py": "53cbbb8c2aa7c19a396e1401c58ed1e97d49e376599f37ac8820ba7bea3cc92f",
+  "compiler/mesh_compiler/decompose.py": "b3078bd3dbce2efa86733650fda1841b54f23b96400d4e1571f29bc98970e121",
+  "compiler/mesh_compiler/driver.py": "7e1dd75ba45866382e49ef0f952650917303ab255151fe99f1b04f3dff2524b2",
+  "compiler/mesh_compiler/schedule.py": "a7969fd08ce284859fc937de70bcbedd01d6d0e44a692f26349d43cee0eeaec6",
+  "compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+  "compiler/mesh_compiler/metal.py": "3bd5818513b019e24a1c86f5c89d64d57e0d74bbdfe6342d7a1d2b68e4213631",
+  "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "be1a351559d4347cf1c600c954fb2ed602fd294cdff6121234cef8bd129ba65e",
+  "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "61b1c20fdcc1db44be9614ca11bc29a063f2c54c68bb98a677efabd1ea6b5044"
+}

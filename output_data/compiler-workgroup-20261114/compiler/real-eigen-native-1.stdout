@@ -1,0 +1,78 @@
+PID 90739 compile
+prepared retained order 46 dispatches 32 commands 14 native entries 0 later passes
+prepared dataflow 606 values 1368 bytes 46 schedule positions; 0 crossings longest local stretch 46
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 1 0 0 0 source 0ca9531fb2bbb493817235e5565439cfe27554ceb590fc6bb7d33bb4176b3321
+prepared kernel 2 synchronization 0 0 0 0 source f19a79c49a2c994a34b5e6a707f488440c9e4f1e6156c0c758c366af997dcd50
+prepared kernel 4 synchronization 12 0 0 0 source db457b0135c7c0e60f97394760636554fa2302c9ab47eddfae57f64fe0839a85
+prepared kernel 5 synchronization 0 0 0 0 source f4f566316803c168af82e0a51c7742dec41540b37fc082e3cc905cd18506e9d0
+prepared kernel 7 synchronization 12 0 0 0 source 6302277bf57fe5a9c79ce316e4353c6f7de4c1179f48300677556615f79d1373
+prepared kernel 8 synchronization 1 0 0 0 source 1d3e7438565c154b92a90b188fd645b02dfa31329ffe8a4ed305e43bc92785a1
+prepared kernel 10 synchronization 5 0 0 0 source 9ee9f96f529c5cafee0e004bf8ca34225e3df8132ca17875f6c5c65c9a2c5439
+prepared kernel 12 synchronization 0 0 0 0 source 667c4f49619b906788cda629d559c332917e015cd6c4c0518a05e8a162353f08
+prepared kernel 13 synchronization 0 0 0 0 source cd39a99534cdc99b470e912fe34b15a14d192fcf56eb335bf9f75180ef43608c
+prepared kernel 15 synchronization 0 0 0 0 source f9ae868e8d4da4f9249594fa10b1e4c8ad9f940e1514d1d3fa97c470892559a9
+prepared kernel 16 synchronization 8 0 0 0 source a3312d689080ec88501da6ef50d8da939acebfa951cf4ac449ee4f9876c1413f
+prepared kernel 18 synchronization 0 0 0 0 source 4a4a888759327b20b36be068b397420ce6070a91bfec207058628c2e4a007d5f
+prepared kernel 19 synchronization 0 0 0 0 source 23df600a404341947e220b64a67ca04b378eb4be20c42ef2c4a29f1a929b2e9a
+prepared kernel 21 synchronization 0 0 0 0 source 90b5fc10bc227ddf3da180c80a70075b3a6de60fe895d252d590254ba06a1aa3
+prepared kernel 22 synchronization 8 0 0 0 source 47853bb75cdc699a99c49ce0559d51da36229a007fbb2ee0c36ed583d315ed03
+prepared kernel 24 synchronization 0 0 0 0 source 63d8e91d0ed8fa5bbb9b590140d14f99ad90c3c112ab8ae2764d4363e12a5800
+prepared kernel 25 synchronization 0 0 0 0 source b64e3fb1a546295869c3533f2fa656dc8523fb5a64e127098810de460e9e338f
+prepared kernel 27 synchronization 0 0 0 0 source 51560b43ed0b0bc4b1ec76cb517ace0c62449896c3ba6b1279dd6d9f2312ffe3
+prepared kernel 28 synchronization 2 0 0 0 source 9e21ec093735f50a19ff3499eabf4739fc55a866553ae1d8cc3c9033465b39a0
+prepared kernel 29 synchronization 27 0 0 0 source 44173689cdd7e24120dd3542ca2d822686765fcd729de2358e364005174b5a33
+prepared kernel 30 synchronization 22 0 0 0 source 1e867d4422dfd90585deeba791844b31be4fe2c693f1657b0ad2e0d8d19110c9
+prepared kernel 31 synchronization 1 0 0 0 source 8d38f27ed0d5a1ad8f25541053cb4a4cd14a284dca328acbfeec97607691214b
+prepared kernel 33 synchronization 2 0 0 0 source c5d65b2b79263c01a5c59fc1bf74b864dd95f5ff5c6f875efe2c553908c4fd5a
+prepared kernel 35 synchronization 3 0 0 0 source af783cc4291274f3fead8157ba340d09dc8188e0627f41d2db0b00f6808ad42c
+prepared kernel 36 synchronization 4 0 0 0 source 4e90ea9b3b953472dccf28dfece858a86d056e4894d944fbca65de5f47360a86
+prepared kernel 37 synchronization 19 0 0 0 source d2ee49f14856808f271a77ab9db8913f38338111de04c4fbece7132978cfc83a
+prepared kernel 38 synchronization 19 0 0 0 source fc00f63b445e09135e54581eb9ca017800507d7a9ddcd759f02c70fb94c97621
+prepared kernel 39 synchronization 0 0 0 0 source c9bc32ccf5c21209dcea697d48de1ad58cb34fc7c53725d74b1394cf53e80cd9
+prepared kernel 40 synchronization 0 0 0 0 source 4523b57936ff634907e4f19034762d547b07b8ecd35e0947ecb6f7f0e2dcb9c6
+prepared kernel 42 synchronization 17 0 0 0 source 74c656511a5d675c31e720410a13f0342bb0779027180b189dbbe7ef074d1c6d
+prepared kernel 43 synchronization 21 0 0 0 source fcf073bee46afe7e0f5c1d59f495aaae6d67734e93e94bee7a3ab5b9d9f7a8ba
+prepared kernel 44 synchronization 1 0 0 0 source 099c51e010157d80febf894de78747af10d8cf0dcbb7fbe129928f0066077ceb
+prepared dependencies 32 barriers 32 commands
+prepared self-timed program 3 calls 3 positions 1 residues 1 phases 0 plan order edges 2 kept of the unrolled dependences 0 fence waits 2 program-thread waits 0 send-completion waits 0 left to the plan's start 2 start waits
+prepare
+prepared retained order 46 dispatches 32 commands 14 native entries 0 later passes
+prepared dataflow 606 values 1368 bytes 46 schedule positions; 0 crossings longest local stretch 46
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 1 0 0 0 source 0ca9531fb2bbb493817235e5565439cfe27554ceb590fc6bb7d33bb4176b3321
+prepared kernel 2 synchronization 0 0 0 0 source f19a79c49a2c994a34b5e6a707f488440c9e4f1e6156c0c758c366af997dcd50
+prepared kernel 4 synchronization 12 0 0 0 source db457b0135c7c0e60f97394760636554fa2302c9ab47eddfae57f64fe0839a85
+prepared kernel 5 synchronization 0 0 0 0 source f4f566316803c168af82e0a51c7742dec41540b37fc082e3cc905cd18506e9d0
+prepared kernel 7 synchronization 12 0 0 0 source 6302277bf57fe5a9c79ce316e4353c6f7de4c1179f48300677556615f79d1373
+prepared kernel 8 synchronization 1 0 0 0 source 1d3e7438565c154b92a90b188fd645b02dfa31329ffe8a4ed305e43bc92785a1
+prepared kernel 10 synchronization 5 0 0 0 source 9ee9f96f529c5cafee0e004bf8ca34225e3df8132ca17875f6c5c65c9a2c5439
+prepared kernel 12 synchronization 0 0 0 0 source 667c4f49619b906788cda629d559c332917e015cd6c4c0518a05e8a162353f08
+prepared kernel 13 synchronization 0 0 0 0 source cd39a99534cdc99b470e912fe34b15a14d192fcf56eb335bf9f75180ef43608c
+prepared kernel 15 synchronization 0 0 0 0 source f9ae868e8d4da4f9249594fa10b1e4c8ad9f940e1514d1d3fa97c470892559a9
+prepared kernel 16 synchronization 8 0 0 0 source a3312d689080ec88501da6ef50d8da939acebfa951cf4ac449ee4f9876c1413f
+prepared kernel 18 synchronization 0 0 0 0 source 4a4a888759327b20b36be068b397420ce6070a91bfec207058628c2e4a007d5f
+prepared kernel 19 synchronization 0 0 0 0 source 23df600a404341947e220b64a67ca04b378eb4be20c42ef2c4a29f1a929b2e9a
+prepared kernel 21 synchronization 0 0 0 0 source 90b5fc10bc227ddf3da180c80a70075b3a6de60fe895d252d590254ba06a1aa3
+prepared kernel 22 synchronization 8 0 0 0 source 47853bb75cdc699a99c49ce0559d51da36229a007fbb2ee0c36ed583d315ed03
+prepared kernel 24 synchronization 0 0 0 0 source 63d8e91d0ed8fa5bbb9b590140d14f99ad90c3c112ab8ae2764d4363e12a5800
+prepared kernel 25 synchronization 0 0 0 0 source b64e3fb1a546295869c3533f2fa656dc8523fb5a64e127098810de460e9e338f
+prepared kernel 27 synchronization 0 0 0 0 source 51560b43ed0b0bc4b1ec76cb517ace0c62449896c3ba6b1279dd6d9f2312ffe3
+prepared kernel 28 synchronization 2 0 0 0 source 9e21ec093735f50a19ff3499eabf4739fc55a866553ae1d8cc3c9033465b39a0
+prepared kernel 29 synchronization 27 0 0 0 source 44173689cdd7e24120dd3542ca2d822686765fcd729de2358e364005174b5a33
+prepared kernel 30 synchronization 22 0 0 0 source 1e867d4422dfd90585deeba791844b31be4fe2c693f1657b0ad2e0d8d19110c9
+prepared kernel 31 synchronization 1 0 0 0 source 8d38f27ed0d5a1ad8f25541053cb4a4cd14a284dca328acbfeec97607691214b
+prepared kernel 33 synchronization 2 0 0 0 source c5d65b2b79263c01a5c59fc1bf74b864dd95f5ff5c6f875efe2c553908c4fd5a
+prepared kernel 35 synchronization 3 0 0 0 source af783cc4291274f3fead8157ba340d09dc8188e0627f41d2db0b00f6808ad42c
+prepared kernel 36 synchronization 4 0 0 0 source 4e90ea9b3b953472dccf28dfece858a86d056e4894d944fbca65de5f47360a86
+prepared kernel 37 synchronization 19 0 0 0 source d2ee49f14856808f271a77ab9db8913f38338111de04c4fbece7132978cfc83a
+prepared kernel 38 synchronization 19 0 0 0 source fc00f63b445e09135e54581eb9ca017800507d7a9ddcd759f02c70fb94c97621
+prepared kernel 39 synchronization 0 0 0 0 source c9bc32ccf5c21209dcea697d48de1ad58cb34fc7c53725d74b1394cf53e80cd9
+prepared kernel 40 synchronization 0 0 0 0 source 4523b57936ff634907e4f19034762d547b07b8ecd35e0947ecb6f7f0e2dcb9c6
+prepared kernel 42 synchronization 17 0 0 0 source 74c656511a5d675c31e720410a13f0342bb0779027180b189dbbe7ef074d1c6d
+prepared kernel 43 synchronization 21 0 0 0 source fcf073bee46afe7e0f5c1d59f495aaae6d67734e93e94bee7a3ab5b9d9f7a8ba
+prepared kernel 44 synchronization 1 0 0 0 source 099c51e010157d80febf894de78747af10d8cf0dcbb7fbe129928f0066077ceb
+prepared dependencies 32 barriers 32 commands
+prepared self-timed program 3 calls 3 positions restored (no relation solved)
+invoke
+{"eigenvalue_error": 7.892664756562801e-08, "residual": 1.2624146433696507e-07, "normalization": 1.7114259232009488e-08, "finite": true, "values_real": [3.999999523162842, 1.000000238418579, 1.000000238418579], "values_imag": [0.0, 1.9999998807907104, -1.9999998807907104], "vectors_real": [[-1.53318936213509e-07, 0.7071067690849304, 0.7071067690849304], [-0.7071067690849304, 0.35355356335639954, 0.35355356335639954], [-0.7071067690849304, 0.3535534739494324, 0.3535534739494324]], "vectors_imag": [[0.0, 0.0, 0.0], [0.0, -0.3535532057285309, 0.3535532057285309], [0.0, 0.3535533547401428, -0.3535533547401428]], "source_binary_unchanged": true}
