@@ -1,0 +1,51 @@
+{
+  "shapes": [
+    [
+      0
+    ],
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      0,
+      2,
+      2
+    ]
+  ],
+  "reference_shapes": [
+    [
+      0
+    ],
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      0,
+      2,
+      2
+    ]
+  ],
+  "dtypes": [
+    "torch.float32",
+    "torch.float32",
+    "torch.float32",
+    "torch.float32"
+  ],
+  "numel": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "changed_paths": []
+}

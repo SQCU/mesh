@@ -1,0 +1,27 @@
+{"import_complete": true, "source_unchanged_during_import": true}
+compile
+prepared retained order 9 dispatches 6 commands 3 native entries 0 later passes
+prepared dataflow 218 values 652 bytes 9 schedule positions; 0 crossings longest local stretch 9
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source e12fa80c0d9c45aa1cac6846156f02e7b88960589a83390027a15685e2b1e8f2
+prepared kernel 1 synchronization 21 0 0 0 source 13210fe9cc9167df1479cba5207574fbb8be29867fbdc21052fd5ca4bfd6772a
+prepared kernel 3 synchronization 3 0 0 0 source a46da4842db166222062d70942788574e1a6237447fa85985a108523fb226882
+prepared kernel 4 synchronization 1 0 0 0 source 68614f3eb57ebdda81f6a18c3d5031a3c85f3a9853347c30688d99fb92740db7
+prepared kernel 6 synchronization 3 0 0 0 source a6c48124dabc3d5ef4df827179db05639b1483f1d08773c78db4c6c09788fbb7
+prepared kernel 7 synchronization 0 0 0 2 source 6c6715d1a8813597b719928b246d07ccfc3d81cbb540e7d67386a39c440a5b71
+prepared dependencies 6 barriers 6 commands
+prepared self-timed program 6 calls 6 positions 1 residues 1 phases 2 plan order edges 5 kept of the unrolled dependences 2 fence waits 3 program-thread waits 0 send-completion waits 0 left to the plan's start 5 start waits
+prepare
+prepared retained order 9 dispatches 6 commands 3 native entries 0 later passes
+prepared dataflow 218 values 652 bytes 9 schedule positions; 0 crossings longest local stretch 9
+prepared replay period 1 repetitions
+prepared kernel 0 synchronization 12 0 0 4 source e12fa80c0d9c45aa1cac6846156f02e7b88960589a83390027a15685e2b1e8f2
+prepared kernel 1 synchronization 21 0 0 0 source 13210fe9cc9167df1479cba5207574fbb8be29867fbdc21052fd5ca4bfd6772a
+prepared kernel 3 synchronization 3 0 0 0 source a46da4842db166222062d70942788574e1a6237447fa85985a108523fb226882
+prepared kernel 4 synchronization 1 0 0 0 source 68614f3eb57ebdda81f6a18c3d5031a3c85f3a9853347c30688d99fb92740db7
+prepared kernel 6 synchronization 3 0 0 0 source a6c48124dabc3d5ef4df827179db05639b1483f1d08773c78db4c6c09788fbb7
+prepared kernel 7 synchronization 0 0 0 2 source 6c6715d1a8813597b719928b246d07ccfc3d81cbb540e7d67386a39c440a5b71
+prepared dependencies 6 barriers 6 commands
+prepared self-timed program 6 calls 6 positions restored (no relation solved)
+invoke
+{"dtype": "torch.bfloat16", "shape": [2, 2, 2], "relative_errors": [0.0010987932599577557, 0.0016953163667203488], "finite": true, "source_counts": [0.0, 2.0], "result": [[[0.98046875, 0.322265625], [-0.1611328125, 1.625]], [[2.078125, 7.84375], [-5.875, 4.03125]]], "reference": [[[0.9814597388383777, 0.32268087656754013], [-0.16134043828377007, 1.626821491973458]], [[2.0708941306014235, 7.8523215977518], [-5.88924119831385, 4.033974530039377]]], "changed_paths": []}

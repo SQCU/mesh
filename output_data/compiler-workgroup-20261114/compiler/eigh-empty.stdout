@@ -1,0 +1,7 @@
+{"import_complete": true, "source_unchanged_during_import": true}
+compile
+prepared self-timed program 1 calls 1 positions 1 residues 1 phases 0 plan order edges 0 kept of the unrolled dependences 0 fence waits 0 program-thread waits 0 send-completion waits 0 left to the plan's start 0 start waits
+prepare
+prepared self-timed program 1 calls 1 positions restored (no relation solved)
+invoke
+{"shapes": [[0], [0, 0], [0, 2], [0, 2, 2]], "reference_shapes": [[0], [0, 0], [0, 2], [0, 2, 2]], "dtypes": ["torch.float32", "torch.float32", "torch.float32", "torch.float32"], "numel": [0, 0, 0, 0], "changed_paths": []}
