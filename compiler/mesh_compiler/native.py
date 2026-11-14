@@ -1259,9 +1259,12 @@ def borrowed(compiler, program, owner):
 # program writes directly), runs one execution of every row, waits for its end, and returns its outputs as views of
 # those backings or of a CONSTANT root's own handle (`fixed`, {(row, root): its tensor}). `uses` the program's
 # borrowed MetalProgramExternals view (pointer, count), kept with the program that owns it; `gpu` the ordinals of the
-# operands it uses on the GPU, read once; `argued` {(row, root): operand ordinal}; `programs` each row's loaded program
-# (Target.prepare's, None for a row without one), owned with `owned`; `work` each such row's Work (read by observe
-# once); `signature` its loaded signature (mesh_graph.Signature) bound to this native program, freed with `owned`
+# operands it uses on the GPU, read once; `argued` {(row, root): operand ordinal}; `allocations` each result backing a
+# call allocates, once, (joint root s, its bytes, its device): Operand.source ("result", s, bytes, device) of an operand
+# or of a supplied owner root's outer output (Target.outputs), as the target states them; `programs` each row's loaded
+# program (Target.prepare's, None for a row without one), owned with `owned`; `work` each such row's Work (read by
+# observe once); `signature` its loaded signature (mesh_graph.Signature) bound to this native program, freed with
+# `owned`
 class Bound:
     def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses, programs, signature):
         self.target, self.owner, self.program, self.ended, self.generator = target, owner, program, ended, generator
@@ -1269,6 +1272,9 @@ class Bound:
         self.programs, self.work = programs, None
         self.signature = signature
         self.argued = {at: a for a, operand in enumerate(target.operands) for at in operand.occurrences}
+        sources = (*(operand.source for operand in target.operands),
+                   *(r[1] for r, _ in target.outputs if isinstance(r, tuple)))
+        self.allocations = tuple({source[1]: source[2:] for source in sources if source[0] == "result"}.items())
         self.gpu = frozenset(use.argument for use in uses[0][:uses[1]] if use.uses & METAL_EXTERNAL_GPU)
 
     # metal-microbench metal_ir.h metal_ir_dispatches and metal_ir_kernel_devices (Core ML MLComputePlan): each loaded
@@ -1357,11 +1363,7 @@ class Bound:
         M, _, (lib, _), _ = self.libs
         error, operands = C.create_string_buffer(ROOM), self.target.operands
         execution = lib.MetalProgramIssued(self.program)
-        allocated = {}
-        for source in (*(operand.source for operand in operands), *(r[1] for r, _ in self.target.outputs
-                                                                     if isinstance(r, tuple))):
-            if source[0] == "result" and source[1] not in allocated:
-                allocated[source[1]] = torch.empty(source[2], dtype=torch.uint8, device=source[3])
+        allocated = {s: torch.empty(size, dtype=torch.uint8, device=device) for s, (size, device) in self.allocations}
         borrowed = {}
         try:
             table = (Argument * max(len(operands), 1))(*[self.argument(a, operand, given, allocated, borrowed)

@@ -1,0 +1,15 @@
+{
+  "ValueInfo": 120,
+  "RepeatRegion": 40,
+  "Function": 168,
+  "Planned": 152,
+  "Local": 376,
+  "Signature": 416,
+  "symbols": {
+    "metal_ir_value_physical": true,
+    "metal_ir_source_relation": true,
+    "metal_ir_repeat": true,
+    "metal_ir_value_paged": true
+  },
+  "mesh_view_program_arguments": 5
+}

@@ -1,0 +1,28 @@
+{
+  "head": "3e176c0db2016e2310854eb85d42df1d7b52e8dc",
+  "sha256": {
+    "/Users/mdot/metal-microbench/metal_archive.mm": "efc09390093fc8377e057740fd4da3964a7f820bde2b70e0fd89aeb8916529c1",
+    "/Users/mdot/metal-microbench/metal_capture.h": "b715f2f5df013731c5d7a28ffc833c6d0b1d6207319ca93a68376e975f3d819d",
+    "/Users/mdot/metal-microbench/metal_capture.m": "8aeb8fc689b0863b6e1a667560c2454dbbbaaa575ffcf6a818922b4811a57471",
+    "/Users/mdot/metal-microbench/metal_clone.h": "05e8c696ef9c0671ff96f6f1d053f4562aded8f0b6180a3552aecbb6abb5f2e8",
+    "/Users/mdot/metal-microbench/metal_clone.mm": "8f6bbe8d513e273ca0756770811bdffb913712971195bada31e2c8ef667dceae",
+    "/Users/mdot/metal-microbench/metal_ir.h": "9c969e5db7161b737ee89596e38a28f21cda04184145cb9f5c3f914a077de82c",
+    "/Users/mdot/metal-microbench/metal_ir.mm": "e92cfb27b3fc47895d0cd0dad55f3b22382d73808b0d582fd6cdbcff7725c6ef",
+    "/Users/mdot/metal-microbench/metal_lower.h": "0fb9bb982c00b3f1dd2a45c45a498934d96c7c07f11ddd1ea35ccdfd3b33ce20",
+    "/Users/mdot/metal-microbench/metal_lower.mm": "510c5a71df191be244e7e059c02860d1bae76aae3a60b80b45cbef5c39c548ba",
+    "/Users/mdot/metal-microbench/metal_native.h": "4b45c998706cd4f8ca033e1c92c06c33adc205868544868f90545b544ea847b4",
+    "/Users/mdot/metal-microbench/metal_native.mm": "0506290a08c7d860d54539578a033ed7f17b2811d2a580c937a564c53ab43e8d",
+    "/Users/mdot/metal-microbench/metal_neural.mm": "7eb9437e2556b609cc534a24da289cdf9f3af0ec5f61c90f660010c463158613",
+    "/Users/mdot/metal-microbench/metal_program.h": "d2519d0ba0bb947ce6dbd6ef821ed53caddb7703d350bf1c1039066ff3066683",
+    "/Users/mdot/metal-microbench/metal_program.m": "b0c333e8a40200d195a81c42aa8a3caf38e2a3667361ba080f03a2058ba89f0a",
+    "/Users/mdot/metal-microbench/metal_recording.h": "08acd01d5b294339a5ecd2779e289b1cdae8562cacc0a02fcf092725da0e4b8a",
+    "/Users/mdot/metal-microbench/metal_recording.m": "1b9891146c94b6ac21bd0bbbf7ae7d2c324f91384b5cbe2b2cbc1a407956aeb2",
+    "/Users/mdot/metal-microbench/metal_submission.h": "ea8ea9c811954c47b1e4c836b2a27406cfa2a48b949d74c8b7657a5cc03fcfbd",
+    "/Users/mdot/metal-microbench/metal_transform.mm": "ecdf5b2a77dc9792598a2e3eebb454870b4c93140b501f21532bdab1cedbeb60",
+    "/Users/mdot/metal-microbench/metal_transport.mm": "48f0efd645ac2922dcf7e8b4d851a6983ad1b051737e83980e6bc3036d6ac74d"
+  },
+  "changed": [],
+  "exit_code": 0,
+  "seconds": 33.288737666007364,
+  "archive": 38
+}
