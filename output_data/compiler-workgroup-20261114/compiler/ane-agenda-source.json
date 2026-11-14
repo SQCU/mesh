@@ -1,0 +1,32 @@
+[
+  {
+    "name": "where",
+    "target": "aten.where.self",
+    "dtype": "torch.float32",
+    "shape": [
+      2,
+      2
+    ]
+  },
+  {
+    "name": "scalar_tensor",
+    "target": "aten.scalar_tensor.default",
+    "dtype": "torch.int32",
+    "shape": []
+  },
+  {
+    "name": "scalar_tensor_1",
+    "target": "aten.scalar_tensor.default",
+    "dtype": "torch.int32",
+    "shape": []
+  },
+  {
+    "name": "where_1",
+    "target": "aten.where.self",
+    "dtype": "torch.int32",
+    "shape": [
+      3,
+      2
+    ]
+  }
+]

@@ -1,0 +1,5 @@
+# Agenda scalar type at the source formulation
+
+The requested-ANE2×2 eig construction failed before invocation. The live diagnostic in executor/ane-root14.json identifies root14 as the I64 scalar2 from aten.scalar_tensor, feeding the agenda's where; it was not an arange tensor. The source algorithm declares its agenda offset and size as int32 (retained jax-eigh.reference.py323–326), and _qdwh_eigh_state already returned an int32 agenda but narrowed only after where.
+
+The formulation now supplies explicit int32 size/zero scalar tensors to that same where, preserving its existing boolean entry and output geometry. No generic backend dtype conversion, native code, arange or input values changed. AST/diff checks and actual make_fx fake source construction confirm both scalars and where_1 are int32 (ane-agenda-source.json). The first check command omitted make_fx's required concrete default arguments; correcting the probe wrapper succeeded with unchanged production source. Runtime retry remains pending at this checkpoint.
