@@ -80,6 +80,10 @@ class Plan:
     machine: int
     places: list
     sections: list
+    signature: bytes = b""
+    nodes: tuple = ()
+    arena_bytes: int = 0
+    offsets: tuple = ()
 
 
 # rdma/mesh-dataflow.h mesh_view_whole, mesh_nodes_read; rdma/mesh-collective.h mesh_plan;
@@ -111,16 +115,6 @@ class Scheduled:
     stored: dict = None
     invariant: dict = None
     functions: dict = None
-
-
-# design/synchronization-signature-change-request.md item 1; compiler/mesh_compiler/runtime.py Program;
-# compiler/mesh_compiler/signature.py handed
-def call(scheduled, machine):
-    local = [processor for processor in scheduled.inputs if scheduled.machines[processor] == machine]
-    caller = scheduled.output_processor if scheduled.output_processor in local else next(iter(local), None)
-    others = [processor for processor in local if processor != caller]
-    started = scheduled.plan is not None
-    return caller, others, others if caller != scheduled.output_processor or started else [], started
 
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4, 6 and 8; design/review-warnings.md rule 5

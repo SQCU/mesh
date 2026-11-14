@@ -115,7 +115,9 @@ def extent(value):
     return value.dtype.itemsize * mesh_graph.extent(value.shape, value.stride())
 
 
-# rdma/mesh-collective.h mesh_plan, mesh_plan_save; compiler/mesh_compiler/ir.py Planning
+# rdma/mesh-collective.h mesh_plan, mesh_plan_save; compiler/mesh_compiler/ir.py Planning; rdma/mesh-graph.h
+# mesh_graph_archive; rdma/mesh-dataflow.h mesh_view_values; design/compilation-composition-change-request.md items
+# 3, 6.4 and 7
 def solved(plan, planning):
     function, _ = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences, plan.outstanding,
                                 plan.tasks, plan.before, plan.senders, plan.receivers, plan.resources)
@@ -127,9 +129,14 @@ def solved(plan, planning):
     mesh.check(mesh.LIB.mesh_plan_save(context, *operands, C.byref(made), C.byref(record), C.byref(length)))
     plan.completion = list(function[0].completion[:len(plan.tasks)])
     plan.order = list(function[0].order[:len(plan.tasks)])
-    plan.sections = [[getattr(value.section, name) for name, _ in mesh.Section._fields_]
-                     for value in function[0].value[:len(plan.values)]]
+    sections = [value.section for value in function[0].value[:len(plan.values)]]
+    plan.sections = [[getattr(section, name) for name, _ in mesh.Section._fields_] for section in sections]
     plan.record = C.string_at(record, length.value)
+    plan.signature, plan.nodes = mesh_graph.archive(made.signature.contents), tuple(planning.nodes)
+    first, offset, view = (mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(), mesh.View()
+    mesh.LIB.mesh_view_values(context, function, 1, first, offset, C.byref(view))
+    plan.arena_bytes = view.bytes
+    plan.offsets = tuple(tuple(offset[first[value]:first[value + 1]]) for value in range(len(sections)))
     mesh.LIB.mesh_planned_free(C.byref(made))
     SYSTEM.free(record)
     return plan
