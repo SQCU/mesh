@@ -2042,9 +2042,6 @@ def _recorder():
         lib.MetalProgramCheckFailure.restype = C.c_int
         lib.MetalProgramCheckFailure.argtypes = [C.c_void_p, C.POINTER(CheckFailure)]
         lib.MetalReplayDestroy.restype, lib.MetalReplayDestroy.argtypes = None, [C.POINTER(Replay)]
-        lib.MetalProgramSignature.restype = C.c_int
-        lib.MetalProgramSignature.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, C.POINTER(mesh_graph.Signature),
-                                              C.c_char_p, C.c_size_t]
         metal.MTLCreateSystemDefaultDevice.restype = C.c_void_p
         RECORDER.append((lib, metal.MTLCreateSystemDefaultDevice))
     return RECORDER[0]
@@ -4205,18 +4202,31 @@ def _polar(x, max_iterations=10):
     for a_minus_e_by_sqrt_c, sqrt_c, e in qr_coefs:
         q = torch.linalg.qr(torch.cat([sqrt_c * current, identity.expand(*batch, n, n)], -2)).Q
         current = e * current + a_minus_e_by_sqrt_c * torch.matmul(q[..., :m, :], q[..., m:, :].mH)
-    previous = None
-    for a_minus_e, c, e in chol_coefs:
-        uh = current.mH
-        y = torch.linalg.cholesky_ex(c * torch.matmul(uh, current) + identity).L
+
+    # _use_cholesky's step, and _qdwh's test of it: converged unless norm(u - u_prev) > tol_norm
+    def cholesky_step(u, a_minus_e, c, e):
+        uh = u.mH
+        y = torch.linalg.cholesky_ex(c * torch.matmul(uh, u) + identity).L
         z = torch.linalg.solve_triangular(y, uh, upper=False)
         w = torch.linalg.solve_triangular(y.mH, z, upper=True)
-        previous, current = current, e * current + a_minus_e * w.mH
-    if previous is None:
-        converged = torch.zeros(batch, dtype=torch.bool, device=x.device)
-    else:
-        distance = (current - previous).abs()
-        converged = ((distance * distance).sum((-2, -1)).sqrt() > tol_norm).logical_not()
+        return e * u + a_minus_e * w.mH
+
+    def converges(step, u):
+        distance = (step - u).abs()
+        return ((distance * distance).sum((-2, -1)).sqrt() > tol_norm).logical_not()
+    # without Cholesky coefficients `iterate` returns is_not_converged True; with them, the last step's test
+    converged = torch.zeros(batch, dtype=torch.bool, device=x.device)
+    for a_minus_e, c, e in chol_coefs:
+        step = cholesky_step(current, a_minus_e, c, e)
+        converged, current = converges(step, current), step
+    # _qdwh cond_fun and body_fun: from k = len(qr_coefs) + len(chol_coefs), while not converged and k < max_iterations,
+    # Halley's method, get_chol_params(3, 1, 3) = (3 - 1/3, 3, 1/3), each step tested; a batch member, once its test
+    # passes, keeps its iterate (its loop has ended), the others take the step
+    for _ in range(len(qr_coefs) + len(chol_coefs), max_iterations):
+        step = cholesky_step(current, 3 - 1 / 3, 3, 1 / 3)
+        passed = converges(step, current)
+        current = torch.where(converged[..., None, None], current, step)
+        converged = converged | passed
     u = 1.5 * current - 0.5 * torch.matmul(current, torch.matmul(current.mH, current))
     product = torch.matmul(u.mH, x)
     return u, (product + product.mH) / 2, converged
