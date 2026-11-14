@@ -69,6 +69,11 @@ class Exported:
     # program's call interface, the inspect.Signature of exactly its compiled slot parameters (export.capture) and the
     # TreeSpec of their bound values in parameter order (one child a parameter); None for a function's own export
     interface: tuple = None
+    # torch 2.14.0 torch/export/graph_signature.py InputSpec ConstantArgument; compiler/mesh_compiler/export.py read and
+    # capture: each specialized literal user input as (its input placeholder's name, the literal compiled for it); a
+    # function's from its own ConstantArgument input specs, an outer program's each outer user placeholder some call's
+    # ConstantArgument input came from, in user input order
+    specialized: tuple = ()
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

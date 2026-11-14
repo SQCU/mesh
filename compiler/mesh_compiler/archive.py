@@ -29,7 +29,8 @@ def save(directory, scheduled):
     signature, spec = exported.interface
     torch.save({"state": {name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()},
                 "defaults": {name: parameter.default for name, parameter in signature.parameters.items()
-                             if parameter.default is not inspect.Parameter.empty}}, directory / "state.pt")
+                             if parameter.default is not inspect.Parameter.empty},
+                "specialized": exported.specialized}, directory / "state.pt")
     (directory / "scheduled.json").write_text(json.dumps({
         "output_processor": scheduled.output_processor,
         "processors": {processor: str(device) for processor, device in scheduled.devices.items()},
@@ -60,7 +61,7 @@ def load(directory):
     directory = pathlib.Path(directory)
     about = json.loads((directory / "scheduled.json").read_text())
     payload = torch.load(directory / "state.pt", map_location="cpu", weights_only=True)
-    state, defaults = payload["state"], payload["defaults"]
+    state, defaults, specialized = payload["state"], payload["defaults"], payload["specialized"]
     outputs = [(OutputKind[kind], key) for kind, key in about["outputs"]]
     signature = inspect.Signature([inspect.Parameter(name, getattr(inspect.Parameter, kind),
                                                      default=defaults.get(name, inspect.Parameter.empty))
@@ -68,7 +69,8 @@ def load(directory):
     exported = Exported(None, state, about["tokens"], about["user_inputs"], outputs,
                         pytree.treespec_loads(about["out_spec"]),
                         {name: InputKind[kind] for name, kind in about["state_kinds"].items()},
-                        interface=(signature, pytree.treespec_loads(about["interface"]["spec"])))
+                        interface=(signature, pytree.treespec_loads(about["interface"]["spec"])),
+                        specialized=specialized)
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     functions = {processor: native.restore(saved, directory) for processor, saved in about["targets"].items()}
     (target,) = functions.values()

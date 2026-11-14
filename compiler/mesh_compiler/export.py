@@ -13,7 +13,7 @@ from torch._higher_order_ops.map import map_dense
 from torch._higher_order_ops.scan import generic_scan
 from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode
 from torch.export.experimental import _export_forward_backward
-from torch.export.graph_signature import InputKind, OutputKind
+from torch.export.graph_signature import ConstantArgument, InputKind, OutputKind
 from torch.fx._symbolic_trace import PHWithMeta
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -172,6 +172,10 @@ def read(program, aliases=None):
             state[name], state_kinds[name] = (spec.target, program.constants[spec.target]), spec.kind
         else:
             raise NotImplementedError(f"input kind {spec.kind}")
+    # torch 2.14.0 torch/export/graph_signature.py ConstantArgument: each literal user input the export specialized,
+    # its placeholder's name and value as the input spec gives them
+    specialized = tuple((spec.arg.name, spec.arg.value) for spec in signature.input_specs
+                        if isinstance(spec.arg, ConstantArgument))
 
     for node in nodes:
         if node.op == "placeholder" and node.name in state:
@@ -209,7 +213,7 @@ def read(program, aliases=None):
     program.graph_module.recompile()
     return Exported(program.graph_module, state, tokens, user_inputs, outputs,
                     returned(program.call_spec.out_spec, outputs, signature.backward_signature is not None),
-                    state_kinds, aliases)
+                    state_kinds, aliases, specialized=specialized)
 
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and
@@ -281,7 +285,7 @@ class Captured(torch.fx.Interpreter):
     def __init__(self, module, functions, options, fake):
         super().__init__(module)
         self.functions, self.options, self.fake, self.exported, self.bound = functions, options, fake, {}, {}
-        self.attributes = {}
+        self.attributes, self.specialized = {}, {}
         with fake:
             self.token = torch.empty(0)
 
@@ -307,6 +311,14 @@ class Captured(torch.fx.Interpreter):
             with torch.enable_grad():
                 self.exported[key] = export(module, args, kwargs=kwargs, **self.options)
         function, names = self.exported[key], placeholders(self.exported[key])
+        # torch/utils/_pytree.py TreeSpec.flatten_up_to: each of the call's leaves under the original FX argument it
+        # came from (the calling node's own args and kwargs, before capture replaces them); each ConstantArgument user
+        # input of the function (Exported.specialized) recorded on that original argument with its compiled literal
+        sources, layout = pytree.tree_flatten((self.calling.args, self.calling.kwargs))
+        origins = [source for source, part in zip(sources, layout.flatten_up_to((args, kwargs)), strict=True)
+                   for _ in pytree.tree_leaves(part)]
+        for name, value in function.specialized:
+            self.specialized[origins[function.user_inputs.index(name)]] = value
         values = [self.fake.from_tensor(function.state[name][1]) if name in function.state
                   else self.token if name in function.tokens else leaves[function.user_inputs.index(name)]
                   for name in names]
@@ -501,9 +513,12 @@ def capture(module, bound, functions, options, root):
             if node.op == "call_function" and (torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())
                                                or getattr(node.target, "overloadpacket", None) in DRAWING):
                 node.meta["site"] = next(sites)
+    # Exported.specialized: each outer user placeholder some call's ConstantArgument input came from (Captured.captured),
+    # once, in user input order; a call's literal from a source constant or a prior call's result is no user input
     exported = Exported(module, state, tokens, [node.name for node in users],
                         [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds,
-                        interface=interface)
+                        interface=interface, specialized=tuple((node.name, interpreter.specialized[node])
+                                                               for node in users if node in interpreter.specialized))
     return CapturedProgram(exported, interpreter.exported, bound)
 
 

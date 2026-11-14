@@ -1,5 +1,7 @@
 # design/data-flow.md; design/compilation-composition-change-request.md item 7; schedule-emit/schedule_emit/runtime.py;
 # design/compiler-archive-assignment-2026-11-13.md: the selected group entry's completed Target, Scheduled.functions
+import math
+
 import torch
 from torch.export.graph_signature import InputKind
 from torch.utils import _pytree as pytree
@@ -8,13 +10,28 @@ from . import bridge
 from .ir import RETURNED
 
 
+# torch 2.14.0 torch/_export/utils.py _check_input_constraints_for_graph, lines 487–504, its int, float and str literal
+# branch as written (a bool by its int class): an argument for a specialized literal input of another type or value, or
+# not nan for a nan, does not run the program compiled for that literal
+def literal(path, node_val, arg):
+    if type(arg) is not type(node_val):
+        raise RuntimeError(f"Expected input at {path} to be equal to {node_val}, but got {arg}")
+    if isinstance(node_val, float) and math.isnan(node_val):
+        if not isinstance(arg, float) or not math.isnan(arg):
+            raise RuntimeError(f"Expected input at {path} to be nan, but got {arg}")
+    elif arg != node_val:
+        raise RuntimeError(f"Expected input at {path} to be equal to {node_val}, but got {arg}")
+
+
 # torch 2.14.0 torch/export/graph_signature.py InputKind; Python inspect Signature.bind and BoundArguments
 # apply_defaults; torch/utils/_pytree.py TreeSpec.flatten_up_to; compiler/mesh_compiler/ir.py Exported.interface: each
 # placeholder's actual state or user handle, as given (its device the explicit graph copies govern), aliases kept, the
 # call's arguments bound by the captured slot Signature (its own errors for a missing, unexpected or wrong-kind
 # argument), its defaults applied, and their user leaves the retained TreeSpec's children of the bound values in its
-# structure and key order (its own arity and context errors); prepared once, each live PARAMETER or BUFFER tensor
-# with its entry positions and each user input's entry positions (empty where the selected entry has none)
+# structure and key order (its own arity and context errors), each specialized literal user leaf (Exported.specialized,
+# a value of the upstream literal branch's classes) checked by `literal`; prepared once, each live PARAMETER or BUFFER
+# tensor with its entry positions, each user input's entry positions (empty where the selected entry has none) and
+# each specialized literal's (flat user leaf index, compiled literal)
 class Arguments:
     def __init__(self, scheduled, entry=None):
         self.entry = scheduled.output_processor if entry is None else entry
@@ -34,6 +51,8 @@ class Arguments:
             positions.setdefault(name, []).append(position)
         self.live = tuple((tensor, tuple(positions.get(name, ()))) for name, tensor in live.items())
         self.users = tuple(tuple(positions.get(name, ())) for name in self.exported.user_inputs)
+        self.specialized = tuple((self.exported.user_inputs.index(name), value)
+                                 for name, value in self.exported.specialized if isinstance(value, (int, float, str)))
 
     def bind(self, positions, value):
         for position in positions:
@@ -45,6 +64,8 @@ class Arguments:
         bound = self.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         flat = self.spec.flatten_up_to(tuple(bound.arguments.values()))
+        for k, value in self.specialized:
+            literal(self.exported.user_inputs[k], value, flat[k])
         for positions, value in zip(self.users, flat, strict=True):
             self.bind(positions, value)
         return self.arguments
