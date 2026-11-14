@@ -474,14 +474,16 @@ class Target:
             wires = tuple(dict.fromkeys(declared[4] for declared, _ in intrinsic if declared[4] != mesh.ABSENT))
             self.call_ports.append((ports, wires))
 
-    # metal-microbench metal_ir.h metal_ir_value_external, metal_ir_value_planned, metal_ir_specialize and
-    # metal_ir_construct; metal_ir.mm ExternallyVisible and Storages (Value.placed): each numerical body's slots marked
-    # external (the callable table capability); its calls grouped by their construction facts (each call's intrinsic
-    # wires, its planned roots: a sent wire is a TEMPORARY root; its other port roots are interface roots, visible by
-    # their roles); each group's program given its first call's wires' planned identity (plan value (plan_calls[j],
-    # root), rebound on each instance) and constructed once, the body's own program the first group's and, made before
-    # its construction, a construction-ready copy of it each further group's; `templates[j]` call j's constructed
-    # program, None where its function has no body on this node; the copies released with `owned`
+    # metal-microbench metal_ir.h metal_ir_value_external, metal_ir_value_planned, metal_ir_clone and
+    # metal_ir_construct; metal_ir.mm ExternallyVisible and Realize (a storage with a planned value, its symbolic plan
+    # function/index identity, is visible and kept; no physical placement or buffer is implied): each numerical body's
+    # slots marked external (the callable table capability); its calls grouped by their construction facts (each call's
+    # intrinsic wires, its planned roots: a sent wire is a TEMPORARY root; its other port roots are interface roots,
+    # visible by their roles); each group's program given its first call's wires' planned identity (plan value
+    # (plan_calls[j], root), rebound on each instance) and constructed once, the body's own program the first group's
+    # and, cloned from it before its construction (metal_ir_clone: every value, operation and region identity the
+    # source's, its external marks included), a copy each further group's; `templates[j]` call j's constructed program,
+    # None where its function has no body on this node; the copies released with `owned`
     def constructed(self, plan_calls, libs, owned):
         M, compiler, (_, device), _ = libs
         error, templates = C.create_string_buffer(ROOM), [None] * len(self.rows)
@@ -493,7 +495,7 @@ class Target:
                 groups.setdefault(self.call_ports[j][1], []).append(j)
             programs = [program]
             for _ in range(len(groups) - 1):
-                copy = made(compiler.metal_ir_specialize(program, error, ROOM), error, "a construction class")
+                copy = made(compiler.metal_ir_clone(program, error, ROOM), error, "a construction class")
                 owned(lambda copy=copy: compiler.metal_ir_program_free(copy))
                 programs.append(copy)
             gpu = device()

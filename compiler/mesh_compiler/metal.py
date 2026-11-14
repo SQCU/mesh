@@ -469,6 +469,7 @@ def _compiler():
                 ('metal_ir_lower', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_finalize', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_specialize', P, [P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_clone', P, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_machine', None, [P, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine)])):
             function = getattr(lib, name)
             function.restype, function.argtypes = result, arguments
