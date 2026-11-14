@@ -61,6 +61,10 @@ class Exported:
     outputs: list
     out_spec: object
     state_kinds: dict
+    # compiler/patches/torch-export-alias-metadata.patch; compiler/mesh_compiler/export.py export: compilation only, the
+    # export's AOT forward metadata (ViewAndMutationMeta), each AOT input's (InputKind, state target or user input
+    # position), each AOT input's and output's prototype value
+    aliases: tuple = None
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

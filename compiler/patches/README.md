@@ -2,6 +2,83 @@
 
 Style: [Google developer documentation style guide, highlights](https://developers.google.com/style/highlights).
 
+## `torch-export-alias-metadata.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`).
+
+- `torch/_functorch/_aot_autograd/input_output_analysis.py` `create_graph_signature` is the AOT step that both
+  `aot_export_module` (`run_decompositions` and `_export_forward_backward`) and
+  `torch/export/_trace.py` `_aot_export_joint_with_descriptors` call with the trace's own `fx_g` and `fw_metadata`.
+  Initial public `torch.export.export` uses `_export_to_aten_ir_make_fx`; its existing `run_decompositions` then
+  reaches this AOT producer.
+- `torch/export/experimental/__init__.py` `_copy_graph_module_and_signature`, the deepcopy inside
+  `_export_forward_backward`.
+
+### What it changes
+
+- **`create_graph_signature`** sets `fx_g.meta["aot_aliases"] = (fw_metadata, placeholders[num_tokens:], output
+  leaves[num_tokens : num_tokens + num_mutated_inp_runtime_indices + num_outputs + num_intermediate_bases])`, where
+  `num_tokens = len(fw_metadata.tokens)`.
+  - That is the forward metadata (ViewAndMutationMeta, with each OutputAliasInfo and ViewMetaSequence), the graph's
+    own input Nodes without tokens, and its forward output leaves without tokens or appended gradients. Scalar leaves
+    are kept.
+  - `ExportedProgram.__init__` carries `meta` into the program it builds.
+- **`_copy_graph_module_and_signature`** reads that record with `.get`, so the source program's `meta` is untouched.
+  It passes the existing deepcopy memo `{id(record): record}` to its `copy.deepcopy`, so the copy's `meta` holds the
+  same tuple and metadata owner rather than a copy. It then sets the copy's record with the Nodes remapped through
+  the copy's own node order (`zip` of the old and new graphs' nodes), so the copied program's record names its own
+  Nodes.
+
+`compiler/mesh_compiler/export.py` `export` pops the record from the first AOT result it produces: the
+`_export_forward_backward` program with a loss, before `run_decompositions`, which drops its own; otherwise the
+`run_decompositions` program. `_decompose_exported_program`'s `gm.meta.update(ep.graph_module.meta)` therefore
+carries no stale record. `Captured` replays the record with `_RuntimeForwardEpilogue`.
+
+### Target
+
+| Item | Value |
+|---|---|
+| Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor with a fuzz-0 dry run and application |
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/_functorch/_aot_autograd/input_output_analysis.py` | before `64da2ac0ed7c7102ce5cd18849248a5a6998cd7399380d1101f02689d0018715`, after `c22dc4ab26febeddca53f1046ef9b4e8d51a1c3de48b214d58fc8682291db24f` |
+| `torch/export/experimental/__init__.py` | before `01b2d7575c126f5e53a34c481a0995637752d2c23a494ad66c411e6b44cd8d3d`, after `fbafa5a99821ef2f2cef78dab657ee7d60c48a44e881c8ef0698c803865186eb` |
+| `torch/export/_trace.py` | not changed by this patch: original `28f46a16edfdecd9b7f3c1cbf388e6ca7a3c53e5d0d88ade81aefe9c42d203dd` |
+
+The context lines are the installed source as read: `create_graph_signature` lines 492-497, and
+`_copy_graph_module_and_signature` lines 28-33 and 44-49.
+
+### Apply, check, reverse
+
+From the repository root:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+shasum -a 256 $SITE/torch/_functorch/_aot_autograd/input_output_analysis.py $SITE/torch/export/experimental/__init__.py
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-export-alias-metadata.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-export-alias-metadata.patch
+shasum -a 256 $SITE/torch/_functorch/_aot_autograd/input_output_analysis.py $SITE/torch/export/experimental/__init__.py
+```
+
+- The first `shasum` must print the "before" hashes in the table above, and the second the "after" hashes.
+- To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-export-alias-metadata.patch`.
+- This is a pure Python source, so no rebuild is needed. The patch adds no import hook or `sitecustomize`.
+
+### Check after applying
+
+With `TORCH_DEVICE_BACKEND_AUTOLOAD=0`:
+
+1. The public export plus `run_decompositions` on the noncontiguous case (`x = arange(8)[::2]`, `x.add_(y)`,
+   `return x[1:]`). The returned value should alias x with stride 2 and offset 2, and the real input should be
+   unchanged.
+2. Then `frontends/torch/observe/fake_export.py`.
+3. Then the static source observation.
+
+The strict capture observations passed: original mutation alias/stride/offset, gradient-to-function composition,
+Mapped/Scanned normalization and the fixed-result least-squares source assertion/site. The final copy observation
+also confirms the source record remains identical, its metadata is shared and copied input Nodes belong to the new
+graph. Evidence and exact installed hashes are in
+`/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/aot-alias-review.md`.
+
 ## `torch-clone-input-fake-mode.patch`
 
 Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/_dynamo/utils.py` `clone_input`. `scan`'s
@@ -208,6 +285,7 @@ output_data/compiler-workgroup-20261113/executor/.
 ### Not covered (follow-ups for review)
 
 - Alias facts of multi-output fallbacks (`MultiOutputLayout`), and of ExternKernels other than `FallbackKernel`.
+
 - Mutation owners other than those listed above:
   - `TemplateBuffer` `mutated_inputs`;
   - `mkldnn_ir` and `comm_lowering` kernels;
@@ -215,3 +293,54 @@ output_data/compiler-workgroup-20261113/executor/.
   - `ExternKernelOut`/`ExternKernelMultiOut`, created from `FallbackKernel.create` for functional custom ops with an
     out variant.
 - An alias registered after its target was itself registered as a root.
+
+## `torch-lstsq-fixed-results.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), strict export through Dynamo. Five hunks in four
+files.
+
+- **Producer:** `torch/_dynamo/variables/torch.py` adds `handle_linalg_lstsq` to `TorchInGraphFunctionVariable._get_handlers`.
+  - The call is bound by `torch.fx.operator_schemas.normalize_function` (torch.linalg.lstsq's own schema). A call that
+    doesn't bind keeps torch's validation on the generic path.
+  - The call's own fake (`operations._lstsq_metadata`) decides the case. Where it raises `DynamicOutputShapeException`,
+    the residuals' shape is the data's: gelsd or gelss with m > n > 0, unbatched with nrhs > 0 or with a nonempty batch.
+    Every other call, its residuals static (an empty batch, or unbatched with nrhs 0), is the generic path's complete
+    product.
+  - For the data's case it makes one product node `torch.linalg.lstsq(input, b, rcond, driver=…)`, marked
+    `meta["lstsq_fixed"]`, plus a getitem per result slot.
+  - Slots 0, 2 and 3 carry the metadata of `mesh::linalg_lstsq_fixed`'s fake. Slot 1 (residuals) is a `TensorVariable`
+    with dtype, device and class only, and its shape unresolved.
+- **Unresolved shape:** `torch/_dynamo/variables/tensor.py` makes `dynamic_getattr` and `tp_getattro_impl` read
+  `example_value` with `.get`, so that tracker's attributes resolve from its own facts. A data use of it recomputes the
+  product's fake (`get_fake_values_from_nodes`), which raises Dynamo's "Dynamic shape operator", the existing
+  requirement.
+- **Mark handoff:** `torch/_dynamo/functional_export.py` `DynamoGraphTransformer.run_node` adds `lstsq_fixed` to its
+  copied metadata keys (line 412), so the mark reaches strict export's graph.
+- **Selection:** in `torch/export/_trace.py` `_strict_export`, after `_export_to_torch_ir`, each marked product whose
+  slot-1 getitem has no users (or no longer exists) becomes `mesh::linalg_lstsq_fixed`. The slot comes from each
+  getitem's own `args[1]`, and getitems 0, 2 and 3 are re-indexed to 0, 1 and 2. A product with any other user is left
+  as it is.
+
+The operator, its fake, its autograd (solution only; rank and singular values marked non-differentiable) and its
+lowering are `compiler/mesh_compiler/operations.py`'s (`LSTSQ_FIXED`).
+
+### Target
+
+| Item | Value |
+|---|---|
+| Install scope | `/Users/mdot/.venv-mesh-uv`, supervisor-applied 2026-11-14 after frontend's observation hold; fuzz 0 dry-run/application and four-file AST passed |
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/_dynamo/variables/tensor.py` | before `0ce323ae582d1268cbaf318a366ae4224e2eb148740bbd55e136190a0119e443`, after `2505c17558e511a1e8296fb0869b90e37e9bb74fa34116dce710dca606612ec1` |
+| `torch/_dynamo/variables/torch.py` | before `28e9fce5a40ee7038f1ee8517d73781655849da99a02a560ae8c71ea39042995`, after `cd924d13538aef3d6f1814d160ddce610612a135e87109cc0fbd4188c5df5878` |
+| `torch/_dynamo/functional_export.py` | before `646aeca84acd49def77dca8f1bc0fe0ef1fedc07641182f7c65fe8d37a9ab46e`, after `aa2e63d83e8843cb1329070a55ae9398192f66d5c0f3f65a7577434977e06bda` |
+| `torch/export/_trace.py` | before `28f46a16edfdecd9b7f3c1cbf388e6ca7a3c53e5d0d88ade81aefe9c42d203dd`, after `82a87c00dfd323b23ac8f95a0f8d5673e49a25dbd03f9d0bebef14a1a4d9c6a0` (this patch alone) |
+
+- `patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-lstsq-fixed-results.patch`
+  passed against the recorded before files, followed by application and AST checks. Exact command and hashes are in
+  `output_data/compiler-workgroup-20261114/compiler/lstsq-fixed-install.json`.
+- The frontend's `torch-export-alias-metadata.patch` no longer changes `torch/export/_trace.py`; its earlier hunk there
+  was reversed. The `_trace.py` "after" hash above is for this patch alone.
+- The connected ordinary capture of `compiler/lstsq-fixed-command.md` now passes with the paired alias consumer and
+  strict default: the fixed three-result product, original source assertion and original draw site survive. Source
+  evidence is `/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/observe/aot-alias-strict-contracts.json`.
+  This is capture evidence; numerical execution follows the matching native release.

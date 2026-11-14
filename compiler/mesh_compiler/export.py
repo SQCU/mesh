@@ -22,15 +22,17 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils import _pytree as pytree
 
 from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, written
+from .operations import LSTSQ_FIXED
 
 COPY = torch.ops.aten.copy.default
 # torchgen/gen_functionalization_type.py gen_composite_view_copy_kernel: a view_copy operator's registered kernel key
 VIEW_COPY = torch._C.DispatchKey.CompositeExplicitAutogradNonFunctional
 # pub13 section 5.1 case (i): an eigh outlined on a non-CPU engine (compiler/mesh_compiler/decompose.py outline) draws
 # its Haar restarts at its own source site, carried to its QDWH steps as data (operations.QDWH_EIGH_STEP `site`); a
-# pinv, svd or lstsq (each overload) is a draw source too, its expanded svd and eigh keeping its declared site
+# pinv, svd or lstsq (each overload, and compiler/mesh_compiler/operations.py LSTSQ_FIXED, the fixed-result lstsq) is a
+# draw source too, its expanded svd and eigh keeping its declared site
 DRAWING = (torch.ops.aten._linalg_eigh, torch.ops.aten.linalg_pinv, torch.ops.aten._linalg_svd,
-           torch.ops.aten.linalg_lstsq)
+           torch.ops.aten.linalg_lstsq, LSTSQ_FIXED.overloadpacket)
 
 
 # torch 2.14.0 torch/_higher_order_ops/scan.py generic_scan: the scan HOP's operands (combine_fn, init, xs,
@@ -99,13 +101,16 @@ def lifted(program, module):
 # design/unequal-shards-change-request.md item 8; design/torch-source-lowering-change-request.md item 2; torch 2.14.0
 # torch/export/experimental/__init__.py _export_forward_backward and torch/export/exported_program.py
 # run_decompositions and default_decompositions; torch/_ops.py OpOverload has_kernel_for_dispatch_key and _op_dk;
-# torchgen/gen_functionalization_type.py gen_composite_view_copy_kernel: the program's one normalization, before it is
-# read: each fixed map or scan call expanded (`expand`, each call once, a call the expansion exposes after it), its
+# torchgen/gen_functionalization_type.py gen_composite_view_copy_kernel: the program's one capture, torch.export's
+# strict one unless the caller states `strict` (compiler/patches/torch-lstsq-fixed-results.patch), and its one
+# normalization, before it is read: each fixed map or scan call expanded (`expand`, each call once, a call the expansion exposes after it), its
 # exposed tensor attributes lifted, then its forward and backward (a loss) and run_decompositions once over the default
 # table with each captured view_copy operator (torch.Tag.view_copy) that has a CompositeExplicitAutogradNonFunctional
-# kernel decomposed by that registered kernel (its view, then a clone), and any tensor attribute left lifted
+# kernel decomposed by that registered kernel (its view, then a clone), and any tensor attribute left lifted; the alias
+# record (`aot_aliases`) the first AOT result's, with a loss the forward and backward's, popped before
+# run_decompositions (whose own record is then popped and dropped), else run_decompositions'
 def export(module, args, loss=None, **export_options):
-    program = torch.export.export(module, args, **export_options)
+    program, aliases = torch.export.export(module, args, **{"strict": True, **export_options}), None
     graph_module = program.graph_module
     while pending := [n for n in graph_module.graph.nodes if n.op == "call_function" and n.target in STATIC]:
         expand(graph_module, pending[0])
@@ -114,15 +119,34 @@ def export(module, args, loss=None, **export_options):
     if loss is not None:
         with sdpa_kernel(SDPBackend.MATH):
             program = _export_forward_backward(program, joint_loss_index=loss)
+        aliases = aot_aliases(program)
     table = torch.export.default_decompositions()
     for node in program.graph_module.graph.nodes:
         if (node.op == "call_function" and isinstance(node.target, torch._ops.OpOverload)
                 and torch.Tag.view_copy in node.target.tags and node.target.has_kernel_for_dispatch_key(VIEW_COPY)):
             table[node.target] = functools.partial(node.target._op_dk, VIEW_COPY)
-    return read(lifted(program.run_decompositions(table), module))
+    program = lifted(program.run_decompositions(table), module)
+    later = aot_aliases(program)
+    return read(program, later if aliases is None else aliases)
 
 
-def read(program):
+# compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py
+# create_graph_signature `aot_aliases`, carried by torch/export/experimental/__init__.py
+# _copy_graph_module_and_signature); torch/export/graph_signature.py InputSpec: an AOT result's retained forward
+# record, popped from that program once: its ViewAndMutationMeta, each AOT input's role by that program's own input spec
+# of the input's Node (a parameter, buffer or constant its InputKind and target, a user input USER_INPUT and its
+# position among the user inputs), and each AOT input's and forward output's prototype value (no Node kept)
+def aot_aliases(program):
+    metadata, inputs, outputs = program.graph_module.meta.pop("aot_aliases")
+    specs = {spec.arg.name: spec for spec in program.graph_signature.input_specs}
+    users = [spec.arg.name for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT]
+    roles = tuple((specs[node.name].kind, users.index(node.name) if specs[node.name].kind == InputKind.USER_INPUT
+                   else specs[node.name].target) for node in inputs)
+    return metadata, roles, *(tuple(leaf.meta.get("val") if isinstance(leaf, torch.fx.Node) else leaf for leaf in leaves)
+                               for leaves in (inputs, outputs))
+
+
+def read(program, aliases=None):
     graph_module, signature = program.graph_module, program.graph_signature
     nodes = list(graph_module.graph.nodes)
 
@@ -183,7 +207,7 @@ def read(program):
     program.graph_module.recompile()
     return Exported(program.graph_module, state, tokens, user_inputs, outputs,
                     returned(program.call_spec.out_spec, outputs, signature.backward_signature is not None),
-                    state_kinds)
+                    state_kinds, aliases)
 
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and
@@ -228,14 +252,18 @@ def placeholders(function):
 # arguments and each function's state as its fakes, storages shared where the actual ones are; torch.fx Interpreter:
 # the program interpreted once at compile time on them, each call's function exported once per key (its target, its
 # arguments' structure, each leaf's dtype, device, requires_grad, shape, stride, offset and storage among the call's
-# leaves); torch/_functorch/functional_call.py functional_call: the call's source forward on its fake arguments and
-# its module's fake parameters and buffers, its user and loss outputs that forward's result leaves (a returned input
-# or view of one that input's fake), a mutation output the written fake itself, a token output its exported
-# output's own value and each gradient output its exported output's own value in the capture mode by this call's one
-# FakeTensorConverter.from_real_tensor (one converter a call, so a call of a reused export has its own gradients and
-# the call's gradients keep their views and storages among themselves); the call's value its function's own result (compiler/mesh_compiler/ir.py RETURNED
-# outputs under its out_spec, a TrainingResult with a loss), read between calls by item or by a named field; no
-# actual state or argument is read for its contents or written
+# leaves); compiler/mesh_compiler/ir.py Exported.aliases and torch/_functorch/_aot_autograd/runtime_wrappers.py
+# _RuntimeForwardEpilogue (capture_orig_inputs, finalize: input mutations, make_output_handler alias replay through
+# gen_alias_from_base and the retained ViewMetaSequence): the call's actual fakes in the AOT input order (each state
+# target's fake, each user input's leaf), the AOT outputs (mutated inputs, forward outputs, intermediate bases) the
+# prototypes realized by this call's one FakeTensorConverter (seeded with each input prototype's actual fake), the
+# epilogue applying the mutations to the call's fakes and returning the forward outputs (the intermediate bases only its
+# alias operands); its user and loss outputs those values, a mutation output the written fake itself, a token output its exported
+# output's own value and each gradient output its exported output's own value through the same converter (so a call
+# of a reused export has its own results, keeping their views and storages among themselves); the call's value its
+# function's own result (compiler/mesh_compiler/ir.py RETURNED outputs under its out_spec, a TrainingResult with a
+# loss), read between calls by item or by a named field; no source forward is run and no actual state or argument is
+# read for its contents or written
 class Captured(torch.fx.Interpreter):
     def __init__(self, module, functions, options, fake):
         super().__init__(module)
@@ -261,12 +289,20 @@ class Captured(torch.fx.Interpreter):
         values = [self.fake.from_tensor(function.state[name][1]) if name in function.state
                   else self.token if name in function.tokens else leaves[function.user_inputs.index(name)]
                   for name in names]
-        held = {name: self.fake.from_tensor(tensor) for name, tensor in [
-            *module.named_parameters(remove_duplicate=False), *module.named_buffers(remove_duplicate=False)]}
+        from torch._functorch._aot_autograd.runtime_wrappers import _RuntimeForwardEpilogue
+        metadata, roles, prototypes, results = function.aliases
+        tensors, converter = dict(function.state.values()), FakeTensorConverter()
+        actual = [leaves[k] if kind == InputKind.USER_INPUT else self.fake.from_tensor(tensors[k]) for kind, k in roles]
+        for prototype, value in zip(prototypes, actual, strict=True):
+            if isinstance(prototype, torch.Tensor) and isinstance(value, torch.Tensor):
+                converter.set_tensor_memo(prototype, value)
+        epilogue = _RuntimeForwardEpilogue(metadata, trace_joint=False, keep_input_mutations=False)
         with self.fake, torch.enable_grad():
-            result = torch.func.functional_call(module, held, tuple(args), kwargs)
-        forward, exported = iter(pytree.tree_leaves(result)), function.graph_module.graph.output_node().args[0]
-        stated, converter = {target: name for name, (target, _) in function.state.items()}, FakeTensorConverter()
+            outs = [converter.from_real_tensor(self.fake, value) if isinstance(value, torch.Tensor) else value
+                    for value in results]
+            forward = iter(epilogue.finalize(epilogue.capture_orig_inputs(actual), outs))
+        exported = function.graph_module.graph.output_node().args[0]
+        stated = {target: name for name, (target, _) in function.state.items()}
         produced = tuple(
             next(forward) if kind in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT)
             else values[names.index(stated[target] if kind == OutputKind.BUFFER_MUTATION else target)]

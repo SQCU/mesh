@@ -1,0 +1,46 @@
+--- a/torch/_functorch/_aot_autograd/input_output_analysis.py
++++ b/torch/_functorch/_aot_autograd/input_output_analysis.py
+@@ -492,6 +492,14 @@
+             - num_tokens
+         )
+
++    fx_g.meta["aot_aliases"] = (
++        fw_metadata,
++        tuple(fx_g.graph.find_nodes(op="placeholder"))[num_tokens:],
++        tuple(fx_g.graph.output_node().args[0])[
++            num_tokens : num_tokens + fw_metadata.num_mutated_inp_runtime_indices
++            + fw_metadata.num_outputs + fw_metadata.num_intermediate_bases
++        ],
++    )
+     return GraphSignature.from_tracing_metadata(
+         in_spec=in_spec,
+         out_spec=out_spec,
+--- a/torch/export/experimental/__init__.py
++++ b/torch/export/experimental/__init__.py
+@@ -28,7 +28,8 @@
+     # and this can break placeholder names in some particular cases.
+     # For example, node copying will avoid Python keywords like 'input', suffixing and renaming to 'input_1'.
+     # So we manually overwrite placeholder names by reading the old graph.
+-    gm = copy.deepcopy(ep.graph_module)
++    aliases = ep.graph_module.meta.get("aot_aliases")
++    gm = copy.deepcopy(ep.graph_module, {id(aliases): aliases})
+     new_graph_signature = copy.deepcopy(ep.graph_signature)
+
+     # iterate over old/new graph modules
+@@ -43,8 +44,16 @@
+             )
+         for old_node, new_node in zip(old_phs, new_phs):
+             new_node.name = old_node.name
+
++    if aliases is not None:
++        copied = dict(zip(ep.graph_module.graph.nodes, gm.graph.nodes))
++        metadata, inputs, outputs = aliases
++        gm.meta["aot_aliases"] = (
++            metadata,
++            tuple(copied[node] for node in inputs),
++            tuple(copied[leaf] if isinstance(leaf, torch.fx.Node) else leaf for leaf in outputs),
++        )
+     return gm, new_graph_signature
+
+
+ def _remove_detach_pass(
