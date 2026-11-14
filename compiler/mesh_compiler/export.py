@@ -1,6 +1,7 @@
 # design/data-flow.md
 import inspect
 import itertools
+import math
 import operator
 
 import torch
@@ -323,9 +324,18 @@ def capture(module, args, functions, options, root):
 # design/aot-compilation-change-request.md A10; compiler/mesh_compiler/decompose.py outline: every call of function
 # `key` replaced, in place in the program's call graph, by the calls of `parts` in order, each (key, Exported, inputs,
 # results): an input ("call", i) the original call's input i or ("part", p, o) part p's output o; `results` {output o:
-# the original call's output k}, whose outer node (its value, its readers, a mutation's role) becomes part output o,
-# every other output a new outer node of a fresh fake value of the capture's mode (no storage of any other); the
-# program's other calls, functions and outer graph kept
+# the original call's output k}, whose outer node (its readers, a mutation's role) becomes part output o, every other
+# output a new outer node; the program's other calls, functions and outer graph kept. torch 2.14.0
+# torch/_subclasses/fake_tensor.py FakeTensorConverter tensor_memo, set_tensor_memo and from_real_tensor, and
+# torch/_subclasses/meta_utils.py MetaConverter set_storage_memo and MetaTensorDescriber get_tensor_id,
+# get_storage_id and describe_storage (MetaConverter.describer): each part call's one converter the one tensor and
+# storage memo, each of its placeholder prototypes the call's actual argument and its storage the actual storage, at
+# a byte origin (actual offset bytes less the prototype's, one origin a storage); every output's value its prototype
+# realized: a memoized one's memo, one on a bound storage its as_strided view of the actual storage at its own byte
+# offset plus that origin (aligned to its element; the anchor's conjugate and negative bits cleared by their view
+# toggles, a different dtype by .view over the storage's bytes aligned to both elements, then the prototype's bits and
+# requires_grad on that new view) published to the memo, any other the call's own conversion (its fresh storages and
+# their aliases its own)
 def substitute(captured, key, parts):
     graph = captured.exported.graph_module.graph
     functions = {k: f for k, f in captured.functions.items() if k != key}
@@ -346,6 +356,52 @@ def substitute(captured, key, parts):
             there.args, there.kwargs = tuple(arguments), {}
             there.meta.update(function=k)
             at, outputs = there, []
+            converter = FakeTensorConverter()
+            describer, bound = converter.meta_converter.describer, {}
+            prototypes = [n.meta.get("val") for n in exported.graph_module.graph.nodes if n.op == "placeholder"]
+            for prototype, argument in zip(prototypes, arguments, strict=True):
+                actual = argument.meta["val"] if isinstance(argument, torch.fx.Node) else argument
+                if not (isinstance(prototype, torch.Tensor) and isinstance(actual, torch.Tensor)):
+                    continue
+                converter.set_tensor_memo(prototype, actual)
+                converter.meta_converter.set_storage_memo(describer.describe_storage(prototype.untyped_storage()),
+                                                          actual.untyped_storage())
+                origin = actual.storage_offset() * actual.element_size() - \
+                    prototype.storage_offset() * prototype.element_size()
+                held = describer.get_storage_id(actual.untyped_storage()), origin, actual
+                storage = describer.get_storage_id(prototype.untyped_storage())
+                if bound.setdefault(storage, held)[:2] != held[:2]:
+                    raise ValueError(f"{node.name} part {k}: one prototype input storage declared on two actual "
+                                     f"storages or origins {bound[storage][:2]} and {held[:2]}")
+
+            def realized(prototype):
+                found = converter.tensor_memo.get(describer.get_tensor_id(prototype))
+                if found is not None:
+                    return found
+                storage = describer.get_storage_id(prototype.untyped_storage())
+                if storage not in bound:
+                    return converter.from_real_tensor(fake, prototype)
+                _, origin, anchor = bound[storage]
+                byte, element = prototype.storage_offset() * prototype.element_size() + origin, prototype.element_size()
+                if byte % element:
+                    raise ValueError(f"{node.name} part {k}: output at byte {byte} of its input storage is not aligned "
+                                     f"to its {element}-byte elements")
+                with fake:
+                    plain = anchor.conj() if anchor.is_conj() else anchor
+                    plain = plain._neg_view() if plain.is_neg() else plain
+                    if plain.dtype != prototype.dtype:
+                        span = plain.untyped_storage().nbytes()
+                        span -= span % math.lcm(plain.element_size(), element)
+                        plain = plain.as_strided((span // plain.element_size(),), (1,), 0).view(prototype.dtype)
+                    view = plain.as_strided(prototype.shape, prototype.stride(), byte // element)
+                    view = view.conj() if prototype.is_conj() else view
+                    view = view._neg_view() if prototype.is_neg() else view
+                    if view.requires_grad and not prototype.requires_grad:
+                        view = view.detach()
+                    elif prototype.requires_grad and not view.requires_grad:
+                        view.requires_grad_(True)
+                converter.set_tensor_memo(prototype, view)
+                return view
             values = exported.graph_module.graph.output_node().args[0]
             for o, value in enumerate(values):
                 if o in results:
@@ -355,12 +411,8 @@ def substitute(captured, key, parts):
                 else:
                     with graph.inserting_after(at):
                         leaf = graph.call_function(operator.getitem, (there, o))
-                    prototype = value.meta["val"] if isinstance(value, torch.fx.Node) else value
-                    if isinstance(prototype, torch.Tensor):
-                        with fake:
-                            prototype = torch.empty_strided(prototype.shape, prototype.stride(),
-                                                            dtype=prototype.dtype, device=prototype.device)
-                    leaf.meta["val"] = prototype
+                prototype = value.meta["val"] if isinstance(value, torch.fx.Node) else value
+                leaf.meta["val"] = realized(prototype) if isinstance(prototype, torch.Tensor) else prototype
                 at = leaf
                 outputs.append(leaf)
             calls[there] = Call(k, arguments, outputs)
