@@ -2033,6 +2033,8 @@ def _recorder():
         lib.MetalProgramRun.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, mesh.Q, C.c_void_p, C.c_void_p, C.c_void_p,
                                         C.c_char_p, C.c_size_t]
         lib.MetalProgramHorizon.restype, lib.MetalProgramHorizon.argtypes = mesh.U, [C.c_void_p]
+        lib.MetalProgramPhases.restype = None
+        lib.MetalProgramPhases.argtypes = [C.c_void_p, C.POINTER(mesh.Q), C.POINTER(mesh.Q)]
         lib.MetalProgramEnd.restype = C.c_int
         lib.MetalProgramEnd.argtypes = [C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalProgramCheckFailure.restype = C.c_int

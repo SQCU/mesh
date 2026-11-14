@@ -7,7 +7,6 @@
 import ctypes as C
 import dataclasses
 import errno
-import math
 import pathlib
 import sys
 import weakref
@@ -425,9 +424,9 @@ class Target:
         self.marks, self.arguments, self.results = marks, tuple(arguments), tuple(results)
         return self
 
-    # rdma/mesh_compile.py _finalized, _replays and _period (6's stages D and E): after the one plan, the lowered source
-    # specialized and prepared on the compile owner's result, finalized, made native, signed over its horizon and one
-    # period of its placed copies, and saved
+    # rdma/mesh_compile.py _finalized and _replays (6's stages D and E): after the one plan, the lowered source
+    # specialized and prepared on the compile owner's result, finalized, made native, signed over its warm-up and one
+    # period as the native program chose them (metal_recording.h MetalProgramPhases), and saved
     def compile(self, owner, row=0):
         libs = libraries()
         M, compiler, (lib, device), _ = libs
@@ -441,14 +440,9 @@ class Target:
             native = made(lib.MetalRecorderProgram(recorder, calls, 1, C.byref(owner.planned), error, ROOM), error,
                           "the program's calls")
             owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
-            horizon = lib.MetalProgramHorizon(native)
-            copies = [owner.copies(index)[1] for _, _, index in self.marks["placed"]]
-            copies += [owner.copies(index)[1] for _, index in self.own]
-            copies += [count for _, _, count, _ in owner.placements()]
-            step = owner.stepped()
-            if step is not None:
-                copies.append(step[1])
-            signature, executions = mesh_graph.Signature(), mesh.Q(horizon + math.lcm(horizon, *copies))
+            warm, period = mesh.Q(), mesh.Q()
+            lib.MetalProgramPhases(native, C.byref(warm), C.byref(period))
+            signature, executions = mesh_graph.Signature(), mesh.Q(warm.value + period.value + 1)
             checked(lib.MetalProgramSignatureNode(native, self.node, 1, C.byref(executions), C.byref(signature), error,
                                                   ROOM), error, "signature")
             try:
