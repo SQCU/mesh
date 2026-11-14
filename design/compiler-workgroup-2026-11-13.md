@@ -65,6 +65,19 @@ while proceeding, as the operator instructed. No formal type-system project is a
 
 ## Concurrent units
 
+The operator broadened the active work on 2026-11-13:
+
+> try reviewing the entire codebase and identifying all mechanisms by which a compilation IR/optimized solution can be 'discarded', then removing all of those 'discard mechanisms' all at once by refactoring (of the entire data flow)
+
+This continues the same composition requirements across mesh and metal-microbench. The workgroup is reviewing
+the complete compilation data flow, including callable alternative paths, serialization, loading and actual
+execution consumers. Its dated inventory and implementation status are in
+[the result-retention review](../output_data/compiler-workgroup-20261113/discard-mechanisms.md).
+Producer and consumer edits belong to the same replacement even when recorded in several working commits.
+The inventory distinguishes information lost before a consumer needs it from metadata whose obligation has
+already been discharged into a final compiled artifact. It adds no requirement to retain dead compiler data at
+runtime, no new input rejection policy, and no formal type-system project.
+
 These are initial editing responsibilities for coordination, not walls across interfaces. When a complete
 connection needs another owner's file, the supervisors agree the change immediately and one worker writes it.
 An absent operand requires completing its producer and consumer together, not parking either side or supplying
