@@ -1,8 +1,7 @@
-# design/synchronization-signature-change-request.md item 1; design/implementation-order-2026-11-09.md item 10
+# design/synchronization-signature-change-request.md item 1; design/implementation-order-2026-11-09.md item 10;
+# design/compiler-archive-assignment-2026-11-13.md: each completed entry's own record
 import pathlib
 import sys
-
-from .ir import call
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -12,36 +11,10 @@ PRIMITIVE = {name: k for k, name in enumerate(mesh_graph.PRIMITIVES)}
 SENT, RECEIVED = "send", "recv"
 
 
-# compiler/mesh_compiler/runtime.py Program; compiler/mesh_compiler/bridge.py Published
-def handed(records, scheduled):
-    order, made, across = list(scheduled.devices), {}, []
-    for place, machine in enumerate(dict.fromkeys(scheduled.machines.values())):
-        caller, others, joined, started = call(scheduled, machine)
-        finished = scheduled.channels + len(order) + place
-        for processor in (p for p in scheduled.inputs if p == caller or p in others):
-            record, queue = records[processor], scheduled.channels + order.index(processor)
-            last = len(record["tasks"]) + 1
-            first = [("host", "host_wait", 0, queue, 1, 1)]
-            after = [("host", "host_signal", last, finished, len(joined), k + 1)
-                     for k, other in enumerate(joined) if other == processor]
-            if processor == caller:
-                first = [("host", "bridge_start", 0, mesh_graph.PLAN_SUBMISSION, 1, 1)] * started
-                first += [("host", "host_signal", 0, scheduled.channels + order.index(p), 1, 1) for p in others]
-                after = [("host", "host_wait", last, finished, len(joined), k + 1) for k in range(len(joined))]
-            made[processor] = {
-                "tasks": [("host", ("<arguments>",))] + record["tasks"] + [("host", ("<finished>",))] * bool(joined),
-                "dependences": [(a + 1, b + 1) for a, b in record["dependences"]],
-                "operations": first + [(kind, name, task if task is None else task + 1, *rest)
-                                       for kind, name, task, *rest in record["operations"]] + after}
-        across += [((caller, 0), (p, 0)) for p in others]
-        across += [((p, len(records[p]["tasks"]) + 1), (caller, len(records[caller]["tasks"]) + 1)) for p in joined]
-    return made, across
-
-
 def operands(scheduled, executions=1):
     machines = list(dict.fromkeys(scheduled.machines.values()))
     carried = {channel: place for place, channel in enumerate(scheduled.plan.channels if scheduled.plan else ())}
-    records, handoffs = handed({p: function.record for p, function in scheduled.functions.items()}, scheduled)
+    records = {group: function.record for group, function in scheduled.functions.items()}
     first, places, objects, ends, count = {}, {}, {}, {}, 0
     for processor, record in records.items():
         first[processor], seen = count, {}
@@ -69,7 +42,6 @@ def operands(scheduled, executions=1):
             lane["bridge", machine] = len(processors)
             processors.append(mesh_graph.Processor(KIND["bridge"], machines.index(machine)))
     across = [(end[SENT][1], end[RECEIVED][1]) for _, end in sorted(ends.items())]
-    across += [(first[a] + i, first[b] + j) for (a, i), (b, j) in handoffs]
     across += [(first[processor] + a, first[processor] + b)
                for processor, record in records.items() for a, b in record["dependences"]]
     dependences = [mesh_graph.Dependence(a, b, 0)
