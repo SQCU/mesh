@@ -80,3 +80,28 @@ Matching graph observations also passed longest paths with nonnumeric vertex ord
 reference deletion, and native event boundaries. An actual Torch export→placement→devices→schedule construction
 reversed two independent random nodes while preserving original source site IDs 1 and 2; draw consumers saw 2 then 1,
 not reassigned traversal IDs. No statistical or distributed RNG claim.
+
+Remaining public ordered-use consumer audit: a3ab3044 introduced ends(order, uses) for lower/_place as last-use
+projection over the explicit instruction order (reverse order gives first use). 89dabbff changed the helper to
+ends(order, reached, uses) for the former schedule consumer, leaving those two supported rdma callers incompatible.
+Root's separate SAME593 integration-use-lifetimes order now preserves their original first/last use contract via
+canonical native incidence arrays and actual IR result ownership; no second dependency solve is required.
+
+2026-11-14 UTC replica/search continuation (SAME LiteRT17–21, explicit/reported Opus5.5): placement builds one retained
+input relation, queries all placeholder descendants once, and propagates explicit processor labels through its incoming
+rows. The native result has N rows and ceil(P/64) words per row, with original nodes and processor vocabulary retained.
+The rejected full node-closure draft is removed. Unique-view and BMM-stopped queries consume the same relation's masked
+BFS; Python replicas and chain bodies are deleted. DFS retains exclusive subtree ends and the native ancestor query;
+root's actual prepared E2B caller consumes one forest search, replacing per-query search owners.
+
+Strict C syntax and Python AST/diff passed. After canonical Search56 release, actual native label-column observation
+with two same-label users retained both distinct successor labels; borrowed label results survived source reference
+deletion and GC. Actual Torch export→place produced the expected replicated state views on the second processor
+(13 nodes, one transfer). The record is labels-caller-check.log. Root independently ran the existing typed-20261109
+two-rank preparation assets through prepare_e2b.dataflow: all 426 action records matched original manifest sequences,
+exit0/stderr0 (integration-prepared-dataflow.json/.stderr). This is real preparation preservation, not bridge runtime.
+
+The remaining exact separator duplicate is also removed: shares.rows now consumes rdma/allocate.py's existing Fraction
+algorithm, already used by mesh_compile.rows. A real Ragged input with offsets [0,2,5,9] and speeds 3/2,5/4 returned
+row cuts (0,2,3) and value cuts (0,5,9). No float search or changed allocation policy. Finite sharding propagation,
+public call-chain/width analysis and ordered-use endpoints remain explicitly assigned separate live connections.

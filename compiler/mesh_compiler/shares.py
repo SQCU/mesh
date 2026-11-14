@@ -6,6 +6,7 @@ import sys
 from .ir import RECV, SEND, channel_of
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
+import allocate
 import mesh_graph
 
 
@@ -83,7 +84,7 @@ Ragged = collections.namedtuple("Ragged", "values offsets")
 
 # design/unequal-shards-change-request.md item 13
 def rows(ragged, speeds):
-    cuts, held = mesh_graph.separators(ragged.offsets.tolist(), speeds), []
+    cuts, held = allocate.separators(ragged.offsets.tolist(), speeds), []
     while isinstance(ragged, Ragged):
         held.append((ragged.offsets.diff(), tuple(cuts)))
         cuts, ragged = ragged.offsets[cuts].tolist(), ragged.values

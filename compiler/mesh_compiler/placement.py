@@ -504,16 +504,17 @@ def intact(whole, new):
 
 # design/unequal-shards-change-request.md item 8; Brandon et al., Striped Attention, arXiv:2311.09431, section 3.1
 def unmasked(node, rows, keys, queries, held):
-    at, views = [rows, keys], mesh_graph.chain(node, lambda n: next(
-        (user for user in n.users if len(n.users) == 1 and user.target is VIEW), None))
+    inputs = mesh_graph.Graph.adjacency(node.graph.nodes, lambda m: m.all_input_nodes)
+    views = inputs.walk([node], incoming=True, active=[len(n.users) == 1 and next(iter(n.users)).target is VIEW
+                                                       for n in inputs.vertices])
+    at = [rows, keys]
     for before, after in zip(views, views[1:]):
         at = [intact(shape(before), shape(after))[d] for d in at]
     node, user = views[-1], next(iter(views[-1].users))
     every = [list(range(len(held))) for _ in queries]
-    inputs = mesh_graph.Graph.adjacency(node.graph.nodes, lambda m: m.all_input_nodes)
-    constants = [n for n in user.all_input_nodes if n is not node and not any(
-        m.op == "placeholder" for m in inputs.reach([n]))]
-    reached = mesh_graph.reach(node.graph.nodes, [user], lambda n: () if n.target is BMM else list(n.users))
+    dependent = inputs.reach([n for n in inputs.vertices if n.op == "placeholder"], incoming=True)
+    constants = [n for n in user.all_input_nodes if n is not node and n not in dependent]
+    reached = inputs.reach([user], incoming=True, active=[n.target is not BMM for n in inputs.vertices])
     if len(node.users) != 1 or user.target is not ADD or None in at or not constants or not all(
             n.target in MASKED for n in reached):
         return every
@@ -802,15 +803,21 @@ def place(graph_module, placement):
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
         "state" in n.meta if n.op == "placeholder" else view(n) is not None and all(read)))
+    # design/unequal-shards-change-request.md item 8: a call replicated where invariant or of no placeholder (the
+    # placeholders' users' incoming search, once), each replicated call onto the processors of its users and of their
+    # sets, an unreplicated vertex's set empty (one labelled closure over the incoming rows, its columns the processors)
     inputs = mesh_graph.Graph.adjacency(graph.nodes, lambda m: m.all_input_nodes)
-    onto = mesh_graph.replicas(
-        [n for n in graph.nodes if n.op == "call_function"], lambda n: list(n.users),
-        lambda n: invariant[n] or not any(m.op == "placeholder" for m in inputs.reach([n])),
-        lambda n: n.meta["processor"])
+    dependent = inputs.reach([n for n in inputs.vertices if n.op == "placeholder"], incoming=True)
+    replicated = [n.op == "call_function" and (invariant[n] or n not in dependent) for n in inputs.vertices]
+    label = [n.meta.get("processor") for n in inputs.vertices]
+    onto = inputs.labels(inputs.postorder(inputs.vertices, incoming=True), sorted(set(label) - {None}), label,
+                         incoming=True, active=replicated)
     copies = {}
-    for node in [n for n in graph.nodes if n in onto]:
-        copies[node, node.meta["processor"]] = node
-        for processor in onto[node]:
+    for node, active in zip(inputs.vertices, replicated):
+        targets = [processor for processor in onto[node] if processor != node.meta["processor"]] if active else ()
+        if targets:
+            copies[node, node.meta["processor"]] = node
+        for processor in targets:
             with graph.inserting_after(node):
                 there = graph.node_copy(node, lambda n: copies.get((copies.get(n, n), processor), n))
             there.meta.update(processor=processor, constant=there.meta.pop("of", node.name))

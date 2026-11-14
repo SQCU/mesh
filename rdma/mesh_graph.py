@@ -1,9 +1,7 @@
 # design/rubrics.md C9
-import bisect
 import collections.abc
 import ctypes as C
 import errno
-import fractions
 import math
 import os
 import weakref
@@ -13,17 +11,18 @@ import weakref
 class Searched(C.Structure):
     _fields_ = [('vertices', C.c_uint32), ('count', C.c_uint32), ('preorder', C.POINTER(C.c_uint32)),
                 ('postorder', C.POINTER(C.c_uint32)), ('parent', C.POINTER(C.c_uint32)),
-                ('place', C.POINTER(C.c_uint32)), ('entry', C.POINTER(C.c_size_t))]
+                ('place', C.POINTER(C.c_uint32)), ('entry', C.POINTER(C.c_size_t)), ('end', C.POINTER(C.c_uint32))]
 
 
 class Closed(C.Structure):
     _fields_ = [('vertices', C.c_uint32), ('words', C.c_size_t), ('reached', C.POINTER(C.c_uint64))]
 
 
-# one owned native result and the graph whose vertices its IDs name, freed with its last view
+# one owned native result, the graph whose vertices its IDs name and the operands it was made from (`held`), freed with
+# its last view
 class Owned:
-    def __init__(self, made, free, graph):
-        self.made, self.graph, self.freed = made, graph, weakref.finalize(self, free, made)
+    def __init__(self, made, free, graph, held=()):
+        self.made, self.graph, self.held, self.freed = made, graph, held, weakref.finalize(self, free, made)
 
 
 # a borrowed native array over a span of its indices, each element read through `at`; slices are views of the same
@@ -69,24 +68,25 @@ class Reached(collections.abc.Set):
 
 
 # one vertex k of the owned closure bitset: its row (the vertices k's rows lead to) or, transposed, its column (the
-# vertices whose rows lead to k)
+# vertices whose rows lead to k); a row's columns the graph's vertices, or `columns` (objects, their index)
 class Closure(collections.abc.Set):
-    def __init__(self, owned, k, transposed):
+    def __init__(self, owned, k, transposed, columns=None):
         closed = owned.made.contents
         self.owned, self.bits, self.words, self.k, self.transposed = owned, closed.reached, closed.words, k, transposed
+        self.columns = columns or (owned.graph.vertices, owned.graph.at)
 
     def _bit(self, row, column):
         return bool(self.bits[row * self.words + column // 64] >> (column % 64) & 1)
 
     def __contains__(self, u):
-        j = self.owned.graph.at.get(u)
+        j = (self.owned.graph.at if self.transposed else self.columns[1]).get(u)
         return j is not None and (self._bit(j, self.k) if self.transposed else self._bit(self.k, j))
 
     def __iter__(self):
-        vertices = self.owned.graph.vertices
         if self.transposed:
+            vertices = self.owned.graph.vertices
             return (vertices[j] for j in range(len(vertices)) if self._bit(j, self.k))
-        return (vertices[64 * w + b] for w in range(self.words) for b in range(64)
+        return (self.columns[0][64 * w + b] for w in range(self.words) for b in range(64)
                 if self.bits[self.k * self.words + w] >> b & 1)
 
     def __len__(self):
@@ -99,11 +99,11 @@ class Closure(collections.abc.Set):
 
 # the closure by vertex
 class Closures(collections.abc.Mapping):
-    def __init__(self, owned, transposed):
-        self.owned, self.transposed = owned, transposed
+    def __init__(self, owned, transposed, columns=None):
+        self.owned, self.transposed, self.columns = owned, transposed, columns
 
     def __getitem__(self, v):
-        return Closure(self.owned, self.owned.graph.at[v], self.transposed)
+        return Closure(self.owned, self.owned.graph.at[v], self.transposed, self.columns)
 
     def __iter__(self):
         return iter(self.owned.graph.vertices)
@@ -112,10 +112,12 @@ class Closures(collections.abc.Mapping):
         return len(self.owned.graph.vertices)
 
 
-# mesh-graph.h struct mesh_graph_relation_data, mesh_graph_search, mesh_graph_breadth, mesh_graph_closure,
-# mesh_graph_relation_head, mesh_graph_relation_contract and mesh_graph_relation_quotient: one retained relation and its
-# vertices' objects (vertex k is vertices[k]); a search runs over its outgoing rows (row_first, row_edge) in place, and
-# every result is a view of its owned native result, retaining the relation
+# mesh-graph.h struct mesh_graph_relation_data, mesh_graph_search, mesh_graph_breadth(_masked), mesh_graph_closure,
+# mesh_graph_closure_labels, mesh_graph_relation_head, mesh_graph_relation_incoming_head, mesh_graph_relation_contract
+# and mesh_graph_relation_quotient: one retained relation and its vertices' objects (vertex k is vertices[k]); a search
+# runs in place over its outgoing rows (row_first, row_edge, each edge's head) or, `incoming`, its incoming rows
+# (in_first, in_edge, each edge's tail), `active` by vertex the rows followed (None every row), and every result is a
+# view of its owned native result, retaining the relation and its operands
 class Graph:
     def __init__(self, vertices, relation):
         self.vertices, self.relation = list(vertices), relation
@@ -138,50 +140,83 @@ class Graph:
                                                         for k, (a, b) in enumerate(records)])
         return cls(vertices, Relation.create(len(vertices), 0, None, len(records), conflict))
 
-    def _search(self, call, roots, *operands):
+    # the rows a search follows: outgoing (row_first, mesh_graph_relation_head) or incoming (in_first,
+    # mesh_graph_relation_incoming_head, resolved on use)
+    def rows(self, incoming=False):
+        return (self.data.in_first, C.cast(LIB.mesh_graph_relation_incoming_head, C.c_void_p)) if incoming else (
+            self.data.row_first, RELATION_HEAD)
+
+    def _mask(self, active):
+        return None if active is None else (C.c_ubyte * max(self.data.vertices, 1))(*[bool(a) for a in active])
+
+    def _search(self, call, roots, *operands, incoming=False):
         start, count = _array(C.c_uint32, [self.at[v] for v in roots])
-        made = C.POINTER(Searched)()
-        _check(call(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context, count, start, *operands,
-                    C.byref(made)))
-        return Owned(made, LIB.mesh_graph_search_free, self)
+        made, (first, head) = C.POINTER(Searched)(), self.rows(incoming)
+        _check(call(self.data.vertices, first, head, self.context, count, start, *operands, C.byref(made)))
+        return Owned(made, LIB.mesh_graph_search_free, self, operands)
+
+    # mesh_graph_breadth_masked (resolved on use) over the `active` rows
+    def _breadth(self, starts, incoming, active):
+        call = LIB.mesh_graph_breadth_masked
+        call.restype, call.argtypes = C.c_int, [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U,
+                                                C.POINTER(C.c_ubyte), C.POINTER(C.POINTER(Searched))]
+        return self._search(call, starts, self._mask(active), incoming=incoming)
 
     # T. H. Cormen et al., Introduction to Algorithms, 3rd ed., §22.3
-    def search(self, roots, reverse=False):
-        return self._search(LIB.mesh_graph_search, roots, int(reverse))
+    def search(self, roots, reverse=False, incoming=False):
+        return self._search(LIB.mesh_graph_search, roots, int(reverse), incoming=incoming)
 
-    def preorder(self, roots):
-        owned = self.search(roots)
+    def preorder(self, roots, incoming=False):
+        owned = self.search(roots, incoming=incoming)
         return ordered(owned, owned.made.contents.preorder, range(owned.made.contents.count))
 
     # R. E. Tarjan, SIAM J. Comput. 1(2), 1972: the finishing order of the search from the roots in reverse order over
     # rows in reverse order, the order of a stack each root and row is pushed on
-    def postorder(self, roots):
-        owned = self.search(list(roots)[::-1], True)
+    def postorder(self, roots, incoming=False):
+        owned = self.search(list(roots)[::-1], True, incoming)
         return ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count))
 
     # T. H. Cormen et al., 3rd ed., §22.4: the reverse finishing order of the search from every vertex, a topological
     # order of the rows' edges
-    def order(self):
-        owned = self.search(self.vertices)
+    def order(self, incoming=False):
+        owned = self.search(self.vertices, incoming=incoming)
         return ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count - 1, -1, -1))
 
     # T. H. Cormen et al., 3rd ed., §22.2
-    def walk(self, starts):
-        owned = self._search(LIB.mesh_graph_breadth, starts)
+    def walk(self, starts, incoming=False, active=None):
+        owned = self._search(LIB.mesh_graph_breadth, starts, incoming=incoming) if active is None else self._breadth(
+            starts, incoming, active)
         return ordered(owned, owned.made.contents.preorder, range(owned.made.contents.count))
 
-    def reach(self, starts):
-        return Reached(self._search(LIB.mesh_graph_breadth, starts))
+    def reach(self, starts, incoming=False, active=None):
+        return Reached(self._search(LIB.mesh_graph_breadth, starts, incoming=incoming) if active is None else
+                       self._breadth(starts, incoming, active))
 
-    # mesh_graph_closure over the outgoing rows processed in `order`, a View of one search's native vertex IDs covering
-    # every vertex (its postorder over these rows: each head before its row), read in place from its first element by its
-    # step: v's set the vertices whose rows lead to v (rows of predecessors: v's own closure row; `successors`: the
-    # transposed column)
-    def ancestors(self, order, successors=False):
-        made = C.POINTER(Closed)()
-        _check(LIB.mesh_graph_closure(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context,
-                                      *self._order(order), C.byref(made)))
-        return Closures(Owned(made, LIB.mesh_graph_closure_free, self), successors)
+    # mesh_graph_closure over the rows (`incoming` as the searches') processed in `order`, a View of one search's native
+    # vertex IDs covering every vertex (its postorder over these rows: each head before its row), read in place from its
+    # first element by its step: v's set the vertices whose rows lead to v (rows of predecessors: v's own closure row;
+    # `successors`: the transposed column)
+    def ancestors(self, order, successors=False, incoming=False):
+        made, (first, head) = C.POINTER(Closed)(), self.rows(incoming)
+        _check(LIB.mesh_graph_closure(self.data.vertices, first, head, self.context, *self._order(order),
+                                      C.byref(made)))
+        return Closures(Owned(made, LIB.mesh_graph_closure_free, self, (order,)), successors)
+
+    # mesh_graph_closure_labels (resolved on use) over the rows (`incoming`) processed in `order` (as ancestors'): v's
+    # set the `classes` of its active rows' heads (`label` by vertex a class or None) and of their sets, an inactive
+    # vertex's (`active` by vertex, None every vertex) empty; vertices rows of (len(classes) + 63) // 64 words
+    def labels(self, order, classes, label, incoming=False, active=None):
+        classes = list(classes)
+        index = {c: k for k, c in enumerate(classes)}
+        labelled, mask = _array(C.c_uint32, [NONE if c is None else index[c] for c in label])[0], self._mask(active)
+        made, (first, head) = C.POINTER(Closed)(), self.rows(incoming)
+        call = LIB.mesh_graph_closure_labels
+        call.restype, call.argtypes = C.c_int, [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C.c_ssize_t,
+                                                C.POINTER(C.c_ubyte), C.c_uint32, _U, C.POINTER(C.POINTER(Closed))]
+        _check(call(self.data.vertices, first, head, self.context, *self._order(order), mask, len(classes), labelled,
+                    C.byref(made)))
+        return Closures(Owned(made, LIB.mesh_graph_closure_free, self, (order, mask, labelled)), False,
+                        (classes, index))
 
     # mesh_graph_longest over the prerequisite rows (`incoming`: in_first/in_edge, else row_first/row_edge) processed in
     # `order` (as ancestors'), `weight[e]` for the relation's own edge e: a View of the caller-owned lengths, by vertex
@@ -236,21 +271,13 @@ def reach(universe, starts, neighbours):
     return Graph.adjacency(universe, neighbours).reach(starts)
 
 
-# design/unequal-shards-change-request.md item 8
-def replicas(order, users, replicated, place):
-    onto = {}
-    for v in reversed(order):
-        if replicated(v):
-            onto[v] = {q for u in users(v) for q in {place(u)} | onto.get(u, set())} - {place(v)}
-    return {v: sorted(found) for v, found in onto.items() if found}
-
-
-# design/unequal-shards-change-request.md item 8
-def chain(start, following):
-    path = [start]
-    while (after := following(path[-1])) is not None:
-        path.append(after)
-    return path
+# mesh-graph.h mesh_graph_ancestor (resolved on use): whether b is in a's subtree of the owned depth-first search
+# (Graph.search), the objects mapped through its graph
+def ancestor(owned, a, b):
+    call = LIB.mesh_graph_ancestor
+    call.restype, call.argtypes = C.c_int, [C.POINTER(Searched), C.c_uint32, C.c_uint32]
+    at = owned.graph.at
+    return a in at and b in at and bool(call(owned.made, at[a], at[b]))
 
 
 # A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988; design/aot-compilation-change-request.md A10
@@ -281,36 +308,6 @@ def forward(order, neighbours, transfer):
 
 def postorder(universe, roots, neighbours):
     return Graph.adjacency(universe, neighbours).postorder(roots)
-
-
-
-# A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008, section 4, LR-PROBE;
-# design/unequal-shards-change-request.md item 13
-def probe(offsets, speeds, load):
-    cuts = [0]
-    for speed in speeds:
-        cuts.append(bisect.bisect_right(offsets, offsets[cuts[-1]] + load * speed) - 1)
-    return cuts
-
-
-# A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008, sections 2, 3.3 and 3.3.1;
-# design/unequal-shards-change-request.md item 13
-def separators(offsets, speeds):
-    rows, speeds = len(offsets) - 1, [fractions.Fraction(speed) for speed in speeds]
-    succeeded, failed, first = (offsets[rows] - offsets[0]) / speeds[0], -1, 0
-    for speed in speeds:
-        low, high = first + 1, rows + 1
-        while low < high:
-            end = (low + high) // 2
-            load = (offsets[end] - offsets[first]) / speed
-            if failed < load < succeeded:
-                if probe(offsets, speeds, load)[-1] == rows:
-                    succeeded = load
-                else:
-                    failed = load
-            low, high = (low, end) if load >= succeeded else (end + 1, high)
-        first = low - 1
-    return probe(offsets, speeds, succeeded)
 
 
 # L. Lamport, CACM 21(7), 1978; design/disjoint-pages-change-request.md A3 item 2
