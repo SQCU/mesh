@@ -170,3 +170,41 @@ Corrections are being made in the same Opus 5.5 sessions, with Codex reviewing
 the producer, retained result and consuming call together. Moving an algorithm
 body, retaining an unused field, or passing a build does not by itself establish
 that a caller stopped discarding and reconstructing the result.
+
+## Subsequent connected checkpoints
+
+- Mesh `04e1eed3` / metal `79d7e7a6`: full retained query DAG and correspondence
+  maps, actual operation-relation fusion caller, and original function-analysis
+  results. The matching canonical build passed. Mesh `3fc7f3d7` records the
+  existing CPU client and outer filesystem archive run: errors 0.0 and
+  6.902263703523204e-05 for two distinct inputs; unchanged signature; fresh
+  outputs; first output unchanged after the second invocation. These are
+  observations, not an invented numerical tolerance or GPU/transport result.
+- Metal `bc2be2c3` removes the copied dependence arrays and obsolete accessor:
+  dispatch ordering and replay ordering read the retained relation through row
+  views. Metal `32f4960a` completes all callers of the one retained-relation
+  registration function and removes its unused copying wrapper.
+- Mesh `bbb7ed1f` records the exact source value/channel carriers. Review found
+  no missing execution link among those current producer variants. The proposed
+  extra quotient for interleaved fusion groups was withdrawn after inspecting
+  the actual consecutive-group producer; no speculative machinery was added.
+- Mesh `c15f33b1` connects the event result's native dependence array through
+  Function/Plan without reconstruction. It also includes unchanged concurrent
+  Function/archive ABI edits; their validation remains owned by the compiler
+  workgroup, separately from the event-array address/lifetime observation.
+- Metal `df43fff9` connects preparation to retained incoming rows and one DFS
+  forest result. The initial per-query retained-search draft was corrected:
+  caching whole searches would use quadratic storage. The actual caller now
+  consumes one linear-size result and canonical ancestor queries.
+- Metal `0a506f6c`, `3d9c8334`, and mesh `7fc00282` connect fixed GPU argument
+  sites, borrowed backing ownership, and actual native/archive consumers.
+  Their new matched build and client observations are pending at this checkpoint.
+
+The remaining discovered public callers are being assigned as complete local
+handoffs: finite sharding propagation; call-analysis paths/width over retained
+results; and first/last use lifetimes. The latter is a concrete binding defect:
+two remaining callers use the old two-argument helper while a later change gave
+it three arguments for a now-displaced consumer. Exact Fraction partitioning
+also has two implementations; the callers will share its existing owner without
+changing numerical precision. These assignments do not reopen numerical
+lowering, create another evaluator, or authorize deleting supported public paths.
