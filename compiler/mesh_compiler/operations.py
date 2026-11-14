@@ -3460,11 +3460,13 @@ def _searched(target, given, outs):
 
 
 # PyTorch 2.14 documentation, torch.sort and torch.topk: the compiler's one sort expansion (metal_ir.h metal_ir_sort,
-# K. E. Batcher's bitonic network; NaN last ascending, first descending, ties by index), the first k of the order
+# K. E. Batcher's bitonic network; NaN last ascending, first descending, ties by index), the first k of the order;
+# `extent` a one-element int32 tensor: the leading `extent` entries along the axis sorted alone, the rest of the
+# outputs untouched (the bounded QDWH step's diagonal and column norms)
 class _Sort:
-    def __init__(self, x, axis, k, descending, values, indices):
+    def __init__(self, x, axis, k, descending, values, indices, extent=None):
         self.x, self.axis, self.k, self.descending, self.values, self.indices = x, axis, k, descending, values, indices
-        self.place, self.node = GPU, 0
+        self.extent, self.place, self.node = extent, GPU, 0
 
 
 def _ranked(target, given, outs):

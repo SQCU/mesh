@@ -414,6 +414,7 @@ def _compiler():
         P, U, Q = C.c_void_p, mesh.U, mesh.Q
         for name, result, arguments in (
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
+                ('metal_ir_operations', U, [P]),
                 ('metal_ir_archive_load', P, [P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
@@ -448,7 +449,7 @@ def _compiler():
                 ('metal_ir_check_message', None, [P, U, C.c_char_p]),
                 ('metal_ir_lapack', U, [P, C.POINTER(Lapack), U, C.POINTER(Q), U, C.POINTER(U), U, C.POINTER(U),
                                         C.POINTER(Matrix), C.POINTER(Expr), U, C.POINTER(Term), Q]),
-                ('metal_ir_sort', U, [P, U, U, Q, U, U, U, U, Q]),
+                ('metal_ir_sort', U, [P, U, U, Q, U, U, U, U, U, Q]),
                 ('metal_ir_region', U, [P, U, U]), ('metal_ir_parameter', U, [P, U, U]),
                 ('metal_ir_literal', U, [P, U, U, Q]), ('metal_ir_binary', U, [P, U, U, U, U]),
                 ('metal_ir_unary', U, [P, U, U, U]), ('metal_ir_convert', U, [P, U, U, U]),
@@ -661,7 +662,9 @@ class _Builder:
         if isinstance(g, _Sort):
             self.identity = self.base | g.node
             return self.lib.metal_ir_sort(self.p, self.value(g.x), g.axis, g.k, int(g.descending),
-                                          self.value(g.values), self.value(g.indices), g.place, self.identity)
+                                          self.value(g.values), self.value(g.indices),
+                                          0xFFFFFFFF if g.extent is None else self.value(g.extent), g.place,
+                                          self.identity)
         self.identity = self.base | g.node
         lib, p = self.lib, self.p
         inputs, outputs = [self.value(t) for t, _ in g.inputs], [self.value(t) for t, _ in g.outputs]

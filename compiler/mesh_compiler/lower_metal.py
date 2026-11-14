@@ -266,21 +266,25 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             state = (Root("generator", "generator", STATE, *rooted(generator.state, STATE)),)
             stepped = generator.stepped()
             _placed(stepped, advance, len(module.meta["order"]))
+        # metal-microbench metal_ir.h metal_ir_operations: each record's whole interval of created operation IDs (a
+        # constructor such as metal_ir_sort expands into several), its returned ID where it created none
         operations, advanced, writes, stores, emitted = {}, [], {}, {}, {}
         for owner, g in zip(owners + [None] * len(stepped), records + stepped):
+            before = compiler.metal_ir_operations(builder.p)
             op = builder.generic(g)
+            made = list(range(before, compiler.metal_ir_operations(builder.p))) or [op]
             if owner is None:
-                advanced.append(op)
+                advanced += made
                 continue
             task, write, store, node = owner
             if task is not None:
-                operations.setdefault(task, []).append(op)
+                operations.setdefault(task, []).extend(made)
             if node is not None:
-                emitted.setdefault(node, []).append(op)
+                emitted.setdefault(node, []).extend(made)
             if write is not None:
-                writes.setdefault(write, []).append(op)
+                writes.setdefault(write, []).extend(made)
             if store is not None:
-                stores.setdefault(store, []).append(op)
+                stores.setdefault(store, []).extend(made)
         source, copied = module.meta["relation"], module.meta["copied"]
         builder.identity = builder.base
 
