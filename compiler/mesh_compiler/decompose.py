@@ -15,8 +15,8 @@ from torch.utils import _pytree as pytree
 from .devices import on_devices
 from .ir import RETURNED, Exported, shape, views
 from .ir import given as ir_given
-from .operations import (QDWH_EIGH_STEP, _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_result,
-                         _qdwh_eigh_state, _singular_qdwh)
+from .operations import (QDWH_EIGH_STEP, _least_squares_svd, _lstsq_driver, _matrix_exponential, _operands,
+                         _pseudoinverse, _qdwh_eigh_result, _qdwh_eigh_state, _singular_qdwh)
 from .placement import insert_send_recv
 from .schedule import carried
 
@@ -152,7 +152,8 @@ def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
 # reads crosses as a call output and input, on the eigh's processor; each part's placed graph keeps its nodes'
 # processors and its own transfers (renumbered), and is put on its devices (devices.on_devices) as the driver's staged
 # loop does. `staged` the driver's staged records by function key, `processors` and `machines` its maps. First each
-# function's pinv nodes (every overload, on every processor) expand into operations._pseudoinverse, its tolerance dtype
+# function's non-CPU SVD-driver lstsq nodes (gelsd, gelss) expand into operations._least_squares_svd, then its pinv
+# nodes (every overload, on every processor) into operations._pseudoinverse, its tolerance dtype
 # the selected device's (float32 on MPS, float64 else), then its non-CPU _linalg_svd nodes (a pinv's among them) into
 # operations._singular_qdwh (QDWH-SVD, `max_iterations` its QDWH bound), and the function's placed graph is staged
 # again, so their eigh nodes are outlined below (a CPU pinv's or svd's keeps its LAPACK driver)
@@ -168,10 +169,20 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
         shapes = [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
         return lambda *args, **kwargs: _singular_qdwh(**_operands(node.target, args, kwargs), shapes=shapes,
                                                       max_iterations=max_iterations)
+
+    def least_squares(node):
+        shapes = [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
+        return lambda *args, **kwargs: _least_squares_svd(**_operands(node.target, args, kwargs), shapes=shapes)
+
+    def svd_driver(node):
+        read = ir_given(node)[1]
+        return targets[node.meta["processor"]][0] != "cpu" and _lstsq_driver(
+            read["self"].meta["val"], read.get("driver")) in ("gelsd", "gelss")
     for key in pending:
         placed = staged[key][0]
         found = {n.target for n in placed.graph.nodes if n.op == "call_function"}
-        if found & {*PINV, *SVD}:
+        if found & {*PINV, *SVD, *LSTSQ}:
+            _expanded(placed, targets, dict.fromkeys(LSTSQ, least_squares), svd_driver)
             _expanded(placed, targets, dict.fromkeys(PINV, pseudoinverse))
             _expanded(placed, targets, dict.fromkeys(SVD, singular),
                       lambda node: targets[node.meta["processor"]][0] != "cpu")
@@ -198,6 +209,7 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
 EIGH, COPY = A._linalg_eigh.default, A.copy.default
 PINV = tuple(getattr(A.linalg_pinv, overload) for overload in A.linalg_pinv.overloads())
 SVD = tuple(getattr(A._linalg_svd, overload) for overload in A._linalg_svd.overloads())
+LSTSQ = tuple(getattr(A.linalg_lstsq, overload) for overload in A.linalg_lstsq.overloads())
 # the Step's inputs: the state, the input's norm and its source draw site (operations.QDWH_EIGH_STEP); the prefix's
 # first outputs, each Step call the previous call's state and the prefix's norm and site
 STEP_INPUTS = ("blocks", "vectors", "agenda", "top", "norm", "site")

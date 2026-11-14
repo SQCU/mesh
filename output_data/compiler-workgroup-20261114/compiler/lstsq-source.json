@@ -1,0 +1,23 @@
+{
+  "source_sha256": {
+    "compiler/mesh_compiler/operations.py": "5ad20ece429135e9d371183a72f5d53006a62312a96b9c1f44e6c8c9f3cca15b",
+    "compiler/mesh_compiler/decompose.py": "d1a638949531fdab5ef426d2eb1881ea8d764259b63349f7081007f9146f5826",
+    "compiler/mesh_compiler/export.py": "6dea53e386281d06096c290d8f091b7f7bec7ff09d2978235afa95ed2ad02b11",
+    "compiler/mesh_compiler/devices.py": "4d89dd74017573251e47c4c22691ce7a28955c361699f699b578f41875f9ba17",
+    "compiler/mesh_compiler/driver.py": "cfe4f8ab9a2408700ad4e96d8f0b4396e14e329f8b6506772b5717d9527da3b9",
+    "compiler/mesh_compiler/native.py": "a7c99bc6eb08c773fe4d3461284d3d632663b89ce35de78a75486d85c2ca0559",
+    "compiler/mesh_compiler/metal.py": "5c5316c4ba468152e2c061c078e0ff54f4429a63b68fa5ee6b7ed828963ec50e",
+    "compiler/mesh_compiler/lower_metal.py": "0d0c82eeb8f9b02321174eedafc18c0f61e802e492b40ab608c7e967a6d132b4"
+  },
+  "primary_reference_sha256": {
+    "dgelss.reference.f": "44dbdc907ec126183fa1b9968b7af6c844c016676ab1e277b7e61bed08bd7126",
+    "dgelsd.reference.f": "360d0ace3ce6ac60e945560a7f756c58ea91c70cdb3780aa1b9d2b4068845f17",
+    "dlalsd.reference.f": "152054b49095d25fc9884e7b76cc66d42be94cee2181d45ac7ce8e300357e84d",
+    "dlamch.reference.f": "60581debf09a7bc73848439ec30ef6079c80889f908b4645a538e4d7c683b04b",
+    "lstsq-pytorch.reference.cpp": "62d4cd1a2b5b877511aa6a4fd98e427eaab4146eebaf6c6c64b222ffd35faccd"
+  },
+  "AST": "operations/decompose/export PASS",
+  "source_observation": "lstsq-source-observation.json PASS",
+  "binary_reference": "eigh-parts-binaries.json",
+  "native_invocation": "pending"
+}

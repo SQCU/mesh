@@ -3198,6 +3198,66 @@ def _least_squares(target, given, outs):
     return ops
 
 
+# Reference-LAPACK SRC/dgelss.f 385-435, 509-521 and 737-768, dgelsd.f 379-431 and 621-645, dlalsd.f 235-276 and
+# 329-340; PyTorch v2.14.0 BatchLinearAlgebra.cpp linalg_lstsq_out_info 3366-3483: the SVD drivers through the QDWH
+# SVD (_singular_qdwh), `shapes` the node's outputs' (shape, dtype)
+def _least_squares_svd(self, b, rcond=None, driver=None, shapes=()):
+    a, (m, n) = self, self.shape[-2:]
+    rhs = b.unsqueeze(-1) if _linalg_vector_rhs(a, b) else b
+    (solution, _), (residual, real), (rank, _), (singular, _) = shapes
+    if not min(m, n):
+        raw = (rhs.abs() * rhs.abs()).sum(-2)
+        return (a.new_zeros(solution), raw.expand(residual).clone() if math.prod(residual) else
+                a.new_empty(residual, dtype=real), a.new_zeros(rank, dtype=torch.int64),
+                a.new_zeros(singular, dtype=real))
+    limits = torch.finfo(real)
+    rcond = limits.eps * max(m, n) if rcond is None else rcond
+    scaled, right, a_scale, b_scale = LSTSQ_SCALED(a, rhs)
+    u, s, vh = torch.linalg.svd(scaled, full_matrices=False)
+    if driver.lower() == 'gelss':
+        keep = s > (s[..., :1] * (rcond if rcond >= 0 else limits.eps)).clamp(min=limits.tiny)
+    elif min(m, n) == 1:
+        keep = s != 0
+    else:
+        keep = s > (limits.eps / 2 if rcond <= 0 or rcond >= 1 else rcond) * s.amax(-1, keepdim=True)
+    inverse = torch.where(keep, 1 / torch.where(keep, s, 1), 0)
+    made = LSTSQ_UNSCALE(torch.matmul(vh.mH, inverse.unsqueeze(-1) * torch.matmul(u.mH, right)), a_scale, b_scale)
+    return (made.reshape(solution), a.new_empty(residual, dtype=real), keep.sum(-1),
+            s / a_scale.unsqueeze(-1))
+
+
+# the SVD drivers' range scaling and its cancellation-aware undo (_linalg_least_scaled, _linalg_least_unscale) as
+# fake-only operators (their shape rules alone), lowered by _lstsq_scaled and _lstsq_unscale
+torch.library.define('mesh::lstsq_scaled', '(Tensor a, Tensor b) -> (Tensor, Tensor, Tensor, Tensor)')
+torch.library.define('mesh::lstsq_unscale', '(Tensor x, Tensor a_scale, Tensor b_scale) -> Tensor')
+
+
+@torch.library.register_fake('mesh::lstsq_scaled')
+def _lstsq_scaled_shape(a, b):
+    return (torch.empty_like(a), torch.empty_like(b), a.real.new_empty(a.shape[:-2]), b.real.new_empty(b.shape[:-2]))
+
+
+@torch.library.register_fake('mesh::lstsq_unscale')
+def _lstsq_unscale_shape(x, a_scale, b_scale):
+    return torch.empty_like(x)
+
+
+LSTSQ_SCALED, LSTSQ_UNSCALE = torch.ops.mesh.lstsq_scaled.default, torch.ops.mesh.lstsq_unscale.default
+
+
+def _lstsq_scaled(outs, a, b):
+    ops = []
+    for out, value in zip(outs, _linalg_least_scaled(a, b, ops)):
+        ops += _copy(out, value)
+    return ops
+
+
+def _lstsq_unscale(outs, x, a_scale, b_scale):
+    ops = _copy(outs[0], x)
+    _linalg_least_unscale(outs[0], a_scale, b_scale, ops)
+    return ops
+
+
 # an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
 def _bounded(r, at, size):
     zero, last = r.const(0, I32), r.const(size - 1, I32)
@@ -5210,6 +5270,10 @@ def _lowering(local, page, generator=None):
                                                           generator, local.site)
     if local.target is striped:
         return lambda args, kwargs, outs: _striped(outs[0], *args)
+    if local.target is LSTSQ_SCALED:
+        return lambda args, kwargs, outs: _lstsq_scaled(outs, **_operands(local.target, args, kwargs))
+    if local.target is LSTSQ_UNSCALE:
+        return lambda args, kwargs, outs: _lstsq_unscale(outs, **_operands(local.target, args, kwargs))
     if local.target is QDWH_SVD_CORRECTION:
         return lambda args, kwargs, outs: _qdwh_svd_correction(outs, **_operands(local.target, args, kwargs))
     if local.target is QDWH_EIGH_STEP:
