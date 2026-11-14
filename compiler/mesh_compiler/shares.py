@@ -110,9 +110,13 @@ Cost = collections.namedtuple("Cost", "key stage resource ranks fixed coefficien
 
 
 # A. Lastovetsky et al., arXiv:1109.3074, steps 1 and 2: each original node of a function's tasks once, of supplied speeds
-# `times` {processor: {kind: {x: seconds}}} at its `units` (x, n), n / speed at x on its processor (its resource): a
-# shard's (an `of` node's) a unit of its share (part `segment`, rank its processor's index in `processors`), another's
-# fixed
+# `times` {processor: {kind: {x: seconds}}} at its `units` (x, n) (compiler/mesh_compiler/placement.py: a shard's x
+# its current local units, n the full units), speed(x) on its processor (its resource): a shard (an `of` node) of a
+# part (`segment`) is its share variable's (part, rank its processor's index in `processors`) coefficient n / speed(x);
+# every other node, a shard in no part among them, its fixed current work x / speed(x), exactly times[x]. A transfer's
+# time is `solved`'s collective time, not a node's. Rejection filters are not part of even temporary integration
+# validation: work without a share variable stays a fixed cost, never a node dropped, and a missing supplied time
+# raises at its lookup
 def supplied(staged, segment, processors, times):
     rank, made = {p: j for j, p in enumerate(processors)}, []
     for key, stage in staged.items():
@@ -120,13 +124,15 @@ def supplied(staged, segment, processors, times):
         for k, node in stage.node.items():
             first.setdefault(node, k)
         for node, k in first.items():
-            if node.target in (SEND, RECV) or segment(node) is None:
+            if node.target in (SEND, RECV):
                 continue
-            processor, (x, n) = node.meta["processor"], units(node)
-            time = n / speed(times[processor][kind(node)], x)
-            shard = "of" in node.meta
-            made.append(Cost(key, stage.level[k], processor, (rank[processor],), 0.0 if shard else time,
-                             {(segment(node), rank[processor]): time} if shard else {}, None))
+            processor, (x, n), part = node.meta["processor"], units(node), segment(node)
+            held = times[processor][kind(node)]
+            if "of" in node.meta and part is not None:
+                fixed, coefficients = 0.0, {(part, rank[processor]): n / speed(held, x)}
+            else:
+                fixed, coefficients = held[x], {}
+            made.append(Cost(key, stage.level[k], processor, (rank[processor],), fixed, coefficients, None))
     return made
 
 
