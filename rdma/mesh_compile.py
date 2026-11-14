@@ -7456,10 +7456,15 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
 # metal_recording.h MetalRecorderActors, struct MetalActors; design/algorithm-sources.md#the-plans-results-for-native-preparation
 class _Actors(C.Structure):
     _fields_ = [('parts', mesh.U), ('host', C.POINTER(C.c_double)), ('work', C.POINTER(C.c_double)),
-                ('edges', C.c_size_t), ('edge', C.POINTER(mesh_graph.Dependence))]
+                ('edges', C.c_size_t), ('edge', C.POINTER(mesh_graph.Dependence)), ('relation', C.c_void_p)]
 
 
-def _actors(programs, irs):
+# Each function's actual MetalRecorderActors result, retained as made in the construction's owner `owned` (freed with
+# MetalRecorderActorsFree at its release): its work times and edges the result's own arrays, its host times the
+# result's own or, where the source caller copies the inputs in, a derived array of them with that copy's measured cost
+# (mesh-graph.h mesh_graph_actor_time of the inputs' bytes on the CPU) added to part 0. Per function: (host, work,
+# edges, parts, edge count, complete, the result, the added input-copy cost)
+def _actors(programs, irs, owned):
     machines, lib, made = _machines(), programs['lib'], {}
     lib.MetalRecorderActors.restype = C.c_int
     lib.MetalRecorderActors.argtypes = [C.c_void_p, C.POINTER(mesh_graph.Machine), C.POINTER(mesh_graph.Machine),
@@ -7473,23 +7478,17 @@ def _actors(programs, irs):
         gpu, cpu = (C.byref(machines[GPU]), C.byref(machines[CPU])) if machines else (None, None)
         actors = _Actors()
         status = lib.MetalRecorderActors(row['builder'].p, gpu, cpu, C.byref(actors))
+        owned[id(actors)] = lambda actors=actors: lib.MetalRecorderActorsFree(C.byref(actors))
         if status not in (0, errno.ENODATA):
             mesh.check(status)
-        parts, count = actors.parts, actors.edges
-        host, work = (C.c_double * max(parts, 1))(), (C.c_double * max(parts, 1))()
-        edges = (mesh_graph.Dependence * max(count, 1))()
-        if parts:
-            C.memmove(host, actors.host, parts * C.sizeof(C.c_double))
-            C.memmove(work, actors.work, parts * C.sizeof(C.c_double))
-        if count:
-            C.memmove(edges, actors.edge, count * C.sizeof(mesh_graph.Dependence))
-        lib.MetalRecorderActorsFree(C.byref(actors))
+        parts, count, host, added = actors.parts, actors.edges, actors.host, 0.0
         written, complete = sum(irs[k].values[v].section.bytes for v, _ in irs[k].inputs.values()), status == 0
         if parts and written and machines:
-            spent, measured = mesh_graph.actor_time(machines[CPU], mesh_graph.Actor(0.0, 1, 1, written, 0, 0, None))
+            added, measured = mesh_graph.actor_time(machines[CPU], mesh_graph.Actor(0.0, 1, 1, written, 0, 0, None))
             complete &= measured
-            host[0] += spent
-        made[k] = host, work, edges, parts, count, complete
+            host = (C.c_double * parts)(*actors.host[:parts])
+            host[0] += added
+        made[k] = host, actors.work, actors.edge, parts, count, complete, actors, added
     return made
 
 # metal_ir.h METAL_IR_DATA, METAL_IR_TRANSPORT, METAL_IR_STEP: metal_ir_value_info `word` of the step value
@@ -8423,7 +8422,7 @@ def program(block, *example_inputs):
         # node part by part (_actors), mesh_plan's Bff of their edges the horizon and host copies
         # (mesh-graph.h mesh_graph_actor_time ENODATA: a time over the measured operands alone, a lower bound the
         # plan keeps; the functions whose estimate is such a bound reported as `incomplete`, never a zero cost)
-        actors = _actors(programs, irs)
+        actors = _actors(programs, irs, state['constructed'])
         state['incomplete'] = sorted(k for k, actor in actors.items() if not actor[5])
         analysed = _analyse(gm, of, compiled, sources, every)
         return {'nodes': nodes, 'page': page, 'irs': irs, 'holders': holders, 'programs': programs, 'steps': steps,
@@ -8568,8 +8567,9 @@ def _save_program(context, state, path):
                        analysed.norders, analysed.chains, C.byref(retained['planned']), diagnostic=False)
     arrays = [([_declared_record(v) for v in d], bytes(w), bytes(v), bytes(e))
               for d, w, v, e in retained['arrays']]
-    actors = {k: (bytes(host), bytes(work), bytes(edges), parts, count, complete)
-              for k, (host, work, edges, parts, count, complete) in retained['actors'].items()}
+    actors = {k: (C.string_at(host, parts * C.sizeof(C.c_double)), C.string_at(work, parts * C.sizeof(C.c_double)),
+                  C.string_at(edges, count * C.sizeof(mesh_graph.Dependence)), parts, count, complete)
+              for k, (host, work, edges, parts, count, complete, *_) in retained['actors'].items()}
     rows, storage, unique = [], [], {}
     for row in programs['rows']:
         record = {key: row[key] for key in ('k', 'j')}
