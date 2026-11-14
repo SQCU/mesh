@@ -510,13 +510,14 @@ def unmasked(node, rows, keys, queries, held):
         at = [intact(shape(before), shape(after))[d] for d in at]
     node, user = views[-1], next(iter(views[-1].users))
     every = [list(range(len(held))) for _ in queries]
+    inputs = mesh_graph.Graph.adjacency(node.graph.nodes, lambda m: m.all_input_nodes)
     constants = [n for n in user.all_input_nodes if n is not node and not any(
-        m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes))]
-    reached = mesh_graph.reach([user], lambda n: () if n.target is BMM else list(n.users))
+        m.op == "placeholder" for m in inputs.reach([n]))]
+    reached = mesh_graph.reach(node.graph.nodes, [user], lambda n: () if n.target is BMM else list(n.users))
     if len(node.users) != 1 or user.target is not ADD or None in at or not constants or not all(
             n.target in MASKED for n in reached):
         return every
-    order = mesh_graph.postorder(constants[:1], lambda n: n.all_input_nodes)
+    order = inputs.postorder(constants[:1])
     mask = mesh_graph.forward(order, lambda n: n.all_input_nodes, lambda n, read: n.target(
         *map_arg(n.args, lambda m: read[n.all_input_nodes.index(m)]), **n.kwargs))[constants[0]]
     mask = mask.expand(shape(user)).movedim(at, (-2, -1))
@@ -772,6 +773,9 @@ def place(graph_module, placement):
     placed = [n for n in nodes if n.op != "placeholder"]
     stated = {n: placement(n) for n in placed if n.target is not operator.getitem}
     stated.update((n, placement(n)) for n in nodes if n.op == "placeholder")
+    for node in nodes:
+        if node.op == "placeholder":
+            node.meta["stated"] = stated[node]
     replaced = []
 
     def transfer(node, held):
@@ -798,10 +802,10 @@ def place(graph_module, placement):
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
         "state" in n.meta if n.op == "placeholder" else view(n) is not None and all(read)))
+    inputs = mesh_graph.Graph.adjacency(graph.nodes, lambda m: m.all_input_nodes)
     onto = mesh_graph.replicas(
         [n for n in graph.nodes if n.op == "call_function"], lambda n: list(n.users),
-        lambda n: invariant[n] or not any(
-            m.op == "placeholder" for m in mesh_graph.reach([n], lambda m: m.all_input_nodes)),
+        lambda n: invariant[n] or not any(m.op == "placeholder" for m in inputs.reach([n])),
         lambda n: n.meta["processor"])
     copies = {}
     for node in [n for n in graph.nodes if n in onto]:

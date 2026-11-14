@@ -222,16 +222,18 @@ def destined(node):
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4 and 6, and item 8, step 4
 def views(nodes):
-    nodes = mesh_graph.walk(list(getattr(nodes, "nodes", nodes)), lambda n: [u for u in n.users if source(u) is n])
-    inside = set(nodes)
-    for node in mesh_graph.postorder(nodes[::-1], lambda n: [m for m in [source(n)] if m in inside]):
+    starts = list(getattr(nodes, "nodes", nodes))
+    universe = lambda: [n for graph in dict.fromkeys(node.graph for node in starts) for n in graph.nodes]
+    nodes = mesh_graph.walk(universe(), starts, lambda n: [u for u in n.users if source(u) is n])
+    inside = mesh_graph.Reached(nodes.owner)
+    for node in mesh_graph.postorder(nodes, nodes[::-1], lambda n: [m for m in [source(n)] if m in inside]):
         node.meta.pop("to", None)
         node.meta.pop("out", None)
         if aliasing(node):
             evaluated(node, node.meta["processor"])
         elif node.target is operator.getitem and aliasing(node.args[0]):
             node.meta["val"] = node.args[0].meta["val"][node.args[1]]
-    mesh_graph.forward(mesh_graph.postorder(nodes, bases_of), bases_of, based)
+    mesh_graph.forward(mesh_graph.postorder(universe(), nodes, bases_of), bases_of, based)
     for node in dict.fromkeys(reader for n in nodes for reader in (n, *n.users)):
         for held, offset in destined(node):
             if (held.op == "call_function" and held.target is not operator.getitem and len(held.users) == 1

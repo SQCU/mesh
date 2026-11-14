@@ -1,7 +1,8 @@
 # design/compilation-composition-change-request.md items 1, 2, 6 and 7; design/compiler-workgroup-2026-11-13.md;
-# ~/schedule-emit/schedule_emit/driver.py and lower_inductor.py lower: a stage takes the scheduled body of one group
-# and returns its target's program, built by the one numerical construction (rdma/mesh_compile.py _instruction,
-# _Builder); output_data/compiler-workgroup-20261113/frontends/litert/typed-target.status.md, the result contract
+# ~/schedule-emit/schedule_emit/driver.py and lower_inductor.py lower: a stage takes one machine's assembled body and
+# returns its one typed program, built by the one numerical construction (rdma/mesh_compile.py _instruction, _Builder);
+# metal-microbench metal_ir.h (metal_ir_value, metal_ir_value_view); compiler/mesh_compiler/schedule.py Declarations,
+# assemble, SourceRelation
 import collections
 import ctypes as C
 import dataclasses
@@ -10,18 +11,20 @@ import sys
 import weakref
 
 import torch
-from torch.export.graph_signature import InputKind
+from torch.export.graph_signature import InputKind, OutputKind
 from torch.fx.node import map_arg
 from torch.utils import _pytree as pytree
 
-from .ir import RECV, SEND, channel_of
-from .lower_inductor import fanout
+from .ir import RECV, SEND, written
+from .lower_inductor import copies
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_compile as M
 
 Root = collections.namedtuple("Root", "name kind role root value")
-Output = collections.namedtuple("Output", "root value literal metadata")
+Output = collections.namedtuple("Output", "root value literal metadata kind written")
+# torch 2.14.0 torch/export/graph_signature.py OutputKind: a result the program stores into its original input's root
+MUTATIONS = (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)
 # torch 2.14.0 torch/export/graph_signature.py InputKind; metal-microbench metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE
 KINDS = {InputKind.USER_INPUT: ("user_input", M.INPUT), InputKind.PARAMETER: ("parameter", M.STATE),
          InputKind.BUFFER: ("buffer", M.STATE), InputKind.CONSTANT_TENSOR: ("constant_tensor", M.CONSTANT)}
@@ -33,11 +36,10 @@ PLACES = {"cpu": M.CPU, "mps": M.GPU, "ane": M.ANE}
 
 
 @dataclasses.dataclass(eq=False)
-class Constructed:
+class ConstructedMachine:
     program: int
     compiler: object
-    target: str
-    place: int
+    targets: dict
     inputs: tuple
     outputs: tuple
     spec: object
@@ -46,9 +48,15 @@ class Constructed:
     sent: dict
     wires: dict
     operations: dict
-    advanced: tuple = ()
-    fanout: object = None
-    writes: dict = dataclasses.field(default_factory=dict)
+    advanced: tuple
+    copies: object
+    writes: dict
+    stores: dict
+    relation: object
+    vertices: tuple
+    accesses: tuple
+    supplied: tuple
+    writers: tuple
     identity: int = 0
 
     def __post_init__(self):
@@ -81,27 +89,59 @@ def placeholders(nodes, kinds, sources):
     return roots
 
 
-# compiler/mesh_compiler/driver.py lowered, effects: channel -> (declared transfer, its Plan value, the value's solved
-# copy offsets, its byte extent, declared sent view, declared landed view, supplied and completion representatives);
-# compiler/mesh_compiler/lower_inductor.py body, typed: a view (offset, element, (size, byte stride) pairs) of one copy
-# of the Plan value's bytes; J. K. Salmon et al., SC 2011, §3.1: `generator` the machine's one mesh_compile.Generator,
-# its sites numbered across every group it is passed to, its advance in the program built with `advance`
-def construct(module, *, target, kinds, sources, effects=None, generator=None, advance=False, page=0, machines=None):
-    compiler, place = M._compiler(), PLACES[target]
+# compiler/mesh_compiler/schedule.py assemble keyed by machine, Declarations.wires: `module` one machine's body in the
+# retained global task order, `targets` {original processor: (selected kind "cpu" | "mps" | "ane", torch.device)} the
+# driver's selection, `wires` channel -> (declared transfer, logical wire value, its logical bytes, declared sent view,
+# declared landed view), `output_roles` one (OutputKind, placeholder name or None) per output leaf
+# (Scheduled.exported.outputs); compiler/mesh_compiler/lower_inductor.py copies, body typed: a view (offset, element,
+# (size, byte stride) pairs) of the wire value's logical bytes; J. K. Salmon et al., SC 2011, §3.1: `generator` the
+# machine's mesh_compile.Generator; compiler/mesh_compiler/schedule.py SourceRelation, assemble `vertices`: the source
+# relation's correspondence here, each vertex's emitted operation IDs, each access view's (typed root, typed view) and
+# each GIVEN cause's typed operand (root and view, literal, or channel Root), None where this machine holds none
+def construct(module, *, targets, kinds, sources, wires, output_roles, generator=None, page=0, machines=None):
+    compiler = M._compiler()
     builder = M._Builder(compiler, {}, None, 0, 0)
     try:
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[0]), C.byref(machines[1]))
-        nodes, tasks, effects = list(module.graph.nodes), module.meta["tasks"], effects or {}
-        drew = generator.sites if generator is not None else 0
-        roots, fan = placeholders(nodes, kinds, sources), fanout(module, effects)
-        env, records, owners, inputs, landing, sending, held, written = {}, [], [], [], [], [], {}, {}
+        nodes, tasks = list(module.graph.nodes), module.meta["tasks"]
+        roots, made = placeholders(nodes, kinds, sources), copies(module, wires)
+        named = {node.target: node for node in nodes if node.op == "placeholder"}
+        byname = {node.name: node for node in nodes}
+        env, records, owners, inputs, landing, sending, held, grouped = {}, [], [], [], [], [], {}, {}
+        dests, advance = {}, None
+
+        def place(node):
+            return PLACES[targets[node.meta["processor"]][0]]
 
         def rooted(t, role, data=None):
             return builder.declare(t, role, data), builder.value(M._stored(t))
 
+        # compiler/mesh_compiler/ir.py views, destined, based, written: a call's "out" not of an operand it writes, and a
+        # RECV's "to", name the CAT/PAD result it is stored into and its view (offset, sizes, the result's own strides)
+        # of that result's own layout; the result's typed root declared from its metadata before its producer, the
+        # view placed at its index offset in the result's realized view, each result before its operands (reverse
+        # graph order)
+        def destined(node):
+            return node.meta.get("out") is not None and written(node) is None
+
+        def placed(record):
+            name, offset, sizes, strides = record
+            if byname[name] not in dests:
+                dests[byname[name]] = M._held(byname[name].meta["val"])
+            base = dests[byname[name]]
+            at = base.storage_offset()
+            for d in sorted(range(base.dim()), key=lambda d: -strides[d]):
+                if base.shape[d] > 1:
+                    at, offset = at + offset // strides[d] * base.stride(d), offset % strides[d]
+            return base.as_strided(sizes, base.stride(), at)
+
+        for node in reversed(nodes):
+            if destined(node):
+                dests[node] = placed(node.meta["out"])
+
         def wire(channel, like, landed):
-            _, value, _, size, sent, arrived, *_ = effects[channel]
+            _, value, size, sent, arrived = wires[channel]
             offset, element, pairs = arrived if landed else sent
             if value not in held:
                 held[value] = torch.empty(size // like.element_size(), dtype=like.dtype, device="meta")
@@ -119,82 +159,116 @@ def construct(module, *, target, kinds, sources, effects=None, generator=None, a
                 inputs.append(Root(node.target, kind, role, *rooted(env[node], role, data)))
             elif node.op == "output":
                 leaves, spec = pytree.tree_flatten(node.args[0])
-        for kind, of in fan.order:
-            if kind == "write":
-                first = fan.member[of][0]
-                value, view = wire(channel_of(first), env[fan.groups[of][0]], False)
-                given = env[fan.groups[of][0]]
-                made = M._copy(view, given.as_strided(view.shape, given.stride(), given.storage_offset()))
-                M._placed(made, place, tasks[first][0])
-                records += made
-                owners += [(tasks[first], of)] * len(made)
-                written[of] = value, view
-            elif kind != "node":
-                continue
-            elif of.target is RECV:
-                channel = of.args[0]
-                value, env[of] = wire(channel, of.meta["val"], True) if channel in effects else (
-                    None, M._held(of.meta["val"]))
-                landing.append((channel, value, env[of]))
-            elif of.target is SEND:
-                env[of] = None
-                sending.append((of.args[1], None, env[of.args[0]]))
+            elif node.target is RECV:
+                channel = node.args[0]
+                if "to" in node.meta:
+                    value, env[node] = wires[channel][1] if channel in wires else None, placed(node.meta["to"])
+                else:
+                    value, env[node] = wire(channel, node.meta["val"], True) if channel in wires else (
+                        None, M._held(node.meta["val"]))
+                landing.append((channel, value, env[node]))
+            elif node.target is SEND:
+                env[node] = None
+                if node not in made.group:
+                    sending.append((node.args[1], None, env[node.args[0]]))
+                    continue
+                k = made.index[made.group[node]]
+                if made.member[k][0] is node:
+                    value, view = wire(node.args[1], env[node.args[0]], False)
+                    given = env[node.args[0]]
+                    ops = M._copy(view, given.as_strided(view.shape, given.stride(), given.storage_offset()))
+                    M._placed(ops, place(node), tasks[node][0])
+                    records += ops
+                    owners += [(tasks[node], k, None, node)] * len(ops)
+                    grouped[k] = value, view
+                sending.append((node.args[1], *grouped[k]))
             else:
-                local = M._local_call(of)
+                local = M._local_call(node)
                 args, kwargs = map_arg((local.args, local.kwargs), env.__getitem__)
-                env[of], made = M._instruction(local, args, kwargs, of.meta.get("val"), page, generator)
-                M._placed(made, place, tasks[of][0])
-                records += made
-                owners += [(tasks[of], None)] * len(made)
-        sending += [(channel_of(node), *written[fan.index[fan.group[node]]]) for node in fan.sends]
-        received, sent, wires = {}, {}, {}
+                drew = generator.sites if generator is not None else 0
+                env[node], ops = M._instruction(local, args, kwargs, node.meta.get("val"), page, generator,
+                                                [dests[node]] if node in dests else None)
+                M._placed(ops, place(node), tasks[node][0])
+                records += ops
+                owners += [(tasks[node], None, None, node)] * len(ops)
+                if generator is not None and generator.sites > drew:
+                    advance = place(node)
+        received, sent, ends = {}, {}, {}
         for channel, value, t in landing:
             received[channel] = Root(channel, "received", M.INPUT, *rooted(t, M.INPUT))
             if value is not None:
-                wires[value] = Root(value, "wire", M.INPUT, received[channel].root, None)
+                ends[value] = Root(value, "wire", M.INPUT, received[channel].root, None)
         outputs = []
-        for leaf in leaves:
+        for position, (leaf, (kind, name)) in enumerate(zip(leaves, output_roles, strict=True)):
             value = env[leaf] if isinstance(leaf, torch.fx.Node) else leaf
-            if isinstance(value, torch.Tensor):
-                source = leaf.meta["val"] if isinstance(leaf, torch.fx.Node) else value
-                outputs.append(Output(*rooted(value, M.OUTPUT), None, M._metadata(source)))
-            else:
-                outputs.append(Output(None, None, value, None))
+            if not isinstance(value, torch.Tensor):
+                outputs.append(Output(None, None, value, None, kind, None))
+                continue
+            metadata = M._metadata(leaf.meta["val"] if isinstance(leaf, torch.fx.Node) else value)
+            if kind not in MUTATIONS:
+                outputs.append(Output(*rooted(value, M.OUTPUT), None, metadata, kind, None))
+                continue
+            original = env[named[name]]
+            if not M._same_view(value, original):
+                if leaf.op == "placeholder":
+                    stated = named[name].meta["stated"]
+                    holder = stated if isinstance(stated, str) else module.meta["output"]
+                    at, task, identity = PLACES[targets[holder][0]], None, len(module.meta["order"])
+                else:
+                    at, task, identity = place(leaf), tasks[leaf], tasks[leaf][0]
+                ops = M._copy(original, value)
+                M._placed(ops, at, identity)
+                records += ops
+                owners += [(task, None, position, None)] * len(ops)
+            outputs.append(Output(*rooted(original, M.INPUT), None, metadata, kind, name))
         for channel, value, t in sending:
             root, view = (rooted(t, M.TEMPORARY) if value is not None else (builder.root(t), builder.value(M._stored(t))))
             role = builder.roles[M._key(t)]
             sent[channel] = Root(channel, "sent", role, root, view)
             if value is not None:
-                wires.setdefault(value, Root(value, "wire", role, root, None))
+                ends.setdefault(value, Root(value, "wire", role, root, None))
         state, stepped = (), []
-        if generator is not None and (generator.sites > drew or advance and generator.sites):
+        if advance is not None:
             state = (Root("generator", "generator", M.STATE, *rooted(generator.state, M.STATE)),)
-            if advance:
-                stepped = generator.stepped()
-                M._placed(stepped, place, len(module.meta["order"]))
-        operations, advanced, writes = {}, [], {}
+            stepped = generator.stepped()
+            M._placed(stepped, advance, len(module.meta["order"]))
+        operations, advanced, writes, stores, emitted = {}, [], {}, {}, {}
         for owner, g in zip(owners + [None] * len(stepped), records + stepped):
-            made = builder.generic(g)
+            op = builder.generic(g)
             if owner is None:
-                advanced.append(made)
+                advanced.append(op)
                 continue
-            task, write = owner
-            operations.setdefault(task, []).append(made)
+            task, write, store, node = owner
+            if task is not None:
+                operations.setdefault(task, []).append(op)
+            if node is not None:
+                emitted.setdefault(node, []).append(op)
             if write is not None:
-                writes.setdefault(write, []).append(made)
+                writes.setdefault(write, []).append(op)
+            if store is not None:
+                stores.setdefault(store, []).append(op)
+        source, copied = module.meta["relation"], module.meta["copied"]
+        builder.identity = builder.base
+
+        def typed(node):
+            if copied.get(node) not in env:
+                return None
+            value = env[copied[node]]
+            if not isinstance(value, torch.Tensor):
+                return "literal", value
+            view = builder.value(M._stored(value))
+            return builder.roots[M._key(value)], view
+
+        vertices = tuple(tuple(emitted.get(node, ())) for node in module.meta["vertices"])
+        accesses = tuple(typed(node) for node, _ in source.accesses)
+        given = tuple(typed(operand) if kind == "value" else sent.get(operand) or received.get(operand)
+                      for kind, _, _, operand in source.supplied)
+        writers = tuple((tasks[a], tasks[b]) for a, b in module.meta["writers"])
     except BaseException:
         compiler.metal_ir_program_free(builder.p)
         raise
-    return Constructed(builder.p, compiler, target, place, tuple(inputs), tuple(outputs), spec, state, received, sent,
-                       wires, {task: tuple(made) for task, made in operations.items()}, tuple(advanced), fan,
-                       {k: tuple(made) for k, made in writes.items()}, builder.base)
-
-
-# output_data/compiler-workgroup-20261113/frontends/litert/typed-target.inbox.md: compiler/mesh_compiler/native.py
-# Target, lower, the paired consumer of the constructed programs and the plan's effects
-def lower(module, *, target, kinds, sources, effects, start, extent, generator=None, advance=False, page=0,
-          machines=None):
-    from . import native
-    return native.lower(construct(module, target=target, kinds=kinds, sources=sources, effects=effects,
-                                  generator=generator, advance=advance, page=page, machines=machines),
-                        effects=effects, start=start, extent=extent)
+    return ConstructedMachine(builder.p, compiler, dict(targets), tuple(inputs), tuple(outputs), spec, state, received,
+                              sent, ends, {task: tuple(ops) for task, ops in operations.items()}, tuple(advanced),
+                              made, {k: tuple(ops) for k, ops in writes.items()},
+                              {k: tuple(ops) for k, ops in stores.items()}, source, vertices, accesses, given, writers,
+                              builder.base)

@@ -304,29 +304,25 @@ def _device(ir, key):
     return next((v.device.type for v in pytree.tree_leaves(value) if isinstance(v, torch.Tensor)), 'cpu')
 
 
-# GSPMD section 3.1; Alpa section 4.1; design/aot-compilation-change-request.md A10, "Its graph operations are the graph
-# module's"
+# GSPMD section 3.1; Alpa section 4.1; torch 2.14 torch/utils/_pytree.py tree_flatten_with_path, TreeSpec: the mesh's
+# shape its first-child spine, each leaf at its key path
 def _mesh(placement, count):
-    def item(at):
-        value = placement.mesh
-        for i in at:
-            value = value[i]
-        return value
-
-    def sequence(at):
-        return isinstance(item(at), (list, tuple))
-    first = mesh_graph.walk([()], lambda at: [at + (0,)] if sequence(at) and item(at) else [])
-    if sequence(first[-1]):
-        raise ValueError('the placement operand\'s mesh holds an empty sequence (A2)')
-    shape, coords = [len(item(at)) for at in first[:-1]], {}
-    for at in mesh_graph.walk([()], lambda at: [at + (i,) for i in range(len(item(at)))]
-                              if len(at) < len(shape) and sequence(at) else []):
-        if len(at) == len(shape):
-            if not isinstance(item(at), int) or item(at) in coords:
-                raise ValueError('the placement operand\'s mesh at %s: %r is no new device id (A2)' % (at, item(at)))
-            coords[item(at)] = at
-        elif not sequence(at) or len(item(at)) != shape[len(at)]:
-            raise ValueError('the placement operand\'s mesh at %s is not of shape %s (A2)' % (at, shape))
+    leaves, spec = pytree.tree_flatten_with_path(placement.mesh)
+    shape, coords = [], {}
+    while spec.type in (list, tuple):
+        if not spec.num_children:
+            raise ValueError('the placement operand\'s mesh holds an empty sequence (A2)')
+        shape.append(spec.num_children)
+        spec = spec.children_specs[0]
+    for path, leaf in leaves:
+        at = tuple(key.idx for key in path)
+        if len(at) != len(shape):
+            raise ValueError('the placement operand\'s mesh at %s is not of shape %s (A2)' % (at[:-1], shape))
+        if not isinstance(leaf, int) or leaf in coords:
+            raise ValueError('the placement operand\'s mesh at %s: %r is no new device id (A2)' % (at, leaf))
+        coords[leaf] = at
+    if len(coords) != math.prod(shape):
+        raise ValueError('the placement operand\'s mesh is not of shape %s (A2)' % (shape,))
     nodes = list(placement.nodes)
     if sorted(coords) != list(range(len(coords))) or len(nodes) != len(coords) or len(set(nodes)) != len(nodes) \
             or not all(isinstance(n, int) and 0 <= n < count for n in nodes):
@@ -1126,7 +1122,7 @@ def partition(gm, placement, nodes, page):
     _partition(ir, operators)
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
-    ir.sent = mesh_graph.reach([item[1][0] for item in ir.program if item[0] == 'collective'],
+    ir.sent = mesh_graph.reach(items, [item[1][0] for item in ir.program if item[0] == 'collective'],
                                lambda key: items[key][1][:1] if _sliced(items[key]) else ())
     _forms(ir)
     # GSPMD section 4.5
@@ -1345,8 +1341,9 @@ def _consumer(ir, roots):
                 keys = [] if paged is None else [k for j, k in enumerate(keys) if j not in paged]
             return [owner for k in keys for owner in ir.over.get(k, ())]
         return reads
-    return mesh.PAGES if roots & mesh_graph.reach(range(len(ir.program)), read(False)) \
-        and not roots & mesh_graph.reach(range(len(ir.program)), read(True)) else mesh.JOIN
+    universe = [*range(len(ir.program)), *(owner for owners in ir.over.values() for owner in owners)]
+    return mesh.PAGES if roots & mesh_graph.reach(universe, range(len(ir.program)), read(False)) \
+        and not roots & mesh_graph.reach(universe, range(len(ir.program)), read(True)) else mesh.JOIN
 
 
 # design/plan-to-bridge-change-request.md R1; design/aot-compilation-change-request.md, appendix item 7;
@@ -1767,7 +1764,9 @@ def _runs(ir, places):
     synchronous = [g for g, (kind, _, key, operand) in enumerate(ir.program)
                    if not (kind in ('input', 'constant', 'slice') or kind == 'window' and key not in ir.inside
                            or kind == 'collective' and _local(ir, operand) is None)]
-    run = mesh_graph.reach(synchronous, accessed) | set(ir.loads)
+    universe = [*range(len(ir.program)), *(owner for owners in ir.over.values() for owner in owners),
+                *(place.owner for place in places.values() if place is not None)]
+    run = mesh_graph.reach(universe, synchronous, accessed) | set(ir.loads)
     for key, v in ir.owned.items():
         ir.values[v].run = int(key in run)
 
@@ -6406,7 +6405,8 @@ def _concatenated(target, given, outs):
     for t in given['tensors']:
         if t.dim() == 1 and t.shape[0] == 0 and out.dim() != 1:
             continue
-        ops += _copy(out.narrow(d, at, t.shape[d]), t)
+        place = out.narrow(d, at, t.shape[d])
+        ops += [] if _same_view(place, t) else _copy(place, t)
         at += t.shape[d]
     return ops
 
@@ -6734,15 +6734,23 @@ def _written(local, args, kwargs):
 # torch 2.14.0 torchgen/model.py Annotation (`Tensor(a)`, `Tensor(a!)`): a call writing operands in place is those
 # operands and its structured operations into them; a pure alias is its operand's storage and has no work; any other
 # call's result is a temporary of its prototype's sizes and strides and its structured operations into it
-def _instruction(local, args, kwargs, prototype, page, generator):
+def _instruction(local, args, kwargs, prototype, page, generator, outs=None):
     written = _written(local, args, kwargs)
     if written is not None:
         return written[0] if len(written) == 1 else tuple(written), _lowering(local, page, generator)(args, kwargs,
                                                                                                     written)
     if _aliases(local):
         return _call(local, args, kwargs), []
+    if outs is not None:
+        return outs[0] if len(outs) == 1 else tuple(outs), _lowering(local, page, generator)(args, kwargs, outs)
     outs, spec = _made(prototype, local)
     return pytree.tree_unflatten(outs, spec), _lowering(local, page, generator)(args, kwargs, outs)
+
+
+# torch 2.14.0 torch/_tensor_docs.py untyped_storage, stride, storage_offset: the same view of the same storage
+def _same_view(a, b):
+    return (_key(a) == _key(b) and tuple(a.shape) == tuple(b.shape) and tuple(a.stride()) == tuple(b.stride())
+            and a.storage_offset() == b.storage_offset())
 
 
 def _made(prototype, local):
@@ -6844,7 +6852,8 @@ def _initial_values(ir, immutable):
     if ir.initial is not None:
         return ir.initial
     loaded = ir.loads & ir.homes.keys()
-    needed = mesh_graph.reach(loaded, lambda key: ir.attributes[key][1])
+    universe = [*ir.attributes, *(key for item in ir.attributes.values() for key in item[1])]
+    needed = mesh_graph.reach(universe, loaded, lambda key: ir.attributes[key][1] if key in ir.attributes else ())
     order = [key for key in ir.attributes if key in needed]
     host = mesh_graph.forward(order, lambda key: ir.attributes[key][1],
                               lambda key, values: _hosted(ir, ir.attributes[key], values))
@@ -7033,7 +7042,8 @@ class _Builder:
         owner = self.owners.get(key)
         role = CONSTANT if key in self.constants else self.role(owner) if owner is not None else \
             CONSTANT if base.device.type != 'meta' else TEMPORARY
-        v = self.whole(base, role, self.identity)
+        # metal-microbench metal_ir.h metal_ir_value `identity`, metal_ir.mm metal_ir_append
+        v = self.whole(base, role, 0 if role == CONSTANT else self.identity)
         if owner is not None:
             k, index, _, pages, row = owner
             self.lib.metal_ir_value_planned(self.p, v, k, index, 0)
@@ -8281,7 +8291,8 @@ def _compared(retained, signed):
     pairs = [(analysed.orders[2 * q], analysed.orders[2 * q + 1], CAUSES[analysed.causes[q]])
              for q in range(analysed.norders)] + \
         [(a, b, 'chain') for a, b in mesh_graph.successive(len(calls), analysed.chains[:len(calls)])]
-    reached = {a: mesh_graph.reach(parts.get(a, ()), lambda v: after.get(v, ())) for a, _, _ in pairs}
+    graph = mesh_graph.Graph.adjacency(range(signature.tasks), lambda v: after.get(v, ()))
+    reached = {a: graph.reach(parts.get(a, ())) for a, _, _ in pairs}
     here = [(a, b, cause) for a, b, cause in pairs if a in parts and b in parts]
     operations = collections.Counter()
     for (_, primitive), count in signed['counts'].items():

@@ -1,7 +1,7 @@
 # design/compiler-archive-assignment-2026-11-13.md; design/compilation-composition-change-request.md items 2 to 7;
 # torch 2.14 torch/fx/experimental/proxy_tensor.py make_fx, torch/_inductor/decomposition.py select_decomp_table,
 # torch/_inductor/compile_fx.py compile_fx_forward and compile_fx_inner, torch/_inductor/package/package.py
-# package_aoti; output_data/compiler-workgroup-20261113/executor/native.status.md
+# package_aoti
 import dataclasses
 import functools
 import itertools
@@ -30,12 +30,55 @@ OPTIONS = {"aot_inductor.package": True, "layout_optimization": False, "reorder_
 ATEN = torch.ops.aten
 
 
-# compiler/mesh_compiler/schedule.py assemble, module.meta["dependences"] and ["writers"]; rdma/mesh_graph.py
-# dependences_views, postorder: the static fanout of a scheduled body's planned transfers (`effects` channels). Each
-# distinct (source, Plan value, sent view, read-after-write writers) is one write of its members, the SENDs sharing it;
-# a supplied representative is one publication after the writes it covers; a (completion, copies) wait precedes each
-# write it intersects; `order` is the DAG of nodes, waits, writes and publications in its emitted order. Consumed by
-# body (Inductor) and by compiler/mesh_compiler/lower_metal.py construct (the typed program)
+# compiler/mesh_compiler/schedule.py assemble, module.meta["writers"], Declarations.wires; rdma/mesh_graph.py
+# dependences_views: the logical copies of a scheduled body's declared transfers, before any plan. `wires`: channel ->
+# (declared transfer, logical wire value, its logical bytes, declared sent view, declared landed view). Each distinct
+# (source, wire value, sent view, read-after-write writers) is one write of its members, the SENDs sharing it; `overlaps`
+# the groups whose sent views intersect. Consumed by fanout (Inductor) and compiler/mesh_compiler/lower_metal.py
+# construct (the typed program)
+@dataclasses.dataclass
+class Copies:
+    sites: list
+    sends: list
+    values: list
+    group: dict
+    groups: list
+    index: dict
+    member: dict
+    overlaps: dict
+
+
+def copies(module, wires):
+    nodes = list(module.graph.nodes)
+    sites = [node for node in nodes if channel_of(node) in wires]
+    values = list(dict.fromkeys(wires[channel_of(node)][1] for node in sites))
+    writes, sends = {}, [node for node in sites if node.target is SEND]
+    for writer, reader in module.meta["writers"]:
+        writes.setdefault(reader, set()).add(writer)
+    group = {}
+    for node in sends:
+        _, value, _, (offset, element, pairs), _ = wires[channel_of(node)]
+        group[node] = (node.args[0], value, offset, element, tuple(map(tuple, pairs)),
+                       frozenset(writes.get(node, ())))
+    groups = list(dict.fromkeys(group.values()))
+    index = {key: k for k, key in enumerate(groups)}
+    edges = mesh_graph.dependences_views(len(groups), [(value, offset, element, pairs, k, 1) for k, (
+        _, value, offset, element, pairs, _) in enumerate(groups)]).edges() if groups else []
+    overlaps = {k: {k} for k in range(len(groups))}
+    for a, b in edges:
+        overlaps[a].add(b)
+        overlaps[b].add(a)
+    member = {}
+    for node in sends:
+        member.setdefault(index[group[node]], []).append(node)
+    return Copies(sites, sends, values, group, groups, index, member, overlaps)
+
+
+# compiler/mesh_compiler/schedule.py assemble, module.meta["dependences"]; rdma/mesh_graph.py postorder: the solved
+# plan's phase of the fanout over `copies` (`effects`: driver.lowered's, the declared transfer, wire value, its solved copy
+# offsets, its bytes, the declared views and the plan's supplied and completion representatives). A supplied
+# representative is one publication after the writes it covers; a (completion, copies) wait precedes each write it
+# intersects; `order` is the DAG of nodes, waits, writes and publications in its emitted order. Consumed by body
 @dataclasses.dataclass
 class Fanout:
     sites: list
@@ -57,37 +100,22 @@ class Fanout:
 
 def fanout(module, effects):
     nodes = list(module.graph.nodes)
-    sites = [node for node in nodes if channel_of(node) in effects]
+    made = copies(module, {channel: (e[0], e[1], e[3], e[4], e[5]) for channel, e in effects.items()})
+    sites, sends, values, group, groups = made.sites, made.sends, made.values, made.group, made.groups
+    index, member, overlaps = made.index, made.member, made.overlaps
     solved = {value: offsets for _, value, offsets, *_ in effects.values()}
-    values = list(dict.fromkeys(effects[channel_of(node)][1] for node in sites))
     first = dict(zip(values, itertools.accumulate((len(solved[value]) for value in values), initial=0)))
-    before, writes, sends = {}, {}, [node for node in sites if node.target is SEND]
+    before = {}
     for a, b in module.meta["dependences"]:
         before.setdefault(b, []).append(a)
-    for writer, reader in module.meta["writers"]:
-        writes.setdefault(reader, set()).add(writer)
-    group = {}
-    for node in sends:
-        _, value, _, _, (offset, element, pairs), *_ = effects[channel_of(node)]
-        group[node] = (node.args[0], value, offset, element, tuple(map(tuple, pairs)),
-                       frozenset(writes.get(node, ())))
-    groups = list(dict.fromkeys(group.values()))
-    index = {key: k for k, key in enumerate(groups)}
-    edges = mesh_graph.dependences_views(len(groups), [(value, offset, element, pairs, k, 1) for k, (
-        _, value, offset, element, pairs, _) in enumerate(groups)])[0] if groups else []
-    overlaps = {k: {k} for k in range(len(groups))}
-    for a, b in edges:
-        overlaps[a].add(b)
-        overlaps[b].add(a)
     supplied = {node: effects[channel_of(node)][6] for node in sends}
     completion = {node: effects[channel_of(node)][7] for node in sends}
-    units, outlets, completions, owner, member = {}, {}, {}, {}, {}
+    units, outlets, completions, owner = {}, {}, {}, {}
     for node in sends:
         units.setdefault(supplied[node], set()).add(index[group[node]])
         outlets.setdefault(index[group[node]], set()).add(supplied[node])
         completions.setdefault(index[group[node]], {})[completion[node]] = None
         owner[completion[node]] = supplied[node]
-        member.setdefault(index[group[node]], []).append(node)
     completions = {k: [c for c in found if c is not None] for k, found in completions.items()}
     item = lambda u: ("publish", supplied[u]) if u in group else ("node", u)
     affected, waits = {}, {}
@@ -119,7 +147,7 @@ def fanout(module, effects):
     for s in units:
         for _, j in preds["publish", s]:
             exposed.setdefault(j, []).append(s)
-    order = mesh_graph.postorder(items[::-1], preds.__getitem__)
+    order = mesh_graph.postorder(items, items[::-1], preds.__getitem__)
     return Fanout(sites, sends, solved, values, first, group, groups, index, supplied, completion, member, owner,
                   affected, exposed, order)
 

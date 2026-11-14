@@ -1,5 +1,6 @@
 # design/data-flow.md; design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5
 import ctypes as C
+import dataclasses
 import operator
 import pathlib
 import sys
@@ -9,7 +10,7 @@ import torch
 
 from torch.fx.node import map_arg
 
-from .ir import HOST, RECV, Plan, channel_of, views
+from .ir import HOST, RECV, channel_of, views
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -19,8 +20,6 @@ SYSTEM = C.CDLL("/usr/lib/libSystem.B.dylib")
 SYSTEM.free.argtypes = [C.c_void_p]
 PRODUCED, READ, CONSUMED = ((mesh.FROM_PRODUCED, mesh.TO_PRODUCED), (mesh.FROM_SOURCE_READ, mesh.TO_SOURCE_READ),
                             (0, 0))
-# design/disjoint-pages-change-request.md D.3.3
-HOST_LAG = 2
 
 
 def unit_cost(task):
@@ -55,14 +54,29 @@ def accesses(functions):
         name, offset, sizes, strides = record if min(record[3], default=0) >= 0 else whole(named[record[0]])
         return (key[name], *mesh_graph.strided(offset, sizes, strides, element), vertex, write)
 
-    found = []
+    found, sources = [], []
     for vertex, node in enumerate(functions):
-        found += [access(record, node.meta["val"].dtype.itemsize, vertex, 1) for record in wrote(node)]
+        for record in wrote(node):
+            found.append(access(record, node.meta["val"].dtype.itemsize, vertex, 1))
+            sources.append((node, record))
         for held in () if "view" in node.meta else dict.fromkeys(node.all_input_nodes):
             record = held.meta.get("view") or held.meta.get("out") or whole(held)
             if record and record[0] in key and record not in wrote(node):
                 found.append(access(record, held.meta["val"].dtype.itemsize, vertex, 0))
-    return found
+                sources.append((held, record))
+    return found, sources
+
+
+# design/compilation-composition-change-request.md items 6, 6.4 and 7; rdma/mesh-graph.h mesh_graph_relation_create:
+# the source's one relation, its memory witnesses (rdma/mesh_graph.py dependences_supplied over the accesses' views)
+# and, as GIVEN causes of the same solve, each SSA input and each declared channel; `accesses` each view's producing
+# source view, `supplied` each GIVEN cause's (kind, source, sink, operand)
+@dataclasses.dataclass(eq=False)
+class SourceRelation:
+    relation: object
+    functions: list
+    supplied: list
+    accesses: list
 
 
 # design/problems-of-14b9a757-change-request.md items 1, 2 and 6; A. J. Bernstein, IEEE Trans. Electronic Computers
@@ -70,18 +84,26 @@ def accesses(functions):
 def dependence(module, transfers):
     nodes = list(module.graph.nodes)
     functions = [n for n in nodes if n.op == "call_function" and producer(n) is n]
-    after = {}
-    edges, causes, _ = mesh_graph.dependences_views(len(functions), accesses(functions))
+    vertex, after, supplied = {node: k for k, node in enumerate(functions)}, {}, []
+    views, sources = accesses(functions)
+    for node in functions:
+        supplied += [("value", producer(u), node, u) for u in dict.fromkeys(node.all_input_nodes)
+                     if u.op == "call_function"]
+        if node.target is RECV:
+            supplied.append(("channel", transfers[channel_of(node)][0], node, channel_of(node)))
+    relation = mesh_graph.dependences_supplied(len(functions), views,
+                                               [(vertex[source], vertex[sink]) for _, source, sink, _ in supplied])
+    edges = relation.edges()
     for earlier, later in edges:
         after.setdefault(functions[later], []).append(functions[earlier])
-    writers = [(functions[earlier], functions[later]) for (earlier, later), held in causes.items()
-               if any(hazard == mesh_graph.HAZARDS[0] for hazard, _ in held)]
+    writers = [(functions[earlier], functions[later]) for e, (earlier, later) in enumerate(edges)
+               if any(mesh_graph.HAZARDS[relation.conflict(k).kind] == mesh_graph.HAZARDS[0] for k in relation.members(e))]
 
     def preds(node):
         found = [producer(u) for u in node.all_input_nodes if u.op == "call_function"] + after.get(node, [])
         return found + [transfers[channel_of(node)][0]] if node.target is RECV else found
 
-    return nodes, functions, preds, writers
+    return nodes, functions, preds, writers, SourceRelation(relation, functions, supplied, sources)
 
 
 # compiler/mesh_compiler/placement.py place, transfers
@@ -100,18 +122,6 @@ def dependences(events, before):
     found = mesh_graph.precedence([nodes for _, _, _, nodes in events], [place for _, place, _, _ in events],
                                   [nodes[0].meta["processor"] for _, _, _, nodes in events], before)
     return [(events[a][0], events[b][0], lag, events[a][2][0] | events[b][2][1]) for a, b, lag in found]
-
-
-# compiler/mesh_compiler/ir.py views; design/problems-of-14b9a757-change-request.md items 3 and 6, and item 8,
-# step 4; compiler/mesh_compiler/placement.py place, transfers
-def viewed(transfers, carried):
-    def of(node):
-        if node.target is RECV:
-            return None if node.args[0] in carried else transfers[node.args[0]][0].args[0]
-        if "view" in node.meta:
-            return None if "invariant" in node.meta else producer(node).args[0]
-        return next((u for u in node.all_input_nodes if "out" in node.meta and based(u) == node.meta["out"][0]), None)
-    return of
 
 
 def extent(value):
@@ -156,66 +166,43 @@ def solved(plan, planning, function):
     return plan, made, view, first, offset
 
 
-# design/disjoint-pages-change-request.md A3 item 2 and C3.2; design/problems-of-14b9a757-change-request.md 7.1 steps 2
-# and 5, 7.2 step 3, item 8 step 4 and item 14 steps 3 and 4
-def stored(values, places, module, local, before, of, channels, mutated, invariant):
-    index = {node: place for place, node in enumerate(local)}
-    results = {mesh_graph.chain(n, of)[-1] for n in module.graph.output_node().all_input_nodes}
-    roots = {f: [mesh_graph.chain(u, of)[-1] for u in f.all_input_nodes] for f in local}
-    last = mesh_graph.ends(local, before, lambda f: () if f.meta.get("invariant") else [
-        (root, (f if root.op == "placeholder" else root).meta["processor"]) for root in roots[f]] + [
-        (f, f.meta["processor"])] * (f.target is RECV and f.args[0] in channels))
-    named, slices, first = {(node.name, node.meta["processor"]): node for node in local}, set(), {}
-    for node in reversed(local):
-        first.update((record[0], index[node]) for record in wrote(node))
-    landed = {(f.meta["processor"], f.name) for f in local if f.target is RECV and f.args[0] in channels}
-    for value, (processor, name, _) in enumerate(list(places)):
-        node = named.get((name, processor))
-        begin, end = index[producer(node)] if node and (processor, name) not in landed else 0, len(local) - 1
-        if (node, processor) in last and node.target is RECV and node not in results:
-            end = index[last[node, processor]]
-        values[value] = (*values[value][:4], begin, end, *values[value][6:])
-    placed = {(processor, name) for processor, name, _ in places}
-    for (root, processor), reader in last.items():
-        value = root.meta.get("val")
-        if (processor, root.name) in placed or not isinstance(value, torch.Tensor) or not extent(value):
-            continue
-        if root.meta.get("state") in mutated:
-            values.append((extent(value), mesh.INVARIANT, 0, 1, 0, 0, 0, 1))
-        elif "state" in root.meta or "invariant" in root.meta:
-            record = root.meta.get("invariant", (root.meta.get("state"),))
-            if record not in invariant or record in slices:
-                continue
-            slices.add(record)
-            values.append((extent(value), mesh.INVARIANT, 0, 0, 0, 0, 0, 1))
-        elif root.op == "placeholder":
-            values.append((extent(value), mesh.EXECUTION, 0, 0, 0, 0, HOST_LAG, 1))
-        elif producer(root) in index:
-            values.append((extent(value), mesh.EXECUTION, 0, 0, first.get(root.name, index[producer(root)]),
-                           len(local) - 1 if root in results else index[reader], 0, 1))
-        else:
-            continue
-        places.append((processor, root.name, ()))
-        placed.add((processor, root.name))
-    for root in results:
-        value = root.meta.get("val")
-        if producer(root) in index and (root.meta["processor"], root.name) not in placed and isinstance(
-                value, torch.Tensor) and extent(value):
-            values.append((extent(value), mesh.EXECUTION, 0, 0, first.get(root.name, index[producer(root)]),
-                           len(local) - 1, 0, 1))
-            places.append((root.meta["processor"], root.name, ()))
-            placed.add((root.meta["processor"], root.name))
+# design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5;
+# rdma/mesh-collective.h struct mesh_function, mesh_plan; design/compilation-composition-change-request.md items 4 and
+# 7: the source declarations of the one plan, before any solve: its declared transfers and their logical wire values,
+# the caller's costs, the transfer dependences and the source tasks in causal postorder; the numerical values,
+# lifetimes and costs are the lowered program's actual results, added by the plan's consumer
+@dataclasses.dataclass
+class Declarations:
+    program: int
+    channels: list
+    declared: list
+    weights: list
+    values: list
+    places: list
+    dependences: list
+    outstanding: int
+    tasks: list
+    before: list
+    senders: list
+    receivers: list
+    resources: int
+    machine: int
+
+    # channel -> (declared transfer, logical wire value, its logical bytes, declared sent view, declared landed view)
+    def wires(self):
+        return {channel: (transfer, value, self.values[value][0], sent, landed)
+                for transfer, (channel, (*_, value, sent, landed)) in enumerate(zip(self.channels, self.declared))
+                if value != mesh.ABSENT}
 
 
 # design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5;
-# design/integration-finishing-change-request.md item 3; rdma/mesh-collective.h mesh_plan; compiler/mesh_compiler/ir.py
-# Planning; compiler/mesh_compiler/placement.py place, transfers
-def planned(module, transfers, carried, machines, mutated, cost, functions, before, tasks, edges, planning,
-            writers=()):
-    at, task = {node: k for k, node in enumerate(planning.nodes)}, {node: k for k, node in enumerate(functions)}
-    here, machine = planning.here, planning.nodes[planning.here]
-    held, channels = set(functions), {channel for channel, *_ in carried}
-    of = viewed(transfers, channels)
+# design/integration-finishing-change-request.md item 3; compiler/mesh_compiler/ir.py Planning;
+# compiler/mesh_compiler/placement.py place, transfers
+def declarations(module, transfers, carried, machines, cost, functions, before, tasks, edges, planning, writers=()):
+    nodes = planning.nodes if planning is not None else ()
+    at, task = {node: k for k, node in enumerate(nodes)}, {node: k for k, node in enumerate(functions)}
+    here = planning.here if planning is not None else None
+    held = set(functions)
     declared, weights, values, places, events, identities, versions = [], [], [], [], [], {}, {}
     named = {node.name: node for node in module.graph.nodes}
     for writer, reader in writers:
@@ -224,7 +211,7 @@ def planned(module, transfers, carried, machines, mutated, cost, functions, befo
         sent, arrival = transfers[channel]
         source, destination = at[machines[sender]], at[machines[receiver]]
         start = sent.args[0].meta.get("view") or sent.args[0].meta.get("out") or whole(sent.args[0])
-        finish, version = whole(arrival), tuple(sorted(versions.get(sent, ())))
+        finish, version = arrival.meta.get("to") or whole(arrival), tuple(sorted(versions.get(sent, ())))
         written, value = producer(sent.args[0]), mesh.ABSENT
         if here in (source, destination):
             writer = (sender, start[0], version) if source == here else (receiver, finish[0], ())
@@ -240,18 +227,13 @@ def planned(module, transfers, carried, machines, mutated, cost, functions, befo
         events += [(transfer, source, PRODUCED, [written])] * (written in held)
         events += [(transfer, source, READ, read), (transfer, destination, CONSUMED,
                                                     [arrival] + [u for u in arrival.users if u in held])]
-    stored(values, places, module, [n for n in functions if machines[n.meta["processor"]] == machine],
-           before, of, channels, mutated,
-           {record for processor, records in module.meta["invariant"].items()
-            if machines[processor] == machine for record in records})
     ends = [tuple(task[end] for end in transfers[channel]) for channel, *_ in carried]
     crossing = set(ends)
-    plan = Plan(planning.program, [c for c, *_ in carried],
-                declared, weights, values, dependences(events, before), 1, tasks,
-                [edge for edge in edges if edge not in crossing], [sent for sent, _ in ends],
-                [arrival for _, arrival in ends], 1 + max(resource for _, resource in tasks), [], [], b"",
-                machine, places, [])
-    return solved(plan, planning)
+    return Declarations(planning.program if planning is not None else 0, [c for c, *_ in carried], declared, weights,
+                        values, places, dependences(events, before), 1, tasks,
+                        [edge for edge in edges if edge not in crossing], [sent for sent, _ in ends],
+                        [arrival for _, arrival in ends], 1 + max((resource for _, resource in tasks), default=0),
+                        nodes[here] if planning is not None else None)
 
 
 # design/torch-source-lowering-change-request.md item 3; design/aot-compilation-change-request.md A6;
@@ -260,42 +242,34 @@ def planned(module, transfers, carried, machines, mutated, cost, functions, befo
 # Planning; design/compilation-composition-change-request.md items 2, 3, 6 and 7; rdma/mesh-graph.h mesh_graph_contract
 def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), planning=None, groups=None):
     transfers = module.meta["transfers"]
-    nodes, functions, preds, writers = dependence(module, transfers)
-    functions = [node for node in mesh_graph.postorder(functions, preds)]
+    nodes, functions, preds, writers, source = dependence(module, transfers)
+    graph = mesh_graph.Graph.from_conflicts(source.functions, source.relation)
+    functions = graph.order()
     task = {node: k for k, node in enumerate(functions)}
     processors = dict.fromkeys(n.meta["processor"] for n in nodes if n.op != "placeholder")
     lane = {processor: k for k, processor in enumerate(processors)}
     tasks = [(cost(node), lane[node.meta["processor"]]) for node in functions]
-    edges = [(task[earlier], task[node]) for node in functions for earlier in dict.fromkeys(preds(node))]
-    before = mesh_graph.closure(functions, preds)
+    edges = [(task[earlier], task[later]) for earlier, later in graph.edges()]
+    before = graph.ancestors(following=True)
     carried = [transfer for transfer in carried if all(transfer[4])]
-    plan = planned(module, transfers, carried, machines, mutated, cost, functions, before, tasks, edges,
-                   planning, writers) if carried else None
-    order = plan.order if plan else ordered(tasks, edges, len(lane))
-    listed = sorted(functions, key=lambda node: order[task[node]])
+    declared = declarations(module, transfers, carried, machines, cost, functions, before, tasks, edges, planning,
+                            writers)
+    listed = functions
     side = {processor: (groups or {}).get(processor, processor) for processor in processors}
     local = {end for ends in transfers.values() if len({side[end.meta["processor"]] for end in ends}) == 1
              for end in ends}
-    pairs = [(functions[earlier], functions[later]) for earlier, later in
-             (mesh_graph.contract([node not in local for node in functions], edges) if local else edges)]
+    pairs = graph.contract([node not in local for node in graph.vertices]).edges()
     identity = {node: (k, resource) for k, (node, (_, resource)) in enumerate(zip(functions, tasks))}
     members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
     sequence = tuple(identity[node] for node in listed)
     return {group: assemble(group, held, [node for node in listed if node.meta["processor"] in held], nodes, pairs,
-                            transfers, local, identity, writers, sequence) for group, held in members.items()}, plan
-
-
-# rdma/mesh-collective.h mesh_plan; design/plan-to-bridge-change-request.md R5
-def ordered(tasks, edges, resources):
-    function, _ = mesh.function((), (), (), (), 1, tasks, edges, (), (), resources)
-    mesh.check(mesh.LIB.mesh_plan(None, 1, 1, function, 1, (mesh.U * 1)(0), 1, None, None, 0, None, 0,
-                                  C.byref(mesh.Planned())))
-    return list(function[0].order[:len(tasks)])
+                            transfers, local, identity, writers, sequence, source)
+            for group, held in members.items()}, declared
 
 
 # design/compilation-composition-change-request.md items 2, 3 and 6; M. Abadi et al., TensorFlow, arXiv:1603.04467,
 # section 3.2.2: a Send/Receive pair stands only for an edge between devices; compiler/mesh_compiler/ir.py views
-def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers=(), sequence=()):
+def assemble(group, members, order, nodes, pairs, transfers, local, identity, writers, sequence, source):
     graph, copied, tasks = torch.fx.Graph(), {}, {}
     for node in nodes:
         if node.op == "placeholder" and any(u.meta["processor"] in members for u in node.users):
@@ -324,7 +298,8 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         channel: tuple(sent.args[0].meta["val"].stride()) for channel, (sent, arrival) in transfers.items()
         if arrival in copied and arrival not in local}, order=sequence, transfers={
         channel: (copied.get(sent), copied.get(arrival)) for channel, (sent, arrival) in transfers.items()
-        if arrival not in local})
+        if arrival not in local}, relation=source, copied=dict(copied), output=output.meta["processor"], vertices=tuple(
+        None if node in local else copied.get(node) for node in source.functions))
     return module
 
 

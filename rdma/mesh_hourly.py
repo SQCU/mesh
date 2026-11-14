@@ -225,9 +225,10 @@ def main():
         def live(n):
             return sorted({o for _, o in cables(n) if o and mesh_preflight.joined(facts[o])})
 
-        members = mesh_graph.reach([here['host']], live)
-        order = [n for n in mesh_graph.walk([min(members)], live) if n in members]
-        order += sorted(members.difference(order))
+        fabric = mesh_graph.Graph.adjacency(facts, live)
+        members = fabric.reach([here['host']])
+        order = [n for n in fabric.walk([min(members)]) if n in members]
+        order += sorted(members - set(order))
         absent = {name: 'its beacon answered; its probe at %s over ssh did not, within %s s'
                   % (v, mesh_preflight.READ_S) for v, name in silent.items()}
         for n in order:

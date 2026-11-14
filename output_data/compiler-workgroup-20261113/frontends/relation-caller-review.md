@@ -1,0 +1,11 @@
+# Retained source relation caller checkpoint
+
+2026-11-13. Codex frontend review of SAME Torch9740398d (turn19) and LiteRT41f48493 (turn13), both explicit/reported Claude Opus5.5. Raw logs/work orders remain under metal-microbench output_data/compiler-workgroup-20261113/frontends.
+
+The source dependence owner now submits the original memory views and supplied SSA/channel causes in one native call and retains their original arrays in SourceRelation. Graph reads the canonical relation descriptor; schedule uses that relation's native order, closure and contracted relation. Edge/member/order results are borrowed reusable views with direct Python owner composition. ADOPTED registry/callback indirection and the second closure Graph are removed. Original source-to-copied-node, source access and supplied-cause correspondences reach ConstructedMachine; the native cause import/discharge consumer remains open.
+
+Typed numerical construction now supplies selected out/to destination views to the existing shared lowering owner, retaining CAT destination storage and exact aliases rather than allocating independent producer outputs. Mutation output kinds/original destination roots remain explicit. This checkpoint does not close nested destination wire geometry or sharded mutation placement; those exact producer-consumer corrections remain assigned. No root-wide overlap inference or new memory solver is accepted.
+
+Validation: AST of seven core Python files and git diff --check pass. Fresh imports against canonical Local144/RelationData144 build pass. Existing native Graph order/closure and repeated contracted-edge view access pass. The existing CPU Engines client reaches construction after schedule; its first attempt fails locating libmetal_recording.dylib, and executor is correcting the existing loader environment. No new numerical/performance claim.
+
+Immediate continuation: closure consumes explicit retained native order/stride rather than numeric vertex IDs; skip contraction when no vertices are eliminated; remove obsolete after/preds reconstruction. The first two general graph algorithms remain in the existing C owner. Remaining Python graph algorithm migrations and source-cause C consumption are not closed by this checkpoint. Exact C working checkpoint26861434 is separate.

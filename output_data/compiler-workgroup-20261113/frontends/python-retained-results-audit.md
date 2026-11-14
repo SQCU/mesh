@@ -64,15 +64,18 @@ remain an alternative execution mechanism. `export.Captured` is a different, int
   capture or a scheduling solve. `Exported.graph_module=None` in that final executable archive is intentional
   after its compiler consumers are finished; it is not by itself a defective IR handoff.
 
-`export.read` also discards successfully captured programs through generic higher-order/get_attr/input/output-kind
-guards. The guard's own “out of scope” text does not establish a requirement boundary. Captured fixed-shape
-`cond`/`while` bodies and constant tensor attributes retain typed child graphs and value correspondence upstream;
-the consumer must carry those regions and their interfaces into the same compiler owner. Captured user-input
-mutations likewise carry `USER_INPUT_MUTATION` and its target, but the current output-kind branch rejects them
-instead of preserving caller-visible writeback. These are whole-IR rejection mechanisms for any such case in the
-stated capturable domain. Removing the guards and failing later would not close them: actual region, constant,
-mutation and structured-result consumers must be connected. Dynamic-output cases require a separate check of
-the stated domain rather than inheriting the rejection message as policy.
+`export.read` also rejects successfully captured programs through generic higher-order/get_attr/input/output-kind
+guards. The guard's own text does not establish the requirement boundary, but the actual canon does: Torch source
+lowering item 2 and compilation composition's “Withdrawn, 2026-11-09” exclude arbitrary data-dependent control
+between linear algebra, including dynamic `cond`/`while`/`map`/`scan`. A previous paragraph incorrectly inferred
+that fixed tensor shapes admitted those regions; that claim is withdrawn. No dynamic-region implementation is
+assigned from this audit.
+
+The blanket HigherOrderOperator check still needs inspection for statically composable wrappers inside the stated
+domain. Constant tensor attributes and captured `USER_INPUT_MUTATION` also retain exact upstream value/target
+facts that current guards can discard rather than hand to the compiler or caller writeback. Removing guards and
+failing later would not close an admitted case: its static body, constant, mutation and structured-result
+consumers must be connected. Admission comes from the cited scope, not generic torch.export success.
 
 ## Existing typed numerical owner for the target replacement
 
@@ -100,3 +103,22 @@ actual MPS AOT APIs and shares CPU call construction where appropriate. That is 
 inspect, but choosing it alone would not discharge the existing ANE or mixed native-effect composition
 obligations. The next replacement must connect the selected target to the completed-result contract and delete
 the old probing/reconstruction/residual-return bodies, not merely expose an unused construction helper.
+# Graph ownership correction, 2026-11-13
+
+The current thin callers mostly invoke `mesh_graph`, but `rdma/mesh_graph.py:11–211` independently implements
+directed walk/reach, chain, closure/reduction, precedence, propagation/forward, postorder/longest and matching/width.
+This is only partial centralization. The existing native owner is `rdma/mesh-graph.h` and `.c`; the active SAME Torch
+session 9740398d is replacing those Python algorithms with one retained native graph/result and object/edge
+correspondence. The same source graph must serve ordering, closure and contraction without repeated serialization
+or freeing a reduced copied answer. Native arrays and annotations remain alive through their consumers.
+
+The C `mesh_graph_reach` is undirected, whereas Python reach follows the supplied directed adjacency. A name match
+does not establish equivalence. The shared native DFS/order owner must expose the required directed result; no
+second DFS is acceptable. Existing live callers include schedule's causal order/closure/transfer precedence,
+placement's reach/propagation, ir.views' alias propagation, fanout's constructed effect DAG, and shares' longest
+stage path. Domain transfer callbacks and typed correspondence remain at their producers.
+
+The source-cause connection is separately open: retained native conflict witnesses now survive in their owner,
+but typed construction must consume exact view/cause correspondence before the operation-edge/fusion boundary.
+Root-wide Cartesian operation barriers and an `unresolved` tag with no consumer were rejected in review. This is
+the existing composition CR requirement at lines 312–314, not an optional new annotation.

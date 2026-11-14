@@ -1,26 +1,214 @@
 # design/rubrics.md C9
 import bisect
-import collections
+import collections.abc
 import ctypes as C
 import errno
 import fractions
 import math
 import os
+import weakref
 
 
-def walk(starts, neighbours):
-    order, seen, queue = [], set(), collections.deque(starts)
-    while queue:
-        v = queue.popleft()
-        if v not in seen:
-            seen.add(v)
-            order.append(v)
-            queue.extend(neighbours(v))
-    return order
+# mesh-graph.h struct mesh_graph_search and struct mesh_graph_closure: the owned results
+class Searched(C.Structure):
+    _fields_ = [('vertices', C.c_uint32), ('count', C.c_uint32), ('preorder', C.POINTER(C.c_uint32)),
+                ('postorder', C.POINTER(C.c_uint32)), ('parent', C.POINTER(C.c_uint32)),
+                ('place', C.POINTER(C.c_uint32)), ('entry', C.POINTER(C.c_size_t))]
 
 
-def reach(starts, neighbours):
-    return set(walk(starts, neighbours))
+class Closed(C.Structure):
+    _fields_ = [('vertices', C.c_uint32), ('words', C.c_size_t), ('reached', C.POINTER(C.c_uint64))]
+
+
+# one owned native result and the graph whose vertices its IDs name, freed with its last view
+class Owned:
+    def __init__(self, made, free, graph):
+        self.made, self.graph, self.freed = made, graph, weakref.finalize(self, free, made)
+
+
+# a borrowed native array over a span of its indices, each element read through `at`; slices are views of the same
+# array and keep its owner
+class View(collections.abc.Sequence):
+    def __init__(self, owner, items, span, at):
+        self.owner, self.items, self.span, self.at = owner, items, span, at
+
+    def __len__(self):
+        return len(self.span)
+
+    def __getitem__(self, k):
+        span = self.span[k]
+        return View(self.owner, self.items, span, self.at) if isinstance(span, range) else self.at(self.items[span])
+
+    def __iter__(self):
+        return (self.at(self.items[k]) for k in self.span)
+
+
+# a search's order of its owned result, its native vertex IDs mapped to the graph's objects
+def ordered(owned, ids, span):
+    return View(owned, ids, span, owned.graph.vertices.__getitem__)
+
+
+# the vertices a search reached: membership by its place array
+class Reached(collections.abc.Set):
+    def __init__(self, owned):
+        self.owned, self.searched = owned, owned.made.contents
+
+    def __contains__(self, v):
+        k = self.owned.graph.at.get(v)
+        return k is not None and self.searched.place[k] != NONE
+
+    def __iter__(self):
+        return iter(ordered(self.owned, self.searched.preorder, range(self.searched.count)))
+
+    def __len__(self):
+        return self.searched.count
+
+    @classmethod
+    def _from_iterable(cls, items):
+        return set(items)
+
+
+# one vertex k of the owned closure bitset: its row (the vertices k's rows lead to) or, transposed, its column (the
+# vertices whose rows lead to k)
+class Closure(collections.abc.Set):
+    def __init__(self, owned, k, transposed):
+        closed = owned.made.contents
+        self.owned, self.bits, self.words, self.k, self.transposed = owned, closed.reached, closed.words, k, transposed
+
+    def _bit(self, row, column):
+        return bool(self.bits[row * self.words + column // 64] >> (column % 64) & 1)
+
+    def __contains__(self, u):
+        j = self.owned.graph.at.get(u)
+        return j is not None and (self._bit(j, self.k) if self.transposed else self._bit(self.k, j))
+
+    def __iter__(self):
+        vertices = self.owned.graph.vertices
+        if self.transposed:
+            return (vertices[j] for j in range(len(vertices)) if self._bit(j, self.k))
+        return (vertices[64 * w + b] for w in range(self.words) for b in range(64)
+                if self.bits[self.k * self.words + w] >> b & 1)
+
+    def __len__(self):
+        return sum(1 for _ in self)
+
+    @classmethod
+    def _from_iterable(cls, items):
+        return set(items)
+
+
+# the closure by vertex
+class Closures(collections.abc.Mapping):
+    def __init__(self, owned, transposed):
+        self.owned, self.transposed = owned, transposed
+
+    def __getitem__(self, v):
+        return Closure(self.owned, self.owned.graph.at[v], self.transposed)
+
+    def __iter__(self):
+        return iter(self.owned.graph.vertices)
+
+    def __len__(self):
+        return len(self.owned.graph.vertices)
+
+
+# mesh-graph.h struct mesh_graph_relation_data, mesh_graph_search, mesh_graph_breadth, mesh_graph_closure,
+# mesh_graph_relation_head, mesh_graph_relation_contract and mesh_graph_relation_quotient: one retained relation and its
+# vertices' objects (vertex k is vertices[k]); a search runs over its outgoing rows (row_first, row_edge) in place, and
+# every result is a view of its owned native result, retaining the relation
+class Graph:
+    def __init__(self, vertices, relation):
+        self.vertices, self.relation = list(vertices), relation
+        self.at = {v: k for k, v in enumerate(self.vertices)}
+        self.data, self.context = relation.data, C.cast(relation.descriptor, C.c_void_p)
+
+    # the relation dependences_supplied returned, its vertex k the caller's vertices[k]
+    @classmethod
+    def from_conflicts(cls, vertices, relation):
+        return cls(vertices, relation)
+
+    # a source adjacency constructed once as GIVEN conflict records, edge v -> u for each u of neighbours(v), `given` the
+    # record's index, no view
+    @classmethod
+    def adjacency(cls, universe, neighbours):
+        vertices = list(dict.fromkeys(universe))
+        at = {v: k for k, v in enumerate(vertices)}
+        records = [(at[v], at[u]) for v in vertices for u in neighbours(v)]
+        conflict = (Conflict * max(len(records), 1))(*[Conflict(a, b, GIVEN, k, 0, SIZE, SIZE)
+                                                        for k, (a, b) in enumerate(records)])
+        return cls(vertices, Relation.create(len(vertices), 0, None, len(records), conflict))
+
+    def _search(self, call, roots, *operands):
+        start, count = _array(C.c_uint32, [self.at[v] for v in roots])
+        made = C.POINTER(Searched)()
+        _check(call(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context, count, start, *operands,
+                    C.byref(made)))
+        return Owned(made, LIB.mesh_graph_search_free, self)
+
+    # T. H. Cormen et al., Introduction to Algorithms, 3rd ed., §22.3
+    def search(self, roots, reverse=False):
+        return self._search(LIB.mesh_graph_search, roots, int(reverse))
+
+    def preorder(self, roots):
+        owned = self.search(roots)
+        return ordered(owned, owned.made.contents.preorder, range(owned.made.contents.count))
+
+    # R. E. Tarjan, SIAM J. Comput. 1(2), 1972: the finishing order of the search from the roots in reverse order over
+    # rows in reverse order, the order of a stack each root and row is pushed on
+    def postorder(self, roots):
+        owned = self.search(list(roots)[::-1], True)
+        return ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count))
+
+    # T. H. Cormen et al., 3rd ed., §22.4: the reverse finishing order of the search from every vertex, a topological
+    # order of the rows' edges
+    def order(self):
+        owned = self.search(self.vertices)
+        return ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count - 1, -1, -1))
+
+    # T. H. Cormen et al., 3rd ed., §22.2
+    def walk(self, starts):
+        owned = self._search(LIB.mesh_graph_breadth, starts)
+        return ordered(owned, owned.made.contents.preorder, range(owned.made.contents.count))
+
+    def reach(self, starts):
+        return Reached(self._search(LIB.mesh_graph_breadth, starts))
+
+    # mesh_graph_closure over the outgoing rows, their heads all before (`following` 0) or all after (1) their row in
+    # vertex order: v's set the vertices whose rows lead to v (the rows' predecessors: their own closure row; successors:
+    # the transposed column)
+    def ancestors(self, following=False):
+        made = C.POINTER(Closed)()
+        _check(LIB.mesh_graph_closure(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context,
+                                      int(following), C.byref(made)))
+        return Closures(Owned(made, LIB.mesh_graph_closure_free, self), following)
+
+    # the distinct edges in place, (from, to) objects
+    def edges(self):
+        return View(self.relation, self.data.edge, range(self.data.edges),
+                    lambda e: (self.vertices[e.source], self.vertices[e.sink]))
+
+    # derived relations: each retains this relation natively and in Python, with its operand array
+    def contract(self, kept):
+        marks = (C.c_ubyte * max(self.data.vertices, 1))(*[bool(k) for k in kept])
+        return self._derived(self.vertices, LIB.mesh_graph_relation_contract, marks, marks)
+
+    # `classes` the class objects, class k the quotient's vertex k
+    def quotient(self, classes, class_of):
+        held = _array(C.c_uint32, class_of)[0]
+        return self._derived(classes, LIB.mesh_graph_relation_quotient, held, len(classes), held)
+
+    def _derived(self, vertices, call, held, *operands):
+        made = C.c_void_p()
+        _check(call(self.relation.pointer, *operands, None, None, C.byref(made)))
+        return Graph(vertices, Relation(made.value, (held,), self.relation))
+
+
+def walk(universe, starts, neighbours):
+    return Graph.adjacency(universe, neighbours).walk(starts)
+
+
+def reach(universe, starts, neighbours):
+    return Graph.adjacency(universe, neighbours).reach(starts)
 
 
 # design/unequal-shards-change-request.md item 8
@@ -42,20 +230,22 @@ def chain(start, following):
 
 # A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988; design/aot-compilation-change-request.md A10
 def closure(order, neighbours):
-    place, reached = {}, {}
-    for v in order:
-        place[v], reached[v] = len(place), set()
-        for u in sorted(set(neighbours(v)), key=place.__getitem__, reverse=True):
-            if u not in reached[v]:
-                reached[v] |= {u} | reached[u]
-    return reached
+    return Graph.adjacency(order, neighbours).ancestors()
 
 
-# A. V. Aho, M. R. Garey and J. D. Ullman, The transitive reduction of a directed graph, SIAM J. Comput. 1(2), 1972
+# A. V. Aho, M. R. Garey and J. D. Ullman, The transitive reduction of a directed graph, SIAM J. Comput. 1(2), 1972;
+# mesh-graph.h mesh_graph_synchronization: an edge another path covers is redundant
 def reduction(order, neighbours):
-    reached = closure(order, neighbours)
-    return {v: [u for u in dict.fromkeys(neighbours(v)) if not any(u in reached[w] for w in neighbours(v))]
-            for v in order}
+    at = {v: k for k, v in enumerate(dict.fromkeys(order))}
+    edges = [(u, v) for v in at for u in dict.fromkeys(neighbours(v))]
+    tails, count = _array(C.c_uint32, [at[u] for u, _ in edges])
+    heads, _ = _array(C.c_uint32, [at[v] for _, v in edges])
+    redundant, kept = (C.c_ubyte * max(count, 1))(), C.c_size_t()
+    _check(LIB.mesh_graph_synchronization(len(at), count, tails, heads, redundant, C.byref(kept)))
+    found = {v: [] for v in at}
+    for (u, v), covered in zip(edges, redundant):
+        found[v] += [u] * (not covered)
+    return found
 
 
 # F. Harary, Graph Theory, 1969
@@ -70,7 +260,7 @@ def precedence(events, place, thread, reached):
         return a != b and place[a] == place[b] and all(x in reached[y] for x in events[a] for y in events[b])
 
     after = {a: [b for b in range(len(events)) if precedes(a, b)] for a in range(len(events))}
-    covering = reduction(postorder(list(after), after.__getitem__), after.__getitem__)
+    covering = reduction(postorder(list(after), list(after), after.__getitem__), after.__getitem__)
     found = [(a, b, 0) for a in covering for b in covering[a]]
     for one in dict.fromkeys(thread):
         held = [a for a in covering if thread[a] == one]
@@ -98,25 +288,15 @@ def forward(order, neighbours, transfer):
     return values
 
 
-# R. E. Tarjan, SIAM J. Comput. 1(2), 1972
-def postorder(vertices, neighbours):
-    order, seen, stack = [], set(), list(vertices)
-    while stack:
-        v = stack[-1]
-        unseen = [u for u in neighbours(v) if u not in seen]
-        if unseen:
-            stack.extend(unseen)
-        elif stack.pop() not in seen:
-            seen.add(v)
-            order.append(v)
-    return order
+def postorder(universe, roots, neighbours):
+    return Graph.adjacency(universe, neighbours).postorder(roots)
 
 
 # S. Zhang et al., HAP, EuroSys 2024, section 3.2; design/unequal-shards-change-request.md item 6
 def longest(vertices, predecessors, weight):
     def length(v, lengths):
         return max((at + weight(u, v) for u, at in zip(predecessors(v), lengths)), default=0)
-    return forward(postorder(vertices, predecessors), predecessors, length)
+    return forward(postorder(vertices, vertices, predecessors), predecessors, length)
 
 
 # A. Pınar, E. K. Tabak and C. Aykanat, JPDC 68(11), 2008, section 4, LR-PROBE;
@@ -160,50 +340,22 @@ def ends(order, reached, uses):
 
 # F. Harary, Graph Theory, 1969; design/aot-compilation-change-request.md A10
 def paths(vertices, neighbours):
-    entered = {u for v in vertices for u in neighbours(v)}
-    return [walk([v], neighbours) for v in vertices if v not in entered and list(neighbours(v))]
+    graph = Graph.adjacency(vertices, neighbours)
+    into, out = graph.data.in_first, graph.data.row_first
+    return [graph.walk([v]) for k, v in enumerate(graph.vertices) if into[k + 1] == into[k] and out[k + 1] > out[k]]
 
 
-# J. E. Hopcroft and R. M. Karp, An n^5/2 algorithm for maximum matchings in bipartite graphs, SIAM J. Comput. 2, 1973
-def matching(left, neighbours):
-    nil = object()
-    mate, partner, depth = {a: nil for a in left}, {}, {}
-
-    def layer():
-        queue = [a for a in left if mate[a] is nil]
-        for a in left:
-            depth[a] = 0 if mate[a] is nil else math.inf
-        depth[nil] = math.inf
-        for a in queue:
-            if depth[a] < depth[nil]:
-                for b in neighbours(a):
-                    c = partner.get(b, nil)
-                    if depth[c] == math.inf:
-                        depth[c] = depth[a] + 1
-                        if c is not nil:
-                            queue.append(c)
-        return depth[nil] != math.inf
-
-    def augment(a):
-        if a is nil:
-            return True
-        for b in neighbours(a):
-            c = partner.get(b, nil)
-            if depth[c] == depth[a] + 1 and augment(c):
-                mate[a], partner[b] = b, a
-                return True
-        depth[a] = math.inf
-        return False
-    while layer():
-        for a in left:
-            if mate[a] is nil:
-                augment(a)
-    return {a: b for a, b in mate.items() if b is not nil}
-
-
-# design/joint-compilation.md §3, row 2
+# design/joint-compilation.md §3, row 2; mesh-graph.h mesh_graph_chains (R. P. Dilworth, 1950; D. R. Fulkerson, 1956):
+# the fewest chains covering the vertices under the relation, each vertex counted once
 def width(vertices, neighbours):
-    return len(vertices) - len(matching(vertices, neighbours))
+    graph = Graph.adjacency(vertices, neighbours)
+    data = graph.data
+    before = BEFORE(lambda context, a, b: any(data.edge[data.row_edge[k]].sink == b
+                                              for k in range(data.row_first[a], data.row_first[a + 1])))
+    counts = (C.c_uint64 * max(len(graph.vertices), 1))(*[1] * len(graph.vertices))
+    chain, chains = (C.c_uint64 * max(len(graph.vertices), 1))(), C.c_uint64()
+    _check(LIB.mesh_graph_chains(len(graph.vertices), counts, before, None, chain, C.byref(chains)))
+    return chains.value
 
 
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
@@ -214,6 +366,25 @@ PRIMITIVES = ('submit', 'queue_signal', 'queue_wait', 'fence_update', 'fence_wai
               'producer_barrier', 'bridge_raise', 'initial', 'host_publish', 'kernel_fence', 'host_signal')
 NODES, PLAN_COUNT, PLAN_SUBMISSION, LOWERED = 64, 0x80000000, 0xC0000000, 0x40000000
 STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed')
+
+# mesh-graph.h mesh_graph_search, mesh_graph_breadth, mesh_graph_search_free, mesh_graph_relation_head,
+# mesh_graph_closure, mesh_graph_closure_free and mesh_graph_chains; MESH_GRAPH_GIVEN and SIZE_MAX
+GIVEN, SIZE = 3, 2 ** 64 - 1
+_U, _Z = C.POINTER(C.c_uint32), C.POINTER(C.c_size_t)
+LIB.mesh_graph_search.restype = LIB.mesh_graph_breadth.restype = LIB.mesh_graph_closure.restype = C.c_int
+LIB.mesh_graph_chains.restype = C.c_int
+LIB.mesh_graph_search.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U, C.c_int,
+                                  C.POINTER(C.POINTER(Searched))]
+LIB.mesh_graph_breadth.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U,
+                                   C.POINTER(C.POINTER(Searched))]
+LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_int, C.POINTER(C.POINTER(Closed))]
+LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
+LIB.mesh_graph_search_free.argtypes = [C.POINTER(Searched)]
+LIB.mesh_graph_closure_free.argtypes = [C.POINTER(Closed)]
+BEFORE = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_uint32, C.c_uint32)
+LIB.mesh_graph_chains.argtypes = [C.c_uint32, C.POINTER(C.c_uint64), BEFORE, C.c_void_p, C.POINTER(C.c_uint64),
+                                  C.POINTER(C.c_uint64)]
+RELATION_HEAD = C.cast(LIB.mesh_graph_relation_head, C.c_void_p)
 
 
 # mesh-graph.h struct mesh_graph_access
@@ -600,6 +771,80 @@ def intersection(a, b):
         for r in (a, b))
 
 
+# mesh-graph.h struct mesh_graph_relation_data, mesh_graph_relation_create, mesh_graph_relation_data and
+# mesh_graph_relation_free; design/compilation-composition-change-request.md items 6, 6.4 and 7
+class RelationData(C.Structure):
+    _fields_ = [('vertices', C.c_uint32), ('views', C.c_size_t), ('conflicts', C.c_size_t), ('edges', C.c_size_t),
+                ('view', C.POINTER(Viewed)), ('conflict', C.POINTER(Conflict)), ('edge', C.POINTER(Dependence)),
+                ('first', C.POINTER(C.c_size_t)), ('member', C.POINTER(C.c_size_t)),
+                ('row_first', C.POINTER(C.c_size_t)), ('row_edge', C.POINTER(C.c_size_t)),
+                ('in_first', C.POINTER(C.c_size_t)), ('in_edge', C.POINTER(C.c_size_t)),
+                ('parent', C.c_void_p), ('source_first', C.POINTER(C.c_size_t)), ('source', C.POINTER(C.c_size_t)),
+                ('class_of', C.POINTER(C.c_uint32)), ('kept', C.POINTER(C.c_ubyte))]
+
+
+LIB.mesh_graph_relation_create.restype = C.c_int
+LIB.mesh_graph_relation_create.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(Conflict),
+                                           C.c_void_p, C.c_void_p, C.POINTER(C.c_void_p)]
+LIB.mesh_graph_relation_data.restype = C.POINTER(RelationData)
+LIB.mesh_graph_relation_data.argtypes = [C.c_void_p]
+LIB.mesh_graph_relation_free.restype = None
+LIB.mesh_graph_relation_free.argtypes = [C.c_void_p]
+LIB.mesh_graph_relation_contract.restype = LIB.mesh_graph_relation_quotient.restype = C.c_int
+LIB.mesh_graph_relation_contract.argtypes = [C.c_void_p, C.POINTER(C.c_ubyte), C.c_void_p, C.c_void_p,
+                                             C.POINTER(C.c_void_p)]
+LIB.mesh_graph_relation_quotient.argtypes = [C.c_void_p, C.c_uint32, C.POINTER(C.c_uint32), C.c_void_p, C.c_void_p,
+                                             C.POINTER(C.c_void_p)]
+LIB.mesh_graph_relation_synchronization.restype = C.c_int
+LIB.mesh_graph_relation_synchronization.argtypes = [C.c_void_p, C.POINTER(C.POINTER(C.c_ubyte)),
+                                                    C.POINTER(C.c_size_t)]
+# the release of one native reference, then of the conflict vector the library allocated for it (None: free(NULL))
+def _freed(pointer, allocated):
+    LIB.mesh_graph_relation_free(pointer)
+    LIB.free(allocated)
+
+
+# one retained relation: the native reference this object holds, the arrays it borrows (`held`: views, their pairs,
+# conflict records, operands) and its parent relation, alive with it; the native reference released first, then the
+# library's conflict vector `allocated`; `descriptor`/`data` the borrowed descriptor
+class Relation:
+    def __init__(self, pointer, held=(), parent=None, allocated=None):
+        self.pointer, self.held, self.parent = pointer, held, parent
+        self.descriptor = LIB.mesh_graph_relation_data(pointer)
+        self.data = self.descriptor.contents
+        self.freed = weakref.finalize(self, _freed, pointer, allocated)
+
+    # a root over the caller's views and conflict records, borrowed for the Relation's lifetime
+    @classmethod
+    def create(cls, vertices, views, viewed, count, conflict, held=(), allocated=None):
+        made = C.c_void_p()
+        status = LIB.mesh_graph_relation_create(vertices, views, viewed, count, conflict, None, None, C.byref(made))
+        if status:
+            LIB.free(allocated)
+            _check(status)
+        return cls(made.value, (viewed, conflict, *held), None, allocated)
+
+    # mesh_graph_relation_synchronization: the redundant mask over the edges, computed once natively
+    def redundant(self):
+        mask, kept = C.POINTER(C.c_ubyte)(), C.c_size_t()
+        _check(LIB.mesh_graph_relation_synchronization(self.pointer, C.byref(mask), C.byref(kept)))
+        return View(self, mask, range(self.data.edges), bool)
+
+    # the distinct edges, (from, to) vertex IDs, in place
+    def edges(self):
+        return View(self, self.data.edge, range(self.data.edges), lambda e: (e.source, e.sink))
+
+    # edge e's conflict indices, in place
+    def members(self, e):
+        return View(self, self.data.member, range(self.data.first[e], self.data.first[e + 1]), int)
+
+    def conflict(self, k):
+        return self.data.conflict[k]
+
+
+# mesh-graph.h mesh_graph_dependences_views and mesh_graph_relation_create: the one conflict solve over the supplied
+# views and the supplied causes (`supplied` their (from, to) function endpoints, GIVEN's `given` their index), its
+# result borrowed, unchanged, by the one relation
 def dependences_supplied(vertices, views, supplied):
     viewed, held = (Viewed * max(len(views), 1))(), []
     for made, (key, offset, element, pairs, vertex, write) in zip(viewed, views):
@@ -607,21 +852,10 @@ def dependences_supplied(vertices, views, supplied):
         made.key, made.offset, made.element, made.dims, made.pairs = key, offset, element, len(pairs), held[-1]
         made.vertex, made.write = vertex, write
     given = [_array(C.c_uint32, [edge[end] for edge in supplied])[0] for end in range(2)]
-    conflict, count, found = C.POINTER(Conflict)(), C.c_size_t(), {}
+    conflict, count = C.POINTER(Conflict)(), C.c_size_t()
     _check(LIB.mesh_graph_dependences_views(len(views), viewed, len(supplied), *given, C.byref(conflict),
                                             C.byref(count)))
-    try:
-        for cause in conflict[:count.value]:
-            found.setdefault((cause.source, cause.sink), {})[cause.kind, cause.key, cause.given] = (
-                HAZARDS[cause.kind], cause.key)
-    finally:
-        LIB.free(conflict)
-    found = {edge: list(held.values()) for edge, held in found.items()}
-    edges, room = list(found), max(len(found), 1)
-    redundant, kept = (C.c_ubyte * room)(), C.c_size_t()
-    _check(LIB.mesh_graph_synchronization(vertices, len(edges), (C.c_uint32 * room)(*[a for a, _ in edges]),
-                                          (C.c_uint32 * room)(*[b for _, b in edges]), redundant, C.byref(kept)))
-    return edges, found, [bool(r) for r in redundant[:len(edges)]]
+    return Relation.create(vertices, len(views), viewed, count.value, conflict, (held, given), conflict)
 
 
 def dependences_views(vertices, views):
