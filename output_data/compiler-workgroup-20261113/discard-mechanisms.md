@@ -71,3 +71,51 @@ and composition request's 9 November withdrawal. Data-dependent control flow is 
 Torch export alone does not admit cond/while into this assignment. Static wrappers, tensor attributes and
 caller-visible mutations need examination within the assigned fixed graph domain; they are not authority for
 an additional control-flow runtime.
+
+## Subsequent source review and immediate graph consolidation
+
+This addendum is a checkpoint through mesh `93e2c196` and metal `9a548ba3`, with
+the uncommitted work below explicitly distinguished. It supersedes the earlier
+table's status for these connections, not the governing requirements.
+
+- Mesh `e1c6b2da` completes captured input mutation through export, caller aliases
+  and the reference Target/archive path. Final native mutation destinations remain
+  part of the ongoing typed consumer connection.
+- Metal `c0d31bb6` separates immutable numerical construction from specialization
+  and retains completed invariant target emission. Mesh `16261afc` produces a local
+  plan from actual compiled Actors and Storages; `6ebf9690` records the rebuilt
+  Storage24/Local136 interface. Subsequent Local144 save/load edits are active.
+- Metal `9a548ba3` retains unaffected function Work results and batches only
+  undecided access pairs. The preceding conflict cache avoids repeated geometric
+  solves, but still reduces original records to hazard kinds. It is therefore
+  being connected to the common retained relation, rather than treated as a
+  completed information-preserving interface.
+- Metal `8cf23a29` retains external-root and argument-table operands in native
+  artifacts. Actual invocation and output ownership are still being connected;
+  that serialization commit does not establish working execution.
+
+The immediate operator instruction is recorded verbatim in the workgroup
+assignment: consolidate graph algorithms in the existing `mesh-graph.h/.c` and
+keep solved data available through views. Review found three unfinished consumer
+boundaries: Python graph algorithms and per-wrapper reconstruction; native
+parameter-dependence traversal and reduced conflict caching; recorder quotient
+and synchronization code that retains only edge pairs. The native graph owner is
+now being extended to retain original witnesses, edge-to-witness rows, and derived
+edge-to-parent correspondence. The directed search implementation is being shared
+with the existing preorder entrypoint. These source changes are not yet claimed
+as reviewed, rebuilt, connected completion.
+
+The first Python migration draft reconstructed Rows for each wrapper and copied
+native results into lists or sets. Codex rejected that draft because it moved
+algorithm bodies without completing the retained-result handoff. The same Claude
+session is replacing it and connecting the actual schedule consumer. A separate
+review found that typed construction ignores existing `out`/RECV `to` destination
+views for some pure operations. Its fresh temporary loses assigned storage
+identity; the correction is to pass the existing destination into the existing
+lowerer output operand, not add another allocation algorithm or dismiss the
+original hazard witness.
+
+The next canonical build is coordinated around the new native result interfaces.
+The previous successful E2B/native-bench build covered Local136, Storage24 and
+native v30; it supplies no execution or performance evidence for these subsequent
+uncommitted graph and invocation changes.
