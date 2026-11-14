@@ -68,11 +68,13 @@ def operands(scheduled, executions=1):
 # rdma/mesh-graph.h mesh_graph_signature, mesh_graph_compose: the emitted host record's owned signature, composed
 # with the plan's own signature (compiler/mesh_compiler/schedule.py solved), their processors united by identity
 def signature(scheduled, executions=1):
-    plan, held = scheduled.plan, [mesh_graph.build_signature(*operands(scheduled, executions))]
-    if plan and plan.signature:
-        held = [mesh_graph.from_archive(plan.signature), *held]
-        held.insert(0, mesh_graph.compose(held[0], held[1]))
+    plan, held = scheduled.plan, []
     try:
+        held.append(mesh_graph.build_signature(*operands(scheduled, executions)))
+        if plan and plan.signature:
+            held.insert(0, mesh_graph.from_archive(plan.signature))
+            held.insert(0, mesh_graph.signature_span(held[0], executions))
+            held.insert(0, mesh_graph.compose(held[0], held[-1]))
         return dict(mesh_graph.forms(held[0]), record=mesh_graph.record(held[0]))
     finally:
         for made in held:

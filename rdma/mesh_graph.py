@@ -287,6 +287,17 @@ class Span(C.Structure):
     _fields_ = [(n, C.c_uint64) for n in ('first', 'count', 'begin', 'end')]
 
 
+# mesh-graph.h struct mesh_graph_repeated and struct mesh_graph_proof
+class Repeated(C.Structure):
+    _fields_ = [(n, C.c_uint32) for n in ('processor', 'primitive', 'vertex', 'object')] + [
+        (n, C.c_uint64) for n in ('every', 'ordinal', 'lookback')] + [('startup', C.c_uint32), ('padding', C.c_uint32)]
+
+
+class Proof(C.Structure):
+    _fields_ = [('source', C.c_uint32), ('sink', C.c_uint32), ('total_delay', C.c_uint64), ('witness', C.c_uint32),
+                ('proven', C.c_uint32)]
+
+
 class Signature(C.Structure):
     _fields_ = [('processors', C.c_uint32), ('tasks', C.c_uint32), ('operations', C.c_size_t),
                 ('dependences', C.c_size_t), ('synchronized', C.c_size_t), ('uncovered', C.c_size_t),
@@ -297,7 +308,9 @@ class Signature(C.Structure):
                 ('least', C.POINTER(C.c_uint64)), ('previous', C.POINTER(C.c_size_t)),
                 ('waited', C.POINTER(C.c_size_t)), ('first', C.POINTER(C.c_size_t)), ('order', C.POINTER(C.c_size_t)),
                 ('unknown', C.POINTER(C.c_uint64)), ('alias', C.POINTER(C.c_uint32)), ('digest', C.c_ubyte * 32), ('events', C.c_size_t),
-                ('event', C.POINTER(Event)), ('spans', C.c_size_t), ('span', C.POINTER(Span))]
+                ('event', C.POINTER(Event)), ('spans', C.c_size_t), ('span', C.POINTER(Span)),
+                ('repeats', C.c_size_t), ('repeated', C.POINTER(Repeated)), ('proofs', C.c_size_t),
+                ('proof', C.POINTER(Proof))]
 
 
 PRINTERS = ('mesh_graph_matrix_market', 'mesh_graph_dot', 'mesh_graph_space_time')
@@ -491,6 +504,17 @@ def compose(a, b):
     made = Signature()
     _check(LIB.mesh_graph_compose(C.byref(a), C.byref(b), C.byref(made)))
     return made
+
+
+# mesh-graph.h mesh_graph_signature_span; design/synchronization-signature-change-request.md item 1
+LIB.mesh_graph_signature_span.restype = C.c_int
+LIB.mesh_graph_signature_span.argtypes = [C.POINTER(Signature), C.c_uint64, C.POINTER(Signature)]
+
+
+def signature_span(made, executions):
+    spanned = Signature()
+    _check(LIB.mesh_graph_signature_span(C.byref(made), executions, C.byref(spanned)))
+    return spanned
 
 
 # design/compilation-composition-change-request.md item 6.2; mesh-graph.h mesh_graph_contract, mesh_graph_quotient

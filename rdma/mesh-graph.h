@@ -251,6 +251,21 @@ int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edge
 enum { MESH_GRAPH_COMPLETION_EVENT = 1 };
 struct mesh_graph_event { uint32_t object, role, argument, padding; uint64_t lookback; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };
+/* design/synchronization-signature-change-request.md item 1; E. A. Lee and D. G. Messerschmitt, Proc. IEEE 75(9), 1987
+   (delays); M. Lam, PLDI 1988, section 2.3 (unrolled copies): a producer's operation repeated once per execution K, its
+   static fields `processor`, `primitive`, `vertex`, `object`, its primitive INITIAL, HOST_WAIT, BRIDGE_START or
+   BRIDGE_RAISE (rdma/mesh-collective.c plan_signature's). INITIAL once, before every repeated row; HOST_WAIT value
+   max(K every + ordinal - lookback every, 0); BRIDGE_START value K every + ordinal; BRIDGE_RAISE submitted = K every +
+   ordinal - 1, value submitted + 1, at `vertex` and execution (submitted - lookback) / every where submitted >=
+   lookback, else at `startup` and K; each repeated row at execution K otherwise, rows in their order within each K */
+struct mesh_graph_repeated { uint32_t processor, primitive, vertex, object; uint64_t every, ordinal, lookback;
+                             uint32_t startup, padding; };
+/* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §9: added edge `witness`
+   from task `from` to `to` at pair delay `total_delay` (its delay plus its tail's offset), `proven` its
+   mesh_graph_resynchronized test; sorted by from, to, witness */
+struct mesh_graph_proof { uint32_t from, to; uint64_t total_delay; uint32_t witness, proven; };
+_Static_assert(sizeof(struct mesh_graph_repeated) == 48 && sizeof(struct mesh_graph_proof) == 24,
+               "rdma/mesh_graph.py Repeated, Proof");
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
@@ -258,12 +273,25 @@ struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dep
                               struct mesh_graph_synchronized *edge; uint64_t *position, *count, *least;
                               size_t *previous, *waited, *first, *order; uint64_t *unknown; uint32_t *alias;
                               unsigned char digest[32]; size_t events; struct mesh_graph_event *event;
-                              size_t spans; struct mesh_graph_span *span; };
+                              size_t spans; struct mesh_graph_span *span; size_t repeats;
+                              struct mesh_graph_repeated *repeated; size_t proofs; struct mesh_graph_proof *proof; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
                          const struct mesh_graph_operation *operation, struct mesh_graph_signature *signature);
 void mesh_graph_signature_free(struct mesh_graph_signature *signature);
+/* design/synchronization-signature-change-request.md item 1; design/compilation-composition-change-request.md items 3
+   and 6.4: mesh_graph_signature over the rows' operations for executions [0, executions), the rows kept on the
+   signature. mesh_graph_signature_span realizes a kept signature's rows for `executions` the same way and applies its
+   kept proofs as mesh_graph_resynchronized does; ENODATA for a kept signature with operations and no rows (a record
+   written before rows were kept: its repeated operands are absent) */
+int mesh_graph_signature_repeated(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
+                                  const struct mesh_graph_task *task, size_t dependences,
+                                  const struct mesh_graph_dependence *dependence, size_t repeats,
+                                  const struct mesh_graph_repeated *repeated, uint64_t executions,
+                                  struct mesh_graph_signature *signature);
+int mesh_graph_signature_span(const struct mesh_graph_signature *kept, uint64_t executions,
+                              struct mesh_graph_signature *signature);
 int mesh_graph_signature_program(struct mesh_graph_signature *, size_t events, const struct mesh_graph_event *);
 int mesh_graph_signature_spans(struct mesh_graph_signature *, size_t spans, const struct mesh_graph_span *);
 
@@ -292,7 +320,7 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
    make it strongly connected and edge i is necessary to that, and its delay is MinDelay's: with the earlier edges at
    their delays and the later ones at none, no cycle's mean exceeds lambda at added_delay[i] and one does at one less.
    A `false` pair whose task edge is edge i and whose delay less `offset[tail]` is added_delay[i] has `witness` i, and
-   is `transformed` where edge i is witnessed */
+   is `transformed` where edge i is witnessed; each edge's result is kept as one of the signature's `proof` */
 int mesh_graph_resynchronized(struct mesh_graph_signature *signature, const double *time, size_t edges,
                               const uint32_t *from, const uint32_t *to, const uint64_t *delay, uint32_t added,
                               const uint32_t *added_from, const uint32_t *added_to, const uint64_t *added_delay,

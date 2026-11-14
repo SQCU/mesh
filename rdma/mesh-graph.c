@@ -2096,7 +2096,7 @@ static int signature_enforces(const struct mesh_graph_operation *operation, cons
 void mesh_graph_signature_free(struct mesh_graph_signature *s) {
   free(s->processor); free(s->task); free(s->operation); free(s->dependence); free(s->edge); free(s->position);
   free(s->count); free(s->least); free(s->previous); free(s->waited); free(s->first); free(s->order); free(s->unknown);
-  free(s->alias);free(s->event);free(s->span);
+  free(s->alias);free(s->event);free(s->span);free(s->repeated);free(s->proof);
   memset(s, 0, sizeof *s);
 }
 
@@ -2346,6 +2346,103 @@ int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor 
   return result;
 }
 
+/* design/synchronization-signature-change-request.md item 1; mesh-graph.h struct mesh_graph_repeated: the one
+   expansion of a producer's repeated rows over executions [0, executions) */
+static int repeated_operations(size_t repeats, const struct mesh_graph_repeated *r, uint64_t executions,
+                               struct mesh_graph_operation **made, size_t *count) {
+  size_t once = 0;
+  for (size_t k = 0; k < repeats; k++) once += r[k].primitive == MESH_GRAPH_INITIAL;
+  const size_t each = repeats - once;
+  if (each && executions > (SIZE_MAX / sizeof **made - 1 - once) / each) return ENOMEM;
+  const size_t n = once + (size_t)executions * each;
+  struct mesh_graph_operation *o = malloc((n + 1) * sizeof *o);
+  if (!o) return ENOMEM;
+  size_t at = 0;
+  for (size_t k = 0; k < repeats; k++)
+    if (r[k].primitive == MESH_GRAPH_INITIAL)
+      o[at++] = (struct mesh_graph_operation){r[k].processor, r[k].primitive, r[k].vertex, r[k].object, 0, 0};
+  for (uint64_t K = 0; K < executions; K++)
+    for (size_t k = 0; k < repeats; k++) {
+      const struct mesh_graph_repeated *x = r + k;
+      if (x->primitive == MESH_GRAPH_INITIAL) continue;
+      struct mesh_graph_operation *y = o + at++;
+      *y = (struct mesh_graph_operation){x->processor, x->primitive, x->vertex, x->object, K, 0};
+      if (x->primitive == MESH_GRAPH_HOST_WAIT) {
+        const __int128 need = (__int128)K * x->every + (__int128)x->ordinal - (__int128)x->lookback * x->every;
+        y->value = need > 0 ? (uint64_t)need : 0;
+      } else if (x->primitive == MESH_GRAPH_BRIDGE_START) {
+        y->value = K * x->every + x->ordinal;
+      } else if (x->primitive == MESH_GRAPH_BRIDGE_RAISE) {
+        const uint64_t submitted = K * x->every + x->ordinal - 1;
+        const int ended = submitted >= x->lookback;
+        y->vertex = ended ? x->vertex : x->startup;
+        y->execution = ended ? (submitted - x->lookback) / x->every : K;
+        y->value = submitted + 1;
+      }
+    }
+  *made = o; *count = n;
+  return 0;
+}
+int mesh_graph_signature_repeated(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
+                                  const struct mesh_graph_task *task, size_t dependences,
+                                  const struct mesh_graph_dependence *dependence, size_t repeats,
+                                  const struct mesh_graph_repeated *repeated, uint64_t executions,
+                                  struct mesh_graph_signature *s) {
+  memset(s, 0, sizeof *s);
+  struct mesh_graph_operation *operation = NULL;
+  size_t operations = 0;
+  int result = repeated_operations(repeats, repeated, executions, &operation, &operations);
+  if (!result) result = mesh_graph_signature(processors, processor, tasks, task, dependences, dependence, operations,
+                                             operation, s);
+  free(operation);
+  if (result) return result;
+  s->repeated = malloc((repeats + 1) * sizeof *s->repeated);
+  if (!s->repeated) { mesh_graph_signature_free(s); return ENOMEM; }
+  if (repeats) memcpy(s->repeated, repeated, repeats * sizeof *repeated);
+  s->repeats = repeats;
+  return 0;
+}
+/* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §9; mesh-graph.h struct
+   mesh_graph_proof: a false pair takes the first kept proof of its task edge at its delay */
+static int proof_before(const void *a, const void *b) {
+  const struct mesh_graph_proof *x = a, *y = b;
+  if (x->from != y->from) return x->from < y->from ? -1 : 1;
+  if (x->to != y->to) return x->to < y->to ? -1 : 1;
+  return (x->witness > y->witness) - (x->witness < y->witness);
+}
+static int signature_proved(struct mesh_graph_signature *s) {
+  for (size_t k = 0; k < s->synchronized; k++) {
+    struct mesh_graph_synchronized *e = s->edge + k;
+    if (e->state != MESH_GRAPH_FALSE || !signature_enforces(s->operation, e)) continue;
+    const struct mesh_graph_proof probe = {s->operation[e->signal].vertex, s->operation[e->wait].vertex, 0, 0, 0};
+    for (size_t low = graph_lower(s->proof, s->proofs, sizeof *s->proof, &probe, proof_before);
+         low < s->proofs && s->proof[low].from == probe.from && s->proof[low].to == probe.to; low++) {
+      if (s->proof[low].total_delay != e->delay) continue;
+      e->witness = s->proof[low].witness;
+      if (s->proof[low].proven) e->state = MESH_GRAPH_TRANSFORMED;
+      break;
+    }
+  }
+  memset(s->states, 0, sizeof s->states);
+  for (size_t k = 0; k < s->synchronized; k++) s->states[s->edge[k].state]++;
+  return signature_digest(s);
+}
+int mesh_graph_signature_span(const struct mesh_graph_signature *kept, uint64_t executions,
+                              struct mesh_graph_signature *s) {
+  memset(s, 0, sizeof *s);
+  if (kept->operations && !kept->repeats) return ENODATA;
+  int result = mesh_graph_signature_repeated(kept->processors, kept->processor, kept->tasks, kept->task,
+                                             kept->dependences, kept->dependence, kept->repeats, kept->repeated,
+                                             executions, s);
+  if (result) return result;
+  s->proof = malloc((kept->proofs + 1) * sizeof *s->proof);
+  if (!s->proof) result = ENOMEM;
+  if (!result && kept->proofs) memcpy(s->proof, kept->proof, kept->proofs * sizeof *s->proof);
+  if (!result) { s->proofs = kept->proofs; result = signature_proved(s); }
+  if (result) mesh_graph_signature_free(s);
+  return result;
+}
+
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §3, §9, Theorem 4, Figs. 6
    and 8; design/aot-compilation-change-request.md, appendix item 2, BS-4 */
 static int resync_connected(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, size_t skip,
@@ -2353,13 +2450,6 @@ static int resync_connected(uint32_t vertices, size_t edges, const uint32_t *fro
   size_t m = 0;
   for (size_t e = 0; e < edges; e++) if (e != skip) { f[m] = from[e]; t[m++] = to[e]; }
   return mesh_graph_components(vertices, m, f, t, component, count);
-}
-struct resync_end { uint32_t from, to, edge; };
-static int resync_end_before(const void *a, const void *b) {
-  const struct resync_end *x = a, *y = b;
-  if (x->from != y->from) return x->from < y->from ? -1 : 1;
-  if (x->to != y->to) return x->to < y->to ? -1 : 1;
-  return (x->edge > y->edge) - (x->edge < y->edge);
 }
 int mesh_graph_resynchronized(struct mesh_graph_signature *s, const double *time, size_t edges, const uint32_t *from,
                               const uint32_t *to, const uint64_t *delay, uint32_t added, const uint32_t *added_from,
@@ -2376,16 +2466,15 @@ int mesh_graph_resynchronized(struct mesh_graph_signature *s, const double *time
   uint32_t *f = malloc((total + 1) * sizeof *f), *t = malloc((total + 1) * sizeof *t);
   uint32_t *component = malloc(((size_t)T + 1) * sizeof *component), *alone = malloc(((size_t)T + 1) * sizeof *alone);
   uint64_t *all_delay = malloc((total + 1) * sizeof *all_delay);
-  struct resync_end *end = malloc(((size_t)added + 1) * sizeof *end);
+  struct mesh_graph_proof *proof = malloc(((size_t)added + 1) * sizeof *proof);
   unsigned char *ok = malloc((size_t)added + 1);
   struct graph_scratch g;
   result = scratch_alloc(&g, T, total);
-  if (!result && !(all_from && all_to && f && t && component && alone && all_delay && end && ok)) result = ENOMEM;
+  if (!result && !(all_from && all_to && f && t && component && alone && all_delay && proof && ok)) result = ENOMEM;
   uint32_t count = 0;
   for (size_t e = 0; !result && e < edges; e++) { all_from[e] = from[e]; all_to[e] = to[e]; all_delay[e] = delay[e]; }
   for (uint32_t i = 0; !result && i < added; i++) {
     all_from[edges + i] = added_from[i]; all_to[edges + i] = added_to[i]; all_delay[edges + i] = UINT64_MAX;
-    end[i] = (struct resync_end){added_from[i], added_to[i], i};
   }
   if (!result) result = mesh_graph_components(T, edges, from, to, alone, &count);
   for (uint32_t i = 0; !result && i < added; i++) ok[i] = alone[added_from[i]] != alone[added_to[i]];
@@ -2406,27 +2495,20 @@ int mesh_graph_resynchronized(struct mesh_graph_signature *s, const double *time
       all_delay[edges + i] = added_delay[i];
     }
   }
-  if (!result) qsort(end, added, sizeof *end, resync_end_before);
-  for (size_t k = 0; !result && k < s->synchronized; k++) {
-    struct mesh_graph_synchronized *e = s->edge + k;
-    if (e->state != MESH_GRAPH_FALSE || !signature_enforces(s->operation, e)) continue;
-    const struct resync_end probe = {s->operation[e->signal].vertex, s->operation[e->wait].vertex, 0};
-    for (size_t low = graph_lower(end, added, sizeof *end, &probe, resync_end_before);
-         low < added && end[low].from == probe.from && end[low].to == probe.to; low++) {
-      const uint32_t i = end[low].edge;
-      if (e->delay < offset[probe.from] || e->delay - offset[probe.from] != added_delay[i]) continue;
-      e->witness = i;
-      if (ok[i]) e->state = MESH_GRAPH_TRANSFORMED;
-      break;
-    }
+  size_t proofs = 0;
+  for (uint32_t i = 0; !result && i < added; i++) {
+    uint64_t total_delay;
+    if (__builtin_add_overflow(added_delay[i], offset[added_from[i]], &total_delay)) continue;
+    proof[proofs++] = (struct mesh_graph_proof){added_from[i], added_to[i], total_delay, i, ok[i]};
   }
   if (!result) {
-    memset(s->states, 0, sizeof s->states);
-    for (size_t k = 0; k < s->synchronized; k++) s->states[s->edge[k].state]++;
-    result = signature_digest(s);
+    qsort(proof, proofs, sizeof *proof, proof_before);
+    free(s->proof);
+    s->proof = proof; s->proofs = proofs; proof = NULL;
+    result = signature_proved(s);
   }
   scratch_free(&g);
-  free(all_from); free(all_to); free(f); free(t); free(component); free(alone); free(all_delay); free(end); free(ok);
+  free(all_from); free(all_to); free(f); free(t); free(component); free(alone); free(all_delay); free(proof); free(ok);
   return result;
 }
 
@@ -2445,20 +2527,26 @@ static size_t record_parts(const struct mesh_graph_signature *s, struct record_p
   for (int k = 0; k < 7; k++) at = record_align(at + part[k].size);
   return at;
 }
-struct program_record { uint64_t magic, events, spans; };
+struct program_record { uint64_t magic, events, spans, repeats, proofs; };
 #define GRAPH_PROGRAM_RECORD UINT64_C(0x414d41524748534d)
-static size_t program_parts(const struct mesh_graph_signature *s,struct record_part part[2]){
+#define GRAPH_PROGRAM_REPEATED UINT64_C(0x5045525048534d47)
+static size_t program_head(const struct mesh_graph_signature *s){
+  return s->repeats||s->proofs?sizeof(struct program_record):offsetof(struct program_record,repeats);
+}
+static size_t program_parts(const struct mesh_graph_signature *s,struct record_part part[4]){
   part[0]=(struct record_part){s->event,s->events*sizeof *s->event};
   part[1]=(struct record_part){s->span,s->spans*sizeof *s->span};
-  size_t bytes=0;for(int k=0;k<2;k++)bytes+=part[k].size;
-  return bytes?sizeof(struct program_record)+bytes:0;
+  part[2]=(struct record_part){s->repeated,s->repeats*sizeof *s->repeated};
+  part[3]=(struct record_part){s->proof,s->proofs*sizeof *s->proof};
+  size_t bytes=0;for(int k=0;k<4;k++)bytes+=part[k].size;
+  return bytes?program_head(s)+bytes:0;
 }
 static size_t record_size(const struct mesh_graph_signature *s){
-  struct record_part original[7],program[2];return record_parts(s,original)+program_parts(s,program);
+  struct record_part original[7],program[4];return record_parts(s,original)+program_parts(s,program);
 }
 int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t room, size_t *made) {
   struct record_part part[7];
-  struct record_part program[2];
+  struct record_part program[4];
   const size_t primary=record_parts(s,part),metadata=program_parts(s,program);
   *made = primary+metadata;
   if (*made > room) return ERANGE;
@@ -2471,9 +2559,10 @@ int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t
   size_t at = sizeof *head;
   for (int k = 0; k < 7; k++) { memcpy((char *)record + at, part[k].data, part[k].size); at = record_align(at + part[k].size); }
   if(metadata){
-    const struct program_record body={GRAPH_PROGRAM_RECORD,s->events,s->spans};
-    memcpy((char *)record+at,&body,sizeof body);at+=sizeof body;
-    for(int k=0;k<2;k++){if(program[k].size)memcpy((char *)record+at,program[k].data,program[k].size);at+=program[k].size;}
+    const struct program_record body={s->repeats||s->proofs?GRAPH_PROGRAM_REPEATED:GRAPH_PROGRAM_RECORD,s->events,
+                                      s->spans,s->repeats,s->proofs};
+    memcpy((char *)record+at,&body,program_head(s));at+=program_head(s);
+    for(int k=0;k<4;k++){if(program[k].size)memcpy((char *)record+at,program[k].data,program[k].size);at+=program[k].size;}
   }
   return 0;
 }
@@ -2497,21 +2586,28 @@ static int record_restore(const void *record, struct mesh_graph_signature *s, in
   for (int k = 0; !result && k < 7; k++) { memcpy(part[k].data, (const char *)record + at, part[k].size); at = record_align(at + part[k].size); }
   if(!result && primary<head->bytes){
     struct program_record body={0};
-    if(head->bytes-primary<sizeof body)result=EINVAL;
-    else{
-      memcpy(&body,(const char *)record+primary,sizeof body);at=primary+sizeof body;
+    if(head->bytes-primary<sizeof body.magic)result=EINVAL;
+    else memcpy(&body.magic,(const char *)record+primary,sizeof body.magic);
+    const size_t size=body.magic==GRAPH_PROGRAM_REPEATED?sizeof body:offsetof(struct program_record,repeats);
+    if(!result && ((body.magic!=GRAPH_PROGRAM_RECORD && body.magic!=GRAPH_PROGRAM_REPEATED) ||
+                   head->bytes-primary<size))result=EINVAL;
+    if(!result){
+      memcpy(&body,(const char *)record+primary,size);at=primary+size;
       const size_t room=(size_t)head->bytes-at;
-      if(body.magic!=GRAPH_PROGRAM_RECORD || body.events>room/sizeof *s->event ||
-         body.spans>room/sizeof *s->span)result=EINVAL;
+      if(body.events>room/sizeof *s->event || body.spans>room/sizeof *s->span ||
+         body.repeats>room/sizeof *s->repeated || body.proofs>room/sizeof *s->proof)result=EINVAL;
       if(!result){
         s->events=(size_t)body.events;s->spans=(size_t)body.spans;
+        s->repeats=(size_t)body.repeats;s->proofs=(size_t)body.proofs;
         s->event=malloc((s->events+1)*sizeof *s->event);
         s->span=s->spans?malloc(s->spans*sizeof *s->span):NULL;
-        struct record_part program[2];
-        const size_t metadata=program_parts(s,program),payload=metadata?metadata-sizeof body:0;
-        if(!s->event || (s->spans && !s->span))result=ENOMEM;
+        s->repeated=malloc((s->repeats+1)*sizeof *s->repeated);
+        s->proof=malloc((s->proofs+1)*sizeof *s->proof);
+        struct record_part program[4];
+        const size_t metadata=program_parts(s,program),payload=metadata?metadata-program_head(s):0;
+        if(!s->event || (s->spans && !s->span) || !s->repeated || !s->proof)result=ENOMEM;
         else if(payload!=room)result=EINVAL;
-        else for(int k=0;k<2;k++){
+        else for(int k=0;k<4;k++){
           if(program[k].size)memcpy(program[k].data,(const char *)record+at,program[k].size);at+=program[k].size;
         }
       }

@@ -1053,15 +1053,15 @@ static uint32_t plan_submission(const struct plan *p,const uint32_t *actor,uint3
    node's host before the call's submission: the count of its entry reaching `need` (K every + base, K the block); a
    raise is mesh-records.c counts_tell's, the bridge at the edge's source node telling its plan's `submissions`; the
    count words start at 0 (mesh_plan's state cleared). Processors: node v's host 2v and bridge 2v + 1 */
-struct plan_signed { struct mesh_graph_operation *operation; size_t count,held; };
-static int plan_signed_put(struct plan_signed *o,struct mesh_graph_operation x){
+struct plan_signed { struct mesh_graph_repeated *row; size_t count,held; };
+static int plan_signed_put(struct plan_signed *o,struct mesh_graph_repeated x){
   if(o->count==o->held){
     const size_t grown=o->held?2*o->held:256;
-    struct mesh_graph_operation *more=realloc(o->operation,grown*sizeof *more);
+    struct mesh_graph_repeated *more=realloc(o->row,grown*sizeof *more);
     if(!more)return ENOMEM;
-    o->operation=more;o->held=grown;
+    o->row=more;o->held=grown;
   }
-  o->operation[o->count++]=x;
+  o->row[o->count++]=x;
   return 0;
 }
 static uint32_t plan_tell_key(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
@@ -1091,47 +1091,46 @@ static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *call
   for(uint32_t a=0;!status && a<added;a++){
     key[a]=node[from[built+a]]*count+calls[call[from[built+a]]];
     if(delay[built+a]+1>executions)executions=delay[built+a]+1;
-    status=plan_signed_put(&o,(struct mesh_graph_operation){.processor=2*node[to[built+a]],.primitive=MESH_GRAPH_INITIAL,
-                                                            .vertex=MESH_GRAPH_NONE,.object=MESH_GRAPH_PLAN_COUNT+a});
+    status=plan_signed_put(&o,(struct mesh_graph_repeated){.processor=2*node[to[built+a]],.primitive=MESH_GRAPH_INITIAL,
+                                                           .vertex=MESH_GRAPH_NONE,.object=MESH_GRAPH_PLAN_COUNT+a,
+                                                           .startup=MESH_GRAPH_NONE});
   }
   if(!status)mesh_graph_rows(n*count,added,plan_tell_key,key,first,tell);
-  for(uint64_t K=0;!status && K<executions;K++)for(uint32_t v=0;!status && v<n;v++){
+  for(uint32_t v=0;!status && v<n;v++){
     if(!(program>>v&1))continue;
     for(uint32_t j=0;!status && j<J;j++){
       const struct plan *p=plans+calls[j];
       if(v!=s && !(p->nodes>>v&1))continue;
       const uint32_t f=calls[j],i=place[j],u=plan_submission(p,actor,s,j,v);
-      const uint64_t nf=p->calls,submitted=K*nf+i;
+      const uint64_t nf=p->calls;
       const size_t *waits=wait_first+(size_t)v*J+row[f];
       for(size_t q=waits[i];!status && q<waits[i+1];q++){
         const uint32_t a=(uint32_t)wait_order[q],tail=from[built+a],every=plans[calls[call[tail]]].calls;
-        const __int128 need=(__int128)K*every+(__int128)((place[call[tail]]+(uint64_t)lead[tail])%every)+1-
-                            (__int128)added_delay[a]*every;
-        status=plan_signed_put(&o,(struct mesh_graph_operation){.processor=2*v,.primitive=MESH_GRAPH_HOST_WAIT,
-                                                                .vertex=to[built+a],.object=MESH_GRAPH_PLAN_COUNT+a,
-                                                                .execution=K,
-                                                                .value=need>0?(uint64_t)need:0});
+        status=plan_signed_put(&o,(struct mesh_graph_repeated){.processor=2*v,.primitive=MESH_GRAPH_HOST_WAIT,
+                                                               .vertex=to[built+a],.object=MESH_GRAPH_PLAN_COUNT+a,
+                                                               .every=every,
+                                                               .ordinal=(place[call[tail]]+(uint64_t)lead[tail])%every+1,
+                                                               .lookback=added_delay[a],.startup=MESH_GRAPH_NONE});
       }
-      if(!status)status=plan_signed_put(&o,(struct mesh_graph_operation){.processor=2*v,
+      if(!status)status=plan_signed_put(&o,(struct mesh_graph_repeated){.processor=2*v,
                                         .primitive=MESH_GRAPH_BRIDGE_START,.vertex=u,
-                                        .object=MESH_GRAPH_PLAN_SUBMISSION+f,.execution=K,
-                                        .value=submitted+1});
+                                        .object=MESH_GRAPH_PLAN_SUBMISSION+f,.every=nf,.ordinal=(uint64_t)i+1,
+                                        .startup=MESH_GRAPH_NONE});
       for(size_t q=first[(size_t)v*count+f];!status && q<first[(size_t)v*count+f+1];q++){
         const uint32_t a=(uint32_t)tell[q],tail=from[built+a];
-        const int ended=submitted>=lead[tail];
-        status=plan_signed_put(&o,(struct mesh_graph_operation){.processor=2*v+1,.primitive=MESH_GRAPH_BRIDGE_RAISE,
-                                                                .vertex=ended?tail:u,.object=MESH_GRAPH_PLAN_COUNT+a,
-                                                                .execution=ended?(submitted-lead[tail])/nf:K,
-                                                                .value=submitted+1});
+        status=plan_signed_put(&o,(struct mesh_graph_repeated){.processor=2*v+1,.primitive=MESH_GRAPH_BRIDGE_RAISE,
+                                                               .vertex=tail,.object=MESH_GRAPH_PLAN_COUNT+a,.every=nf,
+                                                               .ordinal=(uint64_t)i+1,.lookback=lead[tail],.startup=u});
       }
     }
   }
-  if(!status)status=mesh_graph_signature(2*n,processor,V,task,built,dependence,o.count,o.operation,&signature);
+  if(!status)status=mesh_graph_signature_repeated(2*n,processor,V,task,built,dependence,o.count,o.row,executions,
+                                                  &signature);
   if(!status && (status=mesh_graph_resynchronized(&signature,time,built,from,to,delay,added,from+built,to+built,
                                                   added_delay,lambda,offset)))
     mesh_graph_signature_free(&signature);
   if(!status)**kept=signature;
-  free(dependence);free(offset);free(key);free(first);free(tell);free(o.operation);
+  free(dependence);free(offset);free(key);free(first);free(tell);free(o.row);
   return status;
 }
 /* design/aot-compilation-change-request.md A10; A. J. Bernstein, 1966; M. C. Rinard and P. C. Diniz, 1997, §2 */
