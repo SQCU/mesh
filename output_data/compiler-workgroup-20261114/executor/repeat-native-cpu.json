@@ -1,0 +1,7 @@
+{"channels": [{"function": 0, "channels": 2}], "between machines": 0, "processors": {"projection": [0, "cpu"], "part0": [0, "cpu"]}, "seconds": 0.000622000006842427, "signature": "56c07ef0f51c1db72e5843362869573c37083e3d5d80dacac4476d1a4fc48836", "core ml": [], "outputs": [[2, 32]], "error": 0.0}
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 54 values 36744 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared self-timed program 1 calls 1 positions 1 residues 1 phases 0 plan order edges 0 kept of the unrolled dependences 0 fence waits 0 program-thread waits 0 send-completion waits 0 left to the plan's start 0 start waits
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 54 values 36744 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared self-timed program 1 calls 1 positions restored (no relation solved)
