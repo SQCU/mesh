@@ -1019,8 +1019,11 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
             for position, slot in enumerate(entries):
                 slots[binding.call, side, position], endpoints[binding.call, side, position] = slot.root, slot
                 value = slot.reference.meta.get("val") if isinstance(slot.reference, Node) else None
-                if slot.root is None or not isinstance(value, torch.Tensor):
+                if slot.root is None:
                     continue
+                if not isinstance(value, torch.Tensor):
+                    raise TypeError(f"call {binding.call} {side} {position} binds typed root {slot.root} "
+                                    "without tensor source metadata")
                 s = at[StorageWeakRef(value.untyped_storage())]
                 resolved.setdefault((binding.call, slot.root, s,
                                      value.storage_offset() * value.element_size() - slot.offset), slot.reference)
@@ -1047,9 +1050,10 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
         for typed, slot in ([(r, by_call[j].inputs[names[key].index(r.name)]) for r in made.inputs if r.root == root] +
                             [(r, by_call[j].outputs[o]) for o, r in enumerate(made.outputs) if r.root == root]):
             value = slot.reference.meta.get("val") if isinstance(slot.reference, Node) else None
-            if isinstance(value, torch.Tensor):
-                return (at[StorageWeakRef(value.untyped_storage())],
-                        value.storage_offset() * value.element_size() - typed_view(made, typed.value)[0][0])
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"call {j} endpoint root {root} binds an interface without tensor source metadata")
+            return (at[StorageWeakRef(value.untyped_storage())],
+                    value.storage_offset() * value.element_size() - typed_view(made, typed.value)[0][0])
         return None, 0
 
     def endpoint(j, key, intrinsic, t, side, direction):
