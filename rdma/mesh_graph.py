@@ -457,6 +457,36 @@ def from_record(data):
     return made
 
 
+# mesh-graph.h mesh_graph_archive, mesh_graph_archive_read and mesh_graph_compose;
+# design/compilation-composition-change-request.md items 3 and 6
+LIB.mesh_graph_archive.restype = LIB.mesh_graph_archive_read.restype = LIB.mesh_graph_compose.restype = C.c_int
+LIB.mesh_graph_archive.argtypes = [C.POINTER(Signature), C.c_void_p, C.c_size_t, C.POINTER(C.c_size_t)]
+LIB.mesh_graph_archive_read.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(Signature)]
+LIB.mesh_graph_compose.argtypes = [C.POINTER(Signature), C.POINTER(Signature), C.POINTER(Signature)]
+
+
+def archive(made):
+    size = C.c_size_t()
+    status = LIB.mesh_graph_archive(C.byref(made), None, 0, C.byref(size))
+    if status != errno.ERANGE:
+        _check(status or errno.EINVAL)
+    buffer = C.create_string_buffer(size.value)
+    _check(LIB.mesh_graph_archive(C.byref(made), buffer, size.value, C.byref(size)))
+    return buffer.raw[:size.value]
+
+
+def from_archive(data):
+    buffer, made = C.create_string_buffer(bytes(data), len(data)), Signature()
+    _check(LIB.mesh_graph_archive_read(C.addressof(buffer), len(data), C.byref(made)))
+    return made
+
+
+def compose(a, b):
+    made = Signature()
+    _check(LIB.mesh_graph_compose(C.byref(a), C.byref(b), C.byref(made)))
+    return made
+
+
 # design/compilation-composition-change-request.md item 6.2; mesh-graph.h mesh_graph_contract, mesh_graph_quotient
 LIB.mesh_graph_contract.restype = LIB.mesh_graph_quotient.restype = C.c_int
 LIB.mesh_graph_contract.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Dependence), C.POINTER(C.c_ubyte), C.c_size_t,
