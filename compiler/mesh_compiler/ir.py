@@ -57,6 +57,7 @@ class Exported:
     user_inputs: list
     outputs: list
     out_spec: object
+    state_kinds: dict
 
 
 # rdma/mesh-collective.h struct mesh_function, mesh_plan, mesh_plan_save

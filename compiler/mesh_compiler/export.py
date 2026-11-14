@@ -43,7 +43,7 @@ def read(program):
                 f"{node.name} has shape {tuple(value.shape)}: shapes are compiled; a dimension "
                 "known only at run time is out of scope")
 
-    state, tokens, user_inputs = {}, [], []
+    state, state_kinds, tokens, user_inputs = {}, {}, [], []
     for spec in signature.input_specs:
         name = spec.arg.name
         if spec.kind == InputKind.USER_INPUT:
@@ -51,9 +51,9 @@ def read(program):
         elif spec.kind == InputKind.TOKEN:
             tokens.append(name)
         elif spec.kind == InputKind.PARAMETER or (spec.kind == InputKind.BUFFER and spec.persistent):
-            state[name] = (spec.target, program.state_dict[spec.target])
+            state[name], state_kinds[name] = (spec.target, program.state_dict[spec.target]), spec.kind
         elif spec.kind in (InputKind.BUFFER, InputKind.CONSTANT_TENSOR):
-            state[name] = (spec.target, program.constants[spec.target])
+            state[name], state_kinds[name] = (spec.target, program.constants[spec.target]), spec.kind
         else:
             raise NotImplementedError(f"input kind {spec.kind}")
 
@@ -73,7 +73,7 @@ def read(program):
     if signature.backward_signature is not None:
         forward = pytree.tree_unflatten([0] * out_spec.num_leaves, out_spec)
         out_spec = pytree.tree_structure((forward, gradients))
-    return Exported(program.graph_module, state, tokens, user_inputs, outputs, out_spec)
+    return Exported(program.graph_module, state, tokens, user_inputs, outputs, out_spec, state_kinds)
 
 
 # design/aot-compilation-change-request.md A1 and A10; P. Barham et al., Pathways, arXiv:2203.12533, section 3;

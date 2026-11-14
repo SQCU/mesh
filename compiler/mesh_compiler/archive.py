@@ -4,7 +4,7 @@ import json
 import pathlib
 
 import torch
-from torch.export.graph_signature import OutputKind
+from torch.export.graph_signature import InputKind, OutputKind
 from torch.utils import _pytree as pytree
 
 from . import lower_inductor
@@ -39,6 +39,7 @@ def save(directory, scheduled):
                                     "signature": scheduled.plan.signature.hex()},
         "targets": {processor: function.saved(directory, processor)
                     for processor, function in scheduled.functions.items()},
+        "state_kinds": {name: kind.name for name, kind in exported.state_kinds.items()},
         "tokens": exported.tokens,
         "user_inputs": exported.user_inputs,
         "outputs": [[kind.name, key] for kind, key in exported.outputs],
@@ -54,7 +55,8 @@ def load(directory):
     state = torch.load(directory / "state.pt", map_location="cpu", weights_only=True)
     outputs = [(OutputKind[kind], key) for kind, key in about["outputs"]]
     exported = Exported(None, state, about["tokens"], about["user_inputs"], outputs,
-                        pytree.treespec_loads(about["out_spec"]))
+                        pytree.treespec_loads(about["out_spec"]),
+                        {name: InputKind[kind] for name, kind in about["state_kinds"].items()})
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     functions = {processor: RESTORED[about["engines"].get(processor, devices[processor].type)](
                      saved, directory) for processor, saved in about["targets"].items()}

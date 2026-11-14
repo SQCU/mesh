@@ -4,7 +4,7 @@ import pathlib
 import sys
 
 import torch
-from torch.export.graph_signature import OutputKind
+from torch.export.graph_signature import InputKind
 
 from . import lower_inductor
 from .devices import ENGINES, HOST, on_devices
@@ -71,9 +71,8 @@ def compile_module(module, args, processors, placement, cost=unit_cost, stored=(
 # struct mesh_declared, mesh_plan_save: each declared transfer of this machine with its value's solved copies
 def lowered(scheduled):
     plan, fields = scheduled.plan, [name for name, _ in mesh.Section._fields_]
-    mutated = {key for kind, key in scheduled.exported.outputs if kind == OutputKind.BUFFER_MUTATION}
-    constants = {name: tensor.detach() for name, (key, tensor) in scheduled.exported.state.items()
-                 if key not in mutated}
+    constants = {name: tensor.detach() for name, (_, tensor) in scheduled.exported.state.items()
+                 if scheduled.exported.state_kinds[name] == InputKind.CONSTANT_TENSOR}
     effects = {channel: (transfer, value, plan.offsets[value], plan.sections[value][fields.index("bytes")], sent,
                          landed)
                for transfer, (channel, (*_, value, sent, landed)) in enumerate(zip(plan.channels, plan.declared))

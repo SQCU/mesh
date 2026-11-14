@@ -1,7 +1,7 @@
 # design/data-flow.md; design/compilation-composition-change-request.md item 7; schedule-emit/schedule_emit/runtime.py;
 # design/compiler-archive-assignment-2026-11-13.md: the selected group entry's completed Target, Scheduled.functions
 import torch
-from torch.export.graph_signature import OutputKind
+from torch.export.graph_signature import InputKind, OutputKind
 from torch.utils import _pytree as pytree
 
 from . import bridge
@@ -12,7 +12,9 @@ class Arguments:
     def __init__(self, scheduled, entry=None):
         self.entry = scheduled.output_processor if entry is None else entry
         self.exported, self.device = scheduled.exported, scheduled.devices[self.entry]
-        state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items()}
+        self.live = {name: tensor for name, (_, tensor) in self.exported.state.items()
+                     if self.exported.state_kinds[name] in (InputKind.PARAMETER, InputKind.BUFFER)}
+        state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items() if name not in self.live}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         names = scheduled.inputs[self.entry]
         self.arguments = [state[name].to(self.device) if name in state else None for name in names]
@@ -26,6 +28,8 @@ class Arguments:
             self.arguments[position] = value.to(self.device)
 
     def prepare(self, args, kwargs):
+        for name, tensor in self.live.items():
+            self.bind(name, tensor.detach())
         flat, _ = pytree.tree_flatten((args, kwargs))
         for name, value in zip(self.exported.user_inputs, flat, strict=True):
             self.bind(name, value)
@@ -49,5 +53,5 @@ class Program(Arguments):
             if kind == OutputKind.USER_OUTPUT:
                 user.append(value)
             elif kind == OutputKind.BUFFER_MUTATION:
-                self.bind(self.key_of[key], value)
+                self.exported.state[self.key_of[key]][1].detach().copy_(value)
         return pytree.tree_unflatten(user, self.exported.out_spec)
