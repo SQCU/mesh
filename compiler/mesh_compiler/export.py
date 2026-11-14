@@ -365,11 +365,16 @@ def calls(program, args, functions, **export_options):
         return marked
     graph = Calls(functions, bound.signature.parameters).trace(program, concrete_args={
         name: pytree.tree_map(leaf, value) for name, value in bound.arguments.items()})
-    # rejection filters are forbidden: a traced node of no capture owner raises here, never dropped from the program
+    # rejection filters are forbidden: a traced node of no capture owner raises here, never dropped from the program.
+    # torch 2.14.0 torch/fx/_symbolic_trace.py replace_ph (a flat placeholder's args its parameter's default) and
+    # torch/fx/graph.py CodeGen free_vars: every flat placeholder here is an already-bound leaf (bind and apply_defaults
+    # above; the defaults the original Signature's, Exported.interface), so none keeps a default argument
     for node in graph.nodes:
         if node.op not in ("placeholder", "get_attr", "call_module", "call_function", "output"):
             raise NotImplementedError(f"{node.name} runs between the program's compiled calls; every function of a "
                                       "program is captured")
+        if node.op == "placeholder":
+            node.args = ()
     return capture(torch.fx.GraphModule(program, graph), bound, functions, export_options, program)
 
 
