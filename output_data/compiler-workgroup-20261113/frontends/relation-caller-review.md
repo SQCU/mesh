@@ -9,3 +9,17 @@ Typed numerical construction now supplies selected out/to destination views to t
 Validation: AST of seven core Python files and git diff --check pass. Fresh imports against canonical Local144/RelationData144 build pass. Existing native Graph order/closure and repeated contracted-edge view access pass. The existing CPU Engines client reaches construction after schedule; its first attempt fails locating libmetal_recording.dylib, and executor is correcting the existing loader environment. No new numerical/performance claim.
 
 Immediate continuation: closure consumes explicit retained native order/stride rather than numeric vertex IDs; skip contraction when no vertices are eliminated; remove obsolete after/preds reconstruction. The first two general graph algorithms remain in the existing C owner. Remaining Python graph algorithm migrations and source-cause C consumption are not closed by this checkpoint. Exact C working checkpoint26861434 is separate.
+
+Continuation source-ready: the same search's borrowed reverse order now feeds closure as original vertex IDs plus
+pointer stride. Numeric-ID topological assumptions are removed. Identity contraction is skipped and after/preds
+reconstruction is deleted. The source producer directly consumes mesh_graph_relation_views, retaining complete
+original query coverage and native conflict ownership; erased local channel causes carry their ordinary typed
+operand proof. C strict syntax and Python AST/diff pass. Matching descriptor152/closure native rebuild and actual
+API observation remain pending at this entry.
+
+Matching graph9388eb3e gate: fresh actual RelationData152/source relation_views query DIRECTED, source causes,
+closure over nonnumeric original vertex order, and reusable views after caller Graph reference deletion all pass.
+Executor's existing CPU FFN then passes the whole typed machine/native local-plan/save/restore client, error0.0,
+output[2,32],55values,one native entry. Its earlier failure was post-lower STEP value creation, corrected by the
+actual existing compiler word query. This is CPU client evidence; source-cause completeness, GPU, transport and
+performance remain separate obligations.

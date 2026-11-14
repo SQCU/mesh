@@ -84,7 +84,7 @@ class SourceRelation:
 def dependence(module, transfers):
     nodes = list(module.graph.nodes)
     functions = [n for n in nodes if n.op == "call_function" and producer(n) is n]
-    vertex, after, supplied = {node: k for k, node in enumerate(functions)}, {}, []
+    vertex, supplied = {node: k for k, node in enumerate(functions)}, []
     views, sources = accesses(functions)
     for node in functions:
         supplied += [("value", producer(u), node, u) for u in dict.fromkeys(node.all_input_nodes)
@@ -93,17 +93,9 @@ def dependence(module, transfers):
             supplied.append(("channel", transfers[channel_of(node)][0], node, channel_of(node)))
     relation = mesh_graph.dependences_supplied(len(functions), views,
                                                [(vertex[source], vertex[sink]) for _, source, sink, _ in supplied])
-    edges = relation.edges()
-    for earlier, later in edges:
-        after.setdefault(functions[later], []).append(functions[earlier])
-    writers = [(functions[earlier], functions[later]) for e, (earlier, later) in enumerate(edges)
+    writers = [(functions[earlier], functions[later]) for e, (earlier, later) in enumerate(relation.edges())
                if any(mesh_graph.HAZARDS[relation.conflict(k).kind] == mesh_graph.HAZARDS[0] for k in relation.members(e))]
-
-    def preds(node):
-        found = [producer(u) for u in node.all_input_nodes if u.op == "call_function"] + after.get(node, [])
-        return found + [transfers[channel_of(node)][0]] if node.target is RECV else found
-
-    return nodes, functions, preds, writers, SourceRelation(relation, functions, supplied, sources)
+    return nodes, functions, writers, SourceRelation(relation, functions, supplied, sources)
 
 
 # compiler/mesh_compiler/placement.py place, transfers
@@ -242,7 +234,7 @@ def declarations(module, transfers, carried, machines, cost, functions, before, 
 # Planning; design/compilation-composition-change-request.md items 2, 3, 6 and 7; rdma/mesh-graph.h mesh_graph_contract
 def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), planning=None, groups=None):
     transfers = module.meta["transfers"]
-    nodes, functions, preds, writers, source = dependence(module, transfers)
+    nodes, functions, writers, source = dependence(module, transfers)
     graph = mesh_graph.Graph.from_conflicts(source.functions, source.relation)
     functions = graph.order()
     task = {node: k for k, node in enumerate(functions)}
@@ -250,7 +242,7 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     lane = {processor: k for k, processor in enumerate(processors)}
     tasks = [(cost(node), lane[node.meta["processor"]]) for node in functions]
     edges = [(task[earlier], task[later]) for earlier, later in graph.edges()]
-    before = graph.ancestors(following=True)
+    before = graph.ancestors(functions[::-1], successors=True)
     carried = [transfer for transfer in carried if all(transfer[4])]
     declared = declarations(module, transfers, carried, machines, cost, functions, before, tasks, edges, planning,
                             writers)
@@ -258,7 +250,7 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     side = {processor: (groups or {}).get(processor, processor) for processor in processors}
     local = {end for ends in transfers.values() if len({side[end.meta["processor"]] for end in ends}) == 1
              for end in ends}
-    pairs = graph.contract([node not in local for node in graph.vertices]).edges()
+    pairs = graph.contract([node not in local for node in graph.vertices]).edges() if local else graph.edges()
     identity = {node: (k, resource) for k, (node, (_, resource)) in enumerate(zip(functions, tasks))}
     members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
     sequence = tuple(identity[node] for node in listed)

@@ -173,14 +173,19 @@ class Graph:
     def reach(self, starts):
         return Reached(self._search(LIB.mesh_graph_breadth, starts))
 
-    # mesh_graph_closure over the outgoing rows, their heads all before (`following` 0) or all after (1) their row in
-    # vertex order: v's set the vertices whose rows lead to v (the rows' predecessors: their own closure row; successors:
-    # the transposed column)
-    def ancestors(self, following=False):
+    # mesh_graph_closure over the outgoing rows processed in `order`, a View of one search's native vertex IDs covering
+    # every vertex (its postorder over these rows: each head before its row), read in place from its first element by its
+    # step: v's set the vertices whose rows lead to v (rows of predecessors: v's own closure row; `successors`: the
+    # transposed column)
+    def ancestors(self, order, successors=False):
+        if len(order) != self.data.vertices:
+            raise ValueError("a closure's order covers every vertex once")
+        start = C.cast(C.addressof(order.items.contents) + order.span.start * C.sizeof(C.c_uint32),
+                       C.POINTER(C.c_uint32))
         made = C.POINTER(Closed)()
-        _check(LIB.mesh_graph_closure(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context,
-                                      int(following), C.byref(made)))
-        return Closures(Owned(made, LIB.mesh_graph_closure_free, self), following)
+        _check(LIB.mesh_graph_closure(self.data.vertices, self.data.row_first, RELATION_HEAD, self.context, start,
+                                      order.span.step, C.byref(made)))
+        return Closures(Owned(made, LIB.mesh_graph_closure_free, self), successors)
 
     # the distinct edges in place, (from, to) objects
     def edges(self):
@@ -230,7 +235,9 @@ def chain(start, following):
 
 # A. Goralčíková and V. Koubek, LNCS 74, 1979; K. Simon, TCS 58, 1988; design/aot-compilation-change-request.md A10
 def closure(order, neighbours):
-    return Graph.adjacency(order, neighbours).ancestors()
+    graph = Graph.adjacency(order, neighbours)
+    owned = graph.search(graph.vertices)
+    return graph.ancestors(ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count)))
 
 
 # A. V. Aho, M. R. Garey and J. D. Ullman, The transitive reduction of a directed graph, SIAM J. Comput. 1(2), 1972;
@@ -377,7 +384,8 @@ LIB.mesh_graph_search.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_ui
                                   C.POINTER(C.POINTER(Searched))]
 LIB.mesh_graph_breadth.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U,
                                    C.POINTER(C.POINTER(Searched))]
-LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_int, C.POINTER(C.POINTER(Closed))]
+LIB.mesh_graph_closure.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, _U, C.c_ssize_t,
+                                   C.POINTER(C.POINTER(Closed))]
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
 LIB.mesh_graph_search_free.argtypes = [C.POINTER(Searched)]
 LIB.mesh_graph_closure_free.argtypes = [C.POINTER(Closed)]
@@ -780,7 +788,7 @@ class RelationData(C.Structure):
                 ('row_first', C.POINTER(C.c_size_t)), ('row_edge', C.POINTER(C.c_size_t)),
                 ('in_first', C.POINTER(C.c_size_t)), ('in_edge', C.POINTER(C.c_size_t)),
                 ('parent', C.c_void_p), ('source_first', C.POINTER(C.c_size_t)), ('source', C.POINTER(C.c_size_t)),
-                ('class_of', C.POINTER(C.c_uint32)), ('kept', C.POINTER(C.c_ubyte))]
+                ('class_of', C.POINTER(C.c_uint32)), ('kept', C.POINTER(C.c_ubyte)), ('query', C.c_uint32)]
 
 
 LIB.mesh_graph_relation_create.restype = C.c_int
@@ -842,20 +850,25 @@ class Relation:
         return self.data.conflict[k]
 
 
-# mesh-graph.h mesh_graph_dependences_views and mesh_graph_relation_create: the one conflict solve over the supplied
-# views and the supplied causes (`supplied` their (from, to) function endpoints, GIVEN's `given` their index), its
-# result borrowed, unchanged, by the one relation
+LIB.mesh_graph_relation_views.restype = C.c_int
+LIB.mesh_graph_relation_views.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(Viewed), C.c_size_t, C.POINTER(C.c_uint32),
+                                          C.POINTER(C.c_uint32), C.c_int, C.c_void_p, C.c_void_p,
+                                          C.POINTER(C.c_void_p)]
+
+
+# mesh-graph.h mesh_graph_relation_views (self 0, query DIRECTED): the one conflict solve over the supplied views and
+# the supplied causes (`supplied` their (from, to) function endpoints, GIVEN's `given` their index), its conflict
+# records the relation's own; the views, their pairs and the endpoints borrowed for the Relation's lifetime
 def dependences_supplied(vertices, views, supplied):
     viewed, held = (Viewed * max(len(views), 1))(), []
     for made, (key, offset, element, pairs, vertex, write) in zip(viewed, views):
         held.append((C.c_uint64 * max(2 * len(pairs), 1))(*[x for pair in pairs for x in pair]))
         made.key, made.offset, made.element, made.dims, made.pairs = key, offset, element, len(pairs), held[-1]
         made.vertex, made.write = vertex, write
-    given = [_array(C.c_uint32, [edge[end] for edge in supplied])[0] for end in range(2)]
-    conflict, count = C.POINTER(Conflict)(), C.c_size_t()
-    _check(LIB.mesh_graph_dependences_views(len(views), viewed, len(supplied), *given, C.byref(conflict),
-                                            C.byref(count)))
-    return Relation.create(vertices, len(views), viewed, count.value, conflict, (held, given), conflict)
+    given, made = [_array(C.c_uint32, [edge[end] for edge in supplied])[0] for end in range(2)], C.c_void_p()
+    _check(LIB.mesh_graph_relation_views(vertices, len(views), viewed, len(supplied), *given, 0, None, None,
+                                         C.byref(made)))
+    return Relation(made.value, (viewed, held, given))
 
 
 def dependences_views(vertices, views):

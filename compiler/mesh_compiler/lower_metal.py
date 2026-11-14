@@ -97,7 +97,8 @@ def placeholders(nodes, kinds, sources):
 # (size, byte stride) pairs) of the wire value's logical bytes; J. K. Salmon et al., SC 2011, §3.1: `generator` the
 # machine's mesh_compile.Generator; compiler/mesh_compiler/schedule.py SourceRelation, assemble `vertices`: the source
 # relation's correspondence here, each vertex's emitted operation IDs, each access view's (typed root, typed view) and
-# each GIVEN cause's typed operand (root and view, literal, or channel Root), None where this machine holds none
+# each GIVEN cause's typed operand (root and view, or literal), a channel its port Root, a same-machine channel (its
+# SEND/RECV an ordinary value, `copied`) its value's (root, view), None where this machine holds none
 def construct(module, *, targets, kinds, sources, wires, output_roles, generator=None, page=0, machines=None):
     compiler = M._compiler()
     builder = M._Builder(compiler, {}, None, 0, 0)
@@ -261,8 +262,8 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
 
         vertices = tuple(tuple(emitted.get(node, ())) for node in module.meta["vertices"])
         accesses = tuple(typed(node) for node, _ in source.accesses)
-        given = tuple(typed(operand) if kind == "value" else sent.get(operand) or received.get(operand)
-                      for kind, _, _, operand in source.supplied)
+        given = tuple(typed(operand) if kind == "value" else sent.get(operand) or received.get(operand) or typed(sink)
+                      for kind, _, sink, operand in source.supplied)
         writers = tuple((tasks[a], tasks[b]) for a, b in module.meta["writers"])
     except BaseException:
         compiler.metal_ir_program_free(builder.p)
