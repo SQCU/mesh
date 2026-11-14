@@ -1,0 +1,30 @@
+{
+  "command": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/outer-state-native-command.md",
+  "command_sha256": "7cb4119e5134825eb595255d604b41837875a11c03897fd212cd2e1d16bbeb81",
+  "heads": {
+    "/Users/mdot/dox/mesh": "52e041b192139ffe485862d30bd47506ad460d87",
+    "/Users/mdot/metal-microbench": "602da9416bf8276803effd0d6134bc6983d65689"
+  },
+  "before": {
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py": "e1552444ebec66868c9780396374adeb7108e88054a337277b89007f1897c073",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/metal.py": "512e3833ed3ab13da37cf8d44a79b2b0af5ecc70d8f341b38c79c0b07c88101b",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py": "96715e3c39ca1ea9a8416513971b5fe868a3240e04acea11a6497b91ea1b3214",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/schedule.py": "bb9cb29b206431e20d539891d7b069314bfcd3952179ed6c1bf7f378809c6e12",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "f162f487df367d2c37a14969dc437e00f3b87e9c687203142c580eca18993e2d",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/placement.py": "60b431d2117bda87cd701a2f35663ea35a1b4a958808dfd491856d8cfdac584d",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/export.py": "99167e0e390650d0917c5450b77b39e1b37818525908ab969ee2bf242bf38f42",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/runtime.py": "5b9b859d08606bfcccf89e3fbb4c2e048ab8d8c5e40a8371a866d056a065db6c",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/archive.py": "7baf062ea7740fcf4a31b13e3352f6cf6a04f40adad31dc6724003fc2797125f",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/ir.py": "c409bd26eac2fe5c69036e9d5b234264986a892f39b1256f97c01462a133d919",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/bridge.py": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+    "/Users/mdot/dox/mesh/rdma/libmesh.dylib": "e496c5a59e68853d4173fa1c989b100cdb3b4f40a9c3472ed3985926ab2c74b6",
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "feadfd0199bd3bb73ac5b3dcd5ef954024c2c6d9797ad12b4765b62bc02e52b7",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "f912ffa513257ffa621c54d3506c30a734dcb2255be6c4b7c95f504831d57f82",
+    "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303"
+  },
+  "changed": [],
+  "returncode": 0,
+  "seconds": 4.813012541999342,
+  "pid": 44128
+}

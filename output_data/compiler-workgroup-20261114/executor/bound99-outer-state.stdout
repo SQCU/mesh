@@ -1,0 +1,11 @@
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 7 values 72 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 6 values 56 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared self-timed program 2 calls 2 positions 1 residues 1 phases 1 plan order edges 1 kept of the unrolled dependences 0 fence waits 0 program-thread waits 0 send-completion waits 0 left to the plan's start 0 start waits
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 7 values 72 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 6 values 56 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared self-timed program 2 calls 2 positions restored (no relation solved)
+{"compile_did_not_mutate": true, "roles": {"state_1": "BUFFER", "scale_1": "PARAMETER", "tail_state_1": "BUFFER"}, "original_owners": {"state_1": true, "scale_1": true, "tail_state_1": true}, "observed": [{"invocation": 0, "errors": [0.0, 0.0, 0.0], "state_matches": true, "attribute_alias": true, "returned_alias": true, "stride": [2], "offset": 3, "expected_stride": [2], "expected_offset": 3, "scale": 2.0, "state": [1.5, 2.0, 7.0, 6.75]}, {"invocation": 1, "errors": [0.0, 0.0, 0.0], "state_matches": true, "attribute_alias": true, "returned_alias": true, "stride": [2], "offset": 3, "expected_stride": [2], "expected_offset": 3, "scale": 3.0, "state": [1.75, 1.5, 8.0, 6.625]}]}
