@@ -7,11 +7,8 @@ import torch
 from torch.export.graph_signature import InputKind, OutputKind
 from torch.utils import _pytree as pytree
 
-from . import lower_inductor
+from . import native
 from .ir import Exported, Plan, Scheduled
-
-# compiler/mesh_compiler/driver.py TARGETS: the same selection, by the processor's engine or device type
-RESTORED = {"cpu": lower_inductor.restore}
 
 
 def tuples(value):
@@ -58,8 +55,7 @@ def load(directory):
                         pytree.treespec_loads(about["out_spec"]),
                         {name: InputKind[kind] for name, kind in about["state_kinds"].items()})
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
-    functions = {processor: RESTORED[about["engines"].get(processor, devices[processor].type)](
-                     saved, directory) for processor, saved in about["targets"].items()}
+    functions = {processor: native.restore(saved, directory) for processor, saved in about["targets"].items()}
     carried = [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
                for channel, sender, receiver, dtype, shape, stride in about["carried"]]
     plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"]),

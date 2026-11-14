@@ -7,8 +7,10 @@ import os
 import pathlib
 import sys
 import time
+import weakref
 
 import torch
+from torch.export.graph_signature import InputKind
 
 from .ir import Planning
 
@@ -45,6 +47,8 @@ def planning():
 # design/compilation-composition-change-request.md item 7; compiler/mesh_compiler/ir.py Plan arena_bytes, offsets;
 # torch 2.14 frombuffer
 class Published:
+    placements, stepped = staticmethod(lambda: ()), staticmethod(lambda: None)
+
     def __init__(self, plan, group):
         self.source, self.context = plan, C.addressof(CONTEXT)
         self.function, self.held = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences,
@@ -56,26 +60,38 @@ class Published:
             C.byref(CONTEXT), group, plan.program, self.function, 1, calls, 1, None, None, 0, None,
             time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, plan.record, len(plan.record),
             C.byref(made)))
-        mesh.LIB.mesh_planned_free(C.byref(made))
+        self.planned = made
+        weakref.finalize(self, mesh.LIB.mesh_planned_free, C.byref(made))
         self.plan, self.execution = self.function[0].plan, 0
         sections = [value.section for value in self.function[0].value[:len(plan.values)]]
-        first, offset, view = ((mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(),
-                               mesh.View())
-        mesh.LIB.mesh_view_values(C.byref(CONTEXT), self.function, 1, first, offset, C.byref(view))
+        self.first, self.offset, view = ((mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(),
+                                         mesh.View())
+        mesh.LIB.mesh_view_values(C.byref(CONTEXT), self.function, 1, self.first, self.offset, C.byref(view))
         self.arena = torch.frombuffer((C.c_byte * view.bytes).from_address(view.address), dtype=torch.uint8) if (
             view.bytes) else torch.empty(0, dtype=torch.uint8)
 
+    def bound(self, owned, M):
+        from .native import planned_buffer
+        return planned_buffer(self, owned, M)
+
+    def copies(self, index):
+        from .native import viewed
+        return viewed(self.first, C.addressof(self.offset), index)
+
 
 # design/compilation-composition-change-request.md item 7; rdma/mesh-dataflow.h mesh_attach, mesh_nodes_read;
-# output_data/compiler-workgroup-20261113/executor/native.status.md Model.prepare
+# compiler/mesh_compiler/native.py Target.prepare: the selected machine entry's completed native target relocated onto
+# its run-time owner (a local program's own arena, or the published plan), its constant roots the exported constants
 def prepare(scheduled, entry=None):
+    constants = {name: tensor.detach() for name, (_, tensor) in scheduled.exported.state.items()
+                 if scheduled.exported.state_kinds[name] == InputKind.CONSTANT_TENSOR}
     if scheduled.plan is None:
         key = scheduled.output_processor if entry is None else entry
-        return key, scheduled.functions[key]
+        return key, scheduled.functions[key].prepare(None, constants)
     mesh.check(mesh.LIB.mesh_attach(C.byref(CONTEXT), None))
     found = mesh.Nodes()
     mesh.check(mesh.LIB.mesh_nodes_read(C.byref(CONTEXT), C.byref(found)))
     (key,) = [group for group in scheduled.functions if scheduled.machines[group] == found.node[found.self]] if (
         entry is None) else (entry,)
     published = Published(scheduled.plan, (int(os.environ["MESH_GROUP"]) << 32) + next(PUBLISHED))
-    return key, scheduled.functions[key].bind(published)
+    return key, scheduled.functions[key].prepare(published, constants)

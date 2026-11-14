@@ -120,10 +120,10 @@ def extent(value):
 
 # rdma/mesh-collective.h mesh_plan, mesh_plan_save; compiler/mesh_compiler/ir.py Planning; rdma/mesh-graph.h
 # mesh_graph_archive; rdma/mesh-dataflow.h mesh_view_values; design/compilation-composition-change-request.md items
-# 3, 6.4 and 7
-def solved(plan, planning):
-    function, _ = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences, plan.outstanding,
-                                plan.tasks, plan.before, plan.senders, plan.receivers, plan.resources)
+# 3, 6.4 and 7: the one plan of `function` (the caller's actual mesh.Function, its parts and values the lowered
+# program's), projected into `plan`; its mesh.Planned, mapped view and the view's first/offset arrays returned for the
+# caller to retain and free
+def solved(plan, planning, function):
     calls, made, record, length = (mesh.U * 1)(0), mesh.Planned(), C.c_void_p(), C.c_size_t()
     operands = (plan.program, function, 1, calls, 1, None, None, 0, None)
     context = C.byref(planning.context)
@@ -152,9 +152,8 @@ def solved(plan, planning):
         for transfer, (source, *_) in enumerate(plan.declared)
         for record in [mesh.Publication.from_address(planning.context.M + state.transfers
                                                      + mesh.PUBLICATION_BYTES * transfer)])
-    mesh.LIB.mesh_planned_free(C.byref(made))
     SYSTEM.free(record)
-    return plan
+    return plan, made, view, first, offset
 
 
 # design/disjoint-pages-change-request.md A3 item 2 and C3.2; design/problems-of-14b9a757-change-request.md 7.1 steps 2
