@@ -9,3 +9,8 @@ Implementation: same Claude Opus 5.5 session `dc4b988b-a100-4e17-8c80-ff3f90ac97
 Private checks passed with canonical build flags: mesh-collective C object, mesh-metal Objective-C object, E2B strict syntax, Python syntax, diff whitespace, and C/ctypes layout agreement (`Planned` 96 bytes, new fields at 56/64/72/80/88; transfer slice 24 bytes). Exact commands and logs: `planned-extents.status.md`, `/tmp/planned-extents-check`. Canonical shared build is next. These checks do not establish a live bridge execution or a native plan archive round trip; no such execution is claimed.
 
 Canonical `make -C rdma libmesh.dylib` completed successfully. A fresh process imported the actual installed mesh/mesh_graph bindings, verified the layouts above, freed an empty Planned, and consumed/freed actual owned contract, quotient and view-conflict results. Logs: `owned-extents-libmesh-build.log`, `owned-extents-fresh-abi.log`. This released Python-only CPU checks; Metal/E2B rebuild remains separately pending the paired native-generation correction.
+
+
+## Full affected-consumer build
+
+`make .build/e2b_replay .build/native_bench` completed with exit0 after graph5a43e4b6, extents6cec6b10/442eba53 and SENT732f58c9. Log: `compiler/owned-extents-metal-build.log`. Fresh imports of actual libmesh_metal, libmetal_ir, libmetal_recording, provider and ctypes Program new/free passed (`compiler/owned-extents-metal-abi.log`). This gate included the unused initial specialization scaffold, not the later completed-emission sharing checkpoint; no specialization/runtime claim follows. No live bridge or plan archive roundtrip was executed.
