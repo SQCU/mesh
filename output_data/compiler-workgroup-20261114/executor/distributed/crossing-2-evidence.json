@@ -1,0 +1,726 @@
+{
+  "source": {
+    "mesh": "bcbfe9f1",
+    "metal": "3bdfbaf7"
+  },
+  "client": {
+    "name": "examples/crossing.py",
+    "HIDDEN": 8,
+    "CROSSINGS": 2,
+    "OVERLAP": 1,
+    "device": "mps",
+    "MESH_PROGRAM": "0,1,2,3,4",
+    "MESH_GROUP": 11141144
+  },
+  "peers": {
+    "Ms-Mac-mini-ts": {
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "sha256": {
+          "/Users/mdot/mesh/rdma/mesh-flow": "db82addbbfd81c4b5171d89882dcb29c21aed3d97d1ff8f88c1502837389ec45",
+          "/Users/mdot/mesh/rdma/libmesh.dylib": "8c9444534f4a5768e86e8e07b1fa06e8dee55ad8d5b76d16d1ae25cd5957f12e",
+          "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "a180ae8cc728a7389dfa949a3e57e97ec574b27e5254ce85f12e286e7d1a6b7b",
+          "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "22ba44ab733d327392fe0a6d332ccf62b38274e9b2b106a56168c756f8d54e4f"
+        },
+        "check_symbol": true,
+        "new_free": true,
+        "bridge": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 51394,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 1974797816,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 1048576,
+          "links": 8,
+          "paired_links": 1,
+          "code": 0,
+          "domain": 0
+        }
+      },
+      "after": {
+        "client_pid": 83318,
+        "process_exit": 1,
+        "process": "  PID  PPID STAT COMMAND\n",
+        "status": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 51394,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 1974797816,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 1048576,
+          "links": 8,
+          "paired_links": 1,
+          "code": 0,
+          "domain": 0
+        },
+        "uninterruptible": []
+      },
+      "result": "IndexError: tuple index out of range"
+    },
+    "m5ult2-ts": {
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "sha256": {
+          "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+          "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+          "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "59de4ecdadbd91ade27daa6a1f0eb1e55d9ac323f91610d2c5959eb58724ef6d",
+          "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "ab2561c3d7efa720f4b262317ad7406515f2df985291f0346beca305b15fcbd0"
+        },
+        "check_symbol": true,
+        "new_free": true,
+        "bridge": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 32109,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 455770905,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 4,
+          "code": 0,
+          "domain": 0
+        }
+      },
+      "after": {
+        "client_pid": 76370,
+        "process_exit": 1,
+        "process": "  PID  PPID STAT COMMAND\n",
+        "status": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 32109,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 455770905,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 4,
+          "code": 0,
+          "domain": 0
+        },
+        "uninterruptible": []
+      },
+      "result": "IndexError: tuple index out of range"
+    },
+    "mdots-Mac-Studio-2-ts": {
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "sha256": {
+          "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+          "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+          "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "59de4ecdadbd91ade27daa6a1f0eb1e55d9ac323f91610d2c5959eb58724ef6d",
+          "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "ab2561c3d7efa720f4b262317ad7406515f2df985291f0346beca305b15fcbd0"
+        },
+        "check_symbol": true,
+        "new_free": true,
+        "bridge": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 5415,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 597453729,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 6,
+          "code": 0,
+          "domain": 0
+        }
+      },
+      "after": {
+        "client_pid": 68562,
+        "process_exit": 1,
+        "process": "  PID  PPID STAT COMMAND\n",
+        "status": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 5415,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 597453729,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 6,
+          "code": 0,
+          "domain": 0
+        },
+        "uninterruptible": []
+      },
+      "result": "IndexError: tuple index out of range"
+    },
+    "mdots-Mac-Studio-3-ts": {
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "sha256": {
+          "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+          "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+          "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "59de4ecdadbd91ade27daa6a1f0eb1e55d9ac323f91610d2c5959eb58724ef6d",
+          "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "ab2561c3d7efa720f4b262317ad7406515f2df985291f0346beca305b15fcbd0"
+        },
+        "check_symbol": true,
+        "new_free": true,
+        "bridge": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 95542,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 371057962,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 6,
+          "code": 0,
+          "domain": 0
+        }
+      },
+      "after": {
+        "client_pid": 60132,
+        "process_exit": 1,
+        "process": "  PID  PPID STAT COMMAND\n",
+        "status": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 95542,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 371057962,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 6,
+          "code": 0,
+          "domain": 0
+        },
+        "uninterruptible": []
+      },
+      "result": "OSError: [Errno 22] preparation: Dispatch 3: a read of storage 67 it does not bind so"
+    },
+    "mdots-Mac-Studio-ts": {
+      "abi": {
+        "sizes": {
+          "Repeat": 40,
+          "ValueInfo": 120,
+          "Function": 168,
+          "Planned": 152,
+          "Local": 376,
+          "Signature": 416
+        },
+        "sha256": {
+          "/Users/mdot/mesh/rdma/mesh-flow": "7d4470a9dc61b73694590eb674a6a9d2614562ea3613c660ee12be4de2269ee3",
+          "/Users/mdot/mesh/rdma/libmesh.dylib": "e408ccbca0d1f4434a19ed53faaaa1fae12f13aaff36e2ed31543cbe9ac27fe1",
+          "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "59de4ecdadbd91ade27daa6a1f0eb1e55d9ac323f91610d2c5959eb58724ef6d",
+          "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "ab2561c3d7efa720f4b262317ad7406515f2df985291f0346beca305b15fcbd0"
+        },
+        "check_symbol": true,
+        "new_free": true,
+        "bridge": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 33866,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 521750041,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 5,
+          "code": 0,
+          "domain": 0
+        }
+      },
+      "after": {
+        "client_pid": 78225,
+        "process_exit": 1,
+        "process": "  PID  PPID STAT COMMAND\n",
+        "status": {
+          "up": true,
+          "ready": true,
+          "paired": true,
+          "bridge_pid": 33866,
+          "client": 0,
+          "clients": [],
+          "version": 121,
+          "node": 521750041,
+          "pgsz": 16384,
+          "block": 1,
+          "rows": 5373952,
+          "links": 8,
+          "paired_links": 5,
+          "code": 0,
+          "domain": 0
+        },
+        "uninterruptible": [
+          "16635     1 Us   /usr/local/mesh/runtimes/runtime.a4SF5U/.venv/bin/python /usr/local/mesh/bin/mesh-telemetry.py"
+        ]
+      },
+      "result": "IndexError: tuple index out of range"
+    }
+  },
+  "snapshot": {
+    "row": 0,
+    "node": 0,
+    "source_function": "('work', 'TreeSpec(tuple, None, [TreeSpec(tuple, None, [*,\\n    *]),\\n  TreeSpec(immutable_dict, [], [])])', (('torch.float16', 'cpu', False, (5, 8), (8, 1), 0, 0), ('torch.float16', 'cpu', False, (5, 8), (8, 1), 0, 1)))",
+    "row_fields": {
+      "call": 0,
+      "function": 0,
+      "instance": 0,
+      "planned": 0
+    },
+    "counts": {
+      "dispatches": 4,
+      "bindings": 48,
+      "effects": 62,
+      "sources": 40,
+      "values": 69
+    },
+    "dispatch": {
+      "kind": 4,
+      "kernel": 3,
+      "binding": 26,
+      "bindings": 22,
+      "effect": 38,
+      "effects": 24,
+      "source": 20,
+      "sources": 20,
+      "allocation": 2,
+      "allocations": 1,
+      "arguments": 67,
+      "later": 4294967295,
+      "flags": 2,
+      "fill": 0,
+      "groups": [
+        1,
+        1,
+        1
+      ],
+      "threads": [
+        32,
+        1,
+        1
+      ]
+    },
+    "numeric": {
+      "kernel": 0,
+      "first": 0,
+      "last": 20,
+      "later": 1
+    },
+    "order_position": [
+      3
+    ],
+    "part": 0,
+    "storage_class67": [
+      {
+        "value": 67,
+        "role": 2,
+        "scalar": 8,
+        "storage": 67,
+        "function": 4294967295,
+        "index": 4294967295,
+        "word": 0,
+        "of": 4294967295,
+        "range": 0,
+        "received": 0,
+        "sent": 0,
+        "zeroed": 0,
+        "sendings": 0,
+        "identity": 0,
+        "bytes": 12,
+        "offset": 0,
+        "at": 0,
+        "data_bytes": 0,
+        "data": null,
+        "buffer": null,
+        "page_bytes": 0,
+        "pages": 0,
+        "source": 4294967295
+      }
+    ],
+    "bindings": [
+      {
+        "slot": 0,
+        "value": 6,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 6
+      },
+      {
+        "slot": 1,
+        "value": 22,
+        "access": 2,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 22
+      },
+      {
+        "slot": 2,
+        "value": 8,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 8
+      },
+      {
+        "slot": 3,
+        "value": 10,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 10
+      },
+      {
+        "slot": 4,
+        "value": 12,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 12
+      },
+      {
+        "slot": 5,
+        "value": 4,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 4
+      },
+      {
+        "slot": 6,
+        "value": 0,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 0
+      },
+      {
+        "slot": 7,
+        "value": 2,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 2
+      },
+      {
+        "slot": 8,
+        "value": 20,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 20
+      },
+      {
+        "slot": 9,
+        "value": 18,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 18
+      },
+      {
+        "slot": 10,
+        "value": 16,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 16
+      },
+      {
+        "slot": 11,
+        "value": 14,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 14
+      },
+      {
+        "slot": 12,
+        "value": 24,
+        "access": 2,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 24
+      },
+      {
+        "slot": 13,
+        "value": 62,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 62
+      },
+      {
+        "slot": 14,
+        "value": 61,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 61
+      },
+      {
+        "slot": 15,
+        "value": 61,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 61
+      },
+      {
+        "slot": 16,
+        "value": 61,
+        "access": 3,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 61
+      },
+      {
+        "slot": 17,
+        "value": 61,
+        "access": 3,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 61
+      },
+      {
+        "slot": 18,
+        "value": 66,
+        "access": 1,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 66
+      },
+      {
+        "slot": 19,
+        "value": 61,
+        "access": 3,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 61
+      },
+      {
+        "slot": 20,
+        "value": 63,
+        "access": 3,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 63
+      },
+      {
+        "slot": 21,
+        "value": 64,
+        "access": 3,
+        "table": 0,
+        "offset": 0,
+        "bytes": 0,
+        "storage": 64
+      }
+    ],
+    "effect67": [
+      {
+        "key": 67,
+        "offset": 0,
+        "element": 12,
+        "dims": 0,
+        "pairs": [],
+        "vertex": 3,
+        "write": 0
+      }
+    ]
+  },
+  "files": {
+    "Ms-Mac-mini-ts-crossing-2.stderr": {
+      "bytes": 1447,
+      "sha256": "ea4cdb209fae4c424e2cea615be985613a30dda91c3d09a5d0e68cea27062cc4"
+    },
+    "Ms-Mac-mini-ts-crossing-2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "Ms-Mac-mini-ts-function-abi.json": {
+      "bytes": 1528,
+      "sha256": "47037f3242bc7da1a415067f267809428fde0ef7bffef52f2ce239f2dd4d4442"
+    },
+    "Ms-Mac-mini-ts-function-abi.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "Ms-Mac-mini-ts-postcrossing-2.json": {
+      "bytes": 1005,
+      "sha256": "bc9f5ae8d336018520a9135c69b4f9cb4fae2e8750d10e281f3766e0f058dbe3"
+    },
+    "dispatch3-snapshot.stderr": {
+      "bytes": 2002,
+      "sha256": "3bb999c1d8a3fc3e2628e83d13145b13dd8e59dae291b117ea05fb82b68fff48"
+    },
+    "dispatch3-snapshot.stdout": {
+      "bytes": 14203,
+      "sha256": "9a3d6064d3c800a703bee86fedd412b1e783ad8aa61cabbded4ea72558c352a2"
+    },
+    "m5ult2-ts-crossing-2.stderr": {
+      "bytes": 1447,
+      "sha256": "ea4cdb209fae4c424e2cea615be985613a30dda91c3d09a5d0e68cea27062cc4"
+    },
+    "m5ult2-ts-crossing-2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "m5ult2-ts-function-abi.json": {
+      "bytes": 1583,
+      "sha256": "9f1d5899366057e02af8ca4deb507bb605fcab8ef65bc72c54d5fd9097f5fd7c"
+    },
+    "m5ult2-ts-function-abi.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "m5ult2-ts-postcrossing-2.json": {
+      "bytes": 1060,
+      "sha256": "12059ad6b3f764dc16c00594a251a917e3c0e32442b988c4065089a12fe7318d"
+    },
+    "mdots-Mac-Studio-2-ts-crossing-2.stderr": {
+      "bytes": 1447,
+      "sha256": "ea4cdb209fae4c424e2cea615be985613a30dda91c3d09a5d0e68cea27062cc4"
+    },
+    "mdots-Mac-Studio-2-ts-crossing-2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mdots-Mac-Studio-2-ts-function-abi.json": {
+      "bytes": 1617,
+      "sha256": "9bc15dfc36b6b3279e350556a3d302228816d1ca7b6728107a9ae16eb7367c02"
+    },
+    "mdots-Mac-Studio-2-ts-function-abi.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mdots-Mac-Studio-2-ts-postcrossing-2.json": {
+      "bytes": 1094,
+      "sha256": "e35a7058e028d924fccb4db0a7ba657781e77ceadac83f0ae3c36d017f2670ce"
+    },
+    "mdots-Mac-Studio-3-ts-crossing-2.stderr": {
+      "bytes": 2043,
+      "sha256": "a9bfa25508f2b49ff8c89dbc810d62e5522fd42193059638d3a4283613913034"
+    },
+    "mdots-Mac-Studio-3-ts-crossing-2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mdots-Mac-Studio-3-ts-function-abi.json": {
+      "bytes": 1617,
+      "sha256": "c92ff87e020de2533723d145b74811d46e2d72150f54b789d5febd0f689224a8"
+    },
+    "mdots-Mac-Studio-3-ts-function-abi.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mdots-Mac-Studio-3-ts-postcrossing-2.json": {
+      "bytes": 1094,
+      "sha256": "a11a4d798e55b645fed3e2d786b7eff507b59d16c99fd7ec2da038d990a52eb8"
+    },
+    "mdots-Mac-Studio-ts-crossing-2.stderr": {
+      "bytes": 1447,
+      "sha256": "ea4cdb209fae4c424e2cea615be985613a30dda91c3d09a5d0e68cea27062cc4"
+    },
+    "mdots-Mac-Studio-ts-crossing-2.stdout": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mdots-Mac-Studio-ts-function-abi.json": {
+      "bytes": 1600,
+      "sha256": "eef3bb4c36d02cec2e02fe5965b3e11047ecbf00756f67356e8b00def6278066"
+    },
+    "mdots-Mac-Studio-ts-function-abi.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "mdots-Mac-Studio-ts-postcrossing-2.json": {
+      "bytes": 1190,
+      "sha256": "2801f350f4d2b2d3a29e0302843a244ebbc582a4abf7fcee7bd76fc5dcdb9db3"
+    }
+  }
+}

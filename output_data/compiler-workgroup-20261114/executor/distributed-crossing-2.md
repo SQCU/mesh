@@ -1,0 +1,11 @@
+# Crossing after the Prepared → Function handoff
+
+Five existing fleet nodes, mesh bcbfe9f1 and metal3bdfbaf7; ordinary committed-main synchronization and canonical builds completed on all peers. Fresh imports matched Repeat40, ValueInfo120, Function168, Planned152, Local376 and Signature416; the Check dependency symbol and Program new/free passed. Version121 bridges kept their full arenas and were not restarted again.
+
+The unchanged `examples/crossing.py` caller ran with HIDDEN8, CROSSINGS2, OVERLAP1, MPS, MESH_PROGRAM0,1,2,3,4 and group11141144. All five processes ended exit1 after the canonical network solve, before native invocation. Four nodes failed while resolving an outer output absent from their local numerical body's output list. Output node371057962 failed during capture: `Dispatch 3: a read of storage 67 it does not bind so`. Post-run bridge status was ready/paired, with no attached clients; all five original client PIDs were gone. No capacity change or protocol restart followed.
+
+The outer recipe now consumes the original `CallAnalysis.output_machine` and existing physical `here` operand (b16bc741). A local body alone does not own the outer result. The owner still uses the existing original output/landed recipes.
+
+One authorized compile-only snapshot on node371057962 stopped at that same `Target.placed` exception, before `Owned` unwound. It used the same source/input/placement and group11141145, no numerical call. The live row is call0/source function0/instance0. Dispatch3 is METAL_IR_INDIRECT, numeric kernel0/member0..20/later1, and its actual indirect argument ValueID is67. Root67 is a12-byte U32 TEMPORARY. Its read effect is present; the22 ordinary shader bindings omit that root. The existing special indirect argument owner is therefore the next exact recording consumer, not a missing numerical tensor allocation.
+
+`distributed/crossing-2-evidence.json` retains the actual ABI/binary hashes, peer outcomes, live selected fields and hashes of the original logs. The original snapshot remains `distributed/dispatch3-snapshot.stdout`; it is diagnostic metadata, not an evaluator or reconstructed graph. No distributed numerical accuracy, saved-program coexistence or aggregate publication runtime result is claimed yet.
