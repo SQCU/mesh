@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "/Users/mdot/dox/mesh/examples/engines.py", line 148, in <module>
+    main()
+  File "/Users/mdot/dox/mesh/examples/engines.py", line 144, in main
+    return execute(Engines(widths).eval(), (x,), engines, args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/examples/engines.py", line 111, in execute
+    scheduled = compiled(compile_module(model, inputs, processors, placement('projection', parts)))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 24, in compile_module
+    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 89, in compile_captured
+    constructed[key] = construct(
+                       ^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 349, in construct
+    (SourceOperand * max(len(given), 1))(*map(operand, given)))
+                                              ^^^^^^^
+UnboundLocalError: cannot access local variable 'operand' where it is not associated with a value
