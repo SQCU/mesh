@@ -1263,24 +1263,65 @@ def borrowed(compiler, program, owner):
 # input or state backing the caller's storage; each fresh output root a result allocation of this call, which the
 # program writes directly), runs one execution of every row, waits for its end, and returns its outputs as views of
 # those backings or of a CONSTANT root's own handle (`fixed`, {(row, root): its tensor}). `uses` the program's
-# borrowed MetalProgramExternals view (pointer, count), kept with the program that owns it; `gpu` the ordinals of the
-# operands it uses on the GPU, read once; `argued` {(row, root): operand ordinal}; `allocations` each result backing a
-# call allocates, once, (joint root s, its bytes, its device): Operand.source ("result", s, bytes, device) of an operand
-# or of a supplied owner root's outer output (Target.outputs), as the target states them; `programs` each row's loaded
-# program (Target.prepare's, None for a row without one), owned with `owned`; `work` each such row's Work (read by
-# observe once); `signature` its loaded signature (mesh_graph.Signature) bound to this native program, freed with
-# `owned`
+# borrowed MetalProgramExternals view (pointer, count), kept with the program that owns it. Prepared once from the
+# target's operands and outputs, as the target states them, each call's sources one pool (given, allocated, fixed) by
+# index: `allocations` each result backing a call allocates, (joint root s, its bytes, its device): Operand.source
+# ("result", s, bytes, device) of an operand or of a supplied owner root's outer output; `template` the argument table,
+# each generator operand's own buffer in it; its other operands' (position, outer input or joint root, root byte 0's
+# offset): `hosted` and `shared` the outer inputs the program uses on the host only, or on the GPU (MetalExternalUse
+# METAL_EXTERNAL_GPU), their backing the caller's; `buffers`, `hosts` and `pages` this call's allocations, on MPS
+# (their own MTLBuffer), on the CPU used on the host only, or on the CPU used on the GPU (borrowed pages); `outputs` the
+# outer outputs (Target.outputs) with each literal in place; `direct` each outer placeholder's (position, its input);
+# `views` each view's (position, pool, key, dtype, shape, stride, element offset, `at`): of a supplied owner root (r
+# ("root", its source record, the root byte its backing's byte 0 is)), a CONSTANT root's own handle, or a call's root
+# through its operand's backing ({(row, root): operand} the operands' occurrences), its storage offset (source's byte
+# start - `at`) // itemsize + element offset, `at` normalized per source (an allocation's 0, its root byte folded into
+# the element offset; a handle's own byte start). `programs` each row's loaded program (Target.prepare's, None for a row
+# without one), owned with `owned`; `work` each such row's Work (read by observe once); `signature` its loaded
+# signature (mesh_graph.Signature) bound to this native program, freed with `owned`
 class Bound:
     def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses, programs, signature):
         self.target, self.owner, self.program, self.ended, self.generator = target, owner, program, ended, generator
         self.fixed, self.owned, self.libs, self.uses = fixed, owned, libs, uses
         self.programs, self.work = programs, None
         self.signature = signature
-        self.argued = {at: a for a, operand in enumerate(target.operands) for at in operand.occurrences}
         sources = (*(operand.source for operand in target.operands),
                    *(r[1] for r, _ in target.outputs if isinstance(r, tuple)))
         self.allocations = tuple({source[1]: source[2:] for source in sources if source[0] == "result"}.items())
-        self.gpu = frozenset(use.argument for use in uses[0][:uses[1]] if use.uses & METAL_EXTERNAL_GPU)
+        gpu = frozenset(use.argument for use in uses[0][:uses[1]] if use.uses & METAL_EXTERNAL_GPU)
+        mps = frozenset(s for s, (_, device) in self.allocations if device.type == "mps")
+        made = {"generator": [], "input": [], "result": []}
+        for a, operand in enumerate(target.operands):
+            made[operand.source[0]].append((a, operand.source[1], operand.offset))
+        self.count = len(target.operands)
+        self.template = (Argument * max(self.count, 1))()
+        for a, k, _ in made["generator"]:
+            self.template[a] = Argument(generator[k], 0, None)
+        self.hosted = tuple(e for e in made["input"] if e[0] not in gpu)
+        self.shared = tuple(e for e in made["input"] if e[0] in gpu)
+        self.buffers = tuple(e for e in made["result"] if e[1] in mps)
+        self.hosts = tuple(e for e in made["result"] if e[1] not in mps and e[0] not in gpu)
+        self.pages = tuple(e for e in made["result"] if e[1] not in mps and e[0] in gpu)
+        argued = {at: operand for operand in target.operands for at in operand.occurrences}
+        outputs, direct, views = [], [], []
+        for position, (r, leaf) in enumerate(target.outputs):
+            outputs.append(leaf.literal if leaf.root is None and not isinstance(r, tuple) else None)
+            if r is None and leaf.root is not None:
+                direct.append((position, leaf.root))
+                continue
+            if leaf.root is None and not isinstance(r, tuple):
+                continue
+            shape, stride, offset, dtype, _, _ = leaf.metadata
+            if not isinstance(r, tuple) and (r, leaf.root) in fixed:
+                held = fixed[r, leaf.root]
+                views.append((position, 2, (r, leaf.root), dtype, shape, stride, offset,
+                              held.storage_offset() * held.element_size()))
+                continue
+            source, at = (r[1], r[2]) if isinstance(r, tuple) else (argued[r, leaf.root].source,
+                                                                     argued[r, leaf.root].offset)
+            views.append((position, 1, source[1], dtype, shape, stride, offset - at // dtype.itemsize, 0)
+                         if source[0] == "result" else (position, 0, source[1], dtype, shape, stride, offset, at))
+        self.outputs, self.direct, self.views = tuple(outputs), tuple(direct), tuple(views)
 
     # metal-microbench metal_ir.h metal_ir_dispatches and metal_ir_kernel_devices (Core ML MLComputePlan): each loaded
     # row's NEURAL kernels once, by kernel: its row, call, body's function ordinal and {Neural Engine, CPU, GPU}
@@ -1301,59 +1342,27 @@ class Bound:
                              "devices": dict(zip(("neural engine", "cpu", "gpu"), devices))})
         return made
 
-    # metal_recording.h struct MetalArgument; MTLDevice.h newBufferWithBytesNoCopy:length:options:deallocator: (an
-    # existing address span, page aligned) through compiler/mesh_compiler/metal.py _placed_buffer: root byte 0 of the
-    # caller's view (its byte start less the compiled view's offset in its root). An MPS storage gives its own
-    # MTLBuffer. A CPU storage gives its host base, and where the program uses the operand on the GPU, a shared buffer
-    # borrowing that storage's pages (the system page size) and owning a reference to the storage until its deallocator
-    # runs, one per storage in this call (`borrowed`, {storage address: (first page, buffer)}), released after the call
-    def operand(self, tensor, offset, gpu, borrowed):
-        M, storage = self.libs[0], tensor.untyped_storage()
-        if tensor.device.type == "mps":
-            return Argument(storage.data_ptr(), (tensor.storage_offset() * tensor.element_size() - offset) % (1 << 64),
-                            None)
-        base = tensor.data_ptr() - offset
-        if not gpu:
-            return Argument(None, 0, base)
+    # metal_recording.h struct MetalArgument: root byte 0 of the caller's view (its byte start less the compiled view's
+    # offset in its root); an MPS storage gives its own MTLBuffer
+    @staticmethod
+    def mapped(tensor, offset):
+        return Argument(tensor.untyped_storage().data_ptr(),
+                        (tensor.storage_offset() * tensor.element_size() - offset) % (1 << 64), None)
+
+    # MTLDevice.h newBufferWithBytesNoCopy:length:options:deallocator: (an existing address span, page aligned) through
+    # compiler/mesh_compiler/metal.py _placed_buffer: a CPU storage the program uses on the GPU, its host base and a
+    # shared buffer borrowing that storage's pages (the system page size) and owning a reference to the storage until
+    # its deallocator runs, one per storage in this call (`borrowed`, {storage address: (first page, buffer)}), released
+    # after the call
+    def paged(self, tensor, offset, borrowed):
+        storage, base = tensor.untyped_storage(), tensor.data_ptr() - offset
         address = storage.data_ptr()
         if address not in borrowed:
             first = address - address % mmap.PAGESIZE
             last = -(-(address + storage.nbytes()) // mmap.PAGESIZE) * mmap.PAGESIZE
-            borrowed[address] = first, M._placed_buffer(mesh.View(first, last - first), storage)
+            borrowed[address] = first, self.libs[0]._placed_buffer(mesh.View(first, last - first), storage)
         first, buffer = borrowed[address]
         return Argument(buffer, (base - first) % (1 << 64), base)
-
-    # operand a's invocation argument: the generator's own buffer, an outer input's storage, or this call's result
-    def argument(self, a, operand, given, allocated, borrowed):
-        if operand.source[0] == "generator":
-            return Argument(self.generator[operand.source[1]], 0, None)
-        tensor = given[operand.source[1]] if operand.source[0] == "input" else allocated[operand.source[1]]
-        return self.operand(tensor, operand.offset, a in self.gpu, borrowed)
-
-    # outer output (r, leaf): an outer placeholder's or a literal (r None); a supplied owner root's (r ("root", its
-    # source record, the root byte its backing's byte 0 is), the leaf's metadata in that root); a call's literal; a
-    # CONSTANT root's own handle; or a call's root through its operand's backing
-    def result(self, r, leaf, given, allocated):
-        if r is None:
-            return leaf.literal if leaf.root is None else given[leaf.root]
-        if not isinstance(r, tuple) and leaf.root is None:
-            return leaf.literal
-        shape, stride, offset, dtype, _, _ = leaf.metadata
-        if isinstance(r, tuple):
-            source, at = r[1], r[2]
-        elif (r, leaf.root) in self.fixed:
-            tensor = self.fixed[r, leaf.root]
-            return torch.empty(0, dtype=dtype, device=tensor.device).set_(tensor.untyped_storage(), offset, shape,
-                                                                          stride)
-        else:
-            operand = self.target.operands[self.argued[r, leaf.root]]
-            source, at = operand.source, operand.offset
-        if source[0] == "result":
-            return allocated[source[1]].view(dtype).as_strided(shape, stride, offset - at // dtype.itemsize)
-        tensor = given[source[1]]
-        return torch.empty(0, dtype=dtype, device=tensor.device).set_(
-            tensor.untyped_storage(), (tensor.storage_offset() * tensor.element_size() - at) // dtype.itemsize + offset,
-            shape, stride)
 
     # the one invocation through `run`: metal_recording.h MetalProgramRunArguments (the native program's entry) or
     # MetalProgramRunObserved (its observation entry), with the same operands, results, lifetimes and end. Its first
@@ -1366,15 +1375,26 @@ class Bound:
     # call's borrowed operands are still held; the run's error is raised, else the end's
     def invoked(self, run, given):
         M, _, (lib, _), _ = self.libs
-        error, operands = C.create_string_buffer(ROOM), self.target.operands
+        error = C.create_string_buffer(ROOM)
         execution = lib.MetalProgramIssued(self.program)
         allocated = {s: torch.empty(size, dtype=torch.uint8, device=device) for s, (size, device) in self.allocations}
-        borrowed = {}
+        pools, borrowed = (given, allocated, self.fixed), {}
         try:
-            table = (Argument * max(len(operands), 1))(*[self.argument(a, operand, given, allocated, borrowed)
-                                                         for a, operand in enumerate(operands)])
+            table = type(self.template).from_buffer_copy(self.template)
+            for a, i, offset in self.hosted:
+                table[a] = self.mapped(given[i], offset) if given[i].device.type == "mps" else Argument(
+                    None, 0, given[i].data_ptr() - offset)
+            for a, i, offset in self.shared:
+                table[a] = self.mapped(given[i], offset) if given[i].device.type == "mps" else self.paged(
+                    given[i], offset, borrowed)
+            for a, s, offset in self.buffers:
+                table[a] = self.mapped(allocated[s], offset)
+            for a, s, offset in self.hosts:
+                table[a] = Argument(None, 0, allocated[s].data_ptr() - offset)
+            for a, s, offset in self.pages:
+                table[a] = self.paged(allocated[s], offset, borrowed)
             status = run(self.program, self.owner.context, execution, 1, self.ended, M.START, M.STARTED, table,
-                         len(operands), error, ROOM)
+                         self.count, error, ROOM)
             failed = status and M._execution_error({"lib": lib, "program": self.program}, status,
                                                    f"execution {execution} of the program: {error.value.decode()}")
             end = lib.MetalProgramEnd(self.program, self.ended, error, ROOM)
@@ -1384,7 +1404,15 @@ class Bound:
         finally:
             for _, buffer in borrowed.values():
                 M.PUT(buffer, M.SELECTOR[b"release"])
-        return [self.result(r, leaf, given, allocated) for r, leaf in self.target.outputs]
+        made = list(self.outputs)
+        for position, key in self.direct:
+            made[position] = given[key]
+        for position, pool, key, dtype, shape, stride, offset, at in self.views:
+            tensor = pools[pool][key]
+            made[position] = torch.empty(0, dtype=dtype, device=tensor.device).set_(
+                tensor.untyped_storage(), (tensor.storage_offset() * tensor.element_size() - at) // dtype.itemsize
+                + offset, shape, stride)
+        return made
 
     def __call__(self, *given):
         return self.invoked(self.libs[2][0].MetalProgramRunArguments, given)
