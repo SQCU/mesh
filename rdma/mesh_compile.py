@@ -1887,7 +1887,6 @@ OBJC.sel_registerName.restype, OBJC.sel_registerName.argtypes = C.c_void_p, [C.c
 SEND = C.cast(OBJC.objc_msgSend, C.c_void_p).value
 GET = C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.c_void_p)(SEND)
 PUT = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p)(SEND)
-WRAP = C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p, C.c_ulong, C.c_ulong, C.c_void_p)(SEND)
 SELECTOR = {name: OBJC.sel_registerName(name) for name in
             (b'device', b'retain', b'release', b'newBufferWithBytesNoCopy:length:options:deallocator:')}
 # MTLResource.h MTLResourceStorageModeShared
@@ -2015,6 +2014,8 @@ def _recorder():
             or ctypes.util.find_library('metal_recording') or 'libmetal_recording.dylib'
         lib, metal = C.CDLL(path), C.CDLL('/System/Library/Frameworks/Metal.framework/Metal')
         lib.MetalRecorderOpen.restype, lib.MetalRecorderOpen.argtypes = C.c_void_p, [C.c_void_p, C.c_char_p, C.c_size_t]
+        lib.MetalBufferBorrow.restype = C.c_void_p
+        lib.MetalBufferBorrow.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, RELEASE, C.c_void_p]
         lib.MetalRecorderPrepare.restype = C.c_void_p
         lib.MetalRecorderPrepare.argtypes = [C.c_void_p, C.c_void_p, C.c_char_p, C.c_size_t]
         lib.MetalRecorderReplay.restype = C.c_int
@@ -6608,10 +6609,14 @@ def _delete(managed):
 
 
 # design/aot-compilation-change-request.md, appendix item 7; design/plan-to-bridge-change-request.md R2; MTLResource.h
-# hazardTrackingMode; torch 2.14.0 include/ATen/native/mps/OperationUtils.h needsGather
-def _placed_buffer(view):
-    buffer = WRAP(_metal_device(), SELECTOR[b'newBufferWithBytesNoCopy:length:options:deallocator:'], view.address,
-                  view.bytes, SHARED, None)
+# hazardTrackingMode; torch 2.14.0 include/ATen/native/mps/OperationUtils.h needsGather; metal_recording.h
+# MetalBufferBorrow: a shared buffer (+1) borrowing `view`'s bytes. With `owner` (the Python object those bytes belong
+# to) one strong reference is lent to the buffer (_lent), whose deallocator drops it. Without one, the bytes outlive
+# the buffer by the caller's means (a mapped plan)
+def _placed_buffer(view, owner=None):
+    lib, device = _recorder()[0], _metal_device()
+    buffer = lib.MetalBufferBorrow(device, view.address, view.bytes, RELEASE(), None) if owner is None else _lent(
+        owner, lambda release, held: lib.MetalBufferBorrow(device, view.address, view.bytes, release, held), bool)
     if not buffer:
         raise OSError(errno.ENOMEM, 'Metal made no buffer over the program\'s mapping, %d bytes (MTLDevice.h '
                                     'newBufferWithBytesNoCopy)' % view.bytes)
@@ -7291,7 +7296,7 @@ def _compiler():
                 ('metal_ir_archive_load', P, [P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_solved', P, [P]),
                 ('metal_ir_archive_records', C.POINTER(Span), [P, C.POINTER(U)]),
-                ('metal_ir_archive_free', None, [P]),
+                ('metal_ir_archive_retain', None, [P]), ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
                 ('metal_ir_storages', C.c_size_t, [P, C.POINTER(C.POINTER(Storage))]),
@@ -8181,7 +8186,8 @@ def _bound(context, state, retained, deadline):
                       len(e), 0, analysed.outstanding[k], 0,
                       *((C.cast(actors[k][0], C.POINTER(C.c_double)), C.cast(actors[k][1], C.POINTER(C.c_double)),
                          C.cast(actors[k][2], C.POINTER(mesh_graph.Dependence)), actors[k][3], actors[k][4])
-                        if k in actors else (None, None, None, 0, 0)))
+                        if k in actors else (None, None, None, 0, 0)),
+                      relation=actors[k][6].relation if k in actors else None)
         for k, (d, w, v, e) in enumerate(arrays)])
     # design/compilation-composition-change-request.md item 6, unit 6D: the plan's results for native
     # preparation (mesh-collective.h struct mesh_planned), each call's plan, lead, ordinal and every the
@@ -8191,8 +8197,17 @@ def _bound(context, state, retained, deadline):
                  (mesh.U * len(calls))(*calls), len(calls), analysed.orders, analysed.causes,
                  analysed.norders, analysed.chains, deadline)
     if 'saved_plan' in retained:
-        record = retained['saved_plan']
-        mesh.check(mesh.LIB.mesh_plan_load(*arguments, record, len(record), C.byref(planned)))
+        # mesh-collective.h mesh_plan_load: the saved plan's record, a span of the owned native archive, borrowed by
+        # the loaded plan, which adopts one archive reference on success (metal_ir_archive_retain; released by
+        # metal_ir_archive_free) and restores the functions' compiled parts and relation from it
+        (record, length), archive, compiler = retained['saved_plan'], programs['archive'], programs['compiler']
+        compiler.metal_ir_archive_retain(archive)
+        status = mesh.LIB.mesh_plan_load(*arguments, record, length,
+                                         RELEASE(C.cast(compiler.metal_ir_archive_free, C.c_void_p).value), archive,
+                                         C.byref(planned))
+        if status:
+            compiler.metal_ir_archive_free(archive)
+            mesh.check(status)
     else:
         mesh.check(mesh.LIB.mesh_plan(*arguments, C.byref(planned)))
     retained['functions'], retained['planned'] = functions, planned
@@ -8573,9 +8588,6 @@ def _save_program(context, state, path):
                        analysed.norders, analysed.chains, C.byref(retained['planned']), diagnostic=False)
     arrays = [([_declared_record(v) for v in d], bytes(w), bytes(v), bytes(e))
               for d, w, v, e in retained['arrays']]
-    actors = {k: (C.string_at(host, parts * C.sizeof(C.c_double)), C.string_at(work, parts * C.sizeof(C.c_double)),
-                  C.string_at(edges, count * C.sizeof(mesh_graph.Dependence)), parts, count, complete)
-              for k, (host, work, edges, parts, count, complete, *_) in retained['actors'].items()}
     rows, storage, unique = [], [], {}
     for row in programs['rows']:
         record = {key: row[key] for key in ('k', 'j')}
@@ -8610,7 +8622,7 @@ def _save_program(context, state, path):
         rows.append(record)
     payload = {key: retained[key] for key in ('page', 'holders', 'steps', 'calls', 'every', 'given', 'constants',
                                              'output_recipe', 'initial')}
-    payload.update(arrays=arrays, actors=actors, rows=rows, storage=storage,
+    payload.update(arrays=arrays, rows=rows, storage=storage,
                    irs=[(ir.layouts, ir.inputs, ir.device) for ir in retained['irs']],
                    analysed=(analysed.outstanding, bytes(analysed.orders), bytes(analysed.causes), analysed.norders,
                              bytes(analysed.chains)),
@@ -8621,22 +8633,35 @@ def _save_program(context, state, path):
                            'a compiled mesh program', 'w')
 
 
-# metal_ir.h metal_ir_archive_load, metal_ir_archive_free; CPython C API Py_IncRef, Py_DecRef (Reference Counting);
-# ctypes, Callback functions: the archive of `data`, an immutable bytes object whose own buffer it borrows (no copy;
-# CPython 3.12 bytes keep it 8-byte aligned at the object's 32nd byte). One strong reference is taken for the archive,
-# which adopts it on success and drops it through _RELEASED_BYTES (a ctypes callback, which holds the GIL while it
-# runs) once the archive and every relation it lent are freed; on failure the reference is the caller's and is dropped
-# here. The caller's own reference to the archive is released with metal_ir_archive_free
+# CPython C API Py_IncRef, Py_DecRef (Reference Counting); ctypes, Callback functions: one strong reference to `owner`,
+# a Python object whose bytes a C owner borrows, lent to `load(release, owner)`, which adopts it where
+# `adopted(result)` (on success only) and drops it through _RELEASED_OBJECT (a ctypes callback, which holds the GIL
+# while it runs) once its last holder is freed; otherwise the reference is dropped here
 _INCREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_IncRef', C.pythonapi))
 _DECREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_DecRef', C.pythonapi))
-_RELEASED_BYTES = RELEASE(_DECREF)
+_RELEASED_OBJECT = RELEASE(_DECREF)
 
 
+def _lent(owner, load, adopted):
+    _INCREF(id(owner))
+    try:
+        result = load(_RELEASED_OBJECT, id(owner))
+    except BaseException:
+        _DECREF(id(owner))
+        raise
+    if not adopted(result):
+        _DECREF(id(owner))
+    return result
+
+
+# metal_ir.h metal_ir_archive_load, metal_ir_archive_free: the archive of `data`, an immutable bytes object whose own
+# buffer it borrows (no copy; CPython 3.12 bytes keep it 8-byte aligned at the object's 32nd byte) and, loaded, owns
+# (_lent) until the archive and every relation it lent are freed. The caller's own reference to the archive is
+# released with metal_ir_archive_free
 def _archive_loaded(compiler, data, device, error):
-    _INCREF(id(data))
-    archive = compiler.metal_ir_archive_load(data, len(data), device, _RELEASED_BYTES, id(data), error, len(error))
+    archive = _lent(data, lambda release, owner: compiler.metal_ir_archive_load(data, len(data), device, release, owner,
+                                                                              error, len(error)), bool)
     if not archive:
-        _DECREF(id(data))
         raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
     return archive
 
@@ -8654,7 +8679,7 @@ def _restore_programs(data, owned):
     record = compiler.metal_ir_archive_records(archive, C.byref(count))
     if count.value != 2:
         raise OSError(errno.EINVAL, 'the saved program holds %d records, not a plan and a program\'s' % count.value)
-    plan, saved = C.string_at(record[0].data, record[0].bytes), pickle.loads(C.string_at(record[1].data, record[1].bytes))
+    plan, saved = (record[0].data, record[0].bytes), pickle.loads(C.string_at(record[1].data, record[1].bytes))
     storage = []
     for fixed, contents in saved['storage']:
         blob = C.create_string_buffer(contents, max(len(contents), 1))
@@ -8719,15 +8744,12 @@ def load(path):
             saved = programs['saved']
             arrays = [(_declared_restore(d), _records(mesh.Weight, w), _records(mesh.Value, v),
                        _records(mesh.Dependence, e)) for d, w, v, e in saved['arrays']]
-            actors = {k: (_records(C.c_double, host), _records(C.c_double, work),
-                          _records(mesh_graph.Dependence, edges), parts, count, complete)
-                      for k, (host, work, edges, parts, count, complete) in saved['actors'].items()}
             outstanding, orders, causes, count, chains = saved['analysed']
             irs = [types.SimpleNamespace(layouts=layout, inputs=inputs, device=device, declared=d, values=v, homes={})
                    for (layout, inputs, device), (d, _, v, _) in zip(saved['irs'], arrays)]
             retained = {key: saved[key] for key in ('page', 'holders', 'steps', 'calls', 'every', 'given', 'constants',
                                                    'output_recipe', 'initial')}
-            retained.update(nodes=nodes, irs=irs, arrays=arrays, actors=actors, saved_plan=programs['saved_plan'],
+            retained.update(nodes=nodes, irs=irs, arrays=arrays, actors={}, saved_plan=programs['saved_plan'],
                             analysed=Calls(outstanding, _records(mesh.U, orders), _records(mesh.U, causes), count,
                                            _records(mesh.U, chains)), programs=programs)
             state['built'] = retained

@@ -7,6 +7,7 @@
 import ctypes as C
 import dataclasses
 import errno
+import mmap
 import pathlib
 import sys
 import weakref
@@ -27,6 +28,14 @@ class Argument(C.Structure):
     _fields_ = [("buffer", C.c_void_p), ("offset", mesh.Q), ("base", C.c_void_p)]
 
 
+# metal_recording.h struct MetalExternalUse, METAL_EXTERNAL_GPU: an operand's uses in the completed program
+class ExternalUse(C.Structure):
+    _fields_ = [("argument", mesh.U), ("row", mesh.U), ("value", mesh.U), ("uses", mesh.U)]
+
+
+METAL_EXTERNAL_GPU = 1
+
+
 def libraries():
     import mesh_compile as M
     compiler, (lib, device) = M._compiler(), M._recorder()
@@ -44,6 +53,8 @@ def libraries():
     lib.MetalProgramSignatureNode.restype = C.c_int
     lib.MetalProgramSignatureNode.argtypes = [C.c_void_p, mesh.U, C.c_size_t, C.POINTER(mesh.Q),
                                               C.POINTER(mesh_graph.Signature), C.c_char_p, C.c_size_t]
+    lib.MetalProgramExternals.restype = C.POINTER(ExternalUse)
+    lib.MetalProgramExternals.argtypes = [C.c_void_p, C.POINTER(mesh.U)]
     lib.MetalProgramRunArguments.restype = C.c_int
     lib.MetalProgramRunArguments.argtypes = [C.c_void_p, C.c_void_p, mesh.Q, mesh.Q, C.c_void_p, C.c_void_p,
                                              C.c_void_p, C.POINTER(Argument), mesh.U, C.c_char_p, C.c_size_t]
@@ -130,8 +141,9 @@ def viewed(first, base, index):
 
 # rdma/mesh-collective.h mesh_plan_local, mesh_local_save, mesh_local_load, struct mesh_local, mesh_local_free: the
 # machine program's own storage and native call, solved once from its actual Actors and Storages (solve) or loaded as
-# saved (loaded, no plan), and retained as solved: the mesh.Local and the mesh.Function whose Value array it solved
-# (with the Actors whose parts it read, where solved here), freed by their own owners when the solution is collected;
+# saved (loaded, no plan: the bytes lent to the loaded result, which restores the function's parts and relation), and
+# retained as solved: the mesh.Local and the mesh.Function whose Value array it solved (with the Actors whose parts and
+# relation it read, where solved here), freed by their own owners when the solution is collected;
 # every reader takes its views in place. `count` the program's ValueIDs, `stepped` whether its step word follows them
 class Solution:
     def __init__(self, function, local, count, stepped, *freed):
@@ -145,7 +157,7 @@ class Solution:
         values, count, stepped, quantum, _ = storages(program, explicit, libs)
         function = (mesh.Function * 1)(mesh.Function(
             value=C.cast(values, C.POINTER(mesh.Value)), values=len(values), host=solved.host, work=solved.work,
-            edge=solved.edge, parts=solved.parts, edges=solved.edges))
+            edge=solved.edge, parts=solved.parts, edges=solved.edges, relation=solved.relation))
         solution = cls(function, local, count, stepped, Solution.freed, lib, solved, local)
         solution.held = values, solved
         mesh.check(mesh.LIB.mesh_plan_local(function, quantum, C.byref(local)))
@@ -153,9 +165,11 @@ class Solution:
 
     @classmethod
     def loaded(cls, data, stepped):
+        import mesh_compile as M
         function, local = (mesh.Function * 1)(), mesh.Local()
         solution = cls(function, local, 0, stepped, mesh.LIB.mesh_local_free, C.byref(local))
-        mesh.check(mesh.LIB.mesh_local_load(data, len(data), function, C.byref(local)))
+        mesh.check(M._lent(data, lambda release, owner: mesh.LIB.mesh_local_load(
+            data, len(data), release, owner, function, C.byref(local)), lambda status: status == 0))
         solution.count = local.values - stepped
         return solution
 
@@ -240,8 +254,9 @@ class Transported:
                                                  plan.outstanding, plan.tasks, plan.before, plan.senders,
                                                  plan.receivers, plan.resources)
         f = self.function[0]
-        f.host, f.work, f.edge, f.parts, f.edges = (self.actors.host, self.actors.work, self.actors.edge,
-                                                    self.actors.parts, self.actors.edges)
+        f.host, f.work, f.edge, f.parts, f.edges, f.relation = (
+            self.actors.host, self.actors.work, self.actors.edge, self.actors.parts, self.actors.edges,
+            self.actors.relation)
         self.source, self.planned, view, self.first, self.offset = solved(plan, planning, self.function)
         weakref.finalize(self, mesh.LIB.mesh_planned_free, C.byref(self.planned))
         self.context = C.addressof(planning.context)
@@ -497,7 +512,9 @@ class Target:
                                                M.SHARED), error, "the generator state", errno.ENOMEM)
                 owned(lambda: M.PUT(generator, M.SELECTOR[b"release"]))
                 C.memmove(M.OBJECT(generator, M._SEL(b"contents")), words, C.sizeof(words))
-        return Bound(self, owner, native, ended, generator, fixed, owned, libs)
+            count = mesh.U()
+            uses = lib.MetalProgramExternals(native, C.byref(count))
+        return Bound(self, owner, native, ended, generator, fixed, owned, libs, (uses, count.value))
 
     def recipe(self):
         outputs = [[*leaf[:3], leaf.metadata and [*leaf.metadata[:3], str(leaf.metadata[3]).removeprefix("torch."),
@@ -529,20 +546,37 @@ class Target:
 # A prepared native program on its owner. A call binds its operands at the native program's fixed occurrences (each
 # input or state root the caller's storage; each fresh output root a result allocation of this call, which the program
 # writes directly), runs one execution, waits for its end, and returns its outputs as views of those roots or of a
-# CONSTANT root's own handle (`fixed`, {root: its tensor})
+# CONSTANT root's own handle (`fixed`, {root: its tensor}). `uses` the program's borrowed MetalProgramExternals view
+# (pointer, count), kept with the program that owns it; `gpu` the ordinals of the operands it uses on the GPU, read once
 class Bound:
-    def __init__(self, target, owner, program, ended, generator, fixed, owned, libs):
+    def __init__(self, target, owner, program, ended, generator, fixed, owned, libs, uses):
         self.target, self.owner, self.program, self.ended, self.generator = target, owner, program, ended, generator
-        self.fixed, self.owned, self.libs, self.executions = fixed, owned, libs, 0
+        self.fixed, self.owned, self.libs, self.executions, self.uses = fixed, owned, libs, 0, uses
         self.argued = {root: argument for argument, (_, _, root) in enumerate(target.arguments)}
         self.fresh = {root: k for k, (root, _, _) in enumerate(target.results)}
+        self.gpu = frozenset(use.argument for use in uses[0][:uses[1]] if use.uses & METAL_EXTERNAL_GPU)
 
-    def operand(self, tensor, offset):
-        storage = tensor.untyped_storage()
+    # metal_recording.h struct MetalArgument; MTLDevice.h newBufferWithBytesNoCopy:length:options:deallocator: (an
+    # existing address span, page aligned) through rdma/mesh_compile.py _placed_buffer: root byte 0 of the caller's
+    # view (its byte start less the compiled view's offset in its root). An MPS storage gives its own MTLBuffer. A CPU
+    # storage gives its host base, and where the program uses the operand on the GPU, a shared buffer borrowing that
+    # storage's pages (the system page size) and owning a reference to the storage until its deallocator runs, one per
+    # storage in this call (`borrowed`, {storage address: (first page, buffer)}), released after the call
+    def operand(self, tensor, offset, gpu, borrowed):
+        M, storage = self.libs[0], tensor.untyped_storage()
         if tensor.device.type == "mps":
             return Argument(storage.data_ptr(), (tensor.storage_offset() * tensor.element_size() - offset) % (1 << 64),
                             None)
-        return Argument(None, 0, tensor.data_ptr() - offset)
+        base = tensor.data_ptr() - offset
+        if not gpu:
+            return Argument(None, 0, base)
+        address = storage.data_ptr()
+        if address not in borrowed:
+            first = address - address % mmap.PAGESIZE
+            last = -(-(address + storage.nbytes()) // mmap.PAGESIZE) * mmap.PAGESIZE
+            borrowed[address] = first, M._placed_buffer(mesh.View(first, last - first), storage)
+        first, buffer = borrowed[address]
+        return Argument(buffer, (base - first) % (1 << 64), base)
 
     def result(self, leaf, given, allocated):
         if leaf.root is None:
@@ -563,21 +597,28 @@ class Bound:
         M, _, (lib, _), _ = self.libs
         error, execution = C.create_string_buffer(ROOM), self.executions
         allocated = [torch.empty(size, dtype=torch.uint8, device=device) for _, size, device in self.target.results]
-        operands = [Argument(self.generator, 0, None) if position is None else self.operand(given[position], offset)
-                    for position, offset, _ in self.target.arguments]
-        operands += [self.operand(tensor, 0) for tensor in allocated]
-        table = (Argument * max(len(operands), 1))(*operands)
-        status = lib.MetalProgramRunArguments(self.program, self.owner.context, execution, 1, self.ended, M.START,
-                                              M.STARTED, table, len(operands), error, ROOM)
-        if status:
-            raise M._execution_error({"lib": lib, "program": self.program}, status,
-                                     f"execution {execution} of the program: {error.value.decode()}")
-        self.executions = execution + 1
+        borrowed, results = {}, len(self.target.arguments)
 
         def ended():
             return M.VALUE(self.ended, M._SEL(b"signaledValue"))
-        M._wait(lambda: ended() > execution, ended, f"execution {execution} of the program: no end for "
-                                                    "MESH_PLATFORM_NS")
+        try:
+            operands = [Argument(self.generator, 0, None) if position is None else
+                        self.operand(given[position], offset, argument in self.gpu, borrowed)
+                        for argument, (position, offset, _) in enumerate(self.target.arguments)]
+            operands += [self.operand(tensor, 0, results + k in self.gpu, borrowed)
+                         for k, tensor in enumerate(allocated)]
+            table = (Argument * max(len(operands), 1))(*operands)
+            status = lib.MetalProgramRunArguments(self.program, self.owner.context, execution, 1, self.ended, M.START,
+                                                  M.STARTED, table, len(operands), error, ROOM)
+            if status:
+                raise M._execution_error({"lib": lib, "program": self.program}, status,
+                                         f"execution {execution} of the program: {error.value.decode()}")
+            self.executions = execution + 1
+            M._wait(lambda: ended() > execution, ended, f"execution {execution} of the program: no end for "
+                                                        "MESH_PLATFORM_NS")
+        finally:
+            for _, buffer in borrowed.values():
+                M.PUT(buffer, M.SELECTOR[b"release"])
         return [self.result(leaf, given, allocated) for leaf in self.target.outputs]
 
 

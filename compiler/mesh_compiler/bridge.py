@@ -42,7 +42,8 @@ def planning():
                     sum(1 << int(node) for node in os.environ["MESH_PROGRAM"].split(",")))
 
 
-# rdma/mesh-collective.h mesh_plan_load; rdma/mesh-dataflow.h mesh_retire, mesh_view_values, struct mesh_view;
+# rdma/mesh-collective.h mesh_plan_load (the record's bytes lent to the loaded plan, which restores the function's
+# compiled parts and relation from them); rdma/mesh-dataflow.h mesh_retire, mesh_view_values, struct mesh_view;
 # rdma/mesh-collective.c plan_block, plan_items, plan_saved_page; design/disjoint-pages-change-request.md C3.3;
 # design/compilation-composition-change-request.md item 7; compiler/mesh_compiler/ir.py Plan arena_bytes, offsets;
 # torch 2.14 frombuffer
@@ -54,12 +55,13 @@ class Published:
         self.function, self.held = mesh.function(plan.declared, plan.weights, plan.values, plan.dependences,
                                                  plan.outstanding, plan.tasks, plan.before, plan.senders,
                                                  plan.receivers, plan.resources)
+        import mesh_compile
         calls, made = (mesh.U * 1)(0), mesh.Planned()
         mesh.LIB.mesh_retire(CONTEXT.M, CONTEXT.client)
-        mesh.check(mesh.LIB.mesh_plan_load(
+        mesh.check(mesh_compile._lent(plan.record, lambda release, owner: mesh.LIB.mesh_plan_load(
             C.byref(CONTEXT), group, plan.program, self.function, 1, calls, 1, None, None, 0, None,
-            time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, plan.record, len(plan.record),
-            C.byref(made)))
+            time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, plan.record, len(plan.record), release,
+            owner, C.byref(made)), lambda status: status == 0))
         self.planned = made
         weakref.finalize(self, mesh.LIB.mesh_planned_free, C.byref(made))
         self.plan, self.execution = self.function[0].plan, 0
