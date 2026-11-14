@@ -1,0 +1,43 @@
+{
+  "case": "existing examples.engines.Engines",
+  "shape": [
+    2,
+    32
+  ],
+  "dtype": "torch.float16",
+  "mesh": [
+    0,
+    1
+  ],
+  "source_mm": "mm",
+  "shard_axis": 0,
+  "shard_units": [
+    1,
+    3
+  ],
+  "shard_counts": [
+    8,
+    24
+  ],
+  "source_nodes": 23,
+  "solved_atoms": [
+    {
+      "axis": 0,
+      "units": [
+        1,
+        3
+      ]
+    }
+  ],
+  "source_slots": 44,
+  "partition_items": 28,
+  "declared_transfers": 4,
+  "planned_values": 13,
+  "owned_roots": 13,
+  "value_lifetimes": 27,
+  "owner_lifetimes": 13,
+  "lifetime_bounds_valid": true,
+  "native_result_retained": true,
+  "target_execution": false,
+  "services_started": false
+}

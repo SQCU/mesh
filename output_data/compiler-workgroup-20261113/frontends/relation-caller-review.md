@@ -105,3 +105,24 @@ The remaining exact separator duplicate is also removed: shares.rows now consume
 algorithm, already used by mesh_compile.rows. A real Ragged input with offsets [0,2,5,9] and speeds 3/2,5/4 returned
 row cuts (0,2,3) and value cuts (0,5,9). No float search or changed allocation policy. Finite sharding propagation,
 public call-chain/width analysis and ordered-use endpoints remain explicitly assigned separate live connections.
+
+Final matched public-path observation, graph checkpoint 11e39c11: SAME Torch33–34 replaced the Python _complete
+fixed point with the native finite atom/projection solver. It preserves both priority levels, forward/reverse node
+passes, operand order, frozen annotations, all-or-nothing compatible merges and duplicate mesh-axis rejection. The
+original node tuple is retained with atom vocabulary and the solved native descriptor before _stripe can insert nodes.
+Sharding80 retains all eight input/result arrays through ordinary ctypes ownership; direct GC observation and strict C
+syntax/Python AST/diff pass. Root593's ordered-use endpoints and numerical64's call-chain/width handoffs are separate
+parts of the same joint source checkpoint, with their own review ownership.
+
+After the matching canonical library gate, the existing examples.engines.Engines model (FP16 [2,32], K32/N48/L1)
+passed actual Torch export→rdma.partition→lower with explicit two-device compiler placement/map operands. Shard(0,
+(1,3)) survived as the original typed atom and produced counts (8,24). The result retained 23 source nodes,44 slots,
+28 partition items,4 declared transfers and13 owned values. Both real lifetime consumers ran:27 logical-value and13
+owner records, all first≤last<28. Exit0; stderr contains only the existing Torch treespec deprecation warning. Compact
+evidence is partition-lower-check.json, raw stderr is its sibling. This covers actual source partition/collective
+lowering and result ownership; it does not execute targets, attach services, validate a fleet or invoke _analyse.
+
+No further execution or source edits are required for this bounded frontend assignment. SAME Torch9740398d and
+LiteRT41f48493 are held. Final worker records remain in metal-microbench/output_data/compiler-workgroup-20261113/
+frontends/torch/session-33.jsonl and session-34.jsonl, litert/session-20.jsonl and session-21.jsonl, with exact adjacent
+work orders and sessions.json. All explicitly requested/reported model selections were claude-opus-5-5.
