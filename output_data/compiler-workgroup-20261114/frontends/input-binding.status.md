@@ -1,36 +1,30 @@
 # Original input binding
 
-SAME974 sessions 66–68 are terminal and held. Supervisor AST checks of export.py,
-ir.py, runtime.py and archive.py and exact-path diff checks pass. No native caller
-has run for this change; executor's matching source/import window remains held.
+SAME974 sessions 69–70 are terminal/HOLD. Supervisor inspected installed Torch
+2.14.0 FX create_args_for_root677–795 and _proxy_placeholder966–1035, reviewed
+export.py/runtime.py, and passed AST plus exact-path diff checks.
 
-The lost operand was the outer call interface: runtime flattened caller keyword
-insertion order directly into compiled user slots. Exported now retains
-`interface = (inspect.Signature, TreeSpec)`, produced once from the actual
-BoundArguments before per-call interpretation can reuse local names.
+The interface from14be9344 retains inspect.Signature and the original bound-value
+TreeSpec through Exported, runtime and archive. The public reversed-kwargs
+Difference/save/drop/load caller passed with both errors0, exact interface and
+unchanged source/library hashes (Metal evidence fb5f004b).
 
-`calls` uses Signature.bind and apply_defaults before FX tracing: FX emits slots
-for the actual bound/defaulted parameters. `called` retains its explicit outer
-slots; omitted defaults are specialized inside that leaf export. The Signature
-retains original Parameter objects, including kinds and defaults for compiled
-slots. The TreeSpec contains those bound values in parameter order; a variadic
-parameter remains its actual tuple. No prefix-length/name heuristic remains.
+FX's display names for variadics now map once to the original Parameter names at
+the existing Calls trace boundary; super owns expansion/defaults. Its placeholder
+order places keyword-only parameters before variadics, unlike Signature order.
+PHWithMeta.ordinal records each original flat leaf; the canonical FX transfer
+retains it on its Node. called assigns the same operand at placeholder creation.
+capture uses those ordinals for FX interpreter inputs and retains user_inputs in
+Signature-flat order. Existing archive user_inputs carries this correspondence.
+The original state/get_attr and alias owners remain unchanged.
 
-Arguments.prepare calls that Signature's bind and apply_defaults, then the
-retained TreeSpec.flatten_up_to. This canonical owner selects nested dict keys in
-the compiled order and owns structure errors. No new parser, recursive walker,
-fresh-spec mismatch branch, compatibility/default mode or source replay remains.
-Canonical missing/duplicate/unknown parameter errors propagate unchanged.
+Arguments prepares live tensor/position and user-position tuples once. Invocation
+uses canonical Signature.bind, apply_defaults and TreeSpec.flatten_up_to, then
+strict cardinality binding. Program prepares returned indices, constant leaves
+and output TreeSpec once: the non-output owner has the actual None leaf/spec.
+Invocation gathers fresh native results; there is no repeated entry/OutputKind
+choice, name lookup, new parser, compatibility mode or callback dispatch.
 
-Archive saves state and required default objects together in one torch.save
-payload, preserving shared tensor storage. JSON retains parameter names/kinds and
-treespec_dumps(spec). weights_only load reconstructs the same Signature/spec;
-there is no callable pickle, textual default parser or legacy-schema fallback.
-Internal outlined Exported records need no public interface and are unchanged.
-
-The ordinary public command is in metal workgroup
-frontends/torch/input-binding-native-command.md: a two-input noncommutative known
-call compiled positionally, invoked with reversed kwargs, then saved/dropped/
-restored and invoked with reversed kwargs again. Source-only checkpoint: no
-numerical or archive observation claim yet. The earlier tensor-state/alias/RNG
-handoff review found this input binding loss; it did not require a new test grid.
+The next single observation minimally adapts that same Difference caller to
+x,*rest,scale=2,**options and public archive restoration. Variadic ordering and
+prepared output recipes remain source-only until that command completes.

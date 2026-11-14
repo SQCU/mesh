@@ -14,7 +14,7 @@ from torch._higher_order_ops.scan import generic_scan
 from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode
 from torch.export.experimental import _export_forward_backward
 from torch.export.graph_signature import InputKind, OutputKind
-from torch.fx._symbolic_trace import PH
+from torch.fx._symbolic_trace import PHWithMeta
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.multiprocessing.reductions import StorageWeakRef
@@ -228,13 +228,23 @@ def returned(forward, outputs, backward):
 
 # design/aot-compilation-change-request.md A1 and A10; P. Barham et al., Pathways, arXiv:2203.12533, section 3;
 # J. Reed et al., torch.fx, MLSys 2022
+# torch 2.14.0 torch/fx/_symbolic_trace.py Tracer.create_args_for_root, which names a VAR_POSITIONAL parameter's
+# placeholder "*" + name and a VAR_KEYWORD's "**" + name, and Tracer._proxy_placeholder, which looks the original name
+# up in concrete_args and the Signature: each placeholder's display name mapped once to its parameter's own name
+VARIADIC = {inspect.Parameter.VAR_POSITIONAL: "*", inspect.Parameter.VAR_KEYWORD: "**"}
+
+
 class Calls(torch.fx.Tracer):
-    def __init__(self, functions):
+    def __init__(self, functions, parameters):
         super().__init__(autowrap_functions=tuple(f for f in functions if callable(f)))
         self.functions = functions
+        self.names = {VARIADIC.get(parameter.kind, "") + name: name for name, parameter in parameters.items()}
 
     def is_leaf_module(self, module, qualified_name):
         return qualified_name in self.functions
+
+    def _proxy_placeholder(self, name, concrete_args, sig, fn_for_analysis):
+        return super()._proxy_placeholder(self.names[name], concrete_args, sig, fn_for_analysis)
 
 
 class Function(torch.nn.Module):
@@ -339,15 +349,22 @@ class Captured(torch.fx.Interpreter):
         return super().call_function(target, args, kwargs)
 
 
-# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/fx/_symbolic_trace.py PH and
-# Tracer.create_args_for_root (a placeholder for every forward parameter); Python inspect Signature.bind and
-# BoundArguments.apply_defaults: the program's call graph, its placeholders the flat leaves of every forward
-# parameter's bound value, an omitted default's its default
+# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/fx/_symbolic_trace.py PHWithMeta,
+# _transfer_attrs and Tracer.create_args_for_root (a placeholder for every forward parameter, variadics last); Python
+# inspect Signature.bind and BoundArguments.apply_defaults: the program's call graph, its placeholders the flat leaves
+# of every forward parameter's bound value (an omitted default's its default), each placeholder Node's `ordinal` its
+# leaf's position in those bound values' flat order
 def calls(program, args, functions, **export_options):
     bound = inspect.signature(program.forward).bind(*args)
     bound.apply_defaults()
-    graph = Calls(functions).trace(program, concrete_args={
-        name: pytree.tree_map(lambda _: PH, value) for name, value in bound.arguments.items()})
+    ordinals = itertools.count()
+
+    def leaf(_):
+        marked = PHWithMeta()
+        marked.ordinal = next(ordinals)
+        return marked
+    graph = Calls(functions, bound.signature.parameters).trace(program, concrete_args={
+        name: pytree.tree_map(leaf, value) for name, value in bound.arguments.items()})
     # rejection filters are forbidden: a traced node of no capture owner raises here, never dropped from the program
     for node in graph.nodes:
         if node.op not in ("placeholder", "get_attr", "call_module", "call_function", "output"):
@@ -362,8 +379,13 @@ def called(module, args, **export_options):
     root, graph = torch.nn.Module(), torch.fx.Graph()
     root.function = module
     leaves, spec = pytree.tree_flatten(args)
+
+    def placeholder(k):
+        node = graph.placeholder(f"arg_{k}")
+        node.ordinal = k
+        return node
     graph.output(graph.call_module("function", tuple(pytree.tree_unflatten(
-        [graph.placeholder(f"arg_{k}") for k in range(len(leaves))], spec))))
+        [placeholder(k) for k in range(len(leaves))], spec))))
     return capture(torch.fx.GraphModule(root, graph), inspect.signature(module.forward).bind(*args), {"function"},
                    export_options, module)
 
@@ -389,12 +411,16 @@ def capture(module, bound, functions, options, root):
                  pytree.tree_structure(values))
     leaves = [fake.from_tensor(leaf) if isinstance(leaf, torch.Tensor) else leaf for leaf in pytree.tree_leaves(values)]
     graph, interpreter = module.graph, Captured(module, functions, options, fake)
-    outcome = graph.process_outputs(interpreter.run(*leaves, enable_io_processing=False))
+    # `first` stays the insertion anchor for every new state and token placeholder: an attribute's get_attr node, which
+    # may be it, keeps its place until the final cleanup erases it unused; each placeholder Node's `ordinal` (calls'
+    # PHWithMeta, called's own) is its leaf's position in `leaves`, so the FX placeholders take their leaves by it and
+    # the user inputs are those placeholders in leaf order
+    first, inputs = next(iter(graph.nodes)), [node for node in graph.nodes if node.op == "placeholder"]
+    users = sorted(inputs, key=lambda node: node.ordinal)
+    outcome = graph.process_outputs(interpreter.run(*(leaves[node.ordinal] for node in inputs),
+                                                    enable_io_processing=False))
     named = {id(tensor): name for name, tensor in reversed([*root.named_parameters(remove_duplicate=False),
                                                             *root.named_buffers(remove_duplicate=False)])}
-    # `first` stays the insertion anchor for every new state and token placeholder: an attribute's get_attr node, which
-    # may be it, keeps its place until the final cleanup erases it unused
-    first, inputs = next(iter(graph.nodes)), [node for node in graph.nodes if node.op == "placeholder"]
     held, roots, chain, written, state, kinds, tokens, bound = {}, {}, [], {}, {}, {}, [], {}
 
     def hold(node, value):
@@ -406,7 +432,7 @@ def capture(module, bound, functions, options, root):
     def holder(value):
         return held[id(value)][1] if isinstance(value, torch.Tensor) else value
 
-    for node, value in zip(inputs, leaves, strict=True):
+    for node, value in zip(users, leaves, strict=True):
         roots[id(value)] = hold(node, value)
     parameters = {id(tensor) for _, tensor in root.named_parameters(remove_duplicate=False)}
     buffers = {id(tensor) for _, tensor in root.named_buffers(remove_duplicate=False)}
@@ -470,7 +496,7 @@ def capture(module, bound, functions, options, root):
             if node.op == "call_function" and (torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())
                                                or getattr(node.target, "overloadpacket", None) in DRAWING):
                 node.meta["site"] = next(sites)
-    exported = Exported(module, state, tokens, [node.name for node in inputs],
+    exported = Exported(module, state, tokens, [node.name for node in users],
                         [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds,
                         interface=interface)
     return CapturedProgram(exported, interpreter.exported, bound)
