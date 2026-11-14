@@ -24,3 +24,27 @@ owner047; no extra runtime alias detection or redundant output copies. Preserve 
 
 The frontend now retains TrainingResult(outputs, parameters, inputs) with separate actual gradient-target maps,
 not mixed key names. Do not reconstruct or reinterpret that pytree here; keep the explicit output roles.
+
+Executor's implemented setter declares its callback as metal.RELEASE. Passing a borrowed/no-release relation
+therefore uses RELEASE() (ctypes' typed null function pointer), not Python None. Import that ABI type from metal.
+Use actual stage construction to check this paired call; mere successful imports do not exercise ctypes arguments.
+
+## Actual producer observation: returned views also retain mutation identity
+
+Root ran actual torch.export.export(...).run_decompositions() in the sanctioned Torch environment on:
+`def forward(self, x, y): x.add_(y); return x[1:]`, shape (4,).
+The output specs are USER_INPUT_MUTATION x, node `add`, shape(4,), offset0, and USER_OUTPUT, node `slice_2`,
+shape(3,), offset1. Both meta values have the same storage. Therefore a map keyed by exact output Node alone
+misses the returned view. This is a concrete producer case, not a hypothetical parser rule.
+
+Prefer feeding the already-declared mutation destination into the existing _instruction destination operand
+before numerical construction, so subsequent explicit source view operations consume the actual destination
+and preserve its strides/offset. Inspect the same canonical view/destination machinery first. Do not add a
+second alias parser or a runtime alias detector. A returned slice of noncontiguous input is also a view of that
+actual input; substituting contiguous temporary metadata would be wrong. Complete the actual typed handoff.
+
+Ordering is part of that handoff: introducing an actual input write only inside lower_metal, after schedule, is
+too late to preserve earlier reads such as `z=x+1; x.add_(2)`. Frontend974 is assigned producer-side mutation
+destination annotation before dependence/schedule, using the existing ir.views/out/view responsibilities.
+Coordinate that producer/consumer directly; do not invent lowerer-local alias or hazard analysis. Consume the
+retained destination in _instruction and source views, preserving the relation's real read/write witnesses.
