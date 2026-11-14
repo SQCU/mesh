@@ -10,6 +10,7 @@ import torch
 from torch._guards import detect_fake_mode
 from torch.export.graph_signature import OutputKind
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.graph_module import _assign_attr, _get_attr
 from torch.utils import _pytree as pytree
 
 from .devices import on_devices
@@ -129,6 +130,7 @@ def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
             if "device" in generated.kwargs:
                 generated.kwargs = {**generated.kwargs, "device": device}
             sources[generated] = origin
+        _owned(graph_module, traced, copied, kept, device, origin)
         # a tuple result (torch.fx: the node's users its getitems): each getitem's image its output's result node
         replaced = {g: result[g.args[1]] for g in node.users} if isinstance(result, (tuple, list)) else {node: result}
         users = [user for old in replaced for user in old.users]
@@ -150,6 +152,39 @@ def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
     views(changed)
     graph_module.recompile()
     return graph_module
+
+
+# torch 2.14.0 torch/_higher_order_ops/switch.py trace_switch: a formulation's branch GraphModules registered on
+# make_fx's traced root (tracer.root.register_module) and read by its get_attr nodes. Each copied get_attr's attribute
+# (torch/fx/graph_module.py _get_attr) is assigned on `owner` (_assign_attr) under that copied node's own name, a fresh
+# one should the owner already hold it, and the node's target is that name; a branch GraphModule's nodes (its own
+# branches', a nested region's, among them) take the source's metadata `kept` (its processor and draw site), a made
+# tensor's `device` that processor's, and its meta["decomposed"] maps them to `origin`, ir.views their view metadata
+def _owned(owner, traced, copied, kept, device, origin):
+    for node in [n for n in traced.graph.nodes if n.op == "get_attr"]:
+        made, value = copied[node], _get_attr(traced, node.target)
+        name, k = made.name, 0
+        while hasattr(owner, name):
+            k += 1
+            name = "%s_%d" % (made.name, k)
+        _assign_attr(value, owner, name)
+        made.target = name
+        if isinstance(value, torch.fx.GraphModule):
+            _branch_owned(value, kept, device, origin)
+
+
+def _branch_owned(branch, kept, device, origin):
+    made = [n for n in branch.graph.nodes if n.op not in ("placeholder", "output")]
+    for generated in made:
+        generated.meta.update(kept)
+        if "device" in generated.kwargs:
+            generated.kwargs = {**generated.kwargs, "device": device}
+        nested = _get_attr(branch, generated.target) if generated.op == "get_attr" else None
+        if isinstance(nested, torch.fx.GraphModule):
+            _branch_owned(nested, kept, device, origin)
+    branch.meta["decomposed"] = dict.fromkeys(made, origin)
+    views(branch.graph)
+    branch.recompile()
 
 
 # design/torch-source-lowering-change-request.md item 6; JAX jax/_src/tpu/linalg/eigh.py _eigh_work; P. Barham et al.,
@@ -304,12 +339,13 @@ def _invariant(graph_module):
 # outputs on `processor` (a value elsewhere sent there, placement.insert_send_recv) with each original output's role
 # kept and its `destination` (a mutation's value another part's input first copied in, as export.read does); a value
 # crossing from another part stated on its producer's processor, where its users are (their transfers are the parts');
-# `sources` the placed graph's generated → original map, its copied nodes' images this part's `decomposed`
+# `sources` the placed graph's generated → original map, its copied nodes' images this part's `decomposed`; `owner`
+# the placed GraphModule, whose attributes (a switch's branch GraphModules) the part's get_attr nodes read
 class _Part:
-    def __init__(self, original, nodes, transfers, parts, sources):
+    def __init__(self, original, nodes, transfers, parts, sources, owner):
         self.graph, self.env, self.original, self.inputs, self.outputs = torch.fx.Graph(), {}, original, [], []
         self.nodes, self.transfers, self.parts, self.originals = nodes, transfers, parts, {}
-        self.sources, self.decomposed = sources, {}
+        self.sources, self.decomposed, self.owner = sources, {}, owner
 
     def placeholder(self, node, source):
         made = self.graph.placeholder(node.name)
@@ -326,7 +362,11 @@ class _Part:
         self.inputs.append(source)
         return made
 
+    # the get_attr nodes the copied nodes read, compile-time operands, first; then the nodes
     def copy(self):
+        for held in dict.fromkeys(n for node in self.nodes for n in node.all_input_nodes if n.op == "get_attr"):
+            if held not in self.env:
+                self.env[held] = self.graph.node_copy(held)
         for node in self.nodes:
             self.env[node] = self.graph.node_copy(node, lambda n: self.env[n])
         for node in self.nodes:
@@ -359,7 +399,7 @@ class _Part:
             original = self.originals.get(made)
             parts.update(_parts_moved({original: self.parts[original]}, self.env, within=False) if original is not None
                          else {made: _whole(made, made.meta["stated"])})
-        graph_module = torch.fx.GraphModule(torch.nn.Module(), graph)
+        graph_module = torch.fx.GraphModule(self.owner, graph)
         views(graph)
         graph_module.meta.update(transfers=transfers, invariant=_invariant(graph_module), input_parts=parts,
                                  decomposed=self.decomposed)
@@ -414,7 +454,7 @@ def _outlined(key, exported, placed, eigh, max_iterations):
     late_used |= {named[destination[k]] for k, v in enumerate(values) if in_late(v) and k in destination}
 
     # the prefix
-    prefix = _Part(exported, early, transfers, parts, sources)
+    prefix = _Part(exported, early, transfers, parts, sources, placed)
     used = {p for node in early + [eigh] for p in node.all_input_nodes if p.op == "placeholder"}
     used |= {v for k, v in enumerate(values) if isinstance(v, torch.fx.Node) and v.op == "placeholder"
              and not in_late(v)}
@@ -425,8 +465,9 @@ def _outlined(key, exported, placed, eigh, max_iterations):
     prefix.copy()
     state = _formulated(prefix.graph, functools.partial(_qdwh_eigh_state, upper=upper, site=eigh.meta["site"]),
                         [prefix.env[a]], eigh, processor, {a: prefix.env[a]}, prefix.decomposed, origin)
+    # (a get_attr the suffix reads is its own compile-time operand, _Part.copy, never a crossing value)
     crossing = list(dict.fromkeys(p for node in late for p in node.all_input_nodes
-                                  if p.op != "placeholder" and not in_late(p)))
+                                  if p.op not in ("placeholder", "get_attr") and not in_late(p)))
     # each partition of an original placeholder the suffix takes crosses too, so its input parts are its own inputs
     crossing += [part for p in placeholders if p in late_used for _, part, _ in parts[p]
                  if part is not p and part not in crossing]
@@ -476,7 +517,7 @@ def _outlined(key, exported, placed, eigh, max_iterations):
     # the suffix
     calls = 2 * n - 1
     last = calls
-    suffix = _Part(exported, late, transfers, parts, sources)
+    suffix = _Part(exported, late, transfers, parts, sources, placed)
     for p in placeholders:
         if p in late_used:
             suffix.placeholder(p, ("call", position[p]))

@@ -1,0 +1,14 @@
+# numerical52: switch producer corrections (SAME64), operations.py + decompose.py + devices.py, source HOLD, unstaged
+- **1. int32 index:** `_digitized` accumulates `logical_not(norm < cutoff).to(torch.int32)`, so equality and NaN still go up. The overflow switch index is `over.to(torch.int32)` (lax.switch's np.int32). The batched overflow selects on `over` itself.
+- **2. Shared powers (operations.py 2318–2390):** there is one power constructor, `_powers(degrees, scaled, identity)`: A^2 … A^max(d−1) (A^6 for 13), each A^k = A^(k−2)·A^2. There is one polynomial body, `_pade(degree, scaled, powers)`.
+  - Scalar: each `switch_op` branch is `_pade_branch(degree, scaled, identity)`, which builds only that degree's own powers inside the branch.
+  - Batched: `_powers(degrees)` builds the union once (f64 A^2/4/6/8, f32 A^2/4/6, as before numerical51). Every `_pade(d, scaled, powers)` reuses it, then `_branch_selected(index, made)` selects. `_branch_selected` now takes the already-evaluated branch results.
+- **3. `_Part` (decompose.py 343–406):**
+  - `_Part(original, nodes, transfers, parts, sources, owner)`, where `owner` is the placed GraphModule. `copy()` first `node_copy`s every get_attr node its nodes read, as a compile-time operand, then the nodes. `finish` builds `GraphModule(self.owner, graph)`, whose `_copy_attr` shares the branch objects and starts with an empty meta.
+  - `_outlined` passes `placed`, and `crossing` excludes get_attr nodes. No interface field was added.
+- **4. `devices.on_devices` (devices.py 24–33):** every nested `torch.fx.GraphModule` from `modules()` that has meta `decomposed` gets its map held by the deepcopy memo. Afterwards, `memo[id(branch)].meta["decomposed"] = {memo[node]: source}`, so the keys are the copied branch nodes and the values are the same original source nodes. transfers, input_parts and work_axes are unchanged.
+- **5. Recompiles:** `_owned` assigns attributes (`_assign_attr`/`_get_attr`, module objects shared) and makes no owner recompile. `_expanded` recompiles once (153). `_branch_owned` recompiles only its own mutated branch (187).
+- **Fields unchanged from 51:**
+  - `_Switch(index, branches, outputs)`: `index` is a one-element int32 tensor; `branches` is a tuple of `(records list, yields tuple)` in branch order; `outputs` is the tuple of common results, `outputs[k]` ← the selected `yields[k]`. `place`/`node` default to GPU, 0, and `_placed` recurses into the branches.
+  - Branch owner: `owner.get_submodule(get_attr.target)`.
+- **Checks:** AST passes on all three files. pyflakes shows only the 2 warnings already at HEAD. Cumulative delta is +160/−42. No import, target or evaluator.

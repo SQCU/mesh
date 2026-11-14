@@ -23,7 +23,14 @@ def on_devices(graph_module, processors):
     original, parts = graph_module.meta["transfers"], graph_module.meta["input_parts"]
     decomposed = graph_module.meta.get("decomposed", {})
     memo = {id(original): original, id(parts): parts, id(decomposed): decomposed}
+    # compiler/mesh_compiler/decompose.py _branch_owned: each nested branch GraphModule's own `decomposed`, held by the
+    # memo (not deep-copied) and remapped below as the outer one is, its keys the copied branch's nodes
+    nested = [m for m in graph_module.modules() if m is not graph_module and isinstance(m, torch.fx.GraphModule)
+              and "decomposed" in m.meta]
+    memo.update((id(m.meta["decomposed"]), m.meta["decomposed"]) for m in nested)
     graph_module = copy.deepcopy(graph_module, memo)
+    for branch in nested:
+        memo[id(branch)].meta["decomposed"] = {memo[node]: source for node, source in branch.meta["decomposed"].items()}
     transfers = {channel: (memo[sender], memo[arrival]) for channel, (sender, arrival) in original.items()}
     graph, graph_module.meta["transfers"] = graph_module.graph, transfers
     graph_module.meta["input_parts"] = {memo[node]: tuple((processor, memo[part], geometry)

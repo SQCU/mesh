@@ -5,6 +5,7 @@
 # 039ad8ed, lines 31-32, 35-40, 78-81, 341-352, 1028-1037, 1156-1167, 1269-1273, 2050-2057, 2059-2587, 2595-3050,
 # 3071-6557, 6691-6693, 6708-6718, 6744-6792, 8067-8070
 import collections
+import functools
 import itertools
 import math
 import operator
@@ -13,6 +14,7 @@ import sys
 
 import torch
 import torch.utils._pytree as pytree
+from torch._higher_order_ops.switch import switch_op
 from torch._prims_common import corresponding_complex_dtype, get_computation_dtype
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
@@ -2294,55 +2296,109 @@ def _matrix_exp_squares(outs, x, count, limit):
 # computation dtype (torch/_prims_common get_computation_dtype, aten OpMathType: bfloat16 and float16 in float32,
 # complex32 in complex64, the others as given), and the result is cast back to the input's dtype before the assertion
 # takes it as its dep_token
+#
+# JAX jax/_src/scipy/linalg.py _calc_P_Q: idx = jnp.digitize(A_L1, conds), U, V = lax.switch(idx, [_pade3, ...], A);
+# expm: R = lax.cond(n_squarings > max_squarings, _nan, _compute, (A, P, Q)), and an input of ndim > 2 jnp.vectorize'd,
+# where jax/_src/lax/control_flow/conditionals.py _cond_batching_rule evaluates every branch and selects by the batched
+# index. One branch formulation (_pade, the solve-and-squaring and NaN branches) serves both: a single matrix through
+# torch/_higher_order_ops/switch.py switch_op (one branch runs), a batch through _branch_selected
 def _matrix_exponential(a, max_squarings):
     if not a.numel():
         return torch.empty_like(a)
     given, a = a.dtype, a.to(get_computation_dtype(a.dtype))
-    real = a.real.dtype
     # Rejection filters are not part of even temporary integration validation.
-    # A computation kind without JAX's theta table has an unfinished formulation; it fails here, at its trace.
-    if real not in SQUARING:
-        raise NotImplementedError('linalg.matrix_exp of %s computed in %s: its scaling and squaring table is '
-                                  'unfinished (design/torch-source-lowering-change-request.md item 6)'
-                                  % (given, a.dtype))
-    maxnorm, conds, degrees = SQUARING[real]
+    # SQUARING's lookup is the formulation's own requirement: a computation kind without JAX's table (float8, which
+    # get_computation_dtype keeps) raises at it
+    maxnorm, conds, degrees = SQUARING[a.real.dtype]
     norm = a.abs().sum(-2).amax(-1)
     count = (norm / maxnorm).log2().floor().clamp(min=0)
     scaled = a / count.exp2()[..., None, None]
+    identity = torch.eye(a.shape[-1], dtype=a.dtype, device=a.device)
+    batched = a.dim() > 2
 
-    def combined(terms, made=None):
-        for coefficient, matrix in terms:
-            made = coefficient * matrix if made is None else made + coefficient * matrix
-        return made
-    powers = {0: torch.eye(a.shape[-1], dtype=a.dtype, device=a.device), 2: torch.matmul(scaled, scaled)}
-    powers[4] = torch.matmul(powers[2], powers[2])
-    for degree in range(6, min(max(degrees), 9), 2):
-        powers[degree] = torch.matmul(powers[degree - 2], powers[2])
-    u, v = None, None
-    for j, degree in enumerate(degrees):
-        b, parts = PADE[degree], []
-        for parity in (1, 0):
-            low = [(b[k + parity], powers[k]) for k in range(6 if degree == 13 else degree - 1, -1, -2)]
-            if degree == 13:
-                high = combined([(b[k + 6 + parity], powers[k]) for k in (6, 4, 2)])
-                parts.append(combined(low, torch.matmul(powers[6], high)))
-            else:
-                parts.append(combined(low))
-        parts[0] = torch.matmul(scaled, parts[0])
-        if not j:
-            u, v = parts
-            continue
-        below = (norm < conds[j - 1])[..., None, None]
-        u, v = torch.where(below, u, parts[0]), torch.where(below, v, parts[1])
-    result = torch.linalg.solve_ex(v - u, u + v).result
-    result = MATRIX_EXP_SQUARES(result, count, max_squarings)
+    index = _digitized(norm, conds)
+    if batched:
+        powers = _powers(degrees, scaled, identity)
+        u, v = _branch_selected(index, [_pade(degree, scaled, powers) for degree in degrees])
+    else:
+        u, v = switch_op(index, tuple(functools.partial(_pade_branch, degree) for degree in degrees),
+                         [scaled, identity])
     over = count > max_squarings
+    squares = functools.partial(_solved_squares, max_squarings=max_squarings)
+    operands = [u + v, v - u, count]
+    result, = _branch_selected(over, [squares(*operands), _overflowed(*operands)]) if batched else \
+        switch_op(over.to(torch.int32), (squares, _overflowed), operands)
     # JAX jax/_src/scipy/linalg.py expm, `_nan` where n_squarings > max_squarings; then the operator's runtime error,
     # torch 2.14.0 torch/_export/passes/functionalize_side_effectful_ops_pass.py: _assert_async.msg as
     # _functional_assert_async.msg, its `dep_token` the result, so the error follows the result's write, and the
     # operator's result the assertion's (torch/_meta_registrations.py functional_assert_async_meta: `return dep_token`)
-    result = torch.where(over[..., None, None], math.nan, result).to(given)
-    return A._functional_assert_async.msg(over.logical_not(), 'linalg.matrix_exp', result)
+    return A._functional_assert_async.msg(over.logical_not(), 'linalg.matrix_exp', result.to(given))
+
+
+# jnp.digitize(A_L1, conds) (right=False, searchsorted side 'right'): the count of cutoffs not above A_L1, each
+# logical_not(norm < cutoff), so an equal norm takes the higher degree and a NaN norm (no cutoff compares) the highest;
+# int32, as lax.switch converts its index (np.int32)
+def _digitized(norm, conds):
+    index = None
+    for cutoff in conds:
+        above = (norm < cutoff).logical_not().to(torch.int32)
+        index = above if index is None else index + above
+    return index
+
+
+# _cond_batching_rule's batched index: every branch's results `made` (in branch order), each result component
+# made[index]'s (select_n); a boolean index the two-branch cond's
+def _branch_selected(index, made):
+    chosen = list(made[0])
+    for k, outs in enumerate(made[1:], 1):
+        at = (index == k)[..., None, None]
+        chosen = [torch.where(at, out, held) for out, held in zip(outs, chosen)]
+    return tuple(chosen)
+
+
+def _combined(terms, made=None):
+    for coefficient, matrix in terms:
+        made = coefficient * matrix if made is None else made + coefficient * matrix
+    return made
+
+
+# the powers of the scaled A the Pade `degrees` read: A^2 .. A^(d-1) (A^2, A^4 and A^6 for 13), each A^k = A^(k-2) A^2;
+# one selected degree's alone inside its branch, the union of a batch's degrees once
+def _powers(degrees, scaled, identity):
+    powers = {0: identity, 2: torch.matmul(scaled, scaled)}
+    for k in range(4, max(6 if degree == 13 else degree - 1 for degree in degrees) + 1, 2):
+        powers[k] = torch.matmul(powers[k - 2], powers[2])
+    return powers
+
+
+# JAX _pade3, _pade5, _pade7, _pade9 and _pade13 of the scaled A over its `powers`: (U, V)
+def _pade(degree, scaled, powers):
+    b, parts = PADE[degree], []
+    for parity in (1, 0):
+        low = [(b[k + parity], powers[k]) for k in range(6 if degree == 13 else degree - 1, -1, -2)]
+        if degree == 13:
+            high = _combined([(b[k + 6 + parity], powers[k]) for k in (6, 4, 2)])
+            parts.append(_combined(low, torch.matmul(powers[6], high)))
+        else:
+            parts.append(_combined(low))
+    return torch.matmul(scaled, parts[0]), parts[1]
+
+
+# one switch branch: that degree's own powers, then its (U, V)
+def _pade_branch(degree, scaled, identity):
+    return _pade(degree, scaled, _powers((degree,), scaled, identity))
+
+
+# expm's _compute: _solve_P_Q (jnp.linalg.solve(Q, P)) and _squaring (MATRIX_EXP_SQUARES)
+def _solved_squares(p, q, count, max_squarings):
+    return MATRIX_EXP_SQUARES(torch.linalg.solve_ex(q, p).result, count, max_squarings),
+
+
+# expm's _nan, jnp.full_like(A, nan): in _compute's result layout (_linalg_solve_ex's result strides,
+# make_contiguous_strides_for(shape, row_major=False), which MATRIX_EXP_SQUARES keeps), so both branches yield one
+# common result metadata
+def _overflowed(p, q, count):
+    return torch.full_like(q.mT, math.nan),
 
 
 # JAX jax/_src/tpu/linalg/qdwh.py _qdwh: the static coefficient schedule from eps (l the lower singular value bound,
@@ -2479,6 +2535,17 @@ QDWH_EIGH_STEP = torch.ops.mesh.qdwh_eigh_step.default
 class _Repeat:
     def __init__(self, records, condition, carried):
         self.records, self.condition, self.carried = list(records), condition, tuple(carried)
+        self.place, self.node = GPU, 0
+
+
+# torch 2.14.0 torch/_higher_order_ops/switch.py switch_op (JAX lax.switch): one numerical selection. `index` the
+# one-element integer tensor naming the branch that runs; `branches` in order, each (records, yields): that branch's
+# structured records (a nested _Switch or _Repeat among them) and the tuple of tensors it yields; `outputs` the common
+# result tensors, outputs[k] taking the running branch's yields[k]. Only the selected branch's records run
+class _Switch:
+    def __init__(self, index, branches, outputs):
+        self.index, self.outputs = index, tuple(outputs)
+        self.branches = tuple((list(records), tuple(yields)) for records, yields in branches)
         self.place, self.node = GPU, 0
 
 
@@ -7513,6 +7580,9 @@ def _placed(ops, place, node):
         g.place, g.node = place, node
         if isinstance(g, _Repeat):
             _placed(g.records, place, node)
+        if isinstance(g, _Switch):
+            for records, _ in g.branches:
+                _placed(records, place, node)
 
 
 # design/torch-source-lowering-change-request.md item 1; design/compilation-composition-change-request.md, "Complete
