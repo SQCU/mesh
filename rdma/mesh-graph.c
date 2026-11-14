@@ -2065,58 +2065,65 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
 
 /* design/unequal-shards-change-request.md items 6 and 14; S. Zhang et al., HAP, EuroSys 2024, section 5.1, (3), "The
    objective function is the sum of the communication time and computation time of all stages"; X. Jia et al., Whale,
-   USENIX ATC 2022, with HiGHS 1.15.1 README.md, "l <= x <= u": columns B_j in [0, upper[j]], the largest share and each
-   stage's largest computation time; rows the shares' sum, the largest share over each B_j and each stage's time over
-   each rank's; HiGHS 1.15.1, highs_c_api.h */
-int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const double *fixed, const double *slope,
-                      const double *upper, double *share) {
-  const uint64_t rows = 1 + (uint64_t)ranks * ((uint64_t)stages + 1), columns = (uint64_t)ranks + stages + 1;
-  if (rows >= INT32_MAX / 2 || columns >= INT32_MAX / 2) return ENOMEM;
-  const size_t room = rows > columns ? rows : columns;
+   USENIX ATC 2022, with HiGHS 1.15.1 README.md, "l <= x <= u": columns B[p * ranks + j] in [0, upper[j]], each part's
+   largest share and each stage's largest computation time; rows each part's shares' sum, its largest share over each
+   of its shares and each stage's time over each of its rows, a row's coefficients over the full share variables its
+   terms couple; HiGHS 1.15.1, highs_c_api.h */
+int mesh_graph_shares_coupled(uint32_t ranks, uint32_t parts, uint32_t stages, uint32_t rows, const double *comm,
+                              const uint32_t *stage, const double *fixed, const size_t *first, const uint32_t *variable,
+                              const double *coefficient, const double *upper, double *share) {
+  const uint64_t shares = (uint64_t)parts * ranks, terms = first[rows];
+  const uint64_t constraints = parts + shares + (uint64_t)rows, columns = shares + parts + stages;
+  const uint64_t entries = 3 * shares + (uint64_t)rows + terms;
+  if (constraints >= INT32_MAX / 2 || columns >= INT32_MAX / 2 || entries >= INT32_MAX / 2) return ENOMEM;
+  for (uint32_t r = 0; r < rows; r++) if (stage[r] >= stages) return EINVAL;
+  for (uint64_t k = 0; k < terms; k++) if (variable[k] >= shares) return EINVAL;
+  const size_t room = constraints > columns ? constraints : columns;
   double *lower = malloc(room * sizeof *lower), *high = malloc(room * sizeof *high);
-  double *value = malloc(2 * room * sizeof *value), *column = malloc(columns * sizeof *column);
-  HighsInt *start = malloc(room * sizeof *start), *index = malloc(2 * room * sizeof *index);
+  double *value = malloc(entries * sizeof *value), *column = malloc(columns * sizeof *column);
+  HighsInt *start = malloc(room * sizeof *start), *index = malloc(entries * sizeof *index);
   void *highs = lower && high && value && column && start && index ? Highs_create() : NULL;
   int result = highs ? 0 : ENOMEM;
   const double infinity = highs ? Highs_getInfinity(highs) : 0;
   if (!result) {
-    double largest = 0;
-    for (uint32_t i = 0; i < stages; i++) largest += comm[i];
-    for (uint32_t j = 0; j < ranks; j++) { lower[j] = 0; high[j] = upper[j]; }
-    lower[ranks] = 0; high[ranks] = infinity;
-    for (uint32_t i = 0; i < stages; i++) { lower[ranks + 1 + i] = -infinity; high[ranks + 1 + i] = infinity; }
+    for (uint64_t c = 0; c < shares; c++) { lower[c] = 0; high[c] = upper[c % ranks]; }
+    for (uint32_t p = 0; p < parts; p++) { lower[shares + p] = 0; high[shares + p] = infinity; }
+    for (uint32_t i = 0; i < stages; i++) { lower[shares + parts + i] = -infinity; high[shares + parts + i] = infinity; }
     if (Highs_setBoolOptionValue(highs, "output_flag", 0) == kHighsStatusError ||
         Highs_setStringOptionValue(highs, "solver", "simplex") == kHighsStatusError ||
         Highs_setIntOptionValue(highs, "simplex_strategy", 1) == kHighsStatusError ||
         Highs_setStringOptionValue(highs, "parallel", "off") == kHighsStatusError ||
         Highs_setIntOptionValue(highs, "threads", 1) == kHighsStatusError ||
         Highs_changeObjectiveSense(highs, kHighsObjSenseMinimize) == kHighsStatusError ||
-        Highs_addVars(highs, (HighsInt)columns, lower, high) == kHighsStatusError ||
-        Highs_changeColCost(highs, (HighsInt)ranks, largest) == kHighsStatusError)
+        Highs_addVars(highs, (HighsInt)columns, lower, high) == kHighsStatusError)
       result = EDOM;
+    for (uint32_t p = 0; p < parts && !result; p++) {
+      double largest = 0;
+      for (uint32_t i = 0; i < stages; i++) largest += comm[(size_t)i * parts + p];
+      if (Highs_changeColCost(highs, (HighsInt)(shares + p), largest) == kHighsStatusError) result = EDOM;
+    }
     for (uint32_t i = 0; i < stages && !result; i++)
-      if (Highs_changeColCost(highs, (HighsInt)(ranks + 1 + i), 1) == kHighsStatusError) result = EDOM;
+      if (Highs_changeColCost(highs, (HighsInt)(shares + parts + i), 1) == kHighsStatusError) result = EDOM;
   }
   if (!result) {
     HighsInt total = 0, nonzeros = 0;
-    start[total] = nonzeros; lower[total] = 1; high[total] = 1; total++;
-    for (uint32_t j = 0; j < ranks; j++) { index[nonzeros] = (HighsInt)j; value[nonzeros++] = 1; }
-    if (Highs_addRows(highs, total, lower, high, nonzeros, start, index, value) == kHighsStatusError) result = EDOM;
-    total = 0; nonzeros = 0;
-    for (uint32_t j = 0; j < ranks; j++) {
-      start[total] = nonzeros; lower[total] = 0; high[total] = infinity; total++;
-      index[nonzeros] = (HighsInt)j; value[nonzeros++] = -1;
-      index[nonzeros] = (HighsInt)ranks; value[nonzeros++] = 1;
+    for (uint32_t p = 0; p < parts; p++) {
+      start[total] = nonzeros; lower[total] = 1; high[total] = 1; total++;
+      for (uint32_t j = 0; j < ranks; j++) { index[nonzeros] = (HighsInt)((uint64_t)p * ranks + j); value[nonzeros++] = 1; }
     }
-    for (uint32_t i = 0; i < stages; i++)
-      for (uint32_t j = 0; j < ranks; j++) {
-        const size_t k = (size_t)i * ranks + j;
-        start[total] = nonzeros; lower[total] = fixed[k]; high[total] = infinity; total++;
-        index[nonzeros] = (HighsInt)j; value[nonzeros++] = -slope[k];
-        index[nonzeros] = (HighsInt)(ranks + 1 + i); value[nonzeros++] = 1;
+    for (uint64_t c = 0; c < shares; c++) {
+      start[total] = nonzeros; lower[total] = 0; high[total] = infinity; total++;
+      index[nonzeros] = (HighsInt)c; value[nonzeros++] = -1;
+      index[nonzeros] = (HighsInt)(shares + c / ranks); value[nonzeros++] = 1;
+    }
+    for (uint32_t r = 0; r < rows; r++) {
+      start[total] = nonzeros; lower[total] = fixed[r]; high[total] = infinity; total++;
+      for (size_t k = first[r]; k < first[r + 1]; k++) {
+        index[nonzeros] = (HighsInt)variable[k]; value[nonzeros++] = -coefficient[k];
       }
-    if (!result && Highs_addRows(highs, total, lower, high, nonzeros, start, index, value) == kHighsStatusError)
-      result = EDOM;
+      index[nonzeros] = (HighsInt)(shares + parts + stage[r]); value[nonzeros++] = 1;
+    }
+    if (Highs_addRows(highs, total, lower, high, nonzeros, start, index, value) == kHighsStatusError) result = EDOM;
   }
   if (!result) {
     if (Highs_run(highs) == kHighsStatusError) result = EDOM;
@@ -2124,9 +2131,25 @@ int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const
     else if (Highs_getModelStatus(highs) != kHighsModelStatusOptimal ||
              Highs_getSolution(highs, column, NULL, NULL, NULL) == kHighsStatusError) result = EDOM;
   }
-  if (!result) for (uint32_t j = 0; j < ranks; j++) share[j] = column[j];
+  if (!result) for (uint64_t c = 0; c < shares; c++) share[c] = column[c];
   if (highs) Highs_destroy(highs);
   free(lower); free(high); free(value); free(column); free(start); free(index);
+  return result;
+}
+
+int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const double *fixed, const double *slope,
+                      const double *upper, double *share) {
+  const uint64_t rows = (uint64_t)stages * ranks;
+  if (rows >= INT32_MAX / 2) return ENOMEM;
+  size_t *first = malloc((rows + 1) * sizeof *first);
+  uint32_t *stage = malloc((rows + 1) * sizeof *stage), *variable = malloc((rows + 1) * sizeof *variable);
+  int result = first && stage && variable ? 0 : ENOMEM;
+  for (uint64_t r = 0; !result && r <= rows; r++) first[r] = r;
+  for (uint64_t r = 0; !result && r < rows; r++) { stage[r] = (uint32_t)(r / ranks); variable[r] = (uint32_t)(r % ranks); }
+  if (!result)
+    result = mesh_graph_shares_coupled(ranks, 1, stages, (uint32_t)rows, comm, stage, fixed, first, variable, slope, upper,
+                                       share);
+  free(first); free(stage); free(variable);
   return result;
 }
 
@@ -2910,12 +2933,15 @@ static int signature_static(uint32_t p) {
   return p == MESH_GRAPH_THREADGROUP_BARRIER || p == MESH_GRAPH_SIMDGROUP_BARRIER || p == MESH_GRAPH_ATOMIC ||
          p == MESH_GRAPH_KERNEL_FENCE;
 }
+/* MESH_GRAPH_BRIDGE_READ: the bridge's SEND hop's read of a release's supplied word (rdma/mesh-collective.c
+   plan_supplied), the word a publication raises: a wait of the publications' class */
 static int signature_wait(uint32_t p) {
-  return p == MESH_GRAPH_QUEUE_WAIT || p == MESH_GRAPH_FENCE_WAIT || p == MESH_GRAPH_HOST_WAIT || p == MESH_GRAPH_HOST_NOTIFY;
+  return p == MESH_GRAPH_QUEUE_WAIT || p == MESH_GRAPH_FENCE_WAIT || p == MESH_GRAPH_HOST_WAIT || p == MESH_GRAPH_HOST_NOTIFY ||
+         p == MESH_GRAPH_BRIDGE_READ;
 }
 static uint32_t signature_class(uint32_t p) {
   return p == MESH_GRAPH_FENCE_UPDATE || p == MESH_GRAPH_FENCE_WAIT ? 1 : p == MESH_GRAPH_INITIAL ? 2 :
-         p == MESH_GRAPH_HOST_PUBLISH ? 3 : 0;
+         p == MESH_GRAPH_HOST_PUBLISH || p == MESH_GRAPH_BRIDGE_READ ? 3 : 0;
 }
 static size_t graph_lower(const void *base, size_t count, size_t size, const void *probe,
                           int (*before)(const void *, const void *)) {
@@ -2988,10 +3014,14 @@ static int signature_enforces(const struct mesh_graph_operation *operation, cons
          operation[e->wait].vertex != MESH_GRAPH_NONE && operation[e->signal].execution <= operation[e->wait].execution;
 }
 
+static void realized_free(struct mesh_graph_realized *);
 void mesh_graph_signature_free(struct mesh_graph_signature *s) {
   free(s->processor); free(s->task); free(s->operation); free(s->dependence); free(s->edge); free(s->position);
   free(s->count); free(s->least); free(s->previous); free(s->waited); free(s->first); free(s->order); free(s->unknown);
   free(s->alias);free(s->event);free(s->span);free(s->repeated);free(s->proof);
+  free(s->answer);free(s->projected);
+  if(s->realized)realized_free(s->realized);
+  if(s->scopes)mesh_graph_scopes_free(s->scopes);
   memset(s, 0, sizeof *s);
 }
 
@@ -3033,6 +3063,198 @@ int mesh_graph_signature_spans(struct mesh_graph_signature *s,size_t spans,const
   if(spans)memcpy(p,span,spans*sizeof *p);
   free(s->span);s->span=p;s->spans=spans;
   return signature_digest(s);
+}
+/* design/synchronization-signature-change-request.md items 1, 4 and 6: completion scopes (mesh-graph.h struct
+   mesh_graph_scopes) over borrowed row descriptors, and a signature's realized occurrences, sites and published values
+   (struct mesh_graph_realized), each reference counted as relations are, each releasing its adopted owner with its
+   last reference; `own` the holder's own arrays (a restored or composed scopes' descriptors, a composed holder's
+   occurrences and published values), `part` the composed operands' holders it retains (each original owner kept) */
+struct mesh_graph_scopes { size_t references, rows; const struct mesh_graph_scopes_data *row; void (*release)(void *);
+                           void *owner; void *own; struct mesh_graph_scopes *part[2]; };
+struct mesh_graph_realized { size_t references; void (*release)(void *); void *owner; void *own;
+                             struct mesh_graph_realized *part[2]; };
+static int scopes_row_valid(const struct mesh_graph_scopes_data *d) {
+  if ((d->completions && (!d->completion || !d->release_first || d->release_first[0])) || (d->writers && !d->writer) ||
+      (d->completions && d->release_first[d->completions] != d->releases) || (d->releases && !d->release)) return 0;
+  for (size_t c = 0; c < d->completions; c++) {
+    const struct mesh_graph_completion *x = d->completion + c;
+    if (x->writer > d->writers || x->writers > d->writers - x->writer || d->release_first[c + 1] < d->release_first[c])
+      return 0;
+    uint64_t total = 0;
+    for (uint32_t w = 0; w < x->writers; w++) {
+      if (d->writer[x->writer + w].count > UINT64_MAX - total) return 0;
+      total += d->writer[x->writer + w].count;
+    }
+    if (total != x->total) return 0;
+  }
+  return 1;
+}
+int mesh_graph_scopes_create(size_t rows, const struct mesh_graph_scopes_data *row, void (*release_owner)(void *),
+                             void *owner, struct mesh_graph_scopes **out) {
+  *out = NULL;
+  if (rows && !row) return EINVAL;
+  for (size_t r = 0; r < rows; r++) if (!scopes_row_valid(row + r)) return EINVAL;
+  struct mesh_graph_scopes *made = malloc(sizeof *made);
+  if (!made) return ENOMEM;
+  *made = (struct mesh_graph_scopes){.references = 1, .rows = rows, .row = row, .release = release_owner, .owner = owner};
+  *out = made;
+  return 0;
+}
+void mesh_graph_scopes_retain(struct mesh_graph_scopes *x) { __atomic_fetch_add(&x->references, 1, __ATOMIC_RELAXED); }
+void mesh_graph_scopes_free(struct mesh_graph_scopes *x) {
+  if (__atomic_fetch_sub(&x->references, 1, __ATOMIC_ACQ_REL) != 1) return;
+  if (x->release) x->release(x->owner);
+  free(x->own);
+  for (int k = 0; k < 2; k++) if (x->part[k]) mesh_graph_scopes_free(x->part[k]);
+  free(x);
+}
+const struct mesh_graph_scopes_data *mesh_graph_scopes_rows(const struct mesh_graph_scopes *x, size_t *rows) {
+  *rows = x->rows;
+  return x->row;
+}
+static void realized_free(struct mesh_graph_realized *x) {
+  if (__atomic_fetch_sub(&x->references, 1, __ATOMIC_ACQ_REL) != 1) return;
+  if (x->release) x->release(x->owner);
+  free(x->own);
+  for (int k = 0; k < 2; k++) if (x->part[k]) realized_free(x->part[k]);
+  free(x);
+}
+static void realized_retain(struct mesh_graph_realized *x) { __atomic_fetch_add(&x->references, 1, __ATOMIC_RELAXED); }
+static void scopes_released(void *x) { mesh_graph_scopes_free(x); }
+static void signature_states(struct mesh_graph_signature *s) {
+  memset(s->states, 0, sizeof s->states);
+  for (size_t k = 0; k < s->synchronized; k++) s->states[s->edge[k].state]++;
+}
+/* a publication event's identity: its release's owner call and representative transfer, and its published value */
+struct scope_key { uint32_t owner, transfer; uint64_t value; uint32_t event, padding; };
+static int scope_key_before(const void *a, const void *b) {
+  const struct scope_key *x = a, *y = b;
+  if (x->owner != y->owner) return x->owner < y->owner ? -1 : 1;
+  if (x->transfer != y->transfer) return x->transfer < y->transfer ? -1 : 1;
+  return (x->value > y->value) - (x->value < y->value);
+}
+/* a signature's attachment: its scopes and realized holder (one reference each its own), their occurrences, sites and
+   published values, its answered reads and its projected sites (its own, NULL for none) */
+struct signature_attached { struct mesh_graph_scopes *scopes; struct mesh_graph_realized *realized;
+                            size_t occurrences, sites, publications, answers;
+                            const struct mesh_graph_occurrence *occurrence; const struct mesh_graph_site *site;
+                            const uint64_t *published; struct mesh_graph_answered *answer;
+                            struct mesh_graph_site *projected; };
+static struct signature_attached signature_attachment(const struct mesh_graph_signature *s) {
+  return (struct signature_attached){s->scopes, s->realized, s->occurrences, s->sites, s->publications, s->answers,
+                                     s->occurrence, s->site, s->published, s->answer, s->projected};
+}
+/* attachment x set, nothing released: every pair MESH_GRAPH_SCOPED by an earlier attachment UNMATCHED again (SCOPED is
+   only ever made from UNMATCHED, here), then each of x's answered reads' pairs MESH_GRAPH_SCOPED where no operation
+   answered it, the states counted; no edge, least delay or task changes */
+static void signature_attach_set(struct mesh_graph_signature *s, const struct signature_attached *x) {
+  s->scopes = x->scopes; s->realized = x->realized; s->occurrences = x->occurrences; s->sites = x->sites;
+  s->publications = x->publications; s->answers = x->answers; s->occurrence = x->occurrence; s->site = x->site;
+  s->published = x->published; s->answer = x->answer; s->projected = x->projected;
+  for (size_t k = 0; k < s->synchronized; k++)
+    if (s->edge[k].state == MESH_GRAPH_SCOPED) s->edge[k].state = MESH_GRAPH_UNMATCHED;
+  for (size_t k = 0; k < s->answers; k++) {
+    const size_t e = s->waited[s->answer[k].operation];
+    if (e != SIZE_MAX && s->edge[e].state == MESH_GRAPH_UNMATCHED) s->edge[e].state = MESH_GRAPH_SCOPED;
+  }
+  signature_states(s);
+}
+/* x's answered reads over the signature's operations: every MESH_GRAPH_BRIDGE_READ answered by the publication event
+   of its (owner, representative transfer, value); none without scopes. The signature is not changed */
+static int signature_answered(const struct mesh_graph_signature *s, struct signature_attached *x) {
+  x->answer = NULL; x->answers = 0;
+  if (!x->scopes) return 0;
+  size_t keys = 0;
+  for (size_t k = 0; k < x->occurrences; k++) {
+    const struct mesh_graph_occurrence *y = x->occurrence + k;
+    const struct mesh_graph_scopes_data *d = x->scopes->row + y->row;
+    const size_t n = d->release_first[y->completion + 1] - d->release_first[y->completion];
+    if (n > SIZE_MAX / sizeof(struct scope_key) - 1 - keys) return ENOMEM;
+    keys += n;
+  }
+  struct scope_key *key = malloc((keys + 1) * sizeof *key);
+  struct mesh_graph_answered *answer = malloc((s->operations + 1) * sizeof *answer);
+  if (!key || !answer) { free(key); free(answer); return ENOMEM; }
+  size_t answers = 0;
+  keys = 0;
+  for (size_t k = 0; k < x->occurrences; k++) {
+    const struct mesh_graph_occurrence *y = x->occurrence + k;
+    const struct mesh_graph_scopes_data *d = x->scopes->row + y->row;
+    const size_t f = d->release_first[y->completion], n = d->release_first[y->completion + 1] - f;
+    for (size_t r = 0; r < n; r++)
+      key[keys++] = (struct scope_key){d->release[f + r].owner, d->release[f + r].transfer, x->published[y->event + r],
+                                       y->event + (uint32_t)r, 0};
+  }
+  qsort(key, keys, sizeof *key, scope_key_before);
+  for (size_t o = 0; o < s->operations; o++) {
+    const struct mesh_graph_operation *w = s->operation + o;
+    if (w->primitive != MESH_GRAPH_BRIDGE_READ || w->vertex == MESH_GRAPH_NONE || w->object < MESH_GRAPH_PLAN_SUPPLIED)
+      continue;
+    const struct scope_key probe = {s->task[w->vertex].label, w->object - MESH_GRAPH_PLAN_SUPPLIED, w->value, 0, 0};
+    const size_t at = graph_lower(key, keys, sizeof *key, &probe, scope_key_before);
+    if (at == keys || scope_key_before(key + at, &probe)) continue;
+    answer[answers++] = (struct mesh_graph_answered){key[at].event, (uint32_t)o};
+  }
+  free(key);
+  x->answer = answer; x->answers = answers;
+  return 0;
+}
+/* a restored or composed signature's answered reads from the attachment it holds, its pairs' states from them */
+static int signature_answers(struct mesh_graph_signature *s) {
+  struct signature_attached x = signature_attachment(s);
+  const int result = signature_answered(s, &x);
+  if (!result) { free(s->answer); signature_attach_set(s, &x); }
+  return result;
+}
+/* attachment x, its scopes and holder one reference each the caller holds for it and its projected sites the caller's,
+   made the signature's as one transaction: its answered reads, states and digest from x, then the earlier attachment
+   released (its references, answers and projected sites). On failure the signature is as it was (its attachment,
+   states and digest), x the caller's still, nothing released */
+static int signature_attach(struct mesh_graph_signature *s, struct signature_attached x) {
+  int result = signature_answered(s, &x);
+  if (result) return result;
+  const struct signature_attached prior = signature_attachment(s);
+  signature_attach_set(s, &x);
+  result = signature_digest(s);
+  if (result) { signature_attach_set(s, &prior); free(x.answer); return result; }
+  free(prior.answer); free(prior.projected);
+  if (prior.realized) realized_free(prior.realized);
+  if (prior.scopes) mesh_graph_scopes_free(prior.scopes);
+  return 0;
+}
+/* the domains of a signature's realized arrays against its scopes and tasks */
+static int signature_realized_valid(const struct mesh_graph_signature *s, const struct mesh_graph_scopes *scopes,
+                                    size_t occurrences, const struct mesh_graph_occurrence *occurrence, size_t sites,
+                                    const struct mesh_graph_site *site, size_t publications) {
+  for (size_t k = 0; k < occurrences; k++) {
+    const struct mesh_graph_occurrence *x = occurrence + k;
+    if (x->row >= scopes->rows || x->completion >= scopes->row[x->row].completions) return 0;
+    const struct mesh_graph_scopes_data *d = scopes->row + x->row;
+    const struct mesh_graph_completion *c = d->completion + x->completion;
+    const size_t releases = d->release_first[x->completion + 1] - d->release_first[x->completion];
+    if (x->site > sites || c->writers > sites - x->site || x->event > publications ||
+        releases > publications - x->event) return 0;
+  }
+  for (size_t k = 0; k < sites; k++)
+    if (site[k].first >= s->tasks || (site[k].later != MESH_GRAPH_NONE && site[k].later >= s->tasks)) return 0;
+  return 1;
+}
+int mesh_graph_signature_scopes(struct mesh_graph_signature *s, struct mesh_graph_scopes *scopes, size_t occurrences,
+                                const struct mesh_graph_occurrence *occurrence, size_t sites,
+                                const struct mesh_graph_site *site, size_t publications, const uint64_t *published,
+                                void (*release_owner)(void *), void *owner) {
+  if (!scopes || (occurrences && !occurrence) || (sites && !site) || (publications && !published) ||
+      !signature_realized_valid(s, scopes, occurrences, occurrence, sites, site, publications)) return EINVAL;
+  struct mesh_graph_realized *realized = malloc(sizeof *realized);
+  if (!realized) return ENOMEM;
+  *realized = (struct mesh_graph_realized){.references = 1, .release = release_owner, .owner = owner};
+  mesh_graph_scopes_retain(scopes);
+  const int result = signature_attach(s, (struct signature_attached){
+    .scopes = scopes, .realized = realized, .occurrences = occurrences, .sites = sites, .publications = publications,
+    .occurrence = occurrence, .site = site, .published = published});
+  /* on failure the caller keeps `owner` and its arrays: the holder freed unreleased, its scopes reference dropped */
+  if (result) { free(realized); mesh_graph_scopes_free(scopes); }
+  return result;
 }
 /* everything a signature holds beyond its processors, tasks, dependences, operations, pairs, least delays and aliases,
    from those: each operation's place in its processor's order, the pair it waits in, the counts, states and digest */
@@ -3265,7 +3487,7 @@ static int repeated_operations(size_t repeats, const struct mesh_graph_repeated 
       if (x->primitive == MESH_GRAPH_HOST_WAIT) {
         const __int128 need = (__int128)K * x->every + (__int128)x->ordinal - (__int128)x->lookback * x->every;
         y->value = need > 0 ? (uint64_t)need : 0;
-      } else if (x->primitive == MESH_GRAPH_BRIDGE_START) {
+      } else if (x->primitive == MESH_GRAPH_BRIDGE_START || x->primitive == MESH_GRAPH_BRIDGE_READ) {
         y->value = K * x->every + x->ordinal;
       } else if (x->primitive == MESH_GRAPH_BRIDGE_RAISE) {
         const uint64_t submitted = K * x->every + x->ordinal - 1;
@@ -3422,19 +3644,107 @@ static size_t record_parts(const struct mesh_graph_signature *s, struct record_p
   for (int k = 0; k < 7; k++) at = record_align(at + part[k].size);
   return at;
 }
-struct program_record { uint64_t magic, events, spans, repeats, proofs; };
+/* the record's program section: its events, spans, repeated rows and proofs; a scoped signature's (GRAPH_PROGRAM_SCOPED)
+   then its rows' counts (struct scope_row_record), each row's completion[], writer[], release_first[completions + 1]
+   and release[], its occurrence[], site[] and published[], every array 8-byte sized, so each starts 8-aligned where the
+   record is */
+struct program_record { uint64_t magic, events, spans, repeats, proofs, rows, occurrences, sites, publications; };
+struct scope_row_record { uint64_t completions, writers, releases; };
 #define GRAPH_PROGRAM_RECORD UINT64_C(0x414d41524748534d)
 #define GRAPH_PROGRAM_REPEATED UINT64_C(0x5045525048534d47)
+#define GRAPH_PROGRAM_SCOPED UINT64_C(0x504f435348534d47)
 static size_t program_head(const struct mesh_graph_signature *s){
-  return s->repeats||s->proofs?sizeof(struct program_record):offsetof(struct program_record,repeats);
+  return s->scopes?sizeof(struct program_record):s->repeats||s->proofs?offsetof(struct program_record,rows):
+         offsetof(struct program_record,repeats);
+}
+static size_t scope_row_bytes(const struct mesh_graph_scopes_data *d){
+  return d->completions*sizeof *d->completion+d->writers*sizeof *d->writer+(d->completions+1)*sizeof *d->release_first+
+         d->releases*sizeof *d->release;
+}
+static size_t program_scoped(const struct mesh_graph_signature *s){
+  if(!s->scopes)return 0;
+  size_t bytes=s->scopes->rows*sizeof(struct scope_row_record)+s->occurrences*sizeof *s->occurrence+
+               s->sites*sizeof *s->site+s->publications*sizeof *s->published;
+  for(size_t r=0;r<s->scopes->rows;r++)bytes+=scope_row_bytes(s->scopes->row+r);
+  return bytes;
 }
 static size_t program_parts(const struct mesh_graph_signature *s,struct record_part part[4]){
   part[0]=(struct record_part){s->event,s->events*sizeof *s->event};
   part[1]=(struct record_part){s->span,s->spans*sizeof *s->span};
   part[2]=(struct record_part){s->repeated,s->repeats*sizeof *s->repeated};
   part[3]=(struct record_part){s->proof,s->proofs*sizeof *s->proof};
-  size_t bytes=0;for(int k=0;k<4;k++)bytes+=part[k].size;
-  return bytes?program_head(s)+bytes:0;
+  size_t bytes=program_scoped(s);for(int k=0;k<4;k++)bytes+=part[k].size;
+  return bytes || s->scopes?program_head(s)+bytes:0;
+}
+static size_t program_put(char *at,const void *data,size_t size){ if(size)memcpy(at,data,size); return size; }
+static void program_scoped_write(const struct mesh_graph_signature *s,char *at){
+  if(!s->scopes)return;
+  static const size_t none=0;
+  for(size_t r=0;r<s->scopes->rows;r++){
+    const struct mesh_graph_scopes_data *d=s->scopes->row+r;
+    const struct scope_row_record row={d->completions,d->writers,d->releases};
+    at+=program_put(at,&row,sizeof row);
+  }
+  for(size_t r=0;r<s->scopes->rows;r++){
+    const struct mesh_graph_scopes_data *d=s->scopes->row+r;
+    at+=program_put(at,d->completion,d->completions*sizeof *d->completion);
+    at+=program_put(at,d->writer,d->writers*sizeof *d->writer);
+    at+=program_put(at,d->completions?d->release_first:&none,(d->completions+1)*sizeof *d->release_first);
+    at+=program_put(at,d->release,d->releases*sizeof *d->release);
+  }
+  at+=program_put(at,s->occurrence,s->occurrences*sizeof *s->occurrence);
+  at+=program_put(at,s->site,s->sites*sizeof *s->site);
+  program_put(at,s->published,s->publications*sizeof *s->published);
+}
+/* a scoped record's section read as views of `at` (room bytes): its rows' descriptors (the restored scopes' own), its
+   scopes adopting nothing yet (the caller adopts the record's owner on success), its realized arrays held through them */
+static int program_scoped_read(struct mesh_graph_signature *s,const struct program_record *body,const char *at,
+                               size_t room){
+  const uint64_t rows=body->rows;
+  if(rows>room/sizeof(struct scope_row_record))return EINVAL;
+  struct mesh_graph_scopes_data *row=malloc(((size_t)rows+1)*sizeof *row);
+  if(!row)return ENOMEM;
+  const struct scope_row_record *count=(const void *)at;
+  size_t used=(size_t)rows*sizeof *count;
+  int result=0;
+  for(size_t r=0;!result && r<rows;r++){
+    const struct scope_row_record x=count[r];
+    if(x.completions>room/24 || x.writers>room/24 || x.releases>room/8){result=EINVAL;break;}
+    struct mesh_graph_scopes_data *d=row+r;
+    *d=(struct mesh_graph_scopes_data){.completions=(size_t)x.completions,.writers=(size_t)x.writers,
+                                       .releases=(size_t)x.releases};
+    const size_t bytes=scope_row_bytes(d);
+    if(bytes>room-used){result=EINVAL;break;}
+    const char *y=at+used;
+    d->completion=(const void *)y;y+=d->completions*sizeof *d->completion;
+    d->writer=(const void *)y;y+=d->writers*sizeof *d->writer;
+    d->release_first=(const void *)y;y+=(d->completions+1)*sizeof *d->release_first;
+    d->release=(const void *)y;
+    used+=bytes;
+  }
+  if(!result && (body->occurrences>room/sizeof *s->occurrence || body->sites>room/sizeof *s->site ||
+                 body->publications>room/sizeof *s->published ||
+                 body->occurrences*sizeof *s->occurrence+body->sites*sizeof *s->site+
+                 body->publications*sizeof *s->published!=room-used))result=EINVAL;
+  struct mesh_graph_scopes *scopes=NULL;
+  if(!result)result=mesh_graph_scopes_create((size_t)rows,row,NULL,NULL,&scopes);
+  if(result){free(row);return result;}
+  scopes->own=row;
+  const struct mesh_graph_occurrence *occurrence=(const void *)(at+used);
+  const struct mesh_graph_site *site=(const void *)((const char *)occurrence+body->occurrences*sizeof *occurrence);
+  const uint64_t *published=(const void *)((const char *)site+body->sites*sizeof *site);
+  struct mesh_graph_realized *realized=malloc(sizeof *realized);
+  if(!realized || !signature_realized_valid(s,scopes,(size_t)body->occurrences,occurrence,(size_t)body->sites,site,
+                                            (size_t)body->publications)){
+    free(realized);mesh_graph_scopes_free(scopes);return realized?EINVAL:ENOMEM;
+  }
+  /* the realized arrays are views of the same record bytes the scopes hold; a fresh signature's attachment, its
+     answered reads made once its pairs are (record_restore, mesh_graph_archive_read) */
+  mesh_graph_scopes_retain(scopes);
+  *realized=(struct mesh_graph_realized){.references=1,.release=scopes_released,.owner=scopes};
+  s->scopes=scopes;s->realized=realized;s->occurrences=(size_t)body->occurrences;s->occurrence=occurrence;
+  s->sites=(size_t)body->sites;s->site=site;s->publications=(size_t)body->publications;s->published=published;
+  return 0;
 }
 static size_t record_size(const struct mesh_graph_signature *s){
   struct record_part original[7],program[4];return record_parts(s,original)+program_parts(s,program);
@@ -3454,10 +3764,12 @@ int mesh_graph_record(const struct mesh_graph_signature *s, void *record, size_t
   size_t at = sizeof *head;
   for (int k = 0; k < 7; k++) { memcpy((char *)record + at, part[k].data, part[k].size); at = record_align(at + part[k].size); }
   if(metadata){
-    const struct program_record body={s->repeats||s->proofs?GRAPH_PROGRAM_REPEATED:GRAPH_PROGRAM_RECORD,s->events,
-                                      s->spans,s->repeats,s->proofs};
+    const struct program_record body={s->scopes?GRAPH_PROGRAM_SCOPED:s->repeats||s->proofs?GRAPH_PROGRAM_REPEATED:
+                                      GRAPH_PROGRAM_RECORD,s->events,s->spans,s->repeats,s->proofs,
+                                      s->scopes?s->scopes->rows:0,s->occurrences,s->sites,s->publications};
     memcpy((char *)record+at,&body,program_head(s));at+=program_head(s);
     for(int k=0;k<4;k++){if(program[k].size)memcpy((char *)record+at,program[k].data,program[k].size);at+=program[k].size;}
+    program_scoped_write(s,(char *)record+at);
   }
   return 0;
 }
@@ -3483,9 +3795,10 @@ static int record_restore(const void *record, struct mesh_graph_signature *s, in
     struct program_record body={0};
     if(head->bytes-primary<sizeof body.magic)result=EINVAL;
     else memcpy(&body.magic,(const char *)record+primary,sizeof body.magic);
-    const size_t size=body.magic==GRAPH_PROGRAM_REPEATED?sizeof body:offsetof(struct program_record,repeats);
-    if(!result && ((body.magic!=GRAPH_PROGRAM_RECORD && body.magic!=GRAPH_PROGRAM_REPEATED) ||
-                   head->bytes-primary<size))result=EINVAL;
+    const size_t size=body.magic==GRAPH_PROGRAM_SCOPED?sizeof body:body.magic==GRAPH_PROGRAM_REPEATED?
+                      offsetof(struct program_record,rows):offsetof(struct program_record,repeats);
+    if(!result && ((body.magic!=GRAPH_PROGRAM_RECORD && body.magic!=GRAPH_PROGRAM_REPEATED &&
+                    body.magic!=GRAPH_PROGRAM_SCOPED) || head->bytes-primary<size))result=EINVAL;
     if(!result){
       memcpy(&body,(const char *)record+primary,size);at=primary+size;
       const size_t room=(size_t)head->bytes-at;
@@ -3501,14 +3814,18 @@ static int record_restore(const void *record, struct mesh_graph_signature *s, in
         struct record_part program[4];
         const size_t metadata=program_parts(s,program),payload=metadata?metadata-program_head(s):0;
         if(!s->event || (s->spans && !s->span) || !s->repeated || !s->proof)result=ENOMEM;
-        else if(payload!=room)result=EINVAL;
+        else if(body.magic!=GRAPH_PROGRAM_SCOPED && payload!=room)result=EINVAL;
+        else if(payload>room)result=EINVAL;
         else for(int k=0;k<4;k++){
           if(program[k].size)memcpy(program[k].data,(const char *)record+at,program[k].size);at+=program[k].size;
         }
+        if(!result && body.magic==GRAPH_PROGRAM_SCOPED)
+          result=program_scoped_read(s,&body,(const char *)record+at,(size_t)head->bytes-at);
       }
     }
   }
   if (!result && derive) result = signature_derive(s);
+  if (!result && derive && s->scopes && !(result = signature_answers(s))) result = signature_digest(s);
   if (!result && !derive) memcpy(s->digest, head->digest, sizeof s->digest);
   if (result) mesh_graph_signature_free(s);
   return result;
@@ -3550,7 +3867,8 @@ int mesh_graph_archive(const struct mesh_graph_signature *s, void *bytes, size_t
   for (int k = 0; k < 7; k++) { if (part[k].size) memcpy((char *)bytes + at, part[k].data, part[k].size); at += part[k].size; }
   return 0;
 }
-int mesh_graph_archive_read(const void *bytes, size_t length, struct mesh_graph_signature *s) {
+int mesh_graph_archive_read(const void *bytes, size_t length, void (*release_owner)(void *), void *owner,
+                            struct mesh_graph_signature *s) {
   memset(s, 0, sizeof *s);
   struct signature_archive head;
   if (length < sizeof head) return EINVAL;
@@ -3576,6 +3894,10 @@ int mesh_graph_archive_read(const void *bytes, size_t length, struct mesh_graph_
   s->count = owned[5]; s->unknown = owned[6];
   s->uncovered = head.uncovered; s->redundant = head.redundant; s->unwaited = head.unwaited;
   for (uint32_t k = 0; k < MESH_GRAPH_STATES; k++) s->states[k] = head.states[k];
+  if (s->scopes && (status = signature_answers(s))) { mesh_graph_signature_free(s); return status; }
+  /* adopted: by the scopes, whose views of `bytes` a scoped signature holds; released at once otherwise */
+  if (s->scopes) { s->scopes->release = release_owner; s->scopes->owner = owner; }
+  else if (release_owner) release_owner(owner);
   return 0;
 }
 
@@ -3950,6 +4272,72 @@ static uint32_t compose_processor(struct mesh_graph_signature *s, struct mesh_gr
   s->processor[s->processors] = p;
   return s->processors++;
 }
+/* design/synchronization-signature-change-request.md items 1 and 6: a composed signature's attachment, both
+   operands' occurrences kept (mesh-graph.h mesh_graph_compose): a's rows, sites, publication events and tasks first,
+   b's after them (b's row r composed row a's rows + r, its own for the same scopes; its site k a's sites + k; its event
+   k a's publications + k; its task t a's tasks + t), each operand's scopes and realized holder retained, so each
+   original owner is kept, and only the composed descriptors, occurrences, sites and published values made; one
+   operand's own (its sites' tasks moved for b) where the other has no scopes */
+static int compose_scopes(struct mesh_graph_signature *s, const struct mesh_graph_signature *a,
+                          const struct mesh_graph_signature *b) {
+  const int both = a->scopes && b->scopes, same = a->scopes == b->scopes;
+  const struct mesh_graph_signature *g = b->scopes ? b : a;
+  const size_t rows = both && !same ? a->scopes->rows : 0, lead = both ? a->sites : 0, sites = lead + g->sites,
+               occurrences = (both ? a->occurrences : 0) + g->occurrences,
+               publications = (both ? a->publications : 0) + g->publications;
+  /* the occurrence's uint32_t row, site and event indices */
+  if (both && ((uint64_t)rows + b->scopes->rows > UINT32_MAX || sites > UINT32_MAX || publications > UINT32_MAX))
+    return EOVERFLOW;
+  struct mesh_graph_site *projected = b->scopes && sites ? malloc(sites * sizeof *projected) : NULL;
+  struct mesh_graph_occurrence *occurrence =
+    both ? malloc(occurrences * sizeof *occurrence + publications * sizeof *s->published + 1) : NULL;
+  struct mesh_graph_realized *realized = both ? malloc(sizeof *realized) : NULL;
+  struct mesh_graph_scopes_data *row = both && !same ? malloc((rows + b->scopes->rows + 1) * sizeof *row) : NULL;
+  struct mesh_graph_scopes *scopes = both && !same ? malloc(sizeof *scopes) : NULL;
+  if ((b->scopes && sites && !projected) || (both && (!occurrence || !realized)) || (both && !same && (!row || !scopes))) {
+    free(projected); free(occurrence); free(realized); free(row); free(scopes);
+    return ENOMEM;
+  }
+  struct signature_attached x = {.scopes = g->scopes, .realized = g->realized, .occurrences = g->occurrences,
+                                 .sites = sites, .publications = g->publications, .occurrence = g->occurrence,
+                                 .site = g->site, .published = g->published};
+  if (projected) {
+    if (lead) memcpy(projected, a->site, lead * sizeof *projected);
+    for (size_t k = 0; k < b->sites; k++) {
+      struct mesh_graph_site y = b->site[k];
+      y.first += a->tasks;
+      if (y.later != MESH_GRAPH_NONE) y.later += a->tasks;
+      projected[lead + k] = y;
+    }
+    x.site = x.projected = projected;
+  }
+  if (both) {
+    uint64_t *published = (uint64_t *)(void *)(occurrence + occurrences);
+    if (a->occurrences) memcpy(occurrence, a->occurrence, a->occurrences * sizeof *occurrence);
+    for (size_t k = 0; k < b->occurrences; k++) {
+      struct mesh_graph_occurrence y = b->occurrence[k];
+      y.row += (uint32_t)rows; y.site += (uint32_t)a->sites; y.event += (uint32_t)a->publications;
+      occurrence[a->occurrences + k] = y;
+    }
+    if (a->publications) memcpy(published, a->published, a->publications * sizeof *published);
+    if (b->publications) memcpy(published + a->publications, b->published, b->publications * sizeof *published);
+    realized_retain(a->realized); realized_retain(b->realized);
+    *realized = (struct mesh_graph_realized){.references = 1, .own = occurrence, .part = {a->realized, b->realized}};
+    x.realized = realized; x.occurrences = occurrences; x.publications = publications;
+    x.occurrence = occurrence; x.published = published;
+  } else realized_retain(x.realized);
+  if (scopes) {
+    if (rows) memcpy(row, a->scopes->row, rows * sizeof *row);
+    if (b->scopes->rows) memcpy(row + rows, b->scopes->row, b->scopes->rows * sizeof *row);
+    mesh_graph_scopes_retain(a->scopes); mesh_graph_scopes_retain(b->scopes);
+    *scopes = (struct mesh_graph_scopes){.references = 1, .rows = rows + b->scopes->rows, .row = row, .own = row,
+                                         .part = {a->scopes, b->scopes}};
+    x.scopes = scopes;
+  } else mesh_graph_scopes_retain(x.scopes);
+  const int result = signature_attach(s, x);
+  if (result) { free(projected); realized_free(x.realized); mesh_graph_scopes_free(x.scopes); }
+  return result;
+}
 int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_graph_signature *b,
                        struct mesh_graph_signature *s) {
   memset(s, 0, sizeof *s);
@@ -4063,6 +4451,7 @@ int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_g
     }
   }
   if (!result) result = signature_derive(s);
+  if (!result && (a->scopes || b->scopes)) result = compose_scopes(s, a, b);
   free(pa); free(pb); free(ia); free(ib); free(matched); free(cursor); free(key); free(taken);
   if (result) mesh_graph_signature_free(s);
   return result;
@@ -4073,9 +4462,9 @@ static const char *const signature_kind[MESH_GRAPH_KINDS] = {"queue", "host", "b
 static const char *const signature_primitive[MESH_GRAPH_PRIMITIVES] = {
   "submit", "queue_signal", "queue_wait", "fence_update", "fence_wait", "pass_barrier", "queue_barrier", "host_wait",
   "host_notify", "bridge_start", "threadgroup_barrier", "simdgroup_barrier", "atomic", "producer_barrier",
-  "bridge_raise", "initial", "host_publish", "kernel_fence", "host_signal"};
+  "bridge_raise", "initial", "host_publish", "kernel_fence", "host_signal", "bridge_read"};
 static const char *const signature_state[MESH_GRAPH_STATES] = {"image", "stronger", "false", "unmatched", "satisfied",
-                                                              "transformed"};
+                                                              "transformed", "scoped"};
 struct graph_sink { char *text; size_t room, at; int status; };
 static int graph_put(struct graph_sink *t, const char *format, ...) {
   va_list arguments;
@@ -4103,6 +4492,48 @@ static int signature_ordered(const struct mesh_graph_signature *s, size_t o) {
 }
 static int signature_drawn(const struct mesh_graph_synchronized *e) {
   return e->signal != MESH_GRAPH_NONE && e->state != MESH_GRAPH_SATISFIED;
+}
+/* a scoped signature's completion scopes, occurrences, sites, publication events and answered reads, one line each
+   (none for a signature without scopes: its text is as before) */
+static void signature_scoped(struct graph_sink *t, const struct mesh_graph_signature *s) {
+  if (!s->scopes) return;
+  for (size_t row = 0; row < s->scopes->rows; row++) {
+    const struct mesh_graph_scopes_data *d = s->scopes->row + row;
+    for (size_t c = 0; c < d->completions; c++) {
+      const struct mesh_graph_completion *x = d->completion + c;
+      graph_put(t, "%% scope row %zu %zu value %u counter %u total %llu writers %u+%u releases %zu+%zu\n", row, c,
+                x->value, x->counter, (unsigned long long)x->total, x->writer, x->writers, d->release_first[c],
+                d->release_first[c + 1] - d->release_first[c]);
+    }
+    for (size_t w = 0; w < d->writers; w++) {
+      const struct mesh_graph_completion_writer *x = d->writer + w;
+      graph_put(t, "%% scope_writer row %zu %zu dispatch %u completion %u later", row, w, x->dispatch, x->completion);
+      signature_number(t, x->later);
+      graph_put(t, " count %llu\n", (unsigned long long)x->count);
+    }
+    for (size_t r = 0; r < d->releases; r++)
+      graph_put(t, "%% scope_release row %zu %zu owner %u transfer %u\n", row, r, d->release[r].owner,
+                d->release[r].transfer);
+  }
+  for (size_t k = 0; k < s->occurrences; k++) {
+    const struct mesh_graph_occurrence *x = s->occurrence + k;
+    graph_put(t, "%% occurrence %zu row %u scope %u execution %llu generation %llu copy %llu sites %u events %u\n", k,
+              x->row, x->completion, (unsigned long long)x->execution, (unsigned long long)x->generation,
+              (unsigned long long)x->copy, x->site, x->event);
+  }
+  for (size_t k = 0; k < s->sites; k++) {
+    const struct mesh_graph_site *x = s->site + k;
+    graph_put(t, "%% site %zu first task %u later task", k, x->first);
+    signature_number(t, x->later);
+    graph_put(t, " native %u", x->first_site);
+    signature_number(t, x->later_site);
+    graph_put(t, "\n");
+  }
+  for (size_t k = 0; k < s->publications; k++)
+    graph_put(t, "%% publication event %zu value %llu\n", k, (unsigned long long)s->published[k]);
+  for (size_t k = 0; k < s->answers; k++)
+    graph_put(t, "%% answered operation %u event %u\n", s->answer[k].operation + 1, s->answer[k].event);
+  graph_put(t, "%% totals scoped %zu publications %zu\n", s->states[MESH_GRAPH_SCOPED], s->publications);
 }
 int mesh_graph_matrix_market(const struct mesh_graph_signature *s, char *text, size_t room, size_t *made) {
   struct graph_sink t = {text, room, 0, 0};
@@ -4163,6 +4594,7 @@ int mesh_graph_matrix_market(const struct mesh_graph_signature *s, char *text, s
     graph_put(&t,"%% span %zu first %llu count %llu begin %llu end %llu\n",k,(unsigned long long)x->first,
       (unsigned long long)x->count,(unsigned long long)x->begin,(unsigned long long)x->end);
   }
+  signature_scoped(&t, s);
   graph_put(&t, "%% totals operations %zu synchronized %zu image %zu stronger %zu false %zu unmatched %zu satisfied %zu "
                 "transformed %zu redundant %zu uncovered %zu unwaited %zu\n", s->operations, s->synchronized,
             s->states[MESH_GRAPH_IMAGE], s->states[MESH_GRAPH_STRONGER], s->states[MESH_GRAPH_FALSE],
@@ -4201,6 +4633,19 @@ int mesh_graph_dot(const struct mesh_graph_signature *s, char *text, size_t room
     graph_put(&t, "  o%u -> o%u [label=\"%llu %s%s\"%s];\n", e->signal + 1, e->wait + 1, (unsigned long long)e->delay,
               signature_state[e->state], e->redundant ? " redundant" : "", e->redundant ? " style=dashed" : "");
   }
+  /* a publication event: no processor's, after all of its occurrence's completions (its sites' first and later
+     tasks, alternatives, no edge of the task graph), answering the reads drawn to it */
+  for (size_t k = 0; k < s->occurrences; k++) {
+    const struct mesh_graph_occurrence *x = s->occurrence + k;
+    const struct mesh_graph_scopes_data *d = s->scopes->row + x->row;
+    const size_t f = d->release_first[x->completion], n = d->release_first[x->completion + 1] - f;
+    for (size_t r = 0; r < n; r++)
+      graph_put(&t, "  e%llu [shape=diamond label=\"publication %llu\\nscope %u execution %llu value %llu\"];\n",
+                (unsigned long long)(x->event + r), (unsigned long long)(x->event + r), x->completion,
+                (unsigned long long)x->execution, (unsigned long long)s->published[x->event + r]);
+  }
+  for (size_t k = 0; k < s->answers; k++)
+    graph_put(&t, "  e%u -> o%u [label=\"scoped\" style=bold];\n", s->answer[k].event, s->answer[k].operation + 1);
   graph_put(&t, "}\n");
   return graph_end(&t, made);
 }
@@ -4247,6 +4692,19 @@ int mesh_graph_space_time(const struct mesh_graph_signature *s, char *text, size
     graph_put(&t, " execution %llu object %u", (unsigned long long)x->execution, x->object);
     signature_value(&t, x);
     if (k != SIZE_MAX && !signature_drawn(s->edge + k)) graph_put(&t, " %s", signature_state[s->edge[k].state]);
+    graph_put(&t, "\n");
+  }
+  for (size_t k = 0; !result && k < s->occurrences; k++) {
+    const struct mesh_graph_occurrence *x = s->occurrence + k;
+    const struct mesh_graph_scopes_data *d = s->scopes->row + x->row;
+    const struct mesh_graph_completion *c = d->completion + x->completion;
+    graph_put(&t, "publication events %u+%zu of row %u scope %u execution %llu, once after all %llu completions of tasks",
+              x->event, d->release_first[x->completion + 1] - d->release_first[x->completion], x->row, x->completion,
+              (unsigned long long)x->execution, (unsigned long long)c->total);
+    for (uint32_t w = 0; w < c->writers; w++) {
+      graph_put(&t, " %u", s->site[x->site + w].first);
+      if (s->site[x->site + w].later != MESH_GRAPH_NONE) graph_put(&t, "|%u", s->site[x->site + w].later);
+    }
     graph_put(&t, "\n");
   }
   free(from); free(to); free(place); free(at); free(priority); free(line);

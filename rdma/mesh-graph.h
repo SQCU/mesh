@@ -191,9 +191,18 @@ int mesh_graph_completion_times(uint32_t vertices, const double *length, const u
                                 size_t edges, const uint32_t *from, const uint32_t *to, double *completion);
 /* design/unequal-shards-change-request.md items 6 and 14; S. Zhang et al., HAP, EuroSys 2024, section 5.1, (3): the
    shares B_j of `ranks` ranks that minimise, summed over `stages` stages, comm[i] times the largest B_j plus the largest
-   over j of fixed[i * ranks + j] + slope[i * ranks + j] * B_j, subject to the B_j summing to 1 and 0 <= B_j <= upper[j] */
+   over j of fixed[i * ranks + j] + slope[i * ranks + j] * B_j, subject to the B_j summing to 1 and 0 <= B_j <= upper[j].
+   mesh_graph_shares_coupled is it over `parts` parts' shares B[v], v = p * ranks + j part p's share of rank j in [0,
+   upper[j]], each part's summing to 1: comm[i * parts + p] times part p's largest share, and each of `rows` rows r of
+   stage stage[r] fixed[r] plus coefficient[k] * B[variable[k]] over k in first[r] .. first[r + 1] (a row's variables
+   distinct, of any parts and ranks), the stage's time its rows' largest; mesh_graph_shares is its one part, row i *
+   ranks + j of stage i its variable j with slope its one coefficient. EINVAL for a stage at or past `stages` or a
+   variable at or past parts * ranks */
 int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const double *fixed, const double *slope,
                       const double *upper, double *share);
+int mesh_graph_shares_coupled(uint32_t ranks, uint32_t parts, uint32_t stages, uint32_t rows, const double *comm,
+                              const uint32_t *stage, const double *fixed, const size_t *first, const uint32_t *variable,
+                              const double *coefficient, const double *upper, double *share);
 /* design/joint-compilation.md §3, row 8 */
 int mesh_graph_heap_order(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from,
                           const uint32_t *to, uint32_t *place);
@@ -329,9 +338,11 @@ enum { MESH_GRAPH_SUBMIT, MESH_GRAPH_QUEUE_SIGNAL, MESH_GRAPH_QUEUE_WAIT, MESH_G
        MESH_GRAPH_PASS_BARRIER, MESH_GRAPH_QUEUE_BARRIER, MESH_GRAPH_HOST_WAIT, MESH_GRAPH_HOST_NOTIFY,
        MESH_GRAPH_BRIDGE_START, MESH_GRAPH_THREADGROUP_BARRIER, MESH_GRAPH_SIMDGROUP_BARRIER, MESH_GRAPH_ATOMIC,
        MESH_GRAPH_PRODUCER_BARRIER, MESH_GRAPH_BRIDGE_RAISE, MESH_GRAPH_INITIAL, MESH_GRAPH_HOST_PUBLISH,
-       MESH_GRAPH_KERNEL_FENCE, MESH_GRAPH_HOST_SIGNAL, MESH_GRAPH_PRIMITIVES };
+       MESH_GRAPH_KERNEL_FENCE, MESH_GRAPH_HOST_SIGNAL, MESH_GRAPH_BRIDGE_READ, MESH_GRAPH_PRIMITIVES };
+/* MESH_GRAPH_SCOPED: a wait answered by a completion scope's publication event (mesh_graph_signature_scopes), not by
+   an operation: no task-graph edge is projected from it */
 enum { MESH_GRAPH_IMAGE, MESH_GRAPH_STRONGER, MESH_GRAPH_FALSE, MESH_GRAPH_UNMATCHED, MESH_GRAPH_SATISFIED,
-       MESH_GRAPH_TRANSFORMED, MESH_GRAPH_STATES };
+       MESH_GRAPH_TRANSFORMED, MESH_GRAPH_SCOPED, MESH_GRAPH_STATES };
 struct mesh_graph_processor { uint32_t kind, index; };
 /* one program's identities across its producers: a processor's `index` is thread * MESH_GRAPH_NODES + node (the host's
    program thread 0 and its event listener 1; a queue's ordinal; the bridge 0), node its map index; a plan count word
@@ -341,6 +352,10 @@ struct mesh_graph_processor { uint32_t kind, index; };
 #define MESH_GRAPH_PLAN_COUNT UINT32_C(0x80000000)
 #define MESH_GRAPH_PLAN_SUBMISSION UINT32_C(0xC0000000)
 #define MESH_GRAPH_LOWERED UINT32_C(0x40000000)
+/* a MESH_GRAPH_BRIDGE_READ's object: MESH_GRAPH_PLAN_SUPPLIED + the representative transfer (its owner call's row) of
+   the release whose supplied word the bridge's SEND hop reads (rdma/mesh-collective.c plan_supplied), its owner call
+   its vertex's task's `label` */
+#define MESH_GRAPH_PLAN_SUPPLIED UINT32_C(0x20000000)
 struct mesh_graph_task { uint32_t processor, place, label, copy; };
 struct mesh_graph_dependence { uint32_t from, to; uint64_t delay; };
 struct mesh_graph_operation { uint32_t processor, primitive, vertex, object; uint64_t execution, value; };
@@ -503,6 +518,51 @@ struct mesh_graph_repeated { uint32_t processor, primitive, vertex, object; uint
 struct mesh_graph_proof { uint32_t from, to; uint64_t total_delay; uint32_t witness, proven; };
 _Static_assert(sizeof(struct mesh_graph_repeated) == 48 && sizeof(struct mesh_graph_proof) == 24,
                "rdma/mesh_graph.py Repeated, Proof");
+/* design/synchronization-signature-change-request.md items 1, 4 and 6: released values' completion scopes as the
+   native compiler made them, in these shared canonical records (the native compiler's own completion and writer
+   vectors are of these types, native fa9f4a8a), borrowed under their owner: completion c, counter `counter`
+   of value `value` completed `total` times an execution by writers writer[c.writer .. c.writer + c.writers) (each its
+   dispatch, the dispatch incrementing for it, its metal_ir_laters index `later`, MESH_GRAPH_NONE for a host or
+   unsplit writer, whose readiness the owner holds, and its completions `count`), publishing each of its releases
+   release[release_first[c] .. release_first[c + 1]) (its owner call and representative transfer) once, after the
+   last of them, whichever writer's that is */
+struct mesh_graph_completion { uint32_t value, counter, writer, writers; uint64_t total; };
+struct mesh_graph_completion_writer { uint32_t dispatch, completion, later, padding; uint64_t count; };
+struct mesh_graph_release { uint32_t owner, transfer; };
+_Static_assert(sizeof(struct mesh_graph_completion) == 24 && sizeof(struct mesh_graph_completion_writer) == 24 &&
+               sizeof(struct mesh_graph_release) == 8, "rdma/mesh_graph.py Completion, CompletionWriter, Release");
+struct mesh_graph_scopes_data { size_t completions, writers, releases; const struct mesh_graph_completion *completion;
+                                const struct mesh_graph_completion_writer *writer; const size_t *release_first;
+                                const struct mesh_graph_release *release; };
+/* one row's scopes (struct mesh_graph_scopes_data: one native row Program's own vectors, its counts and borrowed
+   arrays). mesh_graph_scopes_create: reference counted as struct mesh_graph_relation is, over rows row[0 .. rows), the
+   descriptors and their arrays borrowed (no copy), adopting `owner` on success (release_owner(owner) with the last
+   reference; NULL: the caller keeps them alive; on failure the caller keeps it), retained by every signature holding
+   it; mesh_graph_scopes_rows its descriptors. EINVAL for a row whose writer range or release range is out of bounds,
+   or whose writers' counts do not sum to its total */
+struct mesh_graph_scopes;
+int mesh_graph_scopes_create(size_t rows, const struct mesh_graph_scopes_data *row, void (*release_owner)(void *),
+                             void *owner, struct mesh_graph_scopes **out);
+void mesh_graph_scopes_retain(struct mesh_graph_scopes *);
+void mesh_graph_scopes_free(struct mesh_graph_scopes *);
+const struct mesh_graph_scopes_data *mesh_graph_scopes_rows(const struct mesh_graph_scopes *, size_t *rows);
+/* one realized occurrence of row `row`'s completion `completion`: `execution` the block execution t (its
+   MetalSitesEmit operations' execution), `generation` the writer invocation e = t every + ordinal of its row, `copy`
+   e modulo its counter placement's copies (the counter reset to zero for it; no runtime ring generation word is
+   kept); its writers' sites site[site .. site + writers) and its releases' publication events [event, event +
+   releases), event k's published value published[k] (its release owner's execution e + 1). A site is the
+   writer's actual completion sites in that occurrence: `first` the task of the one completing its ready groups (a host
+   writer's one site), `later` its later pass's (MESH_GRAPH_NONE: none), `first_site` and `later_site` their native
+   sites. A publication event is an index of `published`, disjoint from operations and tasks: it is no operation and no
+   processor's, and occurs once after its occurrence's `total` completions */
+struct mesh_graph_occurrence { uint32_t completion, site, event, row; uint64_t execution, generation, copy; };
+struct mesh_graph_site { uint32_t first, later, first_site, later_site; };
+/* a MESH_GRAPH_BRIDGE_READ operation `operation` answered by publication event `event`: the event's release owner the
+   read's vertex's task's label, its representative transfer the read's object less MESH_GRAPH_PLAN_SUPPLIED, its value
+   the read's */
+struct mesh_graph_answered { uint32_t event, operation; };
+_Static_assert(sizeof(struct mesh_graph_occurrence) == 40 && sizeof(struct mesh_graph_site) == 16 &&
+               sizeof(struct mesh_graph_answered) == 8, "rdma/mesh_graph.py Occurrence, Site, Answered");
 struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dependences, synchronized, uncovered,
                               redundant, unwaited, states[MESH_GRAPH_STATES];
                               struct mesh_graph_processor *processor; struct mesh_graph_task *task;
@@ -511,7 +571,12 @@ struct mesh_graph_signature { uint32_t processors, tasks; size_t operations, dep
                               size_t *previous, *waited, *first, *order; uint64_t *unknown; uint32_t *alias;
                               unsigned char digest[32]; size_t events; struct mesh_graph_event *event;
                               size_t spans; struct mesh_graph_span *span; size_t repeats;
-                              struct mesh_graph_repeated *repeated; size_t proofs; struct mesh_graph_proof *proof; };
+                              struct mesh_graph_repeated *repeated; size_t proofs; struct mesh_graph_proof *proof;
+                              struct mesh_graph_scopes *scopes; struct mesh_graph_realized *realized;
+                              size_t occurrences, sites, publications, answers;
+                              const struct mesh_graph_occurrence *occurrence; const struct mesh_graph_site *site;
+                              const uint64_t *published; struct mesh_graph_answered *answer;
+                              struct mesh_graph_site *projected; };
 int mesh_graph_signature(uint32_t processors, const struct mesh_graph_processor *processor, uint32_t tasks,
                          const struct mesh_graph_task *task, size_t dependences,
                          const struct mesh_graph_dependence *dependence, size_t operations,
@@ -530,6 +595,22 @@ int mesh_graph_signature_repeated(uint32_t processors, const struct mesh_graph_p
 int mesh_graph_signature_span(const struct mesh_graph_signature *kept, uint64_t executions,
                               struct mesh_graph_signature *signature);
 int mesh_graph_signature_program(struct mesh_graph_signature *, size_t events, const struct mesh_graph_event *);
+/* a built signature's completion scopes (retained) and their realized occurrences, sites and publication events, the
+   producer's own arrays borrowed (no copy) and its `owner` adopted on success (release_owner(owner) once the signature,
+   and every signature composed from it, is freed; NULL: the caller keeps them alive), replacing any earlier ones (their
+   references released, their SCOPED pairs UNMATCHED again before the new answers), as one transaction: on failure the
+   signature is as it was (its earlier scopes, arrays, states and digest), the caller keeps `owner` and its arrays, and
+   no release_owner call is made; every MESH_GRAPH_BRIDGE_READ whose (owner, representative transfer, value) is one
+   event's answered by it (struct mesh_graph_answered; its pair MESH_GRAPH_SCOPED); the counts and digest again. No pair, edge or least delay of the
+   task graph changes: an event has no task, so no obligation is covered by it. `realized` the adopted arrays' holder
+   (reference counted); `projected` a composed signature's sites, their tasks moved into its task numbering (NULL
+   otherwise). EINVAL for an occurrence's row, completion, sites or events out of range, or a site's task out of
+   range */
+struct mesh_graph_realized;
+int mesh_graph_signature_scopes(struct mesh_graph_signature *, struct mesh_graph_scopes *, size_t occurrences,
+                                const struct mesh_graph_occurrence *, size_t sites, const struct mesh_graph_site *,
+                                size_t publications, const uint64_t *published, void (*release_owner)(void *),
+                                void *owner);
 int mesh_graph_signature_spans(struct mesh_graph_signature *, size_t spans, const struct mesh_graph_span *);
 
 /* design/synchronization-signature-change-request.md item 1, "its SHA-256 is part of the compiled artifact": the
@@ -541,12 +622,25 @@ _Static_assert(sizeof(struct mesh_graph_record) == 72, "mesh_graph_record");
 int mesh_graph_record(const struct mesh_graph_signature *signature, void *record, size_t room, size_t *made);
 int mesh_graph_record_read(const void *record, struct mesh_graph_signature *signature);
 int mesh_graph_archive(const struct mesh_graph_signature *, void *bytes, size_t room, size_t *made);
-int mesh_graph_archive_read(const void *bytes, size_t length, struct mesh_graph_signature *);
+/* mesh_graph_archive_read: a scoped signature's scopes and realized arrays are views of `bytes` (8-byte aligned), its
+   `owner` adopted on success by them (release_owner(owner) once the last signature holding them is freed; NULL: the
+   caller keeps `bytes` alive); a signature without scopes borrows nothing and releases `owner` at once. On failure the
+   caller keeps it. mesh_graph_record_read borrows the same views of its record, which the caller keeps alive. A
+   restored writer's `later` is the integer only: the native owner of the metal_ir_laters it indexes (its readiness) is
+   not in the record, so a standalone reload does not carry that provenance */
+int mesh_graph_archive_read(const void *bytes, size_t length, void (*release_owner)(void *), void *owner,
+                            struct mesh_graph_signature *);
 /* design/synchronization-signature-change-request.md item 1; L. Lamport, CACM 21(7), 1978: one program's signature from
    two producers' (a: the plan's, b: the replay's). Processors are united by identity, a's tasks and dependences come
    first and b's after, each producer's pairs keep their states, witnesses and dependences, and a native operation
    both list (BRIDGE_START, same processor identity, object and value) is b's, its `alias` a's task, with a's operations
-   on that processor before it in a's order placed before it */
+   on that processor before it in a's order placed before it. Both producers' completion scopes and realized
+   occurrences are kept, each distinct occurrence and publication event once: a's rows, sites, events and tasks first,
+   b's after them (b's row r a's rows + r, its own row for the same scopes; site k a's sites + k; event k a's
+   publications + k; task t a's tasks + t), each original scopes and realized holder retained (each owner kept) and only
+   the composed descriptors, occurrences, sites and published values made (mesh_graph_signature_scopes' projected);
+   every BRIDGE_READ answered over all events, no task edge added. EOVERFLOW where a composed row, site or event index
+   exceeds uint32_t */
 int mesh_graph_compose(const struct mesh_graph_signature *a, const struct mesh_graph_signature *b,
                        struct mesh_graph_signature *signature);
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §9, Theorem 4, Fig. 6

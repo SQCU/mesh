@@ -1217,6 +1217,18 @@ static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *call
                                         .primitive=MESH_GRAPH_BRIDGE_START,.vertex=u,
                                         .object=MESH_GRAPH_PLAN_SUBMISSION+f,.every=nf,.ordinal=(uint64_t)i+1,
                                         .startup=MESH_GRAPH_NONE});
+      /* design/synchronization-signature-change-request.md items 1 and 4: this node's bridge reading the supplied word
+         of each release it sources (plan_walk: a demand's root, `in` MESH_ABSENT, sends with field MESH_ABSENT, its
+         hops' word plan_supplied, the word mesh_host_publish raises to the execution + 1), at call j's bridge vertex:
+         the read's identity its call (the vertex's task label) and the demand's representative transfer `first`, its
+         value K every + ordinal the execution + 1 it waits for */
+      for(uint32_t q=0;!status && v==s && (p->nodes>>v&1) && q<p->demands;q++)
+        if(p->demand[q].source==s)
+          status=plan_signed_put(&o,(struct mesh_graph_repeated){.processor=2*v+1,.primitive=MESH_GRAPH_BRIDGE_READ,
+                                                                 .vertex=actor[j]+plan_rank(p->nodes,v),
+                                                                 .object=MESH_GRAPH_PLAN_SUPPLIED+p->demand[q].first,
+                                                                 .every=nf,.ordinal=(uint64_t)i+1,
+                                                                 .startup=MESH_GRAPH_NONE});
       for(size_t q=first[(size_t)v*count+f];!status && q<first[(size_t)v*count+f+1];q++){
         const uint32_t a=(uint32_t)tell[q],tail=from[built+a];
         status=plan_signed_put(&o,(struct mesh_graph_repeated){.processor=2*v+1,.primitive=MESH_GRAPH_BRIDGE_RAISE,
@@ -3006,7 +3018,7 @@ struct plan_saved {
   unsigned char inputs[32];
 };
 struct plan_saved_function { uint64_t page,bytes; uint32_t values,transfers; };
-#define PLAN_SAVED_MAGIC UINT64_C(0x364e414c5048534d)
+#define PLAN_SAVED_MAGIC UINT64_C(0x374e414c5048534d)
 /* the optional section after the signature: struct mesh_planned's first (functions + 1), transfer (first[functions])
    and extent (extents) */
 struct plan_saved_extents { uint64_t tag,extents; };
@@ -3125,7 +3137,7 @@ static void plan_signature_put(struct plan_archive *out,const struct mesh_planne
   void *signature=malloc((size_t)bytes);
   if(!signature && !out->status)out->status=ENOMEM;
   if(!out->status){size_t made=0;out->status=mesh_graph_archive(planned->signature,signature,(size_t)bytes,&made);}
-  plan_archive_bytes(out,signature,(size_t)bytes);free(signature);
+  plan_archive_put(out,signature,(size_t)bytes);free(signature);
 }
 /* the planned first, transfer and extent (struct plan_saved_extents), where the planned result has them */
 static void plan_extents_put(struct plan_archive *out,const struct mesh_planned *planned,uint32_t count){
@@ -3163,6 +3175,17 @@ int mesh_plan_save(struct mesh_ctx *context,uint64_t program,const struct mesh_f
   if(out.status){free(out.bytes);return out.status;}
   head.bytes=out.size;memcpy(out.bytes,&head,sizeof head);
   *bytes=out.bytes;*length=out.size;return 0;
+}
+/* the archived signature viewed in place (8-aligned, plan_signature_put) and read under the loaded bytes' owner: a
+   scoped signature's views of it keep one reference of `bytes` (plan_bytes_release with its last holder) */
+static int plan_signature_get(struct plan_archive *input,uint64_t length,struct plan_bytes *bytes,
+                              struct mesh_graph_signature *signature){
+  const void *archived=plan_archive_view(input,length,1);
+  if(!archived)return input->status;
+  __atomic_fetch_add(&bytes->references,1,__ATOMIC_RELAXED);
+  const int status=mesh_graph_archive_read(archived,(size_t)length,plan_bytes_release,bytes,signature);
+  if(status)__atomic_fetch_sub(&bytes->references,1,__ATOMIC_RELAXED);
+  return status;
 }
 static int plan_saved_span(uint64_t offset,uint64_t count,uint64_t width,uint64_t length){
   return offset<=length && count<=(length-offset)/width;
@@ -3295,7 +3318,6 @@ int mesh_plan_load(struct mesh_ctx *context,uint64_t group,uint64_t program,stru
      head.table_bytes>m->length-table_at-sizeof(struct mesh_algo))status=EINVAL;
   const size_t adjacency_bytes=status?0:(size_t)(head.table_bytes-table_prefix);
   uint32_t *adjacency=malloc(adjacency_bytes+1);
-  void *signature=NULL;
   if(!saved || !state || !value || !page || !adjacency)status=ENOMEM;
   for(uint32_t f=0;!status && f<count;f++){
     plan_archive_bytes(&input,saved+f,sizeof *saved);
@@ -3327,12 +3349,9 @@ int mesh_plan_load(struct mesh_ctx *context,uint64_t group,uint64_t program,stru
   planned->cause=(struct mesh_planned_cause *)(uintptr_t)plan_archive_view(&input,planned->orders,
                                                                            sizeof *planned->cause);
   if(input.status || head.signature>input.size-input.at){status=EINVAL;goto done;}
-  signature=malloc((size_t)head.signature);
-  if(!signature){status=ENOMEM;goto done;}
-  plan_archive_bytes(&input,signature,(size_t)head.signature);
+  if((status=plan_signature_get(&input,head.signature,loaded->bytes,planned->signature)))goto done;
   if(!input.status && input.at<input.size && (status=plan_extents_load(&input,functions,count,planned)))goto done;
   if(input.status || input.at!=input.size){status=EINVAL;goto done;}
-  if((status=mesh_graph_archive_read(signature,(size_t)head.signature,planned->signature)))goto done;
   if((uint64_t)nodes.count+1+adjacency[nodes.count]!=adjacency_bytes/sizeof *adjacency){status=EINVAL;goto done;}
   for(uint32_t j=0;j<ncalls;j++)if(planned->call[j].function!=calls[j]){status=ESTALE;goto done;}
   for(uint64_t r=0;r<head.rows;r++)page[r]=plan_saved_page(&head,destination,arenas,page[r],&status);
@@ -3348,7 +3367,7 @@ done:
   plan_prepared(context);
   if(status){plan_compiled_restore(functions,count,original);mesh_planned_free(planned);}
   for(uint32_t f=0;f<count;f++){if(state)free(state[f]);if(value)free(value[f]);}
-  free(saved);free(state);free(value);free(page);free(adjacency);free(signature);free(original);
+  free(saved);free(state);free(value);free(page);free(adjacency);free(original);
   return status;
 }
 
@@ -3552,7 +3571,7 @@ struct plan_saved_arrays { uint32_t count,dependences,tasks,befores,resources,pa
    preparation retained it), after its weights: these scalars, then demand[demands], demand_of[transfers] and
    release_of[transfers] */
 struct plan_saved_grouped { uint32_t transfers,demands,releases,nodes,self,padding; };
-#define PLAN_SAVED_PROGRAM UINT64_C(0x314d47525048534d)
+#define PLAN_SAVED_PROGRAM UINT64_C(0x324d47525048534d)
 static void plan_arrays_put(struct plan_archive *out,const struct mesh_function *x,const struct mesh_grouped *g){
   uint64_t pairs=0;
   for(uint32_t i=0;i<x->count;i++)pairs+=2*((uint64_t)x->declared[i].from.dims+x->declared[i].to.dims);
@@ -3676,7 +3695,6 @@ int mesh_program_load(struct mesh_ctx *context,uint64_t group,uint64_t program,u
   struct plan_saved_function *saved=calloc((size_t)count+1,sizeof *saved);
   void **state=calloc((size_t)count+1,sizeof *state);
   uint32_t *page=NULL,*adjacency=NULL;
-  void *signature=NULL;
   size_t adjacency_bytes=0;
   int prepared=0;
   if(!pairs || !paired || !grouped || !saved || !state)status=ENOMEM;
@@ -3712,10 +3730,8 @@ int mesh_program_load(struct mesh_ctx *context,uint64_t group,uint64_t program,u
     plan_archive_bytes(&input,adjacency,adjacency_bytes);
     if(input.status || head.signature>input.size-input.at)status=EINVAL;
   }
-  if(!status && !(signature=malloc((size_t)head.signature+1)))status=ENOMEM;
-  if(!status)plan_archive_bytes(&input,signature,(size_t)head.signature);
   if(!status && !(planned->signature=calloc(1,sizeof *planned->signature)))status=ENOMEM;
-  if(!status && !input.status)status=mesh_graph_archive_read(signature,(size_t)head.signature,planned->signature);
+  if(!status && !input.status)status=plan_signature_get(&input,head.signature,loaded->bytes,planned->signature);
   if(!status && !input.status)status=plan_orders_valid(planned,local->calls,ncalls,local->function,
                                                        planned->signature->tasks);
   if(!status && top.extents)status=plan_extents_load(&input,local->function,count,planned);
@@ -3837,7 +3853,7 @@ int mesh_program_load(struct mesh_ctx *context,uint64_t group,uint64_t program,u
   }
   if(prepared)plan_prepared(context);
   for(uint32_t f=0;state && f<count;f++)free(state[f]);
-  free(pairs);free(paired);free(grouped);free(saved);free(state);free(page);free(adjacency);free(signature);
+  free(pairs);free(paired);free(grouped);free(saved);free(state);free(page);free(adjacency);
   if(status)mesh_local_free(local);
   return status;
 }

@@ -400,9 +400,9 @@ NONE = 2 ** 32 - 1
 KINDS = ('queue', 'host', 'bridge', 'kernel')
 PRIMITIVES = ('submit', 'queue_signal', 'queue_wait', 'fence_update', 'fence_wait', 'pass_barrier', 'queue_barrier',
               'host_wait', 'host_notify', 'bridge_start', 'threadgroup_barrier', 'simdgroup_barrier', 'atomic',
-              'producer_barrier', 'bridge_raise', 'initial', 'host_publish', 'kernel_fence', 'host_signal')
-NODES, PLAN_COUNT, PLAN_SUBMISSION, LOWERED = 64, 0x80000000, 0xC0000000, 0x40000000
-STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed')
+              'producer_barrier', 'bridge_raise', 'initial', 'host_publish', 'kernel_fence', 'host_signal', 'bridge_read')
+NODES, PLAN_COUNT, PLAN_SUBMISSION, LOWERED, PLAN_SUPPLIED = 64, 0x80000000, 0xC0000000, 0x40000000, 0x20000000
+STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed', 'scoped')
 
 # mesh-graph.h mesh_graph_search, mesh_graph_breadth, mesh_graph_search_free, mesh_graph_relation_head,
 # mesh_graph_closure and mesh_graph_closure_free; MESH_GRAPH_GIVEN and SIZE_MAX
@@ -507,6 +507,41 @@ class Proof(C.Structure):
                 ('proven', C.c_uint32)]
 
 
+# mesh-graph.h struct mesh_graph_completion, mesh_graph_completion_writer, mesh_graph_release, mesh_graph_scopes_data,
+# mesh_graph_occurrence, mesh_graph_site and mesh_graph_answered: completion scopes and their realized events
+class Completion(C.Structure):
+    _fields_ = [('value', C.c_uint32), ('counter', C.c_uint32), ('writer', C.c_uint32), ('writers', C.c_uint32),
+                ('total', C.c_uint64)]
+
+
+class CompletionWriter(C.Structure):
+    _fields_ = [('dispatch', C.c_uint32), ('completion', C.c_uint32), ('later', C.c_uint32), ('padding', C.c_uint32),
+                ('count', C.c_uint64)]
+
+
+class Release(C.Structure):
+    _fields_ = [('owner', C.c_uint32), ('transfer', C.c_uint32)]
+
+
+class ScopesData(C.Structure):
+    _fields_ = [('completions', C.c_size_t), ('writers', C.c_size_t), ('releases', C.c_size_t),
+                ('completion', C.POINTER(Completion)), ('writer', C.POINTER(CompletionWriter)),
+                ('release_first', C.POINTER(C.c_size_t)), ('release', C.POINTER(Release))]
+
+
+class Occurrence(C.Structure):
+    _fields_ = [('completion', C.c_uint32), ('site', C.c_uint32), ('event', C.c_uint32), ('row', C.c_uint32),
+                ('execution', C.c_uint64), ('generation', C.c_uint64), ('copy', C.c_uint64)]
+
+
+class Site(C.Structure):
+    _fields_ = [('first', C.c_uint32), ('later', C.c_uint32), ('first_site', C.c_uint32), ('later_site', C.c_uint32)]
+
+
+class Answered(C.Structure):
+    _fields_ = [('event', C.c_uint32), ('operation', C.c_uint32)]
+
+
 class Signature(C.Structure):
     _fields_ = [('processors', C.c_uint32), ('tasks', C.c_uint32), ('operations', C.c_size_t),
                 ('dependences', C.c_size_t), ('synchronized', C.c_size_t), ('uncovered', C.c_size_t),
@@ -519,7 +554,13 @@ class Signature(C.Structure):
                 ('unknown', C.POINTER(C.c_uint64)), ('alias', C.POINTER(C.c_uint32)), ('digest', C.c_ubyte * 32), ('events', C.c_size_t),
                 ('event', C.POINTER(Event)), ('spans', C.c_size_t), ('span', C.POINTER(Span)),
                 ('repeats', C.c_size_t), ('repeated', C.POINTER(Repeated)), ('proofs', C.c_size_t),
-                ('proof', C.POINTER(Proof))]
+                ('proof', C.POINTER(Proof)), ('scopes', C.c_void_p), ('realized', C.c_void_p),
+                ('occurrences', C.c_size_t), ('sites', C.c_size_t), ('publications', C.c_size_t),
+                ('answers', C.c_size_t), ('occurrence', C.POINTER(Occurrence)), ('site', C.POINTER(Site)),
+                ('published', C.POINTER(C.c_uint64)), ('answer', C.POINTER(Answered)), ('projected', C.POINTER(Site))]
+    # the Python buffers whose bytes a scoped signature's views borrow (from_record, from_archive; a composed
+    # signature's its operands'), kept as long as it is; None: it borrows none
+    borrowed = None
 
 
 PRINTERS = ('mesh_graph_matrix_market', 'mesh_graph_dot', 'mesh_graph_space_time')
@@ -579,8 +620,29 @@ def shares(comm, comp, upper):
     return list(share[:ranks])
 
 
+# mesh-graph.h mesh_graph_shares_coupled (resolved on use): `comm[i][p]` stage i's collective time a unit of part p's
+# largest share; each of `rows` (stage, fixed, {(part, rank): coefficient}) one row of its stage, its coefficients over
+# the full share variables part * ranks + rank; share[p][rank] part p's share of that rank
+def shares_coupled(comm, rows, upper, parts):
+    ranks, stages, first = len(upper), len(comm), [0]
+    for _, _, coefficients in rows:
+        first.append(first[-1] + len(coefficients))
+    call = LIB.mesh_graph_shares_coupled
+    call.restype = C.c_int
+    call.argtypes = [C.c_uint32] * 4 + [C.POINTER(C.c_double), C.POINTER(C.c_uint32), C.POINTER(C.c_double),
+                                        C.POINTER(C.c_size_t), C.POINTER(C.c_uint32)] + [C.POINTER(C.c_double)] * 3
+    share = (C.c_double * max(parts * ranks, 1))()
+    _check(call(ranks, parts, stages, len(rows), _array(C.c_double, [c for stage in comm for c in stage])[0],
+                _array(C.c_uint32, [stage for stage, _, _ in rows])[0],
+                _array(C.c_double, [fixed for _, fixed, _ in rows])[0], _array(C.c_size_t, first)[0],
+                _array(C.c_uint32, [p * ranks + j for _, _, coefficients in rows for p, j in coefficients])[0],
+                _array(C.c_double, [c for _, _, coefficients in rows for c in coefficients.values()])[0],
+                _array(C.c_double, upper)[0], share))
+    return [list(share[p * ranks:(p + 1) * ranks]) for p in range(parts)]
+
+
 # BSL §3; R. E. Tarjan, SIAM J. Comput. 1(2), 1972; mesh-graph.h mesh_graph_components: each vertex's strongly
-# connected component
+# connected component, a View of the caller-owned native array (its edge operands its owner), by vertex
 LIB.mesh_graph_components.restype = C.c_int
 LIB.mesh_graph_components.argtypes = [C.c_uint32, C.c_size_t, C.POINTER(C.c_uint32), C.POINTER(C.c_uint32),
                                       C.POINTER(C.c_uint32), C.POINTER(C.c_uint32)]
@@ -590,7 +652,7 @@ def components(vertices, edges):
     tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
     component, count = (C.c_uint32 * max(vertices, 1))(), C.c_uint32()
     _check(LIB.mesh_graph_components(vertices, len(edges), tails[0], heads[0], component, C.byref(count)))
-    return list(component[:vertices])
+    return View((tails, heads), component, range(vertices), int)
 
 
 # mesh-graph.h mesh_graph_rows: items bucketed by key, stable; first[keys + 1], order the items grouped by key
@@ -679,9 +741,11 @@ def record(made):
     return buffer.raw[:size.value]
 
 
+# a scoped signature's views borrow `buffer`, which the returned signature keeps
 def from_record(data):
     buffer, made = C.create_string_buffer(bytes(data), len(data)), Signature()
     _check(LIB.mesh_graph_record_read(C.addressof(buffer), C.byref(made)))
+    made.borrowed = buffer
     return made
 
 
@@ -689,7 +753,7 @@ def from_record(data):
 # design/compilation-composition-change-request.md items 3 and 6
 LIB.mesh_graph_archive.restype = LIB.mesh_graph_archive_read.restype = LIB.mesh_graph_compose.restype = C.c_int
 LIB.mesh_graph_archive.argtypes = [C.POINTER(Signature), C.c_void_p, C.c_size_t, C.POINTER(C.c_size_t)]
-LIB.mesh_graph_archive_read.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(Signature)]
+LIB.mesh_graph_archive_read.argtypes = [C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p, C.POINTER(Signature)]
 LIB.mesh_graph_compose.argtypes = [C.POINTER(Signature), C.POINTER(Signature), C.POINTER(Signature)]
 
 
@@ -705,13 +769,16 @@ def archive(made):
 
 def from_archive(data):
     buffer, made = C.create_string_buffer(bytes(data), len(data)), Signature()
-    _check(LIB.mesh_graph_archive_read(C.addressof(buffer), len(data), C.byref(made)))
+    _check(LIB.mesh_graph_archive_read(C.addressof(buffer), len(data), None, None, C.byref(made)))
+    made.borrowed = buffer
     return made
 
 
+# the composed signature retains both operands' scopes and realized holders, so it keeps their borrowed buffers
 def compose(a, b):
     made = Signature()
     _check(LIB.mesh_graph_compose(C.byref(a), C.byref(b), C.byref(made)))
+    made.borrowed = (a.borrowed, b.borrowed)
     return made
 
 
