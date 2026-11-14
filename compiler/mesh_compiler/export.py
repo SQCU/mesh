@@ -150,6 +150,8 @@ def read(program, aliases=None):
     graph_module, signature = program.graph_module, program.graph_signature
     nodes = list(graph_module.graph.nodes)
 
+    # rejection filters are forbidden, even in temporary integration validation: a dimension, input kind or output
+    # kind this owner cannot compile raises here
     for node in nodes:
         value = node.meta.get("val")
         if isinstance(value, torch.Tensor) and not all(isinstance(d, int) for d in value.shape):
@@ -262,18 +264,27 @@ def placeholders(function):
 # output's own value and each gradient output its exported output's own value through the same converter (so a call
 # of a reused export has its own results, keeping their views and storages among themselves); the call's value its
 # function's own result (compiler/mesh_compiler/ir.py RETURNED outputs under its out_spec, a TrainingResult with a
-# loss), read between calls by item or by a named field; no source forward is run and no actual state or argument is
-# read for its contents or written
+# loss), read between calls by item or by a named field; an attribute the program reads its actual value, a tensor's
+# the capture mode's fake of it (its target and real tensor recorded); no source forward is run and no actual state or
+# argument is read for its contents or written
 class Captured(torch.fx.Interpreter):
     def __init__(self, module, functions, options, fake):
         super().__init__(module)
         self.functions, self.options, self.fake, self.exported, self.bound = functions, options, fake, {}, {}
+        self.attributes = {}
         with fake:
             self.token = torch.empty(0)
 
     def run_node(self, node):
         self.calling = node
         return super().run_node(node)
+
+    def get_attr(self, target, args, kwargs):
+        value = super().get_attr(target, args, kwargs)
+        if not isinstance(value, torch.Tensor):
+            return value
+        self.attributes[self.calling] = target, value
+        return self.fake.from_tensor(value)
 
     def captured(self, target, module, args, kwargs):
         leaves, structure = pytree.tree_flatten((args, kwargs))
@@ -321,6 +332,7 @@ class Captured(torch.fx.Interpreter):
     def call_function(self, target, args, kwargs):
         if target in self.functions:
             return self.captured(target, Function(target), args, kwargs)
+        # rejection filters are forbidden: an operation between calls that no captured function owns raises here
         if target not in (operator.getitem, getattr) or not isinstance(args[0], (tuple, list, dict)):
             raise NotImplementedError(f"{self.calling.name} runs between the program's compiled calls; every "
                                       "function of a program is captured")
@@ -333,8 +345,9 @@ def calls(program, args, functions, **export_options):
     parameters = inspect.signature(program.forward).parameters
     graph = Calls(functions).trace(program, concrete_args={
         name: pytree.tree_map(lambda _: PH, value) for name, value in zip(parameters, args)})
+    # rejection filters are forbidden: a traced node of no capture owner raises here, never dropped from the program
     for node in graph.nodes:
-        if node.op not in ("placeholder", "call_module", "call_function", "output"):
+        if node.op not in ("placeholder", "get_attr", "call_module", "call_function", "output"):
             raise NotImplementedError(f"{node.name} runs between the program's compiled calls; every function of a "
                                       "program is captured")
     return capture(torch.fx.GraphModule(program, graph), args, functions, export_options, program)
@@ -355,7 +368,10 @@ def called(module, args, **export_options):
 # its flat arguments), each the outer node holding that value at the call, and each output spec of its function one
 # node after it with its role in its function's outputs; a value held by its latest node (an output, or a buffer or
 # user input mutation of it, the mutation's value the written fake, Captured.captured), a state placeholder's target
-# its tensor's name in `root` (else its call's name and key) and its kind the function's; the program's outputs its
+# its tensor's name in `root` (else its call's name and key) and its kind the function's; each tensor attribute the
+# program reads (Captured.get_attr, torch.fx Interpreter get_attr) its fake's holder: a state placeholder of its name
+# in `root` (else its attribute target) and its role there (PARAMETER, BUFFER, else CONSTANT_TENSOR, its real tensor
+# kept), unless that fake is already held, so a written attribute is a BUFFER_MUTATION; the program's outputs its
 # token chain, each written state or argument with its role and target, and each leaf of its actual result (the calls'
 # own results, a training call's TrainingResult among them) a USER_OUTPUT, under that result's structure
 def capture(module, args, functions, options, root):
@@ -365,6 +381,8 @@ def capture(module, args, functions, options, root):
     outcome = graph.process_outputs(interpreter.run(*leaves, enable_io_processing=False))
     named = {id(tensor): name for name, tensor in reversed([*root.named_parameters(remove_duplicate=False),
                                                             *root.named_buffers(remove_duplicate=False)])}
+    # `first` stays the insertion anchor for every new state and token placeholder: an attribute's get_attr node, which
+    # may be it, keeps its place until the final cleanup erases it unused
     first, inputs = next(iter(graph.nodes)), [node for node in graph.nodes if node.op == "placeholder"]
     held, roots, chain, written, state, kinds, tokens, bound = {}, {}, [], {}, {}, {}, [], {}
 
@@ -379,6 +397,18 @@ def capture(module, args, functions, options, root):
 
     for node, value in zip(inputs, leaves, strict=True):
         roots[id(value)] = hold(node, value)
+    parameters = {id(tensor) for _, tensor in root.named_parameters(remove_duplicate=False)}
+    buffers = {id(tensor) for _, tensor in root.named_buffers(remove_duplicate=False)}
+    for node, (target, tensor) in interpreter.attributes.items():
+        value = fake.from_tensor(tensor)
+        if id(value) not in held:
+            path = named.get(id(tensor), target)
+            with graph.inserting_before(first):
+                roots[id(value)] = hold(graph.placeholder(path.replace(".", "_")), value)
+            state[roots[id(value)].name] = path, tensor
+            kinds[roots[id(value)].name] = (InputKind.PARAMETER if id(tensor) in parameters else InputKind.BUFFER
+                                            if id(tensor) in buffers else InputKind.CONSTANT_TENSOR)
+        node.replace_all_uses_with(holder(value))
     for call, (key, values, produced) in interpreter.bound.items():
         function, names, arguments = interpreter.exported[key], placeholders(interpreter.exported[key]), []
         for name, value in zip(names, values):
@@ -416,7 +446,7 @@ def capture(module, args, functions, options, root):
     graph.output_node().args = (tuple(node for *_, node in results),)
     made = {node for call in bound.values() for node in call.outputs}
     for node in reversed(list(graph.nodes)):
-        if node.op == "call_function" and node not in bound and node not in made and not node.users:
+        if node.op in ("call_function", "get_attr") and node not in bound and node not in made and not node.users:
             graph.erase_node(node)
     graph.set_codegen(torch.fx.graph.CodeGen())
     module.recompile()
@@ -483,6 +513,7 @@ def substitute(captured, key, parts):
                     prototype.storage_offset() * prototype.element_size()
                 held = describer.get_storage_id(actual.untyped_storage()), origin, actual
                 storage = describer.get_storage_id(prototype.untyped_storage())
+                # rejection filters are forbidden: a correspondence this owner cannot relocate raises, never overwritten
                 if bound.setdefault(storage, held)[:2] != held[:2]:
                     raise ValueError(f"{node.name} part {k}: one prototype input storage declared on two actual "
                                      f"storages or origins {bound[storage][:2]} and {held[:2]}")

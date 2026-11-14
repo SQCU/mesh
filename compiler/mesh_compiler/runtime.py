@@ -19,7 +19,10 @@ class Arguments:
         state = {name: tensor.detach() for name, (_, tensor) in self.exported.state.items() if name not in self.live}
         state.update((name, torch.empty(0)) for name in self.exported.tokens)
         names = scheduled.inputs[self.entry]
-        self.arguments = [state.get(name) for name in names]
+        # rejection filters are forbidden, even in temporary integration validation: an entry input no binding owner
+        # provides raises here, never passed as None
+        given = {**dict.fromkeys(self.live), **dict.fromkeys(self.exported.user_inputs), **state}
+        self.arguments = [given[name] for name in names]
         self.positions = {}
         for position, name in enumerate(names):
             self.positions.setdefault(name, []).append(position)
