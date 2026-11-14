@@ -283,10 +283,14 @@ int mesh_program_save(struct mesh_ctx *context,uint64_t program,const struct mes
                       size_t *length);
 int mesh_program_load(struct mesh_ctx *context,uint64_t group,uint64_t program,uint64_t deadline,const void *bytes,
                       size_t length,void (*release)(void *),void *owner,struct mesh_local *local);
-/* design/torch-capture-change-request.md item 6: a network result's copies (local->first's values: its functions'
-   values, then its roots) as byte offsets offset[k] in one mapping *view of the context's region, each copy's row's
-   page (local->offset[k]); UINT64_MAX for a copy of a run 0 value */
-void mesh_view_program(struct mesh_ctx *,const struct mesh_local *local,uint64_t *offset,struct mesh_view *view);
+/* design/torch-capture-change-request.md item 6: every retained copy of a network result (local->first's values: its
+   functions' values, then its roots; run 1 or 0 alike) in one mapping *view of the context's region, the view spanning
+   every row of every copy (each copy section.stride rows from its first row local->offset[k], each row one block at its
+   own bound page, not assumed contiguous). copy_offsets[local->offsets]: copy k's first row's byte offset in the view.
+   page_offsets[local->planned.rows.count], indexed by row - local->planned.rows.first: each copy's row's page's byte
+   offset in the view; defined only for those rows (not the plan's other rows, as its root row) */
+void mesh_view_program(struct mesh_ctx *,const struct mesh_local *local,uint64_t *copy_offsets,uint64_t *page_offsets,
+                       struct mesh_view *view);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

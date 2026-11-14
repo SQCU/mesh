@@ -329,7 +329,7 @@ for name, result, arguments in (
         ('mesh_local_load', C.c_int, [C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
         ('mesh_program_save', C.c_int, [CONTEXT, Q, C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
         ('mesh_program_load', C.c_int, [CONTEXT, Q, Q, Q, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
-        ('mesh_view_program', None, [CONTEXT, C.POINTER(Local), C.POINTER(Q), C.POINTER(View)]),
+        ('mesh_view_program', None, [CONTEXT, C.POINTER(Local), C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, C.POINTER(Planned)]),

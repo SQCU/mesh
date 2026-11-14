@@ -106,10 +106,12 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,u
   *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
 }
 
-/* design/torch-capture-change-request.md item 6; mesh-collective.h mesh_view_program: a network result's copies in
-   local->first's order (its functions' values, then its roots), each copy k's first row local->offset[k], its bytes
-   that row's page onward (its section's stride rows); the view the least to the greatest of those of run 1 values */
-void mesh_view_program(struct mesh_ctx *c,const struct mesh_local *local,uint64_t *offset,struct mesh_view *view){
+/* design/torch-capture-change-request.md item 6; mesh-collective.h mesh_view_program: one traversal of the retained
+   copies' rows (local->first's order; each copy's section.stride rows from local->offset[k], each row's mesh_page
+   address plan_bind_table's), its first pass the view's span, its second each copy's first row and each row as offsets
+   in it */
+void mesh_view_program(struct mesh_ctx *c,const struct mesh_local *local,uint64_t *copy_offsets,uint64_t *page_offsets,
+                       struct mesh_view *view){
   struct hdr *m=c->M;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t low=UINT64_MAX,high=0;
@@ -118,12 +120,14 @@ void mesh_view_program(struct mesh_ctx *c,const struct mesh_local *local,uint64_
       const uint32_t n=f<local->functions?local->function[f].values:local->roots;
       const struct mesh_value *value=f<local->functions?local->function[f].value:local->root;
       for(uint32_t i=0;i<n;i++,v++)
-        for(size_t k=local->first[v];k<local->first[v+1];k++){
-          const uint64_t a=atomic_load_explicit(&mesh_page(m)[local->offset[k]].address,memory_order_relaxed),
-                         z=a+(uint64_t)value[i].section.stride*block;
-          if(!pass && value[i].run){if(a<low)low=a;if(z>high)high=z;}
-          if(pass)offset[k]=value[i].run?a-low:UINT64_MAX;
-        }
+        for(size_t k=local->first[v];k<local->first[v+1];k++)
+          for(uint32_t r=0;r<value[i].section.stride;r++){
+            const uint64_t row=local->offset[k]+r,
+                           a=atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed);
+            if(!pass){if(a<low)low=a;if(a+block>high)high=a+block;continue;}
+            page_offsets[row-local->planned.rows.first]=a-low;
+            if(!r)copy_offsets[k]=a-low;
+          }
     }
   *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
 }

@@ -1,0 +1,29 @@
+{
+  "command": [
+    "cc",
+    "-std=c11",
+    "-fblocks",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fsyntax-only",
+    "-DMESH_PROVIDER_RESERVED_QPS=1",
+    "-ffp-contract=off",
+    "-isystem",
+    ".build/highs/HiGHS-1.15.1/highs",
+    "-isystem",
+    ".build/highs/HiGHS-1.15.1",
+    "-isystem",
+    ".build/isl/isl-0.27/include",
+    "mesh-dataflow.c"
+  ],
+  "exit_code": 0,
+  "hashes": {
+    "rdma/mesh-dataflow.c": "0d3c6175c3a6b1d8d15cdd8319184349ed0c0c87549c2ecb7e24084653a42854",
+    "rdma/mesh-collective.h": "d9820eb7fba898520035623a5828adccbf478338b05bd00ddd42b5bcfefcf370",
+    "rdma/mesh.py": "77ade2fa8b8e230a5833da5a37507fc88484cc9d776e89dba6a7851fd010935e"
+  },
+  "changed_during_check": [],
+  "source_only": true
+}
