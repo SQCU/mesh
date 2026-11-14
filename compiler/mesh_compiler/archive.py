@@ -1,4 +1,7 @@
-# design/data-flow.md; design/compiler-archive-assignment-2026-11-13.md, archive of the completed targets
+# design/data-flow.md; design/aot-compilation-change-request.md A8 to A10 and appendix item 6: the archive of one
+# completed machine program (its native target, joint result and recipe), with the captured program's per-function
+# records as explicit typed records indexed by function ordinal (the completed target's body order, CallAnalysis.keys);
+# a captured function's key, which may be a callable, is compilation-only and is not saved
 import dataclasses
 import json
 import pathlib
@@ -19,7 +22,8 @@ def tuples(value):
 def save(directory, scheduled):
     directory = pathlib.Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    exported = scheduled.exported
+    exported, (target,) = scheduled.exported, scheduled.functions.values()
+    ordinal = {body.key: k for k, body in enumerate(target.bodies)}
     torch.save({name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()}, directory / "state.pt")
     (directory / "scheduled.json").write_text(json.dumps({
         "output_processor": scheduled.output_processor,
@@ -27,12 +31,14 @@ def save(directory, scheduled):
         "machines": scheduled.machines,
         "engines": scheduled.engines,
         "inputs": scheduled.inputs,
-        "channels": scheduled.channels,
+        "channels": [{"function": ordinal[key], "channels": count} for key, count in scheduled.channels.items()],
         "feedforward": scheduled.feedforward,
         "stored": scheduled.stored,
-        "invariant": scheduled.invariant,
-        "carried": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
-                    for channel, sender, receiver, dtype, shape, stride in scheduled.carried],
+        "invariant": [{"function": ordinal[key], "records": records} for key, records in scheduled.invariant.items()],
+        "carried": [{"function": ordinal[key],
+                     "transfers": [[channel, sender, receiver, str(dtype).removeprefix("torch."), shape, stride]
+                                   for channel, sender, receiver, dtype, shape, stride in transfers]}
+                    for key, transfers in scheduled.carried.items()],
         "plan": scheduled.plan and {
             **{field.name: getattr(scheduled.plan, field.name) for field in dataclasses.fields(scheduled.plan)},
             "record": scheduled.plan.record.hex(), "signature": scheduled.plan.signature.hex(),
@@ -59,8 +65,9 @@ def load(directory):
                         {name: InputKind[kind] for name, kind in about["state_kinds"].items()})
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     functions = {processor: native.restore(saved, directory) for processor, saved in about["targets"].items()}
-    carried = [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
-               for channel, sender, receiver, dtype, shape, stride in about["carried"]]
+    carried = {record["function"]: [(channel, sender, receiver, getattr(torch, dtype), shape, stride)
+                                            for channel, sender, receiver, dtype, shape, stride in record["transfers"]]
+               for record in about["carried"]}
     plan = about["plan"] and Plan(**{**about["plan"], "record": bytes.fromhex(about["plan"]["record"]),
                                      "signature": bytes.fromhex(about["plan"]["signature"]),
                                      "dependences": (mesh.Dependence * len(about["plan"]["dependences"]))(
@@ -71,8 +78,9 @@ def load(directory):
                                      "places": [(processor, root, tuple(version))
                                                 for processor, root, version in about["plan"]["places"]]})
     record = directory / "signature.record"
-    return Scheduled(exported, {}, devices, about["machines"], about["output_processor"], about["channels"],
+    channels = {record["function"]: record["channels"] for record in about["channels"]}
+    return Scheduled(exported, {}, devices, about["machines"], about["output_processor"], channels,
                      about["inputs"], about["feedforward"], carried, about["engines"], plan,
                      signature=record.read_bytes() if record.exists() else None, stored=about["stored"],
-                     invariant={processor: tuples(records) for processor, records in about["invariant"].items()},
+                     invariant={record["function"]: tuples(record["records"]) for record in about["invariant"]},
                      functions=functions)
