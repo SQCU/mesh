@@ -1,16 +1,21 @@
 # design/data-flow.md
+import functools
 import inspect
 import itertools
 import math
 import operator
 
 import torch
+from torch._export.passes.lift_constants_pass import lift_constants_pass
+from torch._export.utils import _collect_and_set_constant_attrs, node_inline_
 from torch._guards import detect_fake_mode
-from torch._ops import HigherOrderOperator
+from torch._higher_order_ops.map import map_dense
+from torch._higher_order_ops.scan import generic_scan
 from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode
 from torch.export.experimental import _export_forward_backward
 from torch.export.graph_signature import InputKind, OutputKind
 from torch.fx._symbolic_trace import PH
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.multiprocessing.reductions import StorageWeakRef
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -18,7 +23,6 @@ from torch.utils import _pytree as pytree
 
 from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, written
 
-WITH_EFFECTS = torch.ops.higher_order.with_effects
 COPY = torch.ops.aten.copy.default
 # pub13 section 5.1 case (i): an eigh outlined on a non-CPU engine (compiler/mesh_compiler/decompose.py outline) draws
 # its Haar restarts at its own source site, carried to its QDWH steps as data (operations.QDWH_EIGH_STEP `site`); a
@@ -27,28 +31,90 @@ DRAWING = (torch.ops.aten._linalg_eigh, torch.ops.aten.linalg_pinv, torch.ops.at
            torch.ops.aten.linalg_lstsq)
 
 
-# design/unequal-shards-change-request.md item 8; torch 2.14.0 torch/export/experimental/__init__.py
+# torch 2.14.0 torch/_higher_order_ops/scan.py generic_scan: the scan HOP's operands (combine_fn, init, xs,
+# additional_inputs) in generic_scan's signature
+def scanned(combine_fn, init, xs, additional_inputs):
+    return generic_scan(combine_fn, init, xs, additional_inputs=additional_inputs)
+
+
+# torch 2.14.0 torch/_higher_order_ops/map.py map_dense: each fixed map or scan call's upstream dense owner
+STATIC = {torch.ops.higher_order.map_impl: map_dense, torch.ops.higher_order.scan: scanned}
+
+
+def attribute(graph_module, target):
+    return functools.reduce(getattr, target.split("."), graph_module)
+
+
+# torch 2.14.0 torch/fx/experimental/proxy_tensor.py make_fx and torch/_export/utils.py node_inline_: one fixed map's
+# or scan's call expanded once in place, its dense owner traced on the call's own fake tensor operands (each tensor
+# Node operand a placeholder, every other operand, a body attribute or a literal, the actual captured one, through
+# pytree), inlined over the call's operand Nodes (its getitems the traced results, the traced attributes hoisted), each
+# made node keeping the call's source metadata, the call's unused body attribute dropped
+def expand(graph_module, node):
+    flat, spec = pytree.tree_flatten((node.args, node.kwargs))
+    held = [k for k, item in enumerate(flat) if isinstance(item, torch.fx.Node)
+            and isinstance(item.meta.get("val"), torch.Tensor)]
+    given = [attribute(graph_module, item.target) if isinstance(item, torch.fx.Node) and item.op == "get_attr" else item
+             for item in flat]
+
+    def operation(*operands):
+        values = list(given)
+        for k, operand in zip(held, operands):
+            values[k] = operand
+        args, kwargs = pytree.tree_unflatten(values, spec)
+        return STATIC[node.target](*args, **kwargs)
+    operands = [flat[k].meta["val"] for k in held]
+    with detect_fake_mode(operands):
+        traced = make_fx(operation, tracing_mode="fake")(*operands)
+    name = next(f"expanded_{i}" for i in itertools.count() if not hasattr(graph_module, f"expanded_{i}"))
+    graph_module.add_submodule(name, traced)
+    graph, before = graph_module.graph, set(graph_module.graph.nodes)
+    with graph.inserting_before(node):
+        call = graph.call_module(name, tuple(flat[k] for k in held))
+    node.replace_all_uses_with(call)
+    graph.erase_node(node)
+    for item in flat:
+        if isinstance(item, torch.fx.Node) and item.op == "get_attr" and not item.users:
+            graph.erase_node(item)
+    node_inline_(call)
+    for made in [n for n in graph.nodes if n not in before]:
+        for key, value in node.meta.items():
+            made.meta.setdefault(key, value)
+
+
+# torch 2.14.0 torch/_export/passes/lift_constants_pass.py lift_constants_pass and torch/_export/utils.py
+# _collect_and_set_constant_attrs: a tensor attribute of the program's graph lifted into its signature and constants
+def lifted(program, module):
+    graph_module = program.graph_module
+    if any(n.op == "get_attr" and isinstance(attribute(graph_module, n.target), torch.Tensor)
+           for n in graph_module.graph.nodes):
+        attributes = _collect_and_set_constant_attrs(program.graph_signature, program.constants, module)
+        program.constants.update(lift_constants_pass(graph_module, program.graph_signature, attributes))
+        graph_module.recompile()
+    return program
+
+
+# design/unequal-shards-change-request.md item 8; design/torch-source-lowering-change-request.md item 2; torch 2.14.0
+# torch/export/experimental/__init__.py _export_forward_backward and torch/export/exported_program.py
+# run_decompositions: the program's one normalization, before it is read: each fixed map or scan call expanded
+# (`expand`, each call once, a call the expansion exposes after it), its exposed tensor attributes lifted, then its
+# forward and backward (a loss) and run_decompositions once, and any tensor attribute left lifted
 def export(module, args, loss=None, **export_options):
     program = torch.export.export(module, args, **export_options)
+    graph_module = program.graph_module
+    while pending := [n for n in graph_module.graph.nodes if n.op == "call_function" and n.target in STATIC]:
+        expand(graph_module, pending[0])
+    graph_module.recompile()
+    program = lifted(program, module)
     if loss is not None:
         with sdpa_kernel(SDPBackend.MATH):
             program = _export_forward_backward(program, joint_loss_index=loss)
-    return read(program.run_decompositions())
+    return read(lifted(program.run_decompositions(), module))
 
 
 def read(program):
-    signature = program.graph_signature
-    nodes = list(program.graph_module.graph.nodes)
-    control = [n.target.name() for n in nodes
-               if isinstance(n.target, HigherOrderOperator) and n.target is not WITH_EFFECTS]
-    if control:
-        raise NotImplementedError(
-            f"{control[0]}: data-dependent control flow is out of scope; only static-capture "
-            "programs (fixed operators, shapes and channels) are scheduled")
-    attached = [n.target for n in nodes if n.op == "get_attr"]
-    if attached:
-        raise NotImplementedError(f"get_attr {attached[0]}: a graph that reads an attribute of "
-                                  "its module is out of scope; state must be a placeholder")
+    graph_module, signature = program.graph_module, program.graph_signature
+    nodes = list(graph_module.graph.nodes)
 
     for node in nodes:
         value = node.meta.get("val")

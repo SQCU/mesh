@@ -2,6 +2,65 @@
 
 Style: [Google developer documentation style guide, highlights](https://developers.google.com/style/highlights).
 
+## `torch-clone-input-fake-mode.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/_dynamo/utils.py` `clone_input`. `scan`'s
+trace (`torch/_higher_order_ops/scan.py` `trace_scan`) calls it on each additional input while the export's
+`FakeTensorMode` is active.
+
+### What it changes
+
+- A fake input already returns unchanged (`is_fake`). The unpatched function sends a real input, such as a captured
+  tensor attribute, down its address-preserving real clone path. Under the active fake mode `torch.empty` returns a
+  fake result, so `result.data_ptr()` raises.
+- The patch adds one case after `is_fake`: when `torch._guards.active_fake_mode()` returns a mode, the real input is
+  realized by that same mode's `from_tensor`. Its tensor and storage memo and its alias and view metadata then hold.
+  No data is copied and no shape is guessed.
+- With no active fake mode, the function is unchanged. `detect_fake_mode` isn't used, because it also consults an
+  ambient `TracingContext` when no mode is active.
+
+`compiler/mesh_compiler/export.py` `export` then expands the captured scan through its existing `expand` step. That
+file has no workaround for this.
+
+### Target
+
+| Item | Value |
+|---|---|
+| Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied 2026-11-14 by the supervisor with fuzz 0 after a successful dry run |
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/_dynamo/utils.py` | before `e550c68c924e1c0babaf31fc629e900c1d3b6ecbcf10aa88442d39b405b7102a`; after `fb5057fe580973d03b36217f4f3bbe7f88ac9c7d5802bc6e77597e86a4ca7413` |
+
+The hunk's context is the installed source the supervisor read from line 2571: `clone_input`'s `is_fake(x)` early
+return, then a blank line, then its nested `def is_pinned_cpu_tensor(x: torch.Tensor) -> bool:` and `return (`.
+
+### Apply, check, reverse
+
+From the repository root:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+shasum -a 256 $SITE/torch/_dynamo/utils.py
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-clone-input-fake-mode.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-clone-input-fake-mode.patch
+shasum -a 256 $SITE/torch/_dynamo/utils.py
+```
+
+- Record the two hashes in the table above.
+- To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-clone-input-fake-mode.patch`.
+- This is a pure Python source, so no rebuild is needed. The patch adds no import hook or `sitecustomize`.
+
+### Check after applying
+
+Run `/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/observe/static_source_3.py`.
+Its captured-attribute scan cases (`Scanned`, `Failing`) should then export and print no HOP and no `get_attr`, with
+the captured `scale` as a `CONSTANT_TENSOR`. Before the patch, both fail in `clone_input`. Then run the static caller.
+
+The supervisor's actual source observation after application passed for the fixed map and both captured-attribute
+scans: all three normalize to Core ATen with no remaining HOP or `get_attr`; parameter and constant input roles and
+the scans' two-output pytree are retained. Evidence is
+`/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/observe/static-source-5.txt`
+and its empty `.stderr`. This records capture/normalization, not native execution.
+
 ## `torch-export-user-input-gradients.patch`
 
 Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/export/exported_program.py`,

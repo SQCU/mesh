@@ -1,0 +1,11 @@
+--- a/torch/_dynamo/utils.py
++++ b/torch/_dynamo/utils.py
+@@ -2574,6 +2574,8 @@
+     if is_fake(x):
+         # this func fails on fake tensors in __torch_dispatch__
+         return x
++    if (mode := torch._guards.active_fake_mode()) is not None:
++        return mode.from_tensor(x)
+
+     def is_pinned_cpu_tensor(x: torch.Tensor) -> bool:
+         return (
