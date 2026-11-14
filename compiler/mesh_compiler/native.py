@@ -79,10 +79,12 @@ def checked(status, error, what):
 
 
 # metal-microbench metal_ir.h metal_ir_storages, metal_ir_value_info and metal_ir_step_state: the
-# lowered program's actual Storages as plan values, one per ValueID (run 1 a root its
-# own storage holds: neither an explicit root nor one with data nor the step), and its step word (8 bytes, executions,
-# lag 1) where it has a step value (`word` METAL_IR_STEP, found in the same pass: metal_ir_step_value would construct
-# one after lowering) and the host writes it; the quantum the largest placed alignment
+# lowered program's actual Storages as plan values, one per ValueID (run 1 a root its own storage holds: neither an
+# explicit root, nor fixed storage (a `buffer`: metal_ir_value_data's or metal_ir_value_storage's), nor the step; a
+# CONSTANT or STATE root whose initial contents only `data` holds is planned, the recorder copying them into each placed
+# copy, metal_capture.m MetalInitialContents), and its step word (8 bytes, executions, lag 1) where it has a step value
+# (`word` METAL_IR_STEP, found in the same pass: metal_ir_step_value would construct one after lowering) and the host
+# writes it; the quantum the largest placed alignment
 def storages(program, explicit, libs):
     M, compiler, _, _ = libs
     storage = C.POINTER(M.Storage)()
@@ -95,7 +97,7 @@ def storages(program, explicit, libs):
     values, quantum = (mesh.Value * (count + stepped))(), 1
     for v, info in enumerate(infos):
         stored = storage[v]
-        run = bool(stored.bytes and info.storage == v and v not in explicit and v != step and not info.data)
+        run = bool(stored.bytes and info.storage == v and v not in explicit and v != step and not info.buffer)
         values[v] = mesh.Value(section=mesh.Section(bytes=stored.bytes), state=info.zeroed, begin=stored.begin,
                                end=stored.end, run=int(run),
                                kind=mesh.INVARIANT if info.role in (M.CONSTANT, M.STATE) else mesh.EXECUTION)
