@@ -1,0 +1,78 @@
+{
+  "client": "lstsq-native-command.md",
+  "source": "71f263ec",
+  "exit_code": 0,
+  "stderr_bytes": 0,
+  "result": {
+    "stage": "result",
+    "solution_error": 1.2378176442910118e-07,
+    "equation_residual": 1.1264101739489852e-07,
+    "normal_residual": 9.446090434096205e-08,
+    "singular_value_error": 4.706205596849935e-08,
+    "rank": 2,
+    "reference_rank": 2,
+    "shapes": [
+      [
+        3,
+        2
+      ],
+      [
+        0
+      ],
+      [],
+      [
+        2
+      ]
+    ],
+    "finite": true,
+    "solution": [
+      [
+        0.0869564637541771,
+        0.26086947321891785
+      ],
+      [
+        0.4565217196941376,
+        0.8695651292800903
+      ],
+      [
+        0.8478260040283203,
+        1.0434781312942505
+      ]
+    ],
+    "reference_solution": [
+      [
+        0.08695652173913038,
+        0.26086956521739113
+      ],
+      [
+        0.4565217391304347,
+        0.8695652173913041
+      ],
+      [
+        0.8478260869565217,
+        1.0434782608695652
+      ]
+    ],
+    "singular_values": [
+      3.271324396133423,
+      2.0732674598693848
+    ],
+    "reference_singular_values": [
+      3.2713242148580175,
+      2.073267440848762
+    ]
+  },
+  "native_reload": "19 rows restored; no relation solved",
+  "manifest": "lstsq-source.json",
+  "logs": {
+    "lstsq-native-1.stdout": {
+      "bytes": 35236,
+      "sha256": "c309aaa8b6adce8b513ffab8902146cc23054cbafa49b1a3578010b33a508855"
+    },
+    "lstsq-native-1.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "scope": "One real wide full-row-rank MPS gelsd case; no general GELSS/complex/ANE/nonfinite/rank-deficient/extreme-scaling/iteration-count/performance claim"
+}

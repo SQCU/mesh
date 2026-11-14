@@ -19,5 +19,7 @@
   "AST": "operations/decompose/export PASS",
   "source_observation": "lstsq-source-observation.json PASS",
   "binary_reference": "eigh-parts-binaries.json",
-  "native_invocation": "pending"
+  "native_invocation": "PASS: compile_module\u2192Program\u2192invocation; 19 native rows restored, no relation solved",
+  "changed_source_during_run": [],
+  "changed_binaries": []
 }
