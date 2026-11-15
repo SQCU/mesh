@@ -1,0 +1,28 @@
+Torch version 2.14.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+  File "/Users/mdot/dox/mesh/examples/crossing.py", line 7, in <module>
+    import parallel
+  File "/Users/mdot/dox/mesh/examples/parallel.py", line 19, in <module>
+    from mesh_compiler.driver import compile_module, compile_program, compiled
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 14, in <module>
+    from .lower_inductor import lower
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_inductor.py", line 24, in <module>
+    from torch._inductor.codegen.cpp_template_kernel import CppTemplateKernel
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp_template_kernel.py", line 15, in <module>
+    from .. import config, cpp_builder, ir, lowering as L
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/lowering.py", line 9694, in <module>
+    from . import kernel
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/kernel/__init__.py", line 1, in <module>
+    from . import flex, mm, mm_common, mm_plus_mm
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/kernel/flex/__init__.py", line 3, in <module>
+    from . import flex_attention, flex_decoding
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/kernel/flex/flex_attention.py", line 46, in <module>
+    from .flex_cpu import lower_cpu
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/kernel/flex/flex_cpu.py", line 17, in <module>
+    from ...codegen.cpp_flex_attention_template import CppFlexAttentionTemplate
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp_flex_attention_template.py", line 18, in <module>
+    from .cpp_template import CppTemplate
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp_template.py", line 17, in <module>
+    from .cpp_template_kernel import CppTemplateCaller, CppTemplateKernel
+ImportError: cannot import name 'CppTemplateCaller' from partially initialized module 'torch._inductor.codegen.cpp_template_kernel' (most likely due to a circular import) (/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp_template_kernel.py)

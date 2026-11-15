@@ -43,3 +43,15 @@ broadcast and output1 aliases y. Its outside-workspace command read was denied;
 the original command and actual archived continuation were reviewed directly.
 No production edit was required after0b638912. Command/order and worker records
 remain in the metal workgroup frontends/torch/materialized-output-* and sessions75–79.
+
+The first observation after the original compiler/result replacement used the exact
+preserved command against fixed native137 (build source9a5efe31/graph e4b765af),
+Mesh e908087a with archive eb56bbcb and emitter caller73296c4d. It exited1 during
+import after3.66s: lower_inductor.py's direct CppTemplateKernel import entered
+Torch's lowering/flex/template import cycle and could not import CppTemplateCaller
+from the partially initialized cpp_template_kernel. Capture, native invocation
+and save/load were not reached. All recorded runtime source/dependency/library
+hashes stayed unchanged. materialized-output-upstream-1.{before,after,result}.json
+and its stdout/stderr preserve this first outcome; the prior native117 result
+above remains historical evidence, not evidence for the replacement. Compiler68
+owns the original initialization correction; the same caller is retained.

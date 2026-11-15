@@ -73,7 +73,7 @@
     "Scheduled.operands retains original reference through exact driver keyword. Fresh prepared network keeps original CallAnalysis; loaded compilation retains its saved query record."
   ],
   "current_limits": [
-    "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md is queued on fixed native137 after explicit compiler Python coherence.",
+    "The first preserved materialized-output command on the new result path stopped during import before capture/native execution: lower_inductor CppTemplateKernel import triggered an upstream circular import. No new numerical or save/load observation; exact error and stable source/library hashes are materialized-output-upstream-1.*. The unchanged caller remains queued after the original import owner correction.",
     "Original wrapper binding occurrences now retain their actual source operand and final native value. Compiler66 binding/control/alias semantics remain separately reviewed producer behavior; this serialization does not itself validate runtime correctness.",
     "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
     "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
@@ -667,5 +667,22 @@
       "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
     ],
     "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
+  },
+  "first_connected_public_outcome": {
+    "time_utc": "2026-11-15T07:47:56.517131+00:00",
+    "result": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-1.result.json",
+    "before": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-1.before.json",
+    "after": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-1.after.json",
+    "stdout": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-1.stdout",
+    "stderr": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-1.stderr",
+    "exit": 1,
+    "stage": "import_failed_before_capture",
+    "changed_runtime_inputs": [],
+    "code_sha256": "ce72ab0229f326297e725fd9b460f2a2b3edc4c3bdf1c399b2e11d381dc200d5",
+    "native_manifest": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/executor/native137-build-result.json",
+    "compiler_source": "e908087a",
+    "archive_source": "eb56bbcb",
+    "source_emitter_connection": "73296c4d",
+    "correction_owner": "compiler SAME68 original upstream import initialization; no alternate caller or probe"
   }
 }

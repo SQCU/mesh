@@ -1,0 +1,16 @@
+{
+  "exit": 1,
+  "seconds": 3.6564328329986893,
+  "pid": 30091,
+  "changed_runtime_inputs": [],
+  "command_code_sha256": "ce72ab0229f326297e725fd9b460f2a2b3edc4c3bdf1c399b2e11d381dc200d5",
+  "native_build_manifest": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/executor/native137-build-result.json",
+  "stdout_bytes": 0,
+  "stderr_bytes": 2474,
+  "scope": "Preserved static two-CPU-member sum/expand/returned-input-alias public compile and save/drop/load command; first outcome on original upstream result path.",
+  "stage": "import_failed_before_capture",
+  "error": "ImportError: cannot import name 'CppTemplateCaller' from partially initialized module 'torch._inductor.codegen.cpp_template_kernel'",
+  "source_entry": "compiler/mesh_compiler/lower_inductor.py:24",
+  "native_invocation": false,
+  "save_load_reached": false
+}
