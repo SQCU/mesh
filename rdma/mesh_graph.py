@@ -129,6 +129,25 @@ class Closures(collections.abc.Mapping):
     def __len__(self):
         return len(self.owned.graph.vertices)
 
+    # mesh-graph.h mesh_graph_closure_save: its closure's arrays as the library wrote them (that allocation freed once
+    # copied, or should the copy fail)
+    def save(self):
+        made, length = C.c_void_p(), C.c_size_t()
+        _check(LIB.mesh_graph_closure_save(self.owned.made, C.byref(made), C.byref(length)))
+        try:
+            return C.string_at(made, length.value)
+        finally:
+            LIB.free(made)
+
+    # mesh-graph.h mesh_graph_closure_load: a closure of its own made from `data` without closing, its vertex IDs
+    # `graph`'s, its rows or (`transposed`) columns and `columns` as saved, holding `held` (its processing order) as
+    # ancestors' and labels' results hold theirs
+    @classmethod
+    def load(cls, data, graph, transposed, columns=None, held=()):
+        made = C.POINTER(Closed)()
+        _check(LIB.mesh_graph_closure_load(C.c_char_p(data), len(data), C.byref(made)))
+        return cls(Owned(made, LIB.mesh_graph_closure_free, graph, held), transposed, columns)
+
 
 # mesh-graph.h struct mesh_graph_relation_data, mesh_graph_search, mesh_graph_breadth(_masked), mesh_graph_closure,
 # mesh_graph_closure_labels, mesh_graph_relation_head, mesh_graph_relation_incoming_head, mesh_graph_relation_contract
@@ -443,6 +462,9 @@ LIB.mesh_graph_closure_free.argtypes = [C.POINTER(Closed)]
 LIB.mesh_graph_search_save.restype = LIB.mesh_graph_search_load.restype = C.c_int
 LIB.mesh_graph_search_save.argtypes = [C.POINTER(Searched), C.POINTER(C.c_void_p), C.POINTER(C.c_size_t)]
 LIB.mesh_graph_search_load.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(C.POINTER(Searched))]
+LIB.mesh_graph_closure_save.restype = LIB.mesh_graph_closure_load.restype = C.c_int
+LIB.mesh_graph_closure_save.argtypes = [C.POINTER(Closed), C.POINTER(C.c_void_p), C.POINTER(C.c_size_t)]
+LIB.mesh_graph_closure_load.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(C.POINTER(Closed))]
 RELATION_HEAD = C.cast(LIB.mesh_graph_relation_head, C.c_void_p)
 
 

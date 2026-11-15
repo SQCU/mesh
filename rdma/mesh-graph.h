@@ -88,6 +88,14 @@ int mesh_graph_closure_labels(uint32_t vertices, const size_t *first, uint32_t (
                               const void *context, const uint32_t *order, ptrdiff_t step, const unsigned char *active,
                               uint32_t columns, const uint32_t *label, struct mesh_graph_closure **made);
 void mesh_graph_closure_free(struct mesh_graph_closure *made);
+/* a closure as produced, without closing again: mesh_graph_closure_save writes it into *bytes (*length of them,
+   malloc'd, the caller's to free): the header {vertices (u32), 0 (u32), words (u64)}, then reached [0 .. vertices *
+   words) (u64 each); mesh_graph_closure_load makes a closure of its own (mesh_graph_closure_free; its reached
+   allocated as mesh_graph_closure's and copied from the bytes, which stay the caller's) from exactly those bytes,
+   EINVAL where they are not one saved closure (their length, the header's zero word, or vertices * words past
+   SIZE_MAX), ENOMEM */
+int mesh_graph_closure_save(const struct mesh_graph_closure *closure, void **bytes, size_t *length);
+int mesh_graph_closure_load(const void *bytes, size_t length, struct mesh_graph_closure **made);
 /* T. H. Cormen et al., Introduction to Algorithms, 3rd ed., §24.2, DAG-SHORTEST-PATHS with max for min; S. Zhang et al.,
    HAP, EuroSys 2024, §3.2: over a retained relation's prerequisite rows (incoming: in_first/in_edge, a row's heads the
    edges' `from`; else row_first/row_edge, its heads their `to`), the vertices processed in order[0], order[step], ...

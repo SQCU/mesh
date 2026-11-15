@@ -6,6 +6,7 @@
 # (compiler/mesh_compiler/native.py Target.plan and Target.signature, saved and restored with the target;
 # compiler/mesh_compiler/driver.py compiled), kept in no record of their own here
 import collections
+import ctypes as C
 import dataclasses
 from copy import deepcopy
 import inspect
@@ -30,12 +31,15 @@ def tuples(value):
 
 # a retained reference: `owner` its graph owner's saved index, `path` a nested GraphModule's attribute path in it ("" the
 # owner itself; a captured function's "function_{ordinal}" in the outer source graph), `node` a Node's name (None: the
-# GraphModule); `Related` a SourceRelation, `Graphed` an rdma/mesh_graph.py Graph and `Searching` a Reached search by
-# saved index, each object once
+# GraphModule); `Related` a SourceRelation, `Graphed` an rdma/mesh_graph.py Graph, `Relating` its native Relation (a
+# SourceRelation's and a Graph over it the same one), `Searching` a Reached search (by its native search) and `Closing`
+# a Closures closure by saved index, each object once
 Ref = collections.namedtuple("Ref", "owner path node")
 Related = collections.namedtuple("Related", "index")
 Graphed = collections.namedtuple("Graphed", "index")
+Relating = collections.namedtuple("Relating", "index")
 Searching = collections.namedtuple("Searching", "index")
+Closing = collections.namedtuple("Closing", "index")
 
 
 # torch 2.14.0 torch/_export/serde/serialize.py serialize_hoo_inputs (a higher-order operator's GraphModule operand by
@@ -48,8 +52,9 @@ def branches(module, prefix=""):
             yield from branches(held, prefix + node.target + ".")
 
 
-# a value with each Node, GraphModule, SourceRelation, Graph and Reached it holds a Ref, Related, Graphed or Searching
-# (each registered once in `held`, an owner with its branches), a sequence or a namedtuple of them its own type (torch
+# a value with each Node, GraphModule, SourceRelation, Graph, Relation, Reached and Closures it holds a Ref, Related,
+# Graphed, Relating, Searching or Closing (each registered once in `held`, an owner with its branches), a sequence or
+# a namedtuple of them its own type (torch
 # utils/_pytree.py namedtuple semantics: its fields in order), everything else, a FakeTensor among them, as it is
 # (torch/fx/_graph_pickler.py GraphPickler: no raw Node)
 def encoded(held, value):
@@ -61,9 +66,13 @@ def encoded(held, value):
     if isinstance(value, schedule.SourceRelation):
         return Related(held["relations"].setdefault(value, len(held["relations"])))
     if isinstance(value, schedule.mesh_graph.Reached):
-        return Searching(held["searches"].setdefault(id(value), (len(held["searches"]), value))[0])
+        return Searching(held["searches"].setdefault(id(value.owned), (len(held["searches"]), value))[0])
+    if isinstance(value, schedule.mesh_graph.Closures):
+        return Closing(held["closures"].setdefault(id(value), (len(held["closures"]), value))[0])
     if isinstance(value, schedule.mesh_graph.Graph):
         return Graphed(held["natives"].setdefault(value, len(held["natives"])))
+    if isinstance(value, schedule.mesh_graph.Relation):
+        return Relating(held["kept"].setdefault(id(value), (len(held["kept"]), value))[0])
     if not isinstance(value, (torch.fx.Node, torch.fx.GraphModule)):
         return value
     module, owners, nested = (value.graph.owning_module if isinstance(value, torch.fx.Node) else value, held["owners"],
@@ -77,10 +86,10 @@ def encoded(held, value):
 
 
 # an `encoded` value with each Ref bound to its loaded owner's actual Node or GraphModule (`loaded`: the owners, their
-# GraphModules' nodes by name, made on first use, the SourceRelations, the Graphs, the searches), each Related,
-# Graphed and Searching to its loaded one
+# GraphModules' nodes by name, made on first use, the SourceRelations, the Graphs, the searches, the closures, the
+# native Relations), each Related, Graphed, Searching, Closing and Relating to its loaded one
 def decoded(loaded, value):
-    graphs, named, relations, natives, searches = loaded
+    graphs, named, relations, natives, searches, closures, kept = loaded
     if isinstance(value, Ref):
         module = _get_attr(graphs[value.owner], value.path) if value.path else graphs[value.owner]
         if value.node is None:
@@ -94,6 +103,10 @@ def decoded(loaded, value):
         return natives[value.index]
     if isinstance(value, Searching):
         return searches[value.index]
+    if isinstance(value, Closing):
+        return closures[value.index]
+    if isinstance(value, Relating):
+        return kept[value.index]
     if isinstance(value, dict):
         return {decoded(loaded, k): decoded(loaded, v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
@@ -149,14 +162,59 @@ def snapshot(held, module):
 # design/aot-compilation-change-request.md A10; schedule.py analyse: a CallAnalysis's query results in their saved
 # form: its incoming search's arrays (over the calls' relation, which the joint result keeps), its paths' roots and
 # search (a Reached over their own Graph), its widths by function ordinal (count, the member vertex IDs and their
-# chains: mesh_graph.closure_chains's owner array and result), its supplied causes, accesses and generated state
-def queried(analysis, ordinal):
+# chains: mesh_graph.closure_chains's owner array and result), its supplied causes, accesses and generated state, each
+# function's source Declarations by ordinal (`declared`), and the target's copies (native.py Target.copying: each
+# call's CopyRecords with their copy operations, `copying`)
+def queried(analysis, ordinal, target):
     paths = analysis.paths
     return {"search": schedule.mesh_graph.Reached(analysis.search).save(),
             "paths": (list(paths.items), schedule.mesh_graph.Reached(paths.owner)),
             "widths": {ordinal[key]: (count, tuple(chain.owner[1][k] for k in chain.span), tuple(chain))
                        for key, (count, chain) in analysis.widths.items()},
-            "supplied": analysis.supplied, "accesses": analysis.accesses, "generated": analysis.generated}
+            "supplied": analysis.supplied, "accesses": analysis.accesses, "generated": analysis.generated,
+            "declarations": {ordinal[key]: declared(made) for key, made in analysis.declarations.items()},
+            "copies": copying(target)}
+
+
+# a dataclass record's fields by name, each as it is
+def fields(record):
+    return {field.name: getattr(record, field.name) for field in dataclasses.fields(record)}
+
+
+# native.py Target.copying: each call's copies on this machine, each its schedule.py CopyRecord (its fields, its
+# endpoint Slot's, native.py Slot) with its copy operation in that call's composite program (None: no landing view)
+def copying(target):
+    return {j: tuple(({**fields(copy), "slot": copy.slot and fields(copy.slot)}, operation) for copy, operation in held)
+            for j, held in target.copying.items()}
+
+
+# schedule.py Declarations and dependences: one function's source declarations as produced, each field as it is, its
+# `dependences` the native records (mesh.Dependence's fields each) with their owner's original results: the events
+# (their source nodes), schedule.schedule's source-order closure (Graph.ancestors' Closures, saved once, Closing),
+# the event Graph (its relation saved once, Graphed), its synchronization mask and boundary Views' values and the
+# found records (a, b, lag, edge), in the owner's order. Declarations.before (a field) is the crossing-free task
+# edges, a list, as it is
+def declared(made):
+    events, before, graph, redundant, first, last, found = made.dependences.owner
+    return {**fields(made),
+            "dependences": ([tuple(getattr(record, name) for name, _ in record._fields_) for record in made.dependences],
+                            events, before, graph, list(redundant), list(first), list(last), found)}
+
+
+# rdma/mesh_graph.py Graph.ancestors and labels: a closure's processing order as held with it (its Owned's first held
+# operand: a View of one search's own vertex IDs, schedule.schedule's Graph.order()[::-1]), that search's saved owner
+# (a Reached of the View's owner, Searching), the Searched array the View reads (the one at its address) and its span
+def ordering(held, order):
+    searched, address = order.owner.made.contents, C.cast(order.items, C.c_void_p).value
+    array = next(name for name in ("preorder", "postorder")
+                 if C.cast(getattr(searched, name), C.c_void_p).value == address)
+    return encoded(held, schedule.mesh_graph.Reached(order.owner)), array, (order.span.start, order.span.stop,
+                                                                             order.span.step)
+
+
+# an `ordering` record loaded: that View over the loaded search's own array (rdma/mesh_graph.py ordered)
+def ordered(reached, array, span):
+    return schedule.mesh_graph.ordered(reached.owned, getattr(reached.owned.made.contents, array), range(*span))
 
 
 # design/aot-compilation-change-request.md A10; schedule.py call_operands: the compilation's source record, each value
@@ -214,41 +272,49 @@ def save(directory, scheduled):
     exported, (target,) = scheduled.exported, scheduled.functions.values()
     ordinal = {body.key: k for k, body in enumerate(target.bodies)}
     signature, spec = exported.interface
-    held = {"owners": {}, "nested": {}, "relations": {}, "natives": {}, "searches": {}, "tensors": {}, "memo": {},
-            "projected": {}, "copied": set()}
+    held = {"owners": {}, "nested": {}, "relations": {}, "natives": {}, "searches": {}, "closures": {}, "kept": {},
+            "tensors": {}, "memo": {}, "projected": {}, "copied": set()}
     # the source record from the original analysis (Target.solution.analysis, its operands), or a loaded
     # compilation's retained one (its joint owner's `source`, Scheduled.operands)
     joint = target.solution
     analysis = joint.analysis if isinstance(joint, schedule.Solved) else None
-    query, operands = ((queried(analysis, ordinal), analysis.operands) if analysis is not None else
+    query, operands = ((queried(analysis, ordinal, target), analysis.operands) if analysis is not None else
                        (joint.source["query"], scheduled.operands))
     source = sourced(held, ordinal, operands, query)
     bodies = [(kind, ordinal[key], name, encoded(held, module))
               for kind, kept in (("machine", scheduled.modules), ("processor", scheduled.processor_modules))
               for key, modules in kept.items() for name, module in modules.items()]
-    # each graph owner (each graph a Node reference names) its `snapshot`, each SourceRelation, Graph and search once
-    # (rdma/mesh_graph.py Relation.save, Reached.save: mesh-graph.h's own archives), all one GraphPickler payload
+    # each graph owner (each graph a Node reference names) its `snapshot`, each SourceRelation, Graph, search and
+    # closure once (rdma/mesh_graph.py Relation.save, Reached.save, Closures.save: mesh-graph.h's own archives; a
+    # closure with its Graph, whether transposed, and its columns), all one GraphPickler payload
     # (torch/fx/_graph_pickler.py: one MetaTensorDescriber, so FakeTensor duplicates and views keep their storage;
     # every operator by name, ops_filter None; every node metadata key as encoded, node_metadata_key_filter None:
     # nn_module_stack's normalized (path, type name) strings, source_fn_stack's targets by their pickle reference)
-    graphs, relations, natives, searches = [], [], [], []
-    while (len(graphs), len(relations), len(natives), len(searches)) != tuple(
-            map(len, (held["owners"], held["relations"], held["natives"], held["searches"]))):
+    graphs, relations, natives, searches, closures, kept = [], [], [], [], [], []
+    while (len(graphs), len(relations), len(natives), len(searches), len(closures), len(kept)) != tuple(
+            map(len, (held["owners"], held["relations"], held["natives"], held["searches"], held["closures"],
+                      held["kept"]))):
         if len(graphs) < len(held["owners"]):
             graphs.append(snapshot(held, list(held["owners"])[len(graphs)]))
         elif len(relations) < len(held["relations"]):
             relation = list(held["relations"])[len(relations)]
-            relations.append((relation.relation.save(), *encoded(held, (relation.functions, relation.supplied,
-                                                                        relation.accesses, relation.producers))))
+            relations.append(encoded(held, (relation.relation, relation.functions, relation.supplied,
+                                            relation.accesses, relation.producers)))
         elif len(natives) < len(held["natives"]):
             graph = list(held["natives"])[len(natives)]
-            natives.append((graph.relation.save(), encoded(held, graph.vertices)))
-        else:
+            natives.append(encoded(held, (graph.relation, graph.vertices)))
+        elif len(searches) < len(held["searches"]):
             reached = list(held["searches"].values())[len(searches)][1]
             searches.append((encoded(held, reached.owned.graph), reached.save()))
+        elif len(closures) < len(held["closures"]):
+            closure = list(held["closures"].values())[len(closures)][1]
+            closures.append((encoded(held, closure.owned.graph), closure.save(), closure.transposed,
+                             encoded(held, closure.columns), ordering(held, closure.owned.held[0])))
+        else:
+            kept.append(list(held["kept"].values())[len(kept)][1].save())
     (directory / "annotations.pkl").write_bytes(GraphPickler.dumps(
-        {"graphs": graphs, "relations": relations, "natives": natives, "searches": searches, "source": source,
-         "bodies": bodies}, Options(ops_filter=None, node_metadata_key_filter=None)))
+        {"graphs": graphs, "relations": relations, "natives": natives, "searches": searches, "closures": closures,
+         "kept": kept, "source": source, "bodies": bodies}, Options(ops_filter=None, node_metadata_key_filter=None)))
     torch.save({"state": {name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()},
                 "attributes": [tensor.detach() for _, tensor in held["tensors"].values()],
                 "defaults": {name: parameter.default for name, parameter in signature.parameters.items()
@@ -298,24 +364,28 @@ def load(directory):
                for record in about["carried"]}
     channels = {record["function"]: record["channels"] for record in about["channels"]}
     # the one payload (GraphPickler.loads, one FakeTensorMode: every graph as saved, FakeTensors' shared storage and
-    # shared GraphModules one object each); each tensor attribute its one state.pt tensor; each SourceRelation, Graph
-    # and search loaded once (Relation.load, Reached.load: no solve or search); then every GraphModule's and node's
-    # metadata, the source record and every Ref bound to the actual loaded Node or GraphModule
+    # shared GraphModules one object each); each tensor attribute its one state.pt tensor; each SourceRelation, Graph,
+    # search and closure loaded once (Relation.load, Reached.load, Closures.load: no solve, search or closing); then
+    # every GraphModule's and node's metadata, the source record and every Ref bound to the actual loaded Node or
+    # GraphModule
     saved = GraphPickler.loads((directory / "annotations.pkl").read_bytes(), FakeTensorMode())
     graphs = [module for module, _ in saved["graphs"]]
     for module, attributes in saved["graphs"]:
         for path, name, index in attributes:
             _assign_attr(tensors[index], module.get_submodule(path), name)
-    relations, natives, searches = [], [], []
-    loaded = (graphs, {}, relations, natives, searches)
-    resolve = lambda value: decoded(loaded, value)
     mesh_graph = schedule.mesh_graph
-    natives += [mesh_graph.Graph(resolve(vertices), mesh_graph.Relation.load(data))
-                for data, vertices in saved["natives"]]
+    relations, natives, searches, closures = [], [], [], []
+    kept = [mesh_graph.Relation.load(data) for data in saved["kept"]]
+    loaded = (graphs, {}, relations, natives, searches, closures, kept)
+    resolve = lambda value: decoded(loaded, value)
+    natives += [mesh_graph.Graph(resolve(vertices), resolve(relation)) for relation, vertices in saved["natives"]]
     searches += [mesh_graph.Reached.load(data, resolve(graph)) for graph, data in saved["searches"]]
-    relations += [schedule.SourceRelation(mesh_graph.Relation.load(data), list(resolve(functions_)),
-                                          list(resolve(supplied)), list(resolve(accesses)), dict(resolve(producers)))
-                  for data, functions_, supplied, accesses, producers in saved["relations"]]
+    closures += [mesh_graph.Closures.load(data, resolve(graph), transposed, resolve(columns),
+                                          (ordered(*resolve(order)),))
+                 for graph, data, transposed, columns, order in saved["closures"]]
+    relations += [schedule.SourceRelation(resolve(relation), list(resolve(functions_)), list(resolve(supplied)),
+                                          list(resolve(accesses)), dict(resolve(producers)))
+                  for relation, functions_, supplied, accesses, producers in saved["relations"]]
     seen = set()
     for module in graphs:
         for made in module.modules():
@@ -345,6 +415,11 @@ def load(directory):
         {k: k for k in captured}, [(StorageWeakRef(h.meta["val"].untyped_storage()), h) for h in holders], views,
         accesses, results, roots, frozenset(kept), tuple(schedule.CallPort(*port) for port in ports),
         {StorageWeakRef(p.meta["val"].untyped_storage()) for p in existing}, produced, placements, machines, output)
+    # the target's copies' provenance (Target.copying), each CopyRecord and Slot its loaded record
+    target.copying = {j: tuple((schedule.CopyRecord(**{**record, "slot": record["slot"] and
+                                                       native.Slot(**record["slot"])}), operation)
+                               for record, operation in held)
+                      for j, held in source["query"]["copies"].items()}
     joint = target.solution
     if isinstance(joint, schedule.SavedNetwork):
         target.solution = target.plan = dataclasses.replace(joint, source={"query": source["query"]})

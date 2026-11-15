@@ -293,7 +293,8 @@ class Binding:
 # `offset` the body's first operation in it, () and 0 where the row runs the body's own IDs; `copies` each copy it
 # holds, (kind "stage" or "land", output position (an outer land's outer one), input position (a normal land's), joint
 # wire root, the wire's one ValueID here, its endpoint root: the stage's source output root, an outer land's outer
-# result root, a normal land's original input root's prefix root)
+# result root, a normal land's original input root's prefix root; its copy operation in the row's program, None for a
+# landing with no landing view)
 @dataclasses.dataclass
 class Row:
     call: int
@@ -556,8 +557,8 @@ class Target:
                                            for records in (body.logical, body.outputs))
 
     # compiler/mesh_compiler/schedule.py Prepared.copies, remap and bind; metal-microbench metal_ir.h
-    # metal_ir_value_external, metal_ir_value_planned and metal_ir_append; compiler/mesh_compiler/operations.py _copy
-    # and _placed; compiler/mesh_compiler/metal.py _Builder (bound, declare, generic): each numerical body's slots
+    # metal_ir_value_external, metal_ir_value_planned and metal_ir_append; compiler/mesh_compiler/metal.py _Builder
+    # (stored, viewed, copy: typed roots, views and copies over ValueIDs): each numerical body's slots
     # marked external first (the callable table capability, kept by every append and clone); then, per call j with
     # copies on this machine (`here`, CopyRecord.machine), one composite program per equal (function, copy geometry,
     # sharing):
@@ -572,16 +573,20 @@ class Target:
     #   root backed by it (metal_ir_append's given value: no partition the body materializes is written here);
     #   `values` and `roots` the append's actual arrays (each original ValueID's view ValueID and its storage root,
     #   ValueInfo.storage), `offset` the body's first operation;
-    # - the suffix: each stage (its body's output root, `roots`, at its retained Output view, copied into its wire) and
-    #   each outer land (its wire copied into the outer result root at the leaf's own view, a root of the storage's
-    #   caller ownership, Solved.root_sources: an input's INPUT, a result's OUTPUT, marked external after the body's
-    #   slots);
-    # each copy's operations on its CopyRecord processor's selected target (`targets`). A call with no body here has the
+    # - the suffix: each stage (its owner's output Slot view as appended, `values`, copied into its wire) and each outer
+    #   land (its wire copied into the outer result root, a root of the storage's caller ownership, Solved.root_sources:
+    #   an input's INPUT, a result's OUTPUT, marked external after the body's slots; the leaf's own whole view of it the
+    #   returned view);
+    # each copy one typed copy (metal.py _Builder.copy) over its transfer domain (a stage's and an outer land's
+    # CopyRecord.view, a normal land's InputPart.geometry, each as mesh_graph.strided: a zero-stride dimension its one
+    # element), its views their actual layouts (a normal land's its landing view's complete native descriptor), on its
+    # CopyRecord processor's selected target (`targets`), its operation kept. A call with no body here has the
     # copies alone, its copy-only row. The appended calls' arrays go once to the declaration owner (Prepared.remap),
     # then each wire's ValueID (`wired`) and each outer land's result root binding (`copied`, delta 0: the root covers
     # the storage from byte 0) (Prepared.bind); `composites[j]` call j's program, None where it runs its body's own,
-    # `landed` {outer output position: (call, its Output of OutputKind kinds[position])}, the composites released with
-    # `owned`
+    # `copying[j]` each of call j's CopyRecords with its copy operation in that program (Row.copies' operation: the
+    # copies' provenance), `landed` {outer output position: (call, its Output of OutputKind kinds[position])}, the
+    # composites released with `owned`
     def composed(self, prepared, kinds, here, libs, owned):
         from .lower_metal import Output
         from .operations import _metadata
@@ -593,7 +598,7 @@ class Target:
         for copy in (copy for copy in prepared.copies if copy.machine == here):
             mine.setdefault(copy.call, []).append(copy)
         built, values, roots, wired, copied = {}, {}, {}, {}, []
-        self.composites, self.landed = [None] * len(self.rows), {}
+        self.composites, self.landed, self.copying = [None] * len(self.rows), {}, {}
         for j in sorted(mine):
             row = self.rows[j]
             body = self.bodies[row.function]
@@ -613,12 +618,13 @@ class Target:
             if mapped is not None:
                 values[j], roots[j] = mapped, stored
             self.composites[j] = program
-            held = tuple((copy.kind, copy.output, copy.input, copy.wire, root, end)
-                         for copy, (root, end, _) in zip(listed, ends))
+            self.copying[j] = tuple((copy, operation) for copy, (_, _, _, operation) in zip(listed, ends))
+            held = tuple((copy.kind, copy.output, copy.input, copy.wire, root, end, operation)
+                         for copy, (root, end, _, operation) in zip(listed, ends))
             self.rows = (*self.rows[:j], dataclasses.replace(row, values=mapped if mapped is not None else (),
                                                              roots=stored if stored is not None else (), offset=offset,
                                                              copies=held), *self.rows[j + 1:])
-            for copy, (root, end, view) in zip(listed, ends):
+            for copy, (root, end, view, _) in zip(listed, ends):
                 wired[j, copy.wire] = root
                 if copy.kind == "land" and copy.input is None:
                     copied.append((j, end, copy.storage, 0, copy.leaf))
@@ -628,46 +634,78 @@ class Target:
         prepared.bind(wired, copied)
 
     # one composite (Target.composed): its program, the append's `values` and `roots` arrays (None without a body), the
-    # body's first operation and, per copy of `listed`, (its wire root, its endpoint root, the endpoint's view)
+    # body's first operation and, per copy of `listed`, (its wire root, its endpoint root, the endpoint's view, its copy
+    # operation: None for a landing with no landing view)
     def composite(self, prepared, body, listed, extents, libs, owned):
-        from .lower_metal import PLACES
-        from .operations import _copy, _key, _placed
+        from .lower_metal import PLACES, Bound, _element, _typed
         M, compiler, _, _ = libs
-        error, info, dtypes = C.create_string_buffer(ROOM), M.ValueInfo(), {code: t for t, code in M.SCALAR.items()}
+        error, info = C.create_string_buffer(ROOM), M.ValueInfo()
+        widths = {code: dtype.itemsize for dtype, code in M.SCALAR.items()}
         program = compiler.metal_ir_program_new()
         owned(lambda: compiler.metal_ir_program_free(program))
         machines = M._machines()
         if machines:
             compiler.metal_ir_machine(program, C.byref(machines[M.GPU]), C.byref(machines[M.CPU]))
-        builder, backings, ends, slots = M._Builder(compiler, 0, program=program), {}, {}, len(body.slots)
+        builder, roots, ends, slots = M._Builder(compiler, 0, program=program), {}, {}, len(body.slots)
 
-        def backed(key, extent, dtype, sizes, strides, at):
-            if key not in backings:
-                backings[key] = torch.empty(extent, dtype=torch.uint8, device="meta")
-            return backings[key].view(dtype).as_strided(sizes, strides, at)
+        # metal_ir.h metal_ir_value (compiler/mesh_compiler/metal.py _Builder.stored): one storage root per backing
+        # (`key`: a joint wire, a body's prefix input root, an outer result storage), of role `role`, `elements` of
+        # metal_ir scalar `scalar`, made on its first copy
+        def rooted(key, role, scalar, elements):
+            if key not in roots:
+                roots[key] = (builder.stored(role, scalar, elements), role)
+            return roots[key][0]
 
+        # a typed view (metal.py _Builder.viewed) of root `key` at metal_ir scalar `scalar`, `sizes`, element `strides`
+        # and element `offset`: (its ValueID, scalar, sizes)
+        def domain(key, scalar, sizes, strides, offset):
+            return builder.viewed(*roots[key], scalar, sizes, strides, offset), scalar, tuple(sizes)
+
+        # an original transfer domain (mesh_graph.strided: byte offset `start` moved by `delta` bytes, element bytes,
+        # pairs, a zero-stride dimension already its one element) in elements: sizes, strides, offset
+        def elements(start, element, pairs, delta=0):
+            return tuple(n for n, _ in pairs), tuple(stride // element for _, stride in pairs), (start + delta) // element
+
+        # the typed view (lower_metal.py _typed: a complex dtype's real pairs) of root `key` at an original view of
+        # dtype `dtype`: its sizes, element strides and element offset
+        def typed(key, dtype, sizes, strides, offset):
+            return domain(key, *_typed(Bound(None, dtype, tuple(sizes), tuple(strides), offset)))
+
+        # each copy's joint wire root (TEMPORARY, its whole extent of the leaf's element) and its view there over the
+        # transfer's original domain (CopyRecord.view)
         def wire(copy):
-            start, element, pairs = copy.view
-            view = backed(("wire", copy.wire), extents[copy.wire], copy.leaf.meta["val"].dtype, [n for n, _ in pairs],
-                          [stride // element for _, stride in pairs], start // element)
-            return builder.declare(view, M.TEMPORARY), view
+            dtype = copy.leaf.meta["val"].dtype
+            root = rooted(("wire", copy.wire), M.TEMPORARY, M.SCALAR[_element(dtype)],
+                          extents[copy.wire] // _element(dtype).itemsize)
+            return root, typed(("wire", copy.wire), dtype, *elements(*copy.view))
 
-        def emitted(ops, copy):
-            _placed(ops, PLACES[self.targets[copy.processor][0]], 0)
-            for g in ops:
-                builder.generic(g)
-        # an InputPart landing view of the body's original program as compiled: its scalar type, shape
-        # (metal_ir_value_shape), element offset and strides (metal_ir_value_layout); the landing view is a strided
-        # typed view (compiler/mesh_compiler/metal.py _Builder.value): its layout is one linear term per dimension,
-        # term d dimension d's (dim d, coefficient its element stride, divisor 1, modulus 0)
-        def geometry(value):
+        # metal.py _Builder.copy (metal_ir.h metal_ir_copy): one typed copy of view `given` into view `into` (each
+        # (ValueID, metal_ir scalar, ...)) over the transfer domain `into[2]`, on its CopyRecord processor's selected
+        # target, the record its provenance (newly produced physical-copy work: no source position); its operation
+        # returned
+        def copied(copy, into, given):
+            return builder.copy(copy, PLACES[self.targets[copy.processor][0]], 0, into[2], into[:2], given[:2])
+
+        # the complete native descriptor of value `value` of the body's original program as compiled (metal_ir.h
+        # metal_ir_value_info scalar, metal_ir_value_shape, metal_ir_value_layout: its every term and element offset)
+        def descriptor(value):
             source, at = body.machine.program, C.c_int64()
             compiler.metal_ir_value_info(source, value, C.byref(info))
             rank = compiler.metal_ir_value_shape(source, value, None, 0)
-            shape, terms = (mesh.Q * max(rank, 1))(), (M.Term * max(rank, 1))()
+            shape = (mesh.Q * max(rank, 1))()
             compiler.metal_ir_value_shape(source, value, shape, rank)
-            compiler.metal_ir_value_layout(source, value, terms, rank, C.byref(at))
-            return dtypes[info.scalar], list(shape[:rank]), [terms[d].coefficient for d in range(rank)], at.value
+            count = compiler.metal_ir_value_layout(source, value, None, 0, C.byref(at))
+            terms = (M.Term * max(count, 1))()
+            compiler.metal_ir_value_layout(source, value, terms, count, C.byref(at))
+            return info.scalar, rank, shape, count, terms, at.value
+
+        # that descriptor as a view of root `root` of role `role` here (metal_ir_value, metal_ir_value_view), its
+        # element offset moved by `delta` elements: (its ValueID, scalar, shape)
+        def described(root, role, made, delta=0):
+            scalar, rank, shape, count, terms, at = made
+            v = compiler.metal_ir_value(program, role, scalar, rank, shape, count, terms, at + delta, 0)
+            compiler.metal_ir_value_view(program, v, root)
+            return v, scalar, tuple(shape[:rank])
         deltas = {(call, root, storage): delta for (call, root, storage, delta), _ in prepared.bindings}
         landing = {}
         for k, copy in enumerate(listed):
@@ -676,20 +714,23 @@ class Target:
             whole, root = copy.part.input, wire(copy)[0]
             if whole.root not in landing:
                 compiler.metal_ir_value_info(body.machine.program, whole.root, C.byref(info))
-                dtype, extent = dtypes[info.scalar], info.bytes
-                landing[whole.root] = builder.declare(backed(("input", whole.root), extent, dtype,
-                                                             [extent // dtype.itemsize], [1], 0), whole.role)
+                landing[whole.root] = rooted(("input", whole.root), whole.role, info.scalar,
+                                             info.bytes // widths[info.scalar])
                 mesh.check(compiler.metal_ir_value_external(program, landing[whole.root], body.slots.index(whole.root)))
             if copy.part.landing is None:
-                ends[k] = (root, landing[whole.root], None)
+                ends[k] = (root, landing[whole.root], None, None)
                 continue
-            dtype, shape, strides, at = geometry(copy.part.landing)
-            compiler.metal_ir_value_info(body.machine.program, whole.root, C.byref(info))
-            into = backed(("input", whole.root), info.bytes, dtype, shape, strides, at)
-            given_wire = backed(("wire", copy.wire), extents[copy.wire], dtype, shape, strides,
-                                at + deltas[copy.call, whole.root, copy.storage] // dtype.itemsize)
-            emitted(_copy(into, given_wire), copy)
-            ends[k] = (root, landing[whole.root], builder.value(into))
+            # the InputPart landing view of the body's original program as compiled (its complete descriptor) in the
+            # prefix input root, and the same view of the wire (which holds the source storage's bytes at their own
+            # offsets, the input binding's delta apart), copied over the part's original landing geometry
+            # (InputPart.geometry, the producer's (offset, sizes, strides)) as its transfer domain (mesh_graph.strided:
+            # a zero-stride dimension its one element; lower_metal.py _typed: a complex leaf's real pairs)
+            made, dtype = descriptor(copy.part.landing), copy.leaf.meta["val"].dtype
+            into = described(landing[whole.root], whole.role, made)
+            loops = _typed(Bound(None, dtype, *elements(*mesh_graph.strided(*copy.part.geometry, dtype.itemsize))))[1]
+            operation = copied(copy, (*into[:2], loops), described(
+                root, M.TEMPORARY, made, deltas[copy.call, whole.root, copy.storage] // widths[made[0]]))
+            ends[k] = (root, landing[whole.root], into[0], operation)
         offset, mapped, stored = compiler.metal_ir_operations(program), None, None
         if body.machine is not None:
             count = compiler.metal_ir_values(body.machine.program)
@@ -707,25 +748,25 @@ class Target:
                 continue
             root, view = wire(copy)
             if copy.kind == "stage":
-                shape, stride, first, typed = body.outputs[copy.output].metadata[:4]
-                reach = first + sum((n - 1) * s for n, s in zip(shape, stride) if n) + 1
-                source = torch.empty(reach, dtype=typed, device="meta").as_strided(shape, stride, first)
-                compiler.metal_ir_value_info(program, stored[copy.slot.root], C.byref(info))
-                builder.bound(source, stored[copy.slot.root], info.role)
-                emitted(_copy(view, source), copy)
-                ends[k] = (root, stored[copy.slot.root], None)
+                # the owner's original output view (its Binding Slot's), as metal_ir_append made it here, into the
+                # wire over the transfer's domain
+                operation = copied(copy, view, (mapped[copy.slot.view], view[1]))
+                ends[k] = (root, stored[copy.slot.root], None, operation)
             else:
-                leaf = copy.leaf.meta["val"]
-                result = backed(("result", copy.storage), extents[copy.wire], leaf.dtype, leaf.shape, leaf.stride(),
-                                leaf.storage_offset())
-                fresh = _key(result) not in builder.roots
-                end = builder.declare(result, M.INPUT if prepared.root_sources[copy.storage][0] == "input"
-                                      else M.OUTPUT)
+                # the outer result root (its storage's caller ownership, Solved.root_sources: an input's INPUT, a
+                # result's OUTPUT, the wire's extent from byte 0: the wire's own offsets), marked external after the
+                # body's slots once; the wire copied into it over the transfer's domain, the original leaf's whole
+                # logical view of it returned
+                leaf, fresh = copy.leaf.meta["val"], ("result", copy.storage) not in roots
+                end = rooted(("result", copy.storage),
+                             M.INPUT if prepared.root_sources[copy.storage][0] == "input" else M.OUTPUT, view[1],
+                             extents[copy.wire] // _element(leaf.dtype).itemsize)
                 if fresh:
                     mesh.check(compiler.metal_ir_value_external(program, end, slots))
                     slots += 1
-                emitted(_copy(result, view), copy)
-                ends[k] = (root, end, builder.value(result))
+                operation = copied(copy, typed(("result", copy.storage), leaf.dtype, *elements(*copy.view)), view)
+                ends[k] = (root, end, typed(("result", copy.storage), leaf.dtype, leaf.shape, leaf.stride(),
+                                            leaf.storage_offset())[0], operation)
         return program, mapped, stored, offset, tuple(ends[k] for k in range(len(listed)))
 
     # row j's program's storage root (Row.roots, metal_ir_append's ValueInfo.storage) and view ValueID (Row.values) of
@@ -807,7 +848,7 @@ class Target:
                     sent.append(Port(mesh.SEND, record.transfer, j, root, record.extent, record.at, root,
                                      (None, record.wire), *released(record.transfer)))
             by, landed = {(record.owner, record.transfer): record for record in prepared.ports[j]}, set()
-            wired = {wire: root for _, _, _, wire, root, _ in row.copies}
+            wired = {wire: root for _, _, _, wire, root, _, _ in row.copies}
             for copy in (copy for copy in prepared.copies if copy.call == j and copy.kind == "land"
                          and copy.machine == here):
                 for t in (t for t in copy.transfers if (copy.owner, t) not in landed):

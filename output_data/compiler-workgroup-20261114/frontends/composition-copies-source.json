@@ -1,0 +1,56 @@
+{
+  "scope": "SAME974 turn104 whole copy/binding and saved source result checkpoint",
+  "source_parent": "eba586690dfec9a47e7c6d2e02d19b8fdd1ba87b",
+  "worktree_sha256": {
+    "compiler/mesh_compiler/native.py": "831f639083b3276c74da83c3080062126d34961cbc4af0c5bf253bcb67cf4946",
+    "compiler/mesh_compiler/archive.py": "8cf4bb7d456db2f226ab83d72e40f0eb22c81a525d624db69b9f2046bcb431b2",
+    "compiler/mesh_compiler/lower_metal.py": "8da70d94dc78b4f437b028a5904dffa41382c0aa58b98b587728dbdea487b9c2",
+    "rdma/mesh_graph.py": "41daacccecdddcc6830f540f4af00895681c3696cdba297cb110800cacb29375",
+    "rdma/mesh-graph.h": "a3f94f56105df7d9dff7a3f1e523b2a7f49a50b01b31e5cbabaff03a06d0568e",
+    "rdma/mesh-graph.c": "18d0eb08e446d25ee62a82e57674066aec0a8d5578db84aa15abadc746964971"
+  },
+  "staged_sha256": {
+    "compiler/mesh_compiler/native.py": "831f639083b3276c74da83c3080062126d34961cbc4af0c5bf253bcb67cf4946",
+    "compiler/mesh_compiler/archive.py": "8cf4bb7d456db2f226ab83d72e40f0eb22c81a525d624db69b9f2046bcb431b2",
+    "compiler/mesh_compiler/lower_metal.py": "8da70d94dc78b4f437b028a5904dffa41382c0aa58b98b587728dbdea487b9c2",
+    "rdma/mesh_graph.py": "41daacccecdddcc6830f540f4af00895681c3696cdba297cb110800cacb29375",
+    "rdma/mesh-graph.h": "1f2f834834d4e380254e72b45fad722dd2f5bb527b3af33d4cd857487da9d620",
+    "rdma/mesh-graph.c": "4f21f3d7234958ab28f01351dc9208368be38547cbbbf92e747f03d46f771e3b"
+  },
+  "changed_during_checks": [],
+  "checks": {
+    "ast": "PASS",
+    "pyflakes_exit": 0,
+    "pyflakes_output": "",
+    "strict_command": [
+      "clang",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-ffp-contract=off",
+      "-isystem",
+      ".build/highs/HiGHS-1.15.1/highs",
+      "-isystem",
+      ".build/highs/HiGHS-1.15.1",
+      "-isystem",
+      ".build/isl/isl-0.27/include",
+      "-fsyntax-only",
+      "mesh-graph.c"
+    ],
+    "strict_cwd": "rdma",
+    "strict_exit": 1,
+    "strict_output": "mesh-graph.c:2881:8: error: redefinition of 'mesh_graph_access'\n 2881 | struct mesh_graph_access { size_t references; struct mesh_graph_domain *domain; isl_map *relation; isl_set *guard;\n      |        ^\n./mesh-graph.h:278:8: note: previous definition is here\n  278 | struct mesh_graph_access { uint64_t key, start, end; uint32_t vertex, write; };\n      |        ^\nmesh-graph.c:2904:6: error: no member named 'least' in 'struct mesh_graph_access'\n 2904 |   a->least = 1; a->greatest = 0;\n      |   ~  ^\nmesh-graph.c:2904:20: error: no member named 'greatest' in 'struct mesh_graph_access'\n 2904 |   a->least = 1; a->greatest = 0;\n      |                 ~  ^\nmesh-graph.c:2905:50: error: no member named 'relation' in 'struct mesh_graph_access'\n 2905 |   isl_set *bytes = isl_map_range(isl_map_copy(a->relation));\n      |                                               ~  ^\nmesh-graph.c:2909:19: error: call to undeclared function 'isl_set_dim_min_val'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]\n 2909 |     isl_val *lo = isl_set_dim_min_val(isl_set_copy(bytes), 0), *hi = isl_set_dim_max_val(isl_set_copy(bytes), 0);\n      |                   ^\nmesh-graph.c:2909:19: note: did you mean 'isl_set_dim_min'?\n.build/isl/isl-0.27/include/isl/set.h:597:24: note: 'isl_set_dim_min' declared here\n  597 | __isl_give isl_pw_aff *isl_set_dim_min(__isl_take isl_set *set, int pos);\n      |                        ^\nmesh-graph.c:2909:14: error: incompatible integer to pointer conversion initializing 'isl_val *' (aka 'struct isl_val *') with an expression of type 'int' [-Wint-conversion]\n 2909 |     isl_val *lo = isl_set_dim_min_val(isl_set_copy(bytes), 0), *hi = isl_set_dim_max_val(isl_set_copy(bytes), 0);\n      |              ^    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nmesh-graph.c:2909:70: error: call to undeclared function 'isl_set_dim_max_val'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]\n 2909 |     isl_val *lo = isl_set_dim_min_val(isl_set_copy(bytes), 0), *hi = isl_set_dim_max_val(isl_set_copy(bytes), 0);\n      |                                                                      ^\nmesh-graph.c:2909:65: error: incompatible integer to pointer conversion initializing 'isl_val *' (aka 'struct isl_val *') with an expression of type 'int' [-Wint-conversion]\n 2909 |     isl_val *lo = isl_set_dim_min_val(isl_set_copy(bytes), 0), *hi = isl_set_dim_max_val(isl_set_copy(bytes), 0);\n      |                                                                 ^    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\nmesh-graph.c:2910:68: error: no member named 'least' in 'struct mesh_graph_access'\n 2910 |     if (lo && hi && isl_val_is_int(lo) && isl_val_is_int(hi)) { a->least = isl_val_get_num_si(lo); a->greatest = isl_val_get_num_si(hi); }\n      |                                                                 ~  ^\nmesh-graph.c:2910:103: error: no member named 'greatest' in 'struct mesh_graph_access'\n 2910 |     if (lo && hi && isl_val_is_int(lo) && isl_val_is_int(hi)) { a->least = isl_val_get_num_si(lo); a->greatest = isl_val_get_num_si(hi); }\n      |                                                                                                    ~  ^\nmesh-graph.c:2922:38: error: incompatible pointer to integer conversion initializing 'uint64_t' (aka 'unsigned long long') with an expression of type 'struct mesh_graph_domain *' [-Wint-conversion]\n 2922 |   *a = (struct mesh_graph_access){1, domain, relation, guard, flags, guard_source, 1, 0};\n      |                                      ^~~~~~\nmesh-graph.c:2922:46: error: incompatible pointer to integer conversion initializing 'uint64_t' (aka 'unsigned long long') with an expression of type 'isl_map *' (aka 'struct isl_map *') [-Wint-conversion]\n 2922 |   *a = (struct mesh_graph_access){1, domain, relation, guard, flags, guard_source, 1, 0};\n      |                                              ^~~~~~~~\nmesh-graph.c:2922:56: error: incompatible pointer to integer conversion initializing 'uint32_t' (aka 'unsigned int') with an expression of type 'isl_set *' (aka 'struct isl_set *') [-Wint-conversion]\n 2922 |   *a = (struct mesh_graph_access){1, domain, relation, guard, flags, guard_source, 1, 0};\n      |                                                        ^~~~~\nmesh-graph.c:2922:70: error: excess elements in struct initializer [-Werror,-Wexcess-initializers]\n 2922 |   *a = (struct mesh_graph_access){1, domain, relation, guard, flags, guard_source, 1, 0};\n      |                                                                      ^~~~~~~~~~~~\nmesh-graph.c:2960:56: error: no member named 'references' in 'struct mesh_graph_access'\n 2960 |   __atomic_fetch_add(&((struct mesh_graph_access *)a)->references, 1, __ATOMIC_RELAXED);\n      |                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  ^\nmesh-graph.c:2964:36: error: no member named 'references' in 'struct mesh_graph_access'\n 2964 |   if (!a || __atomic_sub_fetch(&a->references, 1, __ATOMIC_ACQ_REL)) return;\n      |                                 ~  ^\nmesh-graph.c:2965:36: error: no member named 'domain' in 'struct mesh_graph_access'\n 2965 |   struct mesh_graph_domain *d = a->domain;\n      |                                 ~  ^\nmesh-graph.c:2967:19: error: no member named 'relation' in 'struct mesh_graph_access'\n 2967 |   isl_map_free(a->relation); isl_set_free(a->guard);\n      |                ~  ^\nmesh-graph.c:2967:46: error: no member named 'guard' in 'struct mesh_graph_access'\n 2967 |   isl_map_free(a->relation); isl_set_free(a->guard);\n      |                                           ~  ^\nfatal error: too many errors emitted, stopping now [-ferror-limit=]\n20 errors generated.\n"
+  },
+  "limitations": [
+    "No imports, linking, native invocation, save/load execution or matching ABI validation performed.",
+    "Full current graph strict syntax is blocked by peer131 transitional image/access source (mesh_graph_access redefinition and unpaired ISL declarations; an earlier snapshot also exposed header56 versus relation archive assert48). Exact stderr is retained. Only closure declarations/functions are staged; image/view API and implementation drafts excluded.",
+    "Canonical metal_ir_copy is native131 source; compiler66 registration/call pairing not part of this checkpoint.",
+    "Compiler68/66 original lowered/control/many-to-many provenance result fields are pending and not yet saved."
+  ],
+  "retained": [
+    "Original copy domain, native layout terms/offset, mapped Slot.view, returned copy OpID and CopyRecord provenance.",
+    "Original declaration fields, event relation, closure arrays, task search/order, redundancy and boundary results through existing graph owner serializers.",
+    "One graph codec; native relation and search owners shared between source wrappers; loaded native Local relation/closure remain borrowed, not duplicated or solved."
+  ]
+}

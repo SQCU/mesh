@@ -200,6 +200,49 @@ void mesh_graph_closure_free(struct mesh_graph_closure *made) {
   free(made->reached); free(made);
 }
 
+/* mesh-graph.h mesh_graph_closure_save: the header {vertices, 0, words}, then reached; *cells its vertices * words */
+static int closure_bytes(uint32_t vertices, uint64_t words, size_t *cells, size_t *total) {
+  const size_t header = 2 * sizeof(uint32_t) + sizeof(uint64_t);
+  if (words && (size_t)vertices > (SIZE_MAX - header) / sizeof(uint64_t) / (size_t)words) return EINVAL;
+  *cells = (size_t)vertices * (size_t)words;
+  *total = header + *cells * sizeof(uint64_t);
+  return 0;
+}
+
+int mesh_graph_closure_save(const struct mesh_graph_closure *closure, void **bytes, size_t *length) {
+  *bytes = NULL; *length = 0;
+  const uint32_t header[2] = {closure->vertices, 0};
+  const uint64_t words = closure->words;
+  size_t cells, total;
+  int status = closure_bytes(closure->vertices, words, &cells, &total);
+  if (status) return status;
+  char *out = malloc(total), *at = out;
+  if (!out) return ENOMEM;
+  memcpy(at, header, sizeof header); at += sizeof header;
+  memcpy(at, &words, sizeof words); at += sizeof words;
+  memcpy(at, closure->reached, cells * sizeof(uint64_t));
+  *bytes = out; *length = total;
+  return 0;
+}
+
+int mesh_graph_closure_load(const void *bytes, size_t length, struct mesh_graph_closure **made) {
+  *made = NULL;
+  uint32_t header[2];
+  uint64_t words;
+  size_t cells, total;
+  if (length < sizeof header + sizeof words) return EINVAL;
+  memcpy(header, bytes, sizeof header);
+  memcpy(&words, (const char *)bytes + sizeof header, sizeof words);
+  if (header[1] || closure_bytes(header[0], words, &cells, &total) || length != total) return EINVAL;
+  struct mesh_graph_closure *c = calloc(1, sizeof *c);
+  if (c) c->reached = calloc(cells + 1, sizeof *c->reached);
+  if (!c || !c->reached) { mesh_graph_closure_free(c); return ENOMEM; }
+  c->vertices = header[0]; c->words = (size_t)words;
+  memcpy(c->reached, (const char *)bytes + sizeof header + sizeof words, cells * sizeof(uint64_t));
+  *made = c;
+  return 0;
+}
+
 static int closure_descending(const void *a, const void *b) {
   const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
   return (x < y) - (x > y);

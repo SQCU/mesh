@@ -49,7 +49,7 @@ Output = collections.namedtuple("Output", "root value literal metadata kind writ
 # the whole input's placeholder Root, `root`/`value` the partition's typed root and ValueID (its landing view of that
 # input's root), `source` the original partition Node, `landing` the ValueID of its source view (its landing geometry)
 # in `input.root`, None for a non-tensor
-InputPart = collections.namedtuple("InputPart", "processor input root value source landing")
+InputPart = collections.namedtuple("InputPart", "processor input root value source landing geometry")
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: a result the program stores into its original input's root
 MUTATIONS = (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)
 # torch 2.14.0 torch/export/graph_signature.py InputKind; metal-microbench metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE
@@ -1018,7 +1018,7 @@ def construct(module, produced, *, targets, kinds, sources, wires, output_roles,
             made_parts = []
             for processor, whole, part, geometry in parts:
                 root, value, landing_ = part_of(whole, geometry)
-                made_parts.append(InputPart(processor, ported[copied[whole]], root, value, part, landing_))
+                made_parts.append(InputPart(processor, ported[copied[whole]], root, value, part, landing_, geometry))
             input_parts[position_] = tuple(made_parts)
         vertices = tuple(tuple(emitted_.get(node, ())) for node in module.meta["vertices"])
         accesses = tuple(typed(node) for node, _ in source.accesses)
