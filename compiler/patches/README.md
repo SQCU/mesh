@@ -919,3 +919,152 @@ shasum -a 256 $F
 - The first `shasum` must print the "before" hashes above, and the second the "after" hashes.
 - To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpp-build-result.patch`.
 - This is pure Python source, so no rebuild is needed.
+
+## `torch-inductor-cpp-wrapper-binding.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/_inductor/codegen/cpp_wrapper_cpu.py`
+`CppWrapperCpu` (`CppWrapperGpu` and `CppWrapperMps` inherit these unchanged), 16 hunks, under
+`aot_inductor.lowered` only:
+- the entry: `_write_input_preamble`, `_write_input_unpacking`, `_write_constants_unpacking` (JIT constant),
+  `_write_entry_point_postamble`;
+- the allocation and view bindings: `make_allocation` (through `make_buffer_allocation` and memory_planning.py
+  `AllocationPool.codegen_create`), `codegen_alloc_from_pool`, `codegen_reinterpret_view`, and `_bound_prepared` (new);
+- their consumption: `make_buffer_free`, `make_free_by_names`, `codegen_exact_buffer_reuse`, `generate_return`;
+- the seeds writer: `_generate_extern_kernel_out_helper`;
+- the entry's timing: `generate` and `resume_generation` (new override), hunk `@@ -1470,8 +1536,26 @@`.
+
+Ownership (supervisor, 11-15): 66 owns the binding semantics (the entry preamble, allocation, pool, view and control
+outputs). 68 owns the original `generate`/`_generate` planning-to-entry-print timing, as part of
+`torch-inductor-aot-lowered-result.patch`. The two timing functions above overlap that grant. They are kept as
+written here; 68 owns their next final-stage integration. Both patches change separate functions of one upstream
+file and apply in this order: that patch, `torch-inductor-cpp-build-result.patch`, then this one.
+
+The supplied operand is the original `wrapper.supplied`: 68's `LoweredAOTI.emit(supplied)` resumes the planned stage
+(`resume_generation`), which sets it before print. There is no parallel copy. It is to be computed over
+`LoweredAOTI.planned` (the lines `run_wrapper_ir_passes` leaves) and the wrapper's planner operands (`memory_planner`
+or `past_planning_states`). That consumer, in lower_metal.py (66), is not written yet. The slots it names are the
+handles that 132's per-instance/per-residue prepared owner prepares. Everything else in the emitter is unchanged:
+numeric kernels, control, extern calls and the proxy executor call.
+
+### What it changes
+
+- **Entry timing.** `generate` skips `write_wrapper_decl` for a lowered non-const graph. `resume_generation(supplied)`
+  sets `self.supplied`, runs `write_wrapper_decl` and then the original resumption. So the declaration (signature,
+  input preamble and unpacking, constants and input symbols) is printed with `supplied` known, still first in
+  `prefix`. Nothing in `_generate` writes `prefix` before 68's planned yield, and scheduler codegen precedes
+  `generate` in the original too. A const graph, which resumes at once, keeps the original order.
+- **Borrowed entry.** `_write_input_preamble` records `bound_entry`:
+  - `aot`: `run_impl`'s input count, or None for a const graph's `_const_run_impl`, which has no `input_handles`;
+  - `jit`: `inductor_entry_impl`'s;
+  - `inputs` and `constants`: their names in entry order.
+
+  It emits `bound_handles = input_handles + {aot}` (JIT: `+ {jit}`, after its GIL release) and steals nothing.
+  `_write_input_unpacking` binds each input as `ConstantHandle {name}(input_handles[idx])`, held (`bound_held`).
+  A scalar input reads `input_handles[idx]`, and JIT's constant is a `ConstantHandle`. The postamble has no
+  `inputs.clear()`. A wrapper whose misaligned-input copy rebinds an input to an owned clone
+  (`CppWrapperGpu.codegen_inputs`, `inputs_to_check`) raises.
+- **`make_allocation`** consumes `supplied[name] = (k, prepared)`; its slot is `bound_handles[k]`.
+  - Prepared: `{handle} = bound_handles[k]; ConstantHandle {name}({handle});`, the original's non-owning constant
+    binding. It is held and prepared (`_bound_prepared`).
+  - Otherwise: the slot is its storage, viewed at offset 0 with its runtime allocation size and stride
+    (`aoti_torch__alloc_from_pool`), then restrided as the original does.
+  - Recorded in `bound_allocations`, in print order, with its operands as given and `graphs`, `supplied`, `handle`
+    and `result`.
+  - It raises in three cases: no binding supplied, a const graph, and a prepared binding within a control subgraph.
+- **`codegen_alloc_from_pool`** consumes `supplied[("pool", pool, offset, dtype, shape, stride)] = (k, names)`.
+  The view is the slot, `ConstantHandle(tmp)` with `tmp = bound_handles[k]`, and `names` (its `AllocFromPoolLine`
+  group's) are prepared. An unsupplied, statically known view of a prepared pool raises.
+- **`codegen_reinterpret_view`** at print consumes `supplied[("view", data, size, stride, offset, dtype)] = (k, names)`:
+  `ConstantHandle tmp_{data}_{id}(bound_handles[k])`, prepared with `names` (a non-exact reuse's new buffer).
+  Each call is recorded in `bound_views` with `stage` set to "print" or "scheduler". An unsupplied, statically known
+  print-stage view of a prepared binding raises.
+- **Consumption.** For a held binding, `make_buffer_free` and `make_free_by_names` emit nothing. Its exact reuse
+  (`codegen_exact_buffer_reuse`) is held, and prepared if the original was. `generate_return` emits
+  `output_handles[idx] = {name}.get()`.
+- **`generate_return`** first raises on any supplied key the print did not consume (`bound_consumed`). It then
+  records `bound_outputs {idx: "owned" | "borrowed" | earlier idx}`:
+  - "owned": the caller steals the handle (a produced value, scalar or constant clone);
+  - "borrowed": the handle is a held binding's, which the caller already holds;
+  - earlier idx: an alias of that output position.
+- **Seeds writer.** `_generate_extern_kernel_out_helper` with `supplied[("seeds", name)]` records `bound_seeds[name]`
+  and emits no `randint_low_out` draw.
+
+### Entry binding
+
+- 131's body call is the original entry itself: `AOTInductorModel::run_impl(input_handles, output_handles, stream,
+  proxy_executor)`, or the JIT `inductor_entry_impl`. The container's `AOTInductorModelContainerRun` checks
+  `num_inputs`, so it is not this entry.
+- `input_handles[0, aot)` are the entry's own inputs, borrowed: the caller keeps every handle it passes. After them
+  come the supplied slots, `bound_handles[k]`, also borrowed. Under MetalNativeTask's late external-pointer rebinding
+  per invocation, a handle stays the caller's to rebind. Nothing here assumes pointer stability or makes a new handle
+  per call.
+- 132's owner prepares, retains and releases each slot. A prepared slot is that exact view. Any other slot is a
+  storage of `compute_required_storage_length(allocation_shape, stride, 0)` elements of `dtype` on `device`.
+- Output ownership is `bound_outputs`: a "borrowed" output is a slot or input handle, which the caller must not free.
+
+### Unfinished obligations (supervisor source review, 11-15; not a final domain)
+
+- **Occurrence identity.** The keys `supplied[name]` and `("view", data, size, stride, offset, dtype)` cannot tell
+  apart repeated occurrences of one original control or entry. The final binding must consume the original planned
+  line, IR, pool and view identity plus occurrence, not recover it from names or geometry.
+- **Control and early views.** `_bound_prepared`'s errors are obligations still to be met, not limits of what is
+  supported:
+  - a prepared binding within a control subgraph (its outputs move into the control's RAII outputs,
+    `codegen_subgraph_suffix`);
+  - a scheduler-stage view of a prepared binding;
+  - a `while_loop` body's per-pass allocations and carried rebinding.
+- **Seeds.** The branch suppresses the original writer on key presence alone. The retained state/effect owner must
+  supply the corresponding data and its advance once per source call, not a metadata assertion.
+- **Const graph entry operands:** required; currently a const graph's allocation raises and its emission is early.
+- **Results an operator allocates itself:** a fallback's returned handle, the proxy executor's outputs, and a constant
+  output's `aoti_torch_clone`. They are "owned" in `bound_outputs`.
+- **CppWrapperGpu's misaligned-input copy:** it raises.
+- **`CppWrapperCpuArrayRef`'s own unpacking.**
+- **Multiplicity.** The supplied operand depends only on the planned result. Per-configuration and per-residue
+  differences are the caller's handle arrays, so one emission per `LoweredAOTI` would serve every row. The
+  per-configuration emitter result from the same retained plan is 68's.
+
+### Target
+
+| File | Before (sha256) | After (sha256) |
+|---|---|---|
+| `torch/_inductor/codegen/cpp_wrapper_cpu.py` | `d03d3032c9eb078eb918f70f0f44bb823ec6a6d0481b677e4a60ce4a68b2025a` (upstream; installed) | `d5bad4bd3d986bb30c381764442ce9e0fea4060b3cec19ae2df49dc6b9321dff` |
+
+Patch sha256 `71ecddd88f1222a27e3bf28fb3686e4218d2f6f942270ddb3324b54f6e6a2c1c`, 544 lines.
+
+### Combined canonical preflight (11-15)
+
+The preflight ran in an isolated temporary git index (`GIT_INDEX_FILE`), which held the installed blobs of all 16
+files the dependency unit touches:
+1. `git apply --cached -R` the installed aot revision `6d56f939` (patch `a75eb0b8…`).
+2. `git apply --cached` the current `torch-inductor-aot-lowered-result.patch` (`87c0520c…`), then
+   `torch-inductor-cpp-build-result.patch` (`de3ee6d8…`), then this patch (`71ecddd8…`). All applied without offset.
+3. All 16 results parse (`ast.parse`) and compile.
+4. The seven changed files have no pyflakes finding beyond their installed text's. Those files are `compile_fx.py`,
+   `graph.py`, `output_code.py`, `wrapper.py`, `cpp_builder.py`, `codecache.py` and `cpp_wrapper_cpu.py`.
+5. `cpp_wrapper_cpu.py` is touched by this patch alone: its before is the installed blob, and its after is the hash
+   above.
+6. Reversing the three in reverse order gave back the exact pre-aot blobs. Re-applying `6d56f939` gave back the exact
+   installed blobs.
+7. The index was removed.
+
+No Torch or Mesh import, compilation or workload was run. The patch was generated by `difflib` from the after-text,
+and its applicability is `git apply`'s.
+
+### Apply, check, reverse
+
+Not installed; the executor owns installation. In install order (after the aot revision's own steps, then
+`torch-inductor-cpp-build-result.patch`), from the repository root:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+shasum -a 256 $SITE/torch/_inductor/codegen/cpp_wrapper_cpu.py
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpp-wrapper-binding.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpp-wrapper-binding.patch
+shasum -a 256 $SITE/torch/_inductor/codegen/cpp_wrapper_cpu.py
+```
+
+- The first `shasum` must print the "before" hash above, and the second the "after" hash.
+- To reverse:
+  `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpp-wrapper-binding.patch`.
+- This is pure Python source, so no rebuild is needed. No C++ was compiled.

@@ -1,0 +1,544 @@
+--- a/torch/_inductor/codegen/cpp_wrapper_cpu.py
++++ b/torch/_inductor/codegen/cpp_wrapper_cpu.py
+@@ -1021,6 +1021,35 @@
+         """Emit input stealing and (in JIT mode) GIL release."""
+         # Weights are promoted in the JIT mode
+         jit_num_args = len(V.graph.graph_inputs) + len(V.graph.constants)
++        if config.aot_inductor.lowered:
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, the borrowed entry: its caller keeps every
++            # handle it passes, none stolen (_write_input_unpacking binds each
++            # input as a ConstantHandle). bound_entry is its own operands:
++            # "aot" its run_impl's input count (None: a const graph's
++            # _const_run_impl, which has no input_handles), "jit" its
++            # inductor_entry_impl's, `inputs` and `constants` their names in
++            # entry order. The slots supplied for its bindings follow them:
++            # bound_handles, its input_handles past its own inputs. Written by
++            # write_wrapper_decl at its planned stage's resumption
++            # (resume_generation), before any line prints
++            self.bound_entry = dict(
++                aot=None if V.graph.is_const_graph else len(V.graph.graph_inputs),
++                jit=jit_num_args,
++                inputs=tuple(V.graph.graph_inputs),
++                constants=tuple(V.graph.constants),
++            )
++            if not V.graph.is_const_graph:
++                self.prefix.splice_aot(
++                    "[[maybe_unused]] AtenTensorHandle* bound_handles = "
++                    f"input_handles + {self.bound_entry['aot']};"
++                )
++            self.prefix.splice_jit("py::gil_scoped_release_simple release;")
++            self.prefix.splice_jit(
++                "[[maybe_unused]] AtenTensorHandle* bound_handles = "
++                f"input_handles + {jit_num_args};"
++            )
++            return
+         # AOTI const graphs enter through _const_run_impl and have no
+         # input_handles. Their JIT entry point still receives constants as
+         # appended input handles.
+@@ -1051,8 +1080,38 @@
+                 if dtype is None:
+                     raise AssertionError("Fails to get the dtype of the sympy.Expr")
+                 self.codegen_tensor_item(
+-                    dtype, f"inputs[{idx}]", input_key, self.prefix
+-                )
++                    dtype,
++                    (
++                        f"input_handles[{idx}]"
++                        if config.aot_inductor.lowered
++                        else f"inputs[{idx}]"
++                    ),
++                    input_key,
++                    self.prefix,
++                )
++            elif config.aot_inductor.lowered:
++                # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++                # aot_inductor.lowered, a borrowed input (_write_input_preamble)
++                # bound as the original's non-owning ConstantHandle, held: its
++                # free, reuse and return consume it (bound_held). A wrapper whose
++                # own misaligned-input copy rebinds it to an owned clone
++                # (CppWrapperGpu.codegen_inputs, V.graph.inputs_to_check) does not
++                # have this binding
++                if (
++                    V.graph.aot_mode
++                    and type(self).codegen_inputs is not CppWrapperCpu.codegen_inputs
++                    and input_key
++                    in [V.graph.graph_input_names[i] for i in V.graph.inputs_to_check]
++                ):
++                    raise NotImplementedError(
++                        "unresolved integration: input %s's misaligned-input copy "
++                        "(codegen_inputs, inputs_to_check) rebinds it to an owned "
++                        "clone, which its borrowed binding cannot take" % input_key
++                    )
++                self.prefix.writeline(
++                    f"ConstantHandle {input_key}(input_handles[{idx}]);"
++                )
++                self.__dict__.setdefault("bound_held", set()).add(input_key)
+             else:
+                 self.prefix.writeline(f"auto {input_key} = std::move(inputs[{idx}]);")
+         # debug printing for all input args to AOTI model
+@@ -1079,13 +1138,20 @@
+             self.prefix.writeline_aot(
+                 f"[[maybe_unused]] auto& {constants_key} = constants_->at({idx});"
+             )
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, JIT's constant a borrowed input, bound as a
++            # ConstantHandle as AOTI's constants_ entries are
+             self.prefix.writeline_jit(
+-                f"[[maybe_unused]] auto {constants_key} = std::move(inputs[{constants_idx}]);"
++                f"[[maybe_unused]] ConstantHandle {constants_key}(input_handles[{constants_idx}]);"
++                if config.aot_inductor.lowered
++                else f"[[maybe_unused]] auto {constants_key} = std::move(inputs[{constants_idx}]);"
+             )
+ 
+     def _write_entry_point_postamble(self):
+         """Emit AOTI-specific post-input setup (inputs.clear, kernels ref)."""
+-        if not V.graph.is_const_graph:
++        # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++        # aot_inductor.lowered, a borrowed entry has no stolen inputs to clear
++        if not V.graph.is_const_graph and not config.aot_inductor.lowered:
+             self.prefix.writeline_aot("inputs.clear();")
+         self.prefix.writeline_aot(
+             "[[maybe_unused]] auto& kernels = static_cast<AOTInductorModelKernels&>(*this->kernels_.get());"
+@@ -1470,8 +1536,26 @@
+ 
+     def generate(self, is_inference):
+         with dynamo_timed("CppWrapperCpu.generate", log_pt2_compile_event=True):
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, the entry's declaration (write_wrapper_decl:
++            # its signature, input preamble and unpacking, constants and input
++            # symbols) is emitted at its planned stage's resumption, with the
++            # supplied operand (resume_generation), not before its planned
++            # stage. A const graph's generation resumes at once: its declaration
++            # first, as the original
++            if not config.aot_inductor.lowered or V.graph.is_const_graph:
++                self.write_wrapper_decl()
++            return super().generate(is_inference)
++
++    def resume_generation(self, supplied):
++        # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++        # aot_inductor.lowered, its planned stage resumed with `supplied` (the
++        # binding operand its print consumes, held as self.supplied): the
++        # entry's declaration, then its planned lines' print
++        if config.aot_inductor.lowered and not V.graph.is_const_graph:
++            self.supplied = supplied
+             self.write_wrapper_decl()
+-            return super().generate(is_inference)
++        return super().resume_generation(supplied)
+ 
+     def _codegen_aoti_model_class(self):
+         """Emit AOTI model class, constructor, and const_run driver into self.prefix."""
+@@ -1603,6 +1687,27 @@
+     def generate_return(self, output_refs: list[str]):
+         cst_names = V.graph.constants.keys()
+         output2idx: dict[str, int] = {}
++        if config.aot_inductor.lowered:
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, its print's end (its output refs made):
++            # each supplied binding consumed by that print (bound_consumed:
++            # make_allocation's, codegen_alloc_from_pool's,
++            # codegen_reinterpret_view's and a seeds writer's), and each
++            # output's ownership, bound_outputs {position: "owned" (its caller
++            # steals it), "borrowed" (a handle its caller already holds: a held
++            # binding's), or the earlier position whose handle it is}; a
++            # "nullptr" output has none
++            unconsumed = [
++                key
++                for key in self.supplied or ()
++                if key not in self.__dict__.get("bound_consumed", ())
++            ]
++            if unconsumed:
++                raise NotImplementedError(
++                    "unresolved integration: supplied bindings %r, which this "
++                    "wrapper's print does not consume" % (unconsumed,)
++                )
++            self.bound_outputs = {}
+ 
+         # If any output ref represents an rvalue tensor, materialize it to an lvalue
+         # RAIIAtenTensorHandle first.  This prevents situations where the code for the
+@@ -1634,6 +1739,8 @@
+                 self.wrapper_call.writeline(
+                     f"output_handles[{idx}] = {output_tensor}.release();"
+                 )
++                if config.aot_inductor.lowered:
++                    self.bound_outputs[idx] = "owned"
+                 continue
+ 
+             if is_constant_buffer:
+@@ -1648,11 +1755,30 @@
+                     self.wrapper_call.writeline(
+                         f"output_handles[{idx}] = output_handles[{src_idx}];"
+                     )
++                elif config.aot_inductor.lowered and output in getattr(
++                    self, "bound_held", ()
++                ):
++                    # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++                    # aot_inductor.lowered, a held binding's output (a supplied
++                    # slot's or a borrowed input's) is that handle itself, which
++                    # the entry's caller already holds
++                    self.wrapper_call.writeline(
++                        f"output_handles[{idx}] = {output}.get();"
++                    )
+                 else:
+                     self.wrapper_call.writeline(
+                         f"output_handles[{idx}] = {output}.release();"
+                     )
+ 
++            if config.aot_inductor.lowered:
++                self.bound_outputs[idx] = (
++                    "owned"
++                    if is_constant_buffer
++                    else output2idx.get(
++                        output,
++                        "borrowed" if output in getattr(self, "bound_held", ()) else "owned",
++                    )
++                )
+             if output not in output2idx:
+                 output2idx[output] = idx
+ 
+@@ -2014,6 +2140,20 @@
+         device: str,
+         stack_traces: OrderedSet[str] | None = None,
+     ) -> None:
++        if config.aot_inductor.lowered and ("seeds", out) in (
++            self.__dict__.get("supplied") or {}
++        ):
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, a RandomSeeds buffer's writer (its
++            # randint_low_out, a draw from the process default generator)
++            # given its state binding instead: supplied[("seeds", name)], its
++            # body generator's state relation as its canonical owner supplies
++            # it. Its buffer's own binding (supplied[name], or its pool view's)
++            # is the slot that owner writes once per source call: no draw is
++            # emitted. Recorded in bound_seeds {name: that relation}
++            self.__dict__.setdefault("bound_consumed", set()).add(("seeds", out))
++            self.__dict__.setdefault("bound_seeds", {})[out] = self.supplied[("seeds", out)]
++            return
+         if out_view:
+             out_name = f"{out}_as_strided"
+             self.writeline(f"auto {out_name} = {out_view};")
+@@ -2284,6 +2424,14 @@
+         self.unbacked_symbol_decls.add(str(sym))
+ 
+     def make_buffer_free(self, buffer):
++        if config.aot_inductor.lowered and buffer.get_name() in getattr(
++            self, "bound_held", ()
++        ):
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, a held binding (a ConstantHandle: a borrowed
++            # input or a supplied prepared slot) is its caller's or its
++            # canonical owner's, which keeps it past this entry: not reset
++            return ""
+         return (
+             ""
+             if isinstance(buffer.get_output_spec(), ir.MultiOutputLayout)
+@@ -2292,9 +2440,22 @@
+         )
+ 
+     def make_free_by_names(self, names_to_del: list[str]):
++        if config.aot_inductor.lowered:
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, a held binding's free (make_buffer_free's),
++            # here a pool's and its views' (AllocationPool.codegen_destroy)
++            held = getattr(self, "bound_held", ())
++            names_to_del = [name for name in names_to_del if name not in held]
+         return " ".join(f"{name}.reset();" for name in names_to_del)
+ 
+     def codegen_exact_buffer_reuse(self, old_name: str, new_name: str, del_line: str):
++        if config.aot_inductor.lowered and old_name in getattr(self, "bound_held", ()):
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, the reuse of a held binding holds it too,
++            # and of a prepared one is prepared too
++            self.bound_held.add(new_name)
++            if old_name in getattr(self, "bound_prepared", ()):
++                self.bound_prepared.add(new_name)
+         return f"auto {new_name} = std::move({old_name});  // reuse"
+ 
+     def generate_debug_sync(self, buffer):
+@@ -2467,10 +2628,53 @@
+             buffer.get_stride(),
+             V.graph.get_allocation_size(buffer),
+             buffer.get_is_pinned(),
+-        )
++            buffer=buffer,
++        )
++
++    def _bound_prepared(self, names, graphs):
++        # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++        # aot_inductor.lowered, `names` bound to one supplied prepared slot
++        # (make_allocation, codegen_alloc_from_pool, codegen_reinterpret_view)
++        # within `graphs`: held and prepared (bound_held, bound_prepared). One
++        # within a control subgraph (whose outputs move into its control's RAII
++        # outputs, codegen_subgraph_suffix), or with a view of a statically
++        # known layout made before print (at scheduler time: a control's
++        # operands), a runtime view of it, is unresolved
++        if len(graphs) > 1:
++            raise NotImplementedError(
++                "unresolved integration: prepared binding %s within control subgraph "
++                "%s, whose outputs move into its control's RAII outputs "
++                "(codegen_subgraph_suffix)" % (", ".join(names), graphs[-1].name)
++            )
++        early = [
++            view["data"].get_name()
++            for kind, view in self.__dict__.get("bound_views", ())
++            if kind == "view"
++            and view["stage"] == "scheduler"
++            and view["data"].get_name() in names
++            and self.is_statically_known_list_of_ints(
++                [*view["size"], *view["stride"], view["offset"]]
++            )
++        ]
++        if early:
++            raise NotImplementedError(
++                "unresolved integration: prepared binding %s has views made before "
++                "print (codegen_reinterpret_view at scheduler time: a control's "
++                "operands), each a runtime view of it" % ", ".join(early)
++            )
++        self.__dict__.setdefault("bound_held", set()).update(names)
++        self.__dict__.setdefault("bound_prepared", set()).update(names)
+ 
+     def make_allocation(
+-        self, name, device, dtype, shape, stride, allocation_shape=None, is_pinned=False
++        self,
++        name,
++        device,
++        dtype,
++        shape,
++        stride,
++        allocation_shape=None,
++        is_pinned=False,
++        buffer=None,
+     ):
+         """Emit C++ to allocate a tensor handle via aoti_torch_empty_strided.
+ 
+@@ -2532,15 +2736,85 @@
+             )
+             return f"AOTI_TORCH_ERROR_CODE_CHECK(aoti_torch_empty_strided{pinned_str}({args}));"
+ 
+-        # AOTI side: codegen_device_idx returns this->device_idx_ for the
+-        # primary device so the model honors runtime device assignment, but
+-        # keeps concrete indices for non-primary (cross-device) allocations.
+-        # JIT side (pure or dual mode's JIT) has no this->device_idx_ in scope,
+-        # so use the concrete graph device id.
+-        self.wrapper_call.writeline_aot(
+-            _alloc_line(self.codegen_device_idx(device, device_id))
+-        )
+-        self.wrapper_call.writeline_jit(_alloc_line(device_id))
++        if config.aot_inductor.lowered:
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, this allocation bound to the canonical
++            # binding supplied for it: supplied[name] = (k, prepared), in the
++            # operand its planned stage's resumption gives this print
++            # (resume_generation's self.supplied), its canonical owner's over
++            # the planned lines and their planner's result. Its slot is
++            # bound_handles[k], which the entry borrows.
++            # Prepared: the slot is its final view (dtype, size and stride, over
++            # a storage of its allocation size), bound as the original's
++            # non-owning ConstantHandle (a constant's binding: no tensor made,
++            # no RAII), prepared (_bound_prepared): its free, reuse and return
++            # consume it, and each view of it of a statically known layout is
++            # supplied too (codegen_reinterpret_view, codegen_alloc_from_pool).
++            # Otherwise the slot is its storage, viewed here at offset 0 with its
++            # runtime allocation size and stride (aoti_torch__alloc_from_pool),
++            # then restrided as the original.
++            # Recorded in bound_allocations in print order, its own operands as
++            # given: `buffer` make_buffer_allocation's (None for
++            # AllocationPool.codegen_create's, `name` its pool's), `graphs` the
++            # codegened graphs it is printed within (the innermost last),
++            # `supplied` its binding, `handle` and `result` its emitted handle
++            # and declaration
++            if self.bound_entry["aot"] is None:
++                raise NotImplementedError(
++                    "unresolved integration: allocation %s in a const graph, whose "
++                    "entry _const_run_impl has no input_handles to bind it" % name
++                )
++            if name not in self.supplied:
++                raise NotImplementedError(
++                    "unresolved integration: allocation %s has no canonical binding "
++                    "supplied (supplied, over the planned lines run_wrapper_ir_passes "
++                    "left)" % name
++                )
++            k, prepared = self.supplied[name]
++            graphs = tuple(self.codegened_graph_stack)
++            if prepared:
++                self._bound_prepared((name,), graphs)
++            self.__dict__.setdefault("bound_consumed", set()).add(name)
++            record = dict(
++                name=name,
++                device=device,
++                dtype=dtype,
++                shape=shape,
++                stride=orig_stride,
++                allocation_shape=allocation_shape,
++                is_pinned=is_pinned,
++                buffer=buffer,
++                graphs=graphs,
++                supplied=(k, prepared),
++                handle=handle_name,
++            )
++            self.__dict__.setdefault("bound_allocations", []).append(record)
++            if prepared:
++                self.wrapper_call.writeline(f"{handle_name} = bound_handles[{k}];")
++                record["result"] = f"ConstantHandle {name}({handle_name});"
++                return record["result"]
++            args = [
++                f"bound_handles[{k}]",
++                "0",
++                dtype_code,
++                str(len(shape)),
++                allocation_size_array_var,
++                stride_array_var,
++                f"&{handle_name}",
++            ]
++            self.wrapper_call.writeline(
++                f"AOTI_TORCH_ERROR_CODE_CHECK(aoti_torch__alloc_from_pool({', '.join(args)}));"
++            )
++        else:
++            # AOTI side: codegen_device_idx returns this->device_idx_ for the
++            # primary device so the model honors runtime device assignment, but
++            # keeps concrete indices for non-primary (cross-device) allocations.
++            # JIT side (pure or dual mode's JIT) has no this->device_idx_ in
++            # scope, so use the concrete graph device id.
++            self.wrapper_call.writeline_aot(
++                _alloc_line(self.codegen_device_idx(device, device_id))
++            )
++            self.wrapper_call.writeline_jit(_alloc_line(device_id))
+ 
+         if allocation_size != size:
+             old_handle_name, handle_name = handle_name, f"{name}_handle_restrided"
+@@ -2558,11 +2832,58 @@
+                 f"wrap_with_raii_handle_if_needed({old_handle_name});"
+             )
+ 
++        if config.aot_inductor.lowered:
++            record["handle"] = handle_name
++            record["result"] = f"RAIIAtenTensorHandle {name}({handle_name});"
+         return f"RAIIAtenTensorHandle {name}({handle_name});"
+ 
+     def codegen_alloc_from_pool(
+         self, name, offset, dtype, shape, stride
+     ) -> tuple[str, list[str]]:
++        if config.aot_inductor.lowered:
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, this pool view's own operands as given,
++            # ("pool", view) in call order in this wrapper's bound_views: `name`
++            # its pool (the bound_allocations entry of that name), `offset` its
++            # byte offset, `graphs` as bound_allocations', and its produced
++            # result once emitted: `handle` its temporary handle's name,
++            # `result` the reference and lines it returns.
++            # A view supplied a prepared binding, supplied[("pool", name,
++            # offset, dtype, shape, stride)] = (k, names) (memory_planning.py
++            # Allocation.codegen_alloc_from_pool's operands; `names` its
++            # AllocFromPoolLine's group's), is that slot itself, a
++            # ConstantHandle: no view is made, and `names` are prepared
++            # (_bound_prepared). Each view of a prepared pool of a statically
++            # known layout is supplied
++            view = dict(
++                name=name,
++                offset=offset,
++                dtype=dtype,
++                shape=shape,
++                stride=stride,
++                graphs=tuple(self.codegened_graph_stack),
++            )
++            self.__dict__.setdefault("bound_views", []).append(("pool", view))
++            key = ("pool", name, offset, dtype, tuple(shape), tuple(stride))
++            if key in self.supplied:
++                k, names = self.supplied[key]
++                self._bound_prepared(tuple(names), view["graphs"])
++                self.__dict__.setdefault("bound_consumed", set()).add(key)
++                tmp_name = f"tmp_tensor_handle_{next(self.tmp_tensor_id)}"
++                view["supplied"], view["handle"] = (k, names), tmp_name
++                view["result"] = (
++                    f"ConstantHandle({tmp_name})",
++                    [f"AtenTensorHandle {tmp_name} = bound_handles[{k}];"],
++                )
++                return view["result"]
++            if name in getattr(self, "bound_prepared", ()) and (
++                self.is_statically_known_list_of_ints([*shape, *stride, offset])
++            ):
++                raise NotImplementedError(
++                    "unresolved integration: pool view %r of prepared pool %s, a "
++                    "statically known layout, has no prepared binding supplied"
++                    % (key, name)
++                )
+         size = self.codegen_shape_tuple(shape)
+         stride = self.codegen_shape_tuple(stride)
+         tmp_name = f"tmp_tensor_handle_{next(self.tmp_tensor_id)}"
+@@ -2586,6 +2907,9 @@
+             f"AtenTensorHandle {tmp_name};",
+             f"AOTI_TORCH_ERROR_CODE_CHECK(aoti_torch__alloc_from_pool({', '.join(args)}));",
+         ]
++        if config.aot_inductor.lowered:
++            view["handle"] = tmp_name
++            view["result"] = (f"RAIIAtenTensorHandle({tmp_name})", allocations_to_write)
+         return f"RAIIAtenTensorHandle({tmp_name})", allocations_to_write
+ 
+     def codegen_reinterpret_view(
+@@ -2600,6 +2924,56 @@
+         """Returns a newly-created, temporary RAII tensor handle containing the
+         reinterpreted tensor data.  Callers of this function are responsible for saving
+         the handle if persistent access is needed."""
++
++        if config.aot_inductor.lowered:
++            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
++            # aot_inductor.lowered, this view's own operands as given,
++            # ("view", view) in call order in this wrapper's bound_views: `data`
++            # the viewed buffer, `offset` its element offset, `dtype` None where
++            # the view keeps data's, `graphs` as bound_allocations', `stage`
++            # "print", or "scheduler" for one made before its planned stage (no
++            # binding supplied yet: a control's operands), and its produced
++            # result once emitted: `result` the handle expression it returns,
++            # `lines` the lines it wrote first.
++            # At print, a view supplied a prepared binding, supplied[("view",
++            # data's name, size, stride, offset, dtype)] = (k, names) (sizes and
++            # strides as tuples; a const graph's print has no supplied operand),
++            # is that slot itself, a ConstantHandle: no view is made. It and
++            # `names` (the planned names bound to it: a non-exact reuse's new
++            # buffer, make_buffer_reuse) are prepared (_bound_prepared). Each
++            # view of a prepared binding of a statically known layout is supplied
++            printed = "supplied" in self.__dict__
++            supplied = self.__dict__.get("supplied") or {}
++            view = dict(
++                data=data,
++                size=size,
++                stride=stride,
++                offset=offset,
++                dtype=dtype,
++                graphs=tuple(self.codegened_graph_stack),
++                stage="print" if printed else "scheduler",
++            )
++            self.__dict__.setdefault("bound_views", []).append(("view", view))
++            key = ("view", data.get_name(), tuple(size), tuple(stride), offset, dtype)
++            if key in supplied:
++                k, names = supplied[key]
++                result = f"tmp_{data.get_name()}_{next(self.tmp_tensor_id)}"
++                self._bound_prepared((result, *names), view["graphs"])
++                self.__dict__.setdefault("bound_consumed", set()).add(key)
++                line = f"ConstantHandle {result}(bound_handles[{k}]);"
++                writeline(line)
++                view.update(supplied=(k, names), result=result, lines=(line,))
++                return result
++            if (
++                printed
++                and data.get_name() in getattr(self, "bound_prepared", ())
++                and self.is_statically_known_list_of_ints([*size, *stride, offset])
++            ):
++                raise NotImplementedError(
++                    "unresolved integration: view %r of prepared binding %s, a "
++                    "statically known layout, has no prepared binding supplied"
++                    % (key, data.get_name())
++                )
+ 
+         d_size, d_stride, d_offset, d_dtype, collapsible = (
+             codegen_reinterpret_view_helper(data)
+@@ -2711,6 +3085,9 @@
+         #     }.cbegin()
+         # );
+         # ```
++        if config.aot_inductor.lowered:
++            view["result"] = final_tensor_str
++            view["lines"] = tuple(call_strs)
+         return final_tensor_str
+ 
+     def codegen_device_copy(self, src, dst, non_blocking: bool | str):
