@@ -240,9 +240,17 @@ def queried(analysis, ordinal, target):
 # lower_metal.py ConstructedMachine (schedule.py CallAnalysis.constructions: every function's every machine group's
 # construction, a remote group's included): its upstream results, each processor's Produced (`producing`, which
 # registers each of its records in `index` by identity as a Record: ("produced", p), ("input" or "output", p, position
-# k), ("kernel", p, call n), ("extern", "inlined" or "lifted", p, its preorder index)), and their native correspondence
-# by those same records, every operation ID that construction's own program's (the local group's final rows place them
-# by native.py Row.offset and Row.values, the native recipe's): `interfaces` each processor's (inputs, outputs), each
+# k), ("kernel", p, call n), ("extern", "inlined" or "lifted", p, its preorder index), ("line", p, its line table
+# index)), and their native correspondence by those same records, every operation ID that construction's own
+# program's (the local group's final rows place them by native.py Row.offset and Row.values, the native recipe's):
+# `bindings` each original binding of a member's wrapper name (lower_metal.py Binding, in resolution order) as (its
+# processor, its occurrence: each enclosing (ExternCall, consumed Inlined or Lifted) pair as its pair of Records,
+# outermost first (lower_metal.py inline's `occurrence + ((record, body),)`), () its wrapper's own lines; its record: a
+# memory planning line's, an Input's, an Inlined's or Lifted's Record, a
+# constant's GraphLowering's module; its name as produced; its source, the original object bound (its processor's
+# `producing` operand: an IR node by that processor's node table, a constant's tensor Tensored, a symbolic input's
+# expression as it is); its native value: (root, view ValueID), ("literal", value) or None), every occurrence its own;
+# `interfaces` each processor's (inputs, outputs), each
 # (its Input's or Output's record, its native value as projected: (root, view ValueID), ("literal", value) or None);
 # `regions` each registered repeat or switch (metal.py Region, postorder) as (its ExternCall's record, kind, region
 # index, first and end operations, selector), its region index this construction's (native.py Target.composite appends
@@ -257,12 +265,23 @@ def queried(analysis, ordinal, target):
 # body's Neural as (operation, its Produced's record, function, compute units, input, output and state features), its
 # package the native artifact's (native135), its temporary directory not a saved value
 def constructed(machine):
-    index = {}
-    produced = {p: producing(made, p, index) for p, made in machine.produced.items()}
+    index, sources = {}, {}
+    produced = {p: producing(made, p, index, tuple(binding for binding in machine.bindings if binding.processor == p),
+                             sources) for p, made in machine.produced.items()}
 
     def recorded(record):
         return index[id(record)] if id(record) in index else record
+
+    # a Binding's record: a GraphLowering (a constant's) by its module, any other (a line, an Input, an Inlined or
+    # Lifted) by its registered Record
+    def bound(record):
+        from torch._inductor.graph import GraphLowering
+        return record.module if isinstance(record, GraphLowering) else index[id(record)]
     return {"produced": produced,
+            "bindings": tuple((binding.processor,
+                               tuple((index[id(call)], index[id(body)]) for call, body in binding.occurrence),
+                               bound(binding.record), binding.name, sources[id(binding)], binding.value)
+                              for binding in machine.bindings),
             "interfaces": {p: tuple(tuple((index[id(given)], native) for given, native in ports) for ports in pair)
                            for p, pair in machine.interfaces.items()},
             "regions": tuple((index[id(region.record)], region.kind, region.region, region.first, region.end,
@@ -306,12 +325,10 @@ def constructed(machine):
 # sequences by that table (`wrappers` each wrapper's own lines, `extern` and `inlined` each record's, `lifted` each
 # Lifted's wrapper), `nodes` each IR node its lines name once by identity (`node_of`: class, own name and layout,
 # ExternCall records); `wrappers` each wrapper's GraphLowering modules. Their effects are the native artifact's
-# (metal_archive Records: Upstreams, Values, views and regions, by the records constructed pairs); an IR node's native
-# values have no record here: each occurrence's projection (the root, view or literal a consuming line or an Inlined's,
-# Lifted's or Produced's operand binds it to, one node possibly several, a reused or inlined body's each its own) is
-# not retained by lower_metal.py (its Held per name), the pending operand, to be paired by these line, node and
-# record identities
-def producing(made, p, index):
+# (metal_archive Records: Upstreams, Values, views and regions, by the records constructed pairs); each wrapper name's
+# native value at each occurrence (a memory planning line's, a graph input's, a control body input's, a constant's)
+# is constructed's `bindings`, by these line and record identities (each line registered in `index`)
+def producing(made, p, index, bindings, sources):
     model, schedulers, owners, loops = made.model, {}, {}, {}
     controls, objects, lowered = ({kind: [] for kind in ("extern", "inlined", "lifted")},
                                   {kind: [] for kind in ("extern", "inlined", "lifted")}, {})
@@ -466,7 +483,10 @@ def producing(made, p, index):
     # each field's operand, any other line its operand (torch/utils/_indented_buffer.py LineContext, a NamedTuple,
     # its context's; codegen/common.py DeferredLine, its name and line state, as it is, never called)
     def lined(line):
-        return Lined(table.setdefault(id(line), (len(table), line))[0])
+        if id(line) not in table:
+            table[id(line)] = (len(table), line)
+            index[id(line)] = Record("line", p, table[id(line)][0])
+        return Lined(table[id(line)][0])
 
     def line_of(line):
         if isinstance(line, str):
@@ -479,7 +499,7 @@ def producing(made, p, index):
 
     # each IR node once by identity: its class, its own name and layout (IRNode.maybe_get_name, maybe_get_layout:
     # None where it has none) and its ExternCall records' indices by its identity; its native values are per
-    # occurrence, not the node's (pending)
+    # occurrence, not the node's (constructed's `bindings`, by the binding line or record)
     def node_of(node):
         return (type(node), node.maybe_get_name(), operand(node.maybe_get_layout()),
                 tuple(lowered.get(id(node), ())))
@@ -511,6 +531,11 @@ def producing(made, p, index):
     inputs = tuple((given.position, given.node, given.name, operand(given.value)) for given in made.inputs)
     outputs = tuple((given.position, given.node, given.name, given.sent, operand(given.value))
                     for given in made.outputs)
+    # each of this processor's Bindings' original bound object (lower_metal.py Binding.source: a memory planning
+    # line's buffer, a graph input's or a control body input's graph_inputs entry, an IR node by this processor's node
+    # table, a symbolic input's expression as it is; a constant's tensor, the one state.pt registry's at its save) by
+    # that Binding's identity in `sources`, constructed's
+    sources.update((id(binding), operand(binding.source)) for binding in bindings)
 
     # the owner sequences, each line by the one table: each wrapper's own lines, each ExternCall's and Inlined's lines
     # (the same line objects, its codegen's), each Lifted its wrapper's

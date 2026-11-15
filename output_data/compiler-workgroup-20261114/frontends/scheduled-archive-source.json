@@ -73,8 +73,8 @@
     "Scheduled.operands retains original reference through exact driver keyword. Fresh prepared network keeps original CallAnalysis; loaded compilation retains its saved query record."
   ],
   "current_limits": [
-    "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler Python coherence and the matching native release.",
-    "Compiler66 now returns intervals for WhileLoop cond/body/cond and Switch Lifted branches as well as InvokeSubgraph; the existing archive association consumes these original records. Binding/order/effect semantics remain under compiler review. Original intermediate IR operand to native value associations for every consumed occurrence are still pending its actual returned result; archive does not recover them by name or shape.",
+    "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md is queued on fixed native137 after explicit compiler Python coherence.",
+    "Original wrapper binding occurrences now retain their actual source operand and final native value. Compiler66 binding/control/alias semantics remain separately reviewed producer behavior; this serialization does not itself validate runtime correctness.",
     "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
     "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
   ],
@@ -597,6 +597,72 @@
     "limits": [
       "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler Python coherence and the matching native release.",
       "Compiler66 now returns intervals for WhileLoop cond/body/cond and Switch Lifted branches as well as InvokeSubgraph; the existing archive association consumes these original records. Binding/order/effect semantics remain under compiler review. Original intermediate IR operand to native value associations for every consumed occurrence are still pending its actual returned result; archive does not recover them by name or shape.",
+      "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
+      "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
+    ],
+    "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
+  },
+  "binding_occurrence_checkpoint": {
+    "stage": "Source-only original binding occurrence/source/final-native-result archive connection",
+    "time_utc": "2026-11-15T07:39:54.816995+00:00",
+    "producer_commit": "1119d888",
+    "source_parent": "1119d8888123046925102ca4c7b71f3dd492aa23",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 104,
+      "process": 32089,
+      "handle": 58844,
+      "last_result_index": 36,
+      "last_result": "success/source HOLD"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "dbf134a1906260fc8a85a1be71e478b3d1b3f6550aff10870587499295ad40bc"
+    },
+    "references_sha256": {
+      "compiler/mesh_compiler/lower_metal.py": "d2349b46b32cf8a1cac4cbe1707ea8156b278b5a6ba385e5505869656708c960",
+      "compiler/mesh_compiler/lower_inductor.py": "373ae16fef1ddd846c33bcc3d60a1b249a1a3eabae4fdb9832697a1b2a8f0c1d",
+      "compiler/mesh_compiler/native.py": "909a832ada217261ae84bcfbaf55eb0a3382f8aca5f41924840c3ff32a70eb51",
+      "compiler/mesh_compiler/metal.py": "c917f165de83ecb545be36b522d3714e6f69418b82c142142c86ab0208e8a655"
+    },
+    "checks": [
+      {
+        "kind": "AST",
+        "result": "PASS"
+      },
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "changed_during_checks": [],
+    "retained": [
+      "Every original Binding(processor,occurrence,record,name,source,value) is saved in producer resolution order. Each enclosing occurrence remains its nested (ExternCall,Inlined/Lifted) record pair; repeated uses never collapse to a last-value map.",
+      "Original binding line identities reuse the existing single line table. Input/control records use their existing indices; a constant GraphLowering owner becomes its original module reference. No opaque compiler object is pickled.",
+      "The actual bound source operand is projected before its processor IR-node table is finalized. Original memory-line and control-input IR objects keep identity; actual constant tensors use the same shared state.pt registry as source graph attributes. Names are retained provenance and are not used to recover or match objects.",
+      "The original final typed root/view/literal is saved unchanged. Producer1119d888 converts it after Storage.alias forwarding; archive does no geometry/alias recalculation. Existing Row.values/roots/offset and native archive remain the physical result owner."
+    ],
+    "limits": [
+      "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md is queued on fixed native137 after explicit compiler Python coherence.",
+      "Original wrapper binding occurrences now retain their actual source operand and final native value. Compiler66 binding/control/alias semantics remain separately reviewed producer behavior; this serialization does not itself validate runtime correctness.",
       "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
       "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
     ],
