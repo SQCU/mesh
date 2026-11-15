@@ -389,13 +389,14 @@ class UpstreamAccess(C.Structure):
 # struct metal_ir_upstream: `domain` the kernel's index domain (mesh-graph.h struct mesh_graph_domain, in the
 # compilation's one analysis context; native retains it), `access` its accesses, `work` its semantic work (NULL
 # unknown); `module`, `entry` and `binding` a typed body's original parsed module (a WGPUShaderModule), its entry and
-# each argument's @binding, NULL for an Inductor kernel, whose domain and accesses are its own
+# each argument's @binding, `target` its original target options (tint::msl::writer::Options), each NULL for an
+# Inductor kernel, whose domain, accesses and terminal emission are its own
 class Upstream(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('place', 'arguments', 'accesses', 'sources')] + [
         ('argument', C.POINTER(UpstreamArgument)), ('domain', C.c_void_p), ('access', C.POINTER(UpstreamAccess)),
         ('source', C.POINTER(mesh.Q)), ('work', C.POINTER(mesh_graph.Work)), ('identity', mesh.Q),
         ('grid', mesh.U * 3), ('group', mesh.U * 3), ('grouped', mesh.U), ('padding', mesh.U),
-        ('module', C.c_void_p), ('entry', C.c_char_p), ('binding', C.POINTER(mesh.U))]
+        ('module', C.c_void_p), ('entry', C.c_char_p), ('binding', C.POINTER(mesh.U)), ('target', C.c_void_p)]
 
 
 # struct metal_ir_upstream_feature and struct metal_ir_upstream_neural (metal-microbench 02f7e07e, 64 bytes): a Neural
@@ -765,10 +766,12 @@ def _graph():
                 ('mesh_graph_index_truth', P, [P, C.c_int]), ('mesh_graph_index_add', P, [P, P]),
                 ('mesh_graph_index_mul', P, [P, P]), ('mesh_graph_index_floordiv', P, [P, P]),
                 ('mesh_graph_index_modular_indexing', P, [P, P, P]), ('mesh_graph_index_python_mod', P, [P, P]),
+                ('mesh_graph_index_tdiv_q', P, [P, P]), ('mesh_graph_index_tdiv_r', P, [P, P]),
                 ('mesh_graph_index_minimum', P, [P, P]), ('mesh_graph_index_maximum', P, [P, P]),
                 ('mesh_graph_index_where', P, [P, P, P]), ('mesh_graph_index_compare', P, [mesh.U, P, P]),
                 ('mesh_graph_index_and', P, [P, P]), ('mesh_graph_index_or', P, [P, P]),
-                ('mesh_graph_index_not', P, [P]), ('mesh_graph_index_free', None, [P])):
+                ('mesh_graph_index_not', P, [P]), ('mesh_graph_index_wrap', P, [P, mesh.U, C.c_int]),
+                ('mesh_graph_index_free', None, [P])):
             function = getattr(lib, name)
             function.restype, function.argtypes = result, arguments
         GRAPH.append(lib)
@@ -965,7 +968,7 @@ class _Builder:
                                                   for kind, value, access in arguments]),
                         domain, _array(UpstreamAccess, accesses), _array(mesh.Q, [self.base | s for s in sources]),
                         None if work is None else C.pointer(work), self.identity, (mesh.U * 3)(*grid),
-                        (mesh.U * 3)(*(group or (0, 0, 0))), int(group is not None), 0, None, None, None)
+                        (mesh.U * 3)(*(group or (0, 0, 0))), int(group is not None), 0, None, None, None, None)
         first = lib.metal_ir_operations(self.p)
         operation = lib.metal_ir_upstream(self.p, C.byref(body))
         if operation == NONE:
