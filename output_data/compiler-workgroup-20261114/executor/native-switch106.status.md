@@ -18,4 +18,20 @@ Composition 3/4/6/7 supplies the retained-result and partial-evaluation contract
 Checks: worker strict `-Werror` syntax on all eight IR sources, capture/program and two existing tools passed; final owner change passed the affected recorder checks. Supervisor source/diff review passed. The intentionally malformed `metal_recording.m` is unchanged.
 
 Remaining: selector literal stores/range allocation from this plan, joined completion, CPU indexed control and the MIL tree. No full conditional execution claim.
-Next bounded lifetime correction: `commands == segments[0]` and its retained segment association owns that same object; inspect all borrowers/destruction before closing this existing cycle.
+The segment ownership cycle is corrected by native117 below.
+
+## native117: replay segment ownership cycle closed
+- **The cycle:** `result.commands = [segments[0] retain]`, and `@[segments, size, repetitions]` is associated on it with
+  RETAIN, so `commands` ⇄ the array. `MetalReplayDestroy` released `commands`, but the array kept it alive, and with it
+  every association.
+- **Borrowers accounted for:**
+  - The program borrows each replay by `MetalCall.replay` pointer, with no struct copies. Python `Owned` releases the
+    program before the replays' `MetalReplayDestroy`, in reverse registration order (native.py ≈514).
+  - NativePrepared holds the plan and the segment array in `p->held`.
+  - The other callers are the replay's own error path and the tools' destroys.
+- **Correction (`metal_capture.m` `MetalReplayDestroy`):** only the `replaySegmentsKey` association is cleared, then
+  `commands` is released. The array lives while a borrower holds it, and `commands` deallocates at its last owner's
+  release, freeing its other associations then. No metadata is dropped early, and nothing is copied.
+- **Deleted duplicate handoff:** the `dispatchOf` parameter of `MetalNativeCommands`, `MetalNativeGPU`'s fetch of the
+  same map, and `MetalRepeatEmit.dispatchOf`. `MetalNativeCommands` uses the plan's map. Diff: +10/−20.
+- **Checks:** strict rc=0 on capture, program and both tools; `git diff --check` clean.
