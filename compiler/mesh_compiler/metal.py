@@ -526,6 +526,8 @@ def _compiler():
                 ('metal_ir_builtin_named', U, [C.c_char_p]),
                 ('metal_ir_scatter', None, [P, U, U, U, C.POINTER(U), U, U]),
                 ('metal_ir_yield', None, [P, U, U, C.POINTER(U)]),
+                ('metal_ir_if_begin', None, [P, U, U]), ('metal_ir_if_else', None, [P, U, U, C.POINTER(U)]),
+                ('metal_ir_if_end', U, [P, U, U, C.POINTER(U)]),
                 ('metal_ir_operation_erase', None, [P, U]),
                 ('metal_ir_construct', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_work_terms', C.c_int, [P, C.POINTER(C.c_size_t), C.POINTER(C.POINTER(WorkTerm)),
@@ -671,13 +673,30 @@ class _Builder:
                 given = _array(mesh.U, [h[x] for x in record[2]])
                 h.append(lib.metal_ir_extract_if(p, r, record[1], len(record[2]), given, h[record[3]], h[record[4]]))
             elif call == 'scatter':
+                # metal_ir.h metal_ir_scatter: a predicate of None the store always (UINT32_MAX)
                 given = _array(mesh.U, [h[x] for x in record[2]])
-                lib.metal_ir_scatter(p, r, record[1], len(record[2]), given, h[record[3]], h[record[4]])
+                lib.metal_ir_scatter(p, r, record[1], len(record[2]), given, h[record[3]],
+                                     NONE if record[4] is None else h[record[4]])
                 h.append(None)
             elif call == 'yield':
                 given = _array(mesh.U, [h[x] for x in record[1]])
                 lib.metal_ir_yield(p, r, len(record[1]), given)
                 h.append(None)
+            # metal_ir.h metal_ir_if_begin .. metal_ir_if_end (compiler/mesh_compiler/lower_inductor.py _Loop.masked): the
+            # records between if_begin and if_else build its true block, those to if_end its false block; if_end's
+            # record the first merged result, ('if_result', that record, k) result k
+            elif call == 'if_begin':
+                lib.metal_ir_if_begin(p, r, h[record[1]])
+                h.append(None)
+            elif call == 'if_else':
+                given = _array(mesh.U, [h[x] for x in record[1]])
+                lib.metal_ir_if_else(p, r, len(record[1]), given)
+                h.append(None)
+            elif call == 'if_end':
+                given = _array(mesh.U, [h[x] for x in record[1]])
+                h.append(lib.metal_ir_if_end(p, r, len(record[1]), given))
+            elif call == 'if_result':
+                h.append(h[record[1]] + record[2])
             else:
                 # Rejection filters are not part of even temporary integration validation: an operation operations.py
                 # _Region records that this encoder has no IR call for is unsupported here, not another one
