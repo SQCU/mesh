@@ -12,6 +12,8 @@ the vertices and accesses of the joint task graph (Sinnen, *Task Scheduling for 
 Placement supplies each function's CPU, GPU or ANE target. The target compiler composes and fuses those operations
 through TVM's operator fusion (Chen et al., OSDI 2018, §3) and Halide's algorithm/schedule lowering.
 LiteRT's typed delegate bodies enter through the composition request's retained compiler interface.
+A custom numerical lowerer's position and operands are those of the composition request's
+[numerical lowerer boundary](compilation-composition-change-request.md#numerical-lowerer-boundary).
 
 ### 2. The capture is a static dataflow graph
 

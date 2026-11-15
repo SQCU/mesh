@@ -30,6 +30,52 @@ parallelization and communication.
 | [Integration](integration-finishing-change-request.md), 1–4/7 | Target order, task costs and commit observations | Native execution and existing clients |
 | [Synchronization](synchronization-signature-change-request.md), 1–6 | Retained synchronization graph and emitted sites | Printers and external observation |
 
+### Numerical lowerer boundary
+
+The reference is the operator's demonstration at `/Users/mdot/schedule-emit`, commit `f41c64a`.
+
+**Position.** `driver.compile_module` composes `export`, `place`, `on_devices`, `schedule` and `argument_buffers`,
+and returns `Scheduled(exported, modules, devices, output_processor, channels, inputs, feedforward)`
+(`schedule_emit/driver.py` 14–21, `ir.py` 57–76). Capture, placement, device assignment and scheduling are
+backend-independent transformations of that value. Target lowering consumes it at `lower_inductor.lower(scheduled)`
+(`lower_inductor.py` 96–103), which gives each processor's scheduled GraphModule to the upstream compiler,
+`torch.compile(backend="inductor")`. A custom numerical lowerer occupies that same position. Compilation selects the
+custom numerical method explicitly, and that method lowers the complete assigned body. General numerical and
+compiler passes are reached through the upstream compiler's typed interfaces. A custom numerical or target
+implementation is supplied there with its explicit operands and its cited algorithm (source-lowering items 5/6).
+
+**Inputs.** In the demonstration, `adapt` reads each node's `meta["val"]` shape, stride, dtype and device and the
+effectful `send` and `recv` operators (`lower_inductor.py` 66–93). Inductor's own output-stride and buffer-lifetime
+contracts (`keep_output_stride`, `never_reuse_but_free_buffers`) govern the adapted values. `Exported` supplies
+`graph_module`, `state`, `tokens`, `user_inputs`, `outputs` and `out_spec`, and `Scheduled.inputs` orders each
+processor's placeholders. Mesh's lowerer takes the richer retained operand of AOT
+[A5, A6](aot-compilation-change-request.md#a5-allocation-produces-page-bindings),
+[A8–A10](aot-compilation-change-request.md#a8-the-ir-operand-carries-solved-results) and items 2/6/7 above:
+
+- each processor's body and its source correspondence;
+- shape, dtype and precision; layout and alias relations; mutation, state and effect semantics;
+- ordered input and result bindings;
+- the dependency, page/storage/copy, transfer and execution-order results already produced for that body.
+
+Mesh supplies its page-allocation operands from AOT A5's retained allocation result.
+
+**Results.** The lowerer returns compiled bodies, their argument, result and storage bindings, and their effect and
+source correspondence to the same consumers. The demonstration's `runtime.Program(scheduled, functions)`
+(`runtime.py` 27–75) calls the compiled functions with prepared arguments, and `archive.save` and `archive.load`
+(`archive.py` 57–116) retain the `Scheduled` graphs as one `torch.export` archive per processor. Mesh's native
+execution and its A9 archive consume the compiled results. A numerical expansion returns its new internal
+operations, their accesses and effects, and their workspace as typed IR with explicit source correspondence. The
+ordinary owners consume that IR: dependency analysis through the graph module of item 3, and allocation and
+scheduling through AOT [A5, A6](aot-compilation-change-request.md#a5-allocation-produces-page-bindings) and
+[A8](aot-compilation-change-request.md#a8-the-ir-operand-carries-solved-results). Each composes the expansion's
+results with the retained results (item 6), and final target emission consumes their complete retained result.
+
+**Mechanism.** Each consumer uses the solved values it receives. Typed IR carries the bodies through the upstream
+compiler's passes, which keep each algorithm's internal numerical conditions and preserve the required numerical,
+state, alias and dependency semantics and the source correspondence (source-lowering item 2). Native execution
+applies the compiled result to the changing inputs (item 4). The demonstration's per-processor threads, queues and
+Python classes show this data flow; Mesh realizes it through its native execution and archive consumers.
+
 ### 3. Each graph function and each decision is computed in one place
 
 The graph module exposes the cited dependency, closure, contraction, matching, ordering and synchronization

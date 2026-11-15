@@ -393,3 +393,17 @@ domain comes from the lowering rules and their composition, reviewed at the prod
 The page-queue mechanism is completed work, with the recorded distributed execution above and the work account's
 retirement evidence. Its new compiler consumers remain assigned under composition and integration. E2B-specific
 initiative wording is removed from those active requests; the older E2B observations remain historical records.
+
+### Custom numerical lowerer, 14 November
+
+The operator:
+
+> if we were to add a lowerer which had custom numerics, where must it reside in oru data flow and what inputs would it need to take to be valid? document this explicitly, using ~/emit-lowerer as a reference
+
+`/Users/mdot/emit-lowerer` was absent when checked. The available prior reference was
+`/Users/mdot/schedule-emit` at `f41c64a`; root asked for clarification and stated this provisional interpretation.
+The [numerical lowerer boundary](compilation-composition-change-request.md#numerical-lowerer-boundary) cites that
+repository's actual `driver.compile_module`, `ir.Scheduled` and `lower_inductor.lower(scheduled)` source. It
+distinguishes those demonstrated fields from Mesh's retained allocation and dependency results, and locates the
+custom implementation at the same explicit numerical-lowering boundary. This documents a valid interface; it
+does not assign a new numerical algorithm or report a new target implementation.
