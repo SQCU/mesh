@@ -1711,25 +1711,69 @@ def _gebal_step(holds, bounds, factor, f, c, ca, r, g, ra, alive):
     return tuple(torch.where(held, made, x) for made, x in zip(up if factor == 2 else down, (f, c, ca, r, g, ra)))
 
 
-# Reference-LAPACK SRC/zgehrd.f 249-254 and 295-299 (TAU outside ILO..IHI-1 zero; the unblocked code from ILO) and
-# zgehd2.f 190-207 (dgehrd.f, dgehd2.f alike), each static column I = 1..n-1 active where ILO <= I <= IHI-1:
-# ZLARFG(IHI-I, A(I+1,I), A(I+2,I)) by _reflector over rows I+1..IHI; H(I) from the right to A(1:IHI, I+1:IHI), H(I)^H
-# from the left to A(I+1:IHI, I+1:N); beta into A(I+1,I) and v(2:) below it. Returns the packed matrix and TAU
-def _gehrd(h, ilo, ihi):
+# Reference-LAPACK 3.12.1 SRC/zlarf1f.f 196-308 (dlarf1f.f alike): C = H C (SIDE = 'L', `left`) or C H ('R'),
+# H = I - TAU v v^H with v(1) = 1 (never read), on C = x(R0:R0+M-1, C0:C0+N-1), v aligned with x's rows (left) or
+# columns from R0 (C0), where `when`. The M <= 0 or N <= 0 return; with TAU /= 0 LASTV from M (N) down while
+# V(LASTV) = 0, past V(1), and LASTC = ILAZLC(LASTV, N, C) / ILAZLR(M, LASTV, C) (ilazlc.f, ilazlr.f, iladlc.f,
+# iladlr.f: the last column or row holding a nonzero, a NaN nonzero, else 0), else LASTC = 0; the LASTC = 0 return.
+# Left: LASTV = 1, ZSCAL of C(1, 1:LASTC) by ONE - TAU; else WORK = C(2:LASTV, 1:LASTC)^H v(2:LASTV) (ZGEMV), WORK(J) +
+# CONJG(C(1,J)), C(1,J) - TAU CONJG(WORK(J)) (dlarf1f.f's two DAXPYs), and ZGERC's C(I,J) + v(I) (-TAU CONJG(WORK(J)))
+# where WORK(J) /= 0. Right: LASTV = 1, ZSCAL of C(1:LASTC, 1); else WORK = C(1:LASTC, 2:LASTV) v(2:LASTV) (ZGEMV),
+# the ZAXPYs WORK + C(:,1) and C(:,1) + (-TAU) WORK, and ZGERC's C(I,J) + WORK(I) (-TAU CONJG(v(J))) where v(J) /= 0
+def _larf1f(left, m, n, v, tau, x, r0, c0, when):
+    rows, cols = torch.arange(1, x.shape[-2] + 1, device=x.device), _counted(x)
+    along, start, extent = (rows, r0, m) if left else (cols, c0, n)
+    lastv = torch.where((along > _vec(start)) & (along < _vec(start + extent)) & (v != 0), along - _vec(start) + 1,
+                        1).amax(-1)
+    held = (_span(rows, r0, r0 + (lastv if left else m) - 1)[..., :, None]
+            & _span(cols, c0, c0 + (n if left else lastv) - 1)[..., None, :] & (x != 0))
+    if left:
+        lastc = torch.where(held.any(-2), cols - _vec(c0) + 1, 0).amax(-1)
+    else:
+        lastc = torch.where(held.any(-1), rows - _vec(r0) + 1, 0).amax(-1)
+    go = when & (m > 0) & (n > 0) & (tau != 0) & (lastc > 0)
+    multi, t = go & (lastv > 1), _vec(tau)
+    tail = _span(along, start + 1, start + lastv - 1)
+    vt = torch.where(tail, v, 0)
+    if left:
+        reached = _span(cols, c0, c0 + lastc - 1)
+        first = _row(x, r0)
+        work = torch.matmul(vt[..., None, :], _cj(torch.where(tail[..., :, None], x, 0)))[..., 0, :] + _cj(first)
+        lead = torch.where(_vec(multi), first - t * _cj(work), _vec(1 - tau) * first)
+        x = torch.where((rows[:, None] == _mat(r0)) & (reached & _vec(go))[..., None, :], lead[..., None, :], x)
+        made = x + vt[..., :, None] * (-t * _cj(work))[..., None, :]
+        hit = tail[..., :, None] & (reached & (work != 0))[..., None, :]
+    else:
+        reached = _span(rows, r0, r0 + lastc - 1)
+        first = _column(x, c0)
+        work = torch.matmul(torch.where(tail[..., None, :], x, 0), vt[..., :, None])[..., 0] + first
+        lead = torch.where(_vec(multi), first + -t * work, _vec(1 - tau) * first)
+        x = torch.where((cols == _mat(c0)) & (reached & _vec(go))[..., :, None], lead[..., :, None], x)
+        made = x + work[..., :, None] * (-t * _cj(v))[..., None, :]
+        hit = reached[..., :, None] & (tail & (v != 0))[..., None, :]
+    return torch.where(hit & _mat(multi), made, x)
+
+
+# Reference-LAPACK 3.12.1 SRC/zgehrd.f 249-253 (TAU(1:ILO-1) and TAU(MAX(1,IHI):N-1) zero), 295-299 and 352 (the
+# unblocked ZGEHD2 from ILO; OPEN: the blocked DO 40, zlahr2.f and zlarfb.f, where NH >= 130) and zgehd2.f 190-207
+# (dgehrd.f, dgehd2.f alike) on the leading ORDER x ORDER block of h: DO 10 I = ILO, IHI - 1 as static I = 1..n-1
+# active where ILO <= I <= IHI - 1: ZLARFG(IHI - I, A(I+1,I), A(MIN(I+2,N),I)) (_larfg_vector over rows I+2..IHI,
+# A(I+1,I) its BETA), ZLARF1F('Right', IHI, IHI - I, A(I+1,I), TAU(I), A(1,I+1)) and ZLARF1F('Left', IHI - I, N - I,
+# A(I+1,I), CONJG(TAU(I)), A(I+1,I+1)). Returns the packed matrix and TAU(1:n-1)
+def _gehrd(order, ilo, ihi, h):
     n, k = h.shape[-1], _counted(h)
+    one = torch.ones_like(ilo)
     taus = []
     for i in range(1, n):
         active = (ilo <= i) & (i <= ihi - 1)
-        below = ((k > i) & (k <= _vec(ihi)))[..., i:]
-        v, tau, beta = _reflector(torch.where(below, h[..., i:, i - 1], 0))
-        v, tau = torch.where(below, v, 0), torch.where(active, tau, 0)
-        region = _mat(active) & (k <= _vec(ihi))[..., :, None] & below[..., None, :]
-        h = torch.cat([h[..., :, :i], torch.where(region, _dlarf(h[..., :, i:], v, tau, left=False), h[..., :, i:])],
-                      -1)
-        region = _mat(active) & below[..., :, None]
-        h = _put(h, torch.where(region, _dlarf(h[..., i:, i:], v, tau, adjoint=True), h[..., i:, i:]), i, i)
-        packed = torch.cat([beta.to(h.dtype)[..., None], v[..., 1:]], -1)
-        h = _put(h, torch.where(_vec(active) & below, packed, h[..., i:, i - 1])[..., :, None], i, i - 1)
+        column = h[..., :, i - 1]
+        tail = _span(k, i + 2, ihi)
+        beta, tau, made = _larfg_vector(column[..., i], torch.where(tail, column, 0))
+        tau = torch.where(active, tau, 0)
+        column = torch.where(_vec(active) & tail, made, torch.where(_vec(active) & (k == i + 1), _vec(beta), column))
+        h = _column_put(h, i - 1, column)
+        h = _larf1f(False, ihi, ihi - i, column, tau, h, one, one + i, active)
+        h = _larf1f(True, ihi - i, order - i, column, _cj(tau), h, one + i, one + i, active)
         taus.append(tau)
     return h, torch.stack(taus, -1) if taus else h.new_zeros((*h.shape[:-2], 0))
 
@@ -2993,6 +3037,148 @@ def _laqr5_products(wantz, live, u, z, m, mtop, mbot, krcol, incol, accum, ktop,
     return live & (m >= mtop), u, z if wantz else z.clone(), m
 
 
+# Reference-LAPACK 3.12.1 SRC/zlartg.f90 (E. Anderson, Algorithm 978, as _dlartg): C, S, R of complex F and G, SAFMIN
+# = DLAMCH('S') (la_constants), SAFMAX = 1 / SAFMIN, RTMIN = SQRT(SAFMIN): G = 0; F = 0 by G's parts (a zero part,
+# else G1 within (RTMIN, SQRT(SAFMAX / 2)), else by U); F1 and G1 within (RTMIN, RTMAX = SQRT(SAFMAX / 4)), else by U,
+# V and W; each with its F2 >= H2 SAFMIN and RTMAX 2 subcases. A complex by a real divided or multiplied by parts
+def _zlartg(f, g):
+    limits = torch.finfo(f.real.dtype)
+    safmin = limits.tiny
+    safmax = 1 / safmin
+    rtmin = math.sqrt(safmin)
+
+    def abssq(t):
+        return t.real * t.real + t.imag * t.imag
+
+    def bounded(value):
+        return value.clamp(safmin, safmax)
+
+    def solved(fs, gs, f2, h2):
+        rtmax2 = math.sqrt(safmax / 4) * 2
+        cosine = (f2 / h2).sqrt()
+        r_first = _over(fs, cosine)
+        product = _over(fs, f2.sqrt()) * _over(gs.conj(), h2.sqrt())
+        s_first = torch.where((f2 > rtmin) & (h2 < rtmax2), product, gs.conj() * _over(r_first, h2))
+        d = (f2 * h2).sqrt()
+        c_second = f2 / d
+        r_second = torch.where(c_second >= safmin, _over(fs, c_second), _scaled(fs, h2 / d))
+        first = f2 >= h2 * safmin
+        return (torch.where(first, cosine, c_second), torch.where(first, s_first, product),
+                torch.where(first, r_first, r_second))
+    fr, fi, gr, gi = f.real, f.imag, g.real, g.imag
+    g1 = torch.maximum(gr.abs(), gi.abs())
+    edge = (gr == 0) | (gi == 0)
+    r_edge = torch.where(gr == 0, gi.abs(), gr.abs())
+    plain = (g1 > rtmin) & (g1 < math.sqrt(safmax / 2))
+    u = bounded(g1)
+    gs = _over(g, u)
+    d_plain, d_scaled = abssq(g).sqrt(), abssq(gs).sqrt()
+    s_zero = torch.where(edge, _over(g.conj(), r_edge), torch.where(plain, _over(g.conj(), d_plain),
+                                                                      _over(gs.conj(), d_scaled)))
+    r_zero = torch.where(edge, r_edge, torch.where(plain, d_plain, d_scaled * u))
+    f1 = torch.maximum(fr.abs(), fi.abs())
+    rtmax = math.sqrt(safmax / 4)
+    inner = (f1 > rtmin) & (f1 < rtmax) & (g1 > rtmin) & (g1 < rtmax)
+    c_in, s_in, r_in = solved(f, g, abssq(f), abssq(f) + abssq(g))
+    u = bounded(torch.maximum(f1, g1))
+    gs = _over(g, u)
+    g2 = abssq(gs)
+    tiny_f = f1 / u < rtmin
+    v = bounded(f1)
+    w = torch.where(tiny_f, v / u, torch.ones_like(u))
+    fs = torch.where(tiny_f, _over(f, v), _over(f, u))
+    f2 = abssq(fs)
+    h2 = torch.where(tiny_f, f2 * (w * w) + g2, f2 + g2)
+    c_out, s_out, r_out = solved(fs, gs, f2, h2)
+    c_out, r_out = c_out * w, _scaled(r_out, u)
+    c = torch.where(inner, c_in, c_out)
+    s = torch.where(inner, s_in, s_out)
+    r = torch.where(inner, r_in, r_out)
+    g_zero, f_zero = g == 0, f == 0
+    c = torch.where(g_zero, 1, torch.where(f_zero, 0, c))
+    s = torch.where(g_zero, 0, torch.where(f_zero, s_zero, s))
+    r = torch.where(g_zero, f, torch.where(f_zero, r_zero.to(f.dtype), r))
+    return c, s, r
+
+
+# Reference-LAPACK 3.12.1 SRC/zrot.f DO 30 (drot.f alike, S real): rows A and A+1 of x (`rows`) or its columns A and
+# A+1, over the positions `within`: STEMP = C X + S Y, Y = C Y - CONJG(S) X, X = STEMP; the real C's products by parts
+def _rotated(x, a, c, s, within, rows):
+    k = _counted(x)
+    u, w = (_row(x, a), _row(x, a + 1)) if rows else (_column(x, a), _column(x, a + 1))
+    c, s = _vec(c), _vec(s)
+    first, second = _scaled(u, c) + s * w, _scaled(w, c) - _cj(s) * u
+    if rows:
+        x = torch.where((k[:, None] == _mat(a)) & within[..., None, :], first[..., None, :], x)
+        return torch.where((k[:, None] == _mat(a + 1)) & within[..., None, :], second[..., None, :], x)
+    x = torch.where((k == _mat(a)) & within[..., :, None], first[..., :, None], x)
+    return torch.where((k == _mat(a + 1)) & within[..., :, None], second[..., :, None], x)
+
+
+# Reference-LAPACK 3.12.1 SRC/ztrexc.f 182-224 (COMPQ = 'V' where `wantq`) on the leading ORDER x ORDER block of t,
+# where `when`: the N <= 1 or IFST = ILST return, then DO 10 K = IFST + M1, ILST + M2, M3 (forward where IFST < ILST,
+# else back) as one while_loop: ZLARTG(T(K,K+1), T22 - T11), ZROT of rows K, K+1 over columns K+2..N by CS, SN, ZROT
+# of columns K, K+1 over rows 1..K-1 by CS, CONJG(SN), T(K,K) = T22, T(K+1,K+1) = T11, and where WANTQ ZROT of Q's
+# columns K, K+1 over rows 1..N. OPEN in this group: dtrexc.f, the real routine (DLAEXC's 1 x 1 and 2 x 2 blocks)
+def _ztrexc(wantq, order, t, q, ifst, ilst, when):
+    forward = ifst < ilst
+    step = torch.where(forward, 1, -1)
+    carried = (when & (order > 1) & (ifst != ilst), t.contiguous(), q.contiguous() if wantq else t.new_zeros(()),
+               torch.where(forward, ifst, ifst - 1))
+    _, t, q, _ = while_loop_op(_first_any, functools.partial(_ztrexc_pass, wantq), carried,
+                               (torch.where(forward, ilst - 1, ilst), step, order))
+    return t, q
+
+
+def _ztrexc_pass(wantq, live, t, q, k, last, step, order):
+    rows = _counted(t)
+    t11, t22 = _entry(t, k, k), _entry(t, k + 1, k + 1)
+    cs, sn, _ = _zlartg(_entry(t, k, k + 1), t22 - t11)
+    t = _rotated(t, k, cs, sn, _vec(live) & (rows >= _vec(k + 2)) & (rows <= _vec(order)), True)
+    t = _rotated(t, k, cs, sn.conj(), _vec(live) & (rows <= _vec(k - 1)), False)
+    t = _entry_put(t, k, k, t22, live)
+    t = _entry_put(t, k + 1, k + 1, t11, live)
+    if wantq:
+        q = _rotated(q, k, cs, sn.conj(), _vec(live) & (rows <= _vec(order)), False)
+    k = torch.where(live, k + step, k)
+    return live & ((k - last) * step <= 0), t, q if wantq else q.clone(), k
+
+
+# Reference-LAPACK 3.12.1 SRC/zunm2r.f 222-271 (dorm2r.f alike, TAU(I) either way): C = Q C, Q^H C, C Q or C Q^H
+# (`left`, `notran`), Q = H(1) ... H(K), on C = c(CR:CR+M-1, CC:CC+N-1), the reflectors' A(1,1) at a(AR, AC) and TAU
+# 1-based along `tau`, where `when`: the M = 0, N = 0 or K = 0 return, then DO 10 I = I1, I2, I3 (forward where LEFT
+# and not NOTRAN or not LEFT and NOTRAN, else back) as static I over tau's extent where I <= K: MI = M - I + 1 and
+# IC = I (left), else NI = N - I + 1 and JC = I; TAUI = TAU(I), or CONJG(TAU(I)) where not NOTRAN; ZLARF1F(SIDE, MI,
+# NI, A(I,I), TAUI, C(IC,JC))
+def _unm2r(left, notran, m, n, k, a, ar, ac, tau, c, cr, cc, when):
+    go = when & (m > 0) & (n > 0) & (k > 0)
+    count = tau.shape[-1]
+    steps = range(1, count + 1) if left != notran else range(count, 0, -1)
+    size = c.shape[-2] if left else c.shape[-1]
+    for i in steps:
+        mi, ic = (m - i + 1, cr + i - 1) if left else (m, cr)
+        ni, jc = (n, cc) if left else (n - i + 1, cc + i - 1)
+        taui = tau[..., i - 1] if notran else _cj(tau[..., i - 1])
+        column = _column(a, ac + i - 1)
+        shift = (ar + i - 1) - (ic if left else jc)
+        v = column.gather(-1, (torch.arange(size, device=c.device) + _vec(shift)).clamp(0, column.shape[-1] - 1))
+        c = _larf1f(left, mi, ni, v, taui, c, ic, jc, go & (i <= k))
+    return c
+
+
+# Reference-LAPACK 3.12.1 SRC/zunmhr.f 212 and 262-284 (dormhr.f alike): NH = IHI - ILO, the M = 0, N = 0 or NH = 0
+# return, then ZUNMQR(SIDE, TRANS, MI, NI, NH, A(ILO+1,ILO), TAU(ILO), C(I1,I2)) (MI = NH and I1 = ILO + 1 left, else
+# NI = NH and I2 = ILO + 1), whose zunmqr.f 274-279 is ZUNM2R where NB = 32 >= K (OPEN: zunmqr.f's blocked ZLARFT and
+# ZLARFB code where K > 32)
+def _unmhr(left, notran, m, n, ilo, ihi, a, tau, c, when):
+    nh = ihi - ilo
+    one = torch.ones_like(ilo)
+    mi, ni, i1, i2 = (nh, n, ilo + 1, one) if left else (m, nh, one, ilo + 1)
+    index = (torch.arange(tau.shape[-1], device=tau.device) + _vec(ilo - 1)).clamp(0, max(tau.shape[-1] - 1, 0))
+    return _unm2r(left, notran, mi, ni, nh, a, ilo + 1, ilo, tau.gather(-1, index), c, i1, i2,
+                  when & (m != 0) & (n != 0) & (nh != 0))
+
+
 # Reference-LAPACK SRC/zgeev.f 319-517 and dgeev.f 330-560 (JOBVL = 'N', JOBVR = `jobvr`) on a non-CPU engine,
 # the results of LAPACK_ZGEEV (w, vr, info) or LAPACK_DGEEV (wr, wi, vr, info) and their shapes (vr column-major, or
 # (0,) where JOBVR = 'N'): ANRM = ZLANGE('M') (the largest modulus, a NaN kept), INFO = -4 where it is NaN or above
@@ -3017,7 +3203,7 @@ def _geev_routine(a, jobvr):
     scalea = ~bad & (low | (anrm > bignum))
     cscale = torch.where(low, smlnum, torch.full_like(anrm, bignum))
     h, scale, perm, ilo, ihi = _gebal(_lascl(a, anrm, cscale, scalea), ~bad)
-    h, taus = _gehrd(h, ilo, ihi)
+    h, taus = _gehrd(torch.full_like(ilo, n), ilo, ihi, h)
     z = _unghr(h, taus, ilo, ihi) if vectors else h.new_zeros(())
     isolated = ~_span(k, ilo, ihi) | _vec(ilo == ihi)
     diagonal = h.diagonal(dim1=-2, dim2=-1)

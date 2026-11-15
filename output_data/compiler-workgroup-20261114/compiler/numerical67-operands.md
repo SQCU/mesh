@@ -3,9 +3,13 @@
 # numerical67(b): custom-method bodies and operands (operations.py, decompose.py)
 
 Session 211a403e, turn numerical67b (consolidated brief), on top of supervisor checkpoint 8cbc2ab9. The supervisor
-has since preserved two WIP checkpoints: 43aa1f2e (DLADIV) and c4bf33fe (the LAQR1/LAQR5/LARFG group). Neither one
-accepts the method. The operations.py delta on top of c4bf33fe is uncommitted. No native import, build or workload has
-been run.
+has since preserved three WIP checkpoints, none of which accepts the method:
+- 43aa1f2e: DLADIV;
+- c4bf33fe: the LAQR1/LAQR5/LARFG group;
+- e908087a: the LAQR5 stage order and the LAHQR argument lists.
+
+The operations.py delta on top of e908087a (the xLAQR3 dependency group below) is uncommitted. No native import, build
+or workload has been run.
 
 Checks were static only:
 - `py_compile`;
@@ -86,8 +90,14 @@ loops are unrolled with per-member masks. There is no dtype subset and no reject
 - **`_gebal`:**
   - ZGEBAL('B'): the row and column isolation loops and the norm balancing with its two DO WHILE loops.
   - The NaN exit (INFO = -3, ignored by zgeev).
-- **`_gehrd`:** the ZGEHD2 loop, using `_reflector` and `_dlarf`. TAU is zero outside ILO..IHI-1. `_reflector` is
-  the generic max-scaled reflector, not zlarfg.f, and `_dlarf` is not zlarf1f.f. Both are OPEN (see coverage).
+- **`_gehrd(order, ilo, ihi, h)`:** ZGEHRD/DGEHRD's unblocked path, which is zgehd2.f/dgehd2.f 3.12.1 on the leading
+  ORDER block. TAU is zero outside ILO..IHI-1. Static I = 1..n-1 is active where ILO ≤ I ≤ IHI-1. Each step:
+  - ZLARFG(IHI-I, A(I+1,I), A(MIN(I+2,N),I)) through `_larfg_vector`;
+  - ZLARF1F('Right', IHI, IHI-I, …, TAU(I), A(1,I+1));
+  - ZLARF1F('Left', IHI-I, N-I, …, CONJG(TAU(I)), A(I+1,I+1)), through `_larf1f`.
+
+  The packed layout is the one `_unghr` reads. GEEV calls it with ORDER = n, and xLAQR3's ZGEHRD(JW, 1, NS, T) is
+  its other caller. The blocked DO 40 (NH ≥ 130) is OPEN.
 - **ZHSEQR:**
   - W outside ILO..IHI comes from the diagonal. The ILO = IHI return gives W(ILO) = H(ILO,ILO).
   - Otherwise ZLAHQR is called with ZHSEQR's own arguments: `(_zlahqr | _dlahqr)(WANTT = WANTZ = vectors, N, ILO,
@@ -138,6 +148,28 @@ v3.12.1. They are written for the xLAQR0 path, which is still unwired, so no met
   - After DO 145, the far-from-diagonal updates go through U, chunked into WH/WV as the source chunks them. The source
     rows of the residue regions are rewritten to their last chunk.
   - `_vigilant` is the source's vigilant deflation check.
+
+### xLAQR3 dependency group (source present; `_larf1f` live through `_gehrd`, the rest called once `_laqr3` lands)
+
+- **`_larf1f(left, m, n, v, tau, x, r0, c0, when)`:** zlarf1f.f 196-308, and dlarf1f.f in the same body:
+  - LASTV, scanning down past V(1) while V(LASTV) = 0, where TAU ≠ 0;
+  - LASTC = ILAZLC(LASTV, N, C) or ILAZLR(M, LASTV, C), where a NaN counts as nonzero; the LASTC = 0 return;
+  - with LASTV = 1, the ZSCAL by ONE - TAU;
+  - else the ZGEMV, the first-row (left) or first-column (right) correction (zlarf1f's loops or ZAXPYs, dlarf1f's
+    DAXPYs), and ZGERC/DGER skipping a zero WORK(J) (left) or a zero v(J) (right).
+- **`_zlartg`:** zlartg.f90 3.12.1, branch by branch.
+- **`_rotated`:** zrot.f DO 30 (drot.f alike), with the real C's products taken by parts.
+- **`_ztrexc(wantq, order, t, q, ifst, ilst, when)`:** ztrexc.f 182-224.
+  - The N ≤ 1 / IFST = ILST return.
+  - DO 10 as one while_loop (`_ztrexc_pass`), forward or back per member. Each step: ZLARTG(T(K,K+1), T22 - T11),
+    the row and column ZROTs, the swapped diagonal, and Q's ZROT with WANTQ.
+  - dtrexc.f (DLAEXC, DLASY2, DLARFX, DLANV2) is OPEN, so this group's real branch has no xTREXC yet.
+- **`_unm2r`:** zunm2r.f 222-271 and dorm2r.f. The loop direction follows LEFT and NOTRAN; MI/IC or NI/JC, TAUI, then
+  ZLARF1F on C(IC,JC).
+- **`_unmhr`:** zunmhr.f 212 and 262-284 (dormhr.f alike).
+  - NH = IHI - ILO and its return.
+  - ZUNMQR(MI, NI, NH, A(ILO+1,ILO), TAU(ILO), C(I1,I2)), reaching zunmqr.f 274-279's ZUNM2R where NB = 32 ≥ K.
+  - The blocked ZLARFT/ZLARFB path (K > 32) is OPEN.
 - **`_ztrevc` (ztrevc.f with zlatrs.f, ZTREVC3's blocked back-transform VR = Z X):**
   - Shifted diagonal raised to SMIN.
   - ZLATRS's in-out CNORM: each KI's call scales CNORM by TSCAL and returns it ×1/TSCAL (except case 2's ZTRSV
@@ -217,14 +249,14 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
   - xLAQR0 itself: NTINY, IPARMQ NWR/NSR/KACC22, NWMAX/NSMAX, the DO 70 window/NDEC/NDFL logic, exceptional and
     computed shifts, the bubble sort, and the NS × NS shift copy.
     - The LWORK terms never bind: LWORK ≥ 32N from zgeev's MAXWRK, and LWORK = 49 on the HL path.
-  - xLAQR3/xLAQR2: deflation, ZTREXC/DTREXC (with DLAEXC/DLASY2/DLARFX), the spike reflector (zlarf1f), and
-    xGEHRD/xUNMHR on the T window.
+  - xLAQR3/xLAQR2 itself: the deflation loop, the sorting, the spike reflector and the H/T/V/WV updates. Their
+    complex dependencies are written (above). The real DTREXC with DLAEXC/DLASY2/DLARFX is not written.
   - xLAQR4.
   - The blocked ZUNMQR (K > 32, so NS ≥ 34) and blocked ZGEHRD (NH ≥ 130), through zlarft/zlarfb/zlahr2. Their
     sources are fetched, read-only, and not yet transcribed.
   - The HSEQR selection and retry in `_geev_routine`.
-- **`_gehrd` exactness (OPEN):** the generic `_reflector` and `_dlarf` stand in for zlarfg.f/zlarf1f.f in GEEV's own
-  ZGEHD2. They are to be replaced by `_larfg` and a zlarf1f transcription.
+- **`_unghr` exactness (OPEN):** ZUNGHR still applies its reflectors with the generic `_dlarf`, not with zung2r.f's own
+  reflector code. GEEV's ZGEHD2 now uses `_larfg_vector` and `_larf1f`.
 - **Rounding differences from the reference:**
   - The blocked ZGEHRD (NH ≥ 130) and blocked ZUNGHR/ZUNGQR are the unblocked forms here.
   - DLADIV/ZLADIV are transcribed (`_divided`, `_dladiv1`, `_dladiv2`, `_cdiv`; checkpoint 43aa1f2e).
