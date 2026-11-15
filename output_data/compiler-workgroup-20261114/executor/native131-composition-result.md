@@ -1,0 +1,27 @@
+# Native131 — complete produced-body/configuration consumer replacement
+
+SAME e48 persistent Opus5.5 stream only. Native130 is finished and held. Resume implementation now, no new process.
+
+Read the complete composition CR and the executable reference's actual producer/result/consumer responsibility, then the reconciled Codex account `executor/native-flow-supervisor-account.md` and compiler `whole-lowering-ownership-20261114.md`. These govern the whole replacement. Native130 is a mechanical draft, not acceptance or a design. Existing Kernel/Emitted/Construct layouts and chronology have no compatibility authority.
+
+Replace the affected native body/configuration responsibility together with compiler68/66's actual original compiler result. The original GraphLowering/wrapper/control and MPS finalized schedule/index/range/KernelArgs or CPU KernelGroup/CppKernelProxy body is retained before terminal source. Native consumes its real source/expansion, typed buffer/view/access relation, method/ABI/workspace/error and target configuration results. The ordinary relation/allocation owners receive those operands before final emission. First/later use the original terminal emitter on the same numerical solution with distinct composition operands; no preliminary compiled body, numerical rerun, printed-source parsing or independent index solver.
+
+Own one retained typed access/configuration/mapping/Work/obligation result and replace its affected consumers together:
+
+- source/operation effects and witness correspondence → existing relation_decided;
+- actual group/access footprint and placed origin/page relation → ordinary readiness/binding/residency/lifetime owners;
+- received/sent/page/protocol/primitive operands → original pre-emission body composition;
+- actual final entry/parameter/launch/workspace/error records → native target API calls;
+- same produced results → append/clone/specialization, replay/physical-access and saved compilation owners.
+
+Coordinate actual fields directly through compiler supervisor to worker66 and original producer68. Publish source-backed operand/owner correspondence as code becomes real, without pausing the entire implementation for a separate API gate. Do not invent an independent flat-strided approximation of correlated/indirect upstream indices; do not add a schema merely to conceal an absent producer result. Existing original upstream objects and graph/view algorithms remain the owners.
+
+Preserve correct source facts: Transform already retains selected Mapping in Kernel.mapping and ConstructKernels skips implemented operations; relation_decided reuses original witnesses and solves only uncovered pairs. Delete the actual rejected-Inline mapping recomputation if the remaining custom mapping owner still serves it, not the distinct mappings for changed candidates. Physical call/copy/page aliases are genuinely new operands. Work for an opaque produced body must be unknown unless original semantic counts establish it; task timing is not flops. Reuse original Library.metrics and producer counts, no new visitor or source parser. Cost/Work, bindings, readiness, emitted artifacts and archives must consume the same owner, not a helper-only or unknown-zero patch called complete.
+
+Native129's numeric collection→per-p/op protocol composition→one Generate is the current callable owner. Delete obsolete interfaces on the Python side with66; retain typed symbols/signatures/notices, original library algorithms and CPU/MPS ABI. No separate transport arithmetic, dummy numerical kernel, fallback target, narrowing, runtime metadata interpreter or new allocator. CPU/ANE/control/precision obligations stay explicit until actually connected.
+
+Frontend103 owns `native.py` Target.composite/direct callers, replacing meta→operations._copy/_placed→Builder. There is no standalone public native copy constructor currently. Pair the necessary original destination/source Value/view/operation/effect identity with existing logical read/write/copy semantics once; do not recreate a tensor compiler in Python. Compiler66 owns metal.py bindings. Frontend owns no C.
+
+Native C/header/archive/provider files are yours; no other native writer is active. Compiler owns Python/upstream patches; frontend owns native.py/archive/source records. Preserve unrelated source and prior correct ownership. Read-only region/order/replay findings are recorded as a second whole unit; do not fragment this assignment into a new review campaign.
+
+Complete coherent source, meaningful canonical strict checks and ordinary checkpoints. Keep imports/workloads held until paired producer/consumer and matching build exist. Build with existing Make targets after coordinating all C writers; no new workload or evaluator for this assignment. Report exact implemented owner, removed displaced responsibilities, remaining coverage and actual handle. Codex supervisors own structural acceptance; your source/inventory is evidence.
