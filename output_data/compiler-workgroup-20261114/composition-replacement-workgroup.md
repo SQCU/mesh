@@ -7,6 +7,15 @@ corrective follow-up begins with the complete text of both four-sentence memoran
 on 15 November 2026. Codex continues to use the defect manifests for its judgments
 and supplies concrete positive implementation tasks.
 
+The released implementation units are the complete capture producer (104),
+original compiler-result production and configured emission (68/66), and native
+callable/Address/Output production with its immediate Python bridge (131).
+Each unit includes the original producing routines needed to supply its complete
+result. Codex reviews those results before advancing through their direct
+functional neighbors. Runtime, archive, placement and other native consumers
+remain held. The stop instructions recorded below describe earlier checkpoints;
+the linked supervisor accounts record subsequent source changes and review.
+
 This dated order applies the operator's whole-flow correction to the existing
 [composition request](../../design/compilation-composition-change-request.md),
 especially its numerical lowerer boundary, items 2/3/5/6/7, S8, and complete
@@ -22,9 +31,9 @@ the returned results.
 
 > there was a very simple assignment and we even have a very simple reference codebase we can index against
 
-This instruction sets the current work sequence. All eight implementation turns
-were interrupted, their queues cleared, and their current source preserved in
-git. Only worker104 resumes for the capture producer: `export.export`, its
+This instruction sets the current work sequence. At the initial checkpoint, all
+eight implementation turns were interrupted, their queues cleared, and their
+source preserved in git. Worker104 was first resumed for the capture producer: `export.export`, its
 immediate result construction, and the producer's data definition. The reference
 is `schedule-emit/schedule_emit/export.py`'s `export`/`read` and
 `schedule_emit/ir.py`'s `Exported`, at `f41c64a`. They return captured graph,
@@ -52,7 +61,7 @@ This source review reads `schedule-emit` at `f41c64a` and Mesh at `027ab655`.
 The reference's tracked `schedule_emit` source matches that commit. Its existing
 modified emitted archives were left untouched. The observations below concern
 source structure; this review supplies no numerical or performance measurement.
-All eight Claude workers are held during this review.
+All eight Claude workers were held during that source review.
 
 The assigned properties come from [composition](../../design/compilation-composition-change-request.md)
 items 2/3/6/7 and its numerical-lowerer boundary, and
