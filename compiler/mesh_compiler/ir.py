@@ -59,7 +59,8 @@ def channel_of(node):
 # "Numerical lowerer boundary"; torch 2.14.0 torch/_functorch/aot_autograd.py aot_export_joint_with_descriptors and
 # torch/_functorch/_aot_autograd/schemas.py JointWithDescriptors, AOTState, AOTGraphCapture
 # (compiler/patches/torch-aot-joint-params-buffers.patch); torch/export/_trace.py _export_to_torch_ir and
-# _get_param_buffer_mapping; compiler/mesh_compiler/export.py export
+# _get_param_buffer_mapping; torch/_export/wrappers.py _wrap_submodules and _export_tracepoint;
+# torch/_dynamo/functional_export.py meta["module_call_specs"]; compiler/mesh_compiler/export.py export
 @dataclass
 class Exported:
     joint: JointWithDescriptors
@@ -69,6 +70,8 @@ class Exported:
     args: tuple
     kwargs: dict | None
     loss: object
+    functions: tuple
+    module_call_specs: dict
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order
@@ -94,17 +97,10 @@ class Call:
     outputs: list
 
 
-# design/aot-compilation-change-request.md A1 and A10: the outer call graph (its flat inputs, state, outputs and their
-# roles), each captured function's Exported by key in first-call order, each original call node's Call in program order
+# design/aot-compilation-change-request.md A1 and A10; compiler/mesh_compiler/export.py called, calls and substitute
 @dataclass
 class CapturedProgram:
     exported: Exported
-    functions: dict
-    calls: dict
-    # compiler/mesh_compiler/export.py substitute: each function an outline replaced, in replacement order, as (its
-    # original Exported, its parts' own Exported objects in part order, a repeated step's the same object each time):
-    # the original source owner of its parts (its signature and AOT stage records among it), once; a part a later
-    # outline replaced its own entry's original, the same object
     outlined: tuple = ()
 
 

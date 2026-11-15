@@ -87,18 +87,28 @@ def expand(graph_module, node):
 
 # /Users/mdot/schedule-emit/schedule_emit/export.py export and driver.py 14–21;
 # design/compilation-composition-change-request.md "Numerical lowerer boundary"; torch 2.14.0 torch/export/_trace.py
-# _strict_export (_export_to_torch_ir with restore_fqn False, _lstsq_fixed_selected of
-# compiler/patches/torch-lstsq-fixed-results.patch, _get_param_buffer_mapping); torch/_functorch/aot_autograd.py
-# aot_export_joint_with_descriptors 1320–1455 (its `stack` the caller's entered ExitStack, AOTState.stack;
-# compiler/patches/torch-aot-joint-params-buffers.patch)
-def export(stack, module, args, loss=None, kwargs=None, strict=True):
-    source = _export_to_torch_ir(module, args, kwargs, restore_fqn=False, _log_export_usage=False) if strict else module
+# _strict_export (_export_to_torch_ir, restore_fqn False, preserve_module_call_signature; _lstsq_fixed_selected of
+# compiler/patches/torch-lstsq-fixed-results.patch; _get_param_buffer_mapping), _non_strict_export 2341 and
+# _export_to_aten_ir 1202–1211; torch/_export/wrappers.py _wrap_submodules and _export_tracepoint 82–84;
+# torch/_functorch/aot_autograd.py aot_export_module 1668–1672 and aot_export_joint_with_descriptors 1320–1455
+# (compiler/patches/torch-aot-joint-params-buffers.patch)
+def export(stack, module, args, loss=None, kwargs=None, strict=True, functions=()):
+    preserved = () if loss is not None else tuple(path for path in functions if isinstance(path, str))
     if strict:
+        source = _export_to_torch_ir(module, args, kwargs, preserve_module_call_signature=preserved, restore_fqn=False,
+                                     _log_export_usage=False)
         _lstsq_fixed_selected(source)
-    joint = aot_export_joint_with_descriptors(stack, source, args, kwargs,
-                                              decompositions=torch.export.default_decompositions())
+        specs = source.meta["module_call_specs"]
+    else:
+        source, specs = module, {}
+    if loss is None:
+        stack.enter_context(torch.no_grad())
+    with _wrap_submodules(module, () if strict else preserved, specs):
+        joint = aot_export_joint_with_descriptors(stack, source, args, kwargs,
+                                                  decompositions=torch.export.default_decompositions(),
+                                                  _record_nn_module_stack=True)
     return Exported(joint, source, _get_param_buffer_mapping(module, source) if strict else None, module, args, kwargs,
-                    loss)
+                    loss, functions, specs)
 
 
 # compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py
@@ -129,40 +139,6 @@ def returned(forward, outputs, backward):
     parameters, inputs = ({target: 0 for kind, target in outputs if kind == role} for role in GRADIENTS)
     return pytree.tree_structure(TrainingResult(pytree.tree_unflatten([0] * forward.num_leaves, forward), parameters,
                                                 inputs))
-
-
-# design/aot-compilation-change-request.md A1 and A10; P. Barham et al., Pathways, arXiv:2203.12533, section 3;
-# J. Reed et al., torch.fx, MLSys 2022
-# torch 2.14.0 torch/fx/_symbolic_trace.py Tracer.create_args_for_root, which names a VAR_POSITIONAL parameter's
-# placeholder "*" + name and a VAR_KEYWORD's "**" + name, and Tracer._proxy_placeholder, which looks the original name
-# up in concrete_args and the Signature: each placeholder's display name mapped once to its parameter's own name
-VARIADIC = {inspect.Parameter.VAR_POSITIONAL: "*", inspect.Parameter.VAR_KEYWORD: "**"}
-
-
-class Calls(torch.fx.Tracer):
-    def __init__(self, functions, parameters):
-        super().__init__(autowrap_functions=tuple(f for f in functions if callable(f)))
-        self.functions = functions
-        self.names = {VARIADIC.get(parameter.kind, "") + name: name for name, parameter in parameters.items()}
-
-    def is_leaf_module(self, module, qualified_name):
-        return qualified_name in self.functions
-
-    def _proxy_placeholder(self, name, concrete_args, sig, fn_for_analysis):
-        return super()._proxy_placeholder(self.names[name], concrete_args, sig, fn_for_analysis)
-
-
-class Function(torch.nn.Module):
-    def __init__(self, function):
-        super().__init__()
-        self.function = function
-
-    def forward(self, *args, **kwargs):
-        return self.function(*args, **kwargs)
-
-
-def placeholders(function):
-    return [node.name for node in function.graph_module.graph.nodes if node.op == "placeholder"]
 
 
 # torch 2.14.0 torch/_subclasses/fake_tensor.py FakeTensorMode, the capture's one owner of values: the program's
