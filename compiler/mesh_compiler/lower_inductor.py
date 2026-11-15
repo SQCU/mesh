@@ -6,8 +6,8 @@
 # coremltools 9.0 for the Neural Engine), its returned pre-terminal result retained as that compiler's own objects.
 # Fields: output_data/compiler-workgroup-20261114/compiler/numerical68-result.md; upstream hooks:
 # compiler/patches/torch-inductor-aot-lowered-result.patch, torch-inductor-graph-lowering-factory.patch,
-# torch-inductor-mps-kernel-operands.patch, torch-inductor-upstream-composition.patch and
-# torch-inductor-cpu-kernel-results.patch
+# torch-inductor-mps-kernel-operands.patch, torch-inductor-upstream-composition.patch,
+# torch-inductor-cpu-kernel-results.patch and torch-inductor-cpp-build-result.patch
 import contextlib
 import dataclasses
 import functools
@@ -28,8 +28,6 @@ from torch._inductor.codegen.cpp_template_kernel import CppTemplateKernel
 from torch._inductor.codegen.cpp_utils import LocalBufferContext
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
 from torch._inductor.codegen.wrapper import KernelCallLine
-from torch._inductor.cpp_builder import CppTorchDeviceOptions
-from torch._inductor.cpu_vec_isa import pick_vec_isa
 from torch._inductor.graph import GraphLowering, SubgraphLowering
 from torch._inductor.lowering import fallback_handler, register_lowering
 from torch._inductor.scheduler import Scheduler
@@ -308,16 +306,19 @@ class Model:
 # one processor body's returned upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
 # `body` the adapted copy the upstream compiler traced (its graph and its control bodies' the provenance roots),
 # `sources` {(id(copy graph), copy node name): original node}, `sent` the original sent values in output order, `graph`
-# compile_fx_aot's own result (aot_inductor.lowered: output_code.py LoweredAOTI's GraphLowering after GraphLowering.codegen,
-# its scheduler's codegen and its wrapper's generate: buffers, layouts and aliases, graph_inputs, graph_outputs,
-# mutated_inputs, never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its planned lines,
-# lowered_subgraphs and fx_converter: gm, line_nodes, definitions, buffer_to_node, expr_to_proxy, subgm_getattrs;
+# compile_fx_aot's own result's GraphLowering (aot_inductor.lowered: output_code.py LoweredAOTI.graph, after compile_fx's
+# original AOT branch's codegen_with_cpp_wrapper: its scheduler's codegen and its own wrapper_code's (CppWrapperCpu or
+# CppWrapperMps) emitted wrapper and kernel code; buffers, layouts and aliases, graph_inputs, graph_outputs,
+# mutated_inputs, never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its lines;
 # None for the Neural Engine), `signature` the AOT export's GraphSignature of that graph (graph.module.meta; Neural
 # Engine: ExportedProgram.graph_signature), `kernels` {id(KernelCallLine): Kernel} over its wrapper and every subgraph
 # wrapper (every selected-backend kernel call: an mps kernel's, a cpu group's and a cpu template's), `externs` its
 # scheduler's ExternCall records in emission order, every control body's reached through them (ExternCall.inlined and
 # .lifted, each with its own ExternCalls, nested), `seeds` the Seeds of the root graph and of every body graph made
-# under it, `model` the Neural Engine's Model
+# under it, `model` the Neural Engine's Model, `compiled` LoweredAOTI.compiled: AotCodeCompiler.compile's AotCompiled
+# (torch-inductor-cpp-build-result.patch: its wrapper and kernel sources, their object actions, their precompiled
+# headers' and its constants object's actions as run, its link action, its extern kernel nodes; none of its wrapper's or
+# kernel's objects compiled, its shared library not linked), None for the Neural Engine
 @dataclasses.dataclass(eq=False)
 class Produced:
     processor: str
@@ -335,6 +336,7 @@ class Produced:
     externs: tuple
     seeds: tuple
     model: object
+    compiled: object = None
 
     # each original body node of FX nodes `nodes` (an IR node's get_origins(), a program's nodes), in order
     def origins(self, nodes):
@@ -777,12 +779,11 @@ def _template(owner, launch, line, graph, scheduler, produced, nodes, sources):
 PLACED = {MeshMetalKernel: _mps, MeshKernelGroup: _cpu, CppTemplateKernel: _template}
 
 
-# a graph's wrapper and each lifted control body's own (wrapper_fxir.py lowered_subgraphs: a Switch's branches, a
-# while_loop's cond and body, an invoke_subgraph's body)
+# each wrapper of GraphLowering `graph` and of every body graph made under it (_graphs), once: a control body's
+# GraphLowering.codegen_subgraph writes into its parent's (its wrapper_code its parent_graph's; cpp_wrapper_cpu.py
+# codegen_subgraph)
 def _wrappers(graph):
-    yield graph.wrapper_code
-    for lowered in graph.wrapper_code.lowered_subgraphs.values():
-        yield from _wrappers(lowered)
+    return dict.fromkeys(made.wrapper_code for made in _graphs(graph))
 
 
 # GraphLowering `graph` and every body GraphLowering made under it (_Lowering.mesh_subgraphs), each once, depth first
@@ -820,19 +821,21 @@ def _placeholders(graph):
 # one adapted body by compile_fx.py compile_fx_aot, the original AOT entry (V.aot_compilation: _compile_fx_main's
 # run_pre_grad_passes, aot_export_module under unlift_effect_tokens, _unlift_graph, its inference compiler's joint and
 # post-grad passes, compile_fx_inner without the empty-graph bailout or cache), at its scheduled placeholders' fake
-# values under no_grad, `graph_lowering` MeshLowering (the selected backends). config_patches: fx_wrapper (its wrapper
-# lines typed, cpp_wrapper off), aot_inductor.lowered (its lowered result: the GraphLowering after GraphLowering.codegen,
-# its backends' kernel sources made and its wrapper's generate run, no selected CPU or MPS kernel compiled or loaded),
-# schedule-emit's assume_unaligned_fallback_output for a receiving body, and trace.provenance_tracking_level 1 (every
-# rewrite's REPLACE sources)
+# values under no_grad, `graph_lowering` MeshLowering (the selected backends), its wrapper compile_fx_aot's own
+# selection (no fx_wrapper: cpp_wrapper). config_patches: aot_inductor.lowered (its lowered result, LoweredAOTI: its
+# GraphLowering after compile_fx's original AOT branch's codegen_with_cpp_wrapper, and AotCodeCompiler.compile's
+# AotCompiled, its build actions; no object compiled, no library linked or loaded), schedule-emit's
+# assume_unaligned_fallback_output for a receiving body, and trace.provenance_tracking_level 1 (every rewrite's
+# REPLACE sources)
 def _inductor(module, body, sources, sent, processor, kind, device):
     received = any(n.target is RECV_STRIDED for n in body.graph.nodes)
     with torch.no_grad():
-        graph = compile_fx_aot(body, [n.meta["val"] for n in _placeholders(body.graph)],
-                               inner_compile=functools.partial(compile_fx_inner, graph_lowering=MeshLowering),
-                               config_patches={"fx_wrapper": True, "aot_inductor.lowered": True,
-                                               "assume_unaligned_fallback_output": received,
-                                               "trace.provenance_tracking_level": 1})
+        lowered = compile_fx_aot(body, [n.meta["val"] for n in _placeholders(body.graph)],
+                                 inner_compile=functools.partial(compile_fx_inner, graph_lowering=MeshLowering),
+                                 config_patches={"aot_inductor.lowered": True,
+                                                 "assume_unaligned_fallback_output": received,
+                                                 "trace.provenance_tracking_level": 1})
+    graph = lowered.graph
     signature = graph.module.meta["graph_signature"]
     returned = _returned(module)
     names = signature.user_inputs
@@ -844,7 +847,7 @@ def _inductor(module, body, sources, sent, processor, kind, device):
               for k, node in enumerate(returned + sent)),
         {id(record[2]): PLACED[type(record[0])](*record, sources)
          for wrapper in _wrappers(graph) for record in wrapper.__dict__.get("launched_kernels", ())},
-        tuple(graph.scheduler.mesh_externs), _seeds(graph, sources), None)
+        tuple(graph.scheduler.mesh_externs), _seeds(graph, sources), None, lowered.compiled)
 
 
 # the Neural Engine's upstream compiler over one adapted body (its control bodies adapted by _copied): each received
@@ -1084,7 +1087,12 @@ def composed(kernel, made):
     return (_hosted if kernel.place == "cpu" else _threaded)(kernel, made)
 
 
-# metal_ir.h struct metal_ir_upstream_emission
+# metal_ir.h struct metal_ir_upstream_emission. No pass has a build of its own: (), (), None, (), None, (), None.
+# A CPU kernel's build is its body's, Produced.compiled (AotCompiled, compiler/patches/torch-inductor-cpp-build-result.patch):
+# the original AOT kernel_builder's compile_only object action over its kernel code, with its wrapper's, its
+# precompiled headers', its constants object's and its link actions (cpp_builder.py CppBuildAction, each whole: its
+# command, its source, target and link operand positions from their own assembled parts, product, directories, working
+# directory and environment).
 @dataclasses.dataclass(frozen=True)
 class Emission:
     source: str
@@ -1092,6 +1100,11 @@ class Emission:
     parameters: tuple
     compile: tuple
     link: tuple
+    language: str | None
+    environment: tuple
+    directory: str | None
+    sources: tuple
+    output: int | None
 
 
 # metal_ir.h metal_ir_upstream_emitted: the kernel's terminal emission by its own upstream emitter for one pass
@@ -1103,8 +1116,7 @@ class Emission:
 # template's composed pass needs its own upstream hook, cpp_template_kernel.py CppTemplateKernel.def_kernel and its
 # body's opening, which no patch has yet: numerical68-result.md); its parameters its call's arguments in
 # cpp_argdefs order (each at its own slot; its buffers, inplace, input and output, the bound pointer, its sizevars after
-# them the value) and the composition's; codecache.py CppCodeCache's build options (CppTorchDeviceOptions for the cpu,
-# CppPythonBindingsCodeCache: no libtorch, shared) in cpp_builder.py CppBuilder's argument form
+# them the value) and the composition's. Its build is its body's (Emission; Produced.compiled).
 def emitted(kernel, composition=None):
     owner = kernel.owner
     if kernel.place == "cpu":
@@ -1116,13 +1128,7 @@ def emitted(kernel, composition=None):
             with V.set_graph_handler(kernel.graph):
                 source = CppScheduling.defined_source(owner.codegen_group(None, composition), entry, name)
             parameters += composition.typed
-        options = CppTorchDeviceOptions(vec_isa=pick_vec_isa(), include_pytorch=False, device_type="cpu", shared=True)
-        compile_ = (options.get_compiler(), *[f for d in options.get_definitions() for f in ("-D", d)],
-                    *[f"-I{d}" for d in options.get_include_dirs()], *[f"-{f}" for f in options.get_cflags()],
-                    *options.get_passthrough_args())
-        link = (*[f"-{f}" for f in options.get_ldflags()], *[f"-L{d}" for d in options.get_libraries_dirs()],
-                *[f"-l{lib}" for lib in options.get_libraries()])
-        return Emission(source, entry, parameters, compile_, link)
+        return Emission(source, entry, parameters, (), (), None, (), None, (), None)
     entry, source = kernel.produced
     if composition is not None:
         with V.set_graph_handler(kernel.graph), V.set_kernel_handler(owner):
@@ -1130,4 +1136,4 @@ def emitted(kernel, composition=None):
         source = owner.metal_source
     source = _embed_headers([line + "\n" for line in source.split("\n")],
                             [Path(torch.__file__).parent / "include"], set())
-    return Emission(source, entry, (), (), ())
+    return Emission(source, entry, (), (), (), None, (), None, (), None)

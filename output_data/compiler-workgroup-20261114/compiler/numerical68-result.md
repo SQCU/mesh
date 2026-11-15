@@ -558,6 +558,66 @@ that is upstream as is.
 - Precision, target and custom ops are each as upstream lowered them. No subset is selected and nothing numerical is
   added.
 
+### The body's build: `Produced.compiled` (66's body record, 131's whole-program composition, 132's control)
+
+`_inductor` takes compile_fx_aot's own wrapper selection: no `fx_wrapper`, so `cpp_wrapper` (compile_fx.py 2261–2263).
+Its result is the `LoweredAOTI` itself (`torch-inductor-aot-lowered-result.patch` revision `415b82a4…`, not
+installed):
+- `Produced.graph` is `LoweredAOTI.graph`, after the original AOT branch's `codegen_with_cpp_wrapper`;
+- `Produced.compiled` is `LoweredAOTI.compiled`, `AotCodeCompiler.compile`'s `AotCompiled`
+  (`torch-inductor-cpp-build-result.patch` `c8a007eb…`, not installed);
+- `_engine` constructs `Produced` without `compiled`, which is None there. Its spans are 135's and are not changed.
+
+`AotCompiled(wrapper, kernel, wrapper_object, kernel_object, wrapper_header, kernel_header, consts, link,
+extern_kernel_nodes, generated_files)`. Its stage: after the sources are written, the headers precompiled and the
+constants object built; before any wrapper/kernel compile or link, none of which ran.
+
+| Field | Value |
+|---|---|
+| `wrapper`, `kernel` | the source paths as written, each with its compile and link commands appended as comments |
+| `wrapper_object`, `kernel_object` | `CppBuildAction` of `wrapper_builder` and `kernel_builder` (`compile_only`, product `"object"`), not run |
+| `wrapper_header`, `kernel_header` | `PrecompiledHeader(header, preprocessing, checksum, digest, path, precompiling, lock)` or None. It ran here: `path` and `precompiling`'s target persist under `_HEADER_DIR`. `preprocessing`'s output is removed with its temporary directory; its result is retained before that, as `digest` |
+| `consts` | `AotConstants(code, extension, action, assembly, directory, postprocessed, object)`. Built here: `object` persists. `code` and `extension` are its source's content, held before its source file's removal (`action`'s command names that file as it ran). `postprocessed` marks the magic-number data write |
+| `link` | `so_builder`'s whole `CppBuildAction` (its objects, target, link inputs and their resolution, product `"python_module"`), not run |
+| `extern_kernel_nodes` | the serialized extern table `compile` was given, also written beside `wrapper` as `.json` |
+| `generated_files` | `compile`'s generated files |
+
+`CppBuildAction(command, sources, target, ldflags, libraries, library_directories, product, target_file,
+precompiled_header, directories, working_directory, environment, relative)`:
+- Every position comes from its own part of `CppBuilder._command_parts`, which `get_command_line` joins byte-identically
+  to upstream. None comes from matching argument strings.
+- `directories` is what `build()` creates (output directory, then build directory). `working_directory` is its cwd,
+  removed after the build.
+- `environment` is `os.environ`, which the subprocess inherits.
+
+The per-pass `Emission` keeps 131's struct shape, but no pass carries a build of its own: `compile`, `link`,
+`language`, `environment`, `directory`, `sources` and `output` are empty for CPU as for Metal. The displaced
+`CppPythonBindingsCodeCache.load_async` route and its `command.index` positions are removed. 66's body record and
+131's native consumer take the build from `Produced.compiled`.
+
+Open:
+- under `cpp_wrapper`, control bodies codegen into their parent's wrapper. `_wrappers` therefore yields each distinct
+  `wrapper_code` of `_graphs`. The `ExternCall.inlined`/`lifted` records are as the hooks make them under the C++
+  wrapper, not yet reviewed against `cpp_wrapper_cpu.py codegen_subgraph` (2887; 66's reserved span);
+- a CPU pass's composed source (`codegen_group(None, composition)`) is not in `kernel_object`'s `kernel.cpp`. Pairing
+  it with the body's object action is for 66/131;
+- the patch's `wrapper_fxir.py` lowered hunks are unused under `cpp_wrapper`. They are to be removed with 66's
+  consumer replacement.
+- **unit identity**: the emitter runs with upstream's `aot_inductor.dynamic_linkage` (True), so CppWrapperCpu's
+  `aoti_model_class_name` (cpp_wrapper_cpu.py 286–291) has no unit suffix. The static composition's identity
+  (`dynamic_linkage` False, `model_name_for_generated_files` from the body's existing unit, `lower`'s function key and
+  processor, which `produced` does not pass yet) is not selected. 131's `metal_ir_body.entry` is that name; the operand
+  is to be paired with 131;
+- **stage**: `wrapper` and `kernel` are `codegen_with_cpp_wrapper`'s final print. The typed body/allocation/binding/
+  transport operands before that print are not returned. They are 66's hooks' (reserved `cpp_wrapper_cpu.py` spans);
+  the stage that returns them, or the composed source that consumed them, is open with 66 and 131;
+- **Python consumer**: nothing yet projects `Produced.compiled` into 131's `metal_ir_body`, including its `entry` and
+  `handle` fields (run_impl bindings: 66's). `metal.py` 897–903 (66's) still reads the per-pass `Emission.compile`,
+  `link` and `environment`, now empty for CPU;
+- **not runnable or importable as checked out**: `_inductor` needs both uninstalled patches. Against the installed
+  `6d56f939` revision, `compile_fx_aot` does not return `LoweredAOTI(graph, device_type, compiled)`. Nothing here was
+  imported or run.
+
 ## The Neural Engine `Model` (native135/134's consumer)
 
 `Model(program, model, selected, received, handles)`:

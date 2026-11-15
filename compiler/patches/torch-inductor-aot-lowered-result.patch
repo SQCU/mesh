@@ -8,51 +8,44 @@
      OutputCode,
  )
  from torch._inductor.runtime.cache_dir_utils import cache_dir
-@@ -1691,7 +1692,11 @@
-                     with dynamo_timed(
-                         "GraphLowering.compile_to_fn", log_pt2_compile_event=True
-                     ):
--                        if graph.aot_mode and graph.fx_wrapper:
-+                        if graph.aot_mode and config.aot_inductor.lowered:
-+                            # compiler/patches/torch-inductor-aot-lowered-result.patch:
-+                            # GraphLowering.codegen to its lowered result, after its wrapper's generate
-+                            graph.codegen()
-+                        elif graph.aot_mode and graph.fx_wrapper:
-                             if graph.cpp_wrapper:
-                                 raise AssertionError(
-                                     "Expected cpp_wrapper to be False for fx_wrapper AOT mode"
-@@ -1863,6 +1868,10 @@
+@@ -1863,6 +1864,16 @@
  
                      # pyrefly: ignore [unbound-name]
                      if V.aot_compilation:
 +                        # compiler/patches/torch-inductor-aot-lowered-result.patch:
-+                        # aot_inductor.lowered, the lowered result itself
++                        # aot_inductor.lowered, the lowered result itself: its graph after the original AOT
++                        # branch's codegen_with_cpp_wrapper, and AotCodeCompiler.compile's AotCompiled
++                        # (torch-inductor-cpp-build-result.patch)
 +                        if config.aot_inductor.lowered:
-+                            return LoweredAOTI(graph=graph, device_type=graph.device_type)
++                            return LoweredAOTI(
++                                graph=graph,
++                                device_type=graph.device_type,
++                                compiled=compiled_fn,
++                            )
                          if not isinstance(
                              compiled_fn,
                              # pyrefly: ignore [unbound-name]
-@@ -2239,7 +2248,7 @@
+@@ -2239,7 +2250,7 @@
      example_inputs_: list[InputType],
      inner_compile: _CompileFxCallable = compile_fx_inner,
      config_patches: dict[str, Any] | None = None,
 -) -> list[str | Weights] | str | GraphModule:
-+) -> list[str | Weights] | str | GraphModule | GraphLowering:
++) -> list[str | Weights] | str | GraphModule | LoweredAOTI:
      if not isinstance(model_, GraphModule):
          raise AssertionError(f"Expected GraphModule, got {type(model_)}: {model_}")
  
-@@ -2298,6 +2307,10 @@
+@@ -2298,6 +2309,10 @@
              config_patches=config_patches,
          )
  
 +        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the
-+        # lowered result's GraphLowering
++        # lowered result itself
 +        if isinstance(compiled_artifacts, LoweredAOTI):
-+            return compiled_artifacts.graph
++            return compiled_artifacts
          if not isinstance(compiled_artifacts, CompiledAOTI):
              raise AssertionError(
                  f"Expected CompiledAOTI, got {type(compiled_artifacts)}"
-@@ -3279,6 +3292,9 @@
+@@ -3279,6 +3294,9 @@
                              node.meta["val"] = target
  
              unlifted_gm = _unlift_graph(model_, gm, graph_signature)
@@ -78,19 +71,6 @@
  
      # AOTInductor output path
      # If an absolute path is specified, the generated lib files will be stored under the directory;
---- a/torch/_inductor/graph.py
-+++ b/torch/_inductor/graph.py
-@@ -3052,6 +3052,10 @@
- 
-             result = self.wrapper_code.generate(self.is_inference)
-             self.wrapper_code.pop_codegened_graph()
-+            # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, this graph
-+            # itself after its wrapper's generate (wrapper_fxir.py WrapperFxCodegen.fx_converter)
-+            if config.aot_inductor.lowered:
-+                return self, None
-             return result
- 
-     def codegen_subgraph(self, parent_graph: GraphLowering) -> None:
 --- a/torch/_inductor/ir.py
 +++ b/torch/_inductor/ir.py
 @@ -9507,8 +9507,11 @@
@@ -173,20 +153,23 @@
  
 --- a/torch/_inductor/output_code.py
 +++ b/torch/_inductor/output_code.py
-@@ -1169,6 +1169,31 @@
+@@ -1169,6 +1169,34 @@
  
  
  @dataclasses.dataclass
 +class LoweredAOTI(OutputCode):
 +    """
 +    compiler/patches/torch-inductor-aot-lowered-result.patch: an AOT compilation's lowered
-+    result (aot_inductor.lowered): `graph` its GraphLowering after GraphLowering.codegen (its backends' kernel sources
-+    made and defined, its wrapper's generate run: wrapper_code.fx_converter); no selected CPU or MPS kernel compiled or
-+    loaded. compile_fx_aot returns `graph`.
++    result (aot_inductor.lowered), at compile_fx's original AOT branch (cpp_wrapper): `graph` its GraphLowering after
++    codegen_with_cpp_wrapper (its backends' kernels made, its wrapper's and kernel's code emitted by its own
++    wrapper_code), `compiled` AotCodeCompiler.compile's AotCompiled (torch-inductor-cpp-build-result.patch: its
++    object, header, constants and link actions, its wrapper's and kernel's objects not compiled, its shared library
++    not linked). compile_fx_aot returns it.
 +    """
 +
 +    graph: Any
 +    device_type: str
++    compiled: Any
 +
 +    def post_compile(
 +        self,

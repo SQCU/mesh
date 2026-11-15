@@ -1,0 +1,605 @@
+--- a/torch/_inductor/cpp_builder.py
++++ b/torch/_inductor/cpp_builder.py
+@@ -23,7 +23,7 @@
+ from ctypes import cdll, wintypes
+ from ctypes.util import find_library
+ from pathlib import Path
+-from typing import Any
++from typing import Any, NamedTuple
+ 
+ import torch
+ from torch._dynamo.utils import dynamo_timed
+@@ -2312,6 +2312,49 @@
+     return name, dir
+ 
+ 
++def _joined(parts: Sequence[tuple[str, str | None]]) -> str:
++    # compiler/patches/torch-inductor-cpp-build-result.patch: a command field's text, its parts' joined
++    return " ".join(text for text, _ in parts)
++
++
++class CppBuildAction(NamedTuple):
++    """
++    compiler/patches/torch-inductor-cpp-build-result.patch: a CppBuilder's build action, as its command's
++    assembly (CppBuilder._command_parts, which get_command_line joins) makes it and build() realizes it.
++    """
++
++    # its whole command, its compiler executable first: each assembled part's words in order, as
++    # _run_compile_cmd's shlex.split of get_command_line() makes them
++    command: list[str]
++    # the positions in `command` of its source operands, each source file as given (its basename under
++    # use_relative_path)
++    sources: list[int]
++    # the position in `command` of its target operand (MSVC: the output flag's argument carrying it); none for
++    # MSVC preprocessing, whose target MSVC names
++    target: list[int]
++    # the positions in `command` of its link inputs and their resolution (linking only): its ldflags, its
++    # libraries, its library directories
++    ldflags: list[int]
++    libraries: list[int]
++    library_directories: list[int]
++    # its output product, as its options select its output flags: "object" (compile_only), "precompiled_header",
++    # "preprocessor_output" or "python_module" (linked: a shared library)
++    product: str
++    # get_target_file_path(): the file it produces
++    target_file: str
++    # BuildOption.precompiled_header: the header file its -include names (a precompiled dependency), or None
++    precompiled_header: str | None
++    # the directories build() creates for it, in order: its output directory, then its build directory
++    directories: list[str]
++    # build()'s working directory for its command: its build directory, which build() removes after it
++    working_directory: str
++    # the environment its command inherits (_run_compile_cmd's subprocess.run): os.environ as of this result
++    environment: dict[str, str]
++    # use_relative_path: build() realizes it by build_fbcode_re instead (its own temporary build directory, its
++    # sources staged there by basename)
++    relative: bool
++
++
+ class CppBuilder:
+     """
+     CppBuilder is a cpp jit builder, and it supports both Windows, Linux and MacOS.
+@@ -2408,14 +2451,20 @@
+         if _IS_WINDOWS and self._precompiling:
+             raise AssertionError("Cannot currently precompile headers on Windows!")
+ 
++        # compiler/patches/torch-inductor-cpp-build-result.patch: its output product, as this selects its
++        # output flags
+         if self._compile_only:
+             file_ext, output_flags = self.__get_object_flags()
++            self._product = "object"
+         elif self._precompiling:
+             file_ext, output_flags = self.__get_precompiled_header_flags()
++            self._product = "precompiled_header"
+         elif self._preprocessing:
+             file_ext, output_flags = self.__get_preprocessor_output_flags()
++            self._product = "preprocessor_output"
+         else:
+             file_ext, output_flags = self.__get_python_module_flags()
++            self._product = "python_module"
+         self._target_file = os.path.join(self._output_dir, f"{self._name}{file_ext}")
+ 
+         relative_target_file = (
+@@ -2423,14 +2472,19 @@
+             if self._use_relative_path
+             else self._target_file
+         )
++        # compiler/patches/torch-inductor-cpp-build-result.patch: its output's command parts, each with its
++        # role: its target operand its own part (MSVC: the output flag's argument carrying it)
++        self._output_parts: list[tuple[str, str | None]]
+         if _IS_WINDOWS:
+             if self._preprocessing:
+                 # The target file name is automatically determined by MSVC.
+-                self._output = output_flags
++                self._output_parts = [(output_flags, None)]
+             else:
+-                self._output = f"{output_flags}{relative_target_file}"
++                self._output_parts = [
++                    (f"{output_flags}{relative_target_file}", "target")
++                ]
+         else:
+-            self._output = f"{output_flags} {relative_target_file}"
++            self._output_parts = [(output_flags, None), (relative_target_file, "target")]
+ 
+         if isinstance(sources, str):
+             sources = [sources]
+@@ -2442,20 +2496,23 @@
+             self._orig_source_paths = list(sources)
+             sources = [os.path.basename(i) for i in sources]
+ 
++        # compiler/patches/torch-inductor-cpp-build-result.patch: its sources' command parts, each source
++        # operand its own part
++        self._sources_parts: list[tuple[str, str | None]]
+         if self._precompiling:
+             if len(sources) != 1:
+                 raise AssertionError(
+                     f"expected exactly one source when precompiling, got {len(sources)}"
+                 )
+             # See above; we can currently assume this is not on MSVC.
+-            self._sources_args = f"-x c++-header {sources[0]}"
++            self._sources_parts = [("-x c++-header", None), (sources[0], "source")]
+             if self._use_relative_path and _is_clang(BuildOption.get_compiler()):
+                 # Store PCH paths relative to -isysroot so the .pch can
+                 # be used from a different build directory.  The matching
+                 # -isysroot is injected by build_fbcode_re().
+                 self._cflags_args += " -relocatable-pch -Xclang -fno-pch-timestamp "
+         else:
+-            self._sources_args = " ".join(sources)
++            self._sources_parts = [(source, "source") for source in sources]
+ 
+         for cflag in BuildOption.get_cflags():
+             if _IS_WINDOWS:
+@@ -2514,54 +2571,99 @@
+         ):
+             self._passthrough_parameters_args += f"{passthrough_arg} "
+ 
++    def _command_parts(self) -> list[list[tuple[str, str | None]]]:
++        """
++        compiler/patches/torch-inductor-cpp-build-result.patch: its command's assembly, each field in
++        order with its parts and their roles ("source", "target", "ldflags", "libraries", "library_directories";
++        None: its compiler executable or an option). get_command_line joins them; get_build_action makes each
++        part's words its arguments.
++        """
++        if _IS_WINDOWS:
++            # https://learn.microsoft.com/en-us/cpp/build/walkthrough-compile-a-c-program-on-the-command-line?view=msvc-1704
++            # https://stackoverflow.com/a/31566153
++            fields = [
++                [(self._compiler, None)],
++                [(self._include_dirs_args, None)],
++                [(self._definitions_args, None)],
++                [(self._cflags_args, None)],
++                self._sources_parts,
++                [(self._passthrough_parameters_args, None)],
++                self._output_parts,
++            ]
++            if self._do_link:
++                fields += [
++                    [("/LD /link", None)],
++                    [(self._libraries_dirs_args, "library_directories")],
++                    [(self._libraries_args, "libraries")],
++                    [(self._ldflags_args, "ldflags")],
++                ]
++            return [
++                [(normalize_path_separator(text), role) for text, role in field]
++                for field in fields
++            ]
++        fields = [
++            [(self._compiler, None)],
++            self._sources_parts,
++            [(self._definitions_args, None)],
++            [(self._cflags_args, None)],
++            [(self._include_dirs_args, None)],
++            [(self._passthrough_parameters_args, None)],
++            self._output_parts,
++        ]
++        if self._do_link:
++            fields += [
++                [(self._ldflags_args, "ldflags")],
++                [(self._libraries_args, "libraries")],
++                [(self._libraries_dirs_args, "library_directories")],
++            ]
++        return fields
++
+     def get_command_line(self) -> str:
+-        def format_build_command(
+-            compiler: str,
+-            sources: str,
+-            include_dirs_args: str,
+-            definitions_args: str,
+-            cflags_args: str,
+-            ldflags_args: str,
+-            libraries_args: str,
+-            libraries_dirs_args: str,
+-            passthrough_args: str,
+-            output: str,
+-        ) -> str:
+-            if _IS_WINDOWS:
+-                # https://learn.microsoft.com/en-us/cpp/build/walkthrough-compile-a-c-program-on-the-command-line?view=msvc-1704
+-                # https://stackoverflow.com/a/31566153
+-                cmd = (
+-                    f"{compiler} {include_dirs_args} {definitions_args} {cflags_args} "
+-                    f"{sources} {passthrough_args} {output}"
+-                )
+-                if self._do_link:
+-                    cmd += f" /LD /link {libraries_dirs_args} {libraries_args} {ldflags_args}"
+-                cmd = normalize_path_separator(cmd)
+-            else:
+-                cmd = (
+-                    f"{compiler} {sources} {definitions_args} {cflags_args} "
+-                    f"{include_dirs_args} {passthrough_args} {output}"
+-                )
+-                if self._do_link:
+-                    cmd += f" {ldflags_args} {libraries_args} {libraries_dirs_args}"
+-            return cmd
+-
+-        command_line = format_build_command(
+-            compiler=self._compiler,
+-            sources=self._sources_args,
+-            include_dirs_args=self._include_dirs_args,
+-            definitions_args=self._definitions_args,
+-            cflags_args=self._cflags_args,
+-            ldflags_args=self._ldflags_args,
+-            libraries_args=self._libraries_args,
+-            libraries_dirs_args=self._libraries_dirs_args,
+-            passthrough_args=self._passthrough_parameters_args,
+-            output=self._output,
+-        )
+-        return command_line
++        return " ".join(_joined(field) for field in self._command_parts())
+ 
+     def get_target_file_path(self) -> str:
+         return normalize_path_separator(self._target_file)
++
++    def get_build_directory(self) -> str:
++        """
++        compiler/patches/torch-inductor-cpp-build-result.patch: the build directory build() creates
++        under its output directory for its command's working directory, and removes after it
++        """
++        return os.path.join(self._output_dir, f"{self._name}_{_BUILD_TEMP_DIR}")
++
++    def get_build_action(self) -> CppBuildAction:
++        """
++        compiler/patches/torch-inductor-cpp-build-result.patch: its build action (CppBuildAction), each
++        command argument's position that of its own assembled part (_command_parts)
++        """
++        command: list[str] = []
++        positions: dict[str | None, list[int]] = {}
++        for field in self._command_parts():
++            for text, role in field:
++                words = shlex.split(text)
++                if role in ("source", "target"):
++                    # an operand: its part's last word (MSVC: the output flag's argument carrying its target)
++                    positions.setdefault(role, []).append(len(command) + len(words) - 1)
++                else:
++                    positions.setdefault(role, []).extend(
++                        range(len(command), len(command) + len(words))
++                    )
++                command += words
++        return CppBuildAction(
++            command,
++            positions.get("source", []),
++            positions.get("target", []),
++            positions.get("ldflags", []),
++            positions.get("libraries", []),
++            positions.get("library_directories", []),
++            self._product,
++            self.get_target_file_path(),
++            self._build_option.precompiled_header,
++            [self._output_dir, self.get_build_directory()],
++            self.get_build_directory(),
++            dict(os.environ),
++            self._use_relative_path,
++        )
+ 
+     def _stage_passthrough_paths(self, args: list[str]) -> list[str]:
+         """For fbcode remote builds, treat any absolute file path that appears
+@@ -2676,9 +2778,7 @@
+             # remote build uses relative path
+             return self.build_fbcode_re()
+         _create_if_dir_not_exist(self._output_dir)
+-        _build_tmp_dir = os.path.join(
+-            self._output_dir, f"{self._name}_{_BUILD_TEMP_DIR}"
+-        )
++        _build_tmp_dir = self.get_build_directory()
+         _create_if_dir_not_exist(_build_tmp_dir)
+ 
+         build_cmd = self.get_command_line()
+@@ -2916,7 +3016,7 @@
+             f.write(contents)
+ 
+ 
+-def run_asm_build_object(src: str, target: str, cwd: str) -> None:
++def run_asm_build_object(src: str, target: str, cwd: str) -> list[str]:
+     def get_asm_compiler() -> str:
+         if _IS_WINDOWS:
+             ASM_CC = "ml64"
+@@ -2944,3 +3044,6 @@
+         target=normalize_path_separator(target),
+     )
+     run_compile_cmd(cmd, cwd=normalize_path_separator(cwd))
++    # compiler/patches/torch-inductor-cpp-build-result.patch: the command it ran, as _run_compile_cmd
++    # split it
++    return shlex.split(cmd)
+--- a/torch/_inductor/codecache.py
++++ b/torch/_inductor/codecache.py
+@@ -41,7 +41,16 @@
+     MethodType,
+     ModuleType,
+ )
+-from typing import Any, cast, Generic, Literal, NoReturn, TYPE_CHECKING, TypeVar
++from typing import (
++    Any,
++    cast,
++    Generic,
++    Literal,
++    NamedTuple,
++    NoReturn,
++    TYPE_CHECKING,
++    TypeVar,
++)
+ from typing_extensions import NotRequired, override, Self, TypedDict
+ 
+ import torch
+@@ -74,6 +83,7 @@
+     _TORCH_PATH,
+     batch_convert_cubins_to_obj,
+     convert_cubin_to_obj,
++    CppBuildAction,
+     CppBuilder,
+     CppOptions,
+     CppTorchDeviceOptions,
+@@ -2631,6 +2641,54 @@
+         return cls.cache.keys()
+ 
+ 
++class AotConstants(NamedTuple):
++    """
++    compiler/patches/torch-inductor-cpp-build-result.patch: AotCodeCompiler.compile's constants object
++    as _compile_consts built it, before compile's return: `code` and `extension` its source's content as written,
++    retained before its source file's removal (`action`'s command names that file as it ran), `action` its
++    object_builder's whole action, `assembly` the command run_asm_build_object ran in its place
++    in `directory` (use_consts_asm_build off, zero-size constants; None: `action` built it), `postprocessed` whether
++    its constants' data was then written over the object's magic number (large constants under
++    use_consts_asm_build), `object` its object file
++    """
++
++    code: str
++    extension: str
++    action: CppBuildAction
++    assembly: list[str] | None
++    directory: str
++    postprocessed: bool
++    object: str
++
++
++class AotCompiled(NamedTuple):
++    """
++    compiler/patches/torch-inductor-cpp-build-result.patch: aot_inductor.lowered, AotCodeCompiler.compile's
++    result at its stage: after its sources' writes, its headers' precompilation (each PrecompiledHeader's actions ran
++    here, their products under _HEADER_DIR) and its constants object's build (AotConstants: built here); before its
++    wrapper's and kernel's objects' compile and its link, none of which ran. `wrapper` and `kernel` its source files
++    as written (each with its compile and link commands appended as comments), `wrapper_object` and `kernel_object`
++    its wrapper_builder's and kernel_builder's whole actions (compile_only: each its object), `wrapper_header` and
++    `kernel_header` the precompilations whose header each -includes (aot_inductor.precompile_headers; None: none),
++    `consts` its constants object's, `link` its so_builder's whole action (its command over its objects, wrapper's,
++    kernel's, constants' and gpu kernels', with its target, link inputs and their resolution, product, directories,
++    working directory and environment), `extern_kernel_nodes` the serialized extern kernel nodes it was given (its
++    proxy executor's call table, written beside `wrapper` as its .json; None: none), `generated_files` the files it
++    generated
++    """
++
++    wrapper: str
++    kernel: str
++    wrapper_object: CppBuildAction
++    kernel_object: CppBuildAction
++    wrapper_header: PrecompiledHeader | None
++    kernel_header: PrecompiledHeader | None
++    consts: AotConstants
++    link: CppBuildAction
++    extern_kernel_nodes: str | None
++    generated_files: list[str | Weights]
++
++
+ class AotCodeCompiler:
+     """
+     Compile AOT Inductor generated code.
+@@ -2646,10 +2704,11 @@
+         *,
+         device_type: str,
+         additional_files: list[str],
+-    ) -> list[str | Weights] | str:
++    ) -> list[str | Weights] | str | AotCompiled:
+         """
+         Returns the .so path, or returns a list of files that were generated if
+         config.aot_inductor.package=True.
++        compiler/patches/torch-inductor-cpp-build-result.patch: aot_inductor.lowered, its AotCompiled.
+         """
+         generated_files: list[str | Weights] = additional_files  # type: ignore[assignment]
+ 
+@@ -2805,7 +2864,7 @@
+             specified_sub_dir.mkdir(exist_ok=True)
+         cmake_path = str(Path(specified_sub_dir) / "CMakeLists.txt")
+ 
+-        def _compile_consts(consts: bytes | bytearray, platform: str) -> str:
++        def _compile_consts(consts: bytes | bytearray, platform: str) -> AotConstants:
+             # Load from aot_inductor, and update the value on demand.
+             use_asm_build: bool = config.aot_inductor.use_consts_asm_build
+ 
+@@ -2969,8 +3028,12 @@
+                 BuildOption=object_build_options,
+             )
+             consts_o = object_builder.get_target_file_path()
++            # compiler/patches/torch-inductor-cpp-build-result.patch: its build's action, retained
++            assembly: list[str] | None = None
+             if use_asm_build is False and is_zero_size_consts:
+-                run_asm_build_object(str(consts_s), consts_o, str(consts_s.parent))
++                assembly = run_asm_build_object(
++                    str(consts_s), consts_o, str(consts_s.parent)
++                )
+             else:
+                 object_builder.build()
+ 
+@@ -2997,7 +3060,15 @@
+             # Remove the .S file to save space
+             os.remove(consts_s)
+ 
+-            return consts_o
++            return AotConstants(
++                consts_code,
++                code_ext,
++                object_builder.get_build_action(),
++                assembly,
++                str(consts_s.parent),
++                is_large_consts and use_asm_build,
++                consts_o,
++            )
+ 
+         from torch.utils._filelock import FileLock
+ 
+@@ -3185,23 +3256,29 @@
+             )
+ 
+             # potentially, precompile the AOT header for this device
++            # compiler/patches/torch-inductor-cpp-build-result.patch: each precompilation's dependency
++            # actions retained
++            wrapper_header: PrecompiledHeader | None = None
++            kernel_header: PrecompiledHeader | None = None
+             if config.aot_inductor.precompile_headers and not _IS_WINDOWS:
+                 with dynamo_timed("aoti_precompile_header", log_pt2_compile_event=True):
+                     header_file = _get_cpp_wrapper_header(
+                         device_type, aot_mode=graph.aot_mode
+                     )
+-                    wrapper_build_options.precompiled_header = _precompile_header(
++                    wrapper_header = _precompiled_header(
+                         header_file,
+                         cpp_command,
+                         min_optimize=not config.aot_inductor.package_cpp_only,
+                         **compile_command,
+                     )
++                    wrapper_build_options.precompiled_header = wrapper_header.path
+                     if cpp_prefix := _get_cpp_prefix_header(device_type):
+-                        kernel_build_options.precompiled_header = _precompile_header(
++                        kernel_header = _precompiled_header(
+                             cpp_prefix,
+                             cpp_command,
+                             **compile_command,
+                         )
++                        kernel_build_options.precompiled_header = kernel_header.path
+ 
+             wrapper_builder = CppBuilder(
+                 name=str(wrapper_path_operator.stem),
+@@ -3235,7 +3312,9 @@
+                 wrapper_builder.save_compile_cmd_to_cmake(cmake_path, device_type)
+                 wrapper_builder.save_src_to_cmake(cmake_path, wrapper_path)
+                 generated_files.append(cmake_path)
+-            else:
++            elif not config.aot_inductor.lowered:
++                # compiler/patches/torch-inductor-cpp-build-result.patch: aot_inductor.lowered, its objects
++                # built by its result's consumer (AotCompiled)
+                 try:
+                     wrapper_builder.build()
+                 except (exc.CppCompileError, SkipFrame) as e:
+@@ -3266,7 +3345,8 @@
+                 )
+                 aot_constants = struct.pack("qq", consts_size + 8, magic_number)
+ 
+-            consts_o = _compile_consts(aot_constants, sys.platform)
++            constants_object = _compile_consts(aot_constants, sys.platform)
++            consts_o = constants_object.object
+             custom_obj_idx = 0
+             # Note that custom_objs_config.json file is different from the model_constants_config.json file produced
+             # in package_sigmoid(). The keys in custom_objs_config.json directly correspond to the arg name in extern
+@@ -3495,6 +3575,21 @@
+                 f.write(f"// Compile cmd\n// {kernel_compile_cmd}\n")
+                 f.write(f"// Link cmd\n// {link_cmd}\n")
+ 
++            # compiler/patches/torch-inductor-cpp-build-result.patch: aot_inductor.lowered, its result
++            if config.aot_inductor.lowered:
++                return AotCompiled(
++                    wrapper_path,
++                    kernel_path,
++                    wrapper_builder.get_build_action(),
++                    kernel_builder.get_build_action(),
++                    wrapper_header,
++                    kernel_header,
++                    constants_object,
++                    so_builder.get_build_action(),
++                    serialized_extern_kernel_nodes,
++                    generated_files,
++                )
++
+             if config.aot_inductor.package_cpp_only:
+                 linker_flags = str(
+                     wrapper_path_operator.with_name(
+@@ -3684,12 +3779,40 @@
+ _VEC_ISA_CPP_SOURCE_MARKERS = ("at::vec::", "prod_masked_reduce(")
+ 
+ 
+-@functools.cache
++class PrecompiledHeader(NamedTuple):
++    """
++    compiler/patches/torch-inductor-cpp-build-result.patch: a header's precompilation
++    (_precompiled_header), its dependency actions in order as each ran: `preprocessing` its preprocessor's action (in
++    its own temporary directory, removed after it), `checksum` the command over that action's output, `digest` its digest (the
++    preprocessing's retained result, taken before its temporary directory's removal), which names `path`, the header file written under _HEADER_DIR (its -include), `precompiling` its precompile action
++    (_worker_compile_cpp under `lock`: not run where its product already exists). Each ran here; its products, `path`
++    and `precompiling`'s target, persist under _HEADER_DIR; its preprocessing's output does not (it is retained only as `digest`).
++    """
++
++    header: str
++    preprocessing: CppBuildAction
++    checksum: list[str]
++    digest: str
++    path: str
++    precompiling: CppBuildAction
++    lock: str
++
++
+ def _precompile_header(
+     header: str,
+     hashable_cmd_line: str,
+     **compile_command: Any,
+ ) -> str:
++    # compiler/patches/torch-inductor-cpp-build-result.patch: the header file _precompiled_header wrote
++    return _precompiled_header(header, hashable_cmd_line, **compile_command).path
++
++
++@functools.cache
++def _precompiled_header(
++    header: str,
++    hashable_cmd_line: str,
++    **compile_command: Any,
++) -> PrecompiledHeader:
+     if _IS_WINDOWS:
+         raise AssertionError(
+             "CppBuilder does not currently support precompiling on Windows!"
+@@ -3715,18 +3838,19 @@
+             sources=str(preprocessing_header),
+             BuildOption=CppTorchDeviceOptions(**compile_command, preprocessing=True),
+         )
++        preprocessing = preprocessor.get_build_action()
+         preprocessor.build()
+ 
+-        def _get_file_checksum(filename: str) -> str:
++        def _get_file_checksum(checksum: list[str]) -> str:
+             """Reading the whole preprocessed header in for hashing is very expensive,
+             but calling a fast hashing utility in a subprocess is cheap."""
+-            # If Windows support needs to be added here, use certutil -hashfile.
+-            cmd_output = subprocess.run(
+-                ("openssl", "sha512", filename), capture_output=True, text=True
+-            )
++            cmd_output = subprocess.run(checksum, capture_output=True, text=True)
+             return cmd_output.stdout.split()[-1]
+ 
+-        preprocessor_hash = _get_file_checksum(preprocessor.get_target_file_path())
++        # compiler/patches/torch-inductor-cpp-build-result.patch: its checksum command, retained
++        # If Windows support needs to be added here, use certutil -hashfile.
++        checksum = ["openssl", "sha512", preprocessor.get_target_file_path()]
++        preprocessor_hash = _get_file_checksum(checksum)
+ 
+     header_build_option = CppTorchDeviceOptions(**compile_command, precompiling=True)
+     header_hash, header_full_path = write(
+@@ -3747,12 +3871,18 @@
+     # _worker_compile_cpp will automatically ignore any compilation whose result already
+     # exists, so this is always safe.
+     os.makedirs(_HEADER_LOCK_DIR, exist_ok=True)
+-    _worker_compile_cpp(
+-        os.path.join(_HEADER_LOCK_DIR, f"{header_hash}.lock"),
+-        (cpp_builder,),
++    lock = os.path.join(_HEADER_LOCK_DIR, f"{header_hash}.lock")
++    _worker_compile_cpp(lock, (cpp_builder,))
++
++    return PrecompiledHeader(
++        header,
++        preprocessing,
++        checksum,
++        preprocessor_hash,
++        header_full_path,
++        cpp_builder.get_build_action(),
++        lock,
+     )
+-
+-    return header_full_path
+ 
+ 
+ def _get_cpp_prefix_header(device: str) -> str | None:
