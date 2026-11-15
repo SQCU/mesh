@@ -263,7 +263,8 @@ def declarations(module, transfers, carried, machines, cost, functions, before, 
         identity = identities.setdefault((sent.meta["collective"], start[0], version), len(identities))
         declared.append((source, destination, identity, arrival.meta["consumer"], value,
                          *(mesh_graph.strided(*record[1:], dtype.itemsize) for record in (start, finish))))
-        weights.append((cost(written if written in held else sent), cost(arrival), cost(sent), cost((sent, arrival))))
+        weights.append((tasks[task[written if written in held else sent]][0], tasks[task[arrival]][0],
+                        tasks[task[sent]][0], cost((sent, arrival))))
         read = [sent] + [u for u in sent.args[0].users if u in held and u is not sent]
         events += [(transfer, source, PRODUCED, [written])] * (written in held)
         events += [(transfer, source, READ, read), (transfer, destination, CONSUMED,
