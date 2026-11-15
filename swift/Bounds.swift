@@ -110,8 +110,10 @@ public func bounds(_ program: Program, _ placement: Placement, _ topology: Topol
     var path = 0.0
     for hop in placement.path {
         let links = topology.links(between: hop.link.a, hop.link.b)
-        let capacity = links.reduce(0.0) { $0 + Double($1.bandwidth) / 8 }
-        let latency = links.map { $0.latency ?? 0 }.min() ?? 0
+        // mesh callback (compilation/construction; passed to reduce): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+        let capacity = links.reduce(0.0) { _ = mesh_callbacks_are_outside_spec; $0 + Double($1.bandwidth) / 8 }
+        // mesh callback (compilation/construction; passed to map): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+        let latency = links.map { _ = mesh_callbacks_are_outside_spec; $0.latency ?? 0 }.min() ?? 0
         path += latency + seconds(hop.bytes, at: capacity)
     }
     return Bounds(compute: compute, memory: memory, cut: cut, path: path, max: Swift.max(maximum, path))

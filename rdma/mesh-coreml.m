@@ -95,7 +95,8 @@ int mesh_coreml_plan(const char *compiled, char *text, size_t room) {
         __block NSError *failure = nil;
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
         [MLComputePlan loadContentsOfURL:[NSURL fileURLWithPath:@(compiled)] configuration:configuration()
-                       completionHandler:^(MLComputePlan *loaded, NSError *error) {
+                       // mesh callback (preparation (completion handler); passed to completionHandler:): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+                       completionHandler:^(MLComputePlan *loaded, NSError *error) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
             plan = loaded;
             failure = error;
             dispatch_semaphore_signal(done);

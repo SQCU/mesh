@@ -114,7 +114,8 @@ def _saved_bytes(function, *arguments, diagnostic=True):
 # while it runs) once its last holder is freed; otherwise the reference is dropped here
 _INCREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_IncRef', C.pythonapi))
 _DECREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_DecRef', C.pythonapi))
-_RELEASED_OBJECT = RELEASE(_DECREF)
+# mesh callback (completion (release); an outward ctypes RELEASE callback constructed around _DECREF, passed to each borrower): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+_RELEASED_OBJECT = mesh_callbacks_are_outside_spec(RELEASE(_DECREF))
 
 
 def _lent(owner, load, adopted):
@@ -135,8 +136,9 @@ def _lent(owner, load, adopted):
 # relations made in `context` (the loading compilation's one rdma/mesh_graph.py Context, which the archive retains).
 # The caller's own reference to the archive is released with metal_ir_archive_free
 def _archive_loaded(compiler, data, context, device, error):
-    archive = _lent(data, lambda release, owner: compiler.metal_ir_archive_load(context.pointer, data, len(data), device,
-                                                                              release, owner, error, len(error)), bool)
+    # mesh callback (preparation; a load lambda and the bool adoption predicate passed to _lent): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    archive = _lent(data, lambda release, owner: mesh_callbacks_are_outside_spec(compiler.metal_ir_archive_load(context.pointer, data, len(data), device,
+                                                                              release, owner, error, len(error))), mesh_callbacks_are_outside_spec(bool))
     if not archive:
         raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
     return archive
@@ -149,7 +151,8 @@ def _archive_loaded(compiler, data, context, device, error):
 def _placed_buffer(view, owner=None):
     lib, device = _recorder()[0], _metal_device()
     buffer = lib.MetalBufferBorrow(device, view.address, view.bytes, RELEASE(), None) if owner is None else _lent(
-        owner, lambda release, held: lib.MetalBufferBorrow(device, view.address, view.bytes, release, held), bool)
+        # mesh callback (preparation; a load lambda and the bool adoption predicate passed to _lent): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+        owner, lambda release, held: mesh_callbacks_are_outside_spec(lib.MetalBufferBorrow(device, view.address, view.bytes, release, held)), mesh_callbacks_are_outside_spec(bool))
     if not buffer:
         raise OSError(errno.ENOMEM, 'Metal made no buffer over the program\'s mapping, %d bytes (MTLDevice.h '
                                     'newBufferWithBytesNoCopy)' % view.bytes)
@@ -534,13 +537,20 @@ class Composed:
     def __init__(self, program, op, composed, callables, later):
         self.program, self.op, self.composed, self.callables, self.later = program, op, composed, callables, later
 
-    words = property(lambda self: _view(UpstreamWord, self.composed.word, self.composed.words))
-    later_words = property(lambda self: _view(UpstreamWord, self.composed.later_word, self.composed.later_words))
-    received = property(lambda self: _view(UpstreamReceived, self.composed.received, self.composed.receives))
-    sent = property(lambda self: _view(UpstreamSent, self.composed.sent, self.composed.sends))
-    pages = property(lambda self: _view(UpstreamPage, self.composed.page, self.composed.pages))
-    readiness = property(lambda self: self.composed.readiness.contents if self.composed.readiness else None)
-    table = property(lambda self: self.composed.table.contents if self.composed.table else None)
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    words = property(lambda self: mesh_callbacks_are_outside_spec(_view(UpstreamWord, self.composed.word, self.composed.words)))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    later_words = property(lambda self: mesh_callbacks_are_outside_spec(_view(UpstreamWord, self.composed.later_word, self.composed.later_words)))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    received = property(lambda self: mesh_callbacks_are_outside_spec(_view(UpstreamReceived, self.composed.received, self.composed.receives)))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    sent = property(lambda self: mesh_callbacks_are_outside_spec(_view(UpstreamSent, self.composed.sent, self.composed.sends)))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    pages = property(lambda self: mesh_callbacks_are_outside_spec(_view(UpstreamPage, self.composed.page, self.composed.pages)))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    readiness = property(lambda self: mesh_callbacks_are_outside_spec(self.composed.readiness.contents if self.composed.readiness else None))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    table = property(lambda self: mesh_callbacks_are_outside_spec(self.composed.table.contents if self.composed.table else None))
 
 
 # metal_ir.h METAL_IR_CALLABLE_ACQUIRE .. _OTHER, METAL_IR_CALLABLE_OPERAND_VIEW .. _FRAMES
@@ -554,14 +564,20 @@ class Callables:
     def __init__(self, program, handle, emitted):
         self.program, self.handle, self.emitted = program, handle, emitted
 
-    output = property(lambda self: _upstream().metal_ir_callables_output(self.handle))
-    printed = property(lambda self: (C.c_char * self.emitted.bytes).from_address(self.emitted.source))
-    notices = property(lambda self: (C.c_char * self.emitted.notice_bytes).from_address(self.emitted.notice)
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    output = property(lambda self: mesh_callbacks_are_outside_spec(_upstream().metal_ir_callables_output(self.handle)))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    printed = property(lambda self: mesh_callbacks_are_outside_spec((C.c_char * self.emitted.bytes).from_address(self.emitted.source)))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    notices = property(lambda self: mesh_callbacks_are_outside_spec((C.c_char * self.emitted.notice_bytes).from_address(self.emitted.notice))
                        if self.emitted.notice else (C.c_char * 0)())
-    source = property(lambda self: (bytes(self.notices) + bytes(self.printed)).decode())
-    notice = property(lambda self: bytes(self.notices).decode())
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    source = property(lambda self: mesh_callbacks_are_outside_spec((bytes(self.notices) + bytes(self.printed)).decode()))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    notice = property(lambda self: mesh_callbacks_are_outside_spec(bytes(self.notices).decode()))
 
-    module = property(lambda self: _upstream().metal_ir_callables_module(self.handle))
+    # mesh callback (compilation/construction; getter registered with property): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    module = property(lambda self: mesh_callbacks_are_outside_spec(_upstream().metal_ir_callables_module(self.handle)))
 
     def function(self, *args):
         return _upstream().metal_ir_callables_function(self.handle, *args)
@@ -889,7 +905,8 @@ class Binary64:
         if not self.handle:
             raise OSError(errno.ENOMEM, 'a binary64 numeric collection (metal_ir_binary64_open): %s'
                           % error.value.decode())
-        self.close = weakref.finalize(self, lib.metal_ir_binary64_free, self.handle)
+        # mesh callback (completion (release); native metal_ir_binary64_free registered with weakref.finalize): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+        self.close = weakref.finalize(self, mesh_callbacks_are_outside_spec(lib.metal_ir_binary64_free), self.handle)
 
     def request(self, kind, code, from_=0, to=0):
         key = (kind, code, from_, to)
@@ -1028,8 +1045,9 @@ class _Builder:
         storage = base.untyped_storage()
         buffer = storage.data_ptr() if base.device.type == 'mps' else None
         data = OBJECT(buffer, _SEL(b'contents')) if buffer else storage.data_ptr()
-        _lent(base, lambda release, owner: self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0,
-                                                                        owner, release), lambda _: True)
+        # mesh callback (compilation/construction; a load lambda and an adoption predicate lambda passed to _lent): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+        _lent(base, lambda release, owner: mesh_callbacks_are_outside_spec(self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0,
+                                                                        owner, release)), lambda _: mesh_callbacks_are_outside_spec(True))
 
     # metal_ir_upstream: one produced kernel (`record` the producer's own record: lower_inductor.py Kernel, a Neural
     # Engine body's Produced) as one operation at `place`, its identity the builder's base with source position `node`:

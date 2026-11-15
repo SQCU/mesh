@@ -77,7 +77,8 @@ void link_job(struct port *port,int job){
   struct link_numbers numbers={.pairing=atomic_load_explicit(&l->pairing,memory_order_relaxed),.lid=port->heard.lid};
   memcpy(numbers.peer,l->peer,sizeof numbers.peer);memcpy(numbers.gid,port->heard.gid,sizeof numbers.gid);
   l->job=job;l->job_pairing=numbers.pairing;l->job_at=now;atomic_store_explicit(&l->done,0,memory_order_relaxed);
-  dispatch_async(port->work,^{
+  // mesh callback (execution; passed to dispatch_async): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+  dispatch_async(port->work,^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
     atomic_store_explicit(&port->thread[1],pthread_self(),memory_order_release);
     const int raised=guard_raise(port);
     int result=link_lapsed(l,&numbers);
@@ -105,7 +106,8 @@ static void lane_reset(struct port *port,uint32_t k){
 /* the child's open of its port's device, on its port's queue, guarded; its end told the child's loop (child_main) */
 void device_open(struct port *port){
   port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
-  dispatch_async(port->work,^{
+  // mesh callback (preparation; passed to dispatch_async): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+  dispatch_async(port->work,^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
     const int raised=guard_raise(port);
     int refused=0,result=device_up(&port->device,&wire,M,&refused)?(errno?errno:EIO):0;
     if(!result)result=device_gid(&port->device,port->name);

@@ -115,7 +115,8 @@ static __int128 mask_start(const uint32_t g[3],const struct mesh_graph_footprint
   return low;
 }
 struct mask_rows { const uint32_t *bound; uint32_t width; const uint32_t *probe; };
-static int mask_same(const void *context,uint32_t k){
+// mesh callback (preparation; registered with mesh_graph_keyed_find): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int mask_same(const void *context,uint32_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct mask_rows *x=context;
   return !memcmp(x->bound+(size_t)k*x->width,x->probe,x->width*sizeof *x->probe);
 }

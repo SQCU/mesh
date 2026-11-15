@@ -14,7 +14,8 @@
 _Static_assert(MESH_NODES_MOST<=64,"a demand's destinations are one 64-bit set of map indices");
 
 /* design/disjoint-pages-change-request.md C3.7; design/aot-compilation-change-request.md, appendix item 7 */
-void mesh_host_publish(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+// mesh callback (execution; stored in the program run hooks (metal_program.m, metal_recording.m)): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+void mesh_host_publish(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   struct hdr *m=context->M;
   const struct mesh_publication *entry=mesh_transfer_at(m,(const struct mesh_state *)(const void *)((char *)m+plan),
                                                         transfer);
@@ -25,7 +26,8 @@ void mesh_host_publish(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,
 }
 
 /* design/disjoint-pages-change-request.md C3.1, C3.7 */
-uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+// mesh callback (execution; stored in the program run hooks (metal_program.m, metal_recording.m)): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   struct hdr *m=context->M;
   const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
   const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
@@ -49,7 +51,8 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
 
 /* libfabric man/fi_cntr.3.md, fi_cntr_wait, fi_cntr_readerr; libfabric man/fi_endpoint.3.md, fi_cancel;
    rdma-core libibverbs/man/ibv_post_send.3, NOTES */
-uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+// mesh callback (execution; stored in the program run hooks (metal_program.m, metal_recording.m)): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   struct hdr *m=context->M;
   const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
   const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
@@ -179,27 +182,33 @@ struct plan {
 };
 
 struct plan_key { uint32_t source,identity,index; };
-static int plan_key_order(const void *a,const void *b){
+// mesh callback (preparation (collective planning); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_key_order(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_key *x=a,*y=b;
   if(x->source!=y->source)return x->source<y->source?-1:1;
   if(x->identity!=y->identity)return x->identity<y->identity?-1:1;
   return (x->index>y->index)-(x->index<y->index);
 }
 struct plan_edges { const uint32_t *from,*to; };
-static uint32_t plan_end(const void *context,uint32_t e,uint32_t side){
+// mesh callback (preparation (collective planning); registered with mesh_graph_reach): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_end(const void *context,uint32_t e,uint32_t side){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_edges *graph=context;
   return side?graph->to[e]:graph->from[e];
 }
-static int plan_leaf(const void *context,uint32_t d,uint32_t v){
+// mesh callback (preparation (collective planning); registered with mesh_graph_flow): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_leaf(const void *context,uint32_t d,uint32_t v){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   return (int)(((const struct plan_demand *)context)[d].leaves>>v&1);
 }
-static uint32_t plan_at(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
+// mesh callback (preparation (collective planning); registered with mesh_graph_order and mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_at(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const uint32_t *)context)[k]; }
 struct plan_tree { const uint32_t *parent; uint32_t n,root; };
-static uint32_t plan_tree_parent(const void *context,size_t v){
+// mesh callback (preparation (collective planning); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_tree_parent(const void *context,size_t v){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_tree *tree=context;
   return v==tree->root || tree->parent[v]>=tree->n?tree->n:tree->parent[v];
 }
-static void plan_tree_up(void *consumer,uint32_t at,uint32_t step){ if(step==1)*(uint32_t *)consumer=at; }
+// mesh callback (preparation (collective planning); registered with mesh_graph_climb): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static void plan_tree_up(void *consumer,uint32_t at,uint32_t step){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; if(step==1)*(uint32_t *)consumer=at; }
 static uint64_t plan_quantum(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
 static uint64_t plan_quanta(uint64_t bytes,uint64_t quantum){ return (bytes+quantum-1)/quantum; }
 static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){ return plan_quanta(bytes,plan_quantum(m)); }
@@ -238,7 +247,8 @@ static uint32_t plan_event_node(const struct mesh_declared *declared,uint32_t i,
   return produced || own?declared[i].source:declared[i].destination;
 }
 struct plan_edge { uint32_t tail,head,lag; };
-static uint32_t plan_edge_tail(const void *context,size_t k){ return ((const struct plan_edge *)context)[k].tail; }
+// mesh callback (preparation (collective planning); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_edge_tail(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct plan_edge *)context)[k].tail; }
 
 /* design/disjoint-pages-change-request.md C3.3 */
 static int plan_template(struct plan *p,const struct mesh_dependence *dependence,uint32_t dependences){
@@ -338,8 +348,10 @@ static int plan_template(struct plan *p,const struct mesh_dependence *dependence
 
 /* design/disjoint-pages-change-request.md C3.2-C3.4 */
 
-static uint32_t plan_head(const void *context,size_t k){ return ((const struct plan *)context)->head[k]; }
-static uint64_t plan_lag(const void *context,size_t k){ return ((const struct plan *)context)->lag[k]; }
+// mesh callback (preparation (collective planning); registered with mesh_graph_lags): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_head(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct plan *)context)->head[k]; }
+// mesh callback (preparation (collective planning); registered with mesh_graph_lags): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint64_t plan_lag(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct plan *)context)->lag[k]; }
 
 static int plan_acyclic(const struct plan *p){
   size_t *first=malloc(((size_t)p->vertices+1)*sizeof *first);
@@ -489,7 +501,8 @@ struct plan_placement { struct plan_item *item; uint64_t *count,*chain,items,ele
                         struct mesh_range range[2]; uint64_t *at,blocks; uint32_t run,space; uint64_t used[2]; };
 
 /* ExecuTorch exir/memory_planning.py, update_tensor_lifetime */
-static int plan_alone(const void *context,uint32_t a,uint32_t b){
+// mesh callback (preparation (collective planning); registered with mesh_graph_chains): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_alone(const void *context,uint32_t a,uint32_t b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   (void)context;(void)a;(void)b;
   return 0;
 }
@@ -644,7 +657,8 @@ static int plan_before(const struct plan_arcs *x,size_t a,size_t na,size_t b,siz
    always meet; with it a copy of a lagged, transferred or invariant value meets one function's others by that ring and
    every other copy, and occurrence-bearing copies meet unless both are of one block and every occurrence of one
    precedes every occurrence of the other (plan_before: one call's compiled begin and end, distinct calls' closure) */
-static int plan_intersect(const void *context,size_t a,size_t b){
+// mesh callback (preparation (collective planning); registered with mesh_graph_greedy_by_size): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_intersect(const void *context,size_t a,size_t b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_arcs *x=context;
   const int one=x->function[a]==x->function[b] && x->function[a]<x->count;
   uint32_t ta,tb;
@@ -900,7 +914,8 @@ static void plan_walk(struct plan *p){
 /* design/plan-to-bridge-change-request.md R3 to R5 */
 
 struct plan_path { const uint32_t *link_of; uint32_t n,depth,below,*link,*head; };
-static void plan_path_step(void *consumer,uint32_t at,uint32_t step){
+// mesh callback (preparation (collective planning); registered with mesh_graph_climb): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static void plan_path_step(void *consumer,uint32_t at,uint32_t step){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   struct plan_path *path=consumer;
   if(step){
     path->link[path->depth-step]=path->link_of[(size_t)at*path->n+path->below];
@@ -917,7 +932,8 @@ static struct plan_span plan_tasks(const struct plan *p,const struct plan_span *
   return consumer[i];
 }
 /* design/plan-to-bridge-change-request.md R5 */
-static int plan_entry_order(const void *a,const void *b){
+// mesh callback (preparation (collective planning); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_entry_order(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_entry *x=a,*y=b;
   return (x->place>y->place)-(x->place<y->place);
 }
@@ -1109,11 +1125,13 @@ static void plan_room_cause(struct plan_room_edges *graph,uint32_t kind,uint32_t
   graph->now=(struct mesh_planned_cause){kind,pair};
 }
 struct plan_room_rows { const size_t *order; const uint32_t *to; const uint64_t *delay; };
-static uint32_t plan_room_head(const void *context,size_t k){
+// mesh callback (preparation (collective planning); registered with mesh_graph_lags): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_room_head(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_room_rows *rows=context;
   return rows->to[rows->order[k]];
 }
-static uint64_t plan_room_lag(const void *context,size_t k){
+// mesh callback (preparation (collective planning); registered with mesh_graph_lags): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint64_t plan_room_lag(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_room_rows *rows=context;
   return rows->delay[rows->order[k]];
 }
@@ -1168,7 +1186,8 @@ static int plan_signed_put(struct plan_signed *o,struct mesh_graph_repeated x){
   o->row[o->count++]=x;
   return 0;
 }
-static uint32_t plan_tell_key(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
+// mesh callback (preparation (collective planning); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_tell_key(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const uint32_t *)context)[k]; }
 static int plan_signature(struct plan *plans,uint32_t count,const uint32_t *calls,uint32_t J,uint64_t program,uint32_t s,
                           uint32_t n,uint32_t V,const double *time,const struct mesh_graph_task *task,const uint32_t *node,
                           const uint32_t *observer,const uint64_t *lagged,const uint32_t *actor,
@@ -1575,7 +1594,8 @@ void mesh_strided_extents(const struct mesh_strided *v,void (*visit)(void *,uint
   visit(context,start,length);
 }
 struct plan_cutting { uint64_t quantum,range,made,*cuts,*start,*count,*index; };
-static void plan_cut(void *context,uint64_t offset,uint64_t length){
+// mesh callback (preparation (collective planning); registered with mesh_strided_extents): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static void plan_cut(void *context,uint64_t offset,uint64_t length){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   struct plan_cutting *x=context;
   if(!x->cuts)x->made+=(offset+length-1)/x->quantum-offset/x->quantum+1;
   else{
@@ -1585,13 +1605,15 @@ static void plan_cut(void *context,uint64_t offset,uint64_t length){
   x->range+=length;
 }
 struct plan_starting { const uint64_t *cut; uint64_t *at,range,next,instructions; };
-static void plan_start(void *context,uint64_t offset,uint64_t length){
+// mesh callback (preparation (collective planning); registered with mesh_strided_extents): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static void plan_start(void *context,uint64_t offset,uint64_t length){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   struct plan_starting *x=context;
   for(;x->next<x->instructions && x->cut[x->next]<x->range+length;x->next++)
     x->at[x->next]=offset+x->cut[x->next]-x->range;
   x->range+=length;
 }
-static int plan_cut_order(const void *a,const void *b){
+// mesh callback (preparation (collective planning); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_cut_order(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const uint64_t x=*(const uint64_t *)a,y=*(const uint64_t *)b;
   return (x>y)-(x<y);
 }
@@ -1669,12 +1691,14 @@ static int plan_landings(const struct plan *p){
 }
 
 struct plan_touch { uint64_t start,end; uint32_t value,member; };
-static int plan_touch_order(const void *a,const void *b){
+// mesh callback (preparation (collective planning); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_touch_order(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_touch *x=a,*y=b;
   if(x->value!=y->value)return x->value<y->value?-1:1;
   return (x->start>y->start)-(x->start<y->start);
 }
-static int plan_member_order(const void *a,const void *b){
+// mesh callback (preparation (collective planning); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_member_order(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const uint32_t x=*(const uint32_t *)a,y=*(const uint32_t *)b;
   return (x>y)-(x<y);
 }
@@ -1682,7 +1706,8 @@ struct plan_cover { const uint32_t *member; uint32_t members,value,block; };
 static int plan_same_set(const struct plan_cover *x,const struct plan_cover *y){
   return x->members==y->members && !memcmp(x->member,y->member,(size_t)x->members*sizeof *x->member);
 }
-static int plan_cover_order(const void *a,const void *b){
+// mesh callback (preparation (collective planning); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_cover_order(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   const struct plan_cover *x=a,*y=b;
   for(uint32_t k=0;k<x->members && k<y->members;k++)
     if(x->member[k]!=y->member[k])return x->member[k]<y->member[k]?-1:1;
@@ -2068,7 +2093,8 @@ static void plan_prepared(struct mesh_ctx *context){
   os_sync_wake_by_address_all(&m->preparing.client,sizeof m->preparing.client,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
 /* every two reservations live at once */
-static int plan_together(const void *context,size_t a,size_t b){
+// mesh callback (preparation (collective planning); registered with mesh_graph_greedy_by_size): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static int plan_together(const void *context,size_t a,size_t b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   (void)context;(void)a;(void)b;
   return 1;
 }
@@ -2173,7 +2199,8 @@ static int plan_publish(struct mesh_ctx *context,uint64_t group,const struct mes
    succeeds), and the loaded result's own memory (mesh_planned owned): those relations and the calls it publishes into
    (mesh_plan_load); its other arrays are views of the bytes */
 struct plan_bytes { size_t references; void (*release)(void *); void *owner; };
-static void plan_bytes_release(void *bytes){
+// mesh callback (completion (release); registered with mesh_graph_relation_load and mesh_graph_archive_read): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static void plan_bytes_release(void *bytes){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   struct plan_bytes *b=bytes;
   if(__atomic_fetch_sub(&b->references,1,__ATOMIC_ACQ_REL)==1){
     if(b->release)b->release(b->owner);
@@ -2213,7 +2240,8 @@ void mesh_planned_free(struct mesh_planned *planned){
    R5: each function's entries (plan_walk, in plan_schedule's order) by demand (mesh_graph_rows), its RECEIVE entries
    then its SEND entries, each the logical bytes its hops carry: the value's (p->at) where the demand is this node's,
    else the demand's (p->cut) */
-static uint32_t plan_entry_demand(const void *context,size_t k){
+// mesh callback (preparation (collective planning); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+static uint32_t plan_entry_demand(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   return ((const struct plan_entry *)context)[k].demand;
 }
 /* room for n + 1 records of `width` bytes: 1 where that overflows */
@@ -2469,7 +2497,8 @@ int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_
   if(status)mesh_local_free(out);
   return status;
 }
-void mesh_local_free(struct mesh_local *out){
+// mesh callback (completion (release); registered with weakref.finalize by compiler/mesh_compiler/schedule.py): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+void mesh_local_free(struct mesh_local *out){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
   if(!out->planned.owned){
     free(out->first);free(out->offset);free(out->value_first);free(out->row);free(out->order);free(out->source_row);
     free(out->source_order);free(out->demand_first);free(out->demand_of);free(out->release_of);

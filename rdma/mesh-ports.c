@@ -474,7 +474,8 @@ void control_heard(struct port *port){
 void ports_find(void){
   if(finding)return;
   finding=1;
-  dispatch_async(finder,^{
+  // mesh callback (preparation; passed to dispatch_async): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+  dispatch_async(finder,^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
     struct ibv_device **list=ibv_get_device_list(NULL);
     uint32_t n=0;
     for(int i=0;list && list[i] && n<MESH_PORTS;i++)if(!strncmp(ibv_get_device_name(list[i]),"rdma_",5))
