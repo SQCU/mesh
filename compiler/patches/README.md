@@ -375,12 +375,24 @@ This records the producer interface; module/native consumer replacement and exec
 ## `torch-inductor-upstream-composition.patch`
 
 Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), on top of `torch-inductor-mps-kernel-operands.patch`
-as installed (`mps.py` before is that patch's after). It changes three files: `torch/_inductor/codegen/mps.py`
-`MetalKernel`, `torch/_inductor/codegen/cpp.py` `CppScheduling.define_kernel`, and `torch/_inductor/graph.py`
-`GraphLowering.make_subgraph`. These are the upstream hooks `compiler/mesh_compiler/lower_inductor.py` takes the
-producer's results through: its terminal emission, the CPU final source and the control bodies' backends. Prepared
-from the installed source as read. Its fuzz-0 dry run against the "before" hashes below passes; it is not applied, and
-the supervisor applies it.
+as installed (`mps.py` before is that patch's after). It changes three files:
+- `torch/_inductor/codegen/mps.py` `MetalKernel`;
+- `torch/_inductor/codegen/cpp.py` `CppScheduling.define_kernel`, `CppScheduling.defined_source` and
+  `KernelGroup.codegen_group`;
+- `torch/_inductor/graph.py` `GraphLowering.make_subgraph`.
+
+These are the upstream hooks `compiler/mesh_compiler/lower_inductor.py` takes the producer's results through: its
+terminal emission, the CPU final source and the control bodies' backends. The patch was prepared from the installed
+source as read.
+
+Installed. The supervisor checked the "before" hashes below, then ran a fuzz-0 dry run and application of the
+committed patch (`a08d2ded…`), a fuzz-0 reverse dry run and an AST check. All passed, and the installed files have the
+"after" hashes below. The manifest is `output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 1. It also records that the hash comparison stopped at first: the cpp.py
+"after" hash recorded here earlier, `c02487be…`, predated the committed patch's `codegen_group` composition hunk and
+was stale. The applied patch is the committed one, unchanged.
+
+Separately, reversing the committed patch on a copy of the installed files gives the "before" hashes, and applying it
+again gives the "after" hashes, which parse.
 
 ### What it changes
 
@@ -400,6 +412,14 @@ the supervisor applies it.
   other load and store takes it. The value it adds is unchanged.
 - **`CppScheduling.define_kernel`** keeps each defined kernel's declared entry and final source (after its
   placeholder substitutions) as `wrapper.defined_kernels[kernel_name] = (kernel_decl_name, src_code)`.
+- **`CppScheduling.defined_source(src_code, kernel_decl_name, kernel_name)`**: a new static method. It holds
+  `define_kernel`'s own placeholder substitutions, moved there unchanged. `define_kernel` calls it, and so does a
+  composed pass of the same group.
+- **`KernelGroup.codegen_group(name=None, composition=None)`**: with `composition` None, its output is unchanged.
+  Otherwise:
+  - `composition.source` goes after the `cpp_prefix.h` include;
+  - `composition.parameters` follow the group's `cpp_argdefs` arguments;
+  - `composition.enter` statements open the body.
 - **`GraphLowering.make_subgraph`** makes `self.subgraph_lowering(...)`, with the same arguments as before.
   `GraphLowering.subgraph_lowering = SubgraphLowering` follows `SubgraphLowering`, so the default is unchanged. A
   subclass sets its own, so control bodies (`Conditional`, `WhileLoop`, `InvokeSubgraph`) are scheduled by its
@@ -411,8 +431,9 @@ the supervisor applies it.
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
 | `torch/_inductor/codegen/mps.py` | before `0266b4cd4723ba7f7041e7cad1b4bfca577ca904c852b5d6692a1dc7d4c37ef1`, after `8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db` |
-| `torch/_inductor/codegen/cpp.py` | before `885b73279e8686181d3706c6d6a590d07102c44ea739e8c11bb5be5ef758292f`, after `c02487bedc48b66aea869af64004a069426cdf10998abf9786efd0672d2e6d93` |
-| `torch/_inductor/graph.py` | before `efffd6b54ed0e67ad1f41c840957780fae092708adf460ecc16914dcaaba27fe`, after `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591` |
+| `torch/_inductor/codegen/cpp.py` | before `885b73279e8686181d3706c6d6a590d07102c44ea739e8c11bb5be5ef758292f`, after `74b2de2698fcb01ced737ca10238d16f0721a6e1271314fbec65170e66451934` |
+| `torch/_inductor/graph.py` | before `efffd6b54ed0e67ad1f41c840957780fae092708adf460ecc16914dcaaba27fe`, after `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591` (installed `graph.py` is now `torch-inductor-aot-lowered-result.patch`'s after) |
+| Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor at source revision `ba03a780`: fuzz-0 dry run, application, reverse dry run and AST check passed (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 1) |
 
 ### Apply, check, reverse
 
@@ -462,11 +483,12 @@ compilations in the process keep upstream's backends. The GraphLowering is retur
 | Item | Value |
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
-| `torch/_inductor/compile_fx.py` | before `4e5b593e018c6bd6f69062483d524b64820ab272351fbf073b7ec118a66598f8`, after `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592` |
+| `torch/_inductor/compile_fx.py` | before `4e5b593e018c6bd6f69062483d524b64820ab272351fbf073b7ec118a66598f8`, after `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592` (installed `compile_fx.py` is now `torch-inductor-aot-lowered-result.patch`'s after) |
+| Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor at source revision `ba03a780` after the composition patch: fuzz-0 dry run, application and AST check passed (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 2) |
 
-The patch was written from the installed source's context lines 842-847, 1402-1407 and 1622-1628. A fuzz-0 dry run
-against the "before" hash passes. Applying it to a temporary output (`patch -o`) gives the "after" hash, and that
-output parses (`ast.parse`). The patch is not applied; the supervisor applies it.
+The patch was written from the installed source's context lines 842-847, 1402-1407 and 1622-1628. Installed: the
+supervisor's fuzz-0 dry run and application of the committed patch (`bb0f187b…`) passed, the result has the "after"
+hash, and it parses (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 2).
 
 ### Apply, check, reverse
 
@@ -539,9 +561,10 @@ takes the producer's result through it. Fields:
 | `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` |
 | `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386` |
 | `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `2d87d9247e23640662bba136c899a274fa278d3c98da96b630810882c3fdaa2a` |
+| Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor at source revision `ba03a780` after the composition and factory patches: fuzz-0 dry run, application and AST check passed (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 3) |
 
-A fuzz-0 dry run of the four patches in order passes, on a temporary copy of the installed files. Every output parses
-(`ast.parse`). The patch is not applied; the supervisor applies it.
+Installed: the supervisor checked the eight "before" hashes and ran a fuzz-0 dry run and application of the committed
+patch (`7916cb9d…`). Both passed. Every file has its "after" hash and parses (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 3).
 
 ### Apply, check, reverse
 

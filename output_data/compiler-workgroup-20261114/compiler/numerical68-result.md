@@ -7,6 +7,10 @@ written in source:
 - `torch-inductor-graph-lowering-factory.patch` and `torch-inductor-upstream-composition.patch`, both as at HEAD and
   both retained.
 
+All three patches are installed in `/Users/mdot/.venv-mesh-uv` as committed at `ba03a780`: composition, then factory,
+then AOT result. The supervisor applied them at fuzz 0, and every installed file has its README "after" hash and parses.
+No Torch or Mesh module was imported. The manifest is `numerical68-upstream-install.json`.
+
 Nothing here is a proposal. This revision replaces four parts of the earlier note, all rejected by root:
 - the `CompiledAOTI.filename` carrier;
 - the import-time `register_backend_for_device`;
