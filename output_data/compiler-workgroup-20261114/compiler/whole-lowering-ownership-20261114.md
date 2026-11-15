@@ -441,3 +441,25 @@ Source SHA256:
 - `devices.py` `71a57760cdb239f1fa97749e731a35b80590e370eb6ebb12a3e9785b277793f6`
 - `lower_inductor.py` `42a228147da6570ba0c8b660999212fd3411bfd2983c8e3168bbe69e4c0c9078`
 - `shares.py` `5246a23078b83749aa60bc24d6c689f036d0e308348bf42e0da5ee1c09c814e5`
+
+
+### Maintained producer patch callback checkpoint,66 result33
+
+Nine patches now contain38 deliberate unresolved markers and52 rationale-comment pairs. Callback families are: tracepoint dispatch/pre/post/Dynamo hooks; lstsq Dynamo handler and aggregate mapper; alias/default factories; graph/subgraph lowering factories; CPU template preparation/finalization hooks and group/proxy factories; cached precompiled-header producer; C++ writer operand; retained AOT emission/context callbacks and FX converter callbacks. Every original implementation body remains. Module/class-level external callback operands deliberately raise during import; this is an intended error site under the sweep, not a reason for an exemption or a user decision.
+
+Worker source-only evidence reports all28 projected upstream files parse/compile as source with no new pyflakes findings except the38 undefined marker references. Codex independently applied original and marked codegen chains in isolated indexes for seven CPU/MPS files; removing only marker nodes restored the exact pre-sweep AST in each, and reversing each patch chain restored the original index tree. No installed dependency was written or imported; no callback/build/workload ran. Source checks are not producer/emitter semantic acceptance.
+
+The report's unresolved sites are explicitly retained: CollectTracepointsPass.call via PassBase.__call__; OutputCode post_compile/set_triton_bundle lifecycle methods; SelectedKernelCall.__call__/fallthrough as operation dispatch; ExitStack exit registrations; Jinja method calls and PartialRender hook passing. The direct IR/template operation target question must not be answered by labelling every callable value a callback solely from syntax. However, the patched @register_lowering invoke_subgraph and original _generate_kernel_call/_generate_kernel_definition are concrete callback sites: FxConverter invokes the bound methods returned by line.codegen_fx. Same66 continues those omitted sites after this preservation checkpoint. No full-sweep completion is claimed.
+
+No native C/C++/Objective-C source exists beneath compiler/ in the enumerated scope, and66 found no emitted native function-pointer callback in these patches. The seven unmodified patches were inspected for introduced callback use: coremltools-exir-correspondence, aot-joint-params-buffers, aot-runtime-safe-source, clone-input-fake-mode, export-alias-metadata, export-user-input-gradients and mps-kernel-operands.
+
+Patch source SHA256:
+- `torch-export-tracepoint-calls.patch` `541e0008d3690fb745d83d07da74a3d5b99b72d363635cdd58bd956b3319575e`
+- `torch-inductor-alias-mutations.patch` `8603b04bbb718ac860c5abe6cd058de68d167e32dda972360f95d9cddb45bb4a`
+- `torch-inductor-aot-lowered-result.patch` `e625313638cf905dd46ba70039207e9b6462deae40d325a46263c27c5674303a`
+- `torch-inductor-cpp-build-result.patch` `08e5cd510c9bc1af2fc8d2ece67ffedbc86b8ffae2f13e8150f27aca4d4fea01`
+- `torch-inductor-cpp-wrapper-binding.patch` `fbf3e230122fa116bdaafed82b4d55f2a802d6c4133ca7269598333c6f55f455`
+- `torch-inductor-cpu-kernel-results.patch` `e05a991a3faaa6c3f0b1fa1eac8421b6f529b83b241deddf319ab0dd57d330ff`
+- `torch-inductor-graph-lowering-factory.patch` `20ab9ffa91e3d755fab4d1a997475b02477976807f0b1dcca5e6eceb2e43f45b`
+- `torch-inductor-upstream-composition.patch` `b6d111cf94593614edf40ad339a462d52a5d7c94fef318711c1ca6db98999fbe`
+- `torch-lstsq-fixed-results.patch` `ee433bf6b72c4336fe85794fe5e33635578310236632c5788a36f6e5c8850d5d`

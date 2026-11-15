@@ -576,7 +576,7 @@
  
              if config.aot_inductor.package_cpp_only:
                  linker_flags = str(
-@@ -3684,12 +3823,42 @@
+@@ -3684,12 +3823,46 @@
  _VEC_ISA_CPP_SOURCE_MARKERS = ("at::vec::", "prod_masked_reduce(")
  
  
@@ -611,16 +611,20 @@
 +    return _precompiled_header(header, hashable_cmd_line, **compile_command).path
 +
 +
++# Callback inversion of control is outside the working specification (phase: compile-time AOT compilation, header
++# precompilation called back by functools.cache).
++# Runtime callback overhead is inadmissible in performance-critical code.
 +@functools.cache
 +def _precompiled_header(
 +    header: str,
 +    hashable_cmd_line: str,
 +    **compile_command: Any,
 +) -> PrecompiledHeader:
++    mesh_callbacks_are_outside_spec
      if _IS_WINDOWS:
          raise AssertionError(
              "CppBuilder does not currently support precompiling on Windows!"
-@@ -3715,18 +3884,19 @@
+@@ -3715,18 +3888,19 @@
              sources=str(preprocessing_header),
              BuildOption=CppTorchDeviceOptions(**compile_command, preprocessing=True),
          )
@@ -646,7 +650,7 @@
  
      header_build_option = CppTorchDeviceOptions(**compile_command, precompiling=True)
      header_hash, header_full_path = write(
-@@ -3747,12 +3917,18 @@
+@@ -3747,12 +3921,18 @@
      # _worker_compile_cpp will automatically ignore any compilation whose result already
      # exists, so this is always safe.
      os.makedirs(_HEADER_LOCK_DIR, exist_ok=True)

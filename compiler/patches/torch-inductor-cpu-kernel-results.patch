@@ -1,18 +1,22 @@
 --- a/torch/_inductor/codegen/cpp.py
 +++ b/torch/_inductor/codegen/cpp.py
-@@ -2792,6 +2792,11 @@
+@@ -2792,6 +2792,15 @@
          self.reduction_suffix.splice(self.stores)
          (self.loads, self.compute, self.stores, self.cse) = prior
  
++    # Callback inversion of control is outside the working specification (phase: compile-time CPU kernel codegen,
++    # run_function hook calling back fn).
++    # Runtime callback overhead is inadmissible in performance-critical code.
 +    def run_function(self, fn, var_sizes, *args):
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: one function's run in this kernel
 +        # (CppKernelProxy.codegen_functions run: `fn` of its fn_list, `var_sizes` its own, called with `args`)
++        mesh_callbacks_are_outside_spec
 +        fn(*args)
 +
      def create_cse_var(self, *args, **kwargs):
          return CppCSEVariable(*args, **kwargs)
  
-@@ -2828,8 +2833,10 @@
+@@ -2828,8 +2837,10 @@
                  if var == _var:
                      var_id = i
                      break
@@ -24,46 +28,58 @@
                  and var_id
                  and start == 0
                  and end == self.ranges[var_id]
-@@ -4721,7 +4728,7 @@
+@@ -4721,7 +4732,10 @@
                  ]:
                      if in_suffix:
                          raise AssertionError("expected not in_suffix")
 -                    fn(vars, reduction_vars)
-+                    kernel.run_function(fn, var_sizes, vars, reduction_vars)
++                    # Callback inversion of control is outside the working specification (phase: compile-time CPU kernel
++                    # codegen, fn passed to run_function).
++                    # Runtime callback overhead is inadmissible in performance-critical code.
++                    kernel.run_function(mesh_callbacks_are_outside_spec(fn), var_sizes, vars, reduction_vars)
                  else:
                      in_suffix = True
                      if not (
-@@ -4736,7 +4743,7 @@
+@@ -4736,7 +4750,10 @@
                          )
                      # we can fuse in some extra pointwise into the suffix
                      with kernel.write_to_suffix():
 -                        fn(vars, ())
-+                        kernel.run_function(fn, var_sizes, vars, ())
++                        # Callback inversion of control is outside the working specification (phase: compile-time CPU
++                        # kernel codegen, fn passed to run_function).
++                        # Runtime callback overhead is inadmissible in performance-critical code.
++                        kernel.run_function(mesh_callbacks_are_outside_spec(fn), var_sizes, vars, ())
  
          scalar_kernel = codegen_kernel(self.kernel_cls)
          V.graph.removed_buffers |= scalar_kernel.removed_buffers
-@@ -5144,7 +5151,8 @@
+@@ -5144,7 +5161,11 @@
          return tuple(tuple(map(V.graph.sizevars.simplify, s)) for s in sizes)
  
      def reset_kernel_group(self):
 -        self.kernel_group = KernelGroup()
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its group class (kernel_group_cls)
++        # Callback inversion of control is outside the working specification (phase: compile-time CPU scheduling, kernel
++        # group factory).
++        # Runtime callback overhead is inadmissible in performance-critical code.
 +        self.kernel_group = self.kernel_group_cls()
  
      def _get_indexing_ranges_exprs(self, node) -> ir.ExtraIndexingConstraints:
          if isinstance(node, FusedSchedulerNode):
-@@ -5980,6 +5988,10 @@
+@@ -5980,6 +6001,13 @@
              flag_template_buffer_has_other_users=flag_template_buffer_has_other_users,
              epilogue_nodes=epilogue_ir_nodes,
          )
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its epilogues' group and proxy classes this
 +        # scheduling's own (CppTemplateKernel.store_pointwise_nodes and store_grouped_gemm_pointwise_nodes)
-+        kernel.kernel_group_cls = self.kernel_group_cls
-+        kernel.kernel_proxy_cls = self.kernel_proxy_cls
++        # Callback inversion of control is outside the working specification (phase: compile-time CPU template codegen,
++        # factories passed to the template kernel).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        kernel.kernel_group_cls = mesh_callbacks_are_outside_spec(self.kernel_group_cls)
++        kernel.kernel_proxy_cls = mesh_callbacks_are_outside_spec(self.kernel_proxy_cls)
          with kernel:
              if not is_multi_outputs_template(template_node.node):
                  template_node.mark_run()  # type: ignore[attr-defined]
-@@ -6490,3 +6502,8 @@
+@@ -6490,3 +6518,11 @@
              raise AssertionError("expected len(self.loops) >= level")
          loops = None if level == len(self.loops) else self.loops[level:]
          return LoopNest(loops, self.kernel)
@@ -71,17 +87,23 @@
 +
 +# compiler/patches/torch-inductor-cpu-kernel-results.patch: CppScheduling's group class (reset_kernel_group's, its
 +# templates' epilogues' too: codegen_template), which a CppScheduling subclass replaces as it does kernel_proxy_cls
-+CppScheduling.kernel_group_cls = KernelGroup
++# Callback inversion of control is outside the working specification (phase: import-time registration; factory called at
++# compile-time CPU scheduling).
++# Runtime callback overhead is inadmissible in performance-critical code.
++CppScheduling.kernel_group_cls = mesh_callbacks_are_outside_spec(KernelGroup)
 --- a/torch/_inductor/codegen/cpp_template_kernel.py
 +++ b/torch/_inductor/codegen/cpp_template_kernel.py
-@@ -41,16 +41,42 @@
+@@ -41,16 +41,50 @@
  
  
  class CppTemplateKernel(CppKernel):
 +    # compiler/patches/torch-inductor-cpu-kernel-results.patch: its epilogues' group and proxy classes
 +    # (CppScheduling.codegen_template gives its scheduling's)
-+    kernel_group_cls = KernelGroup
-+    kernel_proxy_cls = CppKernelProxy
++    # Callback inversion of control is outside the working specification (phase: import-time class definition; factories
++    # called at compile-time epilogue codegen).
++    # Runtime callback overhead is inadmissible in performance-critical code.
++    kernel_group_cls = mesh_callbacks_are_outside_spec(KernelGroup)
++    kernel_proxy_cls = mesh_callbacks_are_outside_spec(CppKernelProxy)
 +
      def __init__(self, kernel_name, num_threads):
          super().__init__(None, num_threads)
@@ -113,14 +135,19 @@
 +        # composition as codegen_group's (`source` its definitions before the code, `parameters` its entry's own after
 +        # its arguments, `enter` its entry's statements before its body). Its hooks stay registered, each one's
 +        # preparation completed once (as produced)
++        # Callback inversion of control is outside the working specification (phase: compile-time CPU template print,
++        # registered render hooks called back).
++        # Runtime callback overhead is inadmissible in performance-critical code.
 +        printer = PartialRender(self.rendered, self.render_hooks)
 +        for placeholder, hook in self.render_hooks.items():
-+            printer._code = printer._replace_placeholder(placeholder, hook(composition))
++            printer._code = printer._replace_placeholder(
++                placeholder, mesh_callbacks_are_outside_spec(hook)(composition)
++            )
 +        return printer._code if composition is None else f"{composition.source}\n{printer._code}"
  
      def def_kernel(
          self,
-@@ -100,18 +126,44 @@
+@@ -100,18 +134,58 @@
          for sizevar in sizevars:
              self.args.sizevars[sizevar] = f"k{sizevar}"
  
@@ -136,10 +163,14 @@
 -                        self.args.output_buffers[alias] = REMOVED
 -            cpp_argdefs, _, _ = self.args.cpp_argdefs()
 -            return f"void {function_name}({', '.join(cpp_argdefs)})"
++        # Callback inversion of control is outside the working specification (phase: compile-time CPU template render,
++        # def_kernel render hook).
++        # Runtime callback overhead is inadmissible in performance-critical code.
 +        def hook(composition=None):
 +            # compiler/patches/torch-inductor-cpu-kernel-results.patch: as produced (`composition` None) its
 +            # preparation, its result retained (`declared`); a composed pass's (printed) from that retained result,
 +            # its entry's (the kernel's own function_name) with the composition's parameters after its arguments
++            mesh_callbacks_are_outside_spec
 +            if composition is None:
 +                # remove all aliases before generate function definition
 +                if aliases is not None:
@@ -158,6 +189,9 @@
 +
 +        if placeholder in self.render_hooks:
 +            raise AssertionError(f"placeholder already registered: {placeholder}")
++        # Callback inversion of control is outside the working specification (phase: compile-time CPU template render,
++        # def_kernel render hook registration).
++        # Runtime callback overhead is inadmissible in performance-critical code.
 +        self.render_hooks[placeholder] = hook
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: the declaration whose body the next def_body opens
 +        self.declaring = (function_name, placeholder)
@@ -171,17 +205,27 @@
 +        function_name, declared = self.declaring
 +        placeholder = f"<BODY_OF_{declared.strip('<>')}>"
 +
++        # Callback inversion of control is outside the working specification (phase: compile-time CPU template render,
++        # def_body render hook).
++        # Runtime callback overhead is inadmissible in performance-critical code.
 +        def hook(composition=None):
++            mesh_callbacks_are_outside_spec
 +            entry = composition is not None and function_name == str(self.kernel_name)
 +            return "\n".join(composition.enter) if entry else ""
  
++        # Callback inversion of control is outside the working specification (phase: compile-time CPU template render,
++        # def_body render hook registration).
++        # Runtime callback overhead is inadmissible in performance-critical code.
          if placeholder in self.render_hooks:
              raise AssertionError(f"placeholder already registered: {placeholder}")
-@@ -273,9 +325,9 @@
+@@ -273,9 +347,12 @@
                  f"expected {len(var_sizes[0])} offsets, got {len(offsets)}"
              )
          output_index = dst.get_layout().make_indexer()([*var_ranges.keys()])
 -        kernel_group = KernelGroup()
++        # Callback inversion of control is outside the working specification (phase: compile-time epilogue codegen,
++        # kernel group and proxy factories).
++        # Runtime callback overhead is inadmissible in performance-critical code.
 +        kernel_group = self.kernel_group_cls()
          kernel_group.args = self.args
 -        cpp_kernel_proxy = CppKernelProxy(kernel_group)
@@ -189,7 +233,7 @@
          bodies = []
          var_sizes_list = []
          for i, node in enumerate(nodes):
-@@ -324,6 +376,18 @@
+@@ -324,6 +401,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])
@@ -208,11 +252,14 @@
          return kernel_group.loops_code.getvalue()
  
      def store_grouped_gemm_pointwise_nodes(
-@@ -345,9 +409,9 @@
+@@ -345,9 +434,12 @@
          if not all(len(offset) == len(var_sizes[0]) for offset in offsets):
              raise AssertionError(f"expected all offsets of length {len(var_sizes[0])}")
          output_index = ref_dst.get_layout().make_indexer()([*var_ranges.keys()])
 -        kernel_group = KernelGroup()
++        # Callback inversion of control is outside the working specification (phase: compile-time epilogue codegen,
++        # kernel group and proxy factories).
++        # Runtime callback overhead is inadmissible in performance-critical code.
 +        kernel_group = self.kernel_group_cls()
          kernel_group.args = self.args
 -        cpp_kernel_proxy = CppKernelProxy(kernel_group)
@@ -220,7 +267,7 @@
          bodies = []
          var_sizes_list = []
          for i, node in enumerate(nodes):
-@@ -396,6 +460,18 @@
+@@ -396,6 +488,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])
