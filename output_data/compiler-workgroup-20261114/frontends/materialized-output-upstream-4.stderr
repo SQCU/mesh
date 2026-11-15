@@ -1,0 +1,38 @@
+Torch version 2.14.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+Traceback (most recent call last):
+  File "<stdin>", line 32, in <module>
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 31, in compile_program
+    return compile_captured(calls(program, args, functions, **export_options), processors, placement, cost, planning,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 119, in compile_captured
+    constructions = {(key, group): construct(scheduled.modules[key][group], lowered[key], context=context, **made)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1690, in construct
+    consume(p, graph, graph.wrapper_code.lines, produced[p].externs, bodies[p], ())
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1485, in consume
+    extern(p, graph, call, into, occurrence)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1471, in extern
+    planned(p, graph, line, into, occurrence)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1452, in planned
+    raise NotImplementedError("unresolved integration: processor %s wrapper line %r (%s) has no native "
+NotImplementedError: unresolved integration: processor p wrapper line UnbackedSymbolDefsLine(wrapper=<torch._inductor.codegen.wrapper_fxir.WrapperFxCodegen object at 0x11531d310>, output_name='buf0', outputs=[FallbackKernel(
+  python_kernel_name='torch.ops.mesh.recv_strided.default',
+  name=buf0,
+  layout=FixedLayout('cpu', torch.float16, size=[1, 4], stride=[4, 1]),
+  inputs=[],
+  constant_args=(0, 1, 4, 4, 1, torch.float16, device(type='cpu')),
+  kwargs={},
+  output_view=None,
+  python_kernel_name=torch.ops.mesh.recv_strided.default,
+  cpp_kernel_name=None,
+  ordered_kwargs_for_cpp_kernel=[],
+  op_overload=mesh.recv_strided.default,
+  arg_properties=[{'name': 'channel', 'type': int, 'default_value': None}, {'name': 'shape', 'type': List[int], 'default_value': None}, {'name': 'stride', 'type': List[int], 'default_value': None}, {'name': 'dtype', 'type': ScalarType, 'default_value': None}, {'name': 'device', 'type': Device, 'default_value': None}],
+  allarg_properties={'channel': {'type': int, 'default_value': None}, 'shape': {'type': List[int], 'default_value': None}, 'stride': {'type': List[int], 'default_value': None}, 'dtype': {'type': ScalarType, 'default_value': None}, 'device': {'type': Device, 'default_value': None}},
+  kwarg_properties=None,
+  unbacked_bindings={},
+  mutation_outputs=[],
+  alias_mutation_outputs=[],
+  origin_node=getitem_1,
+  origins=OrderedSet([with_effects])
+)], unbacked_bindings={}) (UnbackedSymbolDefsLine) has no native consumer

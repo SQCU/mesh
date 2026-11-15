@@ -72,3 +72,11 @@ FallbackKernel result had no multi-output child list. Compiler66 owns the
 complete original result/binding correction. No numerical execution or save/load
 was reached; runtime inputs remained unchanged. materialized-output-upstream-3.*
 retains the actual traceback and the same command/native137 identity.
+
+The unchanged fourth observation on a0f5d231/4d5d3436 passed direct Tensor
+receive binding, then exited 1 during construction after 3.14 s. The original
+UnbackedSymbolDefsLine for that receive has an empty unbacked_bindings result,
+but lower_metal.planned has no consumer for the typed line. Compiler68/66 owns
+the original result handoff. No numerical execution or save/load was reached;
+runtime inputs remained unchanged. materialized-output-upstream-4.* retains
+the actual traceback and the same command/native137 identity.
