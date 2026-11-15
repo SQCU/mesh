@@ -3130,7 +3130,7 @@ def _rotated(x, a, c, s, within, rows):
 # where `when`: the N <= 1 or IFST = ILST return, then DO 10 K = IFST + M1, ILST + M2, M3 (forward where IFST < ILST,
 # else back) as one while_loop: ZLARTG(T(K,K+1), T22 - T11), ZROT of rows K, K+1 over columns K+2..N by CS, SN, ZROT
 # of columns K, K+1 over rows 1..K-1 by CS, CONJG(SN), T(K,K) = T22, T(K+1,K+1) = T11, and where WANTQ ZROT of Q's
-# columns K, K+1 over rows 1..N. OPEN in this group: dtrexc.f, the real routine (DLAEXC's 1 x 1 and 2 x 2 blocks)
+# columns K, K+1 over rows 1..N. dtrexc.f, the real routine (DLAEXC's 1 x 1 and 2 x 2 blocks), is _dtrexc
 def _ztrexc(wantq, order, t, q, ifst, ilst, when):
     forward = ifst < ilst
     step = torch.where(forward, 1, -1)
@@ -3153,6 +3153,286 @@ def _ztrexc_pass(wantq, live, t, q, k, last, step, order):
         q = _rotated(q, k, cs, sn.conj(), _vec(live) & (rows <= _vec(order)), False)
     k = torch.where(live, k + step, k)
     return live & ((k - last) * step <= 0), t, q if wantq else q.clone(), k
+
+
+# Reference-LAPACK 3.12.1 SRC/dlarfx.f 154-155 (the TAU = 0 return) and its 3 x 3 code: 190-206 (SIDE = 'L', M = 3,
+# DO 60 J = 1, N: SUM = V1 C(1,J) + V2 C(2,J) + V3 C(3,J), C(I,J) = C(I,J) - SUM TI, TI = TAU VI) and 456-472 (SIDE =
+# 'R', N = 3, DO 260 J = 1, M over C(J,1..3)), on C = x(R0.., C0..) where `when`, EXTENT the source's N (`left`) or M;
+# V = (V1, V2, V3) batch scalars
+def _dlarfx3(left, v, tau, x, r0, c0, extent, when):
+    go = when & (tau != 0)
+    ts = [tau * vi for vi in v]
+    rows, cols = torch.arange(1, x.shape[-2] + 1, device=x.device), _counted(x)
+    lines = [_row(x, r0 + i) if left else _column(x, c0 + i) for i in range(3)]
+    total = _vec(v[0]) * lines[0] + _vec(v[1]) * lines[1] + _vec(v[2]) * lines[2]
+    for i in range(3):
+        made = lines[i] - total * _vec(ts[i])
+        if left:
+            hit = (rows[:, None] == _mat(r0 + i)) & (_span(cols, c0, c0 + extent - 1) & _vec(go))[..., None, :]
+            x = torch.where(hit, made[..., None, :], x)
+        else:
+            hit = (cols == _mat(c0 + i)) & (_span(rows, r0, r0 + extent - 1) & _vec(go))[..., :, None]
+            x = torch.where(hit, made[..., :, None], x)
+    return x
+
+
+# Reference-LAPACK 3.12.1 SRC/dlasy2.f 230-475 as dlaexc.f 247-249 calls it (LTRANL = LTRANR = .FALSE., ISGN = -1):
+# TL = D(1,1) (N1 x N1), TR = D(N1+1,N1+1) (N2 x N2) and B = D(1,N1+1) (N1 x N2) of the static 4 x 4 `d`, N1, N2 per
+# member; EPS = DLAMCH('P'), SMLNUM = DLAMCH('S') / EPS; K = N1 + N1 + N2 - 2 selects 248-264 (K = 1), 270-286 or
+# 292-306 then label 40's 312-356 (K = 2, 3: IDAMAX's first largest |TMP|, the LOCU12, LOCL21, LOCU22, XSWPIV and
+# BSWPIV tables of 221-224) or 365-475 (K = 4: DO 100's complete pivoting, the IP, JP scan taking the last |T16(IP,JP)|
+# >= XMAX, IPSV and JPSV kept from the previous I where no entry is taken (the source leaves them unset at I = 1; 1
+# here), DSWAP of rows (and BTMP) and of columns, DO 90 and DO 80, then DO 120 and DO 130). Returns SCALE and X(1,1),
+# X(2,1), X(1,2), X(2,2) (INFO and XNORM unread by DLAEXC)
+def _dlasy2(n1, n2, d):
+    limits = torch.finfo(d.dtype)
+    eps = limits.eps
+    smlnum = limits.tiny / eps
+    sgn = -1.0
+    one, zero = torch.ones_like(n1), torch.zeros_like(d[..., 0, 0])
+
+    def exchanged(values, at, i):
+        made = list(values)
+        for r in range(i + 1, len(values) + 1):
+            made[i - 1] = torch.where(at == r, values[r - 1], made[i - 1])
+            made[r - 1] = torch.where(at == r, values[i - 1], values[r - 1])
+        return made
+    tl11, tl12, tl21, tl22 = d[..., 0, 0], d[..., 0, 1], d[..., 1, 0], d[..., 1, 1]
+    tr11, tr12, tr21, tr22 = (_entry(d, n1 + i, n1 + j) for i, j in ((1, 1), (1, 2), (2, 1), (2, 2)))
+    b11, b12, b21, b22 = (_entry(d, one * i, n1 + j) for i, j in ((1, 1), (1, 2), (2, 1), (2, 2)))
+    k = n1 + n1 + n2 - 2
+    tau1 = tl11 + sgn * tr11
+    bet = tau1.abs()
+    tiny = bet <= smlnum
+    tau1, bet = torch.where(tiny, smlnum, tau1), torch.where(tiny, smlnum, bet)
+    gam = b11.abs()
+    scale1 = torch.where(smlnum * gam > bet, 1 / gam, torch.ones_like(gam))
+    x1 = (b11 * scale1) / tau1
+    three = k == 3
+    smin = torch.where(three, functools.reduce(_larger, (tr11.abs(), tl11.abs(), tl12.abs(), tl21.abs(), tl22.abs())),
+                       functools.reduce(_larger, (tl11.abs(), tr11.abs(), tr12.abs(), tr21.abs(), tr22.abs())))
+    smin = _larger(eps * smin, smlnum)
+    tmp = [tl11 + sgn * tr11, torch.where(three, tl21, sgn * tr12), torch.where(three, tl12, sgn * tr21),
+           torch.where(three, tl22 + sgn * tr11, tl11 + sgn * tr22)]
+    btmp1, btmp2 = b11, torch.where(three, b21, b12)
+    ipiv, dmax = one, tmp[0].abs()
+    for i in range(2, 5):
+        bigger = tmp[i - 1].abs() > dmax
+        ipiv, dmax = torch.where(bigger, i, ipiv), torch.where(bigger, tmp[i - 1].abs(), dmax)
+
+    def located(table):
+        made = tmp[table[0] - 1]
+        for p in range(2, 5):
+            made = torch.where(ipiv == p, tmp[table[p - 1] - 1], made)
+        return made
+    u11 = located((1, 2, 3, 4))
+    u11 = torch.where(u11.abs() <= smin, smin, u11)
+    u12 = located((3, 4, 1, 2))
+    l21 = located((2, 1, 4, 3)) / u11
+    u22 = located((4, 3, 2, 1)) - u12 * l21
+    xswap, bswap = ipiv >= 3, (ipiv == 2) | (ipiv == 4)
+    u22 = torch.where(u22.abs() <= smin, smin, u22)
+    btmp1, btmp2 = torch.where(bswap, btmp2, btmp1), torch.where(bswap, btmp1 - l21 * btmp2, btmp2 - l21 * btmp1)
+    raised = ((2 * smlnum) * btmp2.abs() > u22.abs()) | ((2 * smlnum) * btmp1.abs() > u11.abs())
+    scale2 = torch.where(raised, 0.5 / _larger(btmp1.abs(), btmp2.abs()), torch.ones_like(btmp1))
+    btmp1, btmp2 = torch.where(raised, btmp1 * scale2, btmp1), torch.where(raised, btmp2 * scale2, btmp2)
+    second = btmp2 / u22
+    first = btmp1 / u11 - (u12 / u11) * second
+    first, second = torch.where(xswap, second, first), torch.where(xswap, first, second)
+    smin4 = functools.reduce(_larger, (tr11.abs(), tr12.abs(), tr21.abs(), tr22.abs()))
+    smin4 = functools.reduce(_larger, (smin4, tl11.abs(), tl12.abs(), tl21.abs(), tl22.abs()))
+    smin4 = _larger(eps * smin4, smlnum)
+    t16 = [[zero] * 4 for _ in range(4)]
+    t16[0][0], t16[1][1] = tl11 + sgn * tr11, tl22 + sgn * tr11
+    t16[2][2], t16[3][3] = tl11 + sgn * tr22, tl22 + sgn * tr22
+    t16[0][1], t16[1][0], t16[2][3], t16[3][2] = tl12, tl21, tl12, tl21
+    t16[0][2], t16[1][3], t16[2][0], t16[3][1] = sgn * tr21, sgn * tr21, sgn * tr12, sgn * tr12
+    btmp = [b11, b21, b12, b22]
+    ipsv, jpsv, jpiv = one, one, []
+    for i in range(1, 4):
+        xmax = zero
+        for ip in range(i, 5):
+            for jp in range(i, 5):
+                taken = t16[ip - 1][jp - 1].abs() >= xmax
+                xmax = torch.where(taken, t16[ip - 1][jp - 1].abs(), xmax)
+                ipsv, jpsv = torch.where(taken, ip, ipsv), torch.where(taken, jp, jpsv)
+        for c in range(4):
+            column = exchanged([t16[r][c] for r in range(4)], ipsv, i)
+            for r in range(4):
+                t16[r][c] = column[r]
+        btmp = exchanged(btmp, ipsv, i)
+        t16 = [exchanged(row, jpsv, i) for row in t16]
+        jpiv.append(jpsv)
+        t16[i - 1][i - 1] = torch.where(t16[i - 1][i - 1].abs() < smin4, smin4, t16[i - 1][i - 1])
+        for j in range(i + 1, 5):
+            t16[j - 1][i - 1] = t16[j - 1][i - 1] / t16[i - 1][i - 1]
+            btmp[j - 1] = btmp[j - 1] - t16[j - 1][i - 1] * btmp[i - 1]
+            for kk in range(i + 1, 5):
+                t16[j - 1][kk - 1] = t16[j - 1][kk - 1] - t16[j - 1][i - 1] * t16[i - 1][kk - 1]
+    t16[3][3] = torch.where(t16[3][3].abs() < smin4, smin4, t16[3][3])
+    raised = functools.reduce(torch.logical_or, [(8 * smlnum) * btmp[i].abs() > t16[i][i].abs() for i in range(4)])
+    scale4 = torch.where(raised, (1 / 8) / functools.reduce(_larger, [b.abs() for b in btmp]), torch.ones_like(zero))
+    btmp = [torch.where(raised, b * scale4, b) for b in btmp]
+    solved = [zero] * 4
+    for i in range(1, 5):
+        kk = 5 - i
+        temp = 1 / t16[kk - 1][kk - 1]
+        solved[kk - 1] = btmp[kk - 1] * temp
+        for j in range(kk + 1, 5):
+            solved[kk - 1] = solved[kk - 1] - (temp * t16[kk - 1][j - 1]) * solved[j - 1]
+    for i in range(1, 4):
+        solved = exchanged(solved, jpiv[4 - i - 1], 4 - i)
+    single, four = k == 1, k == 4
+    return (torch.where(single, scale1, torch.where(four, scale4, scale2)),
+            torch.where(single, x1, torch.where(four, solved[0], first)),
+            torch.where(four, solved[1], torch.where(three, second, 0)),
+            torch.where(four, solved[2], torch.where(k == 2, second, 0)), torch.where(four, solved[3], 0))
+
+
+# Reference-LAPACK 3.12.1 SRC/dlaexc.f 185-435, DLAEXC(WANTQ, N, T, Q, J1, N1, N2) on the leading ORDER x ORDER block
+# of t (q where `wantq`) where `when`, J1, N1, N2 per member: 189-192 the N = 0, N1 = 0, N2 = 0 and J1 + N1 > N
+# returns; 198-225 N1 = N2 = 1: DLARTG(T(J1,J2), T22 - T11), DROT of rows J1, J2 over columns J3..N (J3 <= N), of
+# columns J1, J2 over rows 1..J1-1 and of Q's columns over 1..N, T(J1,J1) = T22, T(J2,J2) = T11; else 234-243 D =
+# T(J1:J1+ND-1, J1:J1+ND-1) (the static 4 x 4, zero past ND), DNORM = DLANGE('M'), THRESH = MAX(TEN EPS DNORM,
+# SMLNUM); 247-249 _dlasy2; 253's K = N1 + N1 + N2 - 3 selects label 10 (262-295), 20 (305-337) or 30 (349-394):
+# DLARFG(3) of U (U1, U2), DLARFX (_dlarfx3) of D from the left and right, the swap rejected (label 50, INFO = 1, T
+# and Q as they were) where the test's largest exceeds THRESH, else DLARFX of T and Q, T's zeros and its corner;
+# label 40 (398-426) where N2 = 2, and where N1 = 2 (J3 = J1 + N2): DLANV2 of the 2 x 2 block, its DROTs of rows over
+# columns J+2..N, of columns over rows 1..J-1 and of Q's columns. Returns T, Q, INFO
+def _dlaexc(wantq, order, t, q, j1, n1, n2, when):
+    limits = torch.finfo(t.dtype)
+    eps = limits.eps
+    smlnum = limits.tiny / eps
+    rows, one = _counted(t), torch.ones_like(j1)
+    go = when & (order != 0) & (n1 != 0) & (n2 != 0) & (j1 + n1 <= order)
+    j2, j3, j4 = j1 + 1, j1 + 2, j1 + 3
+    pair = go & (n1 == 1) & (n2 == 1)
+    t11, t22 = _entry(t, j1, j1), _entry(t, j2, j2)
+    cs, sn = _dlartg(_entry(t, j1, j2), t22 - t11)
+    t = _rotated(t, j1, cs, sn, _vec(pair & (j3 <= order)) & _span(rows, j3, order), True)
+    t = _rotated(t, j1, cs, sn, _vec(pair) & (rows <= _vec(j1 - 1)), False)
+    t = _entry_put(_entry_put(t, j1, j1, t22, pair), j2, j2, t11, pair)
+    if wantq:
+        q = _rotated(q, j1, cs, sn, _vec(pair) & (_counted(q) <= _vec(order)), False)
+    block = go & ~pair
+    d = torch.where(_square_within(n1 + n2, 4), _region_at(t, j1, j1, 4, 4), 0)
+    thresh = _larger(10 * eps * d.abs().flatten(-2).amax(-1), smlnum)
+    scale, x11, x21, x12, x22 = _dlasy2(n1, n2, d)
+    unit = torch.ones_like(scale)
+    k = n1 + n1 + n2 - 3
+    tests = []
+    _, tau, (ua, ub) = _larfg(x12, [scale, x11])
+    u = (ua, ub, unit)
+    t11, case = _entry(t, j1, j1), block & (k == 1)
+    d = _dlarfx3(False, u, tau, _dlarfx3(True, u, tau, d, one, one, 3, case), one, one, 3, case)
+    taken = case & ~(functools.reduce(_larger, (d[..., 2, 0].abs(), d[..., 2, 1].abs(), (d[..., 2, 2] - t11).abs()))
+                     > thresh)
+    t = _dlarfx3(True, u, tau, t, j1, j1, order - j1 + 1, taken)
+    t = _dlarfx3(False, u, tau, t, one, j1, j2, taken)
+    t = _entry_put(_entry_put(_entry_put(t, j3, j1, 0, taken), j3, j2, 0, taken), j3, j3, t11, taken)
+    if wantq:
+        q = _dlarfx3(False, u, tau, q, one, j1, order, taken)
+    tests.append((case, taken))
+    _, tau, (ub, uc) = _larfg(-x11, [-x21, scale])
+    u = (unit, ub, uc)
+    t33, case = _entry(t, j3, j3), block & (k == 2)
+    d = _dlarfx3(False, u, tau, _dlarfx3(True, u, tau, d, one, one, 3, case), one, one, 3, case)
+    taken = case & ~(functools.reduce(_larger, (d[..., 1, 0].abs(), d[..., 2, 0].abs(), (d[..., 0, 0] - t33).abs()))
+                     > thresh)
+    t = _dlarfx3(False, u, tau, t, one, j1, j3, taken)
+    t = _dlarfx3(True, u, tau, t, j1, j2, order - j1, taken)
+    t = _entry_put(_entry_put(_entry_put(t, j1, j1, t33, taken), j2, j1, 0, taken), j3, j1, 0, taken)
+    if wantq:
+        q = _dlarfx3(False, u, tau, q, one, j1, order, taken)
+    tests.append((case, taken))
+    _, tau1, (u1b, u1c) = _larfg(-x11, [-x21, scale])
+    temp = -tau1 * (x12 + u1b * x22)
+    _, tau2, (u2b, u2c) = _larfg(-temp * u1b - x22, [-temp * u1c, scale])
+    u1, u2, case = (unit, u1b, u1c), (unit, u2b, u2c), block & (k == 3)
+    d = _dlarfx3(False, u1, tau1, _dlarfx3(True, u1, tau1, d, one, one, 4, case), one, one, 4, case)
+    d = _dlarfx3(False, u2, tau2, _dlarfx3(True, u2, tau2, d, one + 1, one, 4, case), one, one + 1, 4, case)
+    taken = case & ~(functools.reduce(_larger, (d[..., 2, 0].abs(), d[..., 2, 1].abs(), d[..., 3, 0].abs(),
+                                                d[..., 3, 1].abs())) > thresh)
+    t = _dlarfx3(True, u1, tau1, t, j1, j1, order - j1 + 1, taken)
+    t = _dlarfx3(False, u1, tau1, t, one, j1, j4, taken)
+    t = _dlarfx3(True, u2, tau2, t, j2, j1, order - j1 + 1, taken)
+    t = _dlarfx3(False, u2, tau2, t, one, j2, j4, taken)
+    for r, c in ((j3, j1), (j3, j2), (j4, j1), (j4, j2)):
+        t = _entry_put(t, r, c, 0, taken)
+    if wantq:
+        q = _dlarfx3(False, u2, tau2, _dlarfx3(False, u1, tau1, q, one, j1, order, taken), one, j2, order, taken)
+    tests.append((case, taken))
+    swapped = functools.reduce(torch.logical_or, [taken for _, taken in tests])
+    info = torch.where(functools.reduce(torch.logical_or, [case & ~taken for case, taken in tests]), 1, 0)
+    for j, standing in ((j1, swapped & (n2 == 2)), (j1 + n2, swapped & (n1 == 2))):
+        a, b, c, e, _, _, _, _, cs, sn = _dlanv2(_entry(t, j, j), _entry(t, j, j + 1), _entry(t, j + 1, j),
+                                                 _entry(t, j + 1, j + 1))
+        for (r, col), value in (((j, j), a), ((j, j + 1), b), ((j + 1, j), c), ((j + 1, j + 1), e)):
+            t = _entry_put(t, r, col, value, standing)
+        t = _rotated(t, j, cs, sn, _vec(standing & (j + 2 <= order)) & _span(rows, j + 2, order), True)
+        t = _rotated(t, j, cs, sn, _vec(standing) & (rows <= _vec(j - 1)), False)
+        if wantq:
+            q = _rotated(q, j, cs, sn, _vec(standing) & (_counted(q) <= _vec(order)), False)
+    return t, q, info
+
+
+# Reference-LAPACK 3.12.1 SRC/dtrexc.f 207-428 (COMPQ = 'V' where `wantq`) on the leading ORDER x ORDER block of t,
+# where `when`: 207-208 the N <= 1 return; 213-234 IFST and ILST moved to their blocks' first rows, NBF and NBL;
+# 236-237 the IFST = ILST return; 243-246 ILST adjusted where IFST < ILST; 248 and 337 HERE = IFST, then label 10
+# (forward) or label 20 (back) as one while_loop whose pass is one label pass (_dtrexc_pass); 426 ILST = HERE.
+# Returns T, Q, ILST (the source's in/out ILST, also where it returns early) and INFO (1 where a checked DLAEXC
+# rejected its swap, ILST = HERE then)
+def _dtrexc(wantq, order, t, q, ifst, ilst, when):
+    go = when & (order > 1)
+    ifst = torch.where(go & (ifst > 1) & (_entry(t, ifst, ifst - 1) != 0), ifst - 1, ifst)
+    nbf = torch.where((ifst < order) & (_entry(t, ifst + 1, ifst) != 0), 2, 1)
+    ilst = torch.where(go & (ilst > 1) & (_entry(t, ilst, ilst - 1) != 0), ilst - 1, ilst)
+    nbl = torch.where((ilst < order) & (_entry(t, ilst + 1, ilst) != 0), 2, 1)
+    go = go & (ifst != ilst)
+    forward = ifst < ilst
+    ilst = torch.where(go & forward & (nbf == 2) & (nbl == 1), ilst - 1, ilst)
+    ilst = torch.where(go & forward & (nbf == 1) & (nbl == 2), ilst + 1, ilst)
+    carried = (go, t.contiguous(), q.contiguous() if wantq else t.new_zeros(()), ifst.clone(), nbf,
+               torch.zeros_like(ifst))
+    _, t, q, here, _, info = while_loop_op(_first_any, functools.partial(_dtrexc_pass, wantq), carried,
+                                           (forward, ilst, order))
+    return t, q, torch.where(go, here, ilst), info
+
+
+# dtrexc.f 250-333 (`forward`) and 338-424, one label 10 or label 20 pass for HERE: where NBF = 1 or 2, NBNEXT of the
+# next block (T(HERE+NBF+1,HERE+NBF) /= 0, else T(HERE-1,HERE-2) /= 0), DLAEXC(HERE, NBF, NBNEXT) (back: HERE -
+# NBNEXT, NBNEXT, NBF), HERE by NBNEXT and NBF = 3 where the 2 x 2 split (T(HERE+1,HERE) = 0); where NBF = 3, the
+# first DLAEXC(HERE + 1, 1, NBNEXT) (back: HERE - NBNEXT, NBNEXT, 1), then where NBNEXT = 1 DLAEXC(HERE, 1, 1) and
+# HERE by 1, else NBNEXT = 1 where the next 2 x 2 split (T(HERE+2,HERE+1) = 0, back T(HERE,HERE-1) = 0): where 2
+# DLAEXC(HERE, 1, 2) (back: HERE - 1, 2, 1), else DLAEXC(HERE, 1, 1) and DLAEXC(HERE + 1, 1, 1) (back: HERE - 1), HERE
+# by 2. A checked DLAEXC's INFO /= 0 ends it (ILST = HERE), the 1 x 1 swaps unchecked as the source leaves them
+def _dtrexc_pass(wantq, live, t, q, here, nbf, info, forward, ilst, order):
+    one = torch.ones_like(here)
+    whole = nbf <= 2
+    ahead = torch.where((here + nbf + 1 <= order) & (_entry(t, here + nbf + 1, here + nbf) != 0), 2, 1)
+    split = torch.where((here + 3 <= order) & (_entry(t, here + 3, here + 2) != 0), 2, 1)
+    behind = torch.where((here >= 3) & (_entry(t, here - 1, here - 2) != 0), 2, 1)
+    nbnext = torch.where(forward, torch.where(whole, ahead, split), behind)
+    t, q, first = _dlaexc(wantq, order, t, q, torch.where(forward, torch.where(whole, here, here + 1), here - behind),
+                          torch.where(forward, torch.where(whole, nbf, 1), behind),
+                          torch.where(forward, torch.where(whole, ahead, split), torch.where(whole, nbf, 1)), live)
+    failed = live & (first != 0)
+    moved = live & ~failed & whole
+    shifted = torch.where(forward, here + nbnext, here - nbnext)
+    nbf = torch.where(moved & (nbf == 2) & (_entry(t, shifted + 1, shifted) == 0), 3, nbf)
+    apart = live & ~failed & ~whole
+    lone = nbnext == 1
+    paired = ~lone & torch.where(forward, _entry(t, here + 2, here + 1) != 0, _entry(t, here, here - 1) != 0)
+    t, q, second = _dlaexc(wantq, order, t, q, torch.where(paired & ~forward, here - 1, here),
+                           torch.where(paired & ~forward, 2, 1), torch.where(paired & forward, 2, 1), apart)
+    failed = failed | (apart & paired & (second != 0))
+    t, q, _ = _dlaexc(wantq, order, t, q, torch.where(forward, here + 1, here - 1), one, one, apart & ~lone & ~paired)
+    step = torch.where(lone, 1, 2)
+    stepped = torch.where(forward, here + step, here - step)
+    here = torch.where(moved, shifted, torch.where(apart & ~failed, stepped, here))
+    info = torch.where(failed, 1, info)
+    more = torch.where(forward, here < ilst, here > ilst)
+    return live & ~failed & more, t, q if wantq else q.clone(), here, nbf, info
 
 
 # Reference-LAPACK 3.12.1 SRC/zunm2r.f 222-271 (dorm2r.f alike, TAU(I) either way): C = Q C, Q^H C, C Q or C Q^H
@@ -3304,7 +3584,7 @@ def _geev_lwork(order, vectors, whole, dtype):
 # 'N', JW, NS, 1, NS, T, V) where NS > 1 and S /= 0; DO 60 (rows LTOP..KWTOP-1, LTOP = 1 where WANTT, else KTOP),
 # DO 70 (WANTT: columns KBOT+1..N) and DO 80 (WANTZ: Z's rows ILOZ..IHIZ); 569-577 ND = JW - NS, NS - INFQR.
 # ZGEHRD and ZUNMHR are _gehrd's ZGEHD2 and _unmhr's ZUNM2R (OPEN: their blocked code, NS >= 130 and NS - 1 > 32).
-# Returns H, Z, W (SH), NS, ND. OPEN: dlaqr3.f and dlaqr2.f, the real routines
+# Returns H, Z, W (SH), NS, ND. dlaqr3.f and dlaqr2.f, the real routines, are _dlaqr3
 def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, w, kv, kt, nho, kwv, nve, proceed,
            lwork):
     limits = torch.finfo(h.real.dtype)
@@ -3391,6 +3671,162 @@ def _laqr3_sorted(live, t, v, i, jw, ns):
     t, v = _ztrexc(True, jw, t, v, ifst, i, live & (ifst != i))
     i = torch.where(live, i + 1, i)
     return live & (i <= ns), t, v, i
+
+
+# Reference-LAPACK 3.12.1 SRC/dlaqr3.f 360-693, DLAQR3(WANTT, WANTZ, N, KTOP, KBOT, NW, H, ILOZ, IHIZ, Z, NS, ND, SR,
+# SI, V, NH, T, NV, WV) where `proceed`, as _laqr3 takes zlaqr3.f (dlaqr0.f 520-524's call: T, V and WV the same H
+# positions, SIZE the same static extent). dlaqr2.f (`nested` False, dlaqr4.f 526's call) differs only at dlaqr3.f
+# 416-423: DLAHQR for every JW (dlaqr2.f 411-412). 360-367 the KTOP > KBOT and NW < 1 returns (NS = ND = 0); 371-374
+# SMLNUM = SAFMIN (N / ULP); 378-384 JW, KWTOP, S; 386-403 the KBOT = KWTOP window (SR = H(KWTOP,KWTOP), SI = 0, the
+# ABS test); 411-415 DLACPY('U') and DCOPY of the window into T, DLASET V = I; 416-423 DLAQR4 where JW > NMIN =
+# ILAENV(12, 'DLAQR3') = 75 and `nested` (the branch present where SIZE admits JW > 75), else DLAHQR, on T with V
+# into SR(KWTOP), SI(KWTOP); 427-432 DO 10's clean margin (T(J+2,J) = T(J+3,J) = 0 for J <= JW - 3, T(JW,JW-2) = 0
+# where JW > 2); 436-502 NS = JW, ILST = INFQR + 1 and label 20 (_dlaqr3_deflated); 506-507 S = 0 where NS = 0;
+# 509-575 where NS < JW, SORTED = .FALSE., I = NS + 1 and label 30 (_dlaqr3_sorted); 579-601 I = JW and label 60
+# (_dlaqr3_shifts); 603-681 where NS < JW or S = 0: where NS > 1 and S /= 0 DLARFG of V(1,1:NS), DLASET('L') at
+# T(3,1), DLARF1F from the left and right on T and from the right on V, DGEHRD(JW, 1, NS, T) (LWORK - JW);
+# H(KWTOP,KWTOP-1) = S V(1,1) where KWTOP > 1; T back into the window; DORMHR('R', 'N', JW, NS, 1, NS, T, V)
+# (LWORK - JW) where NS > 1 and S /= 0; DO 70 (rows LTOP..KWTOP-1), DO 80 (WANTT: columns KBOT+1..N, DGEMM('C') the
+# transpose) and DO 90 (WANTZ: Z's rows ILOZ..IHIZ) as _laqr3's DO 60, 70 and 80; 685-693 ND = JW - NS, NS - INFQR.
+# DGEHRD and DORMHR are _gehrd's DGEHD2 and _unmhr's DORM2R (OPEN: their blocked code, NS >= 130 and NS - 1 > 32).
+# Returns H, Z, WR (SR), WI (SI), NS, ND
+def _dlaqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, wr, wi, kv, kt, nho, kwv, nve,
+            proceed, lwork):
+    limits = torch.finfo(h.dtype)
+    ulp = limits.eps
+    smlnum = limits.tiny * (order.to(h.dtype) / ulp)
+    one = torch.ones_like(ktop)
+    go = proceed & (ktop <= kbot) & (nw >= 1)
+    jw = torch.minimum(nw, kbot - ktop + 1)
+    kwtop = kbot - jw + 1
+    s = torch.where(kwtop == ktop, 0, _entry(h, kwtop, kwtop - 1))
+    corner = _entry(h, kwtop, kwtop)
+    single = go & (kbot == kwtop)
+    wr, wi = _at_put(wr, kwtop, corner, single), _at_put(wi, kwtop, 0, single)
+    negligible = single & (s.abs() <= _larger(smlnum, ulp * corner.abs()))
+    h = _entry_put(h, kwtop, kwtop - 1, 0, negligible & (kwtop > ktop))
+    main = go & (kbot != kwtop)
+    ii = torch.arange(1, size + 1, device=h.device)
+    within, square = _within(jw, size), _square_within(jw, size)
+    upper = (ii[:, None] <= ii + 1) & square
+    t = torch.where(upper & _mat(main), _region_at(h, kwtop, kwtop, size, size), _region_at(h, kv, kt, size, size))
+    v = torch.where(square & _mat(main), torch.eye(size, dtype=h.dtype, device=h.device),
+                    _region_at(h, kv, one, size, size))
+    sr, si = _vec_at(wr, kwtop, size), _vec_at(wi, kwtop, size)
+    small, infqr = main, torch.zeros_like(ktop)
+    if nested and size > 75:
+        large = main & (jw > 75)
+        t, sr, si, v, infqr = _dlaqr0(True, True, True, jw, one, jw, t, sr, si, one, jw, v, large, lwork)
+        small = main & ~large
+    t, sr, si, v, info = _dlahqr(True, True, jw, one, jw, t, sr, si, one, jw, v, small)
+    infqr = torch.where(small, info, infqr)
+    below = ii[:, None] - ii
+    margin = (((below == 2) | (below == 3)) & (ii <= _mat(jw - 3))) | (
+        (ii[:, None] == _mat(jw)) & (ii == _mat(jw - 2)) & _mat(jw > 2))
+    t = torch.where(margin & _mat(main), 0, t)
+    carried = (main & (infqr + 1 <= jw), t.contiguous(), v.contiguous(), jw.clone(), infqr + 1)
+    _, t, v, ns, _ = while_loop_op(_first_any, functools.partial(_dlaqr3_deflated, ulp), carried, (jw, s, smlnum))
+    s = torch.where(ns == 0, 0, s)
+    carried = (main & (ns < jw), t, v, ns + 1, torch.zeros_like(main))
+    _, t, v, _, _ = while_loop_op(_first_any, _dlaqr3_sorted, carried, (jw, ns, infqr))
+    carried = (main & (jw >= infqr + 1), sr.contiguous(), si.contiguous(), jw.clone())
+    _, sr, si, _ = while_loop_op(_first_any, _dlaqr3_shifts, carried, (t, infqr))
+    update = main & ((ns < jw) | (s == 0))
+    spike = update & (ns > 1) & (s != 0)
+    lead = _row(v, one)
+    beta, tau, made = _larfg_vector(lead[..., 0], torch.where(_span(ii, 2, ns), lead, 0))
+    work = torch.where(ii == 1, _vec(beta), torch.where(_span(ii, 2, ns), made, 0))
+    tau = torch.where(spike, tau, 0)
+    t = torch.where((ii[:, None] >= ii + 2) & square & _mat(spike), 0, t)
+    t = _larf1f(True, ns, jw, work, tau, t, one, one, spike)
+    t = _larf1f(False, ns, ns, work, tau, t, one, one, spike)
+    v = _larf1f(False, jw, ns, work, tau, v, one, one, spike)
+    t, taus = _gehrd(jw, one, torch.where(spike, ns, one), t)
+    h = _entry_put(h, kwtop, kwtop - 1, s * _entry(v, one, one), update & (kwtop > 1))
+    h = _region_put(h, kwtop, kwtop, t, upper & _mat(update))
+    v = _unmhr(False, True, jw, ns, one, ns, t, taus, v, spike)
+    h = _region_put(h, kv, kt, t, square & _mat(main))
+    h = _region_put(h, kv, one, v, square & _mat(main))
+    ltop = one if wantt else ktop
+    _, h, _, _ = while_loop_op(_first_any, functools.partial(_rows_chunk, False),
+                               (update & (ltop <= kwtop - 1), h.contiguous(), h.new_zeros(()), ltop.clone()),
+                               (kwtop - 1, nve, kwtop, jw, v, kwv))
+    if wantt:
+        _, h, _ = while_loop_op(_first_any, _columns_chunk, (update & (kbot + 1 <= order), h, kbot + 1),
+                                (order, nho, kwtop, jw, v, kv, kt))
+    if wantz:
+        _, h, z, _ = while_loop_op(_first_any, functools.partial(_rows_chunk, True),
+                                   (update & (iloz <= ihiz), h, z.contiguous(), iloz.clone()),
+                                   (ihiz, nve, kwtop, jw, v, kwv))
+    placed = within & _vec(main)
+    wr, wi = _vec_put(wr, kwtop, sr, placed), _vec_put(wi, kwtop, si, placed)
+    found = torch.where(single, torch.where(negligible, 0, 1), 0)
+    return (h, z, wr, wi, torch.where(main, ns - infqr, found),
+            torch.where(main, jw - ns, torch.where(negligible, 1, 0)))
+
+
+# dlaqr3.f 438-502, label 20's pass while ILST <= NS: BULGE = T(NS,NS-1) /= 0 (.FALSE. where NS = 1); FOO =
+# ABS(T(NS,NS)), where BULGE plus SQRT(ABS(T(NS,NS-1))) SQRT(ABS(T(NS-1,NS))), ABS(S) where FOO = 0; NS = NS - 1 (2
+# where BULGE) where ABS(S V(1,NS)) (where BULGE its MAX with ABS(S V(1,NS-1))) <= MAX(SMLNUM, ULP FOO), else
+# DTREXC('V', JW, T, V, IFST = NS, ILST) and ILST = DTREXC's ILST + 1 (+ 2 where BULGE)
+def _dlaqr3_deflated(ulp, live, t, v, ns, ilst, jw, s, smlnum):
+    one = torch.ones_like(ns)
+    bulge = (ns != 1) & (_entry(t, ns, ns - 1) != 0)
+    tip = _entry(t, ns, ns).abs()
+    foo = torch.where(bulge, tip + _entry(t, ns, ns - 1).abs().sqrt() * _entry(t, ns - 1, ns).abs().sqrt(), tip)
+    foo = torch.where(foo == 0, s.abs(), foo)
+    spike = (s * _entry(v, one, ns)).abs()
+    spike = torch.where(bulge, _larger(spike, (s * _entry(v, one, ns - 1)).abs()), spike)
+    held = spike <= _larger(smlnum, ulp * foo)
+    move = live & ~held
+    t, v, moved, _ = _dtrexc(True, jw, t, v, ns, ilst, move)
+    width = torch.where(bulge, 2, 1)
+    ns = torch.where(live & held, ns - width, ns)
+    ilst = torch.where(move, moved + width, ilst)
+    return live & (ilst <= ns), t, v, ns, ilst
+
+
+# dlaqr3.f 517-573, label 30's pass while not SORTED: SORTED = .TRUE., KEND = I - 1, I = INFQR + 1, K = I + 1 where
+# I = NS or T(I+1,I) = 0, else I + 2, then label 40 (_dlaqr3_bubbled) while K <= KEND
+def _dlaqr3_sorted(live, t, v, i, sorted_, jw, ns, infqr):
+    kend = i - 1
+    i = torch.where(live, infqr + 1, i)
+    k = torch.where((i == ns) | (_entry(t, i + 1, i) == 0), i + 1, i + 2)
+    sorted_ = live | sorted_
+    carried = (live & (k <= kend), t, v, i, k, sorted_)
+    _, t, v, i, _, sorted_ = while_loop_op(_first_any, _dlaqr3_bubbled, carried, (kend, jw))
+    return live & ~sorted_, t, v, i, sorted_
+
+
+# dlaqr3.f 531-571, label 40's pass for I and K: EVI = ABS(T(I,I)) where K = I + 1, else plus SQRT(ABS(T(I+1,I)))
+# SQRT(ABS(T(I,I+1))); EVK of K alike, ABS(T(K,K)) where K = KEND or T(K+1,K) = 0; I = K where EVI >= EVK, else
+# SORTED = .FALSE., DTREXC('V', JW, T, V, IFST = I, ILST = K) and I = its ILST where its INFO = 0, else K; then K =
+# I + 1 where I = KEND or T(I+1,I) = 0, else I + 2
+def _dlaqr3_bubbled(live, t, v, i, k, sorted_, kend, jw):
+    tii, tkk = _entry(t, i, i).abs(), _entry(t, k, k).abs()
+    evi = torch.where(k == i + 1, tii, tii + _entry(t, i + 1, i).abs().sqrt() * _entry(t, i, i + 1).abs().sqrt())
+    evk = torch.where((k == kend) | (_entry(t, k + 1, k) == 0), tkk,
+                      tkk + _entry(t, k + 1, k).abs().sqrt() * _entry(t, k, k + 1).abs().sqrt())
+    kept = evi >= evk
+    move = live & ~kept
+    t, v, ilst, info = _dtrexc(True, jw, t, v, i, k, move)
+    i = torch.where(live & kept, k, torch.where(move, torch.where(info == 0, ilst, k), i))
+    k = torch.where(live, torch.where((i == kend) | (_entry(t, i + 1, i) == 0), i + 1, i + 2), k)
+    return live & (k <= kend), t, v, i, k, sorted_ & ~move
+
+
+# dlaqr3.f 581-600, label 60's pass while I >= INFQR + 1, SR and SI the window's from KWTOP: SR(I) = T(I,I) and SI(I)
+# = 0 where I = INFQR + 1 or T(I,I-1) = 0 (I = I - 1), else DLANV2 of T(I-1:I,I-1:I) into SR, SI(I-1) and SR, SI(I)
+# (I = I - 2)
+def _dlaqr3_shifts(live, sr, si, i, t, infqr):
+    lone = (i == infqr + 1) | (_entry(t, i, i - 1) == 0)
+    pair, alone = live & ~lone, live & lone
+    _, _, _, _, rt1r, rt1i, rt2r, rt2i, _, _ = _dlanv2(_entry(t, i - 1, i - 1), _entry(t, i - 1, i),
+                                                       _entry(t, i, i - 1), _entry(t, i, i))
+    sr = _at_put(_at_put(_at_put(sr, i, _entry(t, i, i), alone), i - 1, rt1r, pair), i, rt2r, pair)
+    si = _at_put(_at_put(_at_put(si, i, 0, alone), i - 1, rt1i, pair), i, rt2i, pair)
+    i = torch.where(live, i - torch.where(lone, 1, 2), i)
+    return live & (i >= infqr + 1), sr, si, i
 
 
 # Reference-LAPACK 3.12.1 SRC/zlaqr0.f 323-693, ZLAQR0(WANTT, WANTZ, N, ILO, IHI, H, W, ILOZ, IHIZ, Z) where
@@ -3531,6 +3967,171 @@ def _laqr0_swapped(live, w, i, sorted_, k):
     return live & (i <= k - 1), w, i, sorted_ & ~swap
 
 
+# Reference-LAPACK 3.12.1 SRC/dlaqr0.f 323-730, DLAQR0(WANTT, WANTZ, N, ILO, IHI, H, WR, WI, ILOZ, IHIZ, Z) where
+# `proceed`, as _laqr0 takes zlaqr0.f (NWR, NSR, NMIN, NIBBLE, KACC22, NWMAX, NSMAX and ITMAX at dlaqr0.f 368-379,
+# 402-427 and 435, the static LWORK alike). dlaqr4.f (`four`: dlaqr3.f 418 and dlaqr0.f 589's calls) differs only at
+# dlaqr0.f 385 and 520 (DLAQR2 for DLAQR3, dlaqr4.f 391 and 526) and 588-597 (DLAHQR for every NS, dlaqr4.f 594-596).
+# 327-330 the N = 0 return; 332-339 N <= NTINY = 15 (278), DLAHQR (alone where n <= 15); 439 KBOT = IHI; 443-725 DO
+# 80 as one while_loop whose pass is one IT (_dlaqr0_pass); 730 INFO = KBOT once IT passes ITMAX (also where that
+# pass left KBOT < ILO). Returns H, WR, WI, Z, INFO
+def _dlaqr0(wantt, wantz, four, order, ilo, ihi, h, wr, wi, iloz, ihiz, z, proceed, lwork):
+    n = h.shape[-1]
+    go = proceed & (order > 0)
+    h, wr, wi, z, info = _dlahqr(wantt, wantz, order, ilo, ihi, h, wr, wi, iloz, ihiz, z, go & (order <= 15))
+    go = go & (order > 15)
+    if n <= 15:
+        return h, wr, wi, z, info
+    nh = ihi - ilo + 1
+    shifts, nwr, nsr = _laqr0_windows(order, ilo, ihi)
+    nwmax = torch.clamp((order - 1) // 3, max=lwork // 2)
+    nsmax = torch.clamp((order - 3) // 6, max=2 * lwork // 3)
+    nsmax = nsmax - nsmax % 2
+    itmax = 30 * torch.clamp(nh, min=10)
+    ones = torch.ones_like(ihi)
+    carried = (go & (ihi >= ilo), h.contiguous(), z.contiguous() if wantz else h.new_zeros(()), wr.contiguous(),
+               wi.contiguous(), ihi.clone(), nwmax.clone(), ones, -ones, ones.clone())
+    _, h, z, wr, wi, kbot, _, _, _, it = while_loop_op(
+        _first_any, functools.partial(_dlaqr0_pass, wantt, wantz, four, lwork), carried,
+        (order, ilo, iloz, ihiz, itmax, nwr, nsr, nwmax, nsmax, shifts >= 14))
+    return h, wr, wi, z, torch.where(go, torch.where(it > itmax, kbot, 0), info)
+
+
+# dlaqr0.f 443-725, DO 80's pass for IT, as _laqr0_pass (ABS for CABS1): 447-458 KTOP (DO 10); 476-499 NH, NWUPBD, NW
+# (KEXNW = 5) and NDEC; 512-516 KV, KT, NHO, KWV, NVE; 520-524 DLAQR3 (DLAQR2 where `four`); 528 KBOT - LD; 532 KS;
+# 540-714 where LD = 0 or 100 LD <= NW NIBBLE and KBOT - KTOP + 1 > MIN(NMIN, NWMAX): 547-548 NS; 557-574 MOD(NDFL,
+# KEXSH = 6) = 0: KS = KBOT - NS + 1 and DO 30 (I = KBOT down by 2 to MAX(KS + 1, KTOP + 2), each I's reads H's and
+# its writes WR, WI(I-1) and (I) its own: SS = ABS(H(I,I-1)) + ABS(H(I-1,I-2)), DLANV2(WILK1 SS + H(I,I), SS, WILK2
+# SS, that AA), WILK1 = 0.75d0, WILK2 = -0.4375d0, 295), then where KS = KTOP both WR(KS+1), WR(KS) = H(KS+1,KS+1)
+# and WI = 0; else 583-614 where KBOT - KS + 1 <= NS / 2 the NS x NS DLACPY to H(KT,1) (static NSB x NSB as
+# _laqr0_pass) and DLAQR4 (NS > NMIN, not `four`; present where NSB admits NS > 75) or DLAHQR of it into WR(KS),
+# WI(KS), KS + INF, and where KS >= KBOT DLANV2 of H(KBOT-1:KBOT,KBOT-1:KBOT) into WR, WI(KBOT-1) and (KBOT), KS =
+# KBOT - 1; 616-643 where KBOT - KS + 1 > NS DO 50/40's bubble sort; 651-664 DO 70; 670-679 KBOT - KS + 1 = 2 with
+# WI(KBOT) = 0's nearer real shift; 686-706 NS, KS, KDU, KU, KWH, NHO, KWV, NVE; 710-713 DLAQR5 on WR(KS), WI(KS),
+# its DO 10 (dlaqr5.f 330-343) pairing them in place; 718-722 NDFL
+def _dlaqr0_pass(wantt, wantz, four, lwork, live, h, z, wr, wi, kbot, nw, ndfl, ndec, it, order, ilo, iloz, ihiz,
+                 itmax, nwr, nsr, nwmax, nsmax, accum):
+    n, k, one = h.shape[-1], _counted(h), torch.ones_like(kbot)
+    nsb = min((n - 3) // 6, 2 * lwork // 3)
+    nsb = max(2, nsb - nsb % 2)
+    sub = torch.cat([torch.zeros_like(h[..., :1, 0]), h.diagonal(-1, dim1=-2, dim2=-1)], -1)
+    found = torch.where((sub == 0) & (k >= _vec(ilo + 1)) & (k <= _vec(kbot)), k, 0).amax(-1)
+    ktop = torch.where(found > 0, found, ilo)
+    nh = kbot - ktop + 1
+    nwupbd = torch.minimum(nh, nwmax)
+    nw = torch.where(ndfl < 5, torch.minimum(nwupbd, nwr), torch.minimum(nwupbd, 2 * nw))
+    below = nw < nwmax
+    whole = below & (nw >= nh - 1)
+    kwtop = kbot - nw + 1
+    grow = below & ~whole & (_entry(h, kwtop, kwtop - 1).abs() > _entry(h, kwtop - 1, kwtop - 2).abs())
+    nw = torch.where(whole, nh, torch.where(grow, nw + 1, nw))
+    bump = (ndfl >= 5) & ((ndec >= 0) | (nw >= nwupbd))
+    ndec = torch.where(ndfl < 5, -1, torch.where(bump, ndec + 1, ndec))
+    ndec = torch.where(bump & (nw - ndec < 2), 0, ndec)
+    nw = torch.where(bump, nw - ndec, nw)
+    kt = nw + 1
+    h, z, wr, wi, ls, ld = _dlaqr3(wantt, wantz, not four, max(1, min((n - 1) // 3, lwork // 2)), order, ktop, kbot,
+                                   nw, h, iloz, ihiz, z, wr, wi, order - nw + 1, kt, (order - nw - 1) - kt + 1,
+                                   nw + 2, (order - nw) - (nw + 2) + 1, live, lwork)
+    kbot = torch.where(live, kbot - ld, kbot)
+    ks = kbot - ls + 1
+    sweep = live & ((ld == 0) | ((100 * ld <= nw * 14) & (kbot - ktop + 1 > torch.clamp(nwmax, max=75))))
+    ns = torch.minimum(torch.minimum(nsmax, nsr), torch.clamp(kbot - ktop, min=2))
+    ns = ns - ns % 2
+    exceptional = sweep & (ndfl % 6 == 0)
+    computed = sweep & ~exceptional
+    first = kbot - ns + 1
+    prior = torch.cat([torch.zeros_like(sub[..., :1]), sub[..., :-1]], -1)
+    ss = sub.abs() + prior.abs()
+    aa = 0.75 * ss + h.diagonal(dim1=-2, dim2=-1)
+    _, _, _, _, rt1r, rt1i, rt2r, rt2i, _, _ = _dlanv2(aa, ss, -0.4375 * ss, aa)
+    at = (_vec(exceptional) & (k <= _vec(kbot)) & ((_vec(kbot) - k) % 2 == 0)
+          & (k >= _vec(torch.maximum(first + 1, ktop + 2))))
+    ahead = torch.cat([at[..., 1:], torch.zeros_like(at[..., :1])], -1)
+    rt1r, rt1i = (torch.cat([x[..., 1:], x[..., :1]], -1) for x in (rt1r, rt1i))
+    wr = torch.where(at, rt2r, torch.where(ahead, rt1r, wr))
+    wi = torch.where(at, rt2i, torch.where(ahead, rt1i, wi))
+    ks = torch.where(exceptional, first, ks)
+    bottom = exceptional & (ks == ktop)
+    corner = _entry(h, ks + 1, ks + 1)
+    wr = _at_put(_at_put(wr, ks + 1, corner, bottom), ks, corner, bottom)
+    wi = _at_put(_at_put(wi, ks + 1, 0, bottom), ks, 0, bottom)
+    few = computed & (kbot - ks + 1 <= ns // 2)
+    top = order - ns + 1
+    square = _square_within(ns, nsb)
+    h = _region_put(h, top, one, _region_at(h, first, first, nsb, nsb), square & _mat(few))
+    hs, rs, js = _region_at(h, top, one, nsb, nsb), _vec_at(wr, first, nsb), _vec_at(wi, first, nsb)
+    small, inf = few, torch.zeros_like(kbot)
+    if not four and nsb > 75:
+        large = few & (ns > 75)
+        hs, rs, js, _, inf = _dlaqr0(False, False, True, ns, one, ns, hs, rs, js, one, one, hs.new_zeros(()), large,
+                                     lwork)
+        small = few & ~large
+    hs, rs, js, _, info = _dlahqr(False, False, ns, one, ns, hs, rs, js, one, one, hs.new_zeros(()), small)
+    inf = torch.where(small, info, inf)
+    h = _region_put(h, top, one, hs, square & _mat(few))
+    copied = _within(ns, nsb) & _vec(few)
+    wr, wi = _vec_put(wr, first, rs, copied), _vec_put(wi, first, js, copied)
+    ks = torch.where(few, first + inf, ks)
+    pair = few & (ks >= kbot)
+    _, _, _, _, p1r, p1i, p2r, p2i, _, _ = _dlanv2(_entry(h, kbot - 1, kbot - 1), _entry(h, kbot - 1, kbot),
+                                                   _entry(h, kbot, kbot - 1), _entry(h, kbot, kbot))
+    wr = _at_put(_at_put(wr, kbot - 1, p1r, pair), kbot, p2r, pair)
+    wi = _at_put(_at_put(wi, kbot - 1, p1i, pair), kbot, p2i, pair)
+    ks = torch.where(pair, kbot - 1, ks)
+    carried = (computed & (kbot - ks + 1 > ns), wr, wi, kbot.clone(), torch.zeros_like(live))
+    _, wr, wi, _, _ = while_loop_op(_first_any, _dlaqr0_sorted, carried, (ks,))
+    _, wr, wi, _ = while_loop_op(_first_any, _dlaqr0_paired, (computed & (kbot >= ks + 2), wr, wi, kbot.clone()),
+                                 (ks,))
+    two = sweep & (kbot - ks + 1 == 2) & (_at(wi, kbot) == 0)
+    last, before, tip = _at(wr, kbot), _at(wr, kbot - 1), _entry(h, kbot, kbot)
+    nearer = (last - tip).abs() < (before - tip).abs()
+    wr = _at_put(_at_put(wr, kbot - 1, last, two & nearer), kbot, before, two & ~nearer)
+    ns = torch.minimum(ns, kbot - ks + 1)
+    ns = ns - ns % 2
+    ks = kbot - ns + 1
+    kdu = 2 * ns
+    h, z, (sr, si) = _laqr5(wantt, wantz, accum, order, ktop, kbot, ns, (_vec_at(wr, ks, nsb), _vec_at(wi, ks, nsb)),
+                            h, iloz, ihiz, z, order - kdu + 1, order - kdu - (kdu + 4) + 1, kdu + 4,
+                            (order - kdu + 1 - 4) - (kdu + 1) + 1, kdu + 1, sweep)
+    paired = _within(ns, nsb) & _vec(sweep)
+    wr, wi = _vec_put(wr, ks, sr, paired), _vec_put(wi, ks, si, paired)
+    ndfl = torch.where(live, torch.where(ld > 0, 1, ndfl + 1), ndfl)
+    it = torch.where(live, it + 1, it)
+    return (live & (kbot >= ilo) & (it <= itmax), h, z if wantz else z.clone(), wr, wi, kbot, nw, ndfl, ndec, it)
+
+
+# dlaqr0.f 623-641, DO 50's pass for K (KBOT, KS + 1, -1) until SORTED: SORTED = .TRUE., then DO 40
+def _dlaqr0_sorted(live, wr, wi, k, sorted_, ks):
+    _, wr, wi, _, sorted_ = while_loop_op(_first_any, _dlaqr0_swapped, (live & (ks <= k - 1), wr, wi, ks.clone(),
+                                                                        live | sorted_), (k,))
+    k = torch.where(live, k - 1, k)
+    return live & (k >= ks + 1) & ~sorted_, wr, wi, k, sorted_
+
+
+# DO 40's pass for I (KS..K-1): WR, WI(I) and (I+1) swapped where ABS(WR(I)) + ABS(WI(I)) < ABS(WR(I+1)) +
+# ABS(WI(I+1)), SORTED = .FALSE.
+def _dlaqr0_swapped(live, wr, wi, i, sorted_, k):
+    r1, r2, i1, i2 = _at(wr, i), _at(wr, i + 1), _at(wi, i), _at(wi, i + 1)
+    swap = live & (r1.abs() + i1.abs() < r2.abs() + i2.abs())
+    wr = _at_put(_at_put(wr, i, r2, swap), i + 1, r1, swap)
+    wi = _at_put(_at_put(wi, i, i2, swap), i + 1, i1, swap)
+    i = torch.where(live, i + 1, i)
+    return live & (i <= k - 1), wr, wi, i, sorted_ & ~swap
+
+
+# dlaqr0.f 651-664, DO 70's pass for I (KBOT, KS + 2, -2): where WI(I) /= -WI(I-1), WR (and WI) (I), (I-1), (I-2)
+# take (I-1), (I-2), (I)
+def _dlaqr0_paired(live, wr, wi, i, ks):
+    swap = live & (_at(wi, i) != -_at(wi, i - 1))
+    made = []
+    for x in (wr, wi):
+        a, b, c = _at(x, i - 2), _at(x, i - 1), _at(x, i)
+        made.append(_at_put(_at_put(_at_put(x, i, b, swap), i - 1, a, swap), i - 2, c, swap))
+    wr, wi = made
+    i = torch.where(live, i - 2, i)
+    return live & (i >= ks + 2), wr, wi, i
+
+
 # Reference-LAPACK 3.12.1 SRC/zhseqr.f 434-486 past 427-430's ILO = IHI return, where `proceed`, N = n (zgeev.f's
 # order): 434-436 NMIN = MAX(NTINY = 15, ILAENV(12) = 75) (iparmq.f 288); 440-443 N > NMIN, ZLAQR0; else 448-450
 # ZLAHQR and, where its INFO > 0, 457 KBOT = INFO and ZLAQR0(WANTT, WANTZ, N or NL, ILO, KBOT, ..., ILO, IHI, Z):
@@ -3563,6 +4164,38 @@ def _zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed, lwork):
     return (torch.where(_mat(back), hl[..., :n, :n], h), wl[..., :n], zl[..., :n, :n] if wantz else zl, info)
 
 
+# Reference-LAPACK 3.12.1 SRC/dhseqr.f 451-503 past 443-447's ILO = IHI return, where `proceed`, N = n (dgeev.f's
+# order), as _zhseqr takes zhseqr.f: 451-453 NMIN = MAX(NTINY = 15, ILAENV(12) = 75); 457-460 N > NMIN, DLAQR0; else
+# 465-467 DLAHQR and, where its INFO > 0, 474 KBOT = INFO and DLAQR0(WANTT, WANTZ, N or NL, ILO, KBOT, ..., ILO, IHI,
+# Z): 481-483 on H where N >= NL = 49 (347), else 492-501 on HL as _zhseqr's (WR and WI padded to NL here alike), HL
+# back into H where WANTT or INFO /= 0. LWORK is the caller's (`lwork`: dgeev.f's LWORK - N at IWRK = ITAU = N + 1)
+# on 458-460 and 481-483's H, NL on 497-499's HL. Returns H, WR, WI, Z, INFO
+def _dhseqr(wantt, wantz, ilo, ihi, h, wr, wi, z, proceed, lwork):
+    n = h.shape[-1]
+    order = torch.full_like(ilo, n)
+    if n > 75:
+        return _dlaqr0(wantt, wantz, False, order, ilo, ihi, h, wr, wi, ilo, ihi, z, proceed, lwork)
+    h, wr, wi, z, info = _dlahqr(wantt, wantz, order, ilo, ihi, h, wr, wi, ilo, ihi, z, proceed)
+    retry = proceed & (info > 0)
+    if n >= 49:
+        h, wr, wi, z, again = _dlaqr0(wantt, wantz, False, order, ilo, info, h, wr, wi, ilo, ihi, z, retry, lwork)
+        return h, wr, wi, z, torch.where(retry, again, info)
+    pad = 49 - n
+
+    def extended(x):
+        return torch.cat([x, x.new_zeros((*x.shape[:-1], pad))], -1)
+
+    def padded(x):
+        x = extended(x)
+        return torch.cat([x, x.new_zeros((*x.shape[:-2], pad, 49))], -2)
+    hl, wrl, wil, zl, again = _dlaqr0(wantt, wantz, False, torch.full_like(ilo, 49), ilo, info, padded(h),
+                                      extended(wr), extended(wi), ilo, ihi, padded(z) if wantz else z, retry, 49)
+    info = torch.where(retry, again, info)
+    back = retry if wantt else retry & (info != 0)
+    return (torch.where(_mat(back), hl[..., :n, :n], h), wrl[..., :n], wil[..., :n],
+            zl[..., :n, :n] if wantz else zl, info)
+
+
 # Reference-LAPACK 3.12.1 SRC/zgeev.f 321-513 and dgeev.f 342-542 (JOBVL = 'N', JOBVR = `jobvr`) on a non-CPU
 # engine, the results of LAPACK_ZGEEV (w, vr, info) or LAPACK_DGEEV (wr, wi, vr, info) and their shapes (vr
 # column-major, or (0,) where JOBVR = 'N'), with LWORK ATen's (_geev_lwork): ANRM = ZLANGE('M') (the largest modulus,
@@ -3575,10 +4208,13 @@ def _zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed, lwork):
 # (zhseqr.f 414-418: W(1:ILO-1) and W(IHI+1:N) from H's diagonal, 427-430's ILO = IHI W(ILO) = H(ILO,ILO) return,
 # 434-486 _zhseqr, then 490-491's H(3:N,1:N-2) lower part zero where WANTT or INFO /= 0 and N > 2); where INFO = 0
 # and with vectors ZTREVC3, ZGEBAK('B', 'R') and the normalization (VR as ZHSEQR left Z elsewhere); label 50's undo
-# scaling ZLASCL(CSCALE -> ANRM) of W(INFO+1:N), and of W(1:ILO-1) where INFO > 0, where SCALEA and INFO >= 0. OPEN,
-# not yet source here: dhseqr.f's DLAQR0 selection (N > NMIN = 75) and its DLAQR0 retry where DLAHQR returns INFO > 0
-# (dlaqr0.f, dlaqr3.f, dlaqr2.f, dlaqr4.f, dtrexc.f-dlaexc.f, dormhr.f; _laqr5 holds dlaqr5.f), so every real N
-# reaches DLAHQR alone, which is the source's path only for N <= 75 with INFO = 0
+# scaling ZLASCL(CSCALE -> ANRM) of W(INFO+1:N), and of W(1:ILO-1) where INFO > 0, where SCALEA and INFO >= 0. DHSEQR
+# alike (dhseqr.f 427-434 WR and WI = 0 of the isolated, 443-447, 451-503 _dhseqr at LWORK - N, 508-509). OPEN, not
+# yet source here: the blocked paths the LWORK operands select, xGEHRD's DO 40 (xLAHR2, xLARFB where NH >= 130, at
+# LWORK - N, LWORK - 2 N and xLAQR3's LWORK - JW), xUNGHR/xORGHR's blocked xUNGQR/xORGQR and xUNMHR/xORMHR's blocked
+# xUNMQR/xORMQR (K > 32), each reaching its unblocked code for every N here, and xTREVC3's NB = (LWORK - N) / (2 N)
+# (NBMIN 8, NBMAX 128) choice of back-transformation (here VR = Z X for every N); and the BLAS summation order, FMA
+# contraction and the GPU and ANE precision of each engine
 def _geev_routine(a, jobvr):
     n, k, whole, vectors = a.shape[-1], _counted(a), a.is_complex(), jobvr == 'V'
     limits = torch.finfo(a.real.dtype)
@@ -3602,8 +4238,7 @@ def _geev_routine(a, jobvr):
     if n > 1 and whole:
         h, *eigen, z, info = _zhseqr(vectors, vectors, ilo, ihi, h, *eigen, z, searched, lwork)
     elif n > 1:
-        h, *eigen, z, info = _dlahqr(vectors, vectors, torch.full_like(ilo, n), ilo, ihi, h, *eigen, ilo, ihi, z,
-                                     searched)
+        h, *eigen, z, info = _dhseqr(vectors, vectors, ilo, ihi, h, *eigen, z, searched, lwork - n)
     if n > 2:
         h = torch.where((k[:, None] - k >= 2) & _mat(searched & (vectors | (info != 0))), 0, h)
     info = torch.where(bad, -4, info)

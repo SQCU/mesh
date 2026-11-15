@@ -12,8 +12,11 @@ has since preserved five WIP checkpoints, none of which accepts the method:
 - 53af5eda: the complex xLAQR3/xLAQR0/ZHSEQR group below and GEEV's complex ZHSEQR call. Its xLAQR3 DO 60/70/80 and
   xLAQR5 DO 150/160/170 were whole-slab products with a synthesized last-chunk workspace residue (`_times_right`,
   `_times_left`, `_last_chunk`). The supervisor rejected that as a manual rewrite of the source's chunk sequence.
+- 5fa30b55 and cddf5cf9: the corrections below on top of 53af5eda, then the static LWORK query and its handoff to
+  the complex methods (cddf5cf9; see Coverage).
 
-The operations.py delta on top of 53af5eda is uncommitted:
+The operations.py delta on top of cddf5cf9 is uncommitted: the real DLAEXC/DTREXC/DLAQR3/DLAQR0/DHSEQR group below
+and GEEV's real DHSEQR call. The corrections 5fa30b55/cddf5cf9 hold on top of 53af5eda:
 - It replaces those three helpers with the source's per-chunk passes (`_rows_chunk`, `_columns_chunk`), used by
   `_laqr3` and `_laqr5_columns`. It also drops the two functions' unused locals and rewrites their comments.
 - `_zlartg`'s S now follows v3.12.1 zlartg.f90 206-208, 226, 262-264 and 282: S = CONJG(G) (F / SQRT(F2 H2)), else
@@ -36,7 +39,7 @@ Source provenance found during this delta:
   - ilaenv.f's master-only entries;
   - EXTERNAL lists.
 - The repo's `*.reference.f` files that match these batches are also master copies.
-- zgeev.reference.f's `INFO = -4` NaN/overflow return is master's; v3.12.1 zgeev.f has none (OPEN below).
+- zgeev.reference.f's `INFO = -4` NaN/overflow return is master's; v3.12.1 zgeev.f has none (kept; see Coverage).
 - The line citations written from the master batches are mostly 1-29 lines off v3.12.1. Remapping them is OPEN; only
   this delta's own new citations are v3.12.1 numbers.
 
@@ -133,8 +136,8 @@ loops are unrolled with per-member masks. There is no dtype subset and no reject
     W(ILO) = H(ILO,ILO).
   - Complex: `_zhseqr(WANTT = WANTZ = vectors, ILO, IHI, H, W, Z, proceed)`, which is zhseqr.f 435-487 (see the
     complex xLAQR3/xLAQR0/ZHSEQR group below).
-  - Real: DLAHQR alone, `_dlahqr(WANTT = WANTZ = vectors, N, ILO, IHI, H, WR, WI, ILOZ = ILO, IHIZ = IHI, Z,
-    proceed)`. dhseqr.f's DLAQR0 selection and retry are OPEN (see coverage).
+  - Real: `_dhseqr(WANTT = WANTZ = vectors, ILO, IHI, H, WR, WI, Z, proceed, LWORK − N)`, which is dhseqr.f
+    451-503 (see the real group below).
   - Then H's r − c ≥ 2 part is zeroed when WANTT or INFO ≠ 0, with N > 2 (491-492).
 - **`_zlahqr(wantt, wantz, order, ilo, ihi, h, w, iloz, ihiz, z, proceed)`:**
   - zlahqr.f's own argument list. N (`order`) is a runtime batch tensor, so xLAQR3/xLAQR0 can call it on a
@@ -158,10 +161,10 @@ loops are unrolled with per-member masks. There is no dtype subset and no reject
   - 3.12.1 has no BETA > HUGE/2 branch, so none is written.
   - Real and complex share one body, in the input's own precision.
 
-### xLAQR0 sweep dependencies (complex: called by `_laqr0_pass`; real: not yet called)
+### xLAQR0 sweep dependencies (complex: called by `_laqr0_pass`; real: called by `_dlaqr0_pass`)
 
 These go between `_dgeev_normalized` and `_geev_routine`. Each is cited to zlaqr1.f/zlaqr5.f and dlaqr1.f/dlaqr5.f
-v3.12.1. The complex branch is reached through `_laqr0_pass`. The real branch waits for DLAQR0, which is OPEN.
+v3.12.1. The complex branch is reached through `_laqr0_pass`, the real branch through `_dlaqr0_pass`.
 
 - **`_laqr1(e, order, first, second)`:** ZLAQR1/DLAQR1 for N = 2 and N = 3. The real form keeps the source's
   association.
@@ -202,7 +205,7 @@ v3.12.1. The complex branch is reached through `_laqr0_pass`. The real branch wa
   - The N ≤ 1 / IFST = ILST return.
   - DO 10 as one while_loop (`_ztrexc_pass`), forward or back per member. Each step: ZLARTG(T(K,K+1), T22 - T11),
     the row and column ZROTs, the swapped diagonal, and Q's ZROT with WANTQ.
-  - dtrexc.f (DLAEXC, DLASY2, DLARFX, DLANV2) is OPEN, so this group's real branch has no xTREXC yet.
+  - dtrexc.f (DLAEXC, DLASY2, DLARFX, DLANV2) is `_dtrexc` (see the real group below).
 - **`_unm2r`:** zunm2r.f 222-271 and dorm2r.f. The loop direction follows LEFT and NOTRAN; MI/IC or NI/JC, TAUI, then
   ZLARF1F on C(IC,JC).
 - **`_unmhr`:** zunmhr.f 212 and 262-284 (dormhr.f alike).
@@ -214,7 +217,8 @@ v3.12.1. The complex branch is reached through `_laqr0_pass`. The real branch wa
 
 These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr3.f, zlaqr0.f, zhseqr.f and iparmq.f
 3.12.1 line ranges.
-- **`_laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, w, kv, kt, nho, kwv, nve, proceed)`:**
+- **`_laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, w, kv, kt, nho, kwv, nve, proceed,
+  lwork)`:**
   zlaqr3.f 361-577 in source order. It returns H, Z, W (SH), NS and ND.
   - `nested` False is zlaqr2.f. Checked by diff of the executable statements, zlaqr2.f differs only at zlaqr3.f
     416-425 (ZLAHQR for every JW).
@@ -239,7 +243,7 @@ These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr
     - the NS < JW or S = 0 block: the spike ZLARFG, ZLASET('L'), the three ZLARF1Fs, ZGEHRD, H(KWTOP,KWTOP−1), T
       back into the window, ZUNMHR, then DO 60, DO 70 (WANTT) and DO 80 (WANTZ);
     - ND, and NS − INFQR.
-- **`_laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed)`:** zlaqr0.f 323-693.
+- **`_laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed, lwork)`:** zlaqr0.f 323-693.
   - `four` True is zlaqr4.f. By the same diff, it differs only at zlaqr0.f 381 and 516 (ZLAQR2 for ZLAQR3) and
     572-580 (ZLAHQR for every NS).
   - The N = 0 return. N ≤ NTINY = 15 gives ZLAHQR (alone where the static n ≤ 15).
@@ -259,8 +263,8 @@ These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr
     - applies the two-shift rule, then NS, KS, KDU, KU, KWH, NHO, KWV and NVE;
     - calls `_laqr5`, then updates NDFL.
   - INFO = KBOT once IT passes ITMAX. This includes the source's case where that last pass left KBOT < ILO.
-  - NWMAX = (N − 1)/3 and NSMAX = (N − 3)/6. The LWORK/2 and 2·LWORK/3 terms are the larger ones, from the call
-    graph:
+  - NWMAX = MIN((N − 1)/3, LWORK/2) and NSMAX = MIN((N − 3)/6, 2·LWORK/3), with the static LWORK. The call graph
+    that carries LWORK there:
     - ATen's BatchLinearAlgebraKernel.cpp 252-258 (torch 2.14.0, git 08187d9e) passes lapack_work_to_int of the
       query's WORK(1) (204-212);
     - zgeev.f 269 and 298-300: MAXWRK ≥ N + N·ILAENV(1,'ZGEHRD') = 33N (ilaenv.f 349-354);
@@ -268,7 +272,7 @@ These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr
     - it is passed on by zhseqr.f 441-444 and 463-464, zlaqr0.f 516-520 and 573-575, and zlaqr3.f 418-420;
     - zhseqr.f 480-482's HL call passes NL = 49, so 16 < 24 and 7 < 32.
     - The ATen source was fetched read-only to /tmp/n67h/aten.
-- **`_zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed)`:** zhseqr.f 435-487.
+- **`_zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed, lwork)`:** zhseqr.f 435-487.
   - Static N = n > NMIN = 75: ZLAQR0.
   - Else ZLAHQR. Where INFO > 0, KBOT = INFO and ZLAQR0(…, ILO, KBOT, …, ILOZ = ILO, IHIZ = IHI):
     - on H when N ≥ NL = 49;
@@ -304,6 +308,56 @@ These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr
   - `_dlartg`: LAPACK 3.10+ dlartg.f90.
 - **INFO:** `_eigen` passes INFO to `aten._linalg_check_errors(info, 'torch.linalg.eig' | 'torch.linalg.eigvals',
   is_matrix)` after the results are computed.
+
+### Real DLAEXC / DTREXC / DLAQR3 / DLAQR0 / DHSEQR group (uncommitted; called by `_geev_routine` for real)
+
+Each comment cites its v3.12.1 dlarfx.f, dlasy2.f, dlaexc.f, dtrexc.f, dlaqr3.f, dlaqr2.f, dlaqr0.f, dlaqr4.f and
+dhseqr.f line ranges (/tmp/n67i/lapack). Each sits beside its complex counterpart.
+- **`_dlarfx3(left, v, tau, x, r0, c0, extent, when)`:** dlarfx.f's TAU = 0 return and its order-3 code (154-155;
+  190-206 for SIDE = 'L', 456-472 for 'R'), the only order DLAEXC calls.
+- **`_dlasy2(n1, n2, d)`:** dlasy2.f 230-475 with LTRANL = LTRANR = .FALSE. and ISGN = −1, as dlaexc.f 247-249 calls
+  it:
+  - K = 1;
+  - K = 2, 3: the IDAMAX pivot and the LOCU12/LOCL21/LOCU22/XSWPIV/BSWPIV tables;
+  - K = 4: DO 100's complete pivoting, DO 90/80, then DO 120/130. IPSV/JPSV keep the previous I's where no entry is
+    taken; at I = 1 the source leaves them unset, and they are 1 here.
+- **`_dlaexc(wantq, order, t, q, j1, n1, n2, when)`:** dlaexc.f 185-435:
+  - the 1 × 1 swap (DLARTG, DROTs);
+  - else D, THRESH and DLASY2, then labels 10/20/30: DLARFG(3), DLARFX on D, the THRESH test, then DLARFX on T and Q;
+  - label 40's DLANV2 standardization;
+  - INFO = 1 (label 50) where the swap is rejected, with T and Q unchanged.
+- **`_dtrexc(wantq, order, t, q, ifst, ilst, when)`:** dtrexc.f 207-428:
+  - the block-start adjustments of IFST and ILST, then NBF/NBL;
+  - labels 10 (forward) and 20 (back) as one while_loop (`_dtrexc_pass`);
+  - returns the in/out ILST and INFO. A checked DLAEXC's INFO ≠ 0 ends the loop; the 1 × 1 calls the source leaves
+    unchecked stay unchecked.
+- **`_dlaqr3(…, wr, wi, …, proceed, lwork)`:** dlaqr3.f 360-693, with `_laqr3`'s T/V/WV regions and chunk passes.
+  `nested` False is dlaqr2.f, which differs only at dlaqr3.f 416-423 (DLAHQR for every JW). In order:
+  - the returns, then the KBOT = KWTOP window;
+  - T, and V = I, then DLAQR4 or DLAHQR into SR/SI;
+  - DO 10's clean margin;
+  - label 20 (`_dlaqr3_deflated`): BULGE, the spike test, then DTREXC with ILST = its ILST + 1 or 2;
+  - S = 0 where NS = 0;
+  - label 30/40's bubble sort (`_dlaqr3_sorted`, `_dlaqr3_bubbled`): EVI/EVK, DTREXC, then I = its ILST or K;
+  - label 60 (`_dlaqr3_shifts`), DLANV2 of each 2 × 2 block;
+  - the NS < JW or S = 0 block: DLARFG, DLASET('L'), the three DLARF1Fs, DGEHRD, H(KWTOP,KWTOP−1) = S·V(1,1),
+    DORMHR, then DO 70/80/90;
+  - ND, and NS − INFQR.
+- **`_dlaqr0(…, wr, wi, …, proceed, lwork)` and `_dlaqr0_pass`:** dlaqr0.f 323-730, as `_laqr0` with ABS for CABS1.
+  `four` True is dlaqr4.f, which differs only at dlaqr0.f 385, 520 and 588-597.
+  - DO 30's exceptional shifts (DLANV2 with WILK1 = 0.75, WILK2 = −0.4375) are taken at every I of the loop at once:
+    each I reads only H and writes only its own WR/WI(I−1) and (I). Then the KS = KTOP pair.
+  - The NS × NS DLAQR4/DLAHQR shifts, then the KS ≥ KBOT DLANV2 fallback.
+  - DO 50/40's bubble sort on |WR| + |WI| (`_dlaqr0_sorted`, `_dlaqr0_swapped`), then DO 70's pairing
+    (`_dlaqr0_paired`).
+  - The two-real-shift rule.
+  - DLAQR5. Its DO 10 pairing (dlaqr5.f 330-343) is written back into WR/WI(KS..).
+- **`_dhseqr(wantt, wantz, ilo, ihi, h, wr, wi, z, proceed, lwork)`:** dhseqr.f 451-503, as `_zhseqr`:
+  - static N > 75: DLAQR0;
+  - else DLAHQR, and where its INFO > 0 the DLAQR0 retry, on H (N ≥ NL = 49) or on HL with LWORK = NL.
+- **GEEV's real call:** `_dhseqr(vectors, vectors, ILO, IHI, H, WR, WI, Z, searched, LWORK − N)`, at dgeev.f's IWRK =
+  ITAU = N + 1. DHSEQR's isolated WR/WI, its ILO = IHI return and its H(3:N,1:N−2) clearing are `_geev_routine`'s,
+  as for complex.
 
 ## RNG state (connected; the consumer applies the advance)
 
@@ -362,27 +416,40 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
     v3.12.1's LWKOPT = NW·NB + TSIZE (not master's): ZUNMHR gets LWORK − JW.
     - ATen passes lwork = ceil(nextafter(WORK(1))), i.e. zgeev's MAXWRK + 1.
     - MAXWRK takes the maximum over the ZGEHRD/ZUNGHR terms, N + ZTREVC3's query with vectors, and ZHSEQR's query.
-    - This query chain is not yet transcribed; the earlier entries use only its lower bound 33N.
+    - This query chain is `_geev_lwork`: dgeev.f/zgeev.f's MAXWRK, with `_laqr0_query` for the xHSEQR term and
+      ATen's lapack_work_to_int, on static 0-d constants. Its literal LWORK reaches `_zhseqr`/`_dhseqr`,
+      `_laqr0`/`_dlaqr0` and `_laqr3`/`_dlaqr3`.
+    - The supervisor's source review traced that constant to proxy_tensor's lift_fresh_copy (1479), its constant
+      propagation (1494) and its scalar extraction (1362) under `_expanded`'s fake make_fx. That is source evidence
+      only, not an observed trace.
+    - The blocked NB choices this LWORK feeds remain OPEN.
   - The blocked ZGEHRD (DO 40 with zlahr2.f/zlarfb.f) for xLAQR3's ZGEHRD(JW, 1, NS), reached where NS ≥ 130, and for
     GEEV's own ZGEHRD where NH ≥ 130.
   - Their sources are fetched, read-only, and not yet transcribed. Until they are, those members run the unblocked
     ZUNM2R/ZGEHD2.
-- **Real DHSEQR's DLAQR0 (OPEN):** DLAQR0 selection (N > NMIN = 75) and the retry (INFO > 0 from DLAHQR; N ≥ NL = 49
-  on H, else HL). Every real N reaches DLAHQR alone. That is the source's path only for N ≤ 75 with INFO = 0.
-  Unwritten: dlaqr0.f/dlaqr4.f (real shift pairs), dlaqr3.f/dlaqr2.f (2 × 2 blocks with DLANV2), dtrexc.f with
-  dlaexc.f/dlasy2.f/dlarfx.f, and dormhr.f's blocked DORMQR. `_laqr5`'s real branch (dlaqr5.f) and `_laqr1` are
-  written but not yet called.
-- **GEEV's INFO = −4 (OPEN):** `_geev_routine` returns INFO = −4 where ANRM is NaN or above overflow. That return is
-  master zgeev.f's (the repo's zgeev.reference.f). v3.12.1 zgeev.f has none: it scales and proceeds. dgeev.f has the
-  same split.
+- **Real DHSEQR:** the source is now written (see the real group above) and called by GEEV, but none of it has been
+  traced or executed. Still OPEN within it are the same blocked routines as for complex:
+  - DGEHRD's DO 40 (DLAHR2/DLARFB) for GEEV's NH ≥ 130 and DLAQR3's NS ≥ 130;
+  - DORMHR's blocked DORMQR (DLARFT/DLARFB, K = NS − 1 > 32);
+  - GEEV's DORGHR with its blocked DORGQR;
+  - DTREVC3's NB choice.
+
+  Until they are written, those members run DGEHD2, DORM2R and the unblocked DORGHR reflectors.
+- **GEEV's INFO = −4 (kept as the API contract):** `_geev_routine` returns INFO = −4 where ANRM is NaN or above
+  overflow.
+  - That return is master zgeev.f/dgeev.f's (the repo's `*.reference.f`). v3.12.1 zgeev.f/dgeev.f have none; they
+    scale and proceed.
+  - Per the supervisor's 11-15 correction it is kept as the error contract that the CPU route's LAPACK_xGEEV returns to
+    `_linalg_check_errors`. The source comment cites that version explicitly; the return is not removed to make the
+    citations uniform.
 - **Line citations (OPEN):** the comments written from the master batches are 1-29 lines off v3.12.1. These cover
   zlahqr/dlahqr, dlanv2, zgehrd/zgehd2, ztrexc, zunm2r, zunmhr, zunmqr, iparmq, ilaenv, and zlaqr0/3/4 with
   zhseqr. Each needs remapping against /tmp/n67i and /tmp/n67j.
 - **`_unghr` exactness (OPEN):** ZUNGHR still applies its reflectors with the generic `_dlarf`, not with zung2r.f's own
   reflector code. GEEV's ZGEHD2 now uses `_larfg_vector` and `_larf1f`.
 - **Rounding differences from the reference:**
-  - The blocked ZGEHRD (NH ≥ 130, and xLAQR3's NS ≥ 130), the blocked ZUNMQR (xLAQR3's NS ≥ 34) and the blocked
-    ZUNGHR/ZUNGQR are the unblocked forms here.
+  - The blocked ZGEHRD/DGEHRD (NH ≥ 130, and xLAQR3's NS ≥ 130), the blocked ZUNMQR/DORMQR (xLAQR3's NS ≥ 34)
+    and the blocked ZUNGHR/ZUNGQR and DORGHR/DORGQR are the unblocked forms here.
   - DLADIV/ZLADIV are transcribed (`_divided`, `_dladiv1`, `_dladiv2`, `_cdiv`; checkpoint 43aa1f2e).
   - The scaled largest-modulus norm stands in for dznrm2.f90/dnrm2.f90.
   - Backend summation order and FMA differ, as does the TREVC3 GEMM back-transform order.
