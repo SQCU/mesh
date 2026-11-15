@@ -1,6 +1,6 @@
 --- a/torch/_inductor/codegen/cpp_wrapper_cpu.py
 +++ b/torch/_inductor/codegen/cpp_wrapper_cpu.py
-@@ -1021,6 +1021,35 @@
+@@ -1021,6 +1021,34 @@
          """Emit input stealing and (in JIT mode) GIL release."""
          # Weights are promoted in the JIT mode
          jit_num_args = len(V.graph.graph_inputs) + len(V.graph.constants)
@@ -8,19 +8,18 @@
 +            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
 +            # aot_inductor.lowered, the borrowed entry: its caller keeps every
 +            # handle it passes, none stolen (_write_input_unpacking binds each
-+            # input as a ConstantHandle). bound_entry is its own operands:
++            # input as a ConstantHandle). bound_entry is its own operand counts:
 +            # "aot" its run_impl's input count (None: a const graph's
 +            # _const_run_impl, which has no input_handles), "jit" its
-+            # inductor_entry_impl's, `inputs` and `constants` their names in
-+            # entry order. The slots supplied for its bindings follow them:
-+            # bound_handles, its input_handles past its own inputs. Written by
-+            # write_wrapper_decl at its planned stage's resumption
-+            # (resume_generation), before any line prints
++            # inductor_entry_impl's; its inputs and constants themselves its
++            # graph's (V.graph.graph_inputs and constants, in entry order). The
++            # slots supplied for its bindings follow them: bound_handles, its
++            # input_handles past its own inputs. Written by write_wrapper_decl
++            # at its planned result's emission (resume_generation), before any
++            # line prints
 +            self.bound_entry = dict(
 +                aot=None if V.graph.is_const_graph else len(V.graph.graph_inputs),
 +                jit=jit_num_args,
-+                inputs=tuple(V.graph.graph_inputs),
-+                constants=tuple(V.graph.constants),
 +            )
 +            if not V.graph.is_const_graph:
 +                self.prefix.splice_aot(
@@ -36,7 +35,7 @@
          # AOTI const graphs enter through _const_run_impl and have no
          # input_handles. Their JIT entry point still receives constants as
          # appended input handles.
-@@ -1051,8 +1080,38 @@
+@@ -1051,8 +1079,38 @@
                  if dtype is None:
                      raise AssertionError("Fails to get the dtype of the sympy.Expr")
                  self.codegen_tensor_item(
@@ -77,7 +76,7 @@
              else:
                  self.prefix.writeline(f"auto {input_key} = std::move(inputs[{idx}]);")
          # debug printing for all input args to AOTI model
-@@ -1079,13 +1138,20 @@
+@@ -1079,13 +1137,20 @@
              self.prefix.writeline_aot(
                  f"[[maybe_unused]] auto& {constants_key} = constants_->at({idx});"
              )
@@ -100,35 +99,38 @@
              self.prefix.writeline_aot("inputs.clear();")
          self.prefix.writeline_aot(
              "[[maybe_unused]] auto& kernels = static_cast<AOTInductorModelKernels&>(*this->kernels_.get());"
-@@ -1470,8 +1536,26 @@
+@@ -1470,8 +1535,29 @@
  
      def generate(self, is_inference):
          with dynamo_timed("CppWrapperCpu.generate", log_pt2_compile_event=True):
 +            # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
 +            # aot_inductor.lowered, the entry's declaration (write_wrapper_decl:
 +            # its signature, input preamble and unpacking, constants and input
-+            # symbols) is emitted at its planned stage's resumption, with the
-+            # supplied operand (resume_generation), not before its planned
-+            # stage. A const graph's generation resumes at once: its declaration
-+            # first, as the original
++            # symbols) is written at its planned result's emission, with its
++            # supplied bindings (resume_generation), not before its planned
++            # stage. A const graph's declaration is written here, as the
++            # original's: it takes no supplied binding; its print is its
++            # emission's
 +            if not config.aot_inductor.lowered or V.graph.is_const_graph:
 +                self.write_wrapper_decl()
 +            return super().generate(is_inference)
 +
-+    def resume_generation(self, supplied):
++    def resume_generation(self, planned, supplied=None, **defined):
 +        # compiler/patches/torch-inductor-cpp-wrapper-binding.patch:
-+        # aot_inductor.lowered, its planned stage resumed with `supplied` (the
-+        # binding operand its print consumes, held as self.supplied): the
-+        # entry's declaration, then its planned lines' print
++        # aot_inductor.lowered, the emission of its planned result `planned`
++        # given `supplied` (the bindings its print consumes, held by this
++        # emitter as self.supplied, its output state): the entry's
++        # declaration, then the original emission (its print, `defined` its
++        # configured definitions, and its sections' assembly)
 +        if config.aot_inductor.lowered and not V.graph.is_const_graph:
 +            self.supplied = supplied
              self.write_wrapper_decl()
 -            return super().generate(is_inference)
-+        return super().resume_generation(supplied)
++        return super().resume_generation(planned, supplied, **defined)
  
      def _codegen_aoti_model_class(self):
          """Emit AOTI model class, constructor, and const_run driver into self.prefix."""
-@@ -1603,6 +1687,27 @@
+@@ -1603,6 +1689,27 @@
      def generate_return(self, output_refs: list[str]):
          cst_names = V.graph.constants.keys()
          output2idx: dict[str, int] = {}
@@ -156,7 +158,7 @@
  
          # If any output ref represents an rvalue tensor, materialize it to an lvalue
          # RAIIAtenTensorHandle first.  This prevents situations where the code for the
-@@ -1634,6 +1739,8 @@
+@@ -1634,6 +1741,8 @@
                  self.wrapper_call.writeline(
                      f"output_handles[{idx}] = {output_tensor}.release();"
                  )
@@ -165,7 +167,7 @@
                  continue
  
              if is_constant_buffer:
-@@ -1648,11 +1755,30 @@
+@@ -1648,11 +1757,30 @@
                      self.wrapper_call.writeline(
                          f"output_handles[{idx}] = output_handles[{src_idx}];"
                      )
@@ -196,7 +198,7 @@
              if output not in output2idx:
                  output2idx[output] = idx
  
-@@ -2014,6 +2140,20 @@
+@@ -2014,6 +2142,20 @@
          device: str,
          stack_traces: OrderedSet[str] | None = None,
      ) -> None:
@@ -217,7 +219,7 @@
          if out_view:
              out_name = f"{out}_as_strided"
              self.writeline(f"auto {out_name} = {out_view};")
-@@ -2284,6 +2424,14 @@
+@@ -2284,6 +2426,14 @@
          self.unbacked_symbol_decls.add(str(sym))
  
      def make_buffer_free(self, buffer):
@@ -232,7 +234,7 @@
          return (
              ""
              if isinstance(buffer.get_output_spec(), ir.MultiOutputLayout)
-@@ -2292,9 +2440,22 @@
+@@ -2292,9 +2442,22 @@
          )
  
      def make_free_by_names(self, names_to_del: list[str]):
@@ -255,7 +257,7 @@
          return f"auto {new_name} = std::move({old_name});  // reuse"
  
      def generate_debug_sync(self, buffer):
-@@ -2467,10 +2628,53 @@
+@@ -2467,10 +2630,53 @@
              buffer.get_stride(),
              V.graph.get_allocation_size(buffer),
              buffer.get_is_pinned(),
@@ -311,7 +313,7 @@
      ):
          """Emit C++ to allocate a tensor handle via aoti_torch_empty_strided.
  
-@@ -2532,15 +2736,85 @@
+@@ -2532,15 +2738,85 @@
              )
              return f"AOTI_TORCH_ERROR_CODE_CHECK(aoti_torch_empty_strided{pinned_str}({args}));"
  
@@ -373,7 +375,7 @@
 +                is_pinned=is_pinned,
 +                buffer=buffer,
 +                graphs=graphs,
-+                supplied=(k, prepared),
++                supplied=self.supplied[name],
 +                handle=handle_name,
 +            )
 +            self.__dict__.setdefault("bound_allocations", []).append(record)
@@ -406,7 +408,7 @@
  
          if allocation_size != size:
              old_handle_name, handle_name = handle_name, f"{name}_handle_restrided"
-@@ -2558,11 +2832,58 @@
+@@ -2558,11 +2834,58 @@
                  f"wrap_with_raii_handle_if_needed({old_handle_name});"
              )
  
@@ -448,7 +450,7 @@
 +                self._bound_prepared(tuple(names), view["graphs"])
 +                self.__dict__.setdefault("bound_consumed", set()).add(key)
 +                tmp_name = f"tmp_tensor_handle_{next(self.tmp_tensor_id)}"
-+                view["supplied"], view["handle"] = (k, names), tmp_name
++                view["supplied"], view["handle"] = self.supplied[key], tmp_name
 +                view["result"] = (
 +                    f"ConstantHandle({tmp_name})",
 +                    [f"AtenTensorHandle {tmp_name} = bound_handles[{k}];"],
@@ -465,7 +467,7 @@
          size = self.codegen_shape_tuple(shape)
          stride = self.codegen_shape_tuple(stride)
          tmp_name = f"tmp_tensor_handle_{next(self.tmp_tensor_id)}"
-@@ -2586,6 +2907,9 @@
+@@ -2586,6 +2909,9 @@
              f"AtenTensorHandle {tmp_name};",
              f"AOTI_TORCH_ERROR_CODE_CHECK(aoti_torch__alloc_from_pool({', '.join(args)}));",
          ]
@@ -475,7 +477,7 @@
          return f"RAIIAtenTensorHandle({tmp_name})", allocations_to_write
  
      def codegen_reinterpret_view(
-@@ -2600,6 +2924,56 @@
+@@ -2600,6 +2926,56 @@
          """Returns a newly-created, temporary RAII tensor handle containing the
          reinterpreted tensor data.  Callers of this function are responsible for saving
          the handle if persistent access is needed."""
@@ -517,7 +519,7 @@
 +                self.__dict__.setdefault("bound_consumed", set()).add(key)
 +                line = f"ConstantHandle {result}(bound_handles[{k}]);"
 +                writeline(line)
-+                view.update(supplied=(k, names), result=result, lines=(line,))
++                view.update(supplied=supplied[key], result=result, lines=(line,))
 +                return result
 +            if (
 +                printed
@@ -532,7 +534,7 @@
  
          d_size, d_stride, d_offset, d_dtype, collapsible = (
              codegen_reinterpret_view_helper(data)
-@@ -2711,6 +3085,9 @@
+@@ -2711,6 +3087,9 @@
          #     }.cbegin()
          # );
          # ```
