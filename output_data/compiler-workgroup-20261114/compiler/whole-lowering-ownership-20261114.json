@@ -1,0 +1,474 @@
+{
+  "date": "2026-11-14",
+  "scope": "compiler Python/patch ownership, paired with frontend and native audits",
+  "mesh_revision": "8cbc2ab99c2c1305bda0869ba3bfd5d8158f9b50",
+  "source_status": "",
+  "files": [
+    {
+      "path": "compiler/mesh_compiler/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "lines": 0,
+      "imports": []
+    },
+    {
+      "path": "compiler/mesh_compiler/archive.py",
+      "sha256": "fc8b0a0856268b5292950b316eef01b56e3a8ee7521489e52c2d2aaac8c88a5b",
+      "lines": 360,
+      "imports": [
+        "import collections",
+        "import dataclasses",
+        "from copy import deepcopy",
+        "import inspect",
+        "import json",
+        "import pathlib",
+        "import torch",
+        "from torch._subclasses.fake_tensor import FakeTensorMode",
+        "from torch.export.graph_signature import InputKind, OutputKind",
+        "from torch.fx._graph_pickler import GraphPickler, Options",
+        "from torch.fx.graph_module import _assign_attr, _del_attr, _get_attr",
+        "from torch.multiprocessing.reductions import StorageWeakRef",
+        "from torch.utils import _pytree as pytree",
+        "from . import native, schedule",
+        "from .ir import Call, CapturedProgram, Exported, Scheduled"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/bridge.py",
+      "sha256": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+      "lines": 135,
+      "imports": [
+        "import ctypes as C",
+        "import itertools",
+        "import mmap",
+        "import os",
+        "import pathlib",
+        "import sys",
+        "import time",
+        "import weakref",
+        "import torch",
+        "from torch.export.graph_signature import InputKind",
+        "from .ir import Planning",
+        "import mesh",
+        "from .metal import _lent",
+        "from .schedule import published_program",
+        "from .native import planned_buffer",
+        "from .native import viewed",
+        "from .native import framed"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/decompose.py",
+      "sha256": "2af20f0fe921fe4dd72e25cffe1906770b1e375bafea4d66581e0cfd5ae22eec",
+      "lines": 568,
+      "imports": [
+        "import functools",
+        "import operator",
+        "import torch",
+        "from torch._guards import detect_fake_mode",
+        "from torch.export.graph_signature import OutputKind",
+        "from torch.fx.experimental.proxy_tensor import make_fx",
+        "from torch.fx.graph_module import _assign_attr, _get_attr",
+        "from torch.utils import _pytree as pytree",
+        "from .devices import on_devices",
+        "from .ir import RETURNED, Exported, shape, views",
+        "from .ir import given as ir_given",
+        "from .operations import FRAGMENT, LSTSQ_FIXED, _eigen_geev, _fragment_decoded, _lapack_eigen, _lapack_hermitian, _lapack_least_squares, _lapack_singular, _least_squares_qr, _least_squares_svd, _lstsq_driver, _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_pop, _qdwh_eigh_result, _qdwh_eigh_state, _singular_qdwh",
+        "from .placement import insert_send_recv",
+        "from .schedule import carried",
+        "import mesh_graph",
+        "from .export import substitute"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/devices.py",
+      "sha256": "2cdb7363ad34790504be83f75291958cc25d22823a17fdc0d21497d0ad13cedd",
+      "lines": 79,
+      "imports": [
+        "import copy",
+        "import torch",
+        "from .ir import HOST, views"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/driver.py",
+      "sha256": "43254b1aebf1999ed53e565dfc23172694dc7d3f221e84554c754d6c9c7cff40",
+      "lines": 130,
+      "imports": [
+        "import dataclasses",
+        "import torch",
+        "from torch.export.graph_signature import OutputKind",
+        "from . import native",
+        "from .decompose import decompose, outline",
+        "from .devices import ENGINES, HOST, on_devices",
+        "from .export import called, calls",
+        "from .ir import Scheduled",
+        "from .lower_inductor import lower",
+        "from .lower_metal import construct",
+        "from .metal import _machines",
+        "from .operations import Generator, seeded",
+        "from .placement import place",
+        "from .schedule import analyse, call_operands, carried, schedule, unit_cost",
+        "from .bridge import planning as acquired"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/export.py",
+      "sha256": "4260811b1f65a7be72133f0d1f749f9c642a639213bcee927b87e9f3fd2038a2",
+      "lines": 629,
+      "imports": [
+        "import functools",
+        "import inspect",
+        "import itertools",
+        "import math",
+        "import operator",
+        "import torch",
+        "from torch._export.passes.lift_constants_pass import lift_constants_pass",
+        "from torch._export.utils import _collect_and_set_constant_attrs, node_inline_",
+        "from torch._guards import detect_fake_mode",
+        "from torch._higher_order_ops.map import map_dense",
+        "from torch._higher_order_ops.scan import generic_scan",
+        "from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode",
+        "from torch.export.experimental import _export_forward_backward",
+        "from torch.export.graph_signature import ConstantArgument, InputKind, OutputKind",
+        "from torch.fx._symbolic_trace import PHWithMeta",
+        "from torch.fx.experimental.proxy_tensor import make_fx",
+        "from torch.fx.experimental.symbolic_shapes import ShapeEnv",
+        "from torch.multiprocessing.reductions import StorageWeakRef",
+        "from torch.nn.attention import SDPBackend, sdpa_kernel",
+        "from torch.utils import _pytree as pytree",
+        "from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, written",
+        "from .operations import LSTSQ_FIXED",
+        "from torch._functorch._aot_autograd.runtime_wrappers import _RuntimeForwardEpilogue"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/ir.py",
+      "sha256": "e160278ed16a54aa1b476c9583f4e8d252c7bcaf374c4d87d8a27b7d77db1089",
+      "lines": 351,
+      "imports": [
+        "import collections",
+        "import operator",
+        "import pathlib",
+        "import sys",
+        "import threading",
+        "from dataclasses import dataclass",
+        "import torch",
+        "from torch import Tensor",
+        "from torch._guards import detect_fake_mode",
+        "from torch._higher_order_ops.effects import _EffectType, _register_effectful_op",
+        "from torch.export.graph_signature import OutputKind",
+        "from torch.fx.node import map_arg",
+        "from torch.utils import _pytree as pytree",
+        "import mesh_graph"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/lower_coreml.py",
+      "sha256": "fab5d0848889176c9103d7aeb5e978acea02d0df30e30becbe80158c8cd35a06",
+      "lines": 339,
+      "parse": "intentional dead lower_coreml reference: invalid syntax (<unknown>, line 321)"
+    },
+    {
+      "path": "compiler/mesh_compiler/lower_inductor.py",
+      "sha256": "9487813a0475942e866dbd5d05701ae8ea2a826783f42276f4a63fee2a0d0c4c",
+      "lines": 778,
+      "imports": [
+        "import dataclasses",
+        "import functools",
+        "from pathlib import Path",
+        "import coremltools as ct",
+        "import torch",
+        "from torch import Tensor",
+        "from torch._guards import TracingContext",
+        "from torch._higher_order_ops.effects import _EffectType, _register_effectful_op",
+        "from torch._inductor import config",
+        "from torch._inductor import ir as upstream",
+        "from torch._inductor.codegen.cpp import CppScheduling, KernelGroup",
+        "from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling",
+        "from torch._inductor.codegen.simd import DisableReduction, EnableReduction",
+        "from torch._inductor.compile_fx import compile_fx, compile_fx_inner",
+        "from torch._inductor.cpp_builder import CppTorchDeviceOptions",
+        "from torch._inductor.cpu_vec_isa import pick_vec_isa",
+        "from torch._inductor.graph import GraphLowering, SubgraphLowering",
+        "from torch._inductor.lowering import fallback_handler, register_lowering",
+        "from torch._inductor.scheduler import Scheduler",
+        "from torch._inductor.virtualized import V",
+        "from torch.utils._cpp_embed_headers import _embed_headers",
+        "from .ir import RECV, SEND, channel_of"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/lower_metal.py",
+      "sha256": "7bb48abf077e96ae000ec1dc6c73ee33090738ea4e7af7abb2f71703c879f216",
+      "lines": 1040,
+      "imports": [
+        "import collections",
+        "import ctypes as C",
+        "import dataclasses",
+        "import weakref",
+        "import sympy",
+        "import torch",
+        "from torch._inductor import dependencies",
+        "from torch._inductor import ir as upstream",
+        "from torch._inductor.codegen.common import RemovedArg",
+        "from torch._inductor.utils import unique",
+        "from torch.export.graph_signature import InputKind, OutputKind",
+        "from torch.utils import _pytree as pytree",
+        "from torch.utils._sympy.functions import FloorDiv, ModularIndexing",
+        "from torch.utils._sympy.symbol import SymT, symbol_is_type",
+        "from . import lower_inductor as producer",
+        "from . import operations",
+        "from .ir import RECV, SEND",
+        "from .lower_inductor import copies",
+        "from .metal import CHECK_CONVERGENCE, CONSTANT, INPUT, LAPACK_GEEV, LAPACK_GELSD, LAPACK_GELSS, LAPACK_GESDD, LAPACK_HEEVD, NONE, OUTPUT, SCALAR, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED, SOURCE_SENT, SOURCE_VALUE, STATE, TEMPORARY, UPSTREAM_BUFFER, UPSTREAM_ERROR, UPSTREAM_SCALAR, SourceOperand, ValueInfo, _Builder, _compiler, _composition, _configured, _emitted, _footprints, _upstream",
+        "from .operations import ANE, CPU, GPU"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/metal.py",
+      "sha256": "149db27d33a930e216f11453483201f24b177825d2b2ceca12a1ececeacc2ee3",
+      "lines": 1140,
+      "imports": [
+        "import collections",
+        "import ctypes as C",
+        "import ctypes.util",
+        "import errno",
+        "import os",
+        "import pathlib",
+        "import sys",
+        "import torch",
+        "from .operations import CLASS, CPU, GPU, KINDS, SCALAR, _Check, _Repeat, _Sort, _Switch, _Words, _bits, _copy, _key, _placed, _stored",
+        "import mesh",
+        "import mesh_graph"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/native.py",
+      "sha256": "27995cc3d956ea6d8486f76a367209da1be4d5372e7d29d74767fec48dd75bf9",
+      "lines": 1570,
+      "imports": [
+        "import ctypes as C",
+        "import dataclasses",
+        "import errno",
+        "import itertools",
+        "import mmap",
+        "import pathlib",
+        "import sys",
+        "import weakref",
+        "import torch",
+        "from torch.export.graph_signature import OutputKind",
+        "from torch.utils import _pytree as pytree",
+        "from . import metal",
+        "from .metal import METAL_EXTERNAL_GPU, Argument",
+        "import mesh",
+        "import mesh_graph",
+        "from .lower_metal import Output",
+        "from .lower_metal import Root",
+        "from .schedule import loaded_program",
+        "from .schedule import declare_program, solve_program",
+        "from .lower_metal import Output",
+        "from .operations import _metadata",
+        "from .lower_metal import PLACES",
+        "from .operations import _copy, _key, _placed",
+        "from .lower_metal import operand",
+        "from .lower_metal import Output",
+        "from .operations import _metadata",
+        "from .schedule import SavedNetwork"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/operations.py",
+      "sha256": "720939973e021fd476541470dd51f34228ffb49c6dacd6e0fe8876ad74d6830a",
+      "lines": 4775,
+      "imports": [
+        "import collections",
+        "import functools",
+        "import itertools",
+        "import math",
+        "import pathlib",
+        "import sys",
+        "import torch",
+        "from torch._higher_order_ops.cond import cond_op",
+        "from torch._higher_order_ops.switch import switch_op",
+        "from torch._higher_order_ops.while_loop import while_loop_op",
+        "from torch._prims_common import corresponding_complex_dtype, get_computation_dtype",
+        "from torch.fx.graph_module import _get_attr",
+        "import mesh_code",
+        "from torch._subclasses.fake_tensor import DynamicOutputShapeException"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/placement.py",
+      "sha256": "18ec833bf191184d545c5ab272c42ee80f4e647643468ea437f83e8c548c602e",
+      "lines": 1024,
+      "imports": [
+        "import copy",
+        "import functools",
+        "import itertools",
+        "import math",
+        "import operator",
+        "import pathlib",
+        "import sys",
+        "import torch",
+        "from torch._guards import detect_fake_mode",
+        "from torch.fx.node import map_arg",
+        "from .ir import CLONE, JOIN, PAGES, RECV, SEND, aliasing, constant, evaluated, given, shape, view, views",
+        "import mesh_graph"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/runtime.py",
+      "sha256": "5b9b859d08606bfcccf89e3fbb4c2e048ab8d8c5e40a8371a866d056a065db6c",
+      "lines": 92,
+      "imports": [
+        "import math",
+        "import torch",
+        "from torch.export.graph_signature import InputKind",
+        "from torch.utils import _pytree as pytree",
+        "from . import bridge",
+        "from .ir import RETURNED"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/schedule.py",
+      "sha256": "596d0ae1b57e2eb646be7927647229994c7e562d6773509d32460d67b77d449a",
+      "lines": 1315,
+      "imports": [
+        "import ctypes as C",
+        "import dataclasses",
+        "import functools",
+        "import operator",
+        "import pathlib",
+        "import sys",
+        "import time",
+        "import weakref",
+        "import torch",
+        "from torch.export.graph_signature import OutputKind",
+        "from torch.fx.node import Node, map_arg",
+        "from torch.multiprocessing.reductions import StorageWeakRef",
+        "from .ir import HOST, JOIN, RECV, channel_of, views",
+        "import mesh",
+        "import mesh_graph",
+        "from .placement import flat",
+        "from .metal import Term, ValueInfo",
+        "from .operations import SCALAR",
+        "from .archive import attached",
+        "from .metal import _lent"
+      ]
+    },
+    {
+      "path": "compiler/mesh_compiler/shares.py",
+      "sha256": "4ebb348dfbccf74edeb4749044d3f11331fcd0006a36c465f259eecfde1f9826",
+      "lines": 450,
+      "imports": [
+        "import collections",
+        "import pathlib",
+        "import sys",
+        "from .ir import RECV, SEND, channel_of",
+        "import allocate",
+        "import mesh_graph"
+      ]
+    },
+    {
+      "path": "compiler/patches/torch-clone-input-fake-mode.patch",
+      "sha256": "7d4cf393e4101f2546b1337eb9aac0ea73fe8270bf79e53553601f6e8a098ce1",
+      "lines": 11
+    },
+    {
+      "path": "compiler/patches/torch-export-alias-metadata.patch",
+      "sha256": "3b78f2a89c92af83fc21a4bb181e58559b304758313fc86940827c46db40cab6",
+      "lines": 46
+    },
+    {
+      "path": "compiler/patches/torch-export-user-input-gradients.patch",
+      "sha256": "da8eb4af7ffcd0df2913565187ffad82e853570993f6897574e6835b414fa5c3",
+      "lines": 11
+    },
+    {
+      "path": "compiler/patches/torch-inductor-alias-mutations.patch",
+      "sha256": "f513553f6bd7c5fee36835fc0bdc71ed832ea58ad66dde847cde42c96151ceb8",
+      "lines": 252
+    },
+    {
+      "path": "compiler/patches/torch-inductor-graph-lowering-factory.patch",
+      "sha256": "bb0f187b45c826ecfec4d6e82c7a8a91702b3f77e46101b56827cddc5274f48c",
+      "lines": 29
+    },
+    {
+      "path": "compiler/patches/torch-inductor-mps-kernel-operands.patch",
+      "sha256": "079fd01ac9d68b77ce6df748903cbdb5df8839128b29b862d23ac963b82acd31",
+      "lines": 129
+    },
+    {
+      "path": "compiler/patches/torch-inductor-upstream-composition.patch",
+      "sha256": "a08d2ded96ccb7910e7ef24959cc3eade47255ab6b705c9442075091abd87b07",
+      "lines": 252
+    },
+    {
+      "path": "compiler/patches/torch-lstsq-fixed-results.patch",
+      "sha256": "254bc1f4a40f65175fafc8dcf3b3b4bd6ed98b94a1629e77b6aa54d2c9b5d5a8",
+      "lines": 191
+    },
+    {
+      "path": "compiler/patches/README.md",
+      "sha256": "716e1a809d48e2f34c50f399457e0ad9f6357d42f753a2504967fa48900e020a",
+      "lines": 483
+    }
+  ],
+  "upstream": {
+    "_inductor/compile_fx.py": "4e5b593e018c6bd6f69062483d524b64820ab272351fbf073b7ec118a66598f8",
+    "_inductor/graph.py": "efffd6b54ed0e67ad1f41c840957780fae092708adf460ecc16914dcaaba27fe",
+    "_inductor/ir.py": "5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0",
+    "_inductor/scheduler.py": "8e3ca0c3717a4f8973c7bfe41cab52cd0dd7154a5401fd8d60e83b935893178c",
+    "_inductor/dependencies.py": "63b2a6eff781bed1c03d6dde366a6011ac91d22fb434d699c1f4149b2ff25108",
+    "_inductor/codegen/simd.py": "e69dfb7424d525fbc3ec1598d318f4f766af55314282b32e12ea0e69429465d3",
+    "_inductor/codegen/mps.py": "0266b4cd4723ba7f7041e7cad1b4bfca577ca904c852b5d6692a1dc7d4c37ef1",
+    "_inductor/codegen/cpp.py": "885b73279e8686181d3706c6d6a590d07102c44ea739e8c11bb5be5ef758292f",
+    "_inductor/codegen/common.py": "3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466",
+    "_inductor/codegen/wrapper.py": "d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea",
+    "_inductor/fx_passes/post_grad.py": "0793616f6e7d3612a4a935412b380571b47f5fb7d15042c8cdbcfc0b88271431",
+    "_inductor/pattern_matcher.py": "f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b",
+    "_functorch/_aot_autograd/input_output_analysis.py": "c22dc4ab26febeddca53f1046ef9b4e8d51a1c3de48b214d58fc8682291db24f",
+    "_functorch/_aot_autograd/runtime_wrappers.py": "d787a15203c68b5331acf9399f0809d01185300bcde15ffd68133fed2fbd50b4"
+  },
+  "workers": {
+    "68a": {
+      "uuid": "01ede8e3-b3fd-40cd-8b4c-fd37b3941ffa",
+      "exec": 4817,
+      "status": "terminal 0, source written"
+    },
+    "66f": {
+      "uuid": "476e57ac-cf94-49e8-801a-a3ded988dd77",
+      "exec": 78017,
+      "status": "interrupted, terminal 0, source preserved"
+    },
+    "67b": {
+      "uuid": "211a403e-ed56-4d48-a343-ddc67d416cc4",
+      "exec": 52090,
+      "status": "interrupted at source-read boundary, terminal 0, source preserved"
+    }
+  },
+  "imports_or_execution": false,
+  "transitive_boundary": {
+    "rdma/mesh_code.py": {
+      "sha256": "c878849d4d7a2280013eeda694dba794141a1dbb577ac39f88f0e408319e5020",
+      "lines": 101
+    },
+    "rdma/mesh_compile.py": {
+      "sha256": "a81e0fe434139c0c383dcc2859e2dbeb362e751476e67d7cb4632ea87120f1db",
+      "lines": 8831
+    },
+    "rdma/mesh_graph.py": {
+      "sha256": "aa91b75c25d62981da1bd77de9bcfd34b492779227721f7e7ec8fe51dcf2fdc8",
+      "lines": 1068
+    },
+    "rdma/mesh.py": {
+      "sha256": "77ade2fa8b8e230a5833da5a37507fc88484cc9d776e89dba6a7851fd010935e",
+      "lines": 393
+    },
+    "rdma/allocate.py": {
+      "sha256": "592dfcc496f86bb4432ac811806bc3733aa355d68b3f05770d4294fcf9a1b68a",
+      "lines": 144
+    }
+  }
+}
