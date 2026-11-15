@@ -192,9 +192,69 @@
       },
       "ast": "PASS",
       "scope": "dependency source realization only; no Torch/Mesh import, build or workload"
+    },
+    {
+      "patch": "torch-inductor-aot-lowered-result.patch",
+      "patch_sha256": "7f635a66f1a315341dd99195fd15fc1c2321bb85147414d45b50230c5ebf93ec",
+      "source_revision": "82295df70fa3629c4a77073558289a31fc0decc3",
+      "time": "2026-11-15T07:59:33.852151+00:00",
+      "scope": "original provenance comment producer delta only; no Torch/Mesh import or workload",
+      "before": {
+        "torch/_inductor/codegen/wrapper.py": "d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386"
+      },
+      "delta": "--- a/torch/_inductor/codegen/wrapper.py\n+++ b/torch/_inductor/codegen/wrapper.py\n@@ -4453,6 +4471,6 @@\n         debug_handle: int | None = None,\n     ):\n         if debug_handle is not None:\n-            self.writeline(\n+            self.make_comment(\n                 f\"{self.comment} [Provenance debug handles] {kernel_name}:{debug_handle}\"\n             )\n",
+      "dry_run": {
+        "command": [
+          "patch",
+          "--batch",
+          "--fuzz=0",
+          "--no-backup-if-mismatch",
+          "-p1",
+          "-d",
+          "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+          "--dry-run"
+        ],
+        "exit": 0,
+        "stdout": "patching file 'torch/_inductor/codegen/wrapper.py'\n",
+        "stderr": ""
+      },
+      "application": {
+        "command": [
+          "patch",
+          "--batch",
+          "--fuzz=0",
+          "--no-backup-if-mismatch",
+          "-p1",
+          "-d",
+          "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages"
+        ],
+        "exit": 0,
+        "stdout": "patching file 'torch/_inductor/codegen/wrapper.py'\n",
+        "stderr": ""
+      },
+      "reverse_dry_run": {
+        "command": [
+          "patch",
+          "--batch",
+          "--fuzz=0",
+          "--no-backup-if-mismatch",
+          "-p1",
+          "-d",
+          "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+          "--reverse",
+          "--dry-run"
+        ],
+        "exit": 0,
+        "stdout": "patching file 'torch/_inductor/codegen/wrapper.py'\n",
+        "stderr": ""
+      },
+      "after": {
+        "torch/_inductor/codegen/wrapper.py": "5a7a14678343e2d275ed817024f3ac3199e84610ac3ee37b72ff63851585c892"
+      },
+      "ast": "PASS"
     }
   ],
-  "result": "PASS source realization through CPU kernel result patch205e2c94; initial composition README discrepancy preserved above",
+  "result": "PASS source realization through original typed provenance comment producer82295df7; previous observations and discrepancies retained",
   "final": {
     "torch/_inductor/codegen/mps.py": "8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db",
     "torch/_inductor/codegen/cpp.py": "0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3",
@@ -204,7 +264,7 @@
     "torch/_inductor/ir.py": "60ad9e8aee38558011efeb7432803402de08bae2911cbb7f3062be247cede6c3",
     "torch/_inductor/output_code.py": "10c6bb2bcdab8fc74ec85a76b061fcd4e32d40744bc22c76da4d854396c8aac3",
     "torch/_inductor/pattern_matcher.py": "e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441",
-    "torch/_inductor/codegen/wrapper.py": "d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386",
+    "torch/_inductor/codegen/wrapper.py": "5a7a14678343e2d275ed817024f3ac3199e84610ac3ee37b72ff63851585c892",
     "torch/_inductor/codegen/wrapper_fxir.py": "2d87d9247e23640662bba136c899a274fa278d3c98da96b630810882c3fdaa2a"
   }
 }

@@ -634,10 +634,10 @@ takes the producer's result through it. Fields:
 Installed: the supervisor checked the eight "before" hashes and ran a fuzz-0 dry run and application of the committed
 patch (`7916cb9d…`). Both passed. Every file has its "after" hash and parses (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 3).
 
-The `write_provenance_debug_handle` hunk was added after that installation.
-- Until the supervisor installs it, the installed `wrapper.py` is the previous after,
-  `d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386`.
-- The installed delta is one line: `self.writeline(` becomes `self.make_comment(` in `write_provenance_debug_handle`.
+The supervisor installed the `write_provenance_debug_handle` delta from `82295df7` after verifying every recorded
+dependency hash. Fuzz-0 dry run, application, reverse dry run and AST passed; step 5 of the same manifest records
+the commands and hashes. `wrapper.py` changed from `d667391a…` to the table's `5a7a1467…`; other dependencies stayed
+unchanged. The delta is one line: `self.writeline(` becomes `self.make_comment(` in `write_provenance_debug_handle`.
 
 ### Apply, check, reverse
 
