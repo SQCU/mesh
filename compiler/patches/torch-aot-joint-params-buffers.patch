@@ -1,24 +1,66 @@
---- a/torch/_functorch/aot_autograd.py
-+++ b/torch/_functorch/aot_autograd.py
-@@ -1450,6 +1450,9 @@
-         _aot_graph_capture=aot_graph_capture,
-         params_spec=params_spec,
-         buffers_spec=buffers_spec,
-+        # mesh compiler/patches/torch-aot-joint-params-buffers.patch: prepare_aot_module_simplified's
-+        # params_buffers_flat (prepare_aot_config, `mod`'s)
-+        params_buffers_flat=_params_buffers_flat,
-         in_spec=in_spec,
-         out_spec=out_spec.spec,
-     )
+--- a/torch/_functorch/_aot_autograd/collect_metadata_analysis.py
++++ b/torch/_functorch/_aot_autograd/collect_metadata_analysis.py
+@@ -874,5 +874,11 @@
+             grad_enabled_mutation=grad_enabled_mutation,
+             static_input_indices=static_input_indices,
+             tokens=mode._tokens,
++            # mesh compiler/patches/torch-aot-joint-params-buffers.patch
++            flat_args=flat_args,
++            flat_args_descs=flat_args_descs,
++            flat_f_outs_descs=flat_f_outs_descs,
++            intermediate_bases_descs=intermediate_bases_descs,
++            fw_graph_outs=fw_graph_outs,
+         )
+         return metadata
 --- a/torch/_functorch/_aot_autograd/schemas.py
 +++ b/torch/_functorch/_aot_autograd/schemas.py
-@@ -1541,5 +1541,9 @@
+@@ -587,6 +587,14 @@
+     # help users identify where to add .detach() in their code
+     tangent_source_stack_traces: list[str | None] | None = None
+
++    # mesh compiler/patches/torch-aot-joint-params-buffers.patch: collect_metadata_analysis.py
++    # run_functionalized_fw_and_collect_metadata inner
++    flat_args: tuple[Any, ...] | None = None
++    flat_args_descs: list[AOTInput] | None = None
++    flat_f_outs_descs: list[AOTOutput] | None = None
++    intermediate_bases_descs: list[AOTInput] | None = None
++    fw_graph_outs: list[Any] | None = None
++
+     def __post_init__(self) -> None:
+         # pre-compute the indices of the inputs that are mutated.
+         # When keep_input_mutations is set, we don't need to worry about our epilogue
+@@ -1541,5 +1549,12 @@
      params_spec: list[str]
      buffers_spec: list[str]
 
 +    # mesh compiler/patches/torch-aot-joint-params-buffers.patch: aot_autograd.py prepare_aot_config
-+    # params_buffers_flat, in params_spec then buffers_spec order
++    # params_buffers_flat
 +    params_buffers_flat: list[torch.nn.Parameter | Tensor]
++    # mesh compiler/patches/torch-aot-joint-params-buffers.patch: aot_autograd.py
++    # aot_export_joint_with_descriptors, create_aot_state's fw_metadata
++    fw_metadata: ViewAndMutationMeta
 +
      in_spec: pytree.TreeSpec
      out_spec: pytree.TreeSpec
+--- a/torch/_functorch/aot_autograd.py
++++ b/torch/_functorch/aot_autograd.py
+@@ -1437,6 +1437,9 @@
+         shape_env,
+     )
+     aot_state.fw_metadata.act_input_paths = act_input_paths
++    # mesh compiler/patches/torch-aot-joint-params-buffers.patch: create_aot_state's fw_metadata, before
++    # aot_stage1_graph_capture
++    fw_metadata = aot_state.fw_metadata
+
+     # NB: no cache lookup!
+     aot_graph_capture = aot_stage1_graph_capture(aot_state, functional_call)
+@@ -1450,6 +1453,9 @@
+         _aot_graph_capture=aot_graph_capture,
+         params_spec=params_spec,
+         buffers_spec=buffers_spec,
++        # mesh compiler/patches/torch-aot-joint-params-buffers.patch: prepare_aot_module_simplified params_buffers_flat
++        params_buffers_flat=_params_buffers_flat,
++        fw_metadata=fw_metadata,
+         in_spec=in_spec,
+         out_spec=out_spec.spec,
+     )
