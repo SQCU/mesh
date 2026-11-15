@@ -19,7 +19,9 @@ from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch._inductor import config
 from torch._inductor import ir as upstream
 from torch._inductor.codegen.cpp import CppScheduling, KernelGroup
+from torch._inductor.codegen.cpp_template_kernel import CppTemplateKernel
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
+from torch._inductor.codegen.wrapper import KernelCallLine
 from torch._inductor.compile_fx import compile_fx_aot, compile_fx_inner
 from torch._inductor.cpp_builder import CppTorchDeviceOptions
 from torch._inductor.cpu_vec_isa import pick_vec_isa
@@ -136,18 +138,45 @@ class Ranges:
     accesses: list
 
 
+# an actual result a record does not hold: `result` what it is, `owner` the original producer making it, which keeps it
+# nowhere this compilation's result reaches. It is no value of that result: not empty, not iterable
+@dataclasses.dataclass(frozen=True)
+class Unretained:
+    result: str
+    owner: str
+
+
+# a CPU template call's unretained results (MeshCppScheduling.codegen_template): its parameter declarations, which
+# CppTemplateKernel.def_kernel's render hook prints into its source (cpp_template_kernel.py 113-114, cpp_argdefs at
+# render) and returns as text only; and its ranges: its template's own loops, indices and accesses, which its CppTemplate
+# renders as source (ir.CppTemplateBuffer.template, cpp_template.py make_kernel_render), and its epilogues', which
+# CppTemplateKernel renders through a CppKernelProxy of an upstream KernelGroup() of its own (cpp_template_kernel.py
+# 276-278, 348-350), not the selected backend's
+TEMPLATE_DECLARED = Unretained("the template definition's parameter declarations (arg_defs)",
+                               "cpp_template_kernel.py CppTemplateKernel.def_kernel render hook")
+TEMPLATE_RANGES = Unretained("the template's and its epilogues' loops, indices and accesses",
+                             "cpp_template.py CppTemplate render; cpp_template_kernel.py CppTemplateKernel epilogue "
+                             "CppKernelProxy(KernelGroup())")
+
+
 # one selected-backend kernel call, its KernelCallLine `line` in its wrapper's lines (line.wrapper), `graph` the
 # GraphLowering whose body it implements (a control body's SubgraphLowering), `scheduler` the Scheduler whose codegen
-# made it (an inlined control body's: Inlined.scheduler of that inlining), `place` "mps" or "cpu", `owner` the
+# made it (an inlined control body's: Inlined.scheduler of that inlining; a lifted one's: Lifted.scheduler, its line in
+# Lifted.wrapper's lines), `place` "mps" or "cpu", `owner` the
 # backend's kernel (MeshMetalKernel: range trees, body, KernelArgs and workspace_args, headers, mesh_indirect,
-# metal_entry, metal_source; MeshKernelGroup: its KernelArgs, loops and scheduled nodes), `launch` its call record as
-# produced (mps: torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error: its error buffer's
-# argument index, c10/metal/error.h ErrorMessages as its declaration names it); cpu: (kernel name, arg_defs, call_args,
-# arg_types) of KernelArgs.cpp_argdefs). `produced` its (entry, source) as its backend made and defined it before
-# its call (mps: metal_entry and metal_source; cpu: define_kernel's declared entry and final source).
+# metal_entry, metal_source; MeshKernelGroup: its KernelArgs, loops and scheduled nodes; a CPU template's
+# CppTemplateKernel: its KernelArgs, local and removed buffers), `launch` its call record as produced (mps:
+# torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error: its error buffer's argument
+# index, c10/metal/error.h ErrorMessages as its declaration names it); cpu: (kernel name, arg_defs, call_args,
+# arg_types), a group's of its KernelArgs.cpp_argdefs at its call, a template's its KernelCallLine's kernel_name,
+# call_args and arg_types, its arg_defs TEMPLATE_DECLARED). `produced` its (entry, source) as its backend
+# made and defined it before its call (mps: metal_entry and metal_source; cpu, a group's and a template's alike:
+# define_kernel's declared entry and final source, torch-inductor-upstream-composition.patch defined_kernels).
 # `schedule`: mps the node_schedule codegen_node_schedule_with_kernel received,
-# its DisableReduction and EnableReduction scopes in it; cpu the group's scheduled nodes. `ranges`: mps each second-pass
-# SchedulerNode's Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes), its loop nests and outer loop.
+# its DisableReduction and EnableReduction scopes in it; cpu the group's scheduled nodes, a template's the nodes its
+# define_kernel received (its template node, then its epilogue nodes). `ranges`: mps each second-pass SchedulerNode's
+# Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes), its loop nests and outer loop; a template's
+# TEMPLATE_RANGES (not retained: its effects are not empty; its scheduled nodes' read_writes are its own).
 # `scheduled` its SchedulerNodes, `origins` the original body nodes their IR implements
 @dataclasses.dataclass(eq=False)
 class Kernel:
@@ -164,14 +193,17 @@ class Kernel:
     origins: tuple
 
 
-# one extern call of a scheduler (scheduler.py codegen_extern_call), its record made at its return: `node` its ir node
-# as lowered (an ExternKernel: a FallbackKernel, a MultiOutput, a DynamicScalar or AssertScalar; ir.WhileLoop
-# cond_subgraph, body_subgraph, carried_inputs, additional_inputs, outputs and stack_output; ir.InvokeSubgraph subgraph,
-# inputs and outputs; ir.Conditional its branches, each lowered on its own: wrapper_fxir.py lowered_subgraphs), `graph`
-# the GraphLowering it was called in, `scheduler` that scheduler, `lines` every wrapper line its codegen wrote, the line
+# one extern call of a scheduler (scheduler.py codegen_extern_call: every ExternKernelSchedulerNode it codegens, whatever
+# its operator), its record made at its return: `node` its ir node as lowered, whole (its kernel and op_overload,
+# inputs, constant_args, kwargs, layout and outputs as ExternKernel holds them; ir.RandomSeeds aten.randint.low_out
+# among them; ir.WhileLoop cond_subgraph, body_subgraph, carried_inputs, additional_inputs, outputs and stack_output;
+# ir.InvokeSubgraph subgraph, inputs and outputs; ir.Switch selector, operands, outputs and branches), `graph` the
+# GraphLowering it was called in, `scheduler` that scheduler, `lines` every wrapper line its codegen wrote, the line
 # objects themselves in order (upstream's control scaffolding among them as its own str lines), `inlined` each control
 # body inlining that codegen made, in order (Inlined; while_loop: its cond before the loop, its body, its cond at the
-# loop's end)
+# loop's end), `lifted` each control body that codegen lowered on its own, in order (Lifted; a Switch's branches under
+# fx_wrapper). One call's codegen makes one kind: a Switch lifts (wrapper_fxir.py codegen_switch), while_loop and
+# invoke_subgraph inline (wrapper.py, aot_mode)
 @dataclasses.dataclass(frozen=True, eq=False)
 class ExternCall:
     node: object
@@ -179,6 +211,7 @@ class ExternCall:
     scheduler: object
     lines: tuple
     inlined: tuple
+    lifted: tuple
 
 
 # one inlining of a control body (GraphLowering.codegen_subgraph from wrapper.py codegen_subgraph_by_inlining):
@@ -194,10 +227,30 @@ class Inlined:
     externs: tuple
 
 
-# fx_passes/replace_random.py: ir.py RandomSeeds `buffer` the body's random state it draws through, `uses` each
-# inductor_lookup_seed index and the original random nodes it serves; its words the body's Generator (operations.py)
+# one control body lowered on its own (wrapper.py codegen_subgraph_common: the body's own GraphLowering.codegen under
+# its graph handler, its lowered result wrapper_fxir.py lowered_subgraphs[graph.name]): `graph` its SubgraphLowering
+# (the ir node's branch's graph, Switch.branches[b].graph), `scheduler` the Scheduler of that codegen, `wrapper` its own
+# wrapper (wrapper_fxir.py SubgraphFxWrapperCodegen, its parent_wrapper its parent's: its lines, launched_kernels and
+# lowered_subgraphs), `externs`
+# its scheduler's ExternCall records. A body is lowered once per wrapper (codegen_subgraph_common's
+# already_codegened_subgraphs): a later Switch of the same branch graph calls the one lowered by name, its ExternCall's
+# `lifted` empty, its branch's graph the same object as this record's
+@dataclasses.dataclass(frozen=True, eq=False)
+class Lifted:
+    graph: object
+    scheduler: object
+    wrapper: object
+    externs: tuple
+
+
+# fx_passes/replace_random.py, which _recursive_joint_graph_passes runs on the body and on every control body
+# (compile_fx.py _get_subgraph_names): `graph` the GraphLowering that lowered it (the root's or a control body's),
+# ir.py RandomSeeds `buffer` that graph's random state it draws through (an ExternKernelOut, aten.randint.low_out: its
+# ExternCall that graph's scheduler's), `uses` each inductor_lookup_seed index of that graph's module and the original
+# random nodes it serves; its words the body's Generator (operations.py)
 @dataclasses.dataclass(eq=False)
 class Seeds:
+    graph: object
     buffer: object
     uses: tuple
 
@@ -225,8 +278,10 @@ class Model:
 # never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its lines and lowered_subgraphs;
 # None for the Neural Engine), `signature` the AOT export's GraphSignature of that graph (graph.module.meta; Neural
 # Engine: ExportedProgram.graph_signature), `kernels` {id(KernelCallLine): Kernel} over its wrapper and every subgraph
-# wrapper, `externs` its scheduler's ExternCall records in emission order (a lowered cond branch's: its own
-# scheduler's mesh_externs), `model` the Neural Engine's Model
+# wrapper (every selected-backend kernel call: an mps kernel's, a cpu group's and a cpu template's), `externs` its
+# scheduler's ExternCall records in emission order, every control body's reached through them (ExternCall.inlined and
+# .lifted, each with its own ExternCalls, nested), `seeds` the Seeds of the root graph and of every body graph made
+# under it, `model` the Neural Engine's Model
 @dataclasses.dataclass(eq=False)
 class Produced:
     processor: str
@@ -338,8 +393,38 @@ class MeshKernelGroup(KernelGroup):
 
 
 class MeshCppScheduling(CppScheduling):
+    def __init__(self, scheduler):
+        self.mesh_defined = []
+        super().__init__(scheduler)
+
     def reset_kernel_group(self):
         self.kernel_group = MeshKernelGroup()
+
+    # each kernel definition, the common definition producer of a group (flush) and a template (codegen_template) as
+    # made: (the kernel handler it was defined under, the nodes it received, the kernel name it returned). A template's
+    # handler is its CppTemplateKernel (codegen_template defines under V.set_kernel_handler(kernel)); a group's flush
+    # sets none of its own
+    def define_kernel(self, src_code, nodes, kernel_args=None):
+        name = super().define_kernel(src_code, nodes, kernel_args)
+        self.mesh_defined.append((V.kernel, tuple(nodes), name))
+        return name
+
+    # a CPU template's call, its own record made at the return of the original codegen making it (cpp.py
+    # codegen_template: render, then define_kernel, then CppTemplateKernel.call_kernel), as MeshKernelGroup.call_kernel
+    # makes a group's (wrapper.launched_kernels): (its CppTemplateKernel, launch, its KernelCallLine, the graph it was
+    # called in, its scheduler, its (declared entry, final source) as define_kernel defined it, the nodes that
+    # definition received). The kernel and nodes are the one definition this codegen made; the line is the one
+    # KernelCallLine it wrote (call_kernel's generate_kernel_call, its one call), the launch that line's own call
+    # arguments and types as the call produced them
+    def codegen_template(self, template_node, epilogue_nodes, prologue_nodes):
+        wrapper = V.graph.wrapper_code
+        lines, defined = len(wrapper.lines), len(self.mesh_defined)
+        super().codegen_template(template_node, epilogue_nodes, prologue_nodes)
+        (kernel, nodes, name), = self.mesh_defined[defined:]
+        line, = (made for made in wrapper.lines[lines:] if isinstance(made, KernelCallLine))
+        wrapper.__dict__.setdefault("launched_kernels", []).append(
+            (kernel, (line.kernel_name, TEMPLATE_DECLARED, tuple(line.call_args), tuple(line.arg_types)), line,
+             V.graph, V.graph.scheduler, wrapper.defined_kernels[name], nodes))
 
 
 SELECTED = {"mps": MeshMetalScheduling, "cpu": MeshCppScheduling}
@@ -356,13 +441,14 @@ class MeshScheduler(Scheduler):
         return SELECTED[device.type](self)
 
     # each extern call's own record (codegen_extern_call: its ir node's codegen into its graph's wrapper), made at its
-    # return with the control body inlinings that codegen made (MeshSubgraph.codegen_subgraph), in order
+    # return with the control body inlinings (MeshSubgraph.codegen_subgraph) and liftings (MeshSubgraph.codegen) that
+    # codegen made, each in order
     def codegen_extern_call(self, scheduler_node):
-        wrapper, inlined = V.graph.wrapper_code, []
-        start, self.mesh_inlined = len(wrapper.lines), inlined
+        wrapper, inlined, lifted = V.graph.wrapper_code, [], []
+        start, self.mesh_inlined, self.mesh_lifted = len(wrapper.lines), inlined, lifted
         super().codegen_extern_call(scheduler_node)
         self.mesh_externs.append(ExternCall(scheduler_node.node, V.graph, self, tuple(wrapper.lines[start:]),
-                                            tuple(inlined)))
+                                            tuple(inlined), tuple(lifted)))
 
 
 # the compilation's own operand: graph.py GraphLowering as torch-inductor-graph-lowering-factory.patch's graph_lowering
@@ -370,15 +456,22 @@ class MeshScheduler(Scheduler):
 # subgraph_lowering): each scheduled with the selected backends (upstream's _update_scheduler, with MeshScheduler);
 # each placeholder's own result by its qualified name (GraphLowering.placeholder as it returned it, keyed as it keys
 # graph_inputs and graph_input_names: qualify_name, a named SubgraphLowering's prefixed; a TensorBox, a sympy
-# expression, a TorchBindObject, a generator's, or None, which graph_inputs does not hold)
+# expression, a TorchBindObject, a generator's, or None, which graph_inputs does not hold); each body GraphLowering it
+# made, in the order made (make_subgraph, the one constructor of a body's: ir.py InvokeSubgraph, Switch and WhileLoop
+# create and SubgraphBuffer)
 class _Lowering:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.mesh_placeholders = {}
+        self.mesh_placeholders, self.mesh_subgraphs = {}, []
 
     def placeholder(self, target, args, kwargs):
         made = super().placeholder(target, args, kwargs)
         self.mesh_placeholders[self.qualify_name(target)] = made
+        return made
+
+    def make_subgraph(self, gm, example_inputs, subgraph_name):
+        made = super().make_subgraph(gm, example_inputs, subgraph_name)
+        self.mesh_subgraphs.append(made)
         return made
 
     def _update_scheduler(self):
@@ -399,6 +492,15 @@ class MeshSubgraph(_Lowering, SubgraphLowering):
         super().codegen_subgraph(parent_graph)
         parent_graph.scheduler.mesh_inlined.append(Inlined(self, self.scheduler, tuple(wrapper.lines[start:]),
                                                            tuple(self.scheduler.mesh_externs)))
+
+    # this control body lowered on its own (wrapper.py codegen_subgraph_common, under this graph's handler: a Switch's
+    # branch under fx_wrapper), recorded for its parent's extern call making it (`parent` make_subgraph's, the graph
+    # whose scheduler codegens that call)
+    def codegen(self):
+        made = super().codegen()
+        self.parent.scheduler.mesh_lifted.append(Lifted(self, self.scheduler, self.wrapper_code,
+                                                        tuple(self.scheduler.mesh_externs)))
+        return made
 
 
 MeshLowering.subgraph_lowering = MeshSubgraph.subgraph_lowering = MeshSubgraph
@@ -513,7 +615,13 @@ def _cpu(owner, launch, line, graph, scheduler, produced, sources):
                   scheduled, _scheduled_origins(scheduled, sources))
 
 
-PLACED = {MeshMetalKernel: _mps, MeshKernelGroup: _cpu}
+# a CPU template's call record (MeshCppScheduling.codegen_template), `nodes` its definition's
+def _template(owner, launch, line, graph, scheduler, produced, nodes, sources):
+    return Kernel("cpu", graph, scheduler, line, owner, launch, produced, nodes, TEMPLATE_RANGES, nodes,
+                  _scheduled_origins(nodes, sources))
+
+
+PLACED = {MeshMetalKernel: _mps, MeshKernelGroup: _cpu, CppTemplateKernel: _template}
 
 
 # a graph's wrapper and each cond branch's own (wrapper_fxir.py lowered_subgraphs); an inlined control body
@@ -524,14 +632,27 @@ def _wrappers(graph):
         yield from _wrappers(lowered)
 
 
-# each RandomSeeds buffer by its origin (the lowered inductor_seeds node), each lookup's index and original nodes
+# GraphLowering `graph` and every body GraphLowering made under it (_Lowering.mesh_subgraphs), each once, depth first
+# in the order made
+def _graphs(graph):
+    yield graph
+    for made in graph.mesh_subgraphs:
+        yield from _graphs(made)
+
+
+# each RandomSeeds buffer of every graph `_graphs` yields, by its origin (that graph's lowered inductor_seeds node),
+# each of that graph module's lookups' index and original nodes
 def _seeds(graph, sources):
-    owned = {origin: buffer for buffer in graph.buffers if isinstance(buffer, upstream.RandomSeeds)
-             for origin in buffer.origins}
-    uses = {}
-    for node in graph.module.graph.find_nodes(op="call_function", target=torch.ops.prims.inductor_lookup_seed.default):
-        uses.setdefault(owned[node.args[0]], []).append((node.args[1], _origins(sources, (node,))))
-    return tuple(Seeds(buffer, tuple(made)) for buffer, made in uses.items())
+    found = []
+    for lowered in _graphs(graph):
+        owned = {origin: buffer for buffer in lowered.buffers if isinstance(buffer, upstream.RandomSeeds)
+                 for origin in buffer.origins}
+        uses = {}
+        for node in lowered.module.graph.find_nodes(op="call_function",
+                                                    target=torch.ops.prims.inductor_lookup_seed.default):
+            uses.setdefault(owned[node.args[0]], []).append((node.args[1], _origins(sources, (node,))))
+        found += [Seeds(lowered, buffer, tuple(made)) for buffer, made in uses.items()]
+    return tuple(found)
 
 
 def _returned(module):
@@ -824,8 +945,10 @@ class Emission:
 # (`composition` its composed() result; None: as produced), from the same retained owner for each pass. Metal: the
 # patched MetalKernel.codegen_kernel of the retained kernel, its headers expanded (torch/mps/__init__.py
 # compile_shader's _embed_headers). CPU: cpp.py define_kernel's final source and declared entry
-# (torch-inductor-upstream-composition.patch defined_kernels of its line's wrapper), or the retained group's patched
-# codegen_group with its composition through define_kernel's defined_source; its parameters its call's arguments in
+# (torch-inductor-upstream-composition.patch defined_kernels of its line's wrapper; a group's and a template's alike),
+# or the retained group's patched codegen_group with its composition through define_kernel's defined_source (a
+# template's composed pass needs its own upstream hook, cpp_template_kernel.py CppTemplateKernel.def_kernel and its
+# body's opening, which no patch has yet: numerical68-result.md); its parameters its call's arguments in
 # cpp_argdefs order (each at its own slot; its buffers, inplace, input and output, the bound pointer, its sizevars after
 # them the value) and the composition's; codecache.py CppCodeCache's build options (CppTorchDeviceOptions for the cpu,
 # CppPythonBindingsCodeCache: no libtorch, shared) in cpp_builder.py CppBuilder's argument form

@@ -142,9 +142,9 @@ The adaptation now applies its one rule to **every copied graph**: the body and 
 | `signature` | `graph.module.meta["graph_signature"]`, the AOT export's GraphSignature. Neural Engine: `ExportedProgram.graph_signature` |
 | `inputs` | `Input(position, node, name, value)`. `name` is `signature.user_inputs[position]`. `value` is `graph.mesh_placeholders[graph.qualify_name(name)]`, the original `GraphLowering.placeholder` result keyed as it keys `graph_inputs` and `graph_input_names`: a TensorBox, a sympy expression, a TorchBindObject, a generator's, or **None for an admitted None input** (which `graph_inputs` does not hold). Engine: the program's placeholder |
 | `outputs` | `Output(position, node, name, value, sent)`. `name` is `signature.user_outputs[position]`, `value` is `graph.graph_outputs[position]` |
-| `kernels` | `{id(KernelCallLine): Kernel}`, one entry per call, over `graph.wrapper_code` and every `lowered_subgraphs` wrapper |
-| `externs` | the top scheduler's `ExternCall` records, in emission order. For a lowered cond branch, use `branch.scheduler.mesh_externs` |
-| `seeds` | `Seeds(buffer, uses)` |
+| `kernels` | `{id(KernelCallLine): Kernel}`, one entry per call, over `graph.wrapper_code` and every `lowered_subgraphs` wrapper: every MPS kernel call, CPU group call and CPU template call |
+| `externs` | the top scheduler's `ExternCall` records, in emission order. Every control body's are reached through them: `ExternCall.inlined` and `.lifted`, each with its own `externs`, nested |
+| `seeds` | `Seeds(graph, buffer, uses)` for the root graph and every body GraphLowering made under it |
 | `model` | `Model(program, model, selected, received, handles)`, the Neural Engine's. None for Inductor bodies |
 
 `Produced.origins(fx_nodes)` walks the nested NodeSource chains to every source, which is the many-to-many set. For an
@@ -153,25 +153,44 @@ IR node, use `produced.origins(ir_node.get_origins())`.
 ## Per-call records: `Kernel`
 
 Each call's record is made at that call and never overwritten. The tuple is
-`wrapper.launched_kernels[i] = (owner, launch, line, graph, scheduler, produced)`:
+`wrapper.launched_kernels[i] = (owner, launch, line, graph, scheduler, produced, ...)`:
 - MPS: the operands patch's `(owner, launch)`, completed by `MeshMetalKernel.call_kernel` after its
   `generate_kernel_call`.
-- CPU: `MeshKernelGroup.call_kernel`.
+- CPU group: `MeshKernelGroup.call_kernel`.
+- CPU template: `MeshCppScheduling.codegen_template`, at the return of the original `codegen_template` (cpp.py 5921:
+  render, then `define_kernel`, then `CppTemplateKernel.call_kernel`). It records:
+  - the one definition that codegen made, through `MeshCppScheduling.define_kernel`. This is the definition producer
+    common to groups (`flush`) and templates: `(V.kernel, nodes, name)` for every definition, appended to
+    `mesh_defined`. A template defines under its `CppTemplateKernel`'s handler;
+  - the one `KernelCallLine` that codegen wrote;
+  - a seventh element, the nodes that definition received.
+  Nothing is regenerated after the call: `launch` is the line's own call arguments and types.
 
-The `KernelCallLine` is the call's identity.
+The `KernelCallLine` is the call's identity. `CppTemplateKernel` has no subclass; cpp_template.py 101
+`make_kernel_render` makes the one used for a call.
 
-| field | mps (`MeshMetalKernel`) | cpu (`MeshKernelGroup`) |
-|---|---|---|
-| `place` | "mps" | "cpu" |
-| `graph` | `V.graph` at the call (GraphLowering or control body SubgraphLowering) | same |
-| `scheduler` | `V.graph.scheduler` at the call: an inlined body's scheduler for **that occurrence** | same |
-| `line` | its `KernelCallLine` (`line.wrapper` its wrapper) | same |
-| `owner` | the backend kernel: range trees, `range_tree_nodes`, `body`, `args` (with `workspace_args`), `headers`, `mesh_indirect` | the KernelGroup: `args`, `loops_code`, `scheduled_nodes`, `mesh_proxies` |
-| `launch` | `(name, values, types, grid, group, error)` | `(name, arg_defs, call_args, arg_types)` |
-| `produced` | `(metal_entry, metal_source)` at the call, as `codegen_kernel` made and `define_kernel` defined it | `defined_kernels[name]`: (declared entry, final source) |
-| `schedule` | the `node_schedule` received, with its DisableReduction/EnableReduction markers | `scheduled_nodes` |
-| `ranges` | one `Ranges` for each second-pass SchedulerNode | `(CppKernelProxy, nodes)` for each `finalize_kernel` |
-| `scheduled`, `origins` | its SchedulerNodes, and their original nodes | same |
+| field | mps (`MeshMetalKernel`) | cpu group (`MeshKernelGroup`) | cpu template (`CppTemplateKernel`) |
+|---|---|---|---|
+| `place` | "mps" | "cpu" | "cpu" |
+| `graph` | `V.graph` at the call (GraphLowering or control body SubgraphLowering) | same | same |
+| `scheduler` | `V.graph.scheduler` at the call: an inlined body's scheduler for **that occurrence** | same | same |
+| `line` | its `KernelCallLine` (`line.wrapper` its wrapper) | same | same |
+| `owner` | the backend kernel: range trees, `range_tree_nodes`, `body`, `args` (with `workspace_args`), `headers`, `mesh_indirect` | the KernelGroup: `args`, `loops_code`, `scheduled_nodes`, `mesh_proxies` | the template kernel: `args`, `local_buffers`, `removed_buffers` |
+| `launch` | `(name, values, types, grid, group, error)` | `(name, arg_defs, call_args, arg_types)`, from `cpp_argdefs` at the call | `(line.kernel_name, TEMPLATE_DECLARED, line.call_args, line.arg_types)` |
+| `produced` | `(metal_entry, metal_source)` at the call, as `codegen_kernel` made and `define_kernel` defined it | `defined_kernels[name]`: (declared entry, final source) | same |
+| `schedule` | the `node_schedule` received, with its DisableReduction/EnableReduction markers | `scheduled_nodes` | the nodes its `define_kernel` received: the template node, then its epilogue nodes |
+| `ranges` | one `Ranges` for each second-pass SchedulerNode | `(CppKernelProxy, nodes)` for each `finalize_kernel` | `TEMPLATE_RANGES` |
+| `scheduled`, `origins` | its SchedulerNodes, and their original nodes | same | same |
+
+`Unretained(result, owner)` names an actual result that the record does not hold, and its original producer. It is not
+iterable and holds no value of that result, so a consumer cannot read it as empty:
+- `TEMPLATE_DECLARED`: the template definition's parameter declarations. `CppTemplateKernel.def_kernel`'s render hook
+  (cpp_template_kernel.py 113–114) makes them from `cpp_argdefs` at render and returns them only as text in the source.
+- `TEMPLATE_RANGES`: the template's loops, indices and accesses, and its epilogues'.
+  - Its CppTemplate renders its own as source (`ir.CppTemplateBuffer.template`).
+  - Its epilogues are rendered through `CppKernelProxy(KernelGroup())`, an upstream group of its own
+    (cpp_template_kernel.py 276–278, 348–350), not the selected backend's.
+  - A template's effects are not empty. Its scheduled nodes' `read_writes` are its buffer-level reads and writes.
 
 `Ranges(node, variables, reduction, accesses)`:
 - `accesses` holds `(method, buffer, index, mode, graph, fx_node)`.
@@ -180,21 +199,30 @@ The `KernelCallLine` is the call's identity.
   - These are the accesses `CSEProxy` passes to the kernel. A `store_cache` hit and a store to a `removed_buffers` buffer
     are absent, and an `indirect_load` is a `load`.
 
-## Control: `ExternCall` and `Inlined` (each occurrence, at the original method boundaries)
+## Control: `ExternCall`, `Inlined` and `Lifted` (each occurrence, at the original method boundaries)
 
-**`ExternCall(node, graph, scheduler, lines, inlined)`** is made by `MeshScheduler.codegen_extern_call`, at its return,
-for every extern scheduler node:
-- `node` is the ir node as lowered:
+**`ExternCall(node, graph, scheduler, lines, inlined, lifted)`** is made by `MeshScheduler.codegen_extern_call`, at
+its return, for every extern scheduler node, whatever its operator. No operator is selected:
+- `node` is the ir node as lowered, whole. A general extern holds its kernel and `op_overload`, `inputs`,
+  `constant_args`, `kwargs`, layout and outputs as ExternKernel holds them. `ir.RandomSeeds` (`aten.randint.low_out`)
+  is one of them. Control nodes:
   - `ir.WhileLoop`: `cond_subgraph`, `body_subgraph`, `carried_inputs`, `additional_inputs`, `outputs`,
     `stack_output`;
   - `ir.InvokeSubgraph`: `subgraph`, `inputs`, `outputs`;
-  - `ir.Conditional`, whose branches are lowered separately: `lowered_subgraphs`;
-  - FallbackKernel, MultiOutput, DynamicScalar, AssertScalar and the other externs.
+  - `ir.Switch` (ir.py 11130): `selector`, `operands`, `outputs`, `branches`.
 - `graph` and `scheduler` are where it was called.
 - `lines` is every wrapper line its codegen wrote, as the line objects themselves, in order. Upstream's control scaffolding
   is among them as upstream's own str lines.
 - `inlined` is each body inlining its codegen made, in order. `while_loop` makes three: its cond before the loop, its
   body, and its cond at the loop's end.
+- `lifted` is each body its codegen lowered on its own, in order: a Switch's branches. One call's codegen makes one
+  kind:
+  - a Switch lifts (wrapper_fxir.py 169 `codegen_switch` → `codegen_subgraph_common`);
+  - `while_loop` and `invoke_subgraph` inline (wrapper.py, in `aot_mode`).
+
+The native whole consumer takes every `ExternCall.node` as it is. A per-operator whitelist has no producer basis, since
+every extern of every graph is recorded the same way. 66's current `lower_metal.py` raises "has no native consumer yet"
+for every extern but send and receive. That is the consumer gap, and this record does not narrow it.
 
 **`Inlined(graph, scheduler, lines, externs)`** is made by `MeshSubgraph.codegen_subgraph`. That is
 `GraphLowering.codegen_subgraph`, called by `codegen_subgraph_by_inlining`. Its fields:
@@ -206,6 +234,20 @@ for every extern scheduler node:
 - `externs` are its scheduler's ExternCall records, which gives nesting directly.
 - Its interface is the body's own: `graph.mesh_placeholders` / `graph.graph_input_names` (qualified) and
   `graph.graph_outputs`, bound to the ir node's typed inputs and outputs in upstream's order.
+
+**`Lifted(graph, scheduler, wrapper, externs)`** is made by `MeshSubgraph.codegen`, upstream's
+`GraphLowering.codegen` that `codegen_subgraph_common` calls under the body's graph handler (wrapper.py 4861–4892). It
+is appended to `self.parent.scheduler.mesh_lifted`, where `parent` is make_subgraph's: the graph whose scheduler is
+inside that Switch's `codegen_extern_call`. Its fields:
+- `graph` is `Switch.branches[b].graph`, which is also `lowered_subgraphs[graph.name]`.
+- `scheduler` is the Scheduler of that codegen.
+- `wrapper` is its own `SubgraphFxWrapperCodegen` (wrapper_fxir.py 279), with its lines, `launched_kernels` and
+  `lowered_subgraphs`.
+- `externs` are its scheduler's ExternCall records.
+
+A body is lowered once per wrapper (`already_codegened_subgraphs`). A later Switch of the same branch graph, such as a
+while cond's second inlining, calls the lowered body by name. Its `lifted` is empty, and its branch's `graph` is that
+record's object.
 
 So the control hierarchy and each occurrence are explicit records. A consumer never parses the str scaffolding or infers
 nesting from `EnterSubgraphLine` spans. A `while_loop`'s first cond inlining is not bracketed by `EnterSubgraphLine`, and
@@ -249,17 +291,52 @@ that is upstream as is.
 - Walk `produced.externs` and `produced.kernels`, plus the lines of each `ExternCall` / `Inlined` as given:
   - a `KernelCallLine` → `produced.kernels[id(line)]`;
   - an extern → `ExternCall.node`, with `produced.origins(node.get_origins())`;
-  - a control node → its `inlined` occurrences, or for cond, `lowered_subgraphs`.
+  - a control node → its `inlined` or `lifted` occurrences, each with its own `externs`;
 - Replacements for the old fields:
   - `entry.scheduled.node` → `ExternCall.node`;
   - `entry.origins` → `Kernel.origins` / `produced.origins(...)`;
   - `Input.value` → the placeholder result (it may be None);
   - `Output` gains `name`.
 
+## Seeds in every graph
+
+`_recursive_joint_graph_passes` runs `replace_random_passes`, which is joint_graph.py 758's call, on the body and on
+every control body (compile_fx.py 589–634, `_get_subgraph_names`). So each body graph has its own `inductor_seeds`,
+lowered to its own `ir.RandomSeeds` in its own GraphLowering, and its own `inductor_lookup_seed` nodes:
+- `_Lowering.make_subgraph` records each body GraphLowering it makes (`mesh_subgraphs`). It is the one constructor of
+  a body's: ir.py 8592 `SubgraphBuffer` and 11065/11243/11545 InvokeSubgraph/Switch/WhileLoop. `PointwiseSubgraphLowering`
+  is an Interpreter that makes no buffers.
+- `_graphs` is the root and that tree, depth first in the order made.
+- `Seeds(graph, buffer, uses)` is one per RandomSeeds buffer of each graph. `uses` holds that graph module's lookups'
+  `(index, original nodes)`. The buffer's own `ExternCall` is in that graph's scheduler records.
+
+## SCAN in the selected CPU/MPS result (frontend104's question)
+
+The source says it is absent:
+- `ops.scan`, which is the LoopBody scan shim `bind_scan_shim` and its `combine_fn` closure (loop_body.py 596–600,
+  856–863), is reached only from `ir.Scan.store_reduction` (ir.py 3034).
+- `ir.Scan` is made only by `Scan.create`. Its callers are lowering.py 8001–8097 (cumsum, cumprod, logcumsumexp,
+  cummax, cummin) and 9457 (`associative_scan`).
+- `Scan.create` returns `[None]` without `BackendFeature.SCAN` (ir.py 3085), and each caller then falls back to aten.
+  `associative_scan` raises before it on such a device (lowering.py 9408–9415).
+- `has_feature` reads the registered scheduling's features (common.py 471–488):
+  - `CppScheduling.backend_features` is `{INPLACE_BUFFERS, REDUCE_TO_SINGLE_ELEMENT}`;
+  - `MetalScheduling` has none (`BaseScheduling.get_backend_features`, scheduler.py 10600);
+  - the selected Mesh subclasses inherit these and override nothing.
+- So a cumulative op on CPU/MPS arrives as a general extern, a FallbackKernel `ExternCall`. No `ir.Scan` and no scan
+  shim closure is in the result.
+- The scan HOP is rewritten to `while_loop` (post_grad.py 662 `decompose_scan_to_while_loop`), so it arrives as
+  `WhileLoop` control.
+
+There is no combine subgraph owner to publish for these targets.
+
 ## Not covered, stated
 
-- **C++ GEMM templates** (`max_autotune` CPU) call `generate_kernel_call` outside `KernelGroup.call_kernel`. They make
-  no record, so their `KernelCallLine` has no `Kernel`. `max_autotune` is off here.
-- **Seeds**: only `graph.module`'s top-level `inductor_lookup_seed` nodes are collected, not a control body's own.
+- **The CPU template's composed pass.** `emitted(kernel, composition)` composes a group through the patched
+  `KernelGroup.codegen_group`. A template has no such hook, and composing one means its own upstream hook. The
+  definition's parameters come from `CppTemplateKernel.def_kernel`'s render hook, and the body opening comes from the
+  rendered template. Neither is patched yet. A template's as-produced emission, `emitted(kernel)`, is complete.
+- **A template's `TEMPLATE_DECLARED` and `TEMPLATE_RANGES`**, above. Retaining them is the same `def_kernel` and
+  render seam's work; they are not inferred.
 - **`Input.value` for a None input is None.** This is the original placeholder's result, so `name` and position remain
   its interface.
