@@ -16,7 +16,7 @@ import pathlib
 import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.export.graph_signature import InputKind, OutputKind
-from torch.fx._graph_pickler import GraphPickler, Options
+from torch.fx._graph_pickler import GraphPickler, Options, _GraphPickleData
 from torch.fx.graph_module import _assign_attr, _del_attr, _get_attr
 from torch.multiprocessing.reductions import StorageWeakRef
 from torch.utils import _pytree as pytree
@@ -40,6 +40,26 @@ Graphed = collections.namedtuple("Graphed", "index")
 Relating = collections.namedtuple("Relating", "index")
 Searching = collections.namedtuple("Searching", "index")
 Closing = collections.namedtuple("Closing", "index")
+# a raw torch.fx Graph, one no GraphModule owns (torch/_inductor/loop_body.py LoopBodyBlock.graph: LightTracer's), by
+# saved index, and a Node of one by (that index, its name); a Graph a GraphModule owns by that module's Ref (`GraphOf`:
+# the loaded module's own graph)
+Rawed = collections.namedtuple("Rawed", "index")
+RawRef = collections.namedtuple("RawRef", "graph node")
+GraphOf = collections.namedtuple("GraphOf", "module")
+
+
+# torch 2.14.0 torch/fx/_graph_pickler.py GraphPickler (this archive's one payload codec): a raw torch.fx Graph as
+# _GraphPickleData, which owns every Node's serialization and the graph's tracer and codegen, unpickled with the one
+# _UnpickleState over no module (Graph's owning_module None: `graphed`); every other value as GraphPickler reduces it
+class Pickler(GraphPickler):
+    def reducer_override(self, obj):
+        if isinstance(obj, torch.fx.Graph):
+            return graphed, (_GraphPickleData(obj, self.options), self._unpickle_state)
+        return super().reducer_override(obj)
+
+
+def graphed(data, state):
+    return data.unpickle(None, state)
 
 
 # torch 2.14.0 torch/_export/serde/serialize.py serialize_hoo_inputs (a higher-order operator's GraphModule operand by
@@ -53,11 +73,14 @@ def branches(module, prefix=""):
 
 
 # a value with each Node, GraphModule, SourceRelation, Graph, Relation, Reached and Closures it holds a Ref, Related,
-# Graphed, Relating, Searching or Closing (each registered once in `held`, an owner with its branches), a sequence or
-# a namedtuple of them its own type (torch
-# utils/_pytree.py namedtuple semantics: its fields in order), everything else, a FakeTensor among them, as it is
-# (torch/fx/_graph_pickler.py GraphPickler: no raw Node)
+# Graphed, Relating, Searching or Closing (each registered once in `held`, an owner with its branches; a torch.fx Graph
+# GraphOf its owning module's Ref, or Rawed, and a raw graph's Node RawRef), a collections.Counter as it is (canonical
+# pickle's: torch/_inductor/loop_body.py LoopBody.op_counts, operation names' counts), a sequence or a namedtuple of
+# them its own type (torch utils/_pytree.py namedtuple semantics: its fields in order), everything else, a FakeTensor
+# among them, as it is (torch/fx/_graph_pickler.py GraphPickler: no raw Node)
 def encoded(held, value):
+    if isinstance(value, collections.Counter):
+        return value
     if isinstance(value, dict):
         return {encoded(held, k): encoded(held, v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
@@ -73,6 +96,12 @@ def encoded(held, value):
         return Graphed(held["natives"].setdefault(value, len(held["natives"])))
     if isinstance(value, schedule.mesh_graph.Relation):
         return Relating(held["kept"].setdefault(id(value), (len(held["kept"]), value))[0])
+    if isinstance(value, torch.fx.Graph) and value.owning_module is not None:
+        return GraphOf(encoded(held, value.owning_module))
+    if isinstance(value, torch.fx.Graph):
+        return Rawed(held["raws"].setdefault(id(value), (len(held["raws"]), value))[0])
+    if isinstance(value, torch.fx.Node) and value.graph.owning_module is None:
+        return RawRef(encoded(held, value.graph).index, value.name)
     if not isinstance(value, (torch.fx.Node, torch.fx.GraphModule)):
         return value
     module, owners, nested = (value.graph.owning_module if isinstance(value, torch.fx.Node) else value, held["owners"],
@@ -89,7 +118,15 @@ def encoded(held, value):
 # GraphModules' nodes by name, made on first use, the SourceRelations, the Graphs, the searches, the closures, the
 # native Relations), each Related, Graphed, Searching, Closing and Relating to its loaded one
 def decoded(loaded, value):
-    graphs, named, relations, natives, searches, closures, kept = loaded
+    graphs, named, relations, natives, searches, closures, kept, raws = loaded
+    if isinstance(value, Rawed):
+        return raws[value.index]
+    if isinstance(value, GraphOf):
+        return decoded(loaded, value.module).graph
+    if isinstance(value, RawRef):
+        if ("raw", value.graph) not in named:
+            named["raw", value.graph] = {node.name: node for node in raws[value.graph].nodes}
+        return named["raw", value.graph][value.node]
     if isinstance(value, Ref):
         module = _get_attr(graphs[value.owner], value.path) if value.path else graphs[value.owner]
         if value.node is None:
@@ -107,6 +144,8 @@ def decoded(loaded, value):
         return closures[value.index]
     if isinstance(value, Relating):
         return kept[value.index]
+    if isinstance(value, collections.Counter):
+        return value
     if isinstance(value, dict):
         return {decoded(loaded, k): decoded(loaded, v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
@@ -163,8 +202,9 @@ def snapshot(held, module):
 # form: its incoming search's arrays (over the calls' relation, which the joint result keeps), its paths' roots and
 # search (a Reached over their own Graph), its widths by function ordinal (count, the member vertex IDs and their
 # chains: mesh_graph.closure_chains's owner array and result), its supplied causes, accesses and generated state, each
-# function's source Declarations by ordinal (`declared`), and the target's copies (native.py Target.copying: each
-# call's CopyRecords with their copy operations, `copying`)
+# function's source Declarations by ordinal (`declared`), the target's copies (native.py Target.copying: each call's
+# CopyRecords with their copy operations, `copying`) and every construction's upstream results by (function ordinal,
+# machine group) (`constructed`)
 def queried(analysis, ordinal, target):
     paths = analysis.paths
     return {"search": schedule.mesh_graph.Reached(analysis.search).save(),
@@ -173,7 +213,108 @@ def queried(analysis, ordinal, target):
                        for key, (count, chain) in analysis.widths.items()},
             "supplied": analysis.supplied, "accesses": analysis.accesses, "generated": analysis.generated,
             "declarations": {ordinal[key]: declared(made) for key, made in analysis.declarations.items()},
-            "copies": copying(target)}
+            "copies": copying(target),
+            "compiled": {(ordinal[key], group): constructed(machine)
+                         for (key, group), machine in analysis.constructions.items()}}
+
+
+# lower_metal.py ConstructedMachine.produced and .upstream (schedule.py CallAnalysis.constructions: every function's
+# every machine group's construction, a remote group's included): one construction's upstream results, each
+# processor's Produced (`producing`), and each produced kernel's Launched: its native operation (its ID in that
+# construction's own program, as constructed; the local group's final rows place it by native.py Row.offset and
+# Row.values, the native recipe's), its Produced's processor, its Kernel's position in that Produced's kernels and its
+# launch arguments as constructed (buffer names, element bytes, first byte, bytes, access)
+def constructed(machine):
+    processor = {id(made): p for p, made in machine.produced.items()}
+    kernels = {id(kernel): n for made in machine.produced.values() for n, kernel in enumerate(made.kernels.values())}
+    return {"produced": {p: producing(made) for p, made in machine.produced.items()},
+            "upstream": tuple((launched.operation, processor[id(launched.produced)], kernels[id(launched.kernel)],
+                               launched.arguments) for launched in machine.upstream)}
+
+
+# lower_inductor.py Produced as its producer returned it, its FX graphs and nodes by Ref and the upstream compiler's
+# own objects (GraphLowering, Scheduler, kernel owners, IR nodes, wrapper lines) by the FX GraphModules, nodes and
+# names they are of: its kind and device; the scheduled processor `module`; the adapted `body` it traced (its control
+# bodies nested in it); its `sources` as produced, {(graph ID, copy node name): original node}, the graph IDs
+# torch/fx/traceback.py NodeSource's (id(node.graph)), so every saved node's meta["from_node"] chain resolves against
+# it as lower_inductor.py _origins reads it, and `graphs` each body graph's ID's GraphModule; its `sent`; the lowered FX
+# graph its GraphLowering was built over (`lowered`, graph.module: its control subgraphs nested in it), None for the
+# Neural Engine; its AOT `signature` (graph.module.meta's, the same object); each Input's (position, body placeholder,
+# export name: its GraphLowering graph_inputs key) and Output's (position, body node, export name, sent); the
+# upstream objects by identity, each once by index (first seen first): `owners` the distinct backend kernels' count
+# (Kernel.owner), `schedulers` the distinct Schedulers' count (each call, extern and inlining naming its own),
+# `loops` each LoopBody a call's ranges name (`body_of`); `kernels` each call (Produced.kernels order: each
+# KernelCallLine its own) as its own record (`calling`); each ExternCall (`called`) as (its GraphLowering's
+# module, its IR operation's name there (GraphLowering.register_operation), its FX origins, its scheduler's index, each
+# Inlined (`inlining`) in order), each Inlined as (its SubgraphLowering's module, its scheduler's index, its own
+# ExternCalls); each Seeds' uses; the Neural Engine's Model as (its ExportedProgram's graph module and graph
+# signature, its conversion's selected operands, received, handles). Their wrapper lines (ExternCall.lines,
+# Inlined.lines: the typed allocation, free, scope and control lines) are not here: their typed effects and structure
+# are the native projection's (pending)
+def producing(made):
+    model, schedulers, owners, loops = made.model, {}, {}, {}
+
+    def scheduled(scheduler):
+        return schedulers.setdefault(id(scheduler), len(schedulers))
+
+    def called(extern):
+        return (extern.graph.module, extern.node.get_operation_name(), tuple(extern.node.origins),
+                scheduled(extern.scheduler), tuple(map(inlining, extern.inlined)))
+
+    def inlining(inlined):
+        return inlined.graph.module, scheduled(inlined.scheduler), tuple(map(called, inlined.externs))
+
+    # a SchedulerNode's LoopBody (scheduler.py SchedulerNode._body), each once by identity, by its index in `loops`
+    def looped(body):
+        return loops.setdefault(id(body), (len(loops), body))[0]
+
+    # lower_inductor.py Ranges (an mps second-pass SchedulerNode): its node's name and LoopBody, its variables,
+    # reduction and accesses as received (method, buffer name, index, store mode, its LoopBodyBlock graph, that graph's
+    # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes) its nodes' names and LoopBodies
+    # (torch 2.14.0 codegen/cpp.py codegen_node and codegen_outer_loop_node: each node a SchedulerNode of get_nodes(),
+    # every one's _body called by CppKernelProxy.codegen_nodes; a template's finalize_kernel nodes none)
+    ranged = {"mps": lambda r: (r.node.get_name(), looped(r.node._body), r.variables, r.reduction, tuple(r.accesses)),
+              "cpu": lambda r: tuple((node.get_name(), looped(node._body)) for node in r[1])}
+
+    # one Kernel call record as its call made it: its backend kernel's index (Kernel.owner, by identity), its
+    # scheduler's index, its GraphLowering's module, its launch, place and (entry, source) as produced, its original
+    # origins, its schedule (each SchedulerNode by its name, an mps DisableReduction or EnableReduction scope marker as
+    # it is), its scheduled nodes' names and its ranges
+    def calling(kernel):
+        return (owners.setdefault(id(kernel.owner), len(owners)), scheduled(kernel.scheduler), kernel.graph.module,
+                kernel.launch, kernel.place, kernel.produced, kernel.origins,
+                tuple(entry if isinstance(entry, type) else entry.get_name() for entry in kernel.schedule),
+                tuple(node.get_name() for node in kernel.scheduled), tuple(map(ranged[kernel.place], kernel.ranges)))
+    kernels = tuple(map(calling, made.kernels.values()))
+    externs = tuple(map(called, made.externs))
+
+    # torch/_inductor/loop_body.py LoopBody as produced: its sizes, iteration and reduction variables, variable
+    # ranges, indexing expressions, indirect variables and their ranges, memory usage, operation counts, partial
+    # accumulation, its root block's and each subblock's raw FX graph (Rawed), and each submodule but get_index (its
+    # own bound method over `indexing_exprs`, as _init_with_copy rebinds it) as its `clone`, the functools.partial of
+    # LoopBody.bind_set_indirect_shim, bind_masked_shim or bind_scan_shim and its original operands
+    def body_of(body):
+        shims = dict(body.submodules)
+        shims.pop("get_index")
+        return {"sizes": body.sizes, "iter_vars": body.iter_vars, "reduce_vars": body.reduce_vars,
+                "var_ranges": body.var_ranges, "indexing_exprs": body.indexing_exprs,
+                "indirect_vars": body.indirect_vars, "indirect_var_ranges": body.indirect_var_ranges,
+                "memory_usage": body.memory_usage, "op_counts": body.op_counts,
+                "has_partial_accumulate": body.has_partial_accumulate, "root": body.root_block.graph,
+                "subblocks": {name: block.graph for name, block in body.subblocks.items()},
+                "submodules": {name: shim.clone for name, shim in shims.items()}}
+    return {"kind": made.kind, "device": made.device, "module": made.module, "body": made.body,
+            "sources": made.sources, "graphs": {id(module.graph): module for module in made.body.modules()
+                                                if isinstance(module, torch.fx.GraphModule)},
+            "sent": made.sent, "lowered": made.graph and made.graph.module, "signature": made.signature,
+            "processor": made.processor,
+            "inputs": tuple((given.position, given.node, given.name) for given in made.inputs),
+            "outputs": tuple((given.position, given.node, given.name, given.sent) for given in made.outputs),
+            "kernels": kernels, "owners": len(owners), "schedulers": len(schedulers),
+            "loops": tuple(body_of(body) for _, body in loops.values()), "externs": externs,
+            "seeds": tuple(seeds.uses for seeds in made.seeds),
+            "model": model and (model.program.graph_module, model.program.graph_signature, model.selected,
+                                model.received, model.handles)}
 
 
 # a dataclass record's fields by name, each as it is
@@ -273,7 +414,7 @@ def save(directory, scheduled):
     ordinal = {body.key: k for k, body in enumerate(target.bodies)}
     signature, spec = exported.interface
     held = {"owners": {}, "nested": {}, "relations": {}, "natives": {}, "searches": {}, "closures": {}, "kept": {},
-            "tensors": {}, "memo": {}, "projected": {}, "copied": set()}
+            "raws": {}, "tensors": {}, "memo": {}, "projected": {}, "copied": set()}
     # the source record from the original analysis (Target.solution.analysis, its operands), or a loaded
     # compilation's retained one (its joint owner's `source`, Scheduled.operands)
     joint = target.solution
@@ -290,12 +431,19 @@ def save(directory, scheduled):
     # (torch/fx/_graph_pickler.py: one MetaTensorDescriber, so FakeTensor duplicates and views keep their storage;
     # every operator by name, ops_filter None; every node metadata key as encoded, node_metadata_key_filter None:
     # nn_module_stack's normalized (path, type name) strings, source_fn_stack's targets by their pickle reference)
-    graphs, relations, natives, searches, closures, kept = [], [], [], [], [], []
-    while (len(graphs), len(relations), len(natives), len(searches), len(closures), len(kept)) != tuple(
+    graphs, relations, natives, searches, closures, kept, raws = [], [], [], [], [], [], []
+    while (len(graphs), len(relations), len(natives), len(searches), len(closures), len(kept), len(raws)) != tuple(
             map(len, (held["owners"], held["relations"], held["natives"], held["searches"], held["closures"],
-                      held["kept"]))):
+                      held["kept"], held["raws"]))):
         if len(graphs) < len(held["owners"]):
             graphs.append(snapshot(held, list(held["owners"])[len(graphs)]))
+        elif len(raws) < len(held["raws"]):
+            # a raw graph's serialization copy over the archive's one memo (torch/fx/graph.py Graph.__deepcopy__: each
+            # node its own meta dict, no owning module), the original untouched, each node's metadata its `encoded`
+            raw = deepcopy(list(held["raws"].values())[len(raws)][1], held["memo"])
+            for node in raw.nodes:
+                node.meta = encoded(held, node.meta)
+            raws.append(raw)
         elif len(relations) < len(held["relations"]):
             relation = list(held["relations"])[len(relations)]
             relations.append(encoded(held, (relation.relation, relation.functions, relation.supplied,
@@ -312,9 +460,10 @@ def save(directory, scheduled):
                              encoded(held, closure.columns), ordering(held, closure.owned.held[0])))
         else:
             kept.append(list(held["kept"].values())[len(kept)][1].save())
-    (directory / "annotations.pkl").write_bytes(GraphPickler.dumps(
+    (directory / "annotations.pkl").write_bytes(Pickler.dumps(
         {"graphs": graphs, "relations": relations, "natives": natives, "searches": searches, "closures": closures,
-         "kept": kept, "source": source, "bodies": bodies}, Options(ops_filter=None, node_metadata_key_filter=None)))
+         "kept": kept, "raws": raws, "source": source, "bodies": bodies},
+        Options(ops_filter=None, node_metadata_key_filter=None)))
     torch.save({"state": {name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()},
                 "attributes": [tensor.detach() for _, tensor in held["tensors"].values()],
                 "defaults": {name: parameter.default for name, parameter in signature.parameters.items()
@@ -366,8 +515,8 @@ def load(directory):
     # the one payload (GraphPickler.loads, one FakeTensorMode: every graph as saved, FakeTensors' shared storage and
     # shared GraphModules one object each); each tensor attribute its one state.pt tensor; each SourceRelation, Graph,
     # search and closure loaded once (Relation.load, Reached.load, Closures.load: no solve, search or closing); then
-    # every GraphModule's and node's metadata, the source record and every Ref bound to the actual loaded Node or
-    # GraphModule
+    # every GraphModule's, raw graph's and node's metadata, the source record and every Ref bound to the actual loaded
+    # Node, Graph or GraphModule (a raw graph's by `graphed`, Pickler's)
     saved = GraphPickler.loads((directory / "annotations.pkl").read_bytes(), FakeTensorMode())
     graphs = [module for module, _ in saved["graphs"]]
     for module, attributes in saved["graphs"]:
@@ -378,7 +527,7 @@ def load(directory):
     # each native Relation in the restored joint owner's one analysis context (native.restore's, every native artifact
     # of this compilation loaded in it)
     kept = [mesh_graph.Relation.load(data, target.solution.analysis_context) for data in saved["kept"]]
-    loaded = (graphs, {}, relations, natives, searches, closures, kept)
+    loaded = (graphs, {}, relations, natives, searches, closures, kept, saved["raws"])
     resolve = lambda value: decoded(loaded, value)
     natives += [mesh_graph.Graph(resolve(vertices), resolve(relation)) for relation, vertices in saved["natives"]]
     searches += [mesh_graph.Reached.load(data, resolve(graph)) for graph, data in saved["searches"]]
@@ -396,6 +545,9 @@ def load(directory):
                 made.meta = resolve(made.meta)
                 for node in made.graph.nodes:
                     node.meta = resolve(node.meta)
+    for raw in saved["raws"]:
+        for node in raw.nodes:
+            node.meta = resolve(node.meta)
     # the source record: the outer source graph (each call a call_module of its function's captured GraphModule) the
     # public Exported's, each function's Exported, each call's Call, the CallOperands (Scheduled.operands; a storage by
     # its holder's loaded FakeTensor storage) and the query on the joint owner: a local result's attached now, a network

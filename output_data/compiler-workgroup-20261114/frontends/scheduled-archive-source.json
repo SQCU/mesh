@@ -73,9 +73,11 @@
     "Scheduled.operands retains original reference through exact driver keyword. Fresh prepared network keeps original CallAnalysis; loaded compilation retains its saved query record."
   ],
   "current_limits": [
-    "No imports, canonical saved-compilation roundtrip, target execution or runtime validation performed for this replacement.",
-    "Compiler actual upstream lowered/control/source-provenance result is still transitional and its saved-owner handoff remains separate; opaque GraphLowering is not reconstructed.",
-    "Shared compiler/native replacements remain active; matched-runtime chooser and existing public save/load observation remain pending coherent release."
+    "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
+    "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
+    "CPU CppKernelProxy loop nests are not retained here; the original per-call emitted entry/source, scheduled names and LoopBody graphs are retained. Scan clone partials may contain a local combine closure; its serialized owner has not been observed.",
+    "Native135 is adding the original model package/protobuf and debug-handle mapping; current native NeuralFields retains compiled bundle plus IO. Model.program/handles/selected here does not replace the original model result.",
+    "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner; corresponding source graphs and call/provenance records use this shared graph payload."
   ],
   "previous_source_checkpoint": "da96b082",
   "pending_source_layer": {
@@ -132,5 +134,74 @@
   "size": {
     "archive_before_lines": 468,
     "archive_after_lines": 360
+  },
+  "produced_result_checkpoint": {
+    "stage": "Source-only original produced graph, LoopBody and per-call provenance connection; explicitly incomplete full saved-compilation unit",
+    "time_utc": "2026-11-15T06:24:04.827447+00:00",
+    "source_parent": "d5378cb8dab0c8d098429016b4dd7628143717bf",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 104,
+      "process": 32089,
+      "handle": 58844,
+      "last_result_index": 17,
+      "last_result": "success/source HOLD"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "cae7771e2f453f74c0efa7fc282d3e1085f1e116aad53ba2cea3c3caa78a7705"
+    },
+    "references_sha256": {
+      "compiler/mesh_compiler/lower_inductor.py": "9e095353ab32f2750e5f83559e0deb9e3f3a1b990dae3732c6b06f92fc59362a",
+      "compiler/mesh_compiler/lower_metal.py": "094be48c3a74fec1beab625e9c4c812252eb0e2559d1035c14e001be110bbb04",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/_graph_pickler.py": "1b581217e9a3fa83084c775be77ca2ccfd9366ab51c182451a05eabb32c9d14f",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/loop_body.py": "a21779e4d4ba1ce090be0bafc8fb8b0ca08de55f48a41079988238cfac5f5327",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/common.py": "3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466",
+      "/Users/mdot/metal-microbench/metal_archive.mm": "29f43e43b4ae3fb076308ad35c9776f094c3ea7b53dd6a49146f4bf94c1e9a5c"
+    },
+    "checks": [
+      {
+        "kind": "ast",
+        "result": "PASS"
+      },
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "changed_during_checks": [],
+    "retained": [
+      "Every CallAnalysis.constructions function/group contributes its original Produced source/lowered/control graphs, NodeSource-ID correspondence, AOT signature, interface names and source leaves, including remote groups.",
+      "Each original kernel call retains its owner/scheduler identity, launch, produced entry/source and origins; shared backend identity does not overwrite distinct per-call facts. Launched associates original construction operation with processor and call ordinal.",
+      "Ownerless LoopBody FX graphs delegate to upstream _GraphPickleData with GraphPickler shared unpickle state; graph-owned references resolve to the actual loaded GraphModule.graph. Shared raw graph/Node references, original metadata and serialization purity use existing registry/memo.",
+      "LoopBody ranges/indexing/indirect/context operands and original shim.clone descriptors retained without execution; Counter uses canonical pickle unchanged. Recursive ExternCall/Inlined graph/source/scheduler records retained, with no lossy unknown-line-to-None projection.",
+      "Existing joint.source query owns decoded compiled records, so save/load/save consumes retained data and no new analysis or partial ConstructedMachine is manufactured."
+    ],
+    "limits": [
+      "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
+      "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
+      "CPU CppKernelProxy loop nests are not retained here; the original per-call emitted entry/source, scheduled names and LoopBody graphs are retained. Scan clone partials may contain a local combine closure; its serialized owner has not been observed.",
+      "Native135 is adding the original model package/protobuf and debug-handle mapping; current native NeuralFields retains compiled bundle plus IO. Model.program/handles/selected here does not replace the original model result.",
+      "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner; corresponding source graphs and call/provenance records use this shared graph payload."
+    ],
+    "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
   }
 }
