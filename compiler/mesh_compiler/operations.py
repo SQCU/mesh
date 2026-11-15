@@ -3180,10 +3180,11 @@ def _dlarfx3(left, v, tau, x, r0, c0, extent, when):
 # TL = D(1,1) (N1 x N1), TR = D(N1+1,N1+1) (N2 x N2) and B = D(1,N1+1) (N1 x N2) of the static 4 x 4 `d`, N1, N2 per
 # member; EPS = DLAMCH('P'), SMLNUM = DLAMCH('S') / EPS; K = N1 + N1 + N2 - 2 selects 248-264 (K = 1), 270-286 or
 # 292-306 then label 40's 312-356 (K = 2, 3: IDAMAX's first largest |TMP|, the LOCU12, LOCL21, LOCU22, XSWPIV and
-# BSWPIV tables of 221-224) or 365-475 (K = 4: DO 100's complete pivoting, the IP, JP scan taking the last |T16(IP,JP)|
-# >= XMAX, IPSV and JPSV kept from the previous I where no entry is taken (the source leaves them unset at I = 1; 1
-# here), DSWAP of rows (and BTMP) and of columns, DO 90 and DO 80, then DO 120 and DO 130). Returns SCALE and X(1,1),
-# X(2,1), X(1,2), X(2,2) (INFO and XNORM unread by DLAEXC)
+# BSWPIV tables of 221-224) or 365-475 (K = 4: DO 100's complete pivoting, DO 70 and DO 60 (406-416) taking the last
+# ABS(T16(IP,JP)) >= XMAX from XMAX = ZERO, DSWAP of rows (and BTMP) and of columns, DO 90 and DO 80, then DO 120
+# and DO 130). On the source's stated domain each I's first comparison ABS(T16(I,I)) >= ZERO holds, so DO 70/60 set
+# IPSV and JPSV at every I; the 1 the trace starts them from is unreachable there and selects nothing. Returns SCALE
+# and X(1,1), X(2,1), X(1,2), X(2,2) (INFO and XNORM unread by DLAEXC)
 def _dlasy2(n1, n2, d):
     limits = torch.finfo(d.dtype)
     eps = limits.eps
@@ -3865,8 +3866,8 @@ def _laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed, lw
 
 # zlaqr0.f 439-690, DO 70's pass for IT: 448-454 KTOP (DO 10); 471-496 NH, NWUPBD, NW (KEXNW = 5) and NDEC; 507-511
 # KV, KT, NHO, KWV, NVE; 516-520 ZLAQR3 (ZLAQR2 where `four`; its static SIZE (n - 1) / 3 >= NWMAX); 524 KBOT - LD;
-# 528 KS; 536-678 where LD = 0 or 100 LD <= NW NIBBLE and KBOT - KTOP + 1 > MIN(NMIN, NWMAX): 543-544 NS; 553-558
-# MOD(NDFL, KEXSH = 6) = 0's DO 30 (W(I) = H(I,I) + WILK1 CABS1(H(I,I-1)), WILK1 = 0.75d0, W(I-1) = W(I)), else
+# 528 KS; 536-678 where LD = 0 or 100 LD <= NW NIBBLE and KBOT - KTOP + 1 > MIN(NMIN, NWMAX): 543-544 NS; 552-557
+# MOD(NDFL, KEXSH = 6) = 0: KS = KBOT - NS + 1, then DO 30 on H as ZLAQR3 left it (_laqr0_exceptional), else
 # 567-605 where KBOT - KS + 1 <= NS / 2 the NS x NS ZLACPY to H(KT,1) (static NSB x NSB, NSB = (n - 3) / 6 made even
 # >= NSMAX >= NS) and ZLAQR4 (NS > NMIN, not `four`; present where NSB admits NS > 75) or ZLAHQR of it into W(KS),
 # KS + INF, and where KS >= KBOT the 2 x 2 shifts (S, AA..DD = H / S, TR2, DET, RTDISC = SQRT(-DET), KS = KBOT - 1);
@@ -3904,11 +3905,9 @@ def _laqr0_pass(wantt, wantz, four, lwork, live, h, z, w, kbot, nw, ndfl, ndec, 
     exceptional = sweep & (ndfl % 6 == 0)
     computed = sweep & ~exceptional
     first = kbot - ns + 1
-    q = k + (_vec(kbot) - k) % 2
-    raised = _plus_real(h.diagonal(dim1=-2, dim2=-1).gather(-1, (q - 1).clamp(0, n - 1)),
-                        0.75 * _abs1(sub.gather(-1, (q - 1).clamp(0, n - 1))))
-    w = torch.where(_vec(exceptional) & _span(k, first, kbot), raised, w)
     ks = torch.where(exceptional, first, ks)
+    _, w, _ = while_loop_op(_first_any, _laqr0_exceptional, (exceptional & (kbot >= ks + 1), w, kbot.clone()),
+                            (h, ks + 1))
     few = computed & (kbot - ks + 1 <= ns // 2)
     top = order - ns + 1
     square = _square_within(ns, nsb)
@@ -3948,6 +3947,15 @@ def _laqr0_pass(wantt, wantz, four, lwork, live, h, z, w, kbot, nw, ndfl, ndec, 
     ndfl = torch.where(live, torch.where(ld > 0, 1, ndfl + 1), ndfl)
     it = torch.where(live, it + 1, it)
     return (live & (kbot >= ilo) & (it <= itmax), h, z if wantz else z.clone(), w, kbot, nw, ndfl, ndec, it)
+
+
+# zlaqr0.f 554-557, DO 30's pass for I (KBOT, KS + 1, -2), H the one ZLAQR3 left: W(I) = H(I,I) + WILK1
+# CABS1(H(I,I-1)) (WILK1 = 0.75d0, the real product added to H(I,I)'s real part), then W(I-1) = W(I)
+def _laqr0_exceptional(live, w, i, h, stop):
+    raised = _plus_real(_entry(h, i, i), 0.75 * _abs1(_entry(h, i, i - 1)))
+    w = _at_put(_at_put(w, i, raised, live), i - 1, raised, live)
+    i = torch.where(live, i - 2, i)
+    return live & (i >= stop), w, i
 
 
 # zlaqr0.f 611-626, DO 50's pass for K (KBOT, KS + 1, -1) until SORTED: SORTED = .TRUE., then DO 40
@@ -3999,15 +4007,14 @@ def _dlaqr0(wantt, wantz, four, order, ilo, ihi, h, wr, wi, iloz, ihiz, z, proce
 # dlaqr0.f 443-725, DO 80's pass for IT, as _laqr0_pass (ABS for CABS1): 447-458 KTOP (DO 10); 476-499 NH, NWUPBD, NW
 # (KEXNW = 5) and NDEC; 512-516 KV, KT, NHO, KWV, NVE; 520-524 DLAQR3 (DLAQR2 where `four`); 528 KBOT - LD; 532 KS;
 # 540-714 where LD = 0 or 100 LD <= NW NIBBLE and KBOT - KTOP + 1 > MIN(NMIN, NWMAX): 547-548 NS; 557-574 MOD(NDFL,
-# KEXSH = 6) = 0: KS = KBOT - NS + 1 and DO 30 (I = KBOT down by 2 to MAX(KS + 1, KTOP + 2), each I's reads H's and
-# its writes WR, WI(I-1) and (I) its own: SS = ABS(H(I,I-1)) + ABS(H(I-1,I-2)), DLANV2(WILK1 SS + H(I,I), SS, WILK2
-# SS, that AA), WILK1 = 0.75d0, WILK2 = -0.4375d0, 295), then where KS = KTOP both WR(KS+1), WR(KS) = H(KS+1,KS+1)
-# and WI = 0; else 583-614 where KBOT - KS + 1 <= NS / 2 the NS x NS DLACPY to H(KT,1) (static NSB x NSB as
-# _laqr0_pass) and DLAQR4 (NS > NMIN, not `four`; present where NSB admits NS > 75) or DLAHQR of it into WR(KS),
-# WI(KS), KS + INF, and where KS >= KBOT DLANV2 of H(KBOT-1:KBOT,KBOT-1:KBOT) into WR, WI(KBOT-1) and (KBOT), KS =
-# KBOT - 1; 616-643 where KBOT - KS + 1 > NS DO 50/40's bubble sort; 651-664 DO 70; 670-679 KBOT - KS + 1 = 2 with
-# WI(KBOT) = 0's nearer real shift; 686-706 NS, KS, KDU, KU, KWH, NHO, KWV, NVE; 710-713 DLAQR5 on WR(KS), WI(KS),
-# its DO 10 (dlaqr5.f 330-343) pairing them in place; 718-722 NDFL
+# KEXSH = 6) = 0: KS = KBOT - NS + 1, DO 30 on H as DLAQR3 left it (_dlaqr0_exceptional), then where KS = KTOP
+# WR(KS+1) = H(KS+1,KS+1), WI(KS+1) = 0, WR(KS) = WR(KS+1), WI(KS) = WI(KS+1); else 583-614 where KBOT - KS + 1 <=
+# NS / 2 the NS x NS DLACPY to H(KT,1) (static NSB x NSB as _laqr0_pass) and DLAQR4 (NS > NMIN, not `four`; present
+# where NSB admits NS > 75) or DLAHQR of it into WR(KS), WI(KS), KS + INF, and where KS >= KBOT DLANV2 of
+# H(KBOT-1:KBOT,KBOT-1:KBOT) into WR, WI(KBOT-1) and (KBOT), KS = KBOT - 1; 616-643 where KBOT - KS + 1 > NS DO 50/40's
+# bubble sort; 651-664 DO 70; 670-679 KBOT - KS + 1 = 2 with WI(KBOT) = 0's nearer real shift; 686-706 NS, KS, KDU,
+# KU, KWH, NHO, KWV, NVE; 710-713 DLAQR5 on WR(KS), WI(KS), its DO 10 (dlaqr5.f 330-343) pairing them in place;
+# 718-722 NDFL
 def _dlaqr0_pass(wantt, wantz, four, lwork, live, h, z, wr, wi, kbot, nw, ndfl, ndec, it, order, ilo, iloz, ihiz,
                  itmax, nwr, nsr, nwmax, nsmax, accum):
     n, k, one = h.shape[-1], _counted(h), torch.ones_like(kbot)
@@ -4040,17 +4047,10 @@ def _dlaqr0_pass(wantt, wantz, four, lwork, live, h, z, wr, wi, kbot, nw, ndfl, 
     exceptional = sweep & (ndfl % 6 == 0)
     computed = sweep & ~exceptional
     first = kbot - ns + 1
-    prior = torch.cat([torch.zeros_like(sub[..., :1]), sub[..., :-1]], -1)
-    ss = sub.abs() + prior.abs()
-    aa = 0.75 * ss + h.diagonal(dim1=-2, dim2=-1)
-    _, _, _, _, rt1r, rt1i, rt2r, rt2i, _, _ = _dlanv2(aa, ss, -0.4375 * ss, aa)
-    at = (_vec(exceptional) & (k <= _vec(kbot)) & ((_vec(kbot) - k) % 2 == 0)
-          & (k >= _vec(torch.maximum(first + 1, ktop + 2))))
-    ahead = torch.cat([at[..., 1:], torch.zeros_like(at[..., :1])], -1)
-    rt1r, rt1i = (torch.cat([x[..., 1:], x[..., :1]], -1) for x in (rt1r, rt1i))
-    wr = torch.where(at, rt2r, torch.where(ahead, rt1r, wr))
-    wi = torch.where(at, rt2i, torch.where(ahead, rt1i, wi))
     ks = torch.where(exceptional, first, ks)
+    stop = torch.maximum(ks + 1, ktop + 2)
+    _, wr, wi, _ = while_loop_op(_first_any, _dlaqr0_exceptional,
+                                 (exceptional & (kbot >= stop), wr, wi, kbot.clone()), (h, stop))
     bottom = exceptional & (ks == ktop)
     corner = _entry(h, ks + 1, ks + 1)
     wr = _at_put(_at_put(wr, ks + 1, corner, bottom), ks, corner, bottom)
@@ -4098,6 +4098,19 @@ def _dlaqr0_pass(wantt, wantz, four, lwork, live, h, z, wr, wi, kbot, nw, ndfl, 
     ndfl = torch.where(live, torch.where(ld > 0, 1, ndfl + 1), ndfl)
     it = torch.where(live, it + 1, it)
     return (live & (kbot >= ilo) & (it <= itmax), h, z if wantz else z.clone(), wr, wi, kbot, nw, ndfl, ndec, it)
+
+
+# dlaqr0.f 559-568, DO 30's pass for I (KBOT, MAX(KS + 1, KTOP + 2), -2), H the one DLAQR3 left: SS = ABS(H(I,I-1))
+# + ABS(H(I-1,I-2)), AA = WILK1 SS + H(I,I), BB = SS, CC = WILK2 SS, DD = AA (WILK1 = 0.75d0, WILK2 = -0.4375d0,
+# 295), then DLANV2(AA, BB, CC, DD) into WR(I-1), WI(I-1), WR(I), WI(I)
+def _dlaqr0_exceptional(live, wr, wi, i, h, stop):
+    ss = _entry(h, i, i - 1).abs() + _entry(h, i - 1, i - 2).abs()
+    aa = 0.75 * ss + _entry(h, i, i)
+    _, _, _, _, rt1r, rt1i, rt2r, rt2i, _, _ = _dlanv2(aa, ss, -0.4375 * ss, aa)
+    wr = _at_put(_at_put(wr, i - 1, rt1r, live), i, rt2r, live)
+    wi = _at_put(_at_put(wi, i - 1, rt1i, live), i, rt2i, live)
+    i = torch.where(live, i - 2, i)
+    return live & (i >= stop), wr, wi, i
 
 
 # dlaqr0.f 623-641, DO 50's pass for K (KBOT, KS + 1, -1) until SORTED: SORTED = .TRUE., then DO 40

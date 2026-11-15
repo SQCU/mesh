@@ -948,5 +948,27 @@
       "execution": false,
       "status": "WIP; complete query/callee source and real/blocked methods remain unfinished"
     }
-  ]
+  ],
+  "original_result_review_20261115": {
+    "source_commits": [
+      "61456bab",
+      "6e0bc4e1"
+    ],
+    "operations_corrected_sha256": "130b571251f903381af671eed797530e8cad45be47cee258e74fdd7897c6f347",
+    "patch_preflight": {
+      "files": 15,
+      "forward_reverse_exact": true,
+      "ast_pass": true,
+      "added_pyflakes_count": 0,
+      "installed": false
+    },
+    "countersteering": [
+      "post-deflation H retained for literal real/complex DO30",
+      "original wrapper root entry count, not subgraph count",
+      "canonical prepared view/lifetime owner, not extra invocation boxing",
+      "original static model class/header and object-action consumer",
+      "per-result axis operand and original seeded state consumer remain incomplete"
+    ],
+    "runtime": "none; native138 matched separately; current source incomplete"
+  }
 }

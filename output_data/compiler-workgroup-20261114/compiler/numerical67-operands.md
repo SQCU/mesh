@@ -15,8 +15,18 @@ has since preserved five WIP checkpoints, none of which accepts the method:
 - 5fa30b55 and cddf5cf9: the corrections below on top of 53af5eda, then the static LWORK query and its handoff to
   the complex methods (cddf5cf9; see Coverage).
 
-The operations.py delta on top of cddf5cf9 is uncommitted: the real DLAEXC/DTREXC/DLAQR3/DLAQR0/DHSEQR group below
-and GEEV's real DHSEQR call. The corrections 5fa30b55/cddf5cf9 hold on top of 53af5eda:
+- 6e0bc4e1: the real DLAEXC/DTREXC/DLAQR3/DLAQR0/DHSEQR group below and GEEV's real DHSEQR call.
+
+The operations.py delta on top of 6e0bc4e1 is uncommitted. It corrects DO 30, the exceptional shifts, in both
+`_laqr0_pass` and `_dlaqr0_pass`; the supervisor's source review of 6e0bc4e1 found the defect:
+- Both passes read the subdiagonal `sub` taken at the pass's start, before xLAQR3 updated H. zlaqr0.f 552-557 and
+  dlaqr0.f 557-574 read H as xLAQR3 left it.
+- The real pass had also computed every I at once.
+- DO 30 is now its source loop in both, `_laqr0_exceptional` and `_dlaqr0_exceptional`: one I per pass, KS set
+  first, on the current H.
+- `sub` is now read only by DO 10's KTOP search, before xLAQR3, as in the source.
+
+The corrections 5fa30b55/cddf5cf9 hold on top of 53af5eda:
 - It replaces those three helpers with the source's per-chunk passes (`_rows_chunk`, `_columns_chunk`), used by
   `_laqr3` and `_laqr5_columns`. It also drops the two functions' unused locals and rewrites their comments.
 - `_zlartg`'s S now follows v3.12.1 zlartg.f90 206-208, 226, 262-264 and 282: S = CONJG(G) (F / SQRT(F2 H2)), else
@@ -256,7 +266,8 @@ These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr
     - finds KTOP, then NW with NDEC, then KV/KT/NHO/KWV/NVE;
     - calls ZLAQR3 or ZLAQR2, then sets KBOT − LD and KS;
     - tests whether to sweep, then sets NS;
-    - takes the exceptional shifts (DO 30, WILK1 = 0.75), or the computed ones:
+    - takes the exceptional shifts (DO 30 on H as ZLAQR3 left it, `_laqr0_exceptional`, WILK1 = 0.75), or the
+      computed ones:
       - the NS × NS ZLACPY to H(KT,1) through ZLAQR4 or ZLAHQR (static NSB = (n − 3)/6 made even ≥ NSMAX);
       - the 2 × 2 fallback shifts;
       - DO 50/DO 40's bubble sort (`_laqr0_sorted`, `_laqr0_swapped`);
@@ -319,8 +330,9 @@ dhseqr.f line ranges (/tmp/n67i/lapack). Each sits beside its complex counterpar
   it:
   - K = 1;
   - K = 2, 3: the IDAMAX pivot and the LOCU12/LOCL21/LOCU22/XSWPIV/BSWPIV tables;
-  - K = 4: DO 100's complete pivoting, DO 90/80, then DO 120/130. IPSV/JPSV keep the previous I's where no entry is
-    taken; at I = 1 the source leaves them unset, and they are 1 here.
+  - K = 4: DO 100's complete pivoting, DO 90/80, then DO 120/130. On the source's stated domain each I's first
+    comparison ABS(T16(I,I)) ≥ XMAX = 0 holds, so DO 70/60 (dlasy2.f 406-416) set IPSV and JPSV at every I. The 1
+    the trace starts them from is unreachable there and selects nothing; it is not a numerical rule.
 - **`_dlaexc(wantq, order, t, q, j1, n1, n2, when)`:** dlaexc.f 185-435:
   - the 1 × 1 swap (DLARTG, DROTs);
   - else D, THRESH and DLASY2, then labels 10/20/30: DLARFG(3), DLARFX on D, the THRESH test, then DLARFX on T and Q;
@@ -345,8 +357,8 @@ dhseqr.f line ranges (/tmp/n67i/lapack). Each sits beside its complex counterpar
   - ND, and NS − INFQR.
 - **`_dlaqr0(…, wr, wi, …, proceed, lwork)` and `_dlaqr0_pass`:** dlaqr0.f 323-730, as `_laqr0` with ABS for CABS1.
   `four` True is dlaqr4.f, which differs only at dlaqr0.f 385, 520 and 588-597.
-  - DO 30's exceptional shifts (DLANV2 with WILK1 = 0.75, WILK2 = −0.4375) are taken at every I of the loop at once:
-    each I reads only H and writes only its own WR/WI(I−1) and (I). Then the KS = KTOP pair.
+  - KS = KBOT − NS + 1, then DO 30's exceptional shifts as the source loop (`_dlaqr0_exceptional`) on H as DLAQR3
+    left it: SS, then DLANV2 with WILK1 = 0.75 and WILK2 = −0.4375. Then the KS = KTOP pair.
   - The NS × NS DLAQR4/DLAHQR shifts, then the KS ≥ KBOT DLANV2 fallback.
   - DO 50/40's bubble sort on |WR| + |WI| (`_dlaqr0_sorted`, `_dlaqr0_swapped`), then DO 70's pairing
     (`_dlaqr0_paired`).
