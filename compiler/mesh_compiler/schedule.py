@@ -766,6 +766,7 @@ class Solved:
     ports: tuple
     context: object
     owner: object
+    source: object = None
 
     # a network result's program mask (mesh_program_save's and mesh_program_load's operand): its planning's, or, loaded
     # by its preparation, its saved source's
@@ -1273,6 +1274,7 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
 class SavedNetwork:
     record: bytes
     program: int
+    source: object = None
 
     @property
     def plan(self):
@@ -1285,14 +1287,18 @@ class SavedNetwork:
 # mesh-collective.h mesh_program_load and mesh_view_program: a network result its preparation loaded and published
 # (bridge.Published), as a Solved: its Function[], roots, planned record and prefixes over the loaded Local, its copies'
 # offsets the mapped byte offsets `offset` (the arena's), every view held by `owner` (the preparation's _Mapping and
-# `offset`; the _Mapping frees the Local: no second owner); its `plan` the saved source
+# `offset`; the _Mapping frees the Local: no second owner); its `plan` the saved source, its `analysis` a fresh
+# compiled source's own, its `source` a saved source's query attached to the loaded Local (archive.py attached)
 def published_program(local, owner, offset, source):
+    from .archive import attached
     F, S, prefix = local.functions, local.roots, local.value_first
     return Solved(local.function, local, local.planned,
                   [mesh_graph.View(owner, local.first, range(prefix[f], prefix[f + 1] + 1), int) for f in range(F)],
                   mesh_graph.View(owner, local.first, range(prefix[F], prefix[F] + S + 1), int),
-                  mesh_graph.View(owner, offset, range(local.offsets), int), (), (), (), None, local.root,
-                  (local.use_first, local.use), local.calls, None, source, (), None, owner)
+                  mesh_graph.View(owner, offset, range(local.offsets), int), (), (), (),
+                  source.analysis if isinstance(source, Solved) else None, local.root,
+                  (local.use_first, local.use), local.calls, None, source, (), None, owner,
+                  None if source.source is None else attached(source.source["query"], local, owner))
 
 
 # mesh-collective.h mesh_local_load: the saved result of `data` (Solved.saved), loaded, never solved: its Function[],

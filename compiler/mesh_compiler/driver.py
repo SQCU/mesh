@@ -111,7 +111,7 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
                                  for channel, sender, receiver, *layout in stage[4]] for key, stage in staged.items()},
                           dict(engines),
                           invariant={key: stage[0].meta["invariant"] for key, stage in staged.items()},
-                          compilation=compilation, processor_modules=processor_modules)
+                          compilation=compilation, processor_modules=processor_modules, operands=operands)
     lowered = lower(scheduled)
     constructions = {(key, group): construct(scheduled.modules[key][group], lowered[key], **made)
                      for (key, group), made in compilation.items()}

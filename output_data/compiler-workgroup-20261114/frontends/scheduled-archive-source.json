@@ -1,17 +1,21 @@
 {
-  "stage": "source-only reviewed checkpoint; no import, serialization roundtrip, native invocation or complete A9 claim",
-  "time_utc": "2026-11-15T04:09:40.590063+00:00",
+  "stage": "Source-only consolidated graph codec and outer call/query attachment; no import, save/load execution or full A9 completion claim",
+  "time_utc": "2026-11-15T04:49:03.080204+00:00",
   "worker": {
     "session": "9740398d-f513-4c78-8578-f80b79fa2225",
     "model": "claude-opus-5-5",
-    "turn": 99,
-    "handle": 20710,
-    "terminal_exit": 0
+    "turn": 103,
+    "handle": 58844,
+    "pid": 32089,
+    "state": "persistent stream process idle/HOLD, result events0/1/2 success; no source writer",
+    "source_checks": "CLI Python denied; supervisor executed AST/pyflakes/diff using actual source, all passed"
   },
   "source_sha256": {
-    "compiler/mesh_compiler/archive.py": "99f6a41f0e345284ed291620a4313c0ff9f30c7c44e067fe92c4a35aee6f45c7",
-    "compiler/mesh_compiler/schedule.py": "52bfb42d56cfcac2dd45ced3e62db73c57ef1b2ba9e478afa6f5b86515d6b268",
-    "rdma/mesh_graph.py": "e0ba77288fd5892a1c79b407913fa1e9277c557490a2e97b6b3507f028b4a08f"
+    "compiler/mesh_compiler/archive.py": "fc8b0a0856268b5292950b316eef01b56e3a8ee7521489e52c2d2aaac8c88a5b",
+    "compiler/mesh_compiler/schedule.py": "596d0ae1b57e2eb646be7927647229994c7e562d6773509d32460d67b77d449a",
+    "compiler/mesh_compiler/ir.py": "e160278ed16a54aa1b476c9583f4e8d252c7bcaf374c4d87d8a27b7d77db1089",
+    "compiler/mesh_compiler/driver.py": "43254b1aebf1999ed53e565dfc23172694dc7d3f221e84554c754d6c9c7cff40",
+    "rdma/mesh_graph.py": "aa91b75c25d62981da1bd77de9bcfd34b492779227721f7e7ec8fe51dcf2fdc8"
   },
   "checks": [
     {
@@ -25,6 +29,8 @@
         "pyflakes",
         "compiler/mesh_compiler/archive.py",
         "compiler/mesh_compiler/schedule.py",
+        "compiler/mesh_compiler/ir.py",
+        "compiler/mesh_compiler/driver.py",
         "rdma/mesh_graph.py"
       ],
       "exit": 0,
@@ -39,6 +45,8 @@
         "--",
         "compiler/mesh_compiler/archive.py",
         "compiler/mesh_compiler/schedule.py",
+        "compiler/mesh_compiler/ir.py",
+        "compiler/mesh_compiler/driver.py",
         "rdma/mesh_graph.py"
       ],
       "exit": 0,
@@ -49,27 +57,27 @@
   "references_sha256": {
     "/Users/mdot/schedule-emit/schedule_emit/archive.py": "e4ba48c7a82946084498293cfb191509e6ecf8da8dd2136434e796355f060331",
     "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/_graph_pickler.py": "1b581217e9a3fa83084c775be77ca2ccfd9366ab51c182451a05eabb32c9d14f",
-    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/export/_unlift.py": "35faa6af4a285a919ed8d30da550470832a6c15b5aa0b8eb25e331c66217b41b",
-    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_export/passes/lift_constants_pass.py": "ba2d3b0bc33a7397f05b1074515571c39423af7c38b280d814d03502fd1b1e65",
-    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/export/exported_program.py": "bf8418070373473faddea7a535962c2e9626a9493f98d67a0c7d1c17ed56d691",
-    "rdma/mesh-graph.h": "731e0339bf3a0fe7032fc132cad7e341bbb35c5afef72cf222f7899fdfffc05f",
     "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/graph_module.py": "80738cbf20c7422019529de8731a8f6c41e68ee3e59a4911074a9ed560d01b45",
-    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/graph.py": "d27f2ac74696d96cad0693faa6234bea1f172c60ce7326c3266658c346621745"
+    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/graph.py": "d27f2ac74696d96cad0693faa6234bea1f172c60ce7326c3266658c346621745",
+    "rdma/mesh-graph.h": "731e0339bf3a0fe7032fc132cad7e341bbb35c5afef72cf222f7899fdfffc05f",
+    "design/aot-compilation-change-request.md": "18762f183618d019e8ba2cd4a083bfc2b53059a6f560c231ec381fa56bb4663c",
+    "design/compilation-composition-change-request.md": "6af38cc9b500c7da028033149661c9551e476e486eafbd71612fd33194154464"
   },
   "retained": [
-    "Actual processor and machine GraphModules and original source graphs by saved function ordinal; canonical torch.export save/load without retracing",
-    "Qualified Node references, original Mesh annotations and shared FakeTensor storage/view metadata through one GraphPickler payload",
-    "Shared branch attributes rebound to canonical saved graph owner; real tensor attributes and state share torch.save backing",
-    "SourceRelation and outline Graph/Reached arrays restored with existing native save/load, no solve or search",
-    "Public signature, specialized literals, state and native saved/solved result retained by existing owners",
-    "Canonical GraphModule deepcopy with shared memo isolates serialization normalization from original nested source graphs; original annotation/native and tensor owners remain outside the copied normalization graph"
+    "One canonical GraphPickler payload owns all source/machine/processor/nested FX graphs; shared canonical deepcopy memo preserves original source purity and graph identity.",
+    "Original Node/module annotations use qualified references, including nested source branches; metadata filter disabled so original source stacks remain.",
+    "Real tensor attributes/state share state.pt backing; loaded graph attributes rebind exact saved identities. FakeTensor storage/views share GraphPickler MetaTensorDescriber and MetaConverter.",
+    "Original Call/CallOperands function ordinals, full leaves/roles/state/signature/literal correspondence saved; projected outer call_module records support saving loaded compilation without original callable tag.",
+    "Original SourceRelation and Graph/Reached arrays use existing native save/load. Incoming DFS, paths, explicit width member IDs and chain assignments retained; no search/solve on load.",
+    "Loaded local relation/closure borrow existing LocalOwner; network query attachment occurs only at existing Published mesh_program_load result. Native relation/closure/chains/orders/causes/allocations remain original saved owner.",
+    "Scheduled.operands retains original reference through exact driver keyword. Fresh prepared network keeps original CallAnalysis; loaded compilation retains its saved query record."
   ],
   "current_limits": [
-    "No concrete current numerical HOP branch tensor-get_attr instance established; canonical lifting is top-level, serializer rejects unlifted nested tensor attrs. No speculative hoisting policy added.",
-    "Actual new upstream lowered-body owner/field is still being produced by compiler; its serialization handoff remains separate and pending.",
-    "Paired numerical/native replacement is transitional; all source imports/target execution remain held."
+    "No imports, canonical saved-compilation roundtrip, target execution or runtime validation performed for this replacement.",
+    "Compiler actual upstream lowered/control/source-provenance result is still transitional and its saved-owner handoff remains separate; opaque GraphLowering is not reconstructed.",
+    "Shared compiler/native replacements remain active; matched-runtime chooser and existing public save/load observation remain pending coherent release."
   ],
-  "previous_source_checkpoint": "fd3875f6",
+  "previous_source_checkpoint": "da96b082",
   "pending_source_layer": {
     "stage": "WIP history checkpoint before replacing parallel graph codecs; not accepted completion or runtime evidence",
     "time_utc": "2026-11-15T04:33:43.451092+00:00",
@@ -116,5 +124,13 @@
       "SavedNetwork/Solved/published_program and Scheduled.operands pairing not yet implemented.",
       "Root directs one canonical GraphPickler graph codec replacing wrapped/unlift/getitem/name repair path, keeping shared tensors and annotation/native owners."
     ]
+  },
+  "changed_during_checks": [],
+  "removed": [
+    "Parallel torch.export wrapping/lifting/unlift/getitem/name-repair graph path: produced, copied, wrapped, annotated, restored, found routines and related key lists/imports."
+  ],
+  "size": {
+    "archive_before_lines": 468,
+    "archive_after_lines": 360
   }
 }

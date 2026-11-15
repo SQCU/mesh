@@ -178,6 +178,7 @@ class Scheduled:
     # machine orchestration of those same originals. The numerical lowerer's operand (lower_inductor.py lower) and the
     # archive's retained source bodies (archive.py)
     processor_modules: dict = None
+    operands: object = None
 
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4, 6 and 8; design/review-warnings.md rule 5
