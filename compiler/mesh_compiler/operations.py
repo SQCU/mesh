@@ -1396,9 +1396,9 @@ def _least_squares_svd(self, b, rcond=None, driver=None, shapes=()):
 # torch/_higher_order_ops/while_loop.py while_loop_op under JAX's batching rule (jax/_src/lax/control_flow/loops.py
 # _while_loop_batching_rule: the loop runs while any member's predicate holds, each member's step selected where its
 # own does). K, L, I, J, ILO and IHI are the source's 1-based values as int64 batch tensors. DZNRM2/DNRM2 is the
-# scaled norm (largest modulus, then the root of the sum of squared ratios); CABS1 |Re| + |Im|; DLADIV Smith's
-# division (_divided); a real factor of a complex entry multiplies each component (ZDSCAL, Fortran's mixed real and
-# complex product); Fortran SIGN(A, B) takes B's sign bit, a -0 B negative
+# scaled norm (largest modulus, then the root of the sum of squared ratios); CABS1 |Re| + |Im|; DLADIV and ZLADIV
+# dladiv.f's scaled division (_divided); a real factor of a complex entry multiplies each component (ZDSCAL, Fortran's
+# mixed real and complex product); Fortran SIGN(A, B) takes B's sign bit, a -0 B negative
 
 # 1-based positions along the last dimension
 def _counted(x):
@@ -1443,14 +1443,39 @@ def _plus_real(x, s):
     return torch.complex(s + x.real, x.imag) if x.is_complex() else s + x
 
 
-# Smith's complex division (xr + i xi) / (yr + i yi), real components
-def _divided(xr, xi, yr, yi):
-    wide = yr.abs() >= yi.abs()
-    first, second = torch.where(wide, yr, yi), torch.where(wide, yi, yr)
-    ratio = second / first
-    den = first + second * ratio
-    return (torch.where(wide, (xr + xi * ratio) / den, (xr * ratio + xi) / den),
-            torch.where(wide, (xi - xr * ratio) / den, (xi * ratio - xr) / den))
+# Reference-LAPACK SRC/dladiv.f (3.7 on; zladiv.f is it on the parts): P + i Q = (A + i B) / (C + i D), the operands
+# halved where their larger part is at least OV / 2 and raised by BE = 2 / EPS**2 where it is at most UN 2 / EPS (OV,
+# UN, EPS = DLAMCH 'O', 'S', 'E'), then DLADIV1 (or on the swapped parts, Q negated, where |D| > |C|) with DLADIV2's
+# R = 0 and B R = 0 branches, P and Q times S
+def _divided(a, b, c, d):
+    limits = torch.finfo(a.dtype)
+    eps = limits.eps / 2
+    be, small = 2 / (eps * eps), limits.tiny * 2 / eps
+    ab, cd = torch.maximum(a.abs(), b.abs()), torch.maximum(c.abs(), d.abs())
+    s = torch.ones_like(a)
+    halved = ab >= 0.5 * limits.max
+    aa, bb, s = torch.where(halved, 0.5 * a, a), torch.where(halved, 0.5 * b, b), torch.where(halved, 2 * s, s)
+    halved = cd >= 0.5 * limits.max
+    cc, dd, s = torch.where(halved, 0.5 * c, c), torch.where(halved, 0.5 * d, d), torch.where(halved, 0.5 * s, s)
+    raised = ab <= small
+    aa, bb, s = torch.where(raised, aa * be, aa), torch.where(raised, bb * be, bb), torch.where(raised, s / be, s)
+    raised = cd <= small
+    cc, dd, s = torch.where(raised, cc * be, cc), torch.where(raised, dd * be, dd), torch.where(raised, s * be, s)
+    plain = d.abs() <= c.abs()
+    p, q = _dladiv1(aa, bb, cc, dd)
+    p_swapped, q_swapped = _dladiv1(bb, aa, dd, cc)
+    return torch.where(plain, p, p_swapped) * s, torch.where(plain, q, -q_swapped) * s
+
+
+def _dladiv1(a, b, c, d):
+    r = d / c
+    t = 1 / (c + d * r)
+    return _dladiv2(a, b, c, d, r, t), _dladiv2(b, -a, c, d, r, t)
+
+
+def _dladiv2(a, b, c, d, r, t):
+    br = b * r
+    return torch.where(r != 0, torch.where(br != 0, (a + br) * t, a * t + (b * t) * r), (a + d * (b / c)) * t)
 
 
 def _cdiv(x, y):
