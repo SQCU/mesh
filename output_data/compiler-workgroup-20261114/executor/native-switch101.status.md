@@ -24,3 +24,26 @@ No native import, build or invocation has validated this source yet.
 Supervisor AST, pyflakes and diff checks passed on both edited Python files.
 Native selector/range, result/completion and all-engine consumers remain the
 paired C unit's obligation. Fresh imports stay held until its matching build.
+
+## Update (native111: typed selector)
+
+> Call at _Switch control point BEFORE arm operations ... Existing metal_ir_switch adds selector operation ID
+> immediately before children.
+
+- **Registration** (`_compiler()`, matching `metal_ir.h:306–315`, uncommitted):
+  - `metal_ir_switch_selector` is `[P, U, U, U, Q] → U`;
+  - `metal_ir_switch` is `[P, U, U, *U, *U, U, *U, *U, U selector, U children, POINTER(RegionChild)] → U`.
+  - The kind values are the published `METAL_IR_REGION_REPEAT = 1` and `METAL_IR_REGION_SWITCH = 2` (already so in
+    a00eb204). `RegionChild` is `struct metal_ir_region_child`, and both region layouts match the header's asserts
+    (`parent_kind` at 36 in RepeatRegion, 44 bytes; at 44 in SwitchRegion, 48 bytes).
+- **`Builder.switch`:**
+  - It sets `identity = base | g.node`.
+  - At the control point, before any arm operation, it calls `metal_ir_switch_selector(p, value(_stored(index)),
+    branches, g.place, identity)`. The selector is an ordinary operation, kept as `Emitted(_Switch, selector, …)`, and
+    lies inside the switch record's operation range, so lower_metal's emission loop and the source vertex own it.
+  - Then come the arms, with in-arm `_copy` as before, and `metal_ir_switch(…, selector, children…)`.
+  - The index ValueID is named once and reused.
+  - The leaf consumers (`associate`) take only `_Generic` and `_Lapack` records, so the switch's `Emitted` changes
+    nothing there.
+- **Checks:** `py_compile`, `pyflakes` and `git diff --check` pass, with no new line over 120 characters (metal.py
+  +19/−13 vs 774f08e4).
