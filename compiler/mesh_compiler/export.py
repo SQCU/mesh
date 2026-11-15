@@ -214,7 +214,7 @@ def read(program, aliases=None, decomposed=None):
     program.graph_module.recompile()
     return Exported(program.graph_module, state, tokens, user_inputs, outputs,
                     returned(program.call_spec.out_spec, outputs, signature.backward_signature is not None),
-                    state_kinds, aliases, specialized=specialized, decomposed=decomposed)
+                    state_kinds, aliases, specialized=specialized, decomposed=decomposed, signature=signature)
 
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and
@@ -268,8 +268,10 @@ def placeholders(function):
 # torch 2.14.0 torch/_subclasses/fake_tensor.py FakeTensorMode, the capture's one owner of values: the program's
 # arguments and each function's state as its fakes, storages shared where the actual ones are; torch.fx Interpreter:
 # the program interpreted once at compile time on them, each call's function exported once per key (its target, its
-# arguments' structure, each leaf's dtype, device, requires_grad, shape, stride, offset and storage among the call's
-# leaves); compiler/mesh_compiler/ir.py Exported.aliases and torch/_functorch/_aot_autograd/runtime_wrappers.py
+# arguments' structure, each leaf's dtype, device, requires_grad, shape, stride, offset, storage among the call's
+# leaves and tensor object among them: torch/_functorch/_aot_autograd/runtime_wrappers.py AOTDedupeWrapper, a trace of
+# f(x, x) valid only for a call passing one tensor so, distinct aliasing tensors another case, by tensor identity);
+# compiler/mesh_compiler/ir.py Exported.aliases and torch/_functorch/_aot_autograd/runtime_wrappers.py
 # _RuntimeForwardEpilogue (capture_orig_inputs, finalize: input mutations, make_output_handler alias replay through
 # gen_alias_from_base and the retained ViewMetaSequence): the call's actual fakes in the AOT input order (each state
 # target's fake, each user input's leaf), the AOT outputs (mutated inputs, forward outputs, intermediate bases) the
@@ -303,10 +305,11 @@ class Captured(torch.fx.Interpreter):
 
     def captured(self, target, module, args, kwargs):
         leaves, structure = pytree.tree_flatten((args, kwargs))
-        storages = {}
+        storages, objects = {}, {}
         key = target, str(structure), tuple(
             (str(leaf.dtype), str(leaf.device), leaf.requires_grad, tuple(leaf.shape), tuple(leaf.stride()),
-             leaf.storage_offset(), storages.setdefault(StorageWeakRef(leaf.untyped_storage()), len(storages)))
+             leaf.storage_offset(), storages.setdefault(StorageWeakRef(leaf.untyped_storage()), len(storages)),
+             objects.setdefault(id(leaf), len(objects)))
             if isinstance(leaf, torch.Tensor) else repr(leaf) for leaf in leaves)
         if key not in self.exported:
             with torch.enable_grad():
@@ -432,7 +435,16 @@ def capture(module, bound, functions, options, root):
     values = tuple(bound.arguments.values())
     interface = (inspect.Signature([bound.signature.parameters[name] for name in bound.arguments]),
                  pytree.tree_structure(values))
-    leaves = [fake.from_tensor(leaf) if isinstance(leaf, torch.Tensor) else leaf for leaf in pytree.tree_leaves(values)]
+    # torch 2.14.0 torch/_functorch/_aot_autograd/runtime_wrappers.py AOTDedupeWrapper.pre_compile, strategy 1: a tensor
+    # the caller passes in several positions its own leaf at each later one (its first fake's detach, the same storage,
+    # its requires_grad), so each placeholder holds its own value and each call reads the position it read
+    leaves, seen = [], set()
+    for leaf in pytree.tree_leaves(values):
+        made = fake.from_tensor(leaf) if isinstance(leaf, torch.Tensor) else leaf
+        if isinstance(leaf, torch.Tensor) and id(leaf) in seen:
+            made = made.detach().requires_grad_(leaf.requires_grad)
+        seen.add(id(leaf))
+        leaves.append(made)
     graph, interpreter = module.graph, Captured(module, functions, options, fake)
     # `first` stays the insertion anchor for every new state and token placeholder: an attribute's get_attr node, which
     # may be it, keeps its place until the final cleanup erases it unused; each placeholder Node's `ordinal` (calls'

@@ -13,6 +13,7 @@ from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch.export.graph_signature import OutputKind
 from torch.fx.node import map_arg
 from torch.utils import _pytree as pytree
+from torch.utils._python_dispatch import get_alias_info
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -79,6 +80,11 @@ class Exported:
     # `aliases` (the forward epilogue's authority) where a loss's forward and backward record is that one, else the same
     # object as `aliases`
     decomposed: tuple = None
+    # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature: the final program's own signature as its export
+    # returned it (each InputSpec's kind, argument, target and persistent; each OutputSpec's kind, argument and target),
+    # the source record the fields above project; None for a program no torch.export produced (export.capture's outer
+    # program, a part decompose.py builds)
+    signature: object = None
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order
@@ -221,27 +227,79 @@ def evaluated(node, processor):
     return node
 
 
-# design/problems-of-14b9a757-change-request.md items 3 and 6; torch/csrc/jit/frontend/function_schema_parser.cpp
-# alias_info
+# design/problems-of-14b9a757-change-request.md items 3 and 6; torch 2.14.0 torch/utils/_python_dispatch.py
+# get_alias_info (SchemaInfo: torchgen's parse of an ATen schema, TorchScript's of another, each argument's and result's
+# alias set and write, read_only_alias_match_indexes each (argument, result) a result aliasing an argument it does not
+# write, outs_write_aliases each result's written alias): an operator call's alias information, None for any other node
+def alias_info(node):
+    return get_alias_info(node.target) if node.op == "call_function" and isinstance(
+        node.target, torch._ops.OpOverload) else None
+
+
+# a call any of whose results aliases an argument without writing it
 def aliasing(node):
-    returns = getattr(getattr(node.target, "_schema", None), "returns", ())
-    return node.op == "call_function" and bool(returns) and returns[0].alias_info is not None and not returns[
-        0].alias_info.is_write
+    info = alias_info(node)
+    return info is not None and bool(info.read_only_alias_match_indexes)
 
 
-# torch/csrc/jit/frontend/function_schema_parser.cpp alias_info; ExecuTorch documentation, Concepts, Out variant
-def written(node):
-    schema = getattr(node.target, "_schema", None)
-    if node.op != "call_function" or schema is None or len(schema.returns) != 1 or schema.returns[0].alias_info is None:
+# the schema result describing result `k` of a call of schema `info` (its one list result, Tensor(a)[], every element's)
+def result_of(info, k):
+    return 0 if len(info.outs) == 1 else k
+
+
+# each result index of `node`'s value: every element of a list or tuple, else its one
+def results_of(node):
+    value = node.meta.get("val")
+    return range(len(value)) if isinstance(value, (tuple, list)) else range(1)
+
+
+# result `k` of `node`'s value and, of an argument's value `given` (a Node, or a Tensor[] argument's Nodes: pytree
+# leaves), the one leaf whose producer FakeTensor that result's own storage aliases (torch._C._is_alias_of), None where
+# none or several do
+def leaf_of(node, k, given):
+    value = node.meta["val"]
+    result = value[k] if isinstance(value, (tuple, list)) else value
+    held = [leaf for leaf in pytree.tree_leaves(given) if isinstance(leaf, torch.fx.Node) and isinstance(
+        result, torch.Tensor) and isinstance(leaf.meta.get("val"), torch.Tensor)
+            and torch._C._is_alias_of(result, leaf.meta["val"])]
+    return held[0] if len(held) == 1 else None
+
+
+# the argument leaf result `k` of call `node` aliases without writing it: of the argument get_alias_info's read-only
+# matches give that result, the leaf its storage aliases (`leaf_of`); None where it aliases none
+def aliased(node, k=0):
+    info = alias_info(node)
+    if info is None:
         return None
-    names, read = given(node)
-    return next((read[a.name] for a in schema.arguments if a.alias_info is not None and a.alias_info.is_write and
-                 a.alias_info.before_set == schema.returns[0].alias_info.before_set and a.name in read), None)
+    _, read = given(node)
+    return next((leaf for a, r in info.read_only_alias_match_indexes if r == result_of(info, k)
+                 and info.args[a].name in read for leaf in [leaf_of(node, k, read[info.args[a].name])]
+                 if leaf is not None), None)
 
 
+# ExecuTorch documentation, Concepts, Out variant: the argument leaf result `k` of call `node` writes: of the argument
+# written with that result's alias (get_alias_info's outs_write_aliases), the leaf its storage aliases (`leaf_of`);
+# None where it writes none
+def written(node, k=0):
+    info = alias_info(node)
+    if info is None or info.outs_write_aliases is None:
+        return None
+    _, read = given(node)
+    alias = info.outs_write_aliases[result_of(info, k)]
+    return next((leaf for a in info.args if a.is_write and alias in a.alias_set and a.name in read
+                 for leaf in [leaf_of(node, k, read[a.name])] if leaf is not None), None)
+
+
+# the argument leaf `node`'s value aliases: a getitem's, its call's result's at its index (`aliased`, else `written`);
+# a call's, the one leaf every result aliases (`aliased` of each), else the one every result writes (`written`)
 def source(node):
-    made = node.args[0] if node.target is operator.getitem else node
-    return made.args[0] if aliasing(made) else written(made)
+    if node.target is operator.getitem:
+        return aliased(node.args[0], node.args[1]) or written(node.args[0], node.args[1])
+    for found in (aliased, written):
+        held = {found(node, k) for k in results_of(node)}
+        if len(held) == 1 and None not in held:
+            return held.pop()
+    return None
 
 
 def view(node):

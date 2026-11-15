@@ -11,7 +11,8 @@ import torch
 from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
 
-from .ir import CLONE, JOIN, PAGES, RECV, SEND, aliasing, constant, evaluated, given, shape, view, views
+from .ir import (CLONE, JOIN, PAGES, RECV, SEND, aliased, aliasing, constant, evaluated, given, results_of, shape,
+                 view, views)
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -882,9 +883,15 @@ def place(graph_module, placement):
     results = [n for k, n in enumerate(output.args[0])
                if k not in mutated and isinstance(n, torch.fx.Node) and isinstance(n.meta.get("val"), torch.Tensor)]
 
+    # a pure source alias's replay predecessors: a getitem's call where that result aliases an argument without writing
+    # it (ir.aliased); an aliasing call's own aliased argument leaves, each result's (ir.aliased: its schema's read-only
+    # match and the leaf its storage aliases), each once, realize replacing each of those leaves by its realization
     def parent(node):
-        return [node.args[0]] if view(node) is not None and aliasing(
-            node.args[0] if node.target is operator.getitem else node) else []
+        if node.target is operator.getitem:
+            return [node.args[0]] if view(node) is not None and aliased(node.args[0], node.args[1]) is not None else []
+        if not aliasing(node):
+            return []
+        return [leaf for leaf in dict.fromkeys(aliased(node, k) for k in results_of(node)) if leaf is not None]
     order = mesh_graph.postorder(nodes, results, parent)
     retained = {node: (parent(node), node.args, node.kwargs, node.meta["val"]) for node in order}
 
@@ -918,7 +925,8 @@ def place(graph_module, placement):
     def realize(node, read):
         upstream, args, kwargs, like = retained[node]
         if read:
-            arguments = map_arg((args, kwargs), lambda n: read[0] if n is upstream[0] else gathered(
+            realized = dict(zip(upstream, read, strict=True))
+            arguments = map_arg((args, kwargs), lambda n: realized[n] if n in realized else gathered(
                 graph, whole, n, values[n], processor))
             return evaluated(graph.call_function(node.target, *arguments), processor)
         if node.op == "placeholder":

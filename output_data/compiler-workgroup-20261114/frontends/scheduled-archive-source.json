@@ -755,5 +755,26 @@
     "upstream_reference": "torch/_functorch/_aot_autograd/autograd_cache.py _pickle_entry and schemas.py ViewAndMutationMeta.make_runtime_safe; GraphPickler retains FakeTensor identities with its existing describer.",
     "projection_limit": "The runtime-cache make_runtime_safe projection clears traced_tangents and other compilation data, so this source-result archive preserves the original metadata rather than invoking that lossy projection. Serialization compatibility of actual ViewMeta and subclass values remains unobserved; errors propagate at save.",
     "runtime_observation": "Pending unchanged public direct/save/load command; no new probe or caller."
+  },
+  "whole_family_wip41": {
+    "time_utc": "2026-11-15T08:26:43.800349+00:00",
+    "worker_result": 41,
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "313c7b5ea6e987b02aea57b8ad33d02e4c90c87b007da07e7e2e1fbe70e43dac",
+      "compiler/mesh_compiler/export.py": "89cd4f1ec06c83ee19fe9c53232f2cdf67a33b02f6940f199a511e096e5cce43",
+      "compiler/mesh_compiler/ir.py": "5a15dd6d9d67f7a34c1ab78d80e8cbbec0f297076f30026c6f3b240a72ec3706",
+      "compiler/mesh_compiler/placement.py": "b2ac02eb73cddc9c3eefe875eec9e2488cd728135a441b5e0ac53b907516eb4c"
+    },
+    "status": "Unaccepted source WIP preserved before correction; no import or runtime claim",
+    "source_checks": [
+      "AST PASS"
+    ],
+    "review_limits": [
+      "Duplicate leafification before original mutation metadata is not the canonical conditional AOTDedupe strategy and must be corrected.",
+      "Alias candidate ambiguity currently becomes None; complete original per-result/source alias ownership is not yet retained.",
+      "Tuple placement still uses first-result geometry, so the result family is incomplete.",
+      "Original replaced function AOT/result owner still needs preserved function-to-part correspondence."
+    ],
+    "accepted_boundary": "Use original get_alias_info result and retain original graph_signature; full consumer correction remains under review."
   }
 }

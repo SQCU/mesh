@@ -661,7 +661,7 @@ def sourced(held, ordinal, operands, query):
         "functions": {k: (f.graph_module, {name: (target, tensors.setdefault(id(t), (len(tensors), t))[0])
                                            for name, (target, t) in f.state.items()}, f.tokens, f.user_inputs,
                           f.outputs, pytree.treespec_dumps(f.out_spec), f.state_kinds, f.specialized, f.aliases,
-                          f.decomposed is f.aliases, f.decomposed)
+                          f.decomposed is f.aliases, f.decomposed, f.signature)
                       for k, f in functions.items()},
         "calls": [(node, ordinal[call.function], call.inputs, call.outputs) for node, call in captured.calls.items()],
         "operands": (operands.nodes, [holder for _, holder in operands.storages], operands.views, operands.accesses,
@@ -841,9 +841,9 @@ def load(directory):
                         specialized=specialized)
     captured = {k: Exported(module, {name: (key, tensors[t]) for name, (key, t) in kept.items()}, tokens, inputs,
                             results, pytree.treespec_loads(spec), kinds, aliases, specialized=literals,
-                            decomposed=aliases if same else decomposed)
-                for k, (module, kept, tokens, inputs, results, spec, kinds, literals, aliases, same, decomposed)
-                in source["functions"].items()}
+                            decomposed=aliases if same else decomposed, signature=signature)
+                for k, (module, kept, tokens, inputs, results, spec, kinds, literals, aliases, same, decomposed,
+                        signature) in source["functions"].items()}
     calls = {node: Call(k, inputs, results) for node, k, inputs, results in source["calls"]}
     (nodes, holders, views, accesses, results, roots, kept, ports, existing, produced, placements, machines,
      output) = source["operands"]
