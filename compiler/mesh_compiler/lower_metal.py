@@ -45,7 +45,7 @@ from .metal import (CHECK_CONVERGENCE, CONSTANT, DOMAIN_INDIRECT, DOMAIN_LOOP, D
                     REGION_SWITCH, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED, SOURCE_SENT, SOURCE_VALUE, STATE,
                     TEMPORARY, UPSTREAM_BUFFER, UPSTREAM_ERROR, UPSTREAM_SCALAR, DomainDim, RegionChild,
                     SourceOperand, UpstreamAccess, ValueInfo, _array, _Builder, _compiler, _composition, _emitted,
-                    _graph, _neural, _upstream)
+                    _graph, _neural, _upstream, mesh_graph)
 from .operations import ANE, CPU, GPU, SCALAR
 
 Root = collections.namedtuple("Root", "name kind role root value")
@@ -620,6 +620,83 @@ class _Ops:
         return x
 
 
+# torch 2.14.0 torch/_inductor/loop_body.py LoopBody: one kernel call's one consumer of its retained original body
+# results (relations' and _cpu_relations'), over `index` (the call's _Index: its domain; its env the variables of the
+# scope consumed). A body's own results are made once and kept for its every occurrence (a Ranges: one kernel's
+# selection of its node; a CPU proxy's scalar, vector and tail kernels each one of the same node's body): its blocks
+# (its root block, then its masked subblocks), each subblock's parent (that block's ordinal and its call node, whose
+# args[0] is the subblock's mask: LoopBody.bind_masked_shim), its LoopBody.bounds() value ranges by node; each block's
+# one source adjacency (rdma/mesh_graph.py Graph.adjacency over its nodes, each node's all_input_nodes; a node's
+# vertex its position in the block) and, of each mask node, that graph's owned reach of it (Graph.reach: the mask's
+# dependency cone). An occurrence's mask values are its own: the cone run by loop_body.py InterpreterShim over the ops
+# handler (_Ops), the block's other nodes None, each get_index the LoopBody's indexing expression at the occurrence's
+# variables (Ranges.variables, in body.var_ranges order)
+class _Bodies:
+    def __init__(self, index):
+        self.index, self.ops, self.bodies, self.graphs, self.cones = index, _Ops(index), {}, {}, {}
+
+    def held(self, body):
+        if body not in self.bodies:
+            blocks = [body.root_block, *body.subblocks.values()]
+            parents = {body.subblocks[n.target].graph: (b, n) for b, block in enumerate(blocks)
+                       for n in block.graph.nodes if n.op == "call_module" and n.target in body.subblocks}
+            self.bodies[body] = blocks, parents, body.bounds().get_bounds()
+        return self.bodies[body]
+
+    def cone(self, graph, node):
+        if node not in self.cones:
+            if graph not in self.graphs:
+                self.graphs[graph] = mesh_graph.Graph.adjacency(graph.nodes, operator.attrgetter("all_input_nodes"))
+            self.cones[node] = self.graphs[graph].reach([node])
+        return self.cones[node]
+
+    # the UpstreamAccess of each access of `ranges` (Ranges.accesses: method, name, index, mode, block graph, fx node,
+    # then a CPU record's own field), the call's `ordinal`-th Ranges (from 1), as relations describes it:
+    # `argument(ranges, method, name)` its launch argument, None where the final kernel has none (no access of it);
+    # `guard(ranges, method, index)` the condition its code runs under (None none), conjoined with its known masks; its
+    # index sympified (sympy_subs: a CPU vector kernel's load_seed index the int offset CppVecOverrides.load_seed passes
+    # its load, loop_body.py's own index of it sympy.Integer(offset); an expression itself)
+    def accesses(self, ranges, ordinal, argument, guard):
+        index, ops, body = self.index, self.ops, ranges.node._body
+        blocks, parents, bounds = self.held(body)
+        replacements = dict(zip(body.var_ranges, itertools.chain.from_iterable(ranges.variables)))
+        modules = dict.fromkeys(body.submodules, _unrepresented)
+        modules["get_index"] = functools.partial(
+            lambda exprs, name: sympy_subs(exprs[name], replacements), body.indexing_exprs)
+        masks, made = {}, []
+
+        def masked(graph, node):
+            if node not in masks:
+                cone = self.cone(graph, node)
+                shim = InterpreterShim(graph, modules)
+                shim.run(ops, initial_env={n: None for n in graph.nodes if n not in cone})
+                value = shim.env[node]
+                masks[node] = None if value is None else ops.truth(value)
+            return masks[node]
+
+        for method, name, expr, mode, block_graph, node, *_ in ranges.accesses:
+            k = argument(ranges, method, name)
+            if k is None:
+                continue
+            expr = sympy_subs(expr, {})
+            value = index.interp(expr)
+            lo, hi = (0, 0) if value is not None else _ranged(bounds[node.args[2]])
+            known, data, source, unknown, level = guard(ranges, method, expr), False, 0, 0, block_graph
+            while level is not body.root_block.graph:
+                b, call = parents[level]
+                level = blocks[b].graph
+                mask = masked(level, call.args[0])
+                identity = (ordinal << 40) | (b << 20) | self.graphs[level].at[call.args[0]]
+                source = source or identity
+                if mask is None:
+                    data, unknown = True, unknown or identity
+                else:
+                    known = mask if known is None else index.and_(known, mask)
+            write = 0 if method == "load" else 2 if mode in COMMUTING else 1
+            made.append(UpstreamAccess(k, write, value, known, unknown or source, int(data), 0, lo, hi))
+        return made
+
+
 # design/compilation-composition-change-request.md, "Complete replacement workgroup"; metal-microbench metal_ir.h
 # struct metal_ir_upstream `domain` and `access`: an MPS kernel's index domain and each access as its producer made it,
 # in the compilation's one analysis context `context` (rdma/mesh_graph.py Context), from the kernel's retained original
@@ -635,11 +712,10 @@ class _Ops:
 #   (COMMUTING), else 1; its index the original index by sympy_interp into the domain at the kernel's index type (each
 #   range-tree entry its own expression over its root, each size symbol at its hint), and where that is not
 #   quasi-affine its LoopBody.bounds() value range at the access's index node; its guard the conjunction of every
-#   known mask of the masked subblocks enclosing its block (each mask its parent block's node, its dependency cone run
-#   by loop_body.py InterpreterShim over the ops handler, each get_index the LoopBody's indexing expression at the
-#   node's variables), guard_data 1 where any of them reads data or is not quasi-affine, the known conjuncts kept with
-#   it; its guard_source the innermost such unknown mask's identity, else the innermost mask's (Ranges ordinal + 1,
-#   parent block, mask node position);
+#   known mask of the masked subblocks enclosing its block (each mask its parent block's node, its value the call's
+#   one LoopBody consumer's, _Bodies), guard_data 1 where any of them reads data or is not quasi-affine, the known
+#   conjuncts kept with it; its guard_source the innermost such unknown mask's identity, else the innermost mask's
+#   (Ranges ordinal + 1, parent block, mask node position);
 # - the launch's error workspace (kinds[k] UPSTREAM_ERROR): its whole bytes' commuting update.
 # `described` each argument's (buffer names, element bytes, first byte, bytes, access) (Launched.arguments). Returns
 # (domain, accesses, made): the caller frees the domain and every index made once metal_ir_upstream has returned
@@ -683,53 +759,14 @@ def relations(context, kernel, kinds, described):
                     position.setdefault(name, k)
             accesses = [UpstreamAccess(k, 2, None, None, 0, 0, 0, 0, described[k][3] // 4 - 1)
                         for k, kind in enumerate(kinds) if kind == UPSTREAM_ERROR]
-            real, ops = kernel.scheduler.mutation_real_name, _Ops(index)
+            real, bodies = kernel.scheduler.mutation_real_name, _Bodies(index)
             removed = owner.removed_buffers | graph.removed_buffers
-            for r, ranges in enumerate(kernel.ranges):
-                body = ranges.node._body
-                blocks = [body.root_block, *body.subblocks.values()]
-                parents = {body.subblocks[n.target].graph: (b, n) for b, block in enumerate(blocks)
-                           for n in block.graph.nodes if n.op == "call_module" and n.target in body.subblocks}
-                replacements = dict(zip(body.var_ranges, itertools.chain.from_iterable(ranges.variables)))
-                modules = dict.fromkeys(body.submodules, _unrepresented)
-                modules["get_index"] = functools.partial(
-                    lambda exprs, name: sympy_subs(exprs[name], replacements), body.indexing_exprs)
-                masks, bounds = {}, body.bounds().get_bounds()
 
-                def masked(block, node):
-                    if node not in masks:
-                        cone, stack = set(), [node]
-                        while stack:
-                            n = stack.pop()
-                            if n not in cone:
-                                cone.add(n)
-                                stack.extend(n.all_input_nodes)
-                        shim = InterpreterShim(blocks[block].graph, modules)
-                        shim.run(ops, initial_env={n: None for n in blocks[block].graph.nodes if n not in cone})
-                        value = shim.env[node]
-                        masks[node] = None if value is None else ops.truth(value)
-                    return masks[node]
+            def argument(ranges, method, name):
+                return None if name in removed else position[real.get(name, name)]
 
-                for method, name, expr, mode, block_graph, node in ranges.accesses:
-                    if name in removed:
-                        continue
-                    argument = position[real.get(name, name)]
-                    value = index.interp(expr)
-                    lo, hi = (0, 0) if value is not None else _ranged(bounds[node.args[2]])
-                    known, data, source, unknown, level = None, False, 0, 0, block_graph
-                    while level is not body.root_block.graph:
-                        b, call = parents[level]
-                        mask = masked(b, call.args[0])
-                        identity = ((r + 1) << 40) | (b << 20) | list(blocks[b].graph.nodes).index(call.args[0])
-                        source = source or identity
-                        if mask is None:
-                            data, unknown = True, unknown or identity
-                        else:
-                            known = mask if known is None else index.and_(known, mask)
-                        level = blocks[b].graph
-                    write = 0 if method == "load" else 2 if mode in COMMUTING else 1
-                    accesses.append(UpstreamAccess(argument, write, value, known, unknown or source, int(data), 0, lo,
-                                                   hi))
+            for r, ranges in enumerate(kernel.ranges, 1):
+                accesses.extend(bodies.accesses(ranges, r, argument, lambda ranges, method, expr: None))
     except BaseException:
         released(domain, index.made)
         raise
@@ -824,7 +861,7 @@ def _cpu_relations(context, kernel, kinds, described):
         for k, (names, *_) in enumerate(described):
             for name in names:
                 position.setdefault(name, k)
-        accesses, real, ops = [], kernel.scheduler.mutation_real_name, _Ops(index)
+        accesses, real, bodies = [], kernel.scheduler.mutation_real_name, _Bodies(index)
         removed, r = graph.removed_buffers | graph.inplaced_to_remove, 0
         with V.set_graph_handler(graph):
             for fused, sub, path, indirect, local in scopes:
@@ -848,60 +885,24 @@ def _cpu_relations(context, kernel, kinds, described):
                 body_guard = index.truth(False) if any(e for _, _, e in path) else active(sub.active_ranges)
                 suffix_guard = (index.truth(False) if any(e for _, _, e in path[:first]) else
                                 active((outer_loop.var,)) if aggregated else None)
+
+                # this scope's: an access in a reduction suffix (CppRanges.suffix, store_reduction) emitted only by
+                # the kernels its proxy emits it of; a removed store's or a local buffer's no argument
+                def argument(ranges, method, name):
+                    suffix = ranges.suffix or method == "store_reduction"
+                    if method != "load" and name in removed or name in local or suffix and not emitted:
+                        return None
+                    return position[real.get(name, name)]
+
+                def guard(ranges, method, expr):
+                    if any(e and symbol in expr.free_symbols for symbol, _, e in indirect):
+                        return index.truth(False)
+                    return suffix_guard if ranges.suffix or method == "store_reduction" else body_guard
+
                 with V.set_kernel_handler(sub):
                     for ranges in sub.mesh_ranges:
                         r += 1
-                        body = ranges.node._body
-                        blocks = [body.root_block, *body.subblocks.values()]
-                        parents = {body.subblocks[n.target].graph: (b, n) for b, block in enumerate(blocks)
-                                   for n in block.graph.nodes if n.op == "call_module" and n.target in body.subblocks}
-                        replacements = dict(zip(body.var_ranges, itertools.chain.from_iterable(ranges.variables)))
-                        modules = dict.fromkeys(body.submodules, _unrepresented)
-                        modules["get_index"] = functools.partial(
-                            lambda exprs, name: sympy_subs(exprs[name], replacements), body.indexing_exprs)
-                        masks, bounds = {}, body.bounds().get_bounds()
-
-                        def masked(block, node):
-                            if node not in masks:
-                                cone, stack = set(), [node]
-                                while stack:
-                                    n = stack.pop()
-                                    if n not in cone:
-                                        cone.add(n)
-                                        stack.extend(n.all_input_nodes)
-                                shim = InterpreterShim(blocks[block].graph, modules)
-                                shim.run(ops, initial_env={n: None for n in blocks[block].graph.nodes if n not in cone})
-                                value = shim.env[node]
-                                masks[node] = None if value is None else ops.truth(value)
-                            return masks[node]
-
-                        for method, name, expr, mode, block_graph, node, _ in ranges.accesses:
-                            suffix = ranges.suffix or method == "store_reduction"
-                            if method != "load" and name in removed or name in local or suffix and not emitted:
-                                continue
-                            argument = position[real.get(name, name)]
-                            # sympify: a vector kernel's load_seed index the int offset CppVecOverrides.load_seed
-                            # passes its load (loop_body.py's own index of it sympy.Integer(offset))
-                            expr = sympy_subs(expr, {})
-                            value = index.interp(expr)
-                            lo, hi = (0, 0) if value is not None else _ranged(bounds[node.args[2]])
-                            known, data, source, unknown = suffix_guard if suffix else body_guard, False, 0, 0
-                            if any(e and symbol in expr.free_symbols for symbol, _, e in indirect):
-                                known = index.truth(False)
-                            level = block_graph
-                            while level is not body.root_block.graph:
-                                b, call = parents[level]
-                                mask = masked(b, call.args[0])
-                                identity = (r << 40) | (b << 20) | list(blocks[b].graph.nodes).index(call.args[0])
-                                source = source or identity
-                                if mask is None:
-                                    data, unknown = True, unknown or identity
-                                else:
-                                    known = mask if known is None else index.and_(known, mask)
-                                level = blocks[b].graph
-                            write = 0 if method == "load" else 2 if mode in COMMUTING else 1
-                            accesses.append(UpstreamAccess(argument, write, value, known, unknown or source,
-                                                           int(data), 0, lo, hi))
+                        accesses.extend(bodies.accesses(ranges, r, argument, guard))
     except BaseException:
         released(domain, index.made)
         raise

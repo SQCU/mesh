@@ -210,6 +210,15 @@
  
  
  @dataclasses.dataclass
+@@ -4453,7 +4471,7 @@
+         debug_handle: int | None = None,
+     ):
+         if debug_handle is not None:
+-            self.writeline(
++            self.make_comment(
+                 f"{self.comment} [Provenance debug handles] {kernel_name}:{debug_handle}"
+             )
+ 
 --- a/torch/_inductor/codegen/wrapper_fxir.py
 +++ b/torch/_inductor/codegen/wrapper_fxir.py
 @@ -156,6 +156,9 @@

@@ -600,6 +600,13 @@ takes the producer's result through it. Fields:
   - `_generate_assert_scalar` converts an `AssertScalarLine` to `aten._assert_scalar`.
 - **`codegen/wrapper.py` `AssertScalarLine(WrapperLine)`**: `wrapper` and `node`. `codegen` writes the Python wrapper's
   own form, and `codegen_fx` is the converter's `_generate_assert_scalar`.
+- **`codegen/wrapper.py` `write_provenance_debug_handle`**: it calls `self.make_comment(...)` instead of
+  `self.writeline(...)`, with the same text, `"{comment} [Provenance debug handles] {kernel_name}:{debug_handle}"`.
+  - So the handle is a typed `CommentLine` (wrapper.py `make_comment`, the module's own comment producer), not a bare
+    `str` among the wrapper's lines.
+  - Its `codegen` writes the same line, and `wrapper_fxir.py` `_generate_comment` ignores it as every other comment.
+  - Callers are unchanged: `ir.py` `ExternKernel.codegen_comment`, `scheduler.py`, `codegen/cpp.py` and
+    `codegen/triton.py`. `trace.provenance_tracking_level` stays as configured.
 - **`ir.py` `AssertScalar.codegen`**: under `fx_wrapper`, it writes `AssertScalarLine(wrapper, self)`. Upstream wrote
   nothing ("TODO fix").
 - **`pattern_matcher.py` `_transfer_matched(new_nodes, match, pass_name="")`**: under
@@ -620,12 +627,17 @@ takes the producer's result through it. Fields:
 | `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `60ad9e8aee38558011efeb7432803402de08bae2911cbb7f3062be247cede6c3` |
 | `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `10c6bb2bcdab8fc74ec85a76b061fcd4e32d40744bc22c76da4d854396c8aac3` |
 | `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` |
-| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386` |
+| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `5a7a14678343e2d275ed817024f3ac3199e84610ac3ee37b72ff63851585c892` |
 | `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `2d87d9247e23640662bba136c899a274fa278d3c98da96b630810882c3fdaa2a` |
 | Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor at source revision `ba03a780` after the composition and factory patches: fuzz-0 dry run, application and AST check passed (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 3) |
 
 Installed: the supervisor checked the eight "before" hashes and ran a fuzz-0 dry run and application of the committed
 patch (`7916cb9d…`). Both passed. Every file has its "after" hash and parses (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 3).
+
+The `write_provenance_debug_handle` hunk was added after that installation.
+- Until the supervisor installs it, the installed `wrapper.py` is the previous after,
+  `d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386`.
+- The installed delta is one line: `self.writeline(` becomes `self.make_comment(` in `write_provenance_debug_handle`.
 
 ### Apply, check, reverse
 
