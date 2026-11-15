@@ -155,11 +155,11 @@ Neural = collections.namedtuple("Neural", "operation produced package function u
 # one original binding of a member's wrapper name as resolved before emission (ConstructedMachine.bindings):
 # `occurrence` the body occurrence binding it (() its wrapper's own lines; else each enclosing control call's ExternCall
 # and the Inlined or Lifted body consumed there, outermost first), `record` the original object binding it (an
-# AllocateLine, ReinterpretLine, ReuseLine or MultiOutputLine; a graph input's lower_inductor.py Input; a control body
-# input's Inlined or Lifted; a constant's GraphLowering), `source` the original object bound (the AllocateLine's
-# node, the ReinterpretLine's or ReuseLine's reused_as, the MultiOutputLine's result buffer, the GraphLowering's
-# graph_inputs entry, its constants tensor), `value` its native value ((root, view ValueID), ("literal", value), or
-# None)
+# AllocateLine, ReinterpretLine, ReuseLine or MultiOutputLine; a receive's ExternKernelAllocLine; a graph input's
+# lower_inductor.py Input; a control body input's Inlined or Lifted; a constant's GraphLowering), `source` the
+# original object bound (the AllocateLine's node, the ReinterpretLine's or ReuseLine's reused_as, the MultiOutputLine's
+# result buffer, the receive's FallbackKernel (its own result buffer), the GraphLowering's graph_inputs entry, its
+# constants tensor), `value` its native value ((root, view ValueID), ("literal", value), or None)
 Binding = collections.namedtuple("Binding", "processor occurrence record name source value")
 
 
@@ -1210,21 +1210,23 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             return value, Bound(wired[value], dtype, tuple(sizes) if landed_ else tuple(n for n, _ in pairs),
                                 tuple(stride // element for _, stride in pairs), offset // element)
 
-        # a received result `out` (a MultiOutput of `graph`) bound to the value `given` it receives: that value's
-        # storage where its layout is the result's, else its own root and one direct copy of `given` at the receive,
-        # into the receive's own destination `into`
-        def landed(p, graph, record, out, given, owner, into):
-            layout = out.get_layout()
+        # a receive's result: its schema's one Tensor, so its FallbackKernel itself (ir.py FallbackKernel.create,
+        # create_direct_output: the kernel its own result buffer at its own layout, no MultiOutput), bound by its
+        # ExternKernelAllocLine `line` at its body occurrence `occurrence`, to the value `given` it receives: that
+        # value's storage where its layout is the result's, else its own root and one direct copy of `given` at the
+        # receive, into the receive's own destination `into`
+        def landed(p, graph, record, line, given, owner, into, occurrence):
+            node = record.node
+            layout, name = node.get_layout(), node.get_name()
             b = placed(Held(given.storage, 0), layout, graph)
             if (b.dtype, b.size, b.stride) == (given.dtype, given.size, given.stride):
-                results[p, record.node.get_name()] = {
-                    _key(out.indices): Held(given.storage, (given.offset - _hint(graph, layout.offset)) *
-                                            given.dtype.itemsize)}
-                return given
-            h = Held(stored(TEMPORARY, layout.dtype, _bytes(graph, layout)), 0)
-            results[p, record.node.get_name()] = {_key(out.indices): h}
-            own = placed(h, layout, graph)
-            copying(into, record, own, given, [owner], PLACES[produced[p].kind], position(owner))
+                held[p, name] = Held(given.storage, (given.offset - _hint(graph, layout.offset)) * given.dtype.itemsize)
+                own = given
+            else:
+                held[p, name] = Held(stored(TEMPORARY, layout.dtype, _bytes(graph, layout)), 0)
+                own = placed(held[p, name], layout, graph)
+                copying(into, record, own, given, [owner], PLACES[produced[p].kind], position(owner))
+            recorded(p, graph, occurrence, line, name, node)
             return own
 
         # each channel's sent value as its send declares it, (dtype, sizes, strides): a wrapper send's value at its own
@@ -1258,18 +1260,19 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             dtype, sizes, strides = sent_views[channel]
             return Bound(forwards.setdefault(channel, Storage(TEMPORARY, dtype, 0)), dtype, sizes, strides, 0)
 
-        # a received channel at its receive (machine body RECV `m`): in its declared logical wire, landed there; else
-        # in the received result's own root
-        def received(p, graph, record, out, m, into):
-            channel, layout = m.args[0], out.get_layout()
+        # a received channel at its receive (machine body RECV `m`; the receive's result as landed's): in its declared
+        # logical wire, landed there; else in the received result's own root
+        def received(p, graph, record, line, m, into, occurrence):
+            channel, node = m.args[0], record.node
+            layout, name = node.get_layout(), node.get_name()
             if channel in wires:
                 value_, given = wire(channel, layout.dtype, [_hint(graph, n) for n in layout.size], True)
-                env[m] = landed(p, graph, record, out, given, (tasks[m], None, None, m), into)
+                env[m] = landed(p, graph, record, line, given, (tasks[m], None, None, m), into, occurrence)
                 landing.append((channel, value_, given))
             else:
-                h = Held(stored(TEMPORARY, layout.dtype, _bytes(graph, layout)), 0)
-                results[p, record.node.get_name()] = {_key(out.indices): h}
-                env[m] = placed(h, layout, graph)
+                held[p, name] = Held(stored(TEMPORARY, layout.dtype, _bytes(graph, layout)), 0)
+                recorded(p, graph, occurrence, line, name, node)
+                env[m] = placed(held[p, name], layout, graph)
                 landing.append((channel, None, env[m]))
             interface.add(m)
 
@@ -1380,7 +1383,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         # INFO boundary (metal_ir_check, its api the message, CONVERGENCE: torch.linalg.LinAlgError). Every other
         # ExternKernel call (ExternKernelOut, a CPU extern GEMM's extern_kernels.mm; DynamicScalar, AssertScalar,
         # RandomSeeds; any other fallback) has no native operation: the compile raises it
-        def called(p, graph, record, into):
+        def called(p, graph, record, line, into, occurrence):
             node = record.node
             target = getattr(node, "op_overload", None)
             stated = operations.LAPACK.get(getattr(target, "overloadpacket", None))
@@ -1396,12 +1399,13 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             if target is SEND:
                 sending_value(p, record, given["channel"], projected(p, graph, given["value"]), into)
             elif target is producer.RECV_STRIDED:
-                out, channel = node.outputs[0], given["channel"]
+                channel = given["channel"]
                 if channel in remote:
-                    received(p, graph, record, out, remote[channel][1], into)
+                    received(p, graph, record, line, remote[channel][1], into, occurrence)
                 else:
                     n = next(n for n in origins if getattr(n, "target", None) is RECV)
-                    own, m = landed(p, graph, record, out, received_view(channel), owner_of(p, n), into), vertex(p, n)
+                    own = landed(p, graph, record, line, received_view(channel), owner_of(p, n), into, occurrence)
+                    m = vertex(p, n)
                     if m is not None:
                         env[m] = own
             elif stated is not None:
@@ -1461,7 +1465,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             calls = 0
             for line in record.lines:
                 if getattr(line, "node", None) is node and not isinstance(line, wrapper_lines.MemoryPlanningLine):
-                    called(p, graph, record, into)
+                    called(p, graph, record, line, into, occurrence)
                     calls += 1
                 else:
                     planned(p, graph, line, into, occurrence)
