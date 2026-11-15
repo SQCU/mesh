@@ -1147,7 +1147,8 @@ class Target:
         return self
 
     # metal-microbench metal_ir.h metal_ir_archive_load (compiler/mesh_compiler/metal.py _archive_loaded: the archive
-    # borrows and, loaded, owns the artifact's own bytes), metal_ir_archive_program and metal_ir_loaded;
+    # borrows and, loaded, owns the artifact's own bytes, its programs' relations in the joint owner's
+    # `analysis_context`, the compilation's one), metal_ir_archive_program and metal_ir_loaded;
     # metal_recording.h MetalProgramLoad (given the archive handle, which it retains): the completed artifact, every
     # row's program in row order, relocated onto its run-time owner and that owner's own prepared solution
     # (bridge.Published: the network result it loaded once; or None: a new arena of the retained local solution), the
@@ -1166,7 +1167,7 @@ class Target:
         with owned:
             gpu = device()
             owned(lambda: M.PUT(gpu, M.SELECTOR[b"release"]))
-            archive = M._archive_loaded(compiler, self.artifact, gpu, error)
+            archive = M._archive_loaded(compiler, self.artifact, self.solution.analysis_context, gpu, error)
             owned(lambda: compiler.metal_ir_archive_free(archive))
             programs = [compiler.metal_ir_archive_program(archive, r) or None for r in range(len(self.rows))]
             for program in (program for program in programs if program is not None):
@@ -1522,12 +1523,16 @@ def restore(saved, directory):
         "placed": [tuple(entry) for entry in row["marks"]["placed"]]}}) for row in recipe["rows"])
     operands = tuple(Operand(source_restored(operand["source"]), operand["offset"],
                              tuple(map(tuple, operand["occurrences"]))) for operand in recipe["operands"])
+    # the loading compilation's one analysis context (mesh-graph.h mesh_graph_context_create), its joint owner's
+    # `analysis_context`: every loaded relation and native artifact of it (mesh_local_load here; mesh_program_load at
+    # each preparation, bridge.Published; metal_ir_archive_load, Target.prepare; archive.py load's source relations)
+    context = mesh_graph.Context.create()
     record = (directory / saved["joint"]).read_bytes()
     if saved["kind"] == "network":
         from .schedule import SavedNetwork
-        joint = SavedNetwork(record, saved["program"])
+        joint = SavedNetwork(record, saved["program"], analysis_context=context)
     else:
-        joint = loaded_program(record)
+        joint = loaded_program(record, context)
     return Target(bodies, rows, pytree.treespec_loads(recipe["spec"]),
                   tuple((("root", source_restored(r[1]), r[2]) if isinstance(r, list) else r,
                          leaf and leaf_restored(leaf)) for r, leaf in recipe["outputs"]), operands,
@@ -1553,8 +1558,10 @@ def restore(saved, directory):
 # (Target.node: the plan's node map index under `planning`, the bridge's context where calls transfer; else the
 # machine); `targets` the driver's authoritative selection {original processor: (selected kind, torch.device)}
 # (compiler/mesh_compiler/driver.py compile_captured), retained as given for the compilation (`Target.targets`,
-# released after it): a copy-only row's target is its CopyRecord processor's entry
-def compile_program(captured, machines, declarations, analysis, node, planning=None, *, targets):
+# released after it): a copy-only row's target is its CopyRecord processor's entry; `analysis_context` the
+# compilation's one analysis context (driver.py's, every construction's), the joint result's own
+# (schedule.solve_program, Solved.analysis_context)
+def compile_program(captured, machines, declarations, analysis, node, planning=None, *, targets, analysis_context):
     from .schedule import declare_program, solve_program
 
     def built(machine):
@@ -1595,7 +1602,7 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
         target.instanced(context, plan_calls, libs, instances)
         functions, quantum = target.functions(libs)
         joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
-                              declared=prepared)
+                              declared=prepared, analysis_context=analysis_context)
         target.resolved(captured, analysis, joint, here)
         target.solution, target.plan = joint, joint.plan
         target.program = planning.program if planning is not None else None

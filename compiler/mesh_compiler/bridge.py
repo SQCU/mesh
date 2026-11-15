@@ -59,8 +59,9 @@ class _Mapping:
 
 # rdma/mesh-collective.h mesh_program_load: one prepared network program, its saved source `source`
 # (compiler/mesh_compiler/schedule.py SavedNetwork, or the solved network result: its saved() bytes, its program)
-# loaded once into its own mapping (`mapping`, _Mapping: its own client), its rows and pages reserved beside every live
-# publication's, relocated and published, the loaded Local adopted by `mapping` (lent its bytes:
+# loaded once into its own mapping (`mapping`, _Mapping: its own client), its relations in the source's compilation's
+# one analysis context (`source.analysis_context`, every preparation of it the same), its rows and pages reserved
+# beside every live publication's, relocated and published, the loaded Local adopted by `mapping` (lent its bytes:
 # compiler/mesh_compiler/metal.py _lent) until _retired; `group` its preparation's. `solution` the loaded result
 # (schedule.published_program: Function[], roots, prefixes, offsets) whose views hold `mapping` and the byte offsets;
 # `function`, `planned` and `context` its; `offset` every retained copy's first row's byte offset in `arena` (at
@@ -76,8 +77,9 @@ class Published:
         self.source, self.mapping, self.context = source, mapping, C.addressof(mapping.context)
         made = mesh.Local()
         mesh.check(_lent(record, lambda release, owner: mesh.LIB.mesh_program_load(
-            C.byref(mapping.context), group, program, time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS,
-            record, len(record), release, owner, C.byref(made)), lambda status: status == 0))
+            C.byref(mapping.context), source.analysis_context.pointer, group, program,
+            time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, record, len(record), release, owner,
+            C.byref(made)), lambda status: status == 0))
         mapping.loaded.append(made)
         self.offset, view = (mesh.Q * max(made.offsets, 1))(), mesh.View()
         self.pages = (mesh.Q * max(made.planned.rows.count, 1))()

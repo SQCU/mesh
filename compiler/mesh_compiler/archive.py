@@ -375,7 +375,9 @@ def load(directory):
             _assign_attr(tensors[index], module.get_submodule(path), name)
     mesh_graph = schedule.mesh_graph
     relations, natives, searches, closures = [], [], [], []
-    kept = [mesh_graph.Relation.load(data) for data in saved["kept"]]
+    # each native Relation in the restored joint owner's one analysis context (native.restore's, every native artifact
+    # of this compilation loaded in it)
+    kept = [mesh_graph.Relation.load(data, target.solution.analysis_context) for data in saved["kept"]]
     loaded = (graphs, {}, relations, natives, searches, closures, kept)
     resolve = lambda value: decoded(loaded, value)
     natives += [mesh_graph.Graph(resolve(vertices), resolve(relation)) for relation, vertices in saved["natives"]]

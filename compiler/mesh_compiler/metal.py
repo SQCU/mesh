@@ -132,11 +132,12 @@ def _lent(owner, load, adopted):
 
 # metal_ir.h metal_ir_archive_load, metal_ir_archive_free: the archive of `data`, an immutable bytes object whose own
 # buffer it borrows (no copy; CPython 3.12 bytes keep it 8-byte aligned at the object's 32nd byte) and, loaded, owns
-# (_lent) until the archive and every relation it lent are freed. The caller's own reference to the archive is
-# released with metal_ir_archive_free
-def _archive_loaded(compiler, data, device, error):
-    archive = _lent(data, lambda release, owner: compiler.metal_ir_archive_load(data, len(data), device, release, owner,
-                                                                              error, len(error)), bool)
+# (_lent) until the archive and every relation it lent are freed, every loaded program's relations and upstream access
+# relations made in `context` (the loading compilation's one rdma/mesh_graph.py Context, which the archive retains).
+# The caller's own reference to the archive is released with metal_ir_archive_free
+def _archive_loaded(compiler, data, context, device, error):
+    archive = _lent(data, lambda release, owner: compiler.metal_ir_archive_load(context.pointer, data, len(data), device,
+                                                                              release, owner, error, len(error)), bool)
     if not archive:
         raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
     return archive
@@ -600,7 +601,8 @@ def _compiler():
                 ('metal_ir_repeats', C.POINTER(RepeatRegion), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_repeat_carried', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_dispatch_repeats', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
-                ('metal_ir_archive_load', P, [P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_archive_load', P, [P, P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_graph_context', P, [P]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),

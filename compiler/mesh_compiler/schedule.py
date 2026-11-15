@@ -744,8 +744,10 @@ def viewed(owner, local):
 # network result's owner (mesh_plan_program's: the Solved itself, its `program` the planning's; a loaded one's its saved
 # source; None locally), `planned` staying its native Planned view; `ports[j]` the prepared PortRecords (their demand
 # and release the canonical grouping's, which the plan consumed); `context` the planning context (None locally);
-# `owner` the native owner. A loaded result has no bindings, sources, analysis, prepared owner or ports: its rows bind
-# through the saved Target
+# `owner` the native owner; `source` a loaded result's attached saved query (archive.py attached); `analysis_context`
+# its compilation's one analysis context (rdma/mesh_graph.py Context: a fresh compile's original producer's, a loaded
+# result's native.restore's, a published one its source's). A loaded result has no bindings, sources, analysis,
+# prepared owner or ports: its rows bind through the saved Target
 @dataclasses.dataclass(eq=False)
 class Solved:
     functions: object
@@ -767,6 +769,7 @@ class Solved:
     context: object
     owner: object
     source: object = None
+    analysis_context: object = None
 
     # a network result's program mask (mesh_program_save's and mesh_program_load's operand): its planning's, or, loaded
     # by its preparation, its saved source's
@@ -1204,8 +1207,9 @@ def declare_program(analysis, bindings, declarations, wire_values, planning, *, 
 # two distinct roots (a correspondence the caller must state); each instance's grouping (Prepared.grouped[j] at
 # plan_calls[j]) consumed by the network plan and borrowed by its result (Local.grouped); the ports the declaration
 # owner's, their demand and release canonical before the solve; a network result's `plan` the Solved itself, its
-# owner (its program the planning's), a local one's None
-def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan_calls, declared):
+# owner (its program the planning's), a local one's None; its `analysis_context` the compilation's one analysis
+# context as given (compiler/mesh_compiler/driver.py's, every construction's)
+def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan_calls, declared, analysis_context):
     J, K = len(analysis.nodes), len(functions)
     S = len(analysis.storages) + len(declared.wires)
     instances = (mesh.U * max(J, 1))(*plan_calls)
@@ -1262,19 +1266,21 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
                     tuple((*entry, reference, calls[entry[0]].every, calls[entry[0]].ordinal)
                           for entry, reference in resolved.items()), tuple(bindings), analysis.root_sources, analysis,
                     roots, (use_first, use), instances, declared, None, declared.ports,
-                    planning.context if planning is not None else None, owner)
+                    planning.context if planning is not None else None, owner, analysis_context=analysis_context)
     solved.plan = solved if planning is not None else None
     return solved
 
 
 # mesh-collective.h mesh_program_save: a network result saved and not attached (restored, or saved at compile time):
 # `record` its original archive bytes, `program` its program mask, the operand its preparation (compiler/mesh_compiler/
-# bridge.py Published, mesh_program_load) loads and publishes it with; its own `plan`
+# bridge.py Published, mesh_program_load) loads and publishes it with, in `analysis_context` (its compilation's one
+# rdma/mesh_graph.py Context, native.restore's); its own `plan`
 @dataclasses.dataclass(frozen=True, eq=False)
 class SavedNetwork:
     record: bytes
     program: int
     source: object = None
+    analysis_context: object = None
 
     @property
     def plan(self):
@@ -1298,18 +1304,20 @@ def published_program(local, owner, offset, source):
                   mesh_graph.View(owner, offset, range(local.offsets), int), (), (), (),
                   source.analysis if isinstance(source, Solved) else None, local.root,
                   (local.use_first, local.use), local.calls, None, source, (), None, owner,
-                  None if source.source is None else attached(source.source["query"], local, owner))
+                  None if source.source is None else attached(source.source["query"], local, owner),
+                  source.analysis_context)
 
 
-# mesh-collective.h mesh_local_load: the saved result of `data` (Solved.saved), loaded, never solved: its Function[],
-# roots, planned record and copies from the canonical owner, which borrows `data` (lent: compiler/mesh_compiler/metal.py
-# _lent) until its last reference is freed
-def loaded_program(data):
+# mesh-collective.h mesh_local_load: the saved result of `data` (Solved.saved), loaded, never solved, its relations in
+# `context` (its compilation's one rdma/mesh_graph.py Context, native.restore's, held as its `analysis_context`): its
+# Function[], roots, planned record and copies from the canonical owner, which borrows `data` (lent:
+# compiler/mesh_compiler/metal.py _lent) until its last reference is freed
+def loaded_program(data, context):
     from .metal import _lent
     owner = LocalOwner((data,))
-    mesh.check(_lent(data, lambda release, lent: mesh.LIB.mesh_local_load(data, len(data), release, lent,
-                                                                           C.byref(owner.local)),
+    mesh.check(_lent(data, lambda release, lent: mesh.LIB.mesh_local_load(context.pointer, data, len(data), release,
+                                                                           lent, C.byref(owner.local)),
                      lambda status: status == 0))
     local = owner.local
     return Solved(local.function, local, local.planned, *viewed(owner, local), (), (), (), None, local.root,
-                  (local.use_first, local.use), local.calls, None, None, (), None, owner)
+                  (local.use_first, local.use), local.calls, None, None, (), None, owner, None, context)

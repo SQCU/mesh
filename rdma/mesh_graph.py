@@ -942,7 +942,13 @@ LIB.mesh_graph_relation_retain.restype = None
 LIB.mesh_graph_relation_retain.argtypes = [C.c_void_p]
 LIB.mesh_graph_relation_save.restype = LIB.mesh_graph_relation_load.restype = C.c_int
 LIB.mesh_graph_relation_save.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), C.POINTER(C.c_size_t)]
-LIB.mesh_graph_relation_load.argtypes = [C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p, C.POINTER(C.c_void_p)]
+# mesh-graph.h mesh_graph_relation_load: its first operand the loading compilation's one analysis context (Context)
+LIB.mesh_graph_relation_load.argtypes = [C.c_void_p, C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p,
+                                         C.POINTER(C.c_void_p)]
+LIB.mesh_graph_context_create.restype = C.c_int
+LIB.mesh_graph_context_create.argtypes = [C.POINTER(C.c_void_p)]
+LIB.mesh_graph_context_retain.restype = LIB.mesh_graph_context_free.restype = None
+LIB.mesh_graph_context_retain.argtypes = LIB.mesh_graph_context_free.argtypes = [C.c_void_p]
 # ISO/IEC 9899:2018 7.22.3.4 and 7.22.3.3: a loaded relation's backing (malloc's alignment, at least the 8 bytes
 # mesh_graph_relation_load requires) and its release, free, the owner callback the relations adopt
 LIB.malloc.restype = C.c_void_p
@@ -952,6 +958,27 @@ FREE = C.cast(LIB.free, C.c_void_p)
 def _freed(pointer, allocated):
     LIB.mesh_graph_relation_free(pointer)
     LIB.free(allocated)
+
+
+# mesh-graph.h mesh_graph_context_create, mesh_graph_context_retain and mesh_graph_context_free: one compilation's
+# analysis context (one isl_ctx and its lock, refcounted), this object one reference to it, released with it
+class Context:
+    def __init__(self, pointer):
+        self.pointer = pointer
+        self.freed = weakref.finalize(self, LIB.mesh_graph_context_free, pointer)
+
+    @classmethod
+    def create(cls):
+        made = C.c_void_p()
+        _check(LIB.mesh_graph_context_create(C.byref(made)))
+        return cls(made.value)
+
+    # a context another owner holds (a compilation's or a loaded native result's), one more reference this Context
+    # releases
+    @classmethod
+    def borrowed(cls, pointer):
+        LIB.mesh_graph_context_retain(pointer)
+        return cls(pointer)
 
 
 # one retained relation: the native reference this object holds, the arrays it borrows (`held`: views, their pairs,
@@ -1009,16 +1036,17 @@ class Relation:
         return cls(pointer)
 
     # mesh_graph_relation_load: the same relations over one malloc backing holding `data`, adopted as their owner
-    # (release free, called once the last of them, this one or another retaining it, is freed); a failed load keeps
-    # nothing and its backing is freed here once
+    # (release free, called once the last of them, this one or another retaining it, is freed), their access maps
+    # loaded into `context`, the loading compilation's one analysis Context (the loaded relations retain it natively);
+    # a failed load keeps nothing and its backing is freed here once
     @classmethod
-    def load(cls, data):
+    def load(cls, data, context):
         backing = LIB.malloc(max(len(data), 1))
         if not backing:
             raise MemoryError("the loaded relation's backing")
         C.memmove(backing, data, len(data))
         made = C.c_void_p()
-        status = LIB.mesh_graph_relation_load(backing, len(data), FREE, backing, C.byref(made))
+        status = LIB.mesh_graph_relation_load(context.pointer, backing, len(data), FREE, backing, C.byref(made))
         if status:
             LIB.free(backing)
             _check(status)

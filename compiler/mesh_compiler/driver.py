@@ -13,7 +13,7 @@ from .export import called, calls
 from .ir import Scheduled
 from .lower_inductor import lower
 from .lower_metal import construct
-from .metal import _machines
+from .metal import _machines, mesh_graph
 from .operations import Generator, seeded
 from .placement import place
 from .schedule import analyse, call_operands, carried, schedule, unit_cost
@@ -101,7 +101,10 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
     # (each function's machine bodies and its schedule's processor bodies), its numerical lowering
     # (compiler/mesh_compiler/lower_inductor.py lower: {function key: {processor: that body's produced result}}), each
     # machine body's program from its processors' produced results (compiler/mesh_compiler/lower_metal.py construct),
-    # then analysis and the native target
+    # then analysis and the native target. rdma/mesh-graph.h struct mesh_graph_context (rdma/mesh_graph.py Context):
+    # the compilation's one analysis context, made once over the whole lowered result and shared by every construction
+    # (construct `context`, ConstructedMachine.context), in which every produced kernel's domain and access relations
+    # are made and which every program and the call analysis's solved result retain
     scheduled = Scheduled(captured.exported, modules, dict(devices), dict(machines),
                           groups[output_processor],
                           {key: stage[2] for key, stage in staged.items()},
@@ -112,13 +115,14 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
                           dict(engines),
                           invariant={key: stage[0].meta["invariant"] for key, stage in staged.items()},
                           compilation=compilation, processor_modules=processor_modules, operands=operands)
-    lowered = lower(scheduled)
-    constructions = {(key, group): construct(scheduled.modules[key][group], lowered[key], **made)
+    lowered, context = lower(scheduled), mesh_graph.Context.create()
+    constructions = {(key, group): construct(scheduled.modules[key][group], lowered[key], context=context, **made)
                      for (key, group), made in compilation.items()}
     analysis = analyse(operands, constructions, declared)
     constructed = {key: made for (key, group), made in constructions.items() if group == entry}
     target = native.compile_program(captured, constructed, declared, analysis,
-                                    planning.here if planning is not None else machine, planning, targets=targets)
+                                    planning.here if planning is not None else machine, planning, targets=targets,
+                                    analysis_context=context)
     return dataclasses.replace(scheduled, plan=target.plan if planning is not None else None, functions={entry: target},
                                compilation=None)
 

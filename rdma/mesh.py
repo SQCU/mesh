@@ -302,7 +302,8 @@ CONTEXT = C.POINTER(Context)
 # it from each Function's `host` and `work` estimates and gives it as Planned `horizon`.  What must stay: each binding
 # the header's declaration
 # mesh-collective.h mesh_plan_load and mesh_local_load: the archive bytes' owner, released once the loaded result and
-# its relations are
+# its relations are; mesh_local_load's and mesh_program_load's `analysis` the loading compilation's one analysis context
+# (mesh-graph.h struct mesh_graph_context, rdma/mesh_graph.py Context.pointer)
 RELEASE = C.CFUNCTYPE(None, C.c_void_p)
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
@@ -326,9 +327,10 @@ for name, result, arguments in (
                                         C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse), Q,
                                         C.POINTER(Local)]),
         ('mesh_local_save', C.c_int, [C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
-        ('mesh_local_load', C.c_int, [C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
+        ('mesh_local_load', C.c_int, [C.c_void_p, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
         ('mesh_program_save', C.c_int, [CONTEXT, Q, C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
-        ('mesh_program_load', C.c_int, [CONTEXT, Q, Q, Q, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
+        ('mesh_program_load', C.c_int, [CONTEXT, C.c_void_p, Q, Q, Q, C.c_void_p, Z, RELEASE, C.c_void_p,
+                                        C.POINTER(Local)]),
         ('mesh_view_program', None, [CONTEXT, C.POINTER(Local), C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
         ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),

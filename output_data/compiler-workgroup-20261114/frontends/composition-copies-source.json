@@ -52,5 +52,56 @@
     "Original copy domain, native layout terms/offset, mapped Slot.view, returned copy OpID and CopyRecord provenance.",
     "Original declaration fields, event relation, closure arrays, task search/order, redundancy and boundary results through existing graph owner serializers.",
     "One graph codec; native relation and search owners shared between source wrappers; loaded native Local relation/closure remain borrowed, not duplicated or solved."
-  ]
+  ],
+  "shared_context_checkpoint": {
+    "source_parent": "fa77a21d0044d9bc490399f7f6772843b0a7cd79",
+    "scope": "SAME974 turn104: original compilation Context carried through fresh construction, solved owner, source/native archive restoration and deferred network preparation.",
+    "attribution": "Driver fresh Context producer/import/construct argument granted jointly by compiler66; the native compile/solve/load propagation and Context wrapper belong to frontend104. Native131 View56 and C access/context implementation remain excluded.",
+    "worktree_sha256": {
+      "compiler/mesh_compiler/archive.py": "e687fe54f83578a5e81f26ad84ec30c32a9f8cd0eaba7e0f941b40f29adb818c",
+      "compiler/mesh_compiler/bridge.py": "16223ecb319ef03db9a658cd03179f997e789d5f9bc767a629fe8236684cf913",
+      "compiler/mesh_compiler/driver.py": "65b00fca85c194ee4a99481a082e4ec5cd3e87feef9ff83c25579193a74228af",
+      "compiler/mesh_compiler/metal.py": "2d65152f4f9fbf30c55a770268d28e8154fe33c74fb22bfd3b330a9407e40d92",
+      "compiler/mesh_compiler/native.py": "5e041778f07facf03fab56d1b6b8eef485acfc29f10b39682d77fe781b29dbba",
+      "compiler/mesh_compiler/schedule.py": "f1e6319017d18796975f31d054ccf7eeaa6a1e17e6b870f02881ca29f3a11e93",
+      "rdma/mesh.py": "5f9ed7011ae23b670fb2f1eababd6da8b99b11bab3e09e27072328c4437dd842",
+      "rdma/mesh_graph.py": "ff0f4d74d2a50c484502610aaea128ab6e5bcee613d9a576caa2697063ea7f29"
+    },
+    "staged_sha256": {
+      "compiler/mesh_compiler/archive.py": "e687fe54f83578a5e81f26ad84ec30c32a9f8cd0eaba7e0f941b40f29adb818c",
+      "compiler/mesh_compiler/bridge.py": "16223ecb319ef03db9a658cd03179f997e789d5f9bc767a629fe8236684cf913",
+      "compiler/mesh_compiler/driver.py": "65b00fca85c194ee4a99481a082e4ec5cd3e87feef9ff83c25579193a74228af",
+      "compiler/mesh_compiler/metal.py": "9eada29ce6f37f1a0077991cdc05b3458a86878bd50a1febc05ed6a6d929abd5",
+      "compiler/mesh_compiler/native.py": "5e041778f07facf03fab56d1b6b8eef485acfc29f10b39682d77fe781b29dbba",
+      "compiler/mesh_compiler/schedule.py": "f1e6319017d18796975f31d054ccf7eeaa6a1e17e6b870f02881ca29f3a11e93",
+      "rdma/mesh.py": "5f9ed7011ae23b670fb2f1eababd6da8b99b11bab3e09e27072328c4437dd842",
+      "rdma/mesh_graph.py": "18fa07911692f44c13a83134f70cae7af597da89ad537bfd4c885ca9a67d5201"
+    },
+    "changed_during_checks": [],
+    "checks": {
+      "worktree_ast": "PASS",
+      "staged_ast": "PASS",
+      "pyflakes_command": [
+        "/Users/mdot/.venv-mesh-uv/bin/python",
+        "-m",
+        "pyflakes",
+        "compiler/mesh_compiler/archive.py",
+        "compiler/mesh_compiler/bridge.py",
+        "compiler/mesh_compiler/driver.py",
+        "compiler/mesh_compiler/native.py",
+        "compiler/mesh_compiler/schedule.py",
+        "rdma/mesh.py",
+        "rdma/mesh_graph.py"
+      ],
+      "pyflakes_exit": 0,
+      "pyflakes_output": "",
+      "staged_diff_check": "PASS",
+      "metal_lint_scope": "AST checked; peer SCALAR re-export intentionally excluded from pyflakes command."
+    },
+    "known_pairing": "Canonical Builder.copy binding committed in b1de1a9b; 0e54e31b retains original copy/query/closure operands. Current source matches native131 context-first load declarations.",
+    "limits": [
+      "No Python compiler import, matched build, or runtime observation in this checkpoint. Native131 C access/context/archive implementation remains active.",
+      "Compiler66 ConstructedMachine.context remains in its owned lower_metal source. Original compiler68 lowered/control/provenance result serialization awaits its actual producer."
+    ]
+  }
 }
