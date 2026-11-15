@@ -190,12 +190,11 @@ def described(tensor):
 
 
 class Captured(torch.fx.Interpreter):
-    def __init__(self, module, functions, options, fake):
+    def __init__(self, stack, module, functions, options, fake):
         super().__init__(module)
+        self.stack = stack
         self.functions, self.options, self.fake, self.exported, self.bound = functions, options, fake, {}, {}
-        self.attributes, self.specialized = {}, {}
-        with fake:
-            self.token = torch.empty(0)
+        self.attributes = {}
 
     def run_node(self, node):
         self.calling = node
@@ -221,15 +220,11 @@ class Captured(torch.fx.Interpreter):
                                      joint.out_spec)
 
     def call_module(self, target, args, kwargs):
-        return self.captured(target, self.fetch_attr(target), args, kwargs)
+        return self.captured(self.stack, self.fetch_attr(target), args, kwargs)
 
     def call_function(self, target, args, kwargs):
         if target in self.functions:
-            return self.captured(target, Function(target), args, kwargs)
-        # rejection filters are forbidden: an operation between calls that no captured function owns raises here
-        if target not in (operator.getitem, getattr) or not isinstance(args[0], (tuple, list, dict)):
-            raise NotImplementedError(f"{self.calling.name} runs between the program's compiled calls; every "
-                                      "function of a program is captured")
+            return self.captured(self.stack, Function(target), args, kwargs)
         return super().call_function(target, args, kwargs)
 
 
