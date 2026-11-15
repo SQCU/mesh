@@ -2647,15 +2647,21 @@ def _dlaln2(na, nw, smin, a, b, wr, wi):
             torch.where(identity, plain[2], xnorm))
 
 
-# Reference-LAPACK SRC/dtrevc.f 342-519 (SIDE = 'R', HOWMNY = 'B'; dtrevc3.f's back-transformed form) on the real
-# quasi-triangular Schur form t: column KI of X is real (IP = 0), a pair's second (T(KI,KI-1) /= 0, IP = -1, holding
-# the pair's WORK(1+N:) in xr and WORK(1+N2:) in xi) or its first (skipped, IP = 1). All the solves run together in
-# the source's block order: each static round J = n-1..1 is the 1 x 1 block at J or the 2 x 2 block ending at J
-# (T(J,J-1) /= 0; J the first row of a 2 x 2 block skipped), for every column whose own range J = KI-1..1 (KI-2..1
-# for a pair) holds J: DLALN2, the BIGNUM / XNORM rescaling of X and SCALE (a pair's 2 x 2 by REC = 1 / XNORM), DSCAL of
-# WORK(1:KI) by SCALE, X into WORK and the DAXPYs above the block. VR = Z X, each pair's columns its real and imaginary
-# parts, then by 1 / EMAX (the largest |VR(K,KI)|, a pair's |VR(K,KI-1)| + |VR(K,KI)|)
-def _dtrevc(t, z):
+# Reference-LAPACK 3.12.1 SRC/dtrevc3.f 383-398 and 406-842 (SIDE = 'R', HOWMNY = 'B') on the real quasi-triangular
+# Schur form t with LWORK `lwork`. IP by 423-438 for KI = N..1: the KI after a pair's second is its first (IP = 1,
+# skipped), else KI = 1 (`sub`'s leading zero) or T(KI,KI-1) = 0 real (IP = 0), else the pair's second (IP = -1, its
+# WORK(1+(IV-1)N:) in xr and WORK(1+IV N:) in xi); WR, WI and SMIN (452-457), the real right-hand side (464-470) and
+# the pair's initial solve (603-618). All the solves run together in rounds J = N-1..1, each column by its own DO 60
+# (DO 90) JNXT recurrence from KI-1 (KI-2) (475-487, 623-635): J > JNXT skipped, else the 1 x 1 block at J or, where
+# T(J,J-1) /= 0, the 2 x 2 block ending at J: DLALN2, the BIGNUM / XNORM rescaling of X and SCALE (a pair's 2 x 2 by
+# REC = 1 / XNORM), DSCAL of WORK(1:KI) by SCALE, X into WORK and the DAXPYs above the block. NB = MIN((LWORK - N) /
+# (2 N), NBMAX = 128) (373-379; dgeev.f's LWORK - N >= 129 N >= N + 2 N NBMIN, so 378's NB = 1, version 1, is
+# unreached and NB >= 64). Version 2 (584-593, 775-787, 790-837): IV from NB (416-419), a pair at IV - 1 and IV, KI2
+# = KI - 1 (else KI), and where IV <= 2 or KI2 = 1 the DGEMM of VR(1:N,1:KI2+NB-IV) by the block's columns IV..NB and
+# their normalization (810-829: a real column by its largest |.|, a pair's two by EMAX of |VR(K,KI-1)| + |VR(K,KI)|).
+# The per-member blocks (at most NB columns, at least NB - 1 before the last) are each static block b's superset of
+# columns, Z zero past the member's own KI2 + NB - IV (0 times X's zero rows there)
+def _dtrevc(t, z, lwork):
     n, k = t.shape[-1], _counted(t)
     limits = torch.finfo(t.dtype)
     ulp = limits.eps
@@ -2664,10 +2670,12 @@ def _dtrevc(t, z):
     pad = torch.zeros_like(t[..., 0, :1])
     sub = torch.cat([pad, t.diagonal(-1, dim1=-2, dim2=-1)], -1)
     sup = torch.cat([pad, t.diagonal(1, dim1=-2, dim2=-1)], -1)
-    following = torch.cat([t.diagonal(-1, dim1=-2, dim2=-1), pad], -1)
-    second = sub != 0
-    first = (following != 0) & ~second
-    isreal = ~second & ~first
+    codes, previous = [None] * n, torch.zeros_like(sub[..., 0], dtype=torch.int64)
+    for ki in range(n, 0, -1):
+        previous = torch.where(previous == -1, 1, torch.where(sub[..., ki - 1] != 0, -1, 0))
+        codes[ki - 1] = previous
+    ip = torch.stack(codes, -1)
+    second, first, isreal = ip == -1, ip == 1, ip == 0
     wr = t.diagonal(dim1=-2, dim2=-1)
     wi = torch.where(second, sub.abs().sqrt() * sup.abs().sqrt(), 0)
     size = ulp * (wr.abs() + wi.abs())
@@ -2683,11 +2691,12 @@ def _dtrevc(t, z):
         row == col - 1, s1[..., None, :], 0)), xr)
     xi = torch.where(second[..., None, :], torch.where(row < col - 1, -(s2[..., None, :] * tcol), torch.where(
         row == col, s2[..., None, :], 0)), torch.zeros_like(t))
+    jnxt = torch.where(second, k - 2, k - 1)
     for j in range(n - 1, 0, -1):
         two = (t[..., j - 1, j - 2] != 0) if j >= 2 else torch.zeros_like(second[..., 0])
-        skip = t[..., j, j - 1] != 0
-        active = (isreal & (k >= j + 1)) | (second & (k >= j + 2))
-        single, double = active & _vec(~two & ~skip), active & _vec(two & ~skip)
+        active = (isreal | second) & (j <= jnxt)
+        single, double = active & _vec(~two), active & _vec(two)
+        jnxt = torch.where(active, torch.where(_vec(two), j - 2, j - 1), jnxt)
         rows = [j - 1] if j < 2 else [j - 2, j - 1]
         made = {}
         for na in (1, 2) if j >= 2 else (1,):

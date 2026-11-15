@@ -1002,5 +1002,37 @@
       "static class identity across composed owners"
     ],
     "driver_state": "original tensor references retained; detach removed after attach consumer review"
+  },
+  "quota_boundary_review_20261115": {
+    "preflight": {
+      "patches": {
+        "compiler/patches/torch-inductor-aot-lowered-result.patch": "5e63527a005b2a40ba60555a6ef80a22233e37a42021f1eb6f2f6359bf99de49",
+        "compiler/patches/torch-inductor-cpp-build-result.patch": "0cedf4c0caf53ad65ceb9c78b2a6beceee3cb2e2ce7f25870316ff90e890ebfa",
+        "compiler/patches/torch-inductor-cpp-wrapper-binding.patch": "71ecddd88f1222a27e3bf28fb3686e4218d2f6f942270ddb3324b54f6e6a2c1c"
+      },
+      "files": 16,
+      "forward_reverse_exact": true,
+      "ast_pass": true,
+      "pyflakes_no_increase": true,
+      "installed_unchanged": true
+    },
+    "workers": "all eight existing Claude workers returned explicit account weekly-limit response; existing processes retained idle",
+    "reset": "2026-11-17 11:00 America/Los_Angeles",
+    "no_retries_restarts_accounts_or_new_workers": true,
+    "imports_or_execution": false,
+    "implementation_status": "unfinished; quota distinct from already specified contract and implementation failures",
+    "source_hashes": {
+      "compiler/mesh_compiler/operations.py": "5991d618b5cef3771395882ad3dd3d1d276b821fd94203b6b3e628455d5a3bb4",
+      "compiler/patches/torch-inductor-aot-lowered-result.patch": "5e63527a005b2a40ba60555a6ef80a22233e37a42021f1eb6f2f6359bf99de49",
+      "compiler/patches/torch-inductor-cpp-build-result.patch": "0cedf4c0caf53ad65ceb9c78b2a6beceee3cb2e2ce7f25870316ff90e890ebfa"
+    },
+    "remaining": [
+      "reflective emitter-state restoration and handwritten context dependency claims unaccepted",
+      "live closure/state serialization unresolved",
+      "LoweredAOTI emitted result is unpaired with archive .compiled and displaced FxConverter consumers",
+      "original occurrence/control/const/seed/lifetime/prepared binding unfinished",
+      "partial _dtrevc LWORK signature not yet matched by GEEV caller or blocked back-transform",
+      "frontend direct JD/public/archive and native complete link contexts unfinished"
+    ]
   }
 }

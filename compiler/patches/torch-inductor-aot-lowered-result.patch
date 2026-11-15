@@ -8,7 +8,7 @@
      OutputCode,
  )
  from torch._inductor.runtime.cache_dir_utils import cache_dir
-@@ -777,6 +778,24 @@
+@@ -777,6 +778,89 @@
          return config.patch(graph_partition=False)
      else:
          return contextlib.nullcontext()
@@ -30,10 +30,107 @@
 +    finally:
 +        vars(threadlocal).clear()
 +        vars(threadlocal).update(prior)
++
++
++def _emission_context() -> Any:
++    """
++    compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the original contexts an emission
++    runs under (LoweredAOTI.emit, after compile_fx has returned), each as it is here, at its graph's planned stage,
++    entered again for each emission by its own context manager: this thread's config (config.patch over
++    get_config_copy, as compile_fx_inner enters it for a backward compile after compile_fx's has exited); its
++    virtualized handlers (_virtualized_as: its graph, extern kernel nodes, fake mode, debug context, distributed
++    autotune state, aot_compilation and real inputs, each the object set here); its grad mode; its dispatch modes
++    disabled (compile_fx_inner's _disable_current_modes) and the python dispatcher enabled (_compile_fx_main's), under
++    which AotCodeCompiler.compile reads its constants; its RNG state (codegen_and_compile's preserve_rng_state, the
++    CPU generator's state here set within it: compile draws its mmap weights' magic number from it); its cache
++    directories (TORCHINDUCTOR_CACHE_DIR and TRITON_CACHE_DIR, with_fresh_cache_if_config's under
++    force_disable_caches), under which its emission writes; and torch._inductor.debug's provenance globals
++    (_compile_fx_main's reset_provenance_globals). Its other contexts (lazy graph modules, node meta, tracing and
++    compile contexts, functorch config, compiled autograd, timers and metrics) are not entered again: an emission
++    makes no FX graph, traces nothing and runs no autograd. Its debug context is V's, already exited.
++    """
++    from . import debug
++    from .utils import _set_env
++    from .virtualized import threadlocal
++
++    configured = config.get_config_copy()
++    handlers = dict(vars(threadlocal))
++    grad = torch.is_grad_enabled()
++    rng = torch.random.get_rng_state()
++    cached = {
++        key: os.environ[key]
++        for key in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR")
++        if key in os.environ
++    }
++    provenance = {
++        name: getattr(debug, name)
++        for name in (
++            "_pre_grad_graph_id",
++            "_inductor_post_to_pre_grad_nodes",
++            "_inductor_triton_kernel_to_post_grad_node_info",
++            "_inductor_pre_grad_node_stack_trace",
++            "_inductor_kernel_stack_trace",
++            "_inductor_kernel_provenance_debug_handle",
++            "_inductor_kernel_extern_info",
++        )
++    }
++
++    @contextlib.contextmanager
++    def entered() -> Generator[None, None, None]:
++        prior = {name: getattr(debug, name) for name in provenance}
++        with contextlib.ExitStack() as stack:
++            stack.enter_context(config.patch(configured))
++            stack.enter_context(_virtualized_as(handlers))
++            stack.enter_context(torch.set_grad_enabled(grad))
++            stack.enter_context(torch.utils._python_dispatch._disable_current_modes())
++            stack.enter_context(enable_python_dispatcher())
++            stack.enter_context(dynamo_utils.preserve_rng_state())
++            torch.random.set_rng_state(rng)
++            for key, value in cached.items():
++                stack.enter_context(_set_env(key, value))
++            vars(debug).update(provenance)
++            try:
++                yield
++            finally:
++                vars(debug).update(prior)
++
++    return entered
  
  
  def fake_tensor_prop(
-@@ -1709,46 +1728,70 @@
+@@ -1587,6 +1671,9 @@
+                 const_graph = None
+                 const_wrapper_code = None
+                 const_kernel_code = None
++                # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, its const graph's
++                # planned stage and its emission's contexts (None: no const graph)
++                const_planned = const_context = None
+ 
+                 if aot_mode and config.aot_inductor.use_runtime_constant_folding:
+                     # torchbind objects have name that starts with _torchbind_obj
+@@ -1622,9 +1709,18 @@
+                         if not cpp_wrapper:
+                             raise AssertionError("AOT mode only supports C++ wrapper")
+                         const_graph.run()
+-                        const_wrapper_code, const_kernel_code = (
+-                            const_graph.codegen_with_cpp_wrapper()
+-                        )
++                        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, its
++                        # planned stage (its codegen's planned lines) and the contexts its emission runs under, as
++                        # they are here. Its emission is the lowered result's (LoweredAOTI.emit), before its main
++                        # graph's entry declaration takes its code (CppWrapperCpu.write_wrapper_decl:
++                        # const_wrapper_code, const_kernel_code).
++                        if config.aot_inductor.lowered:
++                            const_planned = const_graph.codegen_with_cpp_wrapper()
++                            const_context = _emission_context()
++                        else:
++                            const_wrapper_code, const_kernel_code = (
++                                const_graph.codegen_with_cpp_wrapper()
++                            )
+ 
+                 graph = graph_lowering(
+                     gm,
+@@ -1709,46 +1805,80 @@
                                  raise AssertionError(
                                      "AOT mode only supports C++ wrapper"
                                  )
@@ -44,9 +141,9 @@
 -                            if kernel_code.value:
 +
 +                            # compiler/patches/torch-inductor-aot-lowered-result.patch: this branch's emission from
-+                            # its codegen's result, the one emission for both the direct path and the planned stage's
-+                            # resumption
-+                            def aot_compiled(wrapper_code: Any, kernel_code: Any) -> Any:
++                            # its codegen's result, the one emission for both the direct path and each of the planned
++                            # stage's emissions; `constants` an earlier emission's constants object (None: its own)
++                            def aot_compiled(wrapper_code: Any, kernel_code: Any, constants: Any = None) -> Any:
                                  output_code_log.debug(
 -                                    "AOT kernel code:\n%s", kernel_code.value
 +                                    "AOT wrapper code: \n%s", wrapper_code.value
@@ -113,52 +210,63 @@
 +                                                    else []
 +                                                )
                                              )
--                                        )
--                                    ],
--                                )
 +                                        ],
++                                        constants=constants,
 +                                    )
 +                            # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered.
-+                            # Codegen returns its planned stage (GraphLowering.codegen: its wrapper's planned lines,
-+                            # before any line prints). That stage is returned with its resumption, which runs under
-+                            # this thread's config and virtualized handlers as they are at that stage: its codegen
-+                            # resumed with the supplied operands (GraphLowering.resumed_codegen), then this branch's
-+                            # emission.
++                            # Codegen returns its planned stage (its wrapper's planned lines, neither its entry's
++                            # declaration nor any line written: PythonWrapperCodegen._generate), returned with its
++                            # emission (LoweredAOTI.emit), one for each supplied configuration, under the contexts
++                            # of that stage (_emission_context): its const graph's wrapper set back to its planned
++                            # state and emitted, its code then its graph's (CppWrapperCpu.write_wrapper_decl reads
++                            # it), then its own wrapper's, then this branch's emission over them.
 +                            if config.aot_inductor.lowered:
-+                                from .virtualized import threadlocal
-+
 +                                planned = graph.codegen_with_cpp_wrapper()
-+                                configured = config.get_config_copy()
-+                                handlers = dict(vars(threadlocal))
++                                context = _emission_context()
 +
-+                                def resumed(supplied: Any) -> Any:
-+                                    with config.patch(configured), _virtualized_as(handlers):
-+                                        return aot_compiled(*graph.resumed_codegen(supplied))
++                                def emission(supplied: Any, const_supplied: Any, constants: Any) -> Any:
++                                    if const_graph is not None:
++                                        with const_context():
++                                            const_graph.wrapper_code.restore_planned()
++                                            const_code = const_graph.wrapper_code.resume_generation(
++                                                const_supplied
++                                            )
++                                        graph.const_wrapper_code = const_code[0].value
++                                        graph.const_kernel_code = const_code[1].value
++                                    with context():
++                                        graph.wrapper_code.restore_planned()
++                                        return aot_compiled(
++                                            *graph.wrapper_code.resume_generation(supplied), constants
+                                         )
+-                                    ],
+-                                )
 +
-+                                compiled_fn = resumed
++                                compiled_fn = emission
 +                            else:
 +                                compiled_fn = aot_compiled(*graph.codegen_with_cpp_wrapper())
                          else:
                              compiled_module = graph.compile_to_module()
                              compiled_fn = compiled_module.call
-@@ -1863,6 +1906,16 @@
+@@ -1863,6 +1993,18 @@
  
                      # pyrefly: ignore [unbound-name]
                      if V.aot_compilation:
 +                        # compiler/patches/torch-inductor-aot-lowered-result.patch:
 +                        # aot_inductor.lowered, the lowered result itself: its graph at the original AOT
-+                        # branch's planned stage, its planned lines and its resumption (LoweredAOTI.emit)
++                        # branch's planned stage, its planned lines, its const graph's, and its emission
++                        # (LoweredAOTI.emit)
 +                        if config.aot_inductor.lowered:
 +                            return LoweredAOTI(
 +                                graph=graph,
 +                                device_type=graph.device_type,
 +                                planned=planned,
-+                                resume=compiled_fn,
++                                const_planned=const_planned,
++                                emission=compiled_fn,
 +                            )
                          if not isinstance(
                              compiled_fn,
                              # pyrefly: ignore [unbound-name]
-@@ -2239,7 +2292,7 @@
+@@ -2239,7 +2381,7 @@
      example_inputs_: list[InputType],
      inner_compile: _CompileFxCallable = compile_fx_inner,
      config_patches: dict[str, Any] | None = None,
@@ -167,7 +275,7 @@
      if not isinstance(model_, GraphModule):
          raise AssertionError(f"Expected GraphModule, got {type(model_)}: {model_}")
  
-@@ -2298,6 +2351,10 @@
+@@ -2298,6 +2440,10 @@
              config_patches=config_patches,
          )
  
@@ -178,7 +286,7 @@
          if not isinstance(compiled_artifacts, CompiledAOTI):
              raise AssertionError(
                  f"Expected CompiledAOTI, got {type(compiled_artifacts)}"
-@@ -3279,6 +3336,9 @@
+@@ -3279,6 +3425,9 @@
                              node.meta["val"] = target
  
              unlifted_gm = _unlift_graph(model_, gm, graph_signature)
@@ -204,29 +312,6 @@
  
      # AOTInductor output path
      # If an absolute path is specified, the generated lib files will be stored under the directory;
---- a/torch/_inductor/graph.py
-+++ b/torch/_inductor/graph.py
-@@ -3051,8 +3051,20 @@
-             )
- 
-             result = self.wrapper_code.generate(self.is_inference)
-+            # compiler/patches/torch-inductor-aot-lowered-result.patch: under aot_inductor.lowered, `result` is its
-+            # wrapper's planned stage (a const graph's is its emitted code, PythonWrapperCodegen._generate);
-+            # resumed_codegen ends codegen after that stage's resumed print
-+            if config.aot_inductor.lowered and not self.is_const_graph:
-+                return result
-             self.wrapper_code.pop_codegened_graph()
-             return result
-+
-+    def resumed_codegen(self, supplied: Any) -> tuple[ValueWithLineMap, ValueWithLineMap]:
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: codegen's planned stage resumed. Its wrapper's
-+        # print takes `supplied` (PythonWrapperCodegen.resume_generation), then codegen's own end runs.
-+        result = self.wrapper_code.resume_generation(supplied)
-+        self.wrapper_code.pop_codegened_graph()
-+        return result
- 
-     def codegen_subgraph(self, parent_graph: GraphLowering) -> None:
-         """
 --- a/torch/_inductor/ir.py
 +++ b/torch/_inductor/ir.py
 @@ -9507,8 +9507,11 @@
@@ -309,7 +394,7 @@
  
 --- a/torch/_inductor/output_code.py
 +++ b/torch/_inductor/output_code.py
-@@ -1169,6 +1169,44 @@
+@@ -1169,6 +1169,55 @@
  
  
  @dataclasses.dataclass
@@ -319,23 +404,34 @@
 +    result (aot_inductor.lowered), at compile_fx's original AOT branch (cpp_wrapper), at its codegen's planned stage.
 +    `graph` is its GraphLowering: its backends' kernels are made, and its wrapper_code's lines are planned by its
 +    wrapper IR passes, with its planner's result owner held (wrapper_code.memory_planner or
-+    wrapper_code.past_planning_states). None of its lines is printed. `planned` is those planned lines
-+    (wrapper_code.lines). `resume` is its resumption (compile_fx's): its codegen resumed with the supplied operands,
-+    then the branch's emission, under the config and virtualized handlers as they were at that stage. `compiled` is
-+    its emission's result once emitted (AotCodeCompiler.compile's AotCompiled, torch-inductor-cpp-build-result.patch),
-+    None before. compile_fx_aot returns it.
++    wrapper_code.past_planning_states) and its wrapper's state at that stage (wrapper_code.planned_state). Neither
++    its entry's declaration nor any of its lines is written. `planned` is those planned lines (wrapper_code.lines),
++    `const_planned` its const graph's (graph.const_module's, aot_inductor.use_runtime_constant_folding; None: no
++    const graph). emit(supplied, const_supplied) is one emission from that planned stage, for one configuration
++    (compile_fx's `emission`, under that stage's contexts): its const graph's wrapper emitted given `const_supplied`,
++    its code then its graph's; its own wrapper emitted given `supplied` (each wrapper set back to its planned state,
++    restore_planned, then resume_generation: its entry's declaration and its print, wrapper_code.supplied); then
++    AotCodeCompiler.compile's AotCompiled (torch-inductor-cpp-build-result.patch), which it returns. No emission
++    reruns the lowering or its plan, and its constants object is built by its first emission, each later one taking
++    that one's (AotCompiled.consts). `emitted` is each emission's (supplied, const_supplied, AotCompiled), in order.
++    compile_fx_aot returns it.
 +    """
 +
 +    graph: Any
 +    device_type: str
 +    planned: Any
-+    resume: Any
-+    compiled: Any = None
++    const_planned: Any
++    emission: Any
++    emitted: list[tuple[Any, Any, Any]] = dataclasses.field(default_factory=list)
 +
-+    def emit(self, supplied: Any) -> Any:
-+        # its planned stage resumed, its print given `supplied`: its emission's result
-+        self.compiled = self.resume(supplied)
-+        return self.compiled
++    def emit(self, supplied: Any, const_supplied: Any = None) -> Any:
++        # one emission from its planned stage, for the configuration `supplied` (`const_supplied` its const
++        # graph's): its AotCompiled
++        compiled = self.emission(
++            supplied, const_supplied, self.emitted[0][2].consts if self.emitted else None
++        )
++        self.emitted.append((supplied, const_supplied, compiled))
++        return compiled
 +
 +    def post_compile(
 +        self,
@@ -483,46 +579,90 @@
  
      def codegen(self, code: IndentedBuffer) -> None:
          self.wrapper._generate_kernel_call_helper(
-@@ -2537,6 +2595,27 @@
+@@ -2537,6 +2595,73 @@
              self.header.splice(kernel_defs)
  
      def _generate(self, is_inference):
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: the original generation (_generation) to its
-+        # planned stage. Under aot_inductor.lowered it returns that stage, its planned lines, and resume_generation
-+        # resumes it. Otherwise it resumes at once, as does a const graph's, whose emitted code its main graph's
-+        # GraphLowering takes (compile_fx: const_wrapper_code, const_kernel_code).
-+        self.generation = self._generation(is_inference)
-+        planned = next(self.generation)
-+        if config.aot_inductor.lowered and not V.graph.is_const_graph:
-+            return planned
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the original generation's planned stage, its
++        # wrapper IR passes (its memory plan), then its emission (resume_generation). The passes come before the
++        # emission's first writes (write_triton_header_once, its wrapper call's indent, profiler mark and graph
++        # start), which write no line and which the passes do not read. Under aot_inductor.lowered it returns its
++        # planned lines, with this wrapper's own state at that stage (planned_state). Each emission is then
++        # restore_planned and resume_generation(supplied), one for each supplied configuration, each from that same
++        # stage, none rerunning its passes. Otherwise its one emission follows at once.
++        self.run_wrapper_ir_passes(is_inference)
++        if config.aot_inductor.lowered:
++            self.planned_state = self._planned_state()
++            return self.lines
 +        return self.resume_generation(None)
 +
++    def _planned_state(self):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: this wrapper's state at its planned stage, what
++        # an emission changes: its own attributes (each list, dict, set and OrderedSet by its content), its code
++        # buffers' lines and indent (a DualIndentedBuffer's AOT side too), and each graph's removed_buffers and
++        # inplaced_to_remove (its own and each control body's its lines enter), as
++        # CppWrapperCpu._preserve_codegen_state keeps some of them across codegen_switch's two passes
++        import copy
++
++        from ..utils import DualIndentedBuffer
++
++        values = {
++            name: copy.copy(value) if isinstance(value, (list, dict, set, OrderedSet)) else value
++            for name, value in vars(self).items()
++        }
++        buffers = [
++            (buffer, list(buffer._lines), buffer._indent)
++            for value in values.values()
++            if isinstance(value, IndentedBuffer)
++            for buffer in (value, *((value.aot,) if isinstance(value, DualIndentedBuffer) else ()))
++        ]
++        graphs = [
++            (graph, OrderedSet(graph.removed_buffers), OrderedSet(graph.inplaced_to_remove))
++            for graph in dict.fromkeys(
++                [V.graph, *(line.graph for line in self.lines if isinstance(line, EnterSubgraphLine))]
++            )
++        ]
++        return values, buffers, graphs
++
++    def restore_planned(self):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, this wrapper set back to
++        # its planned state (planned_state) before an emission, so that each emission starts from the same plan
++        # with none of an earlier one's writes. Its counters (itertools.count) go on, as across codegen_switch's two
++        # passes: each emission's names are its own.
++        import copy
++
++        values, buffers, graphs = planned = self.planned_state
++        vars(self).clear()
++        vars(self).update(
++            (name, copy.copy(value) if isinstance(value, (list, dict, set, OrderedSet)) else value)
++            for name, value in values.items()
++        )
++        for buffer, lines, indent in buffers:
++            buffer._lines[:] = lines
++            buffer._indent = indent
++        for graph, removed_buffers, inplaced_to_remove in graphs:
++            graph.removed_buffers = OrderedSet(removed_buffers)
++            graph.inplaced_to_remove = OrderedSet(inplaced_to_remove)
++        self.planned_state = planned
++
 +    def resume_generation(self, supplied):
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: the held generation resumed at its planned stage,
-+        # given `supplied`, the operands its print takes for that stage (held as self.supplied; None from
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the original generation's emission from its
++        # planned stage, given `supplied`, the operands it takes for that stage (self.supplied; None from
 +        # _generate): its print of its planned lines and its sections' assembly. Returns its result.
 +        self.supplied = supplied
-+        try:
-+            next(self.generation)
-+        except StopIteration as generated:
-+            return generated.value
-+
-+    def _generation(self, is_inference):
          if config.profile_bandwidth:
              self.write_triton_header_once()
  
-@@ -2548,6 +2627,10 @@
+@@ -2546,8 +2671,6 @@
+                 self.generate_profiler_mark_wrapper_call(stack)
+             if config.profile_bandwidth:
                  self.generate_start_graph()
- 
-             self.run_wrapper_ir_passes(is_inference)
-+
-+            # compiler/patches/torch-inductor-aot-lowered-result.patch: its planned stage, after its wrapper IR passes
-+            # (its memory plan) and before any line prints: its planned lines
-+            yield self.lines
+-
+-            self.run_wrapper_ir_passes(is_inference)
  
              if config.triton.store_cubin and not config.triton.autotune_at_compile_time:
                  self.generate_reset_kernel_saved_flags()
-@@ -2678,7 +2761,10 @@
+@@ -2678,7 +2801,10 @@
      def memory_plan(self):
          from .memory_planning import MemoryPlanner
  
@@ -534,7 +674,7 @@
  
      def memory_plan_reuse(self):
          outputs = self.get_graph_outputs()
-@@ -2716,6 +2802,9 @@
+@@ -2716,6 +2842,9 @@
              raise AssertionError(
                  f"expected no remaining planning states, got {len(planning_states)}"
              )
@@ -544,7 +684,7 @@
  
          # conservatively use the sum of all allocated buffer sizes
          # in potentially nested scopes as the total allocated size
-@@ -2725,6 +2814,9 @@
+@@ -2725,6 +2854,9 @@
          )
  
      def run_wrapper_ir_passes(self, is_inference: bool):
@@ -554,7 +694,7 @@
          # We disable planning during training because it presently increases peak memory consumption.
          if is_inference and config.memory_planning:
              self.memory_plan()
-@@ -4048,6 +4140,8 @@
+@@ -4048,6 +4180,8 @@
          triton_meta: TritonMeta | None = None,
          inductor_meta=None,
          original_fxnode_name=None,
@@ -563,7 +703,7 @@
      ):
          """
          Generates kernel call code.
-@@ -4088,6 +4182,8 @@
+@@ -4088,6 +4222,8 @@
                  # pyrefly: ignore [bad-argument-type]
                  original_fxnode_name=original_fxnode_name,
                  current_stream_idx=current_stream_idx,
@@ -572,7 +712,7 @@
              )
          )
  
-@@ -4453,7 +4549,7 @@
+@@ -4453,7 +4589,7 @@
          debug_handle: int | None = None,
      ):
          if debug_handle is not None:

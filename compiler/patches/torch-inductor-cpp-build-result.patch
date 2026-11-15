@@ -330,7 +330,7 @@
      CppBuilder,
      CppOptions,
      CppTorchDeviceOptions,
-@@ -2631,6 +2641,72 @@
+@@ -2631,6 +2641,74 @@
          return cls.cache.keys()
  
  
@@ -378,9 +378,11 @@
 +    aot_inductor.model_name_for_generated_files without dynamic_linkage), the class its run_impl is defined on.
 +    `model_header` and `model_header_code` are the class's header as compile wrote it without dynamic_linkage
 +    (model.h with that class named; its wrapper's #include "<suffix>.h" names it) and that header's content; both are ""
-+    with dynamic_linkage, where its wrapper inlines aoti_runtime/interface.cpp instead. Its stage is after its
-+    wrapper's print: the body's planned lines and its planner's result before that print are its graph's
-+    wrapper_code's (torch-inductor-aot-lowered-result.patch), not this result's.
++    with dynamic_linkage, where its wrapper inlines aoti_runtime/interface.cpp instead. Its stage is after one
++    emission (LoweredAOTI.emit, for one supplied configuration: its entry's declaration and its wrapper's print).
++    The body's planned lines and its planner's result before it are its graph's wrapper_code's
++    (torch-inductor-aot-lowered-result.patch), not this result's. `consts` is built by its planned stage's first
++    emission; each later emission's is that one (compile's `constants`).
 +    """
 +
 +    wrapper: str
@@ -403,20 +405,23 @@
  class AotCodeCompiler:
      """
      Compile AOT Inductor generated code.
-@@ -2646,10 +2722,11 @@
+@@ -2646,10 +2724,14 @@
          *,
          device_type: str,
          additional_files: list[str],
 -    ) -> list[str | Weights] | str:
++        constants: AotConstants | None = None,
 +    ) -> list[str | Weights] | str | AotCompiled:
          """
          Returns the .so path, or returns a list of files that were generated if
          config.aot_inductor.package=True.
-+        compiler/patches/torch-inductor-cpp-build-result.patch: aot_inductor.lowered, its AotCompiled.
++        compiler/patches/torch-inductor-cpp-build-result.patch: aot_inductor.lowered, its AotCompiled. `constants` is
++        an earlier emission's constants object from the same planned stage (LoweredAOTI.emit), taken in place of
++        building its own (None: its own built).
          """
          generated_files: list[str | Weights] = additional_files  # type: ignore[assignment]
  
-@@ -2805,7 +2882,7 @@
+@@ -2805,7 +2887,7 @@
              specified_sub_dir.mkdir(exist_ok=True)
          cmake_path = str(Path(specified_sub_dir) / "CMakeLists.txt")
  
@@ -425,7 +430,7 @@
              # Load from aot_inductor, and update the value on demand.
              use_asm_build: bool = config.aot_inductor.use_consts_asm_build
  
-@@ -2969,8 +3046,12 @@
+@@ -2969,8 +3051,12 @@
                  BuildOption=object_build_options,
              )
              consts_o = object_builder.get_target_file_path()
@@ -439,7 +444,7 @@
              else:
                  object_builder.build()
  
-@@ -2994,10 +3075,24 @@
+@@ -2994,10 +3080,24 @@
                          rc = f.write(consts[pos:])
                          pos += rc
  
@@ -465,7 +470,7 @@
  
          from torch.utils._filelock import FileLock
  
-@@ -3185,23 +3280,29 @@
+@@ -3185,23 +3285,29 @@
              )
  
              # potentially, precompile the AOT header for this device
@@ -497,7 +502,7 @@
  
              wrapper_builder = CppBuilder(
                  name=str(wrapper_path_operator.stem),
-@@ -3235,7 +3336,9 @@
+@@ -3235,7 +3341,9 @@
                  wrapper_builder.save_compile_cmd_to_cmake(cmake_path, device_type)
                  wrapper_builder.save_src_to_cmake(cmake_path, wrapper_path)
                  generated_files.append(cmake_path)
@@ -508,17 +513,20 @@
                  try:
                      wrapper_builder.build()
                  except (exc.CppCompileError, SkipFrame) as e:
-@@ -3266,7 +3369,8 @@
+@@ -3266,7 +3374,11 @@
                  )
                  aot_constants = struct.pack("qq", consts_size + 8, magic_number)
  
 -            consts_o = _compile_consts(aot_constants, sys.platform)
-+            constants_object = _compile_consts(aot_constants, sys.platform)
++            # compiler/patches/torch-inductor-cpp-build-result.patch: `constants`, an earlier emission's, or its own
++            constants_object = (
++                _compile_consts(aot_constants, sys.platform) if constants is None else constants
++            )
 +            consts_o = constants_object.object
              custom_obj_idx = 0
              # Note that custom_objs_config.json file is different from the model_constants_config.json file produced
              # in package_sigmoid(). The keys in custom_objs_config.json directly correspond to the arg name in extern
-@@ -3485,15 +3589,42 @@
+@@ -3485,15 +3597,42 @@
              log.debug("aot linkage command: %s", link_cmd)
  
              # Append cmds to the end of codegen-ed wrapper file
@@ -568,7 +576,7 @@
  
              if config.aot_inductor.package_cpp_only:
                  linker_flags = str(
-@@ -3684,12 +3815,42 @@
+@@ -3684,12 +3823,42 @@
  _VEC_ISA_CPP_SOURCE_MARKERS = ("at::vec::", "prod_masked_reduce(")
  
  
@@ -612,7 +620,7 @@
      if _IS_WINDOWS:
          raise AssertionError(
              "CppBuilder does not currently support precompiling on Windows!"
-@@ -3715,18 +3876,19 @@
+@@ -3715,18 +3884,19 @@
              sources=str(preprocessing_header),
              BuildOption=CppTorchDeviceOptions(**compile_command, preprocessing=True),
          )
@@ -638,7 +646,7 @@
  
      header_build_option = CppTorchDeviceOptions(**compile_command, precompiling=True)
      header_hash, header_full_path = write(
-@@ -3747,12 +3909,18 @@
+@@ -3747,12 +3917,18 @@
      # _worker_compile_cpp will automatically ignore any compilation whose result already
      # exists, so this is always safe.
      os.makedirs(_HEADER_LOCK_DIR, exist_ok=True)
