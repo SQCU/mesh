@@ -9,7 +9,6 @@ import operator
 import torch
 from torch._export.non_strict_utils import make_constraints
 from torch._export.utils import node_inline_
-from torch._functorch._aot_autograd.descriptors import PlainAOTInput
 from torch._functorch.aot_autograd import aot_export_joint_with_descriptors
 from torch._guards import detect_fake_mode
 from torch._higher_order_ops.map import map_dense
@@ -21,10 +20,9 @@ from torch.export.graph_signature import InputKind, OutputKind
 from torch.fx._symbolic_trace import PHWithMeta
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
-from torch.multiprocessing.reductions import StorageWeakRef
 from torch.utils import _pytree as pytree
 
-from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult
+from .ir import Call, CapturedProgram, Exported, TrainingResult
 from .operations import LSTSQ_FIXED
 
 COPY = torch.ops.aten.copy.default
@@ -210,77 +208,17 @@ class Captured(torch.fx.Interpreter):
         self.attributes[self.calling] = target, value
         return self.fake.from_tensor(value)
 
-    # one call's function key: its target, the call's own TreeSpec (torch/utils/_pytree.py TreeSpec, its own equality
-    # and hash), each Tensor leaf's every torch/_subclasses/fake_tensor.py extract_tensor_metadata field (the FakeTensor
-    # dispatch cache's own record) with its storage's and its object's first-seen positions among the call's leaves
-    # (torch/_functorch/_aot_autograd/runtime_wrappers.py AOTDedupeWrapper's object identity, merge_view_inputs' shared
-    # storage), each other leaf its type and value (torch/_export/utils.py _check_input_constraints_for_graph's own
-    # literal contract: the type itself, then equality)
-    def captured(self, target, module, args, kwargs):
-        leaves, structure = pytree.tree_flatten((args, kwargs))
-        storages, objects = {}, {}
-        key = target, structure, tuple(
-            (described(leaf), storages.setdefault(StorageWeakRef(leaf.untyped_storage()), len(storages)),
-             objects.setdefault(id(leaf), len(objects)))
-            if isinstance(leaf, torch.Tensor) else (type(leaf), leaf) for leaf in leaves)
-        if key not in self.exported:
-            with torch.enable_grad():
-                self.exported[key] = export(module, args, kwargs=kwargs, **self.options)
-        function, names = self.exported[key], placeholders(self.exported[key])
-        joint, nodes = function.joint, {n.name: n for n in function.graph_module.graph.nodes if n.op == "placeholder"}
-
-        # a user input placeholder's own call argument: its PlainAOTInput's index into the call's flat leaves
-        # (aot_export_joint_with_descriptors' calling convention, descriptors.py); a synthetic or view base's binding
-        # is its dispatch wrapper's (AOTSyntheticBaseWrapper, AOTDedupeWrapper), not yet connected here: it raises
-        def leaf_of(name):
-            desc = nodes[name].meta["desc"]
-            if not isinstance(desc, PlainAOTInput):
-                raise NotImplementedError(f"{name}: binding its {type(desc).__name__} at the call boundary")
-            return desc.idx
-        # torch/utils/_pytree.py TreeSpec.flatten_up_to: each of the call's leaves under the original FX argument it
-        # came from (the calling node's own args and kwargs, before capture replaces them); each literal user input of
-        # the function (Exported.specialized) recorded on that original argument with its compiled literal
-        sources, layout = pytree.tree_flatten((self.calling.args, self.calling.kwargs))
-        origins = [source for source, part in zip(sources, layout.flatten_up_to((args, kwargs)), strict=True)
-                   for _ in pytree.tree_leaves(part)]
-        for name, value in function.specialized:
-            self.specialized[origins[leaf_of(name)]] = value
-        # the call's results: the joint export's companion's callable (Exported.compiled: its original wrappers and
-        # calling convention) over its parameters, then its buffers, in JointWithDescriptors params_spec and
-        # buffers_spec order (each by its placeholder's own ParamAOTInput or BufferAOTInput target), then the call's
-        # leaves (its in_spec's); a gradient output each its input's gradient of the loss through that callable's own
-        # backward (torch.autograd.grad: its compiled backward, the companion's bw_compiler's)
-        stated_fakes = {name: self.fake.from_tensor(tensor) for name, (_, tensor) in function.state.items()}
-        traced = {nodes[name].meta["desc"].target: fake for name, fake in stated_fakes.items()}
-        stated = {target: name for name, (target, _) in function.state.items()}
-        with self.fake, torch.enable_grad():
-            results = list(function.compiled(*(traced[name] for name in (*joint.params_spec, *joint.buffers_spec)),
-                                             *leaves))
-            values = [stated_fakes[name] if name in function.state else self.token if name in function.tokens
-                      else torch.ones_like(results[function.tangents[name].idx]) if name in function.tangents
-                      else leaves[leaf_of(name)] for name in names]
-            forward_kinds = [kind for kind, _ in function.outputs if kind in (OutputKind.USER_OUTPUT,
-                                                                                 OutputKind.LOSS_OUTPUT)]
-            wrt = [stated_fakes[stated[target]] if kind == OutputKind.GRADIENT_TO_PARAMETER else leaves[leaf_of(target)]
-                   for kind, target in function.outputs if kind in GRADIENTS]
-            grads = iter(torch.autograd.grad(results[forward_kinds.index(OutputKind.LOSS_OUTPUT)], wrt,
-                                             allow_unused=True) if wrt else ())
-        forward = iter(results)
-        exported = function.graph_module.graph.output_node().args[0]
-        produced = tuple(
-            next(forward) if kind in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT)
-            else values[names.index(stated[target] if kind == OutputKind.BUFFER_MUTATION else target)]
-            if kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION)
-            else next(grads) if kind in GRADIENTS
-            else exported[k].meta["val"] if isinstance(exported[k], torch.fx.Node) else exported[k]
-            for k, (kind, target) in enumerate(function.outputs))
-        self.calling.meta["function"] = key
-        # each function placeholder's original FX argument where it is a user input (its leaf's origin), the call's
-        # own source provenance of that value (capture: the outer placeholder it read, not merely its value's holder)
-        self.bound[self.calling] = key, values, produced, {
-            name: origins[leaf_of(name)] for name in names if name in function.user_inputs}
-        return pytree.tree_unflatten([value for (kind, _), value in zip(function.outputs, produced, strict=True)
-                                      if kind in RETURNED], function.out_spec)
+    # /Users/mdot/schedule-emit/schedule_emit/export.py export; torch 2.14.0
+    # torch/_functorch/_aot_autograd/collect_metadata_analysis.py run_functionalized_fw_and_collect_metadata 841–842,
+    # schemas.py ViewAndMutationMeta num_mutated_inp_runtime_indices and num_outputs
+    # (compiler/patches/torch-aot-joint-params-buffers.patch); torch/utils/_pytree.py tree_unflatten
+    def captured(self, stack, module, args, kwargs):
+        self.exported[self.calling] = export(stack, module, args, kwargs=kwargs, **self.options)
+        self.bound[self.calling] = (args, kwargs), (self.calling.args, self.calling.kwargs)
+        joint = self.exported[self.calling].joint
+        start = joint.fw_metadata.num_mutated_inp_runtime_indices
+        return pytree.tree_unflatten(joint.fw_metadata.fw_graph_outs[start:start + joint.fw_metadata.num_outputs],
+                                     joint.out_spec)
 
     def call_module(self, target, args, kwargs):
         return self.captured(target, self.fetch_attr(target), args, kwargs)
