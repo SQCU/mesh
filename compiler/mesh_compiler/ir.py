@@ -94,12 +94,20 @@ class Exported:
     # torch/_export/utils.py _check_input_constraints_for_graph reads (runtime.Arguments); None for a part decompose.py
     # builds
     range_constraints: dict = None
-    # compiler/patches/torch-export-alias-metadata.patch (torch/export/_trace.py _aot_export_joint_with_descriptors
-    # `aot_compiled`): the export's own stage-2 callable (aot_compile_joint_with_descriptors over its joint export, its
-    # ExitStack open; abstract: boxed_nop_preserve_node_meta), the original calling convention (parameters and buffers,
-    # then the user arguments) with the original wrappers, the call boundary's (export.Captured.captured); a product
-    # distinct from `graph_module`, not a saved value; None for a program no joint export produced
+    # compiler/mesh_compiler/export.py export and read (torch/_functorch/aot_autograd.py aot_export_joint_with_descriptors
+    # and aot_compile_joint_with_descriptors, one ExitStack): the companion's compiled callable (the original calling
+    # convention: parameters and buffers in params_spec and buffers_spec order, then the user arguments; its original
+    # wrappers), the call boundary's (export.Captured.captured), a product distinct from `graph_module`; the joint
+    # export itself (JointWithDescriptors: its AOTState and AOTGraphCapture, params_spec, buffers_spec, in_spec,
+    # out_spec; `graph_module` its captured graph); the companion's compiler operands and results ({"forward",
+    # "backward": [(graph module, example inputs, compiled result)]}); the stage fields kept before its stage 2's
+    # make_runtime_safe (export.staged); each tangent placeholder's output descriptor; each None for a program no
+    # joint export produced (export.capture's outer program, a part decompose.py builds, a loaded one)
     compiled: object = None
+    joint: object = None
+    compilations: dict = None
+    stage: tuple = None
+    tangents: dict = None
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

@@ -1,0 +1,23 @@
+--- a/torch/_functorch/_aot_autograd/schemas.py
++++ b/torch/_functorch/_aot_autograd/schemas.py
+@@ -413,6 +413,10 @@
+             raise AssertionError(
+                 "original_subclass must not be None before calling make_runtime_safe"
+             )
++        # compiler/patches/torch-aot-runtime-safe-source.patch: this creation meta's own source fields as they were
++        # before this transition replaces them (original_subclass, outer_size, outer_stride), kept on it as its
++        # `source`
++        self.source = (self.original_subclass, self.outer_size, self.outer_stride)
+         self.original_subclass_type = type(self.original_subclass)
+         self.original_subclass = None
+
+@@ -756,6 +760,9 @@
+             else:
+                 return None
+
++        # compiler/patches/torch-aot-runtime-safe-source.patch: this metadata's own source fields as they were before
++        # this transition replaces them (traced_tangents, each output_info entry), kept on it as its `source`
++        self.source = (self.traced_tangents, tuple(self.output_info))
+         self.traced_tangent_metas = [extract_metadata(t) for t in self.traced_tangents]
+         # Clear traced tangents at runtime
+         self.traced_tangents = []
