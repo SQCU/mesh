@@ -3,13 +3,15 @@
 # numerical67(b): custom-method bodies and operands (operations.py, decompose.py)
 
 Session 211a403e, turn numerical67b (consolidated brief), on top of supervisor checkpoint 8cbc2ab9. The supervisor
-has since preserved three WIP checkpoints, none of which accepts the method:
+has since preserved four WIP checkpoints, none of which accepts the method:
 - 43aa1f2e: DLADIV;
 - c4bf33fe: the LAQR1/LAQR5/LARFG group;
-- e908087a: the LAQR5 stage order and the LAHQR argument lists.
+- e908087a: the LAQR5 stage order and the LAHQR argument lists;
+- 4d5d3436: the xLAQR3 dependency group (`_larf1f`, `_gehrd`'s ZGEHD2, `_zlartg`, `_rotated`, `_ztrexc`, `_unm2r`,
+  `_unmhr`).
 
-The operations.py delta on top of e908087a (the xLAQR3 dependency group below) is uncommitted. No native import, build
-or workload has been run.
+The operations.py delta on top of 4d5d3436 is uncommitted: the complex xLAQR3/xLAQR0/ZHSEQR group below, and GEEV's
+complex ZHSEQR call. No native import, build or workload has been run.
 
 Checks were static only:
 - `py_compile`;
@@ -99,11 +101,13 @@ loops are unrolled with per-member masks. There is no dtype subset and no reject
   The packed layout is the one `_unghr` reads. GEEV calls it with ORDER = n, and xLAQR3's ZGEHRD(JW, 1, NS, T) is
   its other caller. The blocked DO 40 (NH ≥ 130) is OPEN.
 - **ZHSEQR:**
-  - W outside ILO..IHI comes from the diagonal. The ILO = IHI return gives W(ILO) = H(ILO,ILO).
-  - Otherwise ZLAHQR is called with ZHSEQR's own arguments: `(_zlahqr | _dlahqr)(WANTT = WANTZ = vectors, N, ILO,
-    IHI, H, W, ILOZ = ILO, IHIZ = IHI, Z, proceed)`.
-  - Then H's r − c ≥ 2 part is zeroed when WANTT or INFO ≠ 0, with N > 2.
-  - ZHSEQR's xLAQR0 selection and retry are OPEN (see coverage).
+  - W outside ILO..IHI comes from the diagonal (zhseqr.f 415-419). The ILO = IHI return (428-431) gives
+    W(ILO) = H(ILO,ILO).
+  - Complex: `_zhseqr(WANTT = WANTZ = vectors, ILO, IHI, H, W, Z, proceed)`, which is zhseqr.f 435-487 (see the
+    complex xLAQR3/xLAQR0/ZHSEQR group below).
+  - Real: DLAHQR alone, `_dlahqr(WANTT = WANTZ = vectors, N, ILO, IHI, H, WR, WI, ILOZ = ILO, IHIZ = IHI, Z,
+    proceed)`. dhseqr.f's DLAQR0 selection and retry are OPEN (see coverage).
+  - Then H's r − c ≥ 2 part is zeroed when WANTT or INFO ≠ 0, with N > 2 (491-492).
 - **`_zlahqr(wantt, wantz, order, ilo, ihi, h, w, iloz, ihiz, z, proceed)`:**
   - zlahqr.f's own argument list. N (`order`) is a runtime batch tensor, so xLAQR3/xLAQR0 can call it on a
     JW-, NS- or HL-sized leading block.
@@ -126,10 +130,10 @@ loops are unrolled with per-member masks. There is no dtype subset and no reject
   - 3.12.1 has no BETA > HUGE/2 branch, so none is written.
   - Real and complex share one body, in the input's own precision.
 
-### xLAQR0 sweep dependencies (source present, not yet called)
+### xLAQR0 sweep dependencies (complex: called by `_laqr0_pass`; real: not yet called)
 
 These go between `_dgeev_normalized` and `_geev_routine`. Each is cited to zlaqr1.f/zlaqr5.f and dlaqr1.f/dlaqr5.f
-v3.12.1. They are written for the xLAQR0 path, which is still unwired, so no method reaches them yet.
+v3.12.1. The complex branch is reached through `_laqr0_pass`. The real branch waits for DLAQR0, which is OPEN.
 
 - **`_laqr1(e, order, first, second)`:** ZLAQR1/DLAQR1 for N = 2 and N = 3. The real form keeps the source's
   association.
@@ -149,7 +153,7 @@ v3.12.1. They are written for the xLAQR0 path, which is still unwired, so no met
     rows of the residue regions are rewritten to their last chunk.
   - `_vigilant` is the source's vigilant deflation check.
 
-### xLAQR3 dependency group (source present; `_larf1f` live through `_gehrd`, the rest called once `_laqr3` lands)
+### xLAQR3 dependency group (checkpoint 4d5d3436; called by `_gehrd` and `_laqr3`)
 
 - **`_larf1f(left, m, n, v, tau, x, r0, c0, when)`:** zlarf1f.f 196-308, and dlarf1f.f in the same body:
   - LASTV, scanning down past V(1) while V(LASTV) = 0, where TAU ≠ 0;
@@ -170,6 +174,73 @@ v3.12.1. They are written for the xLAQR0 path, which is still unwired, so no met
   - NH = IHI - ILO and its return.
   - ZUNMQR(MI, NI, NH, A(ILO+1,ILO), TAU(ILO), C(I1,I2)), reaching zunmqr.f 274-279's ZUNM2R where NB = 32 ≥ K.
   - The blocked ZLARFT/ZLARFB path (K > 32) is OPEN.
+
+### Complex xLAQR3 / xLAQR0 / ZHSEQR group (uncommitted on 4d5d3436; called by `_geev_routine` for complex)
+
+These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr3.f, zlaqr0.f, zhseqr.f and iparmq.f
+3.12.1 line ranges.
+- **`_laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, w, kv, kt, nho, kwv, nve, proceed)`:**
+  zlaqr3.f 361-577 in source order. It returns H, Z, W (SH), NS and ND.
+  - `nested` False is zlaqr2.f. Checked by diff of the executable statements, zlaqr2.f differs only at zlaqr3.f
+    416-425 (ZLAHQR for every JW).
+  - V = H(KV,1), T = H(KV,KT) and WV = H(KWV,1) are zlaqr0.f 516-520's regions. Each is SIZE × SIZE, with SIZE =
+    (n − 1)/3 ≥ NWMAX ≥ NW ≥ JW. T and V are held apart from the window copy until their write-back into the same H
+    positions. DO 70's T and DO 60/DO 80's WV are then rewritten to their last chunks (`_last_chunk`).
+  - In order:
+    - the KTOP > KBOT and NW < 1 returns;
+    - SMLNUM, JW, KWTOP and S, then the KBOT = KWTOP window;
+    - ZLACPY('U') and ZCOPY into T, and V = I;
+    - ZLAQR4 where JW > NMIN = 75 and `nested`, else ZLAHQR;
+    - DO 10 (`_laqr3_deflated`: the spike-tip test, else ZTREXC(NS → ILST));
+    - S = 0 where NS = 0;
+    - DO 30 (`_laqr3_sorted`: DO 20's first strict maximum, `_first_largest`, then ZTREXC);
+    - DO 40;
+    - the NS < JW or S = 0 block: the spike ZLARFG, ZLASET('L'), the three ZLARF1Fs, ZGEHRD, H(KWTOP,KWTOP−1), T
+      back into the window, ZUNMHR, then DO 60, DO 70 (WANTT) and DO 80 (WANTZ);
+    - ND, and NS − INFQR.
+- **`_laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed)`:** zlaqr0.f 323-693.
+  - `four` True is zlaqr4.f. By the same diff, it differs only at zlaqr0.f 381 and 516 (ZLAQR2 for ZLAQR3) and
+    572-580 (ZLAHQR for every NS).
+  - The N = 0 return. N ≤ NTINY = 15 gives ZLAHQR (alone where the static n ≤ 15).
+  - From iparmq.f (`_iparmq_shifts`, iparmq.f 259-279, with single-precision NINT(LOG/LOG(TWO))):
+    - NWR (ISPEC 13: NS when NH ≤ 500, else 3NS/2) and NSR (ISPEC 15);
+    - NMIN = 75 and NIBBLE = 14;
+    - KACC22 (ISPEC 16, the 'LAQR' branch: 2 when NS ≥ 14, else 0), so ACCUM is NS ≥ 14.
+  - ITMAX = MAX(30, 2·KEXSH)·MAX(10, NH), and KBOT = IHI.
+  - DO 70 is one while_loop (`_laqr0_pass`, zlaqr0.f 439-690). Each pass:
+    - finds KTOP, then NW with NDEC, then KV/KT/NHO/KWV/NVE;
+    - calls ZLAQR3 or ZLAQR2, then sets KBOT − LD and KS;
+    - tests whether to sweep, then sets NS;
+    - takes the exceptional shifts (DO 30, WILK1 = 0.75), or the computed ones:
+      - the NS × NS ZLACPY to H(KT,1) through ZLAQR4 or ZLAHQR (static NSB = (n − 3)/6 made even ≥ NSMAX);
+      - the 2 × 2 fallback shifts;
+      - DO 50/DO 40's bubble sort (`_laqr0_sorted`, `_laqr0_swapped`);
+    - applies the two-shift rule, then NS, KS, KDU, KU, KWH, NHO, KWV and NVE;
+    - calls `_laqr5`, then updates NDFL.
+  - INFO = KBOT once IT passes ITMAX. This includes the source's case where that last pass left KBOT < ILO.
+  - NWMAX = (N − 1)/3 and NSMAX = (N − 3)/6. The LWORK/2 and 2·LWORK/3 terms are the larger ones, from the call
+    graph:
+    - ATen's BatchLinearAlgebraKernel.cpp 252-258 (torch 2.14.0, git 08187d9e) passes lapack_work_to_int of the
+      query's WORK(1) (204-212);
+    - zgeev.f 269 and 298-300: MAXWRK ≥ N + N·ILAENV(1,'ZGEHRD') = 33N (ilaenv.f 349-354);
+    - ZHSEQR receives all of it (zgeev.f 352/377/410/420: IWRK = ITAU = 1);
+    - it is passed on by zhseqr.f 441-444 and 463-464, zlaqr0.f 516-520 and 573-575, and zlaqr3.f 418-420;
+    - zhseqr.f 480-482's HL call passes NL = 49, so 16 < 24 and 7 < 32.
+    - The ATen source was fetched read-only to /tmp/n67h/aten.
+- **`_zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed)`:** zhseqr.f 435-487.
+  - Static N = n > NMIN = 75: ZLAQR0.
+  - Else ZLAHQR. Where INFO > 0, KBOT = INFO and ZLAQR0(…, ILO, KBOT, …, ILOZ = ILO, IHIZ = IHI):
+    - on H when N ≥ NL = 49;
+    - else on HL, the 49 × 49 copy: H's leading block, HL(N+1,N) = 0, and columns N+1..49 zero.
+  - HL's other rows N+1..49 left of column N+1 are uninitialized locals in the source. ZLAQR0/3/5 reach them only as
+    workspace that is written before it is read. They are zero here.
+  - W and Z are padded to 49 for the static extent. ZLAQR0 reaches W(1:KBOT) and Z rows ILOZ..IHIZ × columns
+    1..KBOT, with KBOT ≤ N.
+  - HL is copied back where WANTT or INFO ≠ 0.
+- **Static branch presence:** ZLAQR4 inside `_laqr3` is present only where SIZE > 75, and inside `_laqr0_pass` only
+  where NSB > 75 and not `four`. `_laqr0`'s main path is present only where n > 15, and `_zhseqr`'s three paths
+  follow the static n. In each case the omitted source branch's runtime condition cannot hold within the static
+  extent.
 - **`_ztrevc` (ztrevc.f with zlatrs.f, ZTREVC3's blocked back-transform VR = Z X):**
   - Shifted diagonal raised to SMIN.
   - ZLATRS's in-out CNORM: each KI's call scales CNORM by TSCAL and returns it ×1/TSCAL (except case 2's ZTRSV
@@ -243,22 +314,24 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
 
 - **Execution:** no body has been traced or executed. HOP carry metadata (contiguous carries, no aliasing returns) is
   arranged statically, not observed.
-- **ZHSEQR's xLAQR0 (OPEN):** this covers N > NMIN = 75, and the retry where xLAHQR returns INFO > 0: KBOT = INFO,
-  on H itself when N ≥ NL = 49, else on the 49 × 49 HL copy. Every N still reaches xLAHQR alone. That is the source's
-  path only for N ≤ 75 with INFO = 0. Unwritten, for both real and complex:
-  - xLAQR0 itself: NTINY, IPARMQ NWR/NSR/KACC22, NWMAX/NSMAX, the DO 70 window/NDEC/NDFL logic, exceptional and
-    computed shifts, the bubble sort, and the NS × NS shift copy.
-    - The LWORK terms never bind: LWORK ≥ 32N from zgeev's MAXWRK, and LWORK = 49 on the HL path.
-  - xLAQR3/xLAQR2 itself: the deflation loop, the sorting, the spike reflector and the H/T/V/WV updates. Their
-    complex dependencies are written (above). The real DTREXC with DLAEXC/DLASY2/DLARFX is not written.
-  - xLAQR4.
-  - The blocked ZUNMQR (K > 32, so NS ≥ 34) and blocked ZGEHRD (NH ≥ 130), through zlarft/zlarfb/zlahr2. Their
-    sources are fetched, read-only, and not yet transcribed.
-  - The HSEQR selection and retry in `_geev_routine`.
+- **Complex ZHSEQR:** the source is now written (see the group above), but none of it has been traced or executed.
+  Still OPEN within it are the blocked routines that its own calls reach:
+  - The blocked ZUNMQR (zunmqr.f with zlarft.f/zlarfb.f) for xLAQR3's ZUNMHR. It is reached where K = NS − 1 > 32,
+    so NS ≥ 34, which needs (N − 1)/3 ≥ 34, i.e. N ≥ 103.
+  - The blocked ZGEHRD (DO 40 with zlahr2.f/zlarfb.f) for xLAQR3's ZGEHRD(JW, 1, NS), reached where NS ≥ 130, and for
+    GEEV's own ZGEHRD where NH ≥ 130.
+  - Their sources are fetched, read-only, and not yet transcribed. Until they are, those members run the unblocked
+    ZUNM2R/ZGEHD2.
+- **Real DHSEQR's DLAQR0 (OPEN):** DLAQR0 selection (N > NMIN = 75) and the retry (INFO > 0 from DLAHQR; N ≥ NL = 49
+  on H, else HL). Every real N reaches DLAHQR alone. That is the source's path only for N ≤ 75 with INFO = 0.
+  Unwritten: dlaqr0.f/dlaqr4.f (real shift pairs), dlaqr3.f/dlaqr2.f (2 × 2 blocks with DLANV2), dtrexc.f with
+  dlaexc.f/dlasy2.f/dlarfx.f, and dormhr.f's blocked DORMQR. `_laqr5`'s real branch (dlaqr5.f) and `_laqr1` are
+  written but not yet called.
 - **`_unghr` exactness (OPEN):** ZUNGHR still applies its reflectors with the generic `_dlarf`, not with zung2r.f's own
   reflector code. GEEV's ZGEHD2 now uses `_larfg_vector` and `_larf1f`.
 - **Rounding differences from the reference:**
-  - The blocked ZGEHRD (NH ≥ 130) and blocked ZUNGHR/ZUNGQR are the unblocked forms here.
+  - The blocked ZGEHRD (NH ≥ 130, and xLAQR3's NS ≥ 130), the blocked ZUNMQR (xLAQR3's NS ≥ 34) and the blocked
+    ZUNGHR/ZUNGQR are the unblocked forms here.
   - DLADIV/ZLADIV are transcribed (`_divided`, `_dladiv1`, `_dladiv2`, `_cdiv`; checkpoint 43aa1f2e).
   - The scaled largest-modulus norm stands in for dznrm2.f90/dnrm2.f90.
   - Backend summation order and FMA differ, as does the TREVC3 GEMM back-transform order.
