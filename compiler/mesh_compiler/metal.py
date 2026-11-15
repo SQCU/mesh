@@ -17,7 +17,6 @@ import weakref
 import torch
 
 from .operations import CPU, GPU
-from .operations import SCALAR as SCALAR
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh

@@ -44,7 +44,7 @@ from .metal import (CHECK_CONVERGENCE, CONSTANT, DOMAIN_INDIRECT, DOMAIN_LOOP, D
                     REGION_SWITCH, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED, SOURCE_SENT, SOURCE_VALUE, STATE,
                     TEMPORARY, UPSTREAM_BUFFER, UPSTREAM_ERROR, UPSTREAM_SCALAR, DomainDim, RegionChild,
                     SourceOperand, UpstreamAccess, ValueInfo, _array, _Builder, _compiler, _composition, _emitted,
-                    _graph, _neural, _upstream, mesh_graph)
+                    _graph, _neural, _upstream)
 from .operations import ANE, CPU, GPU, SCALAR
 
 Root = collections.namedtuple("Root", "name kind role root value")
@@ -120,7 +120,9 @@ def operand(given):
 
 # the native projection: one storage root of the program (metal_ir_value: its role, element type and bytes; a
 # CONSTANT's initial contents `data`, a real tensor; `zeroed` its contents zero where placed, metal_ir_value_zeroed;
-# `identity` its definer's source position), its ValueID once made (`root`)
+# `identity` its definer's source position), its ValueID once made (`root`); a machine-local channel's received
+# storage `alias` (its sent value's Storage, the byte of that value's first element there), no root of its own,
+# resolved once every member is (construct `final`)
 @dataclasses.dataclass(eq=False)
 class Storage:
     role: int
@@ -130,6 +132,7 @@ class Storage:
     identity: int = 0
     zeroed: bool = False
     root: int = None
+    alias: tuple = None
 
 
 # one value's projection: the view of `storage` as `dtype` at `size` and `stride` from element `offset` (in dtype's
@@ -148,6 +151,13 @@ Launched = collections.namedtuple("Launched", "operation produced kernel argumen
 # package directory (`saved` its owner, removed with the machine), function and selected compute units by name, and
 # each input, output and state feature (its spec name, its metal_ir_upstream argument), metal_ir_upstream_neural's
 Neural = collections.namedtuple("Neural", "operation produced package function units inputs outputs states saved")
+# one original binding of a member's wrapper name as resolved before emission (ConstructedMachine.bindings):
+# `occurrence` the body occurrence binding it (() its wrapper's own lines; else each enclosing control call's ExternCall
+# and the Inlined or Lifted body consumed there, outermost first), `record` the original object binding it (an
+# AllocateLine, ReinterpretLine, ReuseLine or MultiOutputLine; a graph input's lower_inductor.py Input; a control body
+# input's Inlined or Lifted; a constant's GraphLowering), `value` its native value ((root, view ValueID), ("literal",
+# value), or None)
+Binding = collections.namedtuple("Binding", "processor occurrence record name value")
 
 
 @dataclasses.dataclass(eq=False)
@@ -220,6 +230,8 @@ class ConstructedMachine:
     inlinings: tuple = dataclasses.field(default=(), kw_only=True)
     # each Neural Engine body's Neural, in emission order
     neural: tuple = dataclasses.field(default=(), kw_only=True)
+    # each original binding of every member's wrapper names (Binding), in resolution order
+    bindings: tuple = dataclasses.field(default=(), kw_only=True)
 
     def __post_init__(self):
         self.freed = weakref.finalize(self, self.compiler.metal_ir_program_free, self.program)
@@ -787,20 +799,30 @@ def released(domain, made):
 # each vertex's emitted operation IDs, each access view's and each GIVEN cause's typed operand, a channel its port
 # Root, None where this machine holds no value of it (a value the produced kernel keeps inside itself).
 #
-# Each member's returned result consumed as its upstream compiler returned it: its GraphLowering's wrapper lines in
-# their own order (wrapper_code.lines), each line's memory planning a name's storage (AllocateLine a TEMPORARY of its
-# layout's storage_size, kept by a later inlining of the same body; ReinterpretLine and ReuseLine a view of the
-# storage they name, wrapper_fxir.py's offsets; MultiOutputLine its extern's result), each KernelCallLine its Kernel
+# Each member's returned result consumed as its upstream compiler returned it, resolved before any operation is
+# emitted: its GraphLowering's wrapper lines in their own order (wrapper_code.lines; an inlined control body's lines in
+# its parent's wrapper, binding its names: torch 2.14.0 wrapper.py codegen_subgraph_by_inlining, its prefix binding
+# each body input to its call's operand, codegen_allocation allocating a name once per wrapper), each binding recorded
+# at its occurrence (ConstructedMachine.bindings). A graph input is its machine placeholder's root at its first element
+# (graph_input_storage_offsets), a constant its own CONSTANT root, each memory planning line a name's storage
+# (AllocateLine a TEMPORARY of its layout's storage_size; ReinterpretLine and ReuseLine a view of the storage they
+# name, wrapper_fxir.py's offsets; MultiOutputLine its extern's result); each KernelCallLine its Kernel
 # (Produced.kernels), each ExternCall (Produced.externs; an inlining's Inlined.externs, a lifted body's
 # Lifted.externs) at its first line: a send or receive, a typed LAPACK operator (operations.py LAPACK: its Call) and its
 # INFO boundary, a while_loop a native repeat region over its Inlined cond, body and cond, a Switch an indexed switch
-# over its branches' Lifted bodies, an invoke_subgraph its Inlined body. Every other ExternKernel call has no native
-# operation: the compile raises it. A graph input is its machine placeholder's root at its first element
-# (graph_input_storage_offsets), a constant its own CONSTANT root. A Neural Engine member is one operation, its
-# original Core ML program (Model: its saved package, function, selected compute units, each feature bound to its
-# value, its whole invocation's feature relations). The members' units in one order, rdma/mesh_graph.py Graph.order
-# over each member's own order and each machine-local channel's send before its receive. Each projection direct over
-# program values, its record the producer's own
+# over its branches' Lifted bodies, an invoke_subgraph its Inlined body; each operation's operands their Bounds at its
+# own line. Every other ExternKernel call has no native operation: the compile raises it. A machine-local channel's
+# sent value is its send's operand (`references`), its receive that value (schedule.py assemble: a local pair erased,
+# its receive the sent value): its declared view over the channel's received storage, whose alias is the sent value's
+# own storage, resolved once every member is (lower_inductor.py _lower_received: the received buffer in
+# never_reuse_buffers, never reused in place, the sender still holding it); one copy into the receive's own storage
+# only where its declared layout is not the sent value's. A Neural Engine member is one operation, its original Core
+# ML program (Model: its saved package, function, selected compute units, each feature bound to its value, its whole
+# invocation's feature relations). The resolved operations are then emitted in each member's own order, the members
+# in module.meta["members"] order; their
+# causes are the original relation's (schedule.py SourceRelation: `vertices`, `accesses`, `supplied` here), which
+# native.py Target.related joins natively (metal_ir_source_relation). Each projection direct over program values, its
+# record the producer's own
 def construct(module, produced, *, context, targets, kinds, sources, wires, output_roles, generator=None,
               machines=None):
     compiler = _compiler()
@@ -817,7 +839,8 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         named = {node.target: node for node in nodes if node.op == "placeholder"}
         storages, held, results, wired, error = [], {}, {}, {}, []
         env, interface, inputs, landing, sending, grouped = {}, set(), [], [], [], {}
-        items, associated, local, ports, neural_ = [], [], {}, {}, []
+        items, associated, ports, neural_, bindings_ = [], [], {}, [], []
+        bodies, references, forwards = {p: [] for p in members}, {}, {}
 
         def stored(role, dtype, size, data=None, identity=0, zeroed=False):
             storages.append(Storage(role, dtype, size, data, identity, zeroed))
@@ -850,21 +873,25 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             lead = next((o for o in owners if o[0] is not None), None)
             return origins, owners, position(lead) if lead else end
 
-        # one name of processor p's wrapper in `graph` (the GraphLowering whose lines name it): as its lines bound it,
-        # else a constant's own CONSTANT root, a MutationLayoutSHOULDREMOVE buffer its target's
+        # one name of processor p's wrapper in `graph` (the GraphLowering whose lines name it) as its wrapper has bound
+        # it by this line; else a constant's own CONSTANT root (its wrapper's, recorded once), a
+        # MutationLayoutSHOULDREMOVE buffer its target's
         def hold(p, graph, name):
             if (p, name) not in held:
                 if name in graph.constants:
                     data = graph.constants[name]
                     held[p, name] = Held(stored(CONSTANT, data.dtype, data.untyped_storage().nbytes(), data),
                                          data.storage_offset() * data.element_size())
+                    bindings_.append((p, (), graph, name, Bound(held[p, name].storage, data.dtype,
+                                                                tuple(data.shape), tuple(data.stride()),
+                                                                data.storage_offset())))
                     return held[p, name]
                 buffer = graph.get_buffer(name)
                 layout = buffer.get_layout() if buffer is not None else None
                 if not isinstance(layout, upstream.MutationLayoutSHOULDREMOVE):
                     raise NotImplementedError(
-                        "unresolved integration: processor %s buffer %s is not allocated, reinterpreted, reused or "
-                        "bound by any wrapper line consumed before its use" % (p, name))
+                        "unresolved integration: processor %s buffer %s has no binding in its wrapper before its use "
+                        "(no graph input, constant, body input or memory planning line binds it)" % (p, name))
                 held[p, name] = hold(p, graph, layout.get_buffer().get_name())
             return held[p, name]
 
@@ -873,22 +900,31 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                          tuple(_hint(graph, n) for n in layout.stride),
                          h.at // layout.dtype.itemsize + _hint(graph, layout.offset))
 
-        # an IR value of processor p (a buffer, a ReinterpretView of one, its TensorBox) at its own layout
-        def projected(p, graph, x):
+        # an IR value (a buffer, a ReinterpretView of one, its TensorBox) and its own layout (a
+        # MutationLayoutSHOULDREMOVE buffer its target's)
+        def layout_of(x):
             while isinstance(x, (upstream.TensorBox, upstream.StorageBox)):
                 x = x.data
             layout = x.get_layout()
             if isinstance(layout, upstream.MutationLayoutSHOULDREMOVE):
-                return projected(p, graph, layout.target)
+                return layout_of(layout.target)
+            return x, layout
+
+        # an IR value of processor p at its own layout
+        def projected(p, graph, x):
+            x, layout = layout_of(x)
             return placed(hold(p, graph, x.get_name()), layout, graph)
 
-        # a control operand or result: a tensor's Bound; a symbolic or None value (ShapeAsConstantBuffer,
-        # NoneAsConstantBuffer, a sympy expression) none
-        def bound_of(p, graph, x):
-            if x is None or not isinstance(x, upstream.IRNode) or isinstance(
-                    x, (upstream.ShapeAsConstantBuffer, upstream.NoneAsConstantBuffer)):
+        # an operand or interface value: a tensor's Bound; a symbolic one its size hint (ShapeAsConstantBuffer's
+        # expression, a sympy expression); NoneAsConstantBuffer or None none; any other value itself
+        def operand_of(p, graph, x):
+            if isinstance(x, upstream.ShapeAsConstantBuffer):
+                return _hint(graph, x.expr)
+            if x is None or isinstance(x, upstream.NoneAsConstantBuffer):
                 return None
-            return projected(p, graph, x)
+            if isinstance(x, upstream.IRNode):
+                return projected(p, graph, x)
+            return _hint(graph, x) if hasattr(x, "free_symbols") else x
 
         # a scalar control operand (a selector, a condition): its tensor's Bound, a symbolic one an int32 CONSTANT
         def valued(p, graph, x):
@@ -904,12 +940,14 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             return Bound(h.storage, layout.dtype, (_hint(graph, layout.storage_size()),), (1,),
                          h.at // layout.dtype.itemsize)
 
-        # a body's inputs (graph.graph_inputs, in order) bound to the values `given` its caller passes (a tensor's
-        # Bound; a symbolic one none, its value the size hint every launch reads)
-        def bind(p, graph, given):
-            for name, b in zip(graph.graph_inputs, given, strict=True):
-                if b is not None:
+        # a control body occurrence's inputs (body.graph.graph_inputs, in order) bound to the operands `given` its call
+        # passes (codegen_subgraph_by_inlining's prefix: a tensor's Bound; a symbolic one its size hint, the value every
+        # launch reads), each recorded at that occurrence
+        def bind(p, body, given, occurrence):
+            for name, b in zip(body.graph.graph_inputs, given, strict=True):
+                if isinstance(b, Bound):
                     held[p, name] = Held(b.storage, b.offset * b.dtype.itemsize)
+                bindings_.append((p, occurrence, body, name, b))
 
         # a launch's scalar argument: an int64 CONSTANT holding its value (a sizevar or a SymbolicCallArg's numel at
         # its size hint)
@@ -929,8 +967,17 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             return Bound(stored(TEMPORARY, dtype, _extent(b.size, _contiguous(b.size)) * dtype.itemsize), dtype,
                          b.size, _contiguous(b.size), 0)
 
+        # a Bound over its storage's own storage (a machine-local channel's received storage: its sent value's)
+        def final(b):
+            while b.storage.alias is not None:
+                storage, at = b.storage.alias
+                b = Bound(storage, b.dtype, b.size, b.stride, b.offset + at // b.dtype.itemsize)
+            return b
+
         # metal.py Storage roots, made once their roles are settled (before any projection is encoded)
         def root_of(storage):
+            while storage.alias is not None:
+                storage = storage.alias[0]
             if storage.root is None:
                 element = _element(storage.dtype)
                 storage.root = builder.stored(storage.role, SCALAR[element], storage.bytes // element.itemsize,
@@ -942,6 +989,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             return storage.root
 
         def value_of(b):
+            b = final(b)
             scalar_, sizes, strides, offset = _typed(b)
             return builder.viewed(root_of(b.storage), b.storage.role, scalar_, sizes, strides, offset)
 
@@ -982,6 +1030,8 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 if isinstance(b, Bound) and given.name in graph.graph_inputs:
                     held[p, given.name] = Held(b.storage, _hint(graph, graph.graph_input_storage_offsets[given.name])
                                                * b.dtype.itemsize)
+                    bindings_.append((p, (), given, given.name, placed(
+                        held[p, given.name], graph.graph_inputs[given.name].get_layout(), graph)))
 
         # a declared transfer's logical wire (its one TEMPORARY storage of its logical bytes) viewed at its declared
         # landed or sent view
@@ -1009,6 +1059,37 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             own = placed(h, layout, graph)
             copying(into, record, own, given, [owner], PLACES[produced[p].kind], position(owner))
             return own
+
+        # each channel's sent value as its send declares it, (dtype, sizes, strides): a wrapper send's value at its own
+        # layout (its ExternCall SEND, a control body's included), a Neural Engine send's Output at its fake's
+        sent_views = {}
+
+        def declaring(calls):
+            for record in calls:
+                if getattr(record.node, "op_overload", None) is SEND:
+                    given = _named(record.node)
+                    _, layout = layout_of(given["value"])
+                    sent_views[given["channel"]] = (layout.dtype, tuple(_hint(record.graph, n) for n in layout.size),
+                                                    tuple(_hint(record.graph, n) for n in layout.stride))
+                for body in (*record.inlined, *record.lifted):
+                    declaring(body.externs)
+
+        for p in members:
+            if produced[p].kind == "ane":
+                sends = {s.args[0]: channel_of(s) for s in produced[p].module.graph.find_nodes(
+                    op="call_function", target=SEND)}
+                for o in produced[p].outputs:
+                    if o.sent:
+                        fake = o.value.meta["val"]
+                        sent_views[sends[o.node]] = (fake.dtype, tuple(fake.shape), tuple(fake.stride()))
+            else:
+                declaring(produced[p].externs)
+
+        # a machine-local channel's sent value as its receive reads it: its declared view over the channel's received
+        # storage (its alias the sent value's own storage, resolved once every member is)
+        def received_view(channel):
+            dtype, sizes, strides = sent_views[channel]
+            return Bound(forwards.setdefault(channel, Storage(TEMPORARY, dtype, 0)), dtype, sizes, strides, 0)
 
         # a received channel at its receive (machine body RECV `m`): in its declared logical wire, landed there; else
         # in the received result's own root
@@ -1041,17 +1122,22 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 grouped[k] = value_, view
             sending.append((m.args[1], *grouped[k]))
 
+        # a send's value: across machines at its machine SEND; a machine-local channel's its send's operand
+        # (`references`), its received storage's alias
         def sending_value(p, record, channel, value, into):
             if channel in remote:
                 sent(p, record, remote[channel][0], value, into)
             else:
-                local[channel] = value
+                references[channel] = value
 
         # a produced kernel's launch arguments in its launch's own order, each (kind, Bound, access, its buffer names),
         # a buffer's access its KernelArgs membership (inplace_buffers read and written under every name of its
-        # InplacedBuffer, input_buffers read, output_buffers written, both where it is both): the patched mps.py launch
-        # `values` (its buffers by outer name, its sizevars and dynamic numels as expressions, then its error buffer,
-        # the program's error workspace, read and written)
+        # InplacedBuffer, input_buffers read, output_buffers written, both where it is both). An mps launch the patched
+        # mps.py launch `values` (its buffers by outer name, its sizevars and dynamic numels as expressions, then its
+        # error buffer, the program's error workspace, read and written); a cpu launch (kernel name, arg_defs,
+        # call_args, arg_types) its KernelCallLine's call_args as KernelArgs.cpp_argdefs ordered them: its buffers by
+        # outer name, then each of its KernelArgs.sizevars (its expression), the buffers its arg_types' count less the
+        # sizevars' (as lower_inductor.py emitted counts its parameters)
         def launch_arguments(p, kernel_):
             graph, args = kernel_.graph, kernel_.owner.args
 
@@ -1062,6 +1148,10 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 access = (1 if name in args.input_buffers else 0) | (2 if name in args.output_buffers else 0)
                 return UPSTREAM_BUFFER, binding(p, graph, name), access, (name,)
 
+            if kernel_.place == "cpu":
+                _, _, call_args, types = kernel_.launch
+                buffers = len(types) - len(args.sizevars)
+                return [buffer(name) for name in call_args[:buffers]] + [scalar(graph, v) for v in args.sizevars]
             _, values, _, _, _, error_ = kernel_.launch
             arguments = [buffer(v) if isinstance(v, str) else scalar(graph, v) for v in values]
             if error_ is not None:
@@ -1146,7 +1236,9 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                     received(p, graph, record, out, remote[channel][1], into)
                 else:
                     n = next(n for n in origins if getattr(n, "target", None) is RECV)
-                    env[vertex(p, n)] = landed(p, graph, record, out, local[channel], owner_of(p, n), into)
+                    own, m = landed(p, graph, record, out, received_view(channel), owner_of(p, n), into), vertex(p, n)
+                    if m is not None:
+                        env[m] = own
             elif stated is not None:
                 lapacked(p, graph, record, stated, given, origins, owners, at, into)
             else:
@@ -1154,9 +1246,14 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                                        at), owners))
                 associated.extend(o[3] for o in owners if o[3] is not None)
 
-        # one wrapper line of `graph` that no extern call wrote: its memory planning, its kernel call; a line no
-        # native consumer has (a str line outside a control call's own scaffolding, any other line) the compile raises
-        def planned(p, graph, line, into):
+        # a memory planning line's binding of `name`, recorded at its occurrence at its own layout
+        def recorded(p, graph, occurrence, line, name, layout):
+            bindings_.append((p, occurrence, line, name, placed(held[p, name], layout, graph)))
+
+        # one wrapper line of `graph` that no extern call wrote, at its body occurrence `occurrence`: its memory
+        # planning, its kernel call; a line no native consumer has (a str line outside a control call's own
+        # scaffolding, any other line) the compile raises
+        def planned(p, graph, line, into, occurrence):
             if isinstance(line, wrapper_lines.KernelCallLine):
                 kernel_ = produced[p].kernels.get(id(line))
                 if kernel_ is None:
@@ -1165,8 +1262,8 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 kernel(p, kernel_, into)
             elif isinstance(line, wrapper_lines.AllocateLine):
                 layout = line.node.get_layout()
-                if (p, line.node.get_name()) not in held:
-                    held[p, line.node.get_name()] = Held(stored(TEMPORARY, layout.dtype, _bytes(graph, layout)), 0)
+                held[p, line.node.get_name()] = Held(stored(TEMPORARY, layout.dtype, _bytes(graph, layout)), 0)
+                recorded(p, graph, occurrence, line, line.node.get_name(), layout)
             elif isinstance(line, wrapper_lines.ReinterpretLine):
                 base, view = hold(p, graph, line.node.get_name()), line.layout
                 if isinstance(view, upstream.NonOwningLayout):
@@ -1174,52 +1271,57 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 held[p, line.reused_as.get_name()] = Held(base.storage, base.at + (
                     _hint(graph, line.node.get_offset()) + _hint(graph, view.offset) -
                     _hint(graph, line.reused_as.get_offset())) * view.dtype.itemsize)
+                recorded(p, graph, occurrence, line, line.reused_as.get_name(), line.reused_as.get_layout())
             elif isinstance(line, wrapper_lines.ReuseLine):
                 held[p, line.reused_as.get_name()] = hold(p, graph, line.node.get_name())
+                recorded(p, graph, occurrence, line, line.reused_as.get_name(), line.reused_as.get_layout())
             elif isinstance(line, wrapper_lines.MultiOutputLine):
                 held[p, line.result_name] = results[p, line.arg_name][_key(line.indices)]
+                recorded(p, graph, occurrence, line, line.result_name, graph.get_buffer(line.result_name).get_layout())
             elif not isinstance(line, INERT):
                 raise NotImplementedError("unresolved integration: processor %s wrapper line %r (%s) has no native "
                                           "consumer" % (p, line, type(line).__name__))
 
-        # an extern call at its first line, into its destination `into`: a control call its region, an ordinary one
-        # its lines in order (its memory planning, its own call)
-        def extern(p, graph, record, into):
+        # an extern call at its first line, into its destination `into`, at its body occurrence `occurrence`: a
+        # control call its region, an ordinary one its lines in order (its memory planning, its own call)
+        def extern(p, graph, record, into, occurrence):
             node = record.node
             if isinstance(node, upstream.WhileLoop):
-                return repeat(p, record, into)
+                return repeat(p, record, into, occurrence)
             if isinstance(node, upstream.Switch):
-                return switch(p, record, into)
+                return switch(p, record, into, occurrence)
             if isinstance(node, upstream.InvokeSubgraph):
-                return invoked(p, record, into)
+                return invoked(p, record, into, occurrence)
             calls = 0
             for line in record.lines:
                 if getattr(line, "node", None) is node and not isinstance(line, wrapper_lines.MemoryPlanningLine):
                     called(p, graph, record, into)
                     calls += 1
                 else:
-                    planned(p, graph, line, into)
+                    planned(p, graph, line, into, occurrence)
             if not calls and not isinstance(node, upstream.MultiOutput):
                 raise NotImplementedError("unresolved integration: processor %s extern call %s (%s) wrote no call "
                                           "line of its node" % (p, node.get_name(), type(node).__name__))
 
-        # one body's lines in order (`calls` the ExternCalls of the scheduler writing them), into `into`
-        def consume(p, graph, lines, calls, into):
+        # one body occurrence's lines in order (`calls` the ExternCalls of the scheduler writing them), into `into`
+        def consume(p, graph, lines, calls, into, occurrence):
             owner, seen = {id(line): call for call in calls for line in call.lines}, set()
             for line in lines:
                 call = owner.get(id(line))
                 if call is None:
-                    planned(p, graph, line, into)
+                    planned(p, graph, line, into, occurrence)
                 elif id(call) not in seen:
                     seen.add(id(call))
-                    extern(p, graph, call, into)
+                    extern(p, graph, call, into, occurrence)
 
-        # one control body occurrence (an Inlined, a Lifted: `lines` its wrapper lines) as consumed into its own
-        # "inlined" item of `into`, its record kept with its encoded interval (ConstructedMachine.inlinings), owned by
-        # `owners` (None: the region it is in owns it)
-        def inline(p, body, lines, into, owners=None):
-            sub = []
-            consume(p, body.graph, lines, body.externs, sub)
+        # one control body occurrence of the call `record` (an Inlined, a Lifted: `lines` its wrapper lines) within
+        # `occurrence`, its inputs bound to the operands `given` there, as consumed into its own "inlined" item of
+        # `into`, its record kept with its encoded interval (ConstructedMachine.inlinings), owned by `owners` (None:
+        # the region it is in owns it)
+        def inline(p, record, body, lines, given, into, occurrence, owners=None):
+            within, sub = occurrence + ((record, body),), []
+            bind(p, body, given, within)
+            consume(p, body.graph, lines, body.externs, sub, within)
             into.append(("inlined", (body, sub), owners))
 
         # torch 2.14.0 wrapper.py codegen_while_loop (aot_mode: its Inlined cond before the loop, body, cond at the
@@ -1232,7 +1334,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         # where its layout is that storage's, else its own and one copy after the loop. stack_output
         # (while_loop_stack_output: each pass's carried values stacked, its outputs' leading extent the loop's own
         # iteration count, a fresh unbacked symbol of its fakes) has no native repeat output: the compile raises it
-        def repeat(p, record, into):
+        def repeat(p, record, into, occurrence):
             w, graph = record.node, record.graph
             cond0, body, cond1 = record.inlined
             origins, owners, at = owning(p, w)
@@ -1254,14 +1356,12 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                              body.graph)
                 copying(init, record, own, b, owners, place, at)
                 carried.append(own)
-            given = carried + [bound_of(p, graph, x) for x in w.additional_inputs]
-            for inlined in (cond0, body, cond1):
-                bind(p, inlined.graph, given)
-            inline(p, cond0, cond0.lines, init)
+            given = carried + [operand_of(p, graph, x) for x in w.additional_inputs]
+            inline(p, record, cond0, cond0.lines, given, init, occurrence)
             tested = valued(p, cond0.graph, cond0.graph.graph_outputs[0])
             condition = staged(tested, torch.int32)
             copying(init, record, condition, tested, owners, place, at)
-            inline(p, body, body.lines, passed)
+            inline(p, record, body, body.lines, given, passed, occurrence)
             ids, backs = {id(b.storage) for b in carried}, []
             for into_, out in zip(carried, body.graph.graph_outputs):
                 b = projected(p, body.graph, out)
@@ -1273,7 +1373,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             for into_, b in backs:
                 if b != into_:
                     copying(passed, record, into_, b, owners, place, at)
-            inline(p, cond1, cond1.lines, passed)
+            inline(p, record, cond1, cond1.lines, given, passed, occurrence)
             copying(passed, record, condition, valued(p, cond1.graph, cond1.graph.graph_outputs[0]), owners, place,
                     at)
             into.append(("repeat", (record, init, passed, condition, [b.storage for b in carried]), owners))
@@ -1299,7 +1399,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         # into a one-element I32 first), each branch its Lifted body's lines (its own interval) with its inputs bound
         # to the operands, its yields copied into the common results (Switch.outputs, MultiOutput [(list, i)], each its
         # own TEMPORARY)
-        def switch(p, record, into):
+        def switch(p, record, into, occurrence):
             s, graph = record.node, record.graph
             origins, owners, at = owning(p, s)
             place = PLACES[produced[p].kind]
@@ -1308,14 +1408,13 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             if index.dtype is torch.bool:
                 copying(into, record, staged(index, torch.int32), index, owners, place, at)
                 index = into[-1][1][1]
-            operands = [bound_of(p, graph, x) for x in s.operands]
+            operands = [operand_of(p, graph, x) for x in s.operands]
             made_ = outputs_of(p, graph, s)
             common = [placed(made_[_key(out.indices)], out.get_layout(), graph) for out in s.outputs]
             branches = []
             for branch in s.branches:
                 body, sub = lifted[id(branch.graph)], []
-                bind(p, body.graph, operands)
-                inline(p, body, body.wrapper.lines, sub)
+                inline(p, record, body, body.wrapper.lines, operands, sub, occurrence)
                 yields = [projected(p, body.graph, out) for out in body.graph.graph_outputs]
                 for result, given in zip(common, yields, strict=True):
                     copying(sub, record, result, given, owners, place, at)
@@ -1326,12 +1425,11 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         # ir.py InvokeSubgraph (aot_mode: its one Inlined body): its inputs bound to its operands, its body's lines
         # (its own interval, owned by the invocation), each result (InvokeSubgraph.outputs, MultiOutput [(list, i)] at
         # its body output's own layout) that output
-        def invoked(p, record, into):
+        def invoked(p, record, into, occurrence):
             v, graph = record.node, record.graph
             (body,) = record.inlined
             origins, owners, at = owning(p, v)
-            bind(p, body.graph, [bound_of(p, graph, x) for x in v.inputs])
-            inline(p, body, body.lines, into, owners)
+            inline(p, record, body, body.lines, [operand_of(p, graph, x) for x in v.inputs], into, occurrence, owners)
             made_ = {}
             for out, x in zip(v.outputs, body.graph.graph_outputs, strict=True):
                 if isinstance(out, upstream.MultiOutput):
@@ -1347,7 +1445,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         # received channel's landing); each output its ExportedProgram value's own storage as the program's fakes
         # alias it (torch/_export: a view of an input placeholder that input's machine storage, else one TEMPORARY per
         # distinct fake storage), at its fake's layout. A declared state (MLState) the compile raises: the Model
-        # record binds no state to its value
+        # record binds no state to its value. A machine-local received input binds its sent value (received_view)
         def neural(p):
             made_, model = produced[p], produced[p].model
             spec, program = model.model.get_spec(), model.program
@@ -1378,8 +1476,9 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                     env[m] = b
                     interface.add(m)
                 else:
-                    b = local[channel]
-                    env[vertex(p, n)] = b
+                    b, m = received_view(channel), vertex(p, n)
+                    if m is not None:
+                        env[m] = b
                 given.append((placeholder, b))
             storages_ = {}
             for placeholder, b in given:
@@ -1403,83 +1502,36 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             model.model.save(package)
             bound = ([(f.name, b, 1) for f, (_, b) in zip(spec.description.input, given, strict=True)],
                      [(f.name, b, 2) for f, b in zip(spec.description.output, outs.values(), strict=True)])
-            items.append(("neural", (made_, model, package, saved, bound, position(lead) if lead else end), owners))
+            bodies[p].append(("neural", (made_, model, package, saved, bound, position(lead) if lead else end),
+                              owners))
             ports[p] = [(i, env.get(copied.get(originals[p].get(i.node)))) for i in made_.inputs], list(outs.items())
             sends = {o.node: b for o, b in outs.items() if o.sent}
             for s in made_.module.graph.find_nodes(op="call_function", target=SEND):
-                sending_value(p, made_, channel_of(s), sends[s.args[0]], items)
+                sending_value(p, made_, channel_of(s), sends[s.args[0]], bodies[p])
 
-        # an extern call's machine-local channels (its own, its inlined and lifted bodies' calls' included):
-        # (received, sent)
-        def channels(record):
-            node, target = record.node, getattr(record.node, "op_overload", None)
-            received_, sent_ = set(), set()
-            if target is producer.RECV_STRIDED:
-                received_.add(_named(node)["channel"])
-            elif target is SEND:
-                sent_.add(_named(node)["channel"])
-            for body in (*record.inlined, *record.lifted):
-                for nested in body.externs:
-                    r, s = channels(nested)
-                    received_ |= r
-                    sent_ |= s
-            return frozenset(received_ - remote.keys()), frozenset(sent_ - remote.keys())
-
-        # each member's units in its own original order (its wrapper's lines, each extern call at its first line; a
-        # Neural Engine member its one operation): ((machine-local channels it receives, sends), its consumer)
-        def units(p):
-            made_ = produced[p]
-            if made_.kind == "ane":
-                return [((frozenset(n.args[0] for _, n in made_.model.received) - remote.keys(),
-                          frozenset(channel_of(s) for s in made_.module.graph.find_nodes(
-                              op="call_function", target=SEND)) - remote.keys()), functools.partial(neural, p))]
-            graph, listed, seen = made_.graph, [], set()
-            owner = {id(line): call for call in made_.externs for line in call.lines}
-            for line in graph.wrapper_code.lines:
-                call = owner.get(id(line))
-                if call is None:
-                    listed.append(((frozenset(), frozenset()), functools.partial(planned, p, graph, line, items)))
-                elif id(call) not in seen:
-                    seen.add(id(call))
-                    listed.append((channels(call), functools.partial(extern, p, graph, call, items)))
-            return listed
-
-        # the members' units in one order (rdma/mesh_graph.py Graph.adjacency's GIVEN records, Graph.order: Cormen et
-        # al., 3rd ed., §22.4): each member's units in its own order, each machine-local channel's sending unit before
-        # every unit receiving it
-        listed = {p: units(p) for p in members}
-        receivers = {}
+        # the resolution: each member in module.meta["members"] order, a wrapper member's lines in their own order (its
+        # body occurrence ()), a Neural Engine member its one operation; each machine-local channel's received storage
+        # then its sent value's (Storage.alias); the resolved items each member's own order
         for p in members:
-            for k, ((received_, _), _) in enumerate(listed[p]):
-                for channel in received_:
-                    receivers.setdefault(channel, []).append((p, k))
-
-        def following(v):
-            p, k = v
-            (_, sent_), _ = listed[p][k]
-            return [(p, k + 1)] * (k + 1 < len(listed[p])) + [u for c in sent_ for u in receivers.get(c, ())]
-
-        for p, k in mesh_graph.Graph.adjacency([(p, k) for p in members for k in range(len(listed[p]))],
-                                               following).order():
-            listed[p][k][1]()
+            if produced[p].kind == "ane":
+                neural(p)
+            else:
+                graph = produced[p].graph
+                consume(p, graph, graph.wrapper_code.lines, produced[p].externs, bodies[p], ())
+        for channel, storage in forwards.items():
+            v = references[channel]
+            storage.alias = (v.storage, v.offset * v.dtype.itemsize)
+        items.extend(item for p in members for item in bodies[p])
 
         # each member's interface (lower_inductor.py Produced.inputs and .outputs, Output.value the GraphLowering's
-        # graph_outputs entry): their projections, the program values of the machine nodes standing for them
-        def interfaced(p, graph, value):
-            if isinstance(value, upstream.ShapeAsConstantBuffer):
-                return _hint(graph, value.expr)
-            if value is None or isinstance(value, upstream.NoneAsConstantBuffer):
-                return None
-            if isinstance(value, upstream.IRNode):
-                return projected(p, graph, value)
-            return _hint(graph, value) if hasattr(value, "free_symbols") else value
-
+        # graph_outputs entry): their projections (operand_of, at its wrapper's end), the program values of the machine
+        # nodes standing for them
         results_ = {}
         for p in members:
             graph = produced[p].graph
             if p not in ports:
-                ports[p] = ([(i, interfaced(p, graph, i.value)) for i in produced[p].inputs],
-                            [(o, interfaced(p, graph, o.value)) for o in produced[p].outputs])
+                ports[p] = ([(i, operand_of(p, graph, i.value)) for i in produced[p].inputs],
+                            [(o, operand_of(p, graph, o.value)) for o in produced[p].outputs])
             for out, b in ports[p][1]:
                 m = copied.get(originals[p].get(out.node)) if out.node.op == "placeholder" else vertex(p, out.node)
                 if not out.sent:
@@ -1492,8 +1544,9 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         # roles settled before any root is made: each received channel's storage INPUT, each result's OUTPUT, a
         # storage first declared keeping its role (an input's, a constant's)
         def declared(b, role):
-            if b.storage.role == TEMPORARY:
-                b.storage.role = role
+            storage = final(b).storage
+            if storage.role == TEMPORARY:
+                storage.role = role
 
         for _, _, b in landing:
             declared(b, INPUT)
@@ -1509,8 +1562,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 outputs.append((b, None, kind, None, fake))
                 continue
             original = env[named[name]]
-            if (original.storage, original.dtype, original.size, original.stride, original.offset) != (
-                    b.storage, b.dtype, b.size, b.stride, b.offset):
+            if final(original) != final(b):
                 if leaf.op == "placeholder":
                     stated = named[name].meta["stated"]
                     holder = stated if isinstance(stated, str) else module.meta["output"]
@@ -1523,21 +1575,21 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
         for storage in storages:
             root_of(storage)
         inputs = [Root(name, kind, None, None, None) if b is None else
-                  Root(name, kind, b.storage.role, *rooted(b)) for name, kind, b in inputs]
+                  Root(name, kind, final(b).storage.role, *rooted(b)) for name, kind, b in inputs]
         received_, sent_, ends = {}, {}, {}
         for channel, value_, b in landing:
-            received_[channel] = Root(channel, "received", b.storage.role, *rooted(b))
+            received_[channel] = Root(channel, "received", final(b).storage.role, *rooted(b))
             if value_ is not None:
-                ends[value_] = Root(value_, "wire", b.storage.role, received_[channel].root, None)
+                ends[value_] = Root(value_, "wire", final(b).storage.role, received_[channel].root, None)
         for channel, value_, b in sending:
-            sent_[channel] = Root(channel, "sent", b.storage.role, *rooted(b))
+            sent_[channel] = Root(channel, "sent", final(b).storage.role, *rooted(b))
             if value_ is not None:
-                ends.setdefault(value_, Root(value_, "wire", b.storage.role, sent_[channel].root, None))
+                ends.setdefault(value_, Root(value_, "wire", final(b).storage.role, sent_[channel].root, None))
 
         # an output's metadata (compiler/mesh_compiler/native.py Bound.result): its view's shape, strides and offset
         # in the root it names, and the exported value's dtype, device and requires_grad
         def described(b, fake):
-            return tuple(b.size), tuple(b.stride), b.offset, fake.dtype, fake.device, fake.requires_grad
+            return tuple(b.size), tuple(b.stride), final(b).offset, fake.dtype, fake.device, fake.requires_grad
 
         outputs = [Output(None, None, literal, None, kind, None) if b is None else
                    Output(*rooted(b), None, described(b, fake), kind, written)
@@ -1548,6 +1600,8 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
 
         interfaces = {p: (tuple((i, typed_port(b)) for i, b in ins), tuple((o, typed_port(b)) for o, b in outs))
                       for p, (ins, outs) in ports.items()}
+        bindings = tuple(Binding(p, occurrence, record, name, typed_port(b))
+                         for p, occurrence, record, name, b in bindings_)
 
         # metal-microbench metal_ir.h metal_ir_operations: each projection's whole interval of created operation IDs,
         # owned by each source position it implements; each operation's operands as Bounds, in its native order
@@ -1604,7 +1658,8 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                             continue
                         values.append((kind_, value_of(b), access))
                         size = b.size[0] * b.dtype.itemsize
-                        described_.append((buffers, b.dtype.itemsize, b.offset * b.dtype.itemsize, size, access))
+                        described_.append((buffers, b.dtype.itemsize, final(b).offset * b.dtype.itemsize, size,
+                                           access))
                     grid = (1, 1, 1) if kernel_.place == "cpu" else (
                         *(_hint(kernel_.graph, n) for n in kernel_.launch[3] or ()), 1, 1, 1)[:3]
                     group = None if kernel_.place == "cpu" or kernel_.launch[4] is None else (
@@ -1639,7 +1694,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                     first, inner = count(), []
                     encode(passed, inner, NONE)
                     region = builder.repeat(record, first, count(), value_of(condition),
-                                            [root_of(s) for s in dict.fromkeys(carried)], inner)
+                                            list(dict.fromkeys(root_of(s) for s in carried)), inner)
                     children.append(RegionChild(REGION_REPEAT, region, arm))
                 elif kind == "switch":
                     record, index, branches, common, place, at_ = payload
@@ -1721,4 +1776,4 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                               input_parts=input_parts, emitted=tuple(builder.emitted), landings={},
                               upstream=tuple(upstream_), produced=dict(produced), context=context,
                               interfaces=interfaces, regions=tuple(builder.regions), inlinings=tuple(inlinings),
-                              neural=tuple(neural_))
+                              neural=tuple(neural_), bindings=bindings)
