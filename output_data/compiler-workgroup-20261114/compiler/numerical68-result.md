@@ -1,5 +1,7 @@
 # 68: the returned pre-terminal result (source-defined fields)
 
+Current source status, 2026-11-15: the converted-wrapper revision described below is source-only and not installed. `numerical68-patch-preflight.json` records independent canonical git-apply checks over an isolated index and AST checks for all 12 projected files; installed source was unchanged. Earlier installation statements describe the prior committed patch, not this revision. Mutation/result consumers, remaining typed wrapper producers and terminal ABI composition are unfinished.
+
 Producer 68, 2026-11-14. This is the handoff to root, 66/476, native131/134/135 and frontend104. Every field below is
 written in source:
 - `compiler/mesh_compiler/lower_inductor.py`;
@@ -45,19 +47,21 @@ compile_fx_aot(body, [placeholder meta["val"]],
 Then `codegen_and_compile` → the factory's `graph_lowering(gm, ...)` (a `MeshLowering`) → `GraphLowering.run` →
 `GraphLowering.codegen`.
 
-**Stage.** The result is taken after `scheduler.codegen()`. By then each backend's kernel codegen and `define_kernel`
-have run, so the kernel sources exist:
-- MPS: `metal_entry` and `metal_source`, and the wrapper's kernel definitions;
-- CPU: `defined_kernels` and `KernelDefinitionLine`.
+**Stage.** The result is taken after `GraphLowering.codegen`, in two steps:
+- `scheduler.codegen()`. Each backend's kernel codegen and `define_kernel` have run, so the kernel sources exist:
+  - MPS: `metal_entry` and `metal_source`, and the wrapper's kernel definitions;
+  - CPU: `defined_kernels` and `KernelDefinitionLine`.
+- Its wrapper's original `generate`: `run_wrapper_ir_passes` (memory planning as configured; upstream's ordering and
+  semantics, not a consumer option), then `FxConverter.generate`. The converted result is
+  `wrapper_code.fx_converter` (below).
 
-The wrapper lines are as written. The result is taken before `wrapper_code.generate`, so there is no memory planning, no
-FX conversion and no wrapper source. It is also before any module or kernel is compiled or loaded. It is not before
+No selected CPU or MPS kernel is compiled or loaded: a C++ definition is kept by name, not imported. It is not before
 source generation.
 
 From `torch-inductor-aot-lowered-result.patch`:
 - **`config.aot_inductor.lowered: bool = False`** is the operand that asks for it.
-- **`GraphLowering.codegen`**: with `lowered`, after `scheduler.codegen()`, it does `pop_codegened_graph` and returns
-  `(self, None)`.
+- **`GraphLowering.codegen`**: with `lowered`, after its original `wrapper_code.generate(self.is_inference)` and
+  `pop_codegened_graph`, it returns `(self, None)`.
 - **`codegen_and_compile`**: under `aot_mode` and `lowered`, `graph.codegen()` replaces `compile_to_fn`. Its
   `V.aot_compilation` return is `output_code.py LoweredAOTI(graph=graph, device_type=graph.device_type)`.
   - `LoweredAOTI` is a new `OutputCode` dataclass, the explicit lowered-result type. No emitted-file slot is used.
@@ -65,10 +69,14 @@ From `torch-inductor-aot-lowered-result.patch`:
 - **`compile_fx_aot`** returns `compiled_artifacts.graph` for a `LoweredAOTI`. Its annotation adds `GraphLowering`.
 - **The GraphSignature**: `_compile_fx_main` sets `unlifted_gm.meta["graph_signature"] = graph_signature`. That GM is
   `graph.module`.
-- **Cond branches**: `WrapperFxCodegen.codegen_switch` writes `SwitchLine(self, node)`, then `codegen_subgraph_common`
-  for each branch. That calls `subgraph.graph.codegen()`, which returns the branch's own lowered `SubgraphLowering`.
-  Under `lowered`, `define_subgraph_launcher_fn` records it: `wrapper.lowered_subgraphs[name]`. The branch has its own
-  `WrapperFxCodegen` and scheduler.
+- **Control bodies**: `WrapperFxCodegen.codegen_switch` writes `SwitchLine(self, node)`, then `codegen_subgraph_common`
+  for each branch. `codegen_while_loop` and `codegen_invoke_subgraph` (this patch) do the same with `WhileLoopLine`
+  and `InvokeSubgraphLine`. Upstream's form writes `str` scaffolding and inlines in `aot_mode`.
+  - `codegen_subgraph_common` calls `subgraph.graph.codegen()`, which returns the body's own lowered
+    `SubgraphLowering`, its wrapper's generate included.
+  - Under `lowered`, `define_subgraph_launcher_fn` records it as `wrapper.lowered_subgraphs[name]`, and its converted
+    graph as `wrapper.subgms[name]`, which is `subgraph_code.wrapper_code.fx_converter.gm`.
+  - Each body has its own `WrapperFxCodegen`, scheduler and converter.
 - **Scalar assertions**: under `fx_wrapper`, `ir.AssertScalar.codegen` writes `AssertScalarLine(wrapper, node)`, where
   upstream wrote nothing.
 - **Rewrite correspondence**: `pattern_matcher._transfer_matched` runs at both rewrite seams, before
@@ -363,6 +371,103 @@ It returns `(domain, accesses, made)`, as `relations` does. It reuses `_Index`, 
 - An MPS checked indirect of size 0 gives `[0, -1]`, which empties the whole MPS domain. The CPU handling above is
   available to use.
 
+## The converted wrapper result: `wrapper_code.fx_converter` (66's consumer input, as landed)
+
+`torch-inductor-aot-lowered-result.patch`, `wrapper_fxir.py`. The owner is the upstream `FxConverter` itself, kept by
+`WrapperFxCodegen._generate` as `self.fx_converter`. Every graph has one, the root and each lifted body. The fields are
+upstream's, except the two this patch adds:
+- `gm: GraphModule`: the typed wrapper IR. Its nodes are upstream's own conversions:
+  - `empty_strided` allocations named by buffer;
+  - `as_strided` reinterpret and reuse;
+  - `getitem` multi-outputs;
+  - extern `op_overload` calls;
+  - `_assert_scalar`;
+  - `item`/`where` dynamic scalars;
+  - `sym_size`/`sym_stride` unbacked definitions;
+  - sympy-interpreted size expressions;
+  - control HOPs;
+  - selected kernel calls.
+
+  `meta["val"]` is set by `_node_metadata_hook` under `V.fake_mode`.
+- `line_nodes: list[tuple[WrapperLine, tuple[fx.Node, ...]]]` (new): every `WrapperLine` the converter ran, in line
+  order, with the nodes its own conversion created, in graph order. Lines are the planned `wrapper_code.lines`.
+  - A line that makes no node has `()`: a free, comment or null line, an `UnbackedSymbolDefsLine` with empty bindings
+    (upstream's no-op), or a later use of a hash-consed expression. Its line object still carries the original facts:
+    `FreeIfNotReusedLine.node` and `is_reused`, `ReuseLine.node`, `reused_as` and `delete_old`, `NullLine`.
+  - `LineContext` entries are not `WrapperLine`s and are not listed.
+- `definitions: dict[str, KernelDefinitionLine]` (new): each selected C++ (`gpu=False`) kernel definition by kernel
+  name, as `define_kernel` wrote it (`kernel_body`, `cpp_definition`, `metadata`).
+- Upstream's own fields:
+  - `buffer_to_node`: buffer name → node at the end of conversion, after frees and rebindings;
+  - `expr_to_proxy`: symbol and expression → proxy;
+  - `subgm_getattrs`: body name → `get_attr` node;
+  - `kernels`: Triton only;
+  - `lines`, `graph_inputs`, `graph_outputs`, `subgms`.
+
+**Selected kernel call.** A `KernelCallLine` with `triton=False` converts to one node:
+`call_function(selected_kernel_call, args=(kernel_name, *operands), kwargs=call_kwargs)`.
+- Each operand is mapped as a Triton call's: `_lookup_args` turns a buffer name into its node and a `SymbolicCallArg`
+  into its expression; `_generate_sym_node` then gives an int or a node, with `sympy.floor` as `FloorDiv`.
+- The node's value is `None`. `selected_kernel_call` is registered with `torch.fx.node.has_side_effect`, so
+  `Node.is_impure` holds and dead code elimination keeps it.
+- Its writes are its operand buffers. On CPU these are the non-const pointer `arg_types`, i.e. `KernelArgs`' in-place
+  and output buffers. On MPS they are the `KernelArgs` output buffers, which `Kernel.owner.args` holds.
+- The line object stays the key of `Produced.kernels` (`id(KernelCallLine)` → `Kernel`).
+- `KernelCallLine` gains `operands: tuple | None = None`, the call's own operand values in call order, and
+  `call_kwargs: dict = {}`, its keyword operands.
+  - CPU group and template: `KernelArgs.cpp_argdefs` produces `self.cpp_call_operands`, appended with each call arg.
+    A buffer's entry is its outer name; a size argument's is its sympy expression. `call_args` are their strs.
+  - MPS: `operands` is `tuple(typed[0])`, the mps-kernel-operands values: output then input buffer names, sizevars,
+    then range-tree numel expressions or `SymbolicCallArg`s. `call_kwargs` holds `threads` (grid), `group_size`
+    (group) and `error_buf_idx` (error), each only where its formatted argument is appended.
+- `line.device` and `line.current_stream_idx` are the line's own fields.
+
+**Control.** Each control node converts to its HOP over `get_attr` bodies (`subgm_getattrs`). Its result is recorded
+under the ir node's name (`_record_allocation`), so the `MultiOutputLine`s' `getitem` index it.
+- `WhileLoopLine(wrapper, node, stack_output)` converts to
+  `torch.ops.higher_order.while_loop(cond, body, carried, additional, mutated_arg_indices=node.mutated_arg_indices)`.
+  - `mutated_arg_indices` is set by `ir.py` `WhileLoop.create` from its own `check_input_alias_and_mutation` indices.
+  - Under `stack_output`, the node is `while_loop_stack_output(cond, body, carried, additional)`. Its call has no
+    mutated indices, and create asserts none.
+  - Mutated carries remain `node.mutation_outputs`.
+- `InvokeSubgraphLine(wrapper, node)` converts to `torch.ops.higher_order.invoke_subgraph(subgraph, None,
+  *node.inputs)`. Lowering drops the identifier (`lowering.py` `invoke_subgraph`).
+- `SwitchLine` is unchanged: `cond` or `switch`.
+
+**Extern calls.**
+- `ExternKernelMultiOutLine` converts to its out variant (`node.op_overload`) through `_generate_extern_kernel_common`.
+  Each `out_variant_output_nodes[i]` buffer's node is passed as keyword `out_arg_names[i]`, and the node takes
+  `node.get_name()`. It used to inherit `WrapperLine.codegen_fx`, which raised.
+- `_generate_extern_kernel_common` keeps upstream's bindings: a mutated input keeps its node, with no rebinding and no
+  schema-derived alias rule. The original mutation results are the line's ir node's own (`line.node.get_outputs()`):
+  - `[node, *mutation_outputs, *alias_mutation_outputs]`;
+  - each `MutationOutput(layout, mutated_node, mutating_node)` with `mutation_names`, `get_defining_op()` (the call)
+    and `get_mutation_buffers()`;
+  - `AliasMutationOutput.physical` and `get_inputs_that_alias_output()`;
+  - `FallbackKernel.alias_names`; `get_mutation_names()`.
+
+  The call's node is the one node of `line_nodes` for that line whose `target is line.node.op_overload`. Its effect
+  order is line and graph order. Its mutable `OpOverload` schema makes it impure.
+
+**Lifetime sources, retained (not graph uses alone).** A `Free` producing no FX node does not mean the lifetime fact is
+absent. The facts stay with their original owners:
+- the planned lines in `line_nodes`, with their own fields;
+- `wrapper_code` `allocated`, `freed`, `reuses` and `computed_sizes`;
+- `graph` `never_reuse_buffers`, `removed_buffers`, `mutated_inputs`, buffers and layouts (aliases);
+- each extern IR node's `mutation_outputs`, `alias_names` and `get_mutation_names()`;
+- each kernel's `KernelArgs` (in-place, input and output buffers; `Kernel.owner`).
+
+`ExternCall.lines` and `Inlined.lines` are the lines as codegen wrote them, before planning. Memory planning replaces
+`AllocateLine`, `FreeIfNotReusedLine` and `ReuseLine` objects in `wrapper_code.lines`, so take planned facts from
+`line_nodes`. `KernelCallLine` and extern lines are not planning lines, and their identity is unchanged.
+
+**Remaining upstream str lines (not yet typed; the converter raises on them):**
+- `codegen_device_copy` (wrapper.py 3145) and `sync_d2h_copy`;
+- dynamic select and slice (3185–3188);
+- `generate_fallback_kernel_with_runtime_lookup` (2512, under `use_runtime_dispatch`).
+
+They are the next family items at their producers.
+
 ## Control: `ExternCall`, `Inlined` and `Lifted` (each occurrence, at the original method boundaries)
 
 **`ExternCall(node, graph, scheduler, lines, inlined, lifted)`** is made by `MeshScheduler.codegen_extern_call`, at
@@ -379,10 +484,14 @@ its return, for every extern scheduler node, whatever its operator. No operator 
   is among them as upstream's own str lines.
 - `inlined` is each body inlining its codegen made, in order. `while_loop` makes three: its cond before the loop, its
   body, and its cond at the loop's end.
-- `lifted` is each body its codegen lowered on its own, in order: a Switch's branches. One call's codegen makes one
-  kind:
-  - a Switch lifts (wrapper_fxir.py 169 `codegen_switch` → `codegen_subgraph_common`);
-  - `while_loop` and `invoke_subgraph` inline (wrapper.py, in `aot_mode`).
+- `lifted` is each body its codegen lowered on its own, in order. Under `fx_wrapper` every control body lifts:
+  - a Switch's branches;
+  - a `while_loop`'s cond, then its body;
+  - an `invoke_subgraph`'s body.
+
+  This goes through `codegen_switch`, `codegen_while_loop` and `codegen_invoke_subgraph` → `codegen_subgraph_common`.
+  So `inlined` is now always `()`. `Inlined` and `MeshSubgraph.codegen_subgraph` keep their shape until 66's consumer
+  stops reading them. Delete them then, together.
 
 The native whole consumer takes every `ExternCall.node` as it is. A per-operator whitelist has no producer basis, since
 every extern of every graph is recorded the same way. 66's current `lower_metal.py` raises "has no native consumer yet"

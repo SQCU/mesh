@@ -570,21 +570,30 @@ shasum -a 256 $SITE/torch/_inductor/compile_fx.py
 ## `torch-inductor-aot-lowered-result.patch`
 
 Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), on top of
-`torch-inductor-mps-kernel-operands.patch` (installed), `torch-inductor-upstream-composition.patch` and
-`torch-inductor-graph-lowering-factory.patch`, in that order. `graph.py` before is the composition patch's after, and
-`compile_fx.py` before is the factory patch's after. It is the original AOT compilation's lowered result:
-`compile_fx_aot` returns its GraphLowering after `GraphLowering.codegen`'s scheduler codegen. By then each backend's
-kernel codegen and `define_kernel` have run, so the kernel sources exist. The result is taken before the wrapper's
-`generate` (memory planning, FX conversion, wrapper source) and before any module or kernel is compiled or loaded. `compiler/mesh_compiler/lower_inductor.py` `_inductor`
-takes the producer's result through it. Fields:
-`output_data/compiler-workgroup-20261114/compiler/numerical68-result.md`.
+`torch-inductor-mps-kernel-operands.patch` (installed), `torch-inductor-upstream-composition.patch`,
+`torch-inductor-graph-lowering-factory.patch` and `torch-inductor-cpu-kernel-results.patch`, in that order.
+- `graph.py` and `mps.py` before are the composition patch's after.
+- `compile_fx.py` before is the factory patch's after.
+- `cpp.py` before is the cpu-kernel-results patch's after.
+- `cpp_template_kernel.py` and `common.py` before are upstream's.
+
+It is the original AOT compilation's lowered result. `compile_fx_aot` returns its GraphLowering after
+`GraphLowering.codegen`:
+- its scheduler codegen has run, so each backend's kernel codegen and `define_kernel` have run and the kernel sources
+  exist;
+- its wrapper's own `generate` has run: `run_wrapper_ir_passes` (memory planning as configured), then
+  `FxConverter.generate`.
+
+The converter is retained as `wrapper_code.fx_converter`. No selected CPU or MPS kernel is compiled or loaded: a C++
+definition is kept by name, not imported. `compiler/mesh_compiler/lower_inductor.py` `_inductor` takes the producer's
+result through it. Fields: `output_data/compiler-workgroup-20261114/compiler/numerical68-result.md`.
 
 ### What it changes
 
 - **`config.aot_inductor.lowered: bool = False`**: the operand that asks for the lowered result. With it False, every
   output is unchanged.
-- **`GraphLowering.codegen`**: with `lowered`, after `scheduler.codegen()` and its debug log, it does
-  `wrapper_code.pop_codegened_graph()` and returns `(self, None)`.
+- **`GraphLowering.codegen`**: with `lowered`, after its original `wrapper_code.generate(self.is_inference)` and
+  `pop_codegened_graph()`, it returns `(self, None)` in place of the generated result.
 - **`output_code.py` `LoweredAOTI(OutputCode)`**: a new dataclass, `graph` (the GraphLowering) and `device_type`. Its
   `post_compile` and `set_triton_bundle` do nothing, because there is no emitted callable to load.
 - **`compile_fx.py`**:
@@ -595,11 +604,66 @@ takes the producer's result through it. Fields:
   - `compile_fx_aot` returns `compiled_artifacts.graph` for a `LoweredAOTI`. Its annotation adds `GraphLowering`.
 - **`codegen/wrapper_fxir.py` `WrapperFxCodegen`**:
   - `lowered_subgraphs: dict` is set in `__init__`.
-  - `define_subgraph_launcher_fn`, under `lowered`, records each cond branch's own lowered `SubgraphLowering` there by
-    name.
+  - `define_subgraph_launcher_fn`, under `lowered`, keeps two things by name:
+    - each lifted control body's own lowered `SubgraphLowering`, in `lowered_subgraphs`;
+    - its converted graph, `subgraph_code.wrapper_code.fx_converter.gm`, in `subgms`. The converter's
+      `_generate_subgm_getattrs` reads `subgms`.
+  - `_generate` keeps its converter as `self.fx_converter` and then calls `generate()`.
+  - `codegen_while_loop(while_loop, stack_output)` and `codegen_invoke_subgraph(invoke_subgraph)` follow
+    `codegen_switch`: one `WhileLoopLine` or `InvokeSubgraphLine`, then `codegen_subgraph_common` for each body (a
+    while loop's cond, then its body). Upstream's form writes `str` scaffolding.
+- **`codegen/wrapper_fxir.py` `FxConverter`**:
+  - New fields:
+    - `line_nodes: list[tuple[WrapperLine, tuple[fx.Node, ...]]]`: each converted line in line order, with the nodes
+      its own conversion created, in graph order. A free, comment or null line has `()`.
+    - `definitions: dict[str, KernelDefinitionLine]`: each selected C++ kernel's definition, by its name.
+  - `_generate_kernel_definition` records a `gpu=False` definition in `definitions` and returns. Triton definitions
+    import as before.
+  - `_generate_kernel_call` sends a `triton=False` call to `_generate_selected_kernel_call`. That writes one node,
+    `call_function(selected_kernel_call, args=(kernel_name, *operands), kwargs=call_kwargs)`.
+    - Each operand is mapped as a Triton call's: `_lookup_args`, then `_generate_sym_node`, with `sympy.floor` as
+      `FloorDiv`.
+    - `selected_kernel_call` is a module function. Its value is `None`, as `triton_kernel_wrapper_mutation`'s. Its effect
+      is its writes to its operand buffers: on CPU the non-const pointer `arg_types` (`KernelArgs`' in-place and output
+      buffers), on MPS the `KernelArgs` output buffers.
+    - `torch.fx.node.has_side_effect` registers it as side-effectful, so `Node.is_impure` holds and dead code
+      elimination keeps the node.
+  - `_generate_while_loop` writes `torch.ops.higher_order.while_loop(cond, body, carried, additional,
+    mutated_arg_indices=...)`, or `while_loop_stack_output(cond, body, carried, additional)`.
+  - `_generate_invoke_subgraph` writes `torch.ops.higher_order.invoke_subgraph(subgraph, None, *inputs)`. Lowering drops
+    the identifier.
+  - Both control generators record the result under the ir node's name, as `_generate_switch` does.
+  - `_generate_extern_kernel_multi_out` calls `_generate_extern_kernel_common` for the out variant. Each
+    `out_variant_output_nodes` buffer is passed as its own `out_arg_names` keyword, and the result takes the node's name.
+  - `_generate_extern_kernel_common` takes `outs=()` for this.
+  - `_generate_extern_kernel_common` keeps upstream's `buffer_to_node`: a mutated input keeps its node and is not
+    rebound. Its mutation results are the ir node's own (`ExternKernel.get_outputs()`: `mutation_outputs` and
+    `alias_mutation_outputs`, each `MutationOutput`'s `mutation_names`, `get_defining_op()` and
+    `get_mutation_buffers()`, `AliasMutationOutput.physical`). They are reached through `line_nodes` (`line.node`).
   - `_generate_assert_scalar` converts an `AssertScalarLine` to `aten._assert_scalar`.
-- **`codegen/wrapper.py` `AssertScalarLine(WrapperLine)`**: `wrapper` and `node`. `codegen` writes the Python wrapper's
-  own form, and `codegen_fx` is the converter's `_generate_assert_scalar`.
+- **`codegen/wrapper.py`**:
+  - `AssertScalarLine(WrapperLine)`: `wrapper` and `node`. `codegen` writes the Python wrapper's own form, and
+    `codegen_fx` is the converter's `_generate_assert_scalar`.
+  - `WhileLoopLine(wrapper, node, stack_output)` and `InvokeSubgraphLine(wrapper, node)` follow `SwitchLine`.
+  - `ExternKernelMultiOutLine.codegen_fx` returns `_generate_extern_kernel_multi_out`. It used to inherit
+    `WrapperLine`'s, which raised.
+  - `KernelCallLine` gets two fields:
+    - `operands: tuple | None = None`: the call's operands as values, in call order.
+    - `call_kwargs: dict = {}`: its keyword operands.
+  - `generate_kernel_call(..., operands=None, call_kwargs=None)` passes both through.
+- **Selected call sites**:
+  - `common.py` `KernelArgs.cpp_argdefs` sets `self.cpp_call_operands`, a tuple with each call arg's own value,
+    appended where that call arg is:
+    - an in-place, input or output buffer's outer name;
+    - each size argument's sympy expression.
+
+    Its return is unchanged.
+  - `cpp.py` `KernelGroup.call_kernel` and `cpp_template_kernel.py` `CppTemplateKernel.call_kernel` pass
+    `operands=self.args.cpp_call_operands`, right after their own `cpp_argdefs()` call.
+  - `mps.py` `MetalKernel.call_kernel` passes `operands=tuple(typed[0])`. Its `call_kwargs` sets `threads` (grid),
+    `group_size` (group) and `error_buf_idx` (error), each only where its formatted argument is appended.
+- **`ir.py` `WhileLoop.create`**: `while_loop.mutated_arg_indices`, the body's mutated input indices it computes, in
+  the HOP's comma-separated form.
 - **`codegen/wrapper.py` `write_provenance_debug_handle`**: it calls `self.make_comment(...)` instead of
   `self.writeline(...)`, with the same text, `"{comment} [Provenance debug handles] {kernel_name}:{debug_handle}"`.
   - So the handle is a typed `CommentLine` (wrapper.py `make_comment`, the module's own comment producer), not a bare
@@ -621,14 +685,18 @@ takes the producer's result through it. Fields:
 | Item | Value |
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
-| `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `97e1a585cd0d0172ea014ff63d33f40d92cb619da608683eeaf15a1a1eceeadf` |
-| `torch/_inductor/config.py` | before `9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a`, after `f56964af7357aeaa5e1b601f00d94317251049856a4de6a12f6b378cd631ce1f` |
-| `torch/_inductor/graph.py` | before `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591`, after `c9b55b3c5167e89301496d79a8cc33aec467260e90287f81619cbe352ffdd17d` |
-| `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `60ad9e8aee38558011efeb7432803402de08bae2911cbb7f3062be247cede6c3` |
-| `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `10c6bb2bcdab8fc74ec85a76b061fcd4e32d40744bc22c76da4d854396c8aac3` |
-| `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` |
-| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `5a7a14678343e2d275ed817024f3ac3199e84610ac3ee37b72ff63851585c892` |
-| `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `2d87d9247e23640662bba136c899a274fa278d3c98da96b630810882c3fdaa2a` |
+| `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `8a2297669b140332a9ae0970a689927781f5ad40032d59ac5e8bde773f392cc3` (installed: `97e1a585…`, the previous after) |
+| `torch/_inductor/config.py` | before `9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a`, after `adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5` (installed: `f56964af…`) |
+| `torch/_inductor/graph.py` | before `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591`, after `d3a42366d4c7d600bbccb3645228f53c10e45d64a8a8e5fe7a12ccb29e794192` (installed: `c9b55b3c…`) |
+| `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `d642f883e0d783edcf4df3bf7b187903f71a24857ef5500e2fd03d28983ceca4` (installed: `60ad9e8a…`) |
+| `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `908714f17ecf9d2b54fd10e8fdfbd73966ae2ca29b2a41505806a8c25440667d` (installed: `10c6bb2b…`) |
+| `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` (unchanged) |
+| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d9d77265fd62a5debb212113250809b37704e1e6400ef747c68a8adbaf695e52` (installed: `5a7a1467…`) |
+| `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `bb30e4126c5f365b2bf9bf52b64dc7e8bbb0dbcff6337c5b25b690c2648a611a` (installed: `2d87d924…`) |
+| `torch/_inductor/codegen/common.py` | before `3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466` (upstream; installed), after `0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44` |
+| `torch/_inductor/codegen/cpp.py` | before `0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3` (`torch-inductor-cpu-kernel-results.patch`'s after; installed), after `c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2` |
+| `torch/_inductor/codegen/cpp_template_kernel.py` | before `b02db66a50404e4aa3ba5783238b95992be1041f74666cd9824cb0ac7cc397e9` (upstream; installed), after `960ecabf55f0533f5aeddbbae443d4eb90a070a97459eb251f52254db11ff2ce` |
+| `torch/_inductor/codegen/mps.py` | before `8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db` (`torch-inductor-upstream-composition.patch`'s after; installed), after `57ce3bc432400c7206f9909ad8ba4a0cfa60c2d848053189ca8c243bee380f2a` |
 | Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor at source revision `ba03a780` after the composition and factory patches: fuzz-0 dry run, application and AST check passed (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 3) |
 
 Installed: the supervisor checked the eight "before" hashes and ran a fuzz-0 dry run and application of the committed
@@ -639,15 +707,21 @@ dependency hash. Fuzz-0 dry run, application, reverse dry run and AST passed; st
 the commands and hashes. `wrapper.py` changed from `d667391a…` to the table's `5a7a1467…`; other dependencies stayed
 unchanged. The delta is one line: `self.writeline(` becomes `self.make_comment(` in `write_provenance_debug_handle`.
 
+Not installed yet: the converter-family revision (the table's "after" hashes). The installed files are the previous
+"after" hashes, given in parentheses in the table, plus the four newly listed files' "before" hashes. To install the
+delta, check those installed hashes, reverse the committed previous patch, then apply this one, each with fuzz 0.
+This patch file was checked in memory against the installed files and their reversed originals: fuzz-0 forward and
+reverse application is exact for every file, every "after" compiles, and no file has a new pyflakes finding.
+
 ### Apply, check, reverse
 
-From the repository root, after `torch-inductor-upstream-composition.patch` and
-`torch-inductor-graph-lowering-factory.patch`:
+From the repository root, after `torch-inductor-upstream-composition.patch`,
+`torch-inductor-graph-lowering-factory.patch` and `torch-inductor-cpu-kernel-results.patch`:
 
 ```sh
 SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
 I=$SITE/torch/_inductor
-F="$I/compile_fx.py $I/config.py $I/graph.py $I/ir.py $I/output_code.py $I/pattern_matcher.py $I/codegen/wrapper.py $I/codegen/wrapper_fxir.py"
+F="$I/compile_fx.py $I/config.py $I/graph.py $I/ir.py $I/output_code.py $I/pattern_matcher.py $I/codegen/wrapper.py $I/codegen/wrapper_fxir.py $I/codegen/common.py $I/codegen/cpp.py $I/codegen/cpp_template_kernel.py $I/codegen/mps.py"
 shasum -a 256 $F
 patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
 patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
@@ -655,6 +729,6 @@ shasum -a 256 $F
 ```
 
 - The first `shasum` must print the "before" hashes above, and the second the "after" hashes.
-- To reverse, reverse this patch before the factory and composition patches:
+- To reverse, reverse this patch before the cpu-kernel-results, factory and composition patches:
   `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch`.
 - This is pure Python source, so no rebuild is needed.

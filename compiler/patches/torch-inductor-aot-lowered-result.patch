@@ -15,7 +15,7 @@
 -                        if graph.aot_mode and graph.fx_wrapper:
 +                        if graph.aot_mode and config.aot_inductor.lowered:
 +                            # compiler/patches/torch-inductor-aot-lowered-result.patch:
-+                            # GraphLowering.codegen to its lowered result, before its wrapper's generate
++                            # GraphLowering.codegen to its lowered result, after its wrapper's generate
 +                            graph.codegen()
 +                        elif graph.aot_mode and graph.fx_wrapper:
                              if graph.cpp_wrapper:
@@ -64,34 +64,33 @@
                      "dynamo_flat_name_to_original_fqn"
 --- a/torch/_inductor/config.py
 +++ b/torch/_inductor/config.py
-@@ -2345,6 +2345,13 @@
+@@ -2344,6 +2344,13 @@
+     # autotuning. When False (default), tensors are shared across kernels
      # and del'd at their last consumer (faster but higher peak memory).
      autotune_per_kernel_alloc: bool = False
- 
++
 +    # compiler/patches/torch-inductor-aot-lowered-result.patch: the AOT compilation's result its lowered
 +    # result (output_code.py LoweredAOTI): its GraphLowering after GraphLowering.codegen's scheduler codegen (each
-+    # backend's kernel codegen and define_kernel, its kernel sources made), its wrapper's lines as written, before the
-+    # wrapper's generate (no memory planning, wrapper conversion or wrapper source) and before any module or kernel
-+    # compile or load; each control subgraph its own (fx_wrapper)
++    # backend's kernel codegen and define_kernel, its kernel sources made) and its wrapper's generate
++    # (run_wrapper_ir_passes, then FxConverter.generate: wrapper_fxir.py WrapperFxCodegen.fx_converter), with no
++    # selected CPU or MPS kernel compiled or loaded; each control subgraph its own (fx_wrapper)
 +    lowered: bool = False
-+
+ 
      # AOTInductor output path
      # If an absolute path is specified, the generated lib files will be stored under the directory;
-     # If a relative path is specified, it will be used as a subdirectory under the default caching path;
 --- a/torch/_inductor/graph.py
 +++ b/torch/_inductor/graph.py
-@@ -3050,6 +3050,11 @@
-                 V.graph.all_codegen_kernel_names,
-             )
+@@ -3052,6 +3052,10 @@
  
-+            # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, this graph
-+            # itself as its scheduler's codegen left it, before its wrapper's generate
-+            if config.aot_inductor.lowered:
-+                self.wrapper_code.pop_codegened_graph()
-+                return self, None
              result = self.wrapper_code.generate(self.is_inference)
              self.wrapper_code.pop_codegened_graph()
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, this graph
++            # itself after its wrapper's generate (wrapper_fxir.py WrapperFxCodegen.fx_converter)
++            if config.aot_inductor.lowered:
++                return self, None
              return result
+ 
+     def codegen_subgraph(self, parent_graph: GraphLowering) -> None:
 --- a/torch/_inductor/ir.py
 +++ b/torch/_inductor/ir.py
 @@ -9507,8 +9507,11 @@
@@ -108,6 +107,16 @@
          elif V.graph.cpp_wrapper:
              symbol_str = f"std::to_string({symbol})"
              sizevar = V.graph.wrapper_code.codegen_cpp_sizevar(
+@@ -11654,6 +11657,9 @@
+             body_fn.graph.module, fake_all_inputs
+         )[3]
+         mutated_idx_set = OrderedSet(mutated_idxs)
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: those indices as the while_loop HOP's own
++        # operand (mutated_arg_indices)
++        while_loop.mutated_arg_indices = ",".join(str(idx) for idx in mutated_idx_set)
+         mutated_inputs = [all_inputs[idx] for idx in mutated_idx_set]
+ 
+         # Create all outputs first
 --- a/torch/_inductor/output_code.py
 +++ b/torch/_inductor/output_code.py
 @@ -1169,6 +1169,31 @@
@@ -117,9 +126,9 @@
 +class LoweredAOTI(OutputCode):
 +    """
 +    compiler/patches/torch-inductor-aot-lowered-result.patch: an AOT compilation's lowered
-+    result (aot_inductor.lowered): `graph` its GraphLowering as GraphLowering.codegen's scheduler codegen left it (its
-+    backends' kernel sources made and defined), its wrapper's lines before generate; no wrapper source, and no module
-+    or kernel compiled or loaded. compile_fx_aot returns `graph`.
++    result (aot_inductor.lowered): `graph` its GraphLowering after GraphLowering.codegen (its backends' kernel sources
++    made and defined, its wrapper's generate run: wrapper_code.fx_converter); no selected CPU or MPS kernel compiled or
++    loaded. compile_fx_aot returns `graph`.
 +    """
 +
 +    graph: Any
@@ -185,7 +194,45 @@
          # Remove dead replacement nodes so they don't inflate user counts
 --- a/torch/_inductor/codegen/wrapper.py
 +++ b/torch/_inductor/codegen/wrapper.py
-@@ -617,6 +617,24 @@
+@@ -594,6 +594,37 @@
+         return converter._generate_switch
+ 
+ 
++# compiler/patches/torch-inductor-aot-lowered-result.patch: ir.WhileLoop under fx_wrapper, the whole node one line, as
++# SwitchLine (wrapper_fxir.py codegen_while_loop)
++@dataclasses.dataclass
++class WhileLoopLine(WrapperLine):
++    wrapper: PythonWrapperCodegen
++    node: ir.WhileLoop
++    stack_output: bool
++
++    def codegen(self, code: IndentedBuffer) -> None:
++        raise NotImplementedError("Only supports FX codegen")
++
++    @staticmethod
++    def codegen_fx(converter: FxConverter) -> FxConversionFunc:
++        return converter._generate_while_loop
++
++
++# compiler/patches/torch-inductor-aot-lowered-result.patch: ir.InvokeSubgraph under fx_wrapper, the whole node one
++# line, as SwitchLine (wrapper_fxir.py codegen_invoke_subgraph)
++@dataclasses.dataclass
++class InvokeSubgraphLine(WrapperLine):
++    wrapper: PythonWrapperCodegen
++    node: ir.InvokeSubgraph
++
++    def codegen(self, code: IndentedBuffer) -> None:
++        raise NotImplementedError("Only supports FX codegen")
++
++    @staticmethod
++    def codegen_fx(converter: FxConverter) -> FxConversionFunc:
++        return converter._generate_invoke_subgraph
++
++
+ @dataclasses.dataclass
+ class CommentLine(WrapperLine):
+     line: LineContext
+@@ -617,6 +648,24 @@
      @staticmethod
      def codegen_fx(converter: FxConverter) -> FxConversionFunc:
          return converter._generate_dynamic_scalar
@@ -210,7 +257,48 @@
  
  
  @dataclasses.dataclass
-@@ -4453,6 +4471,6 @@
+@@ -778,6 +827,10 @@
+ 
+         code.writeline(f"{node.get_name()} = {kernel_name}({', '.join(args)})")
+ 
++    # compiler/patches/torch-inductor-aot-lowered-result.patch: its conversion (WrapperLine's raised)
++    def codegen_fx(self, converter: FxConverter) -> FxConversionFunc:
++        return converter._generate_extern_kernel_multi_out
++
+ 
+ @dataclasses.dataclass
+ class FreeLine(WrapperLine):
+@@ -810,6 +863,11 @@
+     graph_name: str
+     original_fxnode_name: str
+     current_stream_idx: int | None = None
++    # compiler/patches/torch-inductor-aot-lowered-result.patch: a selected non-Triton call's own operands as values,
++    # in call order (buffer names, then scalar expressions), and its keyword operands (mps.py: threads, group_size,
++    # error_buf_idx); call_args their Python wrapper strings
++    operands: tuple[Any, ...] | None = None
++    call_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
+ 
+     def codegen(self, code: IndentedBuffer) -> None:
+         self.wrapper._generate_kernel_call_helper(
+@@ -4048,6 +4106,8 @@
+         triton_meta: TritonMeta | None = None,
+         inductor_meta=None,
+         original_fxnode_name=None,
++        operands=None,
++        call_kwargs=None,
+     ):
+         """
+         Generates kernel call code.
+@@ -4088,6 +4148,8 @@
+                 # pyrefly: ignore [bad-argument-type]
+                 original_fxnode_name=original_fxnode_name,
+                 current_stream_idx=current_stream_idx,
++                operands=operands,
++                call_kwargs=call_kwargs or {},
+             )
+         )
+ 
+@@ -4453,7 +4515,7 @@
          debug_handle: int | None = None,
      ):
          if debug_handle is not None:
@@ -218,9 +306,59 @@
 +            self.make_comment(
                  f"{self.comment} [Provenance debug handles] {kernel_name}:{debug_handle}"
              )
+ 
 --- a/torch/_inductor/codegen/wrapper_fxir.py
 +++ b/torch/_inductor/codegen/wrapper_fxir.py
-@@ -156,6 +156,9 @@
+@@ -26,6 +26,7 @@
+ from torch._inductor.virtualized import V
+ from torch._library.triton import wrap_triton
+ from torch.fx import GraphModule
++from torch.fx.node import has_side_effect
+ from torch.fx.experimental.symbolic_shapes import (
+     CallMethodKey,
+     ConvertIntKey,
+@@ -57,10 +58,12 @@
+     ExitDeviceContextManagerLine,
+     ExitSubgraphLine,
+     ExternKernelAllocLine,
++    ExternKernelMultiOutLine,
+     ExternKernelOutLine,
+     FreeIfNotReusedLine,
+     FreeLine,
+     IndexPutFallbackLine,
++    InvokeSubgraphLine,
+     KernelCallLine,
+     KernelDefinitionLine,
+     Line,
+@@ -75,6 +78,7 @@
+     SymbolicCallArg,
+     SymbolicCallArgLine,
+     UnbackedSymbolDefsLine,
++    WhileLoopLine,
+     WrapperLine,
+ )
+ 
+@@ -146,6 +150,19 @@
+     return expr.replace(sympy.floor, replace)
+ 
+ 
++@has_side_effect
++def selected_kernel_call(kernel_name: str, *operands: Any, **call_kwargs: Any) -> None:
++    """
++    compiler/patches/torch-inductor-aot-lowered-result.patch: the FX target of a selected non-Triton kernel's call
++    (KernelCallLine.triton False): `kernel_name` its kernel (a CPU kernel's definition FxConverter.definitions'),
++    `operands` and `call_kwargs` the call's own (KernelCallLine.operands, .call_kwargs) as graph values. Its value is
++    None, as triton_kernel_wrapper_mutation's: the call's effect is its writes to its operand buffers (cpu: its
++    non-const pointer arg_types, KernelArgs' in-place and output buffers; mps: its KernelArgs' output buffers), and
++    has_side_effect registers it as side-effectful (Node.is_impure), so dead code elimination keeps it. The lowered
++    result's consumer compiles and calls the kernel.
++    """
++
++
+ class WrapperFxCodegen(PythonWrapperCodegen):
+     """
+     Backend to generate wrapper code as an FX IR graph.
+@@ -156,6 +173,9 @@
      def __init__(self, *args: Any, **kwargs: Any):
          super().__init__(*args, **kwargs)
          self.subgms: dict[str, torch.fx.GraphModule] = {}
@@ -230,19 +368,153 @@
  
      def codegen_inputs(self) -> None:
          """
-@@ -178,6 +181,11 @@
+@@ -172,12 +192,35 @@
+         for subgraph in node.branches:  # pyrefly: ignore [not-iterable]
+             self.codegen_subgraph_common(subgraph)
+ 
++    def codegen_while_loop(self, while_loop: ir.WhileLoop, stack_output: bool) -> None:
++        """
++        compiler/patches/torch-inductor-aot-lowered-result.patch: as codegen_switch, the whole loop one line, its cond
++        and body subgraphs each lowered on its own.
++        """
++        self.writeline(WhileLoopLine(self, while_loop, stack_output))
++        for subgraph in (while_loop.cond_subgraph, while_loop.body_subgraph):
++            self.codegen_subgraph_common(subgraph)
++
++    def codegen_invoke_subgraph(self, invoke_subgraph: ir.InvokeSubgraph) -> None:
++        """
++        compiler/patches/torch-inductor-aot-lowered-result.patch: as codegen_switch, the whole call one line, its
++        subgraph lowered on its own.
++        """
++        self.writeline(InvokeSubgraphLine(self, invoke_subgraph))
++        self.codegen_subgraph_common(invoke_subgraph.subgraph)
++
+     def define_subgraph_launcher_fn(
+         self, name: str, subgraph_code: ValueWithLineMap | FileBackedGraphModule
+     ) -> None:
          """
          Record subgms as they're generated.
          """
 +        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the
-+        # subgraph's GraphLowering (GraphLowering.codegen's result), never converted
++        # subgraph's GraphLowering (GraphLowering.codegen's result) and its converted graph
 +        if config.aot_inductor.lowered:
 +            self.lowered_subgraphs[name] = subgraph_code
++            self.subgms[name] = subgraph_code.wrapper_code.fx_converter.gm
 +            return
          if not isinstance(subgraph_code, FileBackedGraphModule):
              raise AssertionError(
                  f"expected FileBackedGraphModule, got {type(subgraph_code)}"
-@@ -819,6 +827,14 @@
+@@ -214,14 +257,17 @@
+                 self.header.getvalue(),
+             ]
+         )
+-        gm = FxConverter(
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the converter itself, the wrapper's converted
++        # result (its gm, line_nodes and definitions)
++        self.fx_converter = FxConverter(
+             lines=self.lines,
+             prologue=prologue,
+             graph_inputs=self.get_fx_graph_inputs(),
+             graph_outputs=self.get_graph_outputs(),
+             subgms=self.subgms,
+             is_subgraph=self.is_subgraph,
+-        ).generate()
++        )
++        gm = self.fx_converter.generate()
+ 
+         compiled_fn = self.compile_graph(gm)
+ 
+@@ -310,6 +356,11 @@
+         self._unique_symbol_ids: Counter[str] = Counter()
+         self.tracer = torch.fx.proxy.GraphAppendingTracer(graph)
+         self.expr_to_proxy: dict[sympy.Expr, torch.fx.Proxy] = {}
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: each WrapperLine converted, in line order, with the
++        # nodes its own conversion created, in graph order (none for a line making no node: a free, comment or null
++        # line, a hash-consed expression's later use), and each selected non-Triton kernel's definition by its name
++        self.line_nodes: list[tuple[WrapperLine, tuple[torch.fx.Node, ...]]] = []
++        self.definitions: dict[str, KernelDefinitionLine] = {}
+ 
+     def _import_kernel(self, code: str, kernel_name: str) -> CachingAutotuner:
+         """
+@@ -655,7 +706,9 @@
+             # Generate FX IR from Wrapper IR lines.
+             for line in self.lines:
+                 if isinstance(line, WrapperLine):
++                    last = next(reversed(self.gm.graph.nodes), None)
+                     line.codegen_fx(self)(line)
++                    self.line_nodes.append((line, self._created_after(last)))
+                 elif isinstance(line, LineContext):
+                     # Ignore line context in FX IR.
+                     pass
+@@ -676,6 +729,18 @@
+         self.gm.graph.output(output)
+         self.gm.recompile()
+         return self.gm
++
++    def _created_after(self, last: torch.fx.Node | None) -> tuple[torch.fx.Node, ...]:
++        """
++        compiler/patches/torch-inductor-aot-lowered-result.patch: the graph's nodes after `last` (every node when
++        None), in graph order.
++        """
++        created = []
++        for node in reversed(self.gm.graph.nodes):
++            if node is last:
++                break
++            created.append(node)
++        return tuple(reversed(created))
+ 
+     def _sympy_interp(self, expr: sympy.Expr) -> torch.fx.Proxy:
+         # hash cons
+@@ -812,6 +877,48 @@
+             )
+         self._record_allocation(ir_node, fx_node)
+ 
++    def _generate_while_loop(self, line: WhileLoopLine) -> None:
++        """
++        compiler/patches/torch-inductor-aot-lowered-result.patch: the loop as its HOP (while_loop, or
++        while_loop_stack_output, whose call has no mutated_arg_indices) of its cond and body subgraphs, its carried
++        and additional inputs and the body's mutated inputs (ir.py WhileLoop.create), its result recorded as
++        _generate_switch's.
++        """
++        ir_node = line.node
++        if line.stack_output:
++            hop, kwargs = torch.ops.higher_order.while_loop_stack_output, {}
++        else:
++            hop = torch.ops.higher_order.while_loop
++            kwargs = {"mutated_arg_indices": ir_node.mutated_arg_indices}
++        fx_node = self.gm.graph.call_function(
++            hop,
++            args=(
++                self._get_subgm_attr(ir_node.cond_subgraph),
++                self._get_subgm_attr(ir_node.body_subgraph),
++                tuple(self._generate_buffer(arg) for arg in ir_node.carried_inputs),
++                tuple(self._generate_buffer(arg) for arg in ir_node.additional_inputs),
++            ),
++            kwargs=kwargs,
++        )
++        self._record_allocation(ir_node, fx_node)
++
++    def _generate_invoke_subgraph(self, line: InvokeSubgraphLine) -> None:
++        """
++        compiler/patches/torch-inductor-aot-lowered-result.patch: the call as the invoke_subgraph HOP of its subgraph
++        and its inputs, its identifier None (lowering.py invoke_subgraph receives and drops it), its result recorded
++        as _generate_switch's.
++        """
++        ir_node = line.node
++        fx_node = self.gm.graph.call_function(
++            torch.ops.higher_order.invoke_subgraph,
++            args=(
++                self._get_subgm_attr(ir_node.subgraph),
++                None,
++                *(self._generate_buffer(arg) for arg in ir_node.inputs),
++            ),
++        )
++        self._record_allocation(ir_node, fx_node)
++
+     def _generate_assert_size_stride(self, line: WrapperLine) -> None:
+         pass
+ 
+@@ -819,6 +926,14 @@
          if not isinstance(line, CommentLine):
              raise AssertionError(f"expected CommentLine, got {type(line)}")
          # We ignore comments in FX IR.
@@ -257,3 +529,208 @@
  
      def _generate_dynamic_scalar(self, line: WrapperLine) -> None:
          if not isinstance(line, DynamicScalarLine):
+@@ -1269,8 +1384,22 @@
+         out_node = node.output_view if node.output_view else node
+         self._generate_extern_kernel_common(node, out_node)
+ 
++    def _generate_extern_kernel_multi_out(self, line: ExternKernelMultiOutLine) -> None:
++        """
++        compiler/patches/torch-inductor-aot-lowered-result.patch: the call of its out variant
++        (ExternKernelMultiOut.op_overload), each output buffer its own out argument (out_arg_names,
++        out_variant_output_nodes), its result the node's name, as its Python line's.
++        """
++        node = line.node
++        self._generate_extern_kernel_common(
++            node, node, tuple(zip(node.out_arg_names, node.out_variant_output_nodes))
++        )
++
+     def _generate_extern_kernel_common(
+-        self, kernel: ir.ExternKernel, out_ir_node: ir.IRNode
++        self,
++        kernel: ir.ExternKernel,
++        out_ir_node: ir.IRNode,
++        outs: Sequence[tuple[str, ir.IRNode]] = (),
+     ) -> None:
+         """
+         Generates FX IR from either ExternKernelAlloc or ExternKernelOut.
+@@ -1306,7 +1435,8 @@
+         fx_node = self.gm.graph.call_function(
+             kernel.op_overload,  # type: ignore[arg-type]
+             args=args,
+-            kwargs=kwargs,
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: with each out variant output's buffer
++            kwargs={**kwargs, **{name: self.buffer_to_node[out.get_name()] for name, out in outs}},
+         )
+ 
+         # Assign the result to the given name.
+@@ -1322,13 +1452,21 @@
+         if not isinstance(line, KernelCallLine):
+             raise AssertionError(f"expected KernelCallLine, got {type(line)}")
+         if not line.triton:
+-            raise NotImplementedError("FX conversion only supports Triton kernels.")
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: a selected non-Triton kernel's call
++            self._generate_selected_kernel_call(line)
++            return
+ 
+         self._generate_triton_call(line)
+ 
+     def _generate_kernel_definition(self, line: WrapperLine) -> None:
+         if not isinstance(line, KernelDefinitionLine):
+             raise AssertionError(f"expected KernelDefinitionLine, got {type(line)}")
++
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: a selected non-Triton (gpu False, C++) kernel's
++        # definition, the converter's by its kernel name for its calls; not imported
++        if not line.gpu:
++            self.definitions[line.kernel_name] = line
++            return
+ 
+         # Generate code for the kernel.
+         kernel_code = PythonWrapperCodegen._format_kernel_definition(
+@@ -1339,6 +1477,26 @@
+         tuner = self._import_kernel(kernel_code, line.kernel_name)
+         wrapped = wrap_triton(tuner.fn)
+         self.kernels[line.kernel_name] = TritonKernel(tuner, wrapped)
++
++    def _generate_selected_kernel_call(self, line: KernelCallLine) -> None:
++        """
++        compiler/patches/torch-inductor-aot-lowered-result.patch: one selected_kernel_call node of the call's kernel
++        name, operands and keyword operands, each operand mapped as a Triton call's (_lookup_args, then
++        _generate_sym_node, sympy.floor as FloorDiv).
++        """
++
++        def generate(value: Any) -> Any:
++            if isinstance(value, (list, tuple)):
++                return [generate(item) for item in value]
++            if isinstance(value, sympy.Expr):
++                value = replace_floor_div(value)
++            return self._generate_sym_node(value)
++
++        self.gm.graph.call_function(
++            selected_kernel_call,
++            args=(line.kernel_name, *generate(self._lookup_args(line.operands))),
++            kwargs={key: generate(value) for key, value in line.call_kwargs.items()},
++        )
+ 
+     def _generate_symbolic_call_arg(self, line: WrapperLine) -> None:
+         if not isinstance(line, SymbolicCallArgLine):
+--- a/torch/_inductor/codegen/common.py
++++ b/torch/_inductor/codegen/common.py
+@@ -1885,6 +1885,9 @@
+         call_args = []
+         arg_defs = []
+         arg_types = []
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: each call arg's own value, made with it (a
++        # buffer's outer name, a size argument's expression), as self.cpp_call_operands
++        call_operands = []
+         for inplaced in unique(self.inplace_buffers.values()):
+             if isinstance(inplaced, RemovedArg):
+                 continue
+@@ -1894,6 +1897,7 @@
+             cpp_dtype = dtype_to_cpp_type[dtype]
+             arg_defs.append(f"{cpp_dtype}* {inner}")
+             call_args.append(self.wrap_ptr_arg(outer, dtype))
++            call_operands.append(outer)
+             arg_types.append(f"{cpp_dtype}*")
+         for outer, inner in self.input_buffers.items():
+             if outer in self.inplace_buffers:
+@@ -1902,6 +1906,7 @@
+             cpp_dtype = dtype_to_cpp_type[dtype]
+             arg_defs.append(f"const {cpp_dtype}* {inner}")
+             call_args.append(self.wrap_ptr_arg(outer, dtype))
++            call_operands.append(outer)
+             arg_types.append(f"const {cpp_dtype}*")
+         for outer, maybe_inner in self.output_buffers.items():
+             if outer in self.inplace_buffers or isinstance(maybe_inner, RemovedArg):
+@@ -1910,6 +1915,7 @@
+             cpp_dtype = dtype_to_cpp_type[dtype]
+             arg_defs.append(f"{cpp_dtype}* {maybe_inner}")
+             call_args.append(self.wrap_ptr_arg(outer, dtype))
++            call_operands.append(outer)
+             arg_types.append(f"{cpp_dtype}*")
+         for outer, inner in self.sizevars.items():
+             if isinstance(outer, sympy.Symbol) and symbol_is_type(
+@@ -1921,10 +1927,12 @@
+                 arg_defs.append(f"const {INDEX_TYPE} {inner}")
+                 arg_types.append(f"const {INDEX_TYPE}")
+             call_args.append(self.wrap_size_arg(outer))
++            call_operands.append(outer)
+             if V.graph.wrapper_code:
+                 V.graph.wrapper_code.ensure_size_computed(outer)
+         if self.workspace_args:
+             raise AssertionError("Workspace not supported on CPU ")
++        self.cpp_call_operands = tuple(call_operands)
+         return arg_defs, call_args, arg_types
+ 
+     def python_argdefs(
+--- a/torch/_inductor/codegen/cpp.py
++++ b/torch/_inductor/codegen/cpp.py
+@@ -6216,6 +6216,8 @@
+             call_args,
+             triton=False,
+             arg_types=arg_types,
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: cpp_argdefs' own call operands
++            operands=self.args.cpp_call_operands,
+         )
+ 
+ 
+--- a/torch/_inductor/codegen/cpp_template_kernel.py
++++ b/torch/_inductor/codegen/cpp_template_kernel.py
+@@ -121,7 +121,14 @@
+     def call_kernel(self, name: str, node: ir.CppTemplateBuffer):
+         wrapper = V.graph.wrapper_code
+         _, call_args, arg_types = self.args.cpp_argdefs()
+-        wrapper.generate_kernel_call(name, call_args, triton=False, arg_types=arg_types)
++        wrapper.generate_kernel_call(
++            name,
++            call_args,
++            triton=False,
++            arg_types=arg_types,
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: cpp_argdefs' own call operands
++            operands=self.args.cpp_call_operands,
++        )
+ 
+     def dtype(self, node: ir.Buffer) -> str:
+         return DTYPE_TO_CPP[node.get_dtype()]
+--- a/torch/_inductor/codegen/mps.py
++++ b/torch/_inductor/codegen/mps.py
+@@ -1189,11 +1189,15 @@
+             else None
+         )
+         typed = (list(values), list(arg_types))
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the call's keyword operands as values, each
++        # where its formatted argument is appended
++        call_kwargs: dict[str, Any] = {}
+         if len(active) > 0:
+             threads = [expr_printer(t) for t in grid]
+ 
+             args.append(format_threads(threads, "threads"))
+             arg_types.append(list)
++            call_kwargs["threads"] = grid
+         else:
+             if V.graph.cpp_wrapper:
+                 raise RuntimeError("We should always have threads?")
+@@ -1202,6 +1206,7 @@
+             threads = [expr_printer(t) for t in group]
+             args.append(format_threads(threads, "group_size"))
+             arg_types.append(list)
++            call_kwargs["group_size"] = group
+         else:
+             if V.graph.cpp_wrapper:
+                 # Add a None so that we always have a group_size in the
+@@ -1216,6 +1221,7 @@
+             # its index the count of the ordered typed arguments, each positional
+             error = len(typed[0])
+             args.append(f"error_buf_idx={error}")
++            call_kwargs["error_buf_idx"] = error
+ 
+         # compiler/patches/torch-inductor-mps-kernel-operands.patch: each call's record (the kernel, its launch as
+         # produced: kernel name, ordered argument values and types, grid, threadgroup and error buffer index) in
+@@ -1228,6 +1234,8 @@
+             device=torch.device("mps"),
+             triton=False,
+             arg_types=arg_types,
++            operands=tuple(typed[0]),
++            call_kwargs=call_kwargs,
+         )
+ 
+     def device_assert_async(self, cond: CSEVariable, msg: str) -> None:

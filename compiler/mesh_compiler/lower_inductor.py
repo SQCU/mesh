@@ -230,11 +230,13 @@ class Kernel:
 # among them; ir.WhileLoop cond_subgraph, body_subgraph, carried_inputs, additional_inputs, outputs and stack_output;
 # ir.InvokeSubgraph subgraph, inputs and outputs; ir.Switch selector, operands, outputs and branches), `graph` the
 # GraphLowering it was called in, `scheduler` that scheduler, `lines` every wrapper line its codegen wrote, the line
-# objects themselves in order (upstream's control scaffolding among them as its own str lines), `inlined` each control
-# body inlining that codegen made, in order (Inlined; while_loop: its cond before the loop, its body, its cond at the
-# loop's end), `lifted` each control body that codegen lowered on its own, in order (Lifted; a Switch's branches under
-# fx_wrapper). One call's codegen makes one kind: a Switch lifts (wrapper_fxir.py codegen_switch), while_loop and
-# invoke_subgraph inline (wrapper.py, aot_mode)
+# objects themselves in order, as written (before run_wrapper_ir_passes: memory planning replaces an AllocateLine,
+# FreeIfNotReusedLine or ReuseLine in wrapper_code.lines; the planned lines with the nodes each converted to are
+# wrapper_code.fx_converter.line_nodes), `inlined` each control body inlining that codegen made, in order (Inlined),
+# `lifted` each control body that codegen lowered on its own, in order (Lifted). Under fx_wrapper every control body
+# lifts (wrapper_fxir.py codegen_switch, codegen_while_loop and codegen_invoke_subgraph: one SwitchLine, WhileLoopLine
+# or InvokeSubgraphLine, then each body's codegen_subgraph_common; torch-inductor-aot-lowered-result.patch), so
+# `inlined` is empty: a Switch's branches, a while_loop's cond then body and an invoke_subgraph's body are in `lifted`
 @dataclasses.dataclass(frozen=True, eq=False)
 class ExternCall:
     node: object
@@ -259,13 +261,15 @@ class Inlined:
 
 
 # one control body lowered on its own (wrapper.py codegen_subgraph_common: the body's own GraphLowering.codegen under
-# its graph handler, its lowered result wrapper_fxir.py lowered_subgraphs[graph.name]): `graph` its SubgraphLowering
-# (the ir node's branch's graph, Switch.branches[b].graph), `scheduler` the Scheduler of that codegen, `wrapper` its own
-# wrapper (wrapper_fxir.py SubgraphFxWrapperCodegen, its parent_wrapper its parent's: its lines, launched_kernels and
-# lowered_subgraphs), `externs`
+# its graph handler, its wrapper's generate included; its lowered result wrapper_fxir.py lowered_subgraphs[graph.name],
+# its converted graph the parent converter's subgms[graph.name], a get_attr its control node's HOP takes): `graph` its
+# SubgraphLowering (Switch.branches[b].graph, WhileLoop.cond_subgraph.graph and body_subgraph.graph,
+# InvokeSubgraph.subgraph.graph), `scheduler` the Scheduler of that codegen, `wrapper` its own wrapper (wrapper_fxir.py
+# SubgraphFxWrapperCodegen, its parent_wrapper its parent's: its lines, launched_kernels, lowered_subgraphs and
+# fx_converter), `externs`
 # its scheduler's ExternCall records. A body is lowered once per wrapper (codegen_subgraph_common's
-# already_codegened_subgraphs): a later Switch of the same branch graph calls the one lowered by name, its ExternCall's
-# `lifted` empty, its branch's graph the same object as this record's
+# already_codegened_subgraphs): a later control node of the same body graph calls the one lowered by name, its
+# ExternCall's `lifted` without it, its body's graph the same object as this record's
 @dataclasses.dataclass(frozen=True, eq=False)
 class Lifted:
     graph: object
@@ -304,9 +308,10 @@ class Model:
 # one processor body's returned upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
 # `body` the adapted copy the upstream compiler traced (its graph and its control bodies' the provenance roots),
 # `sources` {(id(copy graph), copy node name): original node}, `sent` the original sent values in output order, `graph`
-# compile_fx_aot's own result (aot_inductor.lowered: output_code.py LoweredAOTI's GraphLowering after its scheduler's
-# codegen, before its wrapper's generate: buffers, layouts and aliases, graph_inputs, graph_outputs, mutated_inputs,
-# never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its lines and lowered_subgraphs;
+# compile_fx_aot's own result (aot_inductor.lowered: output_code.py LoweredAOTI's GraphLowering after GraphLowering.codegen,
+# its scheduler's codegen and its wrapper's generate: buffers, layouts and aliases, graph_inputs, graph_outputs,
+# mutated_inputs, never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its planned lines,
+# lowered_subgraphs and fx_converter: gm, line_nodes, definitions, buffer_to_node, expr_to_proxy, subgm_getattrs;
 # None for the Neural Engine), `signature` the AOT export's GraphSignature of that graph (graph.module.meta; Neural
 # Engine: ExportedProgram.graph_signature), `kernels` {id(KernelCallLine): Kernel} over its wrapper and every subgraph
 # wrapper (every selected-backend kernel call: an mps kernel's, a cpu group's and a cpu template's), `externs` its
@@ -772,8 +777,8 @@ def _template(owner, launch, line, graph, scheduler, produced, nodes, sources):
 PLACED = {MeshMetalKernel: _mps, MeshKernelGroup: _cpu, CppTemplateKernel: _template}
 
 
-# a graph's wrapper and each cond branch's own (wrapper_fxir.py lowered_subgraphs); an inlined control body
-# (while_loop, invoke_subgraph in aot_mode) writes into its parent's
+# a graph's wrapper and each lifted control body's own (wrapper_fxir.py lowered_subgraphs: a Switch's branches, a
+# while_loop's cond and body, an invoke_subgraph's body)
 def _wrappers(graph):
     yield graph.wrapper_code
     for lowered in graph.wrapper_code.lowered_subgraphs.values():
@@ -816,8 +821,8 @@ def _placeholders(graph):
 # run_pre_grad_passes, aot_export_module under unlift_effect_tokens, _unlift_graph, its inference compiler's joint and
 # post-grad passes, compile_fx_inner without the empty-graph bailout or cache), at its scheduled placeholders' fake
 # values under no_grad, `graph_lowering` MeshLowering (the selected backends). config_patches: fx_wrapper (its wrapper
-# lines typed, cpp_wrapper off), aot_inductor.lowered (its lowered result: the GraphLowering after its scheduler's
-# codegen, its backends' kernel sources made, before its wrapper's generate and any module or kernel compile or load),
+# lines typed, cpp_wrapper off), aot_inductor.lowered (its lowered result: the GraphLowering after GraphLowering.codegen,
+# its backends' kernel sources made and its wrapper's generate run, no selected CPU or MPS kernel compiled or loaded),
 # schedule-emit's assume_unaligned_fallback_output for a receiving body, and trace.provenance_tracking_level 1 (every
 # rewrite's REPLACE sources)
 def _inductor(module, body, sources, sent, processor, kind, device):
