@@ -9,7 +9,7 @@
  
  import torch
  from torch._dynamo.utils import dynamo_timed
-@@ -2312,6 +2312,49 @@
+@@ -2312,6 +2312,51 @@
      return name, dir
  
  
@@ -24,8 +24,10 @@
 +    assembly (CppBuilder._command_parts, which get_command_line joins) makes it and build() realizes it.
 +    """
 +
-+    # its whole command, its compiler executable first: each assembled part's words in order, as
-+    # _run_compile_cmd's shlex.split of get_command_line() makes them
++    # its whole command: each assembled part's words in order, as _run_compile_cmd's shlex.split of
++    # get_command_line() makes them. Its first word is its compiler as the builder was given it (a name, a path or a
++    # wrapper), not resolved here: _run_compile_cmd's subprocess.run resolves it by its own executable search, with
++    # the environment it inherits (`environment`) and in `working_directory`.
 +    command: list[str]
 +    # the positions in `command` of its source operands, each source file as given (its basename under
 +    # use_relative_path)
@@ -59,7 +61,7 @@
  class CppBuilder:
      """
      CppBuilder is a cpp jit builder, and it supports both Windows, Linux and MacOS.
-@@ -2408,14 +2451,20 @@
+@@ -2408,14 +2453,20 @@
          if _IS_WINDOWS and self._precompiling:
              raise AssertionError("Cannot currently precompile headers on Windows!")
  
@@ -80,7 +82,7 @@
          self._target_file = os.path.join(self._output_dir, f"{self._name}{file_ext}")
  
          relative_target_file = (
-@@ -2423,14 +2472,19 @@
+@@ -2423,14 +2474,19 @@
              if self._use_relative_path
              else self._target_file
          )
@@ -103,7 +105,7 @@
  
          if isinstance(sources, str):
              sources = [sources]
-@@ -2442,20 +2496,23 @@
+@@ -2442,20 +2498,23 @@
              self._orig_source_paths = list(sources)
              sources = [os.path.basename(i) for i in sources]
  
@@ -129,7 +131,7 @@
  
          for cflag in BuildOption.get_cflags():
              if _IS_WINDOWS:
-@@ -2514,54 +2571,99 @@
+@@ -2514,54 +2573,99 @@
          ):
              self._passthrough_parameters_args += f"{passthrough_arg} "
  
@@ -273,7 +275,7 @@
  
      def _stage_passthrough_paths(self, args: list[str]) -> list[str]:
          """For fbcode remote builds, treat any absolute file path that appears
-@@ -2676,9 +2778,7 @@
+@@ -2676,9 +2780,7 @@
              # remote build uses relative path
              return self.build_fbcode_re()
          _create_if_dir_not_exist(self._output_dir)
@@ -284,7 +286,7 @@
          _create_if_dir_not_exist(_build_tmp_dir)
  
          build_cmd = self.get_command_line()
-@@ -2916,7 +3016,7 @@
+@@ -2916,7 +3018,7 @@
              f.write(contents)
  
  
@@ -293,7 +295,7 @@
      def get_asm_compiler() -> str:
          if _IS_WINDOWS:
              ASM_CC = "ml64"
-@@ -2944,3 +3044,6 @@
+@@ -2944,3 +3046,6 @@
          target=normalize_path_separator(target),
      )
      run_compile_cmd(cmd, cwd=normalize_path_separator(cwd))
@@ -328,7 +330,7 @@
      CppBuilder,
      CppOptions,
      CppTorchDeviceOptions,
-@@ -2631,6 +2641,54 @@
+@@ -2631,6 +2641,72 @@
          return cls.cache.keys()
  
  
@@ -340,7 +342,10 @@
 +    object_builder's whole action, `assembly` the command run_asm_build_object ran in its place
 +    in `directory` (use_consts_asm_build off, zero-size constants; None: `action` built it), `postprocessed` whether
 +    its constants' data was then written over the object's magic number (large constants under
-+    use_consts_asm_build), `object` its object file
++    use_consts_asm_build), `object` its object file and `object_bytes` that file's content as built and
++    postprocessed, read here once: `object`'s name comes from its source's key (aot_inductor.
++    model_name_for_generated_files, else its source's hash) and the postprocessed data is not part of it, so a later
++    compile under the same name rebuilds that file
 +    """
 +
 +    code: str
@@ -350,6 +355,7 @@
 +    directory: str
 +    postprocessed: bool
 +    object: str
++    object_bytes: bytes
 +
 +
 +class AotCompiled(NamedTuple):
@@ -365,7 +371,16 @@
 +    kernel's, constants' and gpu kernels', with its target, link inputs and their resolution, product, directories,
 +    working directory and environment), `extern_kernel_nodes` the serialized extern kernel nodes it was given (its
 +    proxy executor's call table, written beside `wrapper` as its .json; None: none), `generated_files` the files it
-+    generated
++    generated. `wrapper_code` and `kernel_code` are the content compile gave those two files: write's content, then
++    its appended compile and link commands. write leaves a file that already exists under its key as it was, so this
++    content, not the file at `wrapper` or `kernel`, is each object action's source as given. `model_class` is its
++    wrapper's own aoti_model_class_name (CppWrapperCpu: AOTInductorModel, suffixed by
++    aot_inductor.model_name_for_generated_files without dynamic_linkage), the class its run_impl is defined on.
++    `model_header` and `model_header_code` are the class's header as compile wrote it without dynamic_linkage
++    (model.h with that class named; its wrapper's #include "<suffix>.h" names it) and that header's content; both are ""
++    with dynamic_linkage, where its wrapper inlines aoti_runtime/interface.cpp instead. Its stage is after its
++    wrapper's print: the body's planned lines and its planner's result before that print are its graph's
++    wrapper_code's (torch-inductor-aot-lowered-result.patch), not this result's.
 +    """
 +
 +    wrapper: str
@@ -378,12 +393,17 @@
 +    link: CppBuildAction
 +    extern_kernel_nodes: str | None
 +    generated_files: list[str | Weights]
++    wrapper_code: str
++    kernel_code: str
++    model_class: str
++    model_header: str
++    model_header_code: str
 +
 +
  class AotCodeCompiler:
      """
      Compile AOT Inductor generated code.
-@@ -2646,10 +2704,11 @@
+@@ -2646,10 +2722,11 @@
          *,
          device_type: str,
          additional_files: list[str],
@@ -396,7 +416,7 @@
          """
          generated_files: list[str | Weights] = additional_files  # type: ignore[assignment]
  
-@@ -2805,7 +2864,7 @@
+@@ -2805,7 +2882,7 @@
              specified_sub_dir.mkdir(exist_ok=True)
          cmake_path = str(Path(specified_sub_dir) / "CMakeLists.txt")
  
@@ -405,7 +425,7 @@
              # Load from aot_inductor, and update the value on demand.
              use_asm_build: bool = config.aot_inductor.use_consts_asm_build
  
-@@ -2969,8 +3028,12 @@
+@@ -2969,8 +3046,12 @@
                  BuildOption=object_build_options,
              )
              consts_o = object_builder.get_target_file_path()
@@ -419,7 +439,15 @@
              else:
                  object_builder.build()
  
-@@ -2997,7 +3060,15 @@
+@@ -2994,10 +3075,24 @@
+                         rc = f.write(consts[pos:])
+                         pos += rc
+ 
++            # compiler/patches/torch-inductor-cpp-build-result.patch: the constants object as built and
++            # postprocessed, its bytes
++            with open(consts_o, "rb") as f:
++                object_bytes = f.read()
++
              # Remove the .S file to save space
              os.remove(consts_s)
  
@@ -432,11 +460,12 @@
 +                str(consts_s.parent),
 +                is_large_consts and use_asm_build,
 +                consts_o,
++                object_bytes,
 +            )
  
          from torch.utils._filelock import FileLock
  
-@@ -3185,23 +3256,29 @@
+@@ -3185,23 +3280,29 @@
              )
  
              # potentially, precompile the AOT header for this device
@@ -468,7 +497,7 @@
  
              wrapper_builder = CppBuilder(
                  name=str(wrapper_path_operator.stem),
-@@ -3235,7 +3312,9 @@
+@@ -3235,7 +3336,9 @@
                  wrapper_builder.save_compile_cmd_to_cmake(cmake_path, device_type)
                  wrapper_builder.save_src_to_cmake(cmake_path, wrapper_path)
                  generated_files.append(cmake_path)
@@ -479,7 +508,7 @@
                  try:
                      wrapper_builder.build()
                  except (exc.CppCompileError, SkipFrame) as e:
-@@ -3266,7 +3345,8 @@
+@@ -3266,7 +3369,8 @@
                  )
                  aot_constants = struct.pack("qq", consts_size + 8, magic_number)
  
@@ -489,10 +518,34 @@
              custom_obj_idx = 0
              # Note that custom_objs_config.json file is different from the model_constants_config.json file produced
              # in package_sigmoid(). The keys in custom_objs_config.json directly correspond to the arg name in extern
-@@ -3495,6 +3575,21 @@
-                 f.write(f"// Compile cmd\n// {kernel_compile_cmd}\n")
-                 f.write(f"// Link cmd\n// {link_cmd}\n")
+@@ -3485,15 +3589,42 @@
+             log.debug("aot linkage command: %s", link_cmd)
  
+             # Append cmds to the end of codegen-ed wrapper file
++            # (compiler/patches/torch-inductor-cpp-build-result.patch: each file's appended text, kept)
++            wrapper_appended = (
++                "\n"
++                f"// Compile cmd\n// {wrapper_compile_cmd}\n"
++                f"// Link cmd\n// {link_cmd}\n"
++            )
+             with open(wrapper_path, "a") as f:
+-                f.write("\n")
+-                f.write(f"// Compile cmd\n// {wrapper_compile_cmd}\n")
+-                f.write(f"// Link cmd\n// {link_cmd}\n")
+-
++                f.write(wrapper_appended)
++
++            kernel_appended = (
++                "\n"
++                f"// Compile cmd\n// {kernel_compile_cmd}\n"
++                f"// Link cmd\n// {link_cmd}\n"
++            )
+             with open(kernel_path, "a") as f:
+-                f.write("\n")
+-                f.write(f"// Compile cmd\n// {kernel_compile_cmd}\n")
+-                f.write(f"// Link cmd\n// {link_cmd}\n")
++                f.write(kernel_appended)
++
 +            # compiler/patches/torch-inductor-cpp-build-result.patch: aot_inductor.lowered, its result
 +            if config.aot_inductor.lowered:
 +                return AotCompiled(
@@ -506,12 +559,16 @@
 +                    so_builder.get_build_action(),
 +                    serialized_extern_kernel_nodes,
 +                    generated_files,
++                    wrapper_code + wrapper_appended,
++                    kernel_code + kernel_appended,
++                    graph.wrapper_code.aoti_model_class_name,
++                    header_path,
++                    header_code,
 +                )
-+
+ 
              if config.aot_inductor.package_cpp_only:
                  linker_flags = str(
-                     wrapper_path_operator.with_name(
-@@ -3684,12 +3779,40 @@
+@@ -3684,12 +3815,42 @@
  _VEC_ISA_CPP_SOURCE_MARKERS = ("at::vec::", "prod_masked_reduce(")
  
  
@@ -519,11 +576,13 @@
 +class PrecompiledHeader(NamedTuple):
 +    """
 +    compiler/patches/torch-inductor-cpp-build-result.patch: a header's precompilation
-+    (_precompiled_header), its dependency actions in order as each ran: `preprocessing` its preprocessor's action (in
-+    its own temporary directory, removed after it), `checksum` the command over that action's output, `digest` its digest (the
-+    preprocessing's retained result, taken before its temporary directory's removal), which names `path`, the header file written under _HEADER_DIR (its -include), `precompiling` its precompile action
-+    (_worker_compile_cpp under `lock`: not run where its product already exists). Each ran here; its products, `path`
-+    and `precompiling`'s target, persist under _HEADER_DIR; its preprocessing's output does not (it is retained only as `digest`).
++    (_precompiled_header), its dependency actions in order as each ran. `preprocessing` is its preprocessor's action,
++    run in its own temporary directory; that directory and its output are removed after it. `checksum` is the
++    command over that output, and `digest` is that command's result, taken before the removal. The digest is all
++    that is kept of the preprocessing: its output is not retained, and no later action reads it. `digest` names
++    `path`, the header file written under _HEADER_DIR (its -include). `precompiling` is its precompile action
++    (_worker_compile_cpp under `lock`: not run where its product already exists). Each ran here. Its products, `path`
++    and `precompiling`'s target, persist under _HEADER_DIR.
 +    """
 +
 +    header: str
@@ -553,7 +612,7 @@
      if _IS_WINDOWS:
          raise AssertionError(
              "CppBuilder does not currently support precompiling on Windows!"
-@@ -3715,18 +3838,19 @@
+@@ -3715,18 +3876,19 @@
              sources=str(preprocessing_header),
              BuildOption=CppTorchDeviceOptions(**compile_command, preprocessing=True),
          )
@@ -579,7 +638,7 @@
  
      header_build_option = CppTorchDeviceOptions(**compile_command, precompiling=True)
      header_hash, header_full_path = write(
-@@ -3747,12 +3871,18 @@
+@@ -3747,12 +3909,18 @@
      # _worker_compile_cpp will automatically ignore any compilation whose result already
      # exists, so this is always safe.
      os.makedirs(_HEADER_LOCK_DIR, exist_ok=True)

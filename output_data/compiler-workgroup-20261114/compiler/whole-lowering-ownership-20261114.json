@@ -970,5 +970,37 @@
       "per-result axis operand and original seeded state consumer remain incomplete"
     ],
     "runtime": "none; native138 matched separately; current source incomplete"
+  },
+  "planned_return_review_20261115": {
+    "staged_lower_inductor_sha256": "7a25549b44eea3582a0e929c287d9ecfdd42491c36c3fb2b6ada7a63202c7c25",
+    "dependency_after_sha256": {
+      "torch/_inductor/codecache.py": "83409729b8f8f1c29cfb6e2fdfe82871a8ffa94e118309a78e7b8d94414b8ae8",
+      "torch/_inductor/codegen/common.py": "0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44",
+      "torch/_inductor/codegen/cpp.py": "c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2",
+      "torch/_inductor/codegen/cpp_template_kernel.py": "960ecabf55f0533f5aeddbbae443d4eb90a070a97459eb251f52254db11ff2ce",
+      "torch/_inductor/codegen/mps.py": "57ce3bc432400c7206f9909ad8ba4a0cfa60c2d848053189ca8c243bee380f2a",
+      "torch/_inductor/codegen/wrapper.py": "c504b6a9862b7cabb76c27207eb9e0c1c407b31559d181e5aebce47979c768f9",
+      "torch/_inductor/codegen/wrapper_fxir.py": "1b9b5e525c9822cc3fd8df0e05acbb6713e013f6c0badec4bac9e7dd4c281131",
+      "torch/_inductor/compile_fx.py": "0a1460a62a59ac0a7877ebcf3aa5327e1a36447063ff041dded7f7925db23556",
+      "torch/_inductor/config.py": "adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5",
+      "torch/_inductor/cpp_builder.py": "fa98d76f45751abb6cf88bd8cb1e48d6fd8a0defe16077090185b229279a963a",
+      "torch/_inductor/graph.py": "2c83b47f9e25b956fbfea16d44702eb7b4637b47d92cc9bd641960191646d0a2",
+      "torch/_inductor/ir.py": "e53a6377ff2a9d7678d639dedccbbf662d946367a6dac1be0f83ab29a10ebfa7",
+      "torch/_inductor/lowering.py": "5869663abf8440cbc4d11688acce36d080904ed6b96038028d4fb4e88291a394",
+      "torch/_inductor/output_code.py": "8a468b93162b105ff963868bd6fd5a5b0a2f985d5eb0b9fc0e14caca2ed0f7d5",
+      "torch/_inductor/pattern_matcher.py": "e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441"
+    },
+    "forward_reverse_exact": true,
+    "ast_pass": true,
+    "added_pyflakes_count": 0,
+    "installed": false,
+    "unfinished": [
+      "const graph continuation",
+      "generation context and lifetime",
+      "same original owner across multiple configured rows",
+      "supplied binding consumption and original borrowed entry",
+      "static class identity across composed owners"
+    ],
+    "driver_state": "original tensor references retained; detach removed after attach consumer review"
   }
 }

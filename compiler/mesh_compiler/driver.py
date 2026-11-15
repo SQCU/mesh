@@ -94,7 +94,7 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
         for group in modules[key]:
             compilation[key, group] = dict(
                 targets=targets, kinds=exported.state_kinds,
-                sources={name: tensor.detach() for name, (_, tensor) in exported.state.items()},
+                sources={name: tensor for name, (_, tensor) in exported.state.items()},
                 wires=declared[key].wires(machines[group]), output_roles=roles if group == groups[produced] else (),
                 generator=Generator(words.clone()), machines=_machines() if group == entry else None)
     # design/compilation-composition-change-request.md, numerical lowerer boundary: the complete scheduled operand

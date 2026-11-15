@@ -306,19 +306,23 @@ class Model:
 # one processor body's returned upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
 # `body` the adapted copy the upstream compiler traced (its graph and its control bodies' the provenance roots),
 # `sources` {(id(copy graph), copy node name): original node}, `sent` the original sent values in output order, `graph`
-# compile_fx_aot's own result's GraphLowering (aot_inductor.lowered: output_code.py LoweredAOTI.graph, after compile_fx's
-# original AOT branch's codegen_with_cpp_wrapper: its scheduler's codegen and its own wrapper_code's (CppWrapperCpu or
-# CppWrapperMps) emitted wrapper and kernel code; buffers, layouts and aliases, graph_inputs, graph_outputs,
-# mutated_inputs, never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its lines;
+# compile_fx_aot's own result's GraphLowering (aot_inductor.lowered: output_code.py LoweredAOTI.graph, at compile_fx's
+# original AOT branch's planned stage: its scheduler's codegen run, its own wrapper_code's (CppWrapperCpu or
+# CppWrapperMps) lines planned by its wrapper IR passes, none printed, its planner's result owner wrapper_code.
+# memory_planner or wrapper_code.past_planning_states; buffers, layouts and aliases, graph_inputs, graph_outputs,
+# mutated_inputs, never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its planned lines;
 # None for the Neural Engine), `signature` the AOT export's GraphSignature of that graph (graph.module.meta; Neural
 # Engine: ExportedProgram.graph_signature), `kernels` {id(KernelCallLine): Kernel} over its wrapper and every subgraph
 # wrapper (every selected-backend kernel call: an mps kernel's, a cpu group's and a cpu template's), `externs` its
 # scheduler's ExternCall records in emission order, every control body's reached through them (ExternCall.inlined and
 # .lifted, each with its own ExternCalls, nested), `seeds` the Seeds of the root graph and of every body graph made
-# under it, `model` the Neural Engine's Model, `compiled` LoweredAOTI.compiled: AotCodeCompiler.compile's AotCompiled
-# (torch-inductor-cpp-build-result.patch: its wrapper and kernel sources, their object actions, their precompiled
-# headers' and its constants object's actions as run, its link action, its extern kernel nodes; none of its wrapper's or
-# kernel's objects compiled, its shared library not linked), None for the Neural Engine
+# under it, `model` the Neural Engine's Model, `lowered` the LoweredAOTI itself (None for the Neural Engine): its
+# `planned` lines (graph.wrapper_code.lines) and its resumption, lowered.emit(supplied), which resumes its wrapper's
+# print with the supplied operands for that stage (wrapper_code.supplied) and then compile_fx's AOT emission. Its result
+# is lowered.compiled, AotCodeCompiler.compile's AotCompiled (torch-inductor-cpp-build-result.patch: its wrapper and
+# kernel sources, their object actions, their precompiled headers' and its constants object's actions as run, its
+# link action, its extern kernel nodes; none of its wrapper's or kernel's objects compiled, its shared library not
+# linked), None until emitted
 @dataclasses.dataclass(eq=False)
 class Produced:
     processor: str
@@ -336,7 +340,7 @@ class Produced:
     externs: tuple
     seeds: tuple
     model: object
-    compiled: object = None
+    lowered: object = None
 
     # each original body node of FX nodes `nodes` (an IR node's get_origins(), a program's nodes), in order
     def origins(self, nodes):
@@ -822,9 +826,10 @@ def _placeholders(graph):
 # run_pre_grad_passes, aot_export_module under unlift_effect_tokens, _unlift_graph, its inference compiler's joint and
 # post-grad passes, compile_fx_inner without the empty-graph bailout or cache), at its scheduled placeholders' fake
 # values under no_grad, `graph_lowering` MeshLowering (the selected backends), its wrapper compile_fx_aot's own
-# selection (no fx_wrapper: cpp_wrapper). config_patches: aot_inductor.lowered (its lowered result, LoweredAOTI: its
-# GraphLowering after compile_fx's original AOT branch's codegen_with_cpp_wrapper, and AotCodeCompiler.compile's
-# AotCompiled, its build actions; no object compiled, no library linked or loaded), schedule-emit's
+# selection (no fx_wrapper: cpp_wrapper). config_patches: aot_inductor.lowered (its lowered result, LoweredAOTI, at
+# compile_fx's original AOT branch's planned stage: its GraphLowering with its wrapper's lines planned and none
+# printed, and its resumption to the wrapper's print and AotCodeCompiler.compile's AotCompiled, its build actions; no
+# object compiled, no library linked or loaded), schedule-emit's
 # assume_unaligned_fallback_output for a receiving body, and trace.provenance_tracking_level 1 (every rewrite's
 # REPLACE sources)
 def _inductor(module, body, sources, sent, processor, kind, device):
@@ -847,7 +852,7 @@ def _inductor(module, body, sources, sent, processor, kind, device):
               for k, node in enumerate(returned + sent)),
         {id(record[2]): PLACED[type(record[0])](*record, sources)
          for wrapper in _wrappers(graph) for record in wrapper.__dict__.get("launched_kernels", ())},
-        tuple(graph.scheduler.mesh_externs), _seeds(graph, sources), None, lowered.compiled)
+        tuple(graph.scheduler.mesh_externs), _seeds(graph, sources), None, lowered)
 
 
 # the Neural Engine's upstream compiler over one adapted body (its control bodies adapted by _copied): each received
@@ -1088,7 +1093,8 @@ def composed(kernel, made):
 
 
 # metal_ir.h struct metal_ir_upstream_emission. No pass has a build of its own: (), (), None, (), None, (), None.
-# A CPU kernel's build is its body's, Produced.compiled (AotCompiled, compiler/patches/torch-inductor-cpp-build-result.patch):
+# A CPU kernel's build is its body's, Produced.lowered.compiled once emitted (AotCompiled,
+# compiler/patches/torch-inductor-cpp-build-result.patch):
 # the original AOT kernel_builder's compile_only object action over its kernel code, with its wrapper's, its
 # precompiled headers', its constants object's and its link actions (cpp_builder.py CppBuildAction, each whole: its
 # command, its source, target and link operand positions from their own assembled parts, product, directories, working
@@ -1116,7 +1122,7 @@ class Emission:
 # template's composed pass needs its own upstream hook, cpp_template_kernel.py CppTemplateKernel.def_kernel and its
 # body's opening, which no patch has yet: numerical68-result.md); its parameters its call's arguments in
 # cpp_argdefs order (each at its own slot; its buffers, inplace, input and output, the bound pointer, its sizevars after
-# them the value) and the composition's. Its build is its body's (Emission; Produced.compiled).
+# them the value) and the composition's. Its build is its body's (Emission; Produced.lowered.compiled).
 def emitted(kernel, composition=None):
     owner = kernel.owner
     if kernel.place == "cpu":

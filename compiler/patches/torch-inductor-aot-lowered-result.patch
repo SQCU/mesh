@@ -8,24 +8,157 @@
      OutputCode,
  )
  from torch._inductor.runtime.cache_dir_utils import cache_dir
-@@ -1863,6 +1864,16 @@
+@@ -777,6 +778,24 @@
+         return config.patch(graph_partition=False)
+     else:
+         return contextlib.nullcontext()
++
++
++@contextlib.contextmanager
++def _virtualized_as(handlers: dict[str, Any]) -> Generator[None, None, None]:
++    """
++    compiler/patches/torch-inductor-aot-lowered-result.patch: this thread's virtualized handlers (V) set to
++    `handlers`, a copy of virtualized.threadlocal's own attributes as they were, then restored to their prior ones
++    """
++    from .virtualized import threadlocal
++
++    prior = dict(vars(threadlocal))
++    vars(threadlocal).clear()
++    vars(threadlocal).update(handlers)
++    try:
++        yield
++    finally:
++        vars(threadlocal).clear()
++        vars(threadlocal).update(prior)
+ 
+ 
+ def fake_tensor_prop(
+@@ -1709,46 +1728,70 @@
+                                 raise AssertionError(
+                                     "AOT mode only supports C++ wrapper"
+                                 )
+-                            wrapper_code, kernel_code = graph.codegen_with_cpp_wrapper()
+-                            output_code_log.debug(
+-                                "AOT wrapper code: \n%s", wrapper_code.value
+-                            )
+-                            if kernel_code.value:
++
++                            # compiler/patches/torch-inductor-aot-lowered-result.patch: this branch's emission from
++                            # its codegen's result, the one emission for both the direct path and the planned stage's
++                            # resumption
++                            def aot_compiled(wrapper_code: Any, kernel_code: Any) -> Any:
+                                 output_code_log.debug(
+-                                    "AOT kernel code:\n%s", kernel_code.value
++                                    "AOT wrapper code: \n%s", wrapper_code.value
+                                 )
+-
+-                            serialized_extern_kernel_nodes = None
+-                            if V.extern_kernel_nodes:
+-                                serialized_extern_kernel_nodes = (
+-                                    graph.extern_node_serializer(V.extern_kernel_nodes)
+-                                )
+-                                output_code_log.debug(
+-                                    "Serialized Extern Kernel Nodes: \n%s",
+-                                    serialized_extern_kernel_nodes,
+-                                )
+-
+-                            with dynamo_timed(
+-                                "AotCodeCompiler.compile", log_pt2_compile_event=True
+-                            ):
+-                                # Directly return the file path with the compiled code
+-                                compiled_fn = AotCodeCompiler.compile(
+-                                    graph,
+-                                    wrapper_code.value,
+-                                    kernel_code.value,
+-                                    serialized_extern_kernel_nodes,
+-                                    device_type=graph.device_type,
+-                                    additional_files=[
+-                                        *dict.fromkeys(
+-                                            graph.wrapper_code.additional_files
+-                                            + (
+-                                                const_graph.wrapper_code.additional_files
+-                                                if const_graph
+-                                                else []
++                                if kernel_code.value:
++                                    output_code_log.debug(
++                                        "AOT kernel code:\n%s", kernel_code.value
++                                    )
++
++                                serialized_extern_kernel_nodes = None
++                                if V.extern_kernel_nodes:
++                                    serialized_extern_kernel_nodes = (
++                                        graph.extern_node_serializer(V.extern_kernel_nodes)
++                                    )
++                                    output_code_log.debug(
++                                        "Serialized Extern Kernel Nodes: \n%s",
++                                        serialized_extern_kernel_nodes,
++                                    )
++
++                                with dynamo_timed(
++                                    "AotCodeCompiler.compile", log_pt2_compile_event=True
++                                ):
++                                    # Directly return the file path with the compiled code
++                                    return AotCodeCompiler.compile(
++                                        graph,
++                                        wrapper_code.value,
++                                        kernel_code.value,
++                                        serialized_extern_kernel_nodes,
++                                        device_type=graph.device_type,
++                                        additional_files=[
++                                            *dict.fromkeys(
++                                                graph.wrapper_code.additional_files
++                                                + (
++                                                    const_graph.wrapper_code.additional_files
++                                                    if const_graph
++                                                    else []
++                                                )
+                                             )
+-                                        )
+-                                    ],
+-                                )
++                                        ],
++                                    )
++                            # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered.
++                            # Codegen returns its planned stage (GraphLowering.codegen: its wrapper's planned lines,
++                            # before any line prints). That stage is returned with its resumption, which runs under
++                            # this thread's config and virtualized handlers as they are at that stage: its codegen
++                            # resumed with the supplied operands (GraphLowering.resumed_codegen), then this branch's
++                            # emission.
++                            if config.aot_inductor.lowered:
++                                from .virtualized import threadlocal
++
++                                planned = graph.codegen_with_cpp_wrapper()
++                                configured = config.get_config_copy()
++                                handlers = dict(vars(threadlocal))
++
++                                def resumed(supplied: Any) -> Any:
++                                    with config.patch(configured), _virtualized_as(handlers):
++                                        return aot_compiled(*graph.resumed_codegen(supplied))
++
++                                compiled_fn = resumed
++                            else:
++                                compiled_fn = aot_compiled(*graph.codegen_with_cpp_wrapper())
+                         else:
+                             compiled_module = graph.compile_to_module()
+                             compiled_fn = compiled_module.call
+@@ -1863,6 +1906,16 @@
  
                      # pyrefly: ignore [unbound-name]
                      if V.aot_compilation:
 +                        # compiler/patches/torch-inductor-aot-lowered-result.patch:
-+                        # aot_inductor.lowered, the lowered result itself: its graph after the original AOT
-+                        # branch's codegen_with_cpp_wrapper, and AotCodeCompiler.compile's AotCompiled
-+                        # (torch-inductor-cpp-build-result.patch)
++                        # aot_inductor.lowered, the lowered result itself: its graph at the original AOT
++                        # branch's planned stage, its planned lines and its resumption (LoweredAOTI.emit)
 +                        if config.aot_inductor.lowered:
 +                            return LoweredAOTI(
 +                                graph=graph,
 +                                device_type=graph.device_type,
-+                                compiled=compiled_fn,
++                                planned=planned,
++                                resume=compiled_fn,
 +                            )
                          if not isinstance(
                              compiled_fn,
                              # pyrefly: ignore [unbound-name]
-@@ -2239,7 +2250,7 @@
+@@ -2239,7 +2292,7 @@
      example_inputs_: list[InputType],
      inner_compile: _CompileFxCallable = compile_fx_inner,
      config_patches: dict[str, Any] | None = None,
@@ -34,7 +167,7 @@
      if not isinstance(model_, GraphModule):
          raise AssertionError(f"Expected GraphModule, got {type(model_)}: {model_}")
  
-@@ -2298,6 +2309,10 @@
+@@ -2298,6 +2351,10 @@
              config_patches=config_patches,
          )
  
@@ -45,7 +178,7 @@
          if not isinstance(compiled_artifacts, CompiledAOTI):
              raise AssertionError(
                  f"Expected CompiledAOTI, got {type(compiled_artifacts)}"
-@@ -3279,6 +3294,9 @@
+@@ -3279,6 +3336,9 @@
                              node.meta["val"] = target
  
              unlifted_gm = _unlift_graph(model_, gm, graph_signature)
@@ -71,6 +204,29 @@
  
      # AOTInductor output path
      # If an absolute path is specified, the generated lib files will be stored under the directory;
+--- a/torch/_inductor/graph.py
++++ b/torch/_inductor/graph.py
+@@ -3051,8 +3051,20 @@
+             )
+ 
+             result = self.wrapper_code.generate(self.is_inference)
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: under aot_inductor.lowered, `result` is its
++            # wrapper's planned stage (a const graph's is its emitted code, PythonWrapperCodegen._generate);
++            # resumed_codegen ends codegen after that stage's resumed print
++            if config.aot_inductor.lowered and not self.is_const_graph:
++                return result
+             self.wrapper_code.pop_codegened_graph()
+             return result
++
++    def resumed_codegen(self, supplied: Any) -> tuple[ValueWithLineMap, ValueWithLineMap]:
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: codegen's planned stage resumed. Its wrapper's
++        # print takes `supplied` (PythonWrapperCodegen.resume_generation), then codegen's own end runs.
++        result = self.wrapper_code.resume_generation(supplied)
++        self.wrapper_code.pop_codegened_graph()
++        return result
+ 
+     def codegen_subgraph(self, parent_graph: GraphLowering) -> None:
+         """
 --- a/torch/_inductor/ir.py
 +++ b/torch/_inductor/ir.py
 @@ -9507,8 +9507,11 @@
@@ -153,23 +309,33 @@
  
 --- a/torch/_inductor/output_code.py
 +++ b/torch/_inductor/output_code.py
-@@ -1169,6 +1169,34 @@
+@@ -1169,6 +1169,44 @@
  
  
  @dataclasses.dataclass
 +class LoweredAOTI(OutputCode):
 +    """
 +    compiler/patches/torch-inductor-aot-lowered-result.patch: an AOT compilation's lowered
-+    result (aot_inductor.lowered), at compile_fx's original AOT branch (cpp_wrapper): `graph` its GraphLowering after
-+    codegen_with_cpp_wrapper (its backends' kernels made, its wrapper's and kernel's code emitted by its own
-+    wrapper_code), `compiled` AotCodeCompiler.compile's AotCompiled (torch-inductor-cpp-build-result.patch: its
-+    object, header, constants and link actions, its wrapper's and kernel's objects not compiled, its shared library
-+    not linked). compile_fx_aot returns it.
++    result (aot_inductor.lowered), at compile_fx's original AOT branch (cpp_wrapper), at its codegen's planned stage.
++    `graph` is its GraphLowering: its backends' kernels are made, and its wrapper_code's lines are planned by its
++    wrapper IR passes, with its planner's result owner held (wrapper_code.memory_planner or
++    wrapper_code.past_planning_states). None of its lines is printed. `planned` is those planned lines
++    (wrapper_code.lines). `resume` is its resumption (compile_fx's): its codegen resumed with the supplied operands,
++    then the branch's emission, under the config and virtualized handlers as they were at that stage. `compiled` is
++    its emission's result once emitted (AotCodeCompiler.compile's AotCompiled, torch-inductor-cpp-build-result.patch),
++    None before. compile_fx_aot returns it.
 +    """
 +
 +    graph: Any
 +    device_type: str
-+    compiled: Any
++    planned: Any
++    resume: Any
++    compiled: Any = None
++
++    def emit(self, supplied: Any) -> Any:
++        # its planned stage resumed, its print given `supplied`: its emission's result
++        self.compiled = self.resume(supplied)
++        return self.compiled
 +
 +    def post_compile(
 +        self,
@@ -317,7 +483,78 @@
  
      def codegen(self, code: IndentedBuffer) -> None:
          self.wrapper._generate_kernel_call_helper(
-@@ -4048,6 +4106,8 @@
+@@ -2537,6 +2595,27 @@
+             self.header.splice(kernel_defs)
+ 
+     def _generate(self, is_inference):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the original generation (_generation) to its
++        # planned stage. Under aot_inductor.lowered it returns that stage, its planned lines, and resume_generation
++        # resumes it. Otherwise it resumes at once, as does a const graph's, whose emitted code its main graph's
++        # GraphLowering takes (compile_fx: const_wrapper_code, const_kernel_code).
++        self.generation = self._generation(is_inference)
++        planned = next(self.generation)
++        if config.aot_inductor.lowered and not V.graph.is_const_graph:
++            return planned
++        return self.resume_generation(None)
++
++    def resume_generation(self, supplied):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the held generation resumed at its planned stage,
++        # given `supplied`, the operands its print takes for that stage (held as self.supplied; None from
++        # _generate): its print of its planned lines and its sections' assembly. Returns its result.
++        self.supplied = supplied
++        try:
++            next(self.generation)
++        except StopIteration as generated:
++            return generated.value
++
++    def _generation(self, is_inference):
+         if config.profile_bandwidth:
+             self.write_triton_header_once()
+ 
+@@ -2548,6 +2627,10 @@
+                 self.generate_start_graph()
+ 
+             self.run_wrapper_ir_passes(is_inference)
++
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: its planned stage, after its wrapper IR passes
++            # (its memory plan) and before any line prints: its planned lines
++            yield self.lines
+ 
+             if config.triton.store_cubin and not config.triton.autotune_at_compile_time:
+                 self.generate_reset_kernel_saved_flags()
+@@ -2678,7 +2761,10 @@
+     def memory_plan(self):
+         from .memory_planning import MemoryPlanner
+ 
+-        self.lines = MemoryPlanner(self).plan(self.lines)
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the planner itself, kept as its result's owner
++        # (its buffer groups, allocations and live ranges; each PoolMemoryPlanningLine's group is one of them)
++        self.memory_planner = MemoryPlanner(self)
++        self.lines = self.memory_planner.plan(self.lines)
+ 
+     def memory_plan_reuse(self):
+         outputs = self.get_graph_outputs()
+@@ -2716,6 +2802,9 @@
+             raise AssertionError(
+                 f"expected no remaining planning states, got {len(planning_states)}"
+             )
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: each scope's planning state, kept as its reuse
++        # result's owner, in the order its scope exited (the root's last)
++        self.past_planning_states = past_planning_states
+ 
+         # conservatively use the sum of all allocated buffer sizes
+         # in potentially nested scopes as the total allocated size
+@@ -2725,6 +2814,9 @@
+         )
+ 
+     def run_wrapper_ir_passes(self, is_inference: bool):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the owner of its planner's result, whichever
++        # plans: memory_plan's MemoryPlanner or memory_plan_reuse's planning states (the other stays None)
++        self.memory_planner = self.past_planning_states = None
+         # We disable planning during training because it presently increases peak memory consumption.
+         if is_inference and config.memory_planning:
+             self.memory_plan()
+@@ -4048,6 +4140,8 @@
          triton_meta: TritonMeta | None = None,
          inductor_meta=None,
          original_fxnode_name=None,
@@ -326,7 +563,7 @@
      ):
          """
          Generates kernel call code.
-@@ -4088,6 +4148,8 @@
+@@ -4088,6 +4182,8 @@
                  # pyrefly: ignore [bad-argument-type]
                  original_fxnode_name=original_fxnode_name,
                  current_stream_idx=current_stream_idx,
@@ -335,7 +572,7 @@
              )
          )
  
-@@ -4453,7 +4515,7 @@
+@@ -4453,7 +4549,7 @@
          debug_handle: int | None = None,
      ):
          if debug_handle is not None:
