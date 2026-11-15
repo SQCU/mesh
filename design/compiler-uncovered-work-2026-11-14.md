@@ -43,6 +43,7 @@ particular revisions and inputs.
 | Retirement of those published functions | [`distributed-multipage-1-retirement.json`](../output_data/compiler-workgroup-20261114/executor/distributed-multipage-1-retirement.json) | Five nodes returned to zero publications and full reported capacity with the same bridge processes. |
 | Final native public bindings for state and aliases | [`bound99-outer-state.json`](../output_data/compiler-workgroup-20261114/executor/bound99-outer-state.json), recorded by `a3bcca69` | Two calls over two invocations, zero recorded numerical error, updated state, retained attribute/returned aliases, stride 2 and offset 3. |
 | Placed output geometry and saved public result bindings | [`materialized-output-native.json`](../output_data/compiler-workgroup-20261114/frontends/materialized-output-native.json), recorded by `a1e7a6fb`; source `0b638912` | Direct and saved invocation have zero recorded numerical error; a broadcast result retains shape [5,8], strides [0,1], offset 0 and 16-byte backing; the other result aliases the caller input. Reload preserves the signature, creates fresh result storage and restores two calls without solving their relation. This instance has no mutation, nonzero result offset or conditional execution. |
+| Cost observation source handoff | Metal `a3cb5621`, Mesh `c613b7cd` | Original residue slices retain their own timing sample and issued count; the consumer distinguishes samples from estimated total duration and avoids charging later twins as full numerical occurrences. Strict syntax, AST/lint and diff checks passed. Matching runtime chooser observation remains pending. |
 | Withdrawn received-matmul special path | Integration item 5's named implementation and test are absent from the current metal tree | The deletion is completed history. Its old item is removed from the active request. |
 
 The graph, allocation, routing, archive and bridge mechanisms exercised here are existing work. Their new compiler
@@ -68,18 +69,30 @@ reviewed in the lowering rules and their composition, rather than inferred from 
 |---|---|---|
 | Native consumers of numerical conditional regions | Complete the compiled GPU span selection and indirect arguments, one produced span plan consumed by command emission, and joined completion; lower the same conditional bodies for CPU and ANE | [`native-switch106.status.md`](../output_data/compiler-workgroup-20261114/executor/native-switch106.status.md), currently titled native-switch112, lists unfinished source. Source scalar branches/region ownership are committed in `d4e7f120`/`a00eb204`; matched native execution is unfinished. Composition 2/4–7, capture 9, source lowering 2/6. |
 | Numerical target coverage | Complete source/primitive lowering and its composition across AOT A1's domain on each assigned processor. Located unfinished cases include ANE exact word operations, binary64/complex lowering, and numerical conditions, convergence and driver semantics | [`ane-bitcast-review.json`](../output_data/compiler-workgroup-20261114/executor/ane-bitcast-review.json) records construction status 22 before invocation; [`spectral-contract-review.md`](../output_data/compiler-workgroup-20261114/compiler/spectral-contract-review.md) records source-review limits. Source lowering 5/6 and composition's software arithmetic. |
-| Execution-cost inputs | Complete actual-work and repeat-multiplicity coverage in the existing observation/cost path | `7d34092d` already retains supplied fixed work alongside share-dependent coefficients. [`integration-cost-filters.status.md`](../output_data/compiler-workgroup-20261114/integration-cost-filters.status.md) records that correction. AOT A3, unequal-shards 6/7/14, integration 3. |
+| Execution-cost inputs | Observe the committed per-residue sample/count connection through the existing chooser after the matching build | Metal `a3cb5621`/Mesh `c613b7cd` retain issued multiplicity and sample-based estimated costs. `7d34092d` retains supplied fixed work alongside share-dependent coefficients, satisfying the explicit task-weight input contract. Automatic scaling limits remain stated below. AOT A3, unequal-shards 6/7/14, integration 3. |
 | Signature and domain-wide integration | Carry new emitted operations and completion through the retained signature relation and the shared compiler consumers for Torch-export and typed LiteRT programs. Existing clients observe explicit properties of those transformations | Synchronization 1–6, integration 1/2/7, composition's domain-wide integration clause. Matching the native consumers and establishing lowering coverage remain outstanding. |
 
 CPU native execution already exists. The first row concerns its conditional-region consumer, together with the
 GPU and ANE consumers. The remaining work is identified by the produced value and its consumer, rather than by
 inventing a separate CPU runtime or reimplementing the transport algorithms.
 
+The automatic cost path uses known Work as a size-scaling proxy calibrated by the full sampled duration. Unknown
+arithmetic and conditional inner execution limit that estimate; a unit with no counted Work has no inferred speed.
+These are model limits, not a requirement to count every dynamic primitive. At inspected OpenXLA
+`07a0913ccb9c2a2818dcfc302eb2b18cfbe9fd32`,
+[`HloCostAnalysis::HandleWhile`/`HandleConditional`](https://github.com/openxla/xla/blob/07a0913ccb9c2a2818dcfc302eb2b18cfbe9fd32/xla/service/hlo_cost_analysis.cc#L1415)
+estimate one loop iteration and per-property branch maxima;
+[`GpuHloCostAnalysis`](https://github.com/openxla/xla/blob/07a0913ccb9c2a2818dcfc302eb2b18cfbe9fd32/xla/service/gpu/model/gpu_hlo_cost_analysis.cc#L347)
+uses approximate operation costs. [Lastovetsky et al., arXiv:1109.3074v1, §2](https://arxiv.org/pdf/1109.3074v1)
+uses computation units and measured times to form partial speed estimates. Supplied task costs remain the explicit
+weight operand; no new primitive-counting or tracing unit follows from the unknown markers alone. This qualification
+does not narrow numerical/target coverage or complete the pending runtime observation.
+
 ### Request accounting
 
 | Request | Completed work or retained foundation | Remaining assignment |
 |---|---|---|
-| AOT A1–A10 | Shared graph/routing/allocation machinery; compiled calls, bindings, publication, placed output geometry and saved results exercised above | Native conditional consumers, cost coverage and domain-wide lowering integration |
+| AOT A1–A10 | Shared graph/routing/allocation machinery; compiled calls, bindings, publication, placed output geometry and saved results exercised above; explicit supplied-cost input retained | Native conditional consumers, matched cost-consumer observation and domain-wide lowering integration |
 | Composition | Explicit staged driver, retained program/source relationships, graph-module consolidation | Complete the native result handoffs in the units above |
 | Disjoint pages | Shared allocation, multi-page transfer and retirement mechanisms exercised above | Completion/lifetime consumption for the new conditional bodies |
 | Integration finishing | Existing five-node bridge use; item 5's deletion completed | Domain-wide compiled execution, costs, feedback and property-directed observations |
@@ -89,7 +102,7 @@ inventing a separate CPU runtime or reimplementing the transport algorithms.
 | Synchronization signature | Existing signature/observer mechanism | Association with new emitted sites and observation of the connected program |
 | Torch capture | Source/public-state bindings, placed output geometry and saved call results exercised above | Conditional-body consumers |
 | Torch source lowering | Source numerical decompositions and scalar Padé branches committed | Native branch execution and numerical coverage identified above |
-| Unequal shards | Existing counts, placement and ratio solver; supplied fixed-cost correction committed | Actual work and multiplicity inputs to the existing cost/ratio solve |
+| Unequal shards | Existing counts, placement and ratio solver; supplied fixed-cost correction and per-residue sample/count handoff committed | Matching runtime observation of the existing cost/ratio consumer, with the automatic scaling limits above |
 
 Each active entry has the specific remaining assignment shown here. Completed clauses are historical
 accomplishments, not repeated assignments. A request with all its work and recorded complaints resolved moves
