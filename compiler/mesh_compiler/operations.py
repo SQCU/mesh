@@ -1711,9 +1711,9 @@ def _gebal_step(holds, bounds, factor, f, c, ca, r, g, ra, alive):
     return tuple(torch.where(held, made, x) for made, x in zip(up if factor == 2 else down, (f, c, ca, r, g, ra)))
 
 
-# Reference-LAPACK 3.12.1 SRC/zlarf1f.f 196-308 (dlarf1f.f alike): C = H C (SIDE = 'L', `left`) or C H ('R'),
-# H = I - TAU v v^H with v(1) = 1 (never read), on C = x(R0:R0+M-1, C0:C0+N-1), v aligned with x's rows (left) or
-# columns from R0 (C0), where `when`. The M <= 0 or N <= 0 return; with TAU /= 0 LASTV from M (N) down while
+# Reference-LAPACK 3.12.1 SRC/zlarf1f.f 196-299 (dlarf1f.f 193-288 alike): C = H C (SIDE = 'L', `left`) or C H
+# ('R'), H = I - TAU v v^H with v(1) = 1 (never read), on C = x(R0:R0+M-1, C0:C0+N-1), v aligned with x's rows (left)
+# or columns from R0 (C0), where `when`. With TAU /= 0 LASTV from M (N) down while
 # V(LASTV) = 0, past V(1), and LASTC = ILAZLC(LASTV, N, C) / ILAZLR(M, LASTV, C) (ilazlc.f, ilazlr.f, iladlc.f,
 # iladlr.f: the last column or row holding a nonzero, a NaN nonzero, else 0), else LASTC = 0; the LASTC = 0 return.
 # Left: LASTV = 1, ZSCAL of C(1, 1:LASTC) by ONE - TAU; else WORK = C(2:LASTV, 1:LASTC)^H v(2:LASTV) (ZGEMV), WORK(J) +
@@ -1731,7 +1731,7 @@ def _larf1f(left, m, n, v, tau, x, r0, c0, when):
         lastc = torch.where(held.any(-2), cols - _vec(c0) + 1, 0).amax(-1)
     else:
         lastc = torch.where(held.any(-1), rows - _vec(r0) + 1, 0).amax(-1)
-    go = when & (m > 0) & (n > 0) & (tau != 0) & (lastc > 0)
+    go = when & (tau != 0) & (lastc > 0)
     multi, t = go & (lastv > 1), _vec(tau)
     tail = _span(along, start + 1, start + lastv - 1)
     vt = torch.where(tail, v, 0)
@@ -2675,10 +2675,11 @@ def _dgeev_normalized(v, wi):
 # xLAQR0's sweep: WANTT and WANTZ static; N, KTOP, KBOT, NSHFTS, ILOZ, IHIZ, KACC22 = 2 (`accum`, iparmq.f ISPEC
 # 16: NS >= 14) and the workspace xLAQR0 places in H (U = H(KU,1), WV = H(KWV,1), WH = H(KU,KWH), NV, NH) each
 # member's own. The shifts are a static-length tuple, (S,) complex or (SR, SI) real, the member's first NSHFTS used;
-# V is 3 x NBMPS and U is KDU x KDU within their static bounds, the U, WV and WH contents left in H as the source
-# leaves them (each chunked xGEMM's last chunk per position). DO 180 and DO 145 are nested while_loop passes, and
-# within DO 145's pass DO 80, DO 100 and DO 120/140 are three while_loops in the source's order, each its M = MBOT,
-# MTOP, -1. Real only: dlaqr5.f's DO 10 pairing of the shifts, ABS for
+# V is 3 x NBMPS and U is KDU x KDU within their static bounds. xLAQR5 reaches H(KU,1) only as its argument U: held
+# as its own array through ZLASET and DO 145 and put into H(KU,1) before DO 150; DO 150, 160 and 170 then write each
+# chunk into H's own WH and WV positions and copy it back from there. DO 180 and DO 145 are nested while_loop
+# passes, and within DO 145's pass DO 80, DO 100 and DO 120/140 are three while_loops in the source's order, each its
+# M = MBOT, MTOP, -1. Real only: dlaqr5.f's DO 10 pairing of the shifts, ABS for
 # CABS1, no conjugates, and DO 50/60 as REFSUM = X(J,K+1) + V2 X(J,K+2) times T1, T2; complex DO 50/60 is
 # REFSUM = V1 (X(J,K+1) + V2 X(J,K+2)), X(J,K+2) -= REFSUM CONJG(V2)
 
@@ -2713,31 +2714,39 @@ def _region_put(x, r0, c0, block, mask):
     return torch.where(hit & spread(mask), spread(block.to(x.dtype)), x)
 
 
-# a chunked DO loop's last chunk per offset: DO J = FIRST, LAST, CHUNK with JLEN = MIN(CHUNK, LAST - J + 1) leaves
-# workspace offset A (0-based) from the last J with J + A <= LAST; (its 1-based positions, A < MIN(CHUNK, count))
-def _last_chunk(first, last, chunk, size):
-    a = torch.arange(size, device=first.device)
-    step = torch.clamp(chunk, min=1)[..., None]
-    made = first[..., None] + a + step * torch.div(last[..., None] - first[..., None] - a, step, rounding_mode='floor')
-    return made, a < _vec(torch.minimum(chunk, last - first + 1))
+# one pass, for J, of a chunked DO J = FIRST, LAST, CHUNK with JLEN = MIN(CHUNK, LAST - J + 1), as zlaqr3.f DO 60
+# and DO 80 and zlaqr5.f DO 160 and DO 170 write it (dlaqr3.f and dlaqr5.f with DGEMM and DLACPY): xGEMM('N', 'N',
+# JLEN, NU, NU, ONE, X(J,C0), M, ZERO, W) into the workspace W = H(WR,1), then xLACPY('ALL', JLEN, NU, W, X(J,C0)).
+# X is h, or z where `onz`; M is static SIZE x SIZE, its leading NU x NU the source's
+def _rows_chunk(onz, live, h, z, j, last, chunk, c0, nu, m, wr):
+    x = z if onz else h
+    rows, size, one = x.shape[-2], m.shape[-1], torch.ones_like(j)
+    used = _within(torch.minimum(chunk, last - j + 1), rows)[..., :, None] & _within(nu, size)[..., None, :]
+    made = torch.matmul(torch.where(used, _region_at(x, j, c0, rows, size), 0),
+                        torch.where(_square_within(nu, size), m, 0))
+    used = used & _mat(live)
+    h = _region_put(h, wr, one, made, used)
+    copied = _region_at(h, wr, one, rows, size)
+    if onz:
+        z = _region_put(z, j, c0, copied, used)
+    else:
+        h = _region_put(h, j, c0, copied, used)
+    j = torch.where(live, j + chunk, j)
+    return live & (j <= last), h, z if onz else z.clone(), j
 
 
-# xGEMM then xLACPY onto a slab: x(rows, TOP..TOP+EXTENT-1) = x(rows, TOP..) M (_times_right), and
-# x(TOP..TOP+EXTENT-1, columns) = A x(TOP.., columns) (_times_left); M and A static SIZE x SIZE, zero past EXTENT
-def _times_right(x, top, extent, m, rows):
-    size = m.shape[-1]
-    within, one = _within(extent, size), torch.ones_like(top)
-    block = torch.where(within[..., None, :], _region_at(x, one, top, x.shape[-2], size), 0)
-    made = torch.matmul(block, torch.where(_square_within(extent, size), m, 0))
-    return _region_put(x, one, top, made, rows[..., :, None] & within[..., None, :])
-
-
-def _times_left(x, top, extent, a, columns):
-    size = a.shape[-1]
-    within, one = _within(extent, size), torch.ones_like(top)
-    block = torch.where(within[..., :, None], _region_at(x, top, one, size, x.shape[-1]), 0)
-    made = torch.matmul(torch.where(_square_within(extent, size), a, 0), block)
-    return _region_put(x, top, one, made, within[..., :, None] & columns[..., None, :])
+# the same pass for zlaqr3.f DO 70 and zlaqr5.f DO 150: xGEMM('C', 'N', NU, JLEN, NU, ONE, M, H(R0,J), ZERO, W) into
+# the workspace W = H(WR,WC), then xLACPY('ALL', NU, JLEN, W, H(R0,J))
+def _columns_chunk(live, h, j, last, chunk, r0, nu, m, wr, wc):
+    cols, size = h.shape[-1], m.shape[-1]
+    used = _within(nu, size)[..., :, None] & _within(torch.minimum(chunk, last - j + 1), cols)[..., None, :]
+    made = torch.matmul(torch.where(_square_within(nu, size), m, 0).mH,
+                        torch.where(used, _region_at(h, r0, j, size, cols), 0))
+    used = used & _mat(live)
+    h = _region_put(h, wr, wc, made, used)
+    h = _region_put(h, r0, j, _region_at(h, wr, wc, size, cols), used)
+    j = torch.where(live, j + chunk, j)
+    return live & (j <= last), h, j
 
 
 # the reflector loops: REFSUM = X(J,C) + C1 X(J,C+1) [+ C2 X(J,C+2)], X(J,C+I) -= REFSUM T(I) over the rows `rows`
@@ -2878,11 +2887,13 @@ def _laqr5(wantt, wantz, accum, order, ktop, kbot, nshfts, shifts, h, iloz, ihiz
     return h, z, shifts
 
 
-# DO 180's pass for INCOL: JTOP, NDCOL, U = I (ZLASET, where ACCUM), DO 145, then where ACCUM DO 150 (H rows
-# INCOL+K1.. by U(K1:,K1:)^H, WH its last chunks), DO 160 and DO 170 (by U(K1:,K1:), WV their last chunks)
+# DO 180's pass for INCOL: JTOP, NDCOL, U = I (ZLASET, where ACCUM), DO 145, then where ACCUM U into H(KU,1) and
+# zlaqr5.f 765-810's DO 150 (_columns_chunk: U(K1,K1)^H H(INCOL+K1,JCOL) into WH, then back), DO 160 and, where
+# WANTZ, DO 170 (_rows_chunk: H(JROW,INCOL+K1) and Z(JROW,INCOL+K1) by U(K1,K1) into WV, then back), each chunk by
+# chunk in the source's order
 def _laqr5_columns(wantt, wantz, ulp, live, h, z, vs, incol, accum, order, ktop, kbot, nbmps, iloz, ihiz, ku, nv,
                    kwv, nh, kwh, smlnum, *shifts):
-    n, k, ub = h.shape[-1], _counted(h), 4 * vs.shape[-1]
+    ub = 4 * vs.shape[-1]
     kdu = 4 * nbmps
     one = torch.ones_like(ktop)
     jtop = torch.where(accum, torch.maximum(ktop, incol), one if wantt else ktop)
@@ -2897,22 +2908,19 @@ def _laqr5_columns(wantt, wantz, ulp, live, h, z, vs, incol, accum, order, ktop,
     jtop, jbot = (one, order) if wantt else (ktop, kbot)
     k1 = torch.clamp(ktop - incol, min=1)
     nu = (kdu - torch.clamp(ndcol - kbot, min=0)) - k1 + 1
-    block = torch.where(_square_within(nu, ub), _region_at(u, k1, k1, ub, ub), 0)
-    top, span = incol + k1, (incol + k1 - 1)[..., None] + torch.arange(ub, device=h.device)
-    rows = _within(nu, ub)
     h = _region_put(h, ku, one, u, _square_within(kdu, ub) & _mat(far))
+    block = _region_at(u, k1, k1, ub, ub)
     first = torch.minimum(ndcol, kbot) + 1
-    h = _times_left(h, top, nu, block.mH, _vec(far) & _span(k, first, jbot))
-    places, used = _last_chunk(first, jbot, nh, n)
-    h = _region_put(h, ku, kwh, _taken(h, span, places - 1), rows[..., :, None] & used[..., None, :] & _mat(far))
+    _, h, _ = while_loop_op(_first_any, _columns_chunk, (far & (first <= jbot), h.contiguous(), first),
+                            (jbot, nh, incol + k1, nu, block, ku, kwh))
     edge = torch.maximum(ktop, incol) - 1
-    h = _times_right(h, top, nu, block, _vec(far) & _span(k, jtop, edge))
-    places, used = _last_chunk(jtop, edge, nv, n)
-    h = _region_put(h, kwv, one, _taken(h, places - 1, span), used[..., :, None] & rows[..., None, :] & _mat(far))
+    _, h, _, _ = while_loop_op(_first_any, functools.partial(_rows_chunk, False),
+                               (far & (jtop <= edge), h, h.new_zeros(()), jtop.clone()),
+                               (edge, nv, incol + k1, nu, block, kwv))
     if wantz:
-        z = _times_right(z, top, nu, block, _vec(far) & _span(_counted(z), iloz, ihiz))
-        places, used = _last_chunk(iloz, ihiz, nv, z.shape[-2])
-        h = _region_put(h, kwv, one, _taken(z, places - 1, span), used[..., :, None] & rows[..., None, :] & _mat(far))
+        _, h, z, _ = while_loop_op(_first_any, functools.partial(_rows_chunk, True),
+                                   (far & (iloz <= ihiz), h, z.contiguous(), iloz.clone()),
+                                   (ihiz, nv, incol + k1, nu, block, kwv))
     incol = torch.where(live, incol + 2 * nbmps, incol)
     return live & (incol <= kbot - 2), h, z if wantz else z.clone(), vs.clone(), incol
 
@@ -3037,10 +3045,12 @@ def _laqr5_products(wantz, live, u, z, m, mtop, mbot, krcol, incol, accum, ktop,
     return live & (m >= mtop), u, z if wantz else z.clone(), m
 
 
-# Reference-LAPACK 3.12.1 SRC/zlartg.f90 (E. Anderson, Algorithm 978, as _dlartg): C, S, R of complex F and G, SAFMIN
-# = DLAMCH('S') (la_constants), SAFMAX = 1 / SAFMIN, RTMIN = SQRT(SAFMIN): G = 0; F = 0 by G's parts (a zero part,
-# else G1 within (RTMIN, SQRT(SAFMAX / 2)), else by U); F1 and G1 within (RTMIN, RTMAX = SQRT(SAFMAX / 4)), else by U,
-# V and W; each with its F2 >= H2 SAFMIN and RTMAX 2 subcases. A complex by a real divided or multiplied by parts
+# Reference-LAPACK 3.12.1 SRC/zlartg.f90 147-288 (E. Anderson, Algorithm 978, as _dlartg): C, S, R of complex F and
+# G, SAFMIN = DLAMCH('S') (la_constants), SAFMAX = 1 / SAFMIN, RTMIN = SQRT(SAFMIN): G = 0; F = 0 by G's parts (a zero
+# part, else G1 within (RTMIN, SQRT(SAFMAX / 2)), else by U); F1 and G1 within (RTMIN, RTMAX = SQRT(SAFMAX / 4)), else
+# by U, V and W; each with its F2 >= H2 SAFMIN subcase (S = CONJG(G) (F / SQRT(F2 H2)) where F2 > RTMIN and
+# H2 < 2 RTMAX, else CONJG(G) (R / H2)) and its other (S = CONJG(G) (F / D)), 206-208, 226, 262-264 and 282. A
+# complex by a real divided or multiplied by parts
 def _zlartg(f, g):
     limits = torch.finfo(f.real.dtype)
     safmin = limits.tiny
@@ -3057,13 +3067,14 @@ def _zlartg(f, g):
         rtmax2 = math.sqrt(safmax / 4) * 2
         cosine = (f2 / h2).sqrt()
         r_first = _over(fs, cosine)
-        product = _over(fs, f2.sqrt()) * _over(gs.conj(), h2.sqrt())
-        s_first = torch.where((f2 > rtmin) & (h2 < rtmax2), product, gs.conj() * _over(r_first, h2))
+        s_first = torch.where((f2 > rtmin) & (h2 < rtmax2), gs.conj() * _over(fs, (f2 * h2).sqrt()),
+                              gs.conj() * _over(r_first, h2))
         d = (f2 * h2).sqrt()
         c_second = f2 / d
         r_second = torch.where(c_second >= safmin, _over(fs, c_second), _scaled(fs, h2 / d))
+        s_second = gs.conj() * _over(fs, d)
         first = f2 >= h2 * safmin
-        return (torch.where(first, cosine, c_second), torch.where(first, s_first, product),
+        return (torch.where(first, cosine, c_second), torch.where(first, s_first, s_second),
                 torch.where(first, r_first, r_second))
     fr, fi, gr, gi = f.real, f.imag, g.real, g.imag
     g1 = torch.maximum(gr.abs(), gi.abs())
@@ -3217,8 +3228,10 @@ def _iparmq_shifts(nh):
 
 # Reference-LAPACK 3.12.1 SRC/zlaqr3.f 361-577, ZLAQR3(WANTT, WANTZ, N, KTOP, KBOT, NW, H, ILOZ, IHIZ, Z, NS, ND, SH,
 # V, NH, T, NV, WV) where `proceed`, N the member's ORDER, as zlaqr0.f 516-520 calls it: V = H(KV,1), T = H(KV,KT),
-# WV = H(KWV,1), NH = NHO, NV = NVE (each SIZE x SIZE here, SIZE = (n - 1) / 3 >= NWMAX >= NW >= JW, held apart
-# from the window copy to their write-back into H's same positions, then DO 70's T and DO 60/80's WV last chunks).
+# WV = H(KWV,1), NH = NHO, NV = NVE. ZLAQR3 reaches H(KV,KT) and H(KV,1) only as its T and V: here SIZE x SIZE
+# arrays (SIZE = (n - 1) / 3 >= NWMAX >= NW >= JW) taken from those H positions at entry and put back there after
+# ZUNMHR, their last write before DO 60; DO 60, DO 70 and DO 80 then write each chunk's xGEMM into H's own WV and T
+# positions and copy it out of them (_rows_chunk, _columns_chunk), chunk by chunk in the source's order.
 # zlaqr2.f (`nested` False, zlaqr4.f 521's call) differs only at zlaqr3.f 416-425: ZLAHQR for every JW. 361-368 the
 # KTOP > KBOT and NW < 1 returns (NS = ND = 0); 372-375 SMLNUM = SAFMIN (N / ULP); 379-385 JW, KWTOP, S; 387-403
 # the KBOT = KWTOP window; 411-415 ZLACPY('U') and ZCOPY of the window into T, ZLASET V = I; 416-425 ZLAQR4 where
@@ -3235,7 +3248,7 @@ def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, 
     limits = torch.finfo(h.real.dtype)
     ulp = limits.eps
     smlnum = limits.tiny * (order.to(h.real.dtype) / ulp)
-    n, k, one = h.shape[-1], _counted(h), torch.ones_like(ktop)
+    one = torch.ones_like(ktop)
     go = proceed & (ktop <= kbot) & (nw >= 1)
     jw = torch.minimum(nw, kbot - ktop + 1)
     kwtop = kbot - jw + 1
@@ -3283,20 +3296,16 @@ def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, 
     h = _region_put(h, kv, kt, t, square & _mat(main))
     h = _region_put(h, kv, one, v, square & _mat(main))
     ltop = one if wantt else ktop
-    span = (kwtop - 1)[..., None] + torch.arange(size, device=h.device)
-    h = _times_right(h, kwtop, jw, v, _vec(update) & _span(k, ltop, kwtop - 1))
-    places, used = _last_chunk(ltop, kwtop - 1, nve, n)
-    h = _region_put(h, kwv, one, _taken(h, places - 1, span), used[..., :, None] & within[..., None, :] & _mat(update))
+    _, h, _, _ = while_loop_op(_first_any, functools.partial(_rows_chunk, False),
+                               (update & (ltop <= kwtop - 1), h.contiguous(), h.new_zeros(()), ltop.clone()),
+                               (kwtop - 1, nve, kwtop, jw, v, kwv))
     if wantt:
-        h = _times_left(h, kwtop, jw, v.mH, _vec(update) & _span(k, kbot + 1, order))
-        places, used = _last_chunk(kbot + 1, order, nho, n)
-        h = _region_put(h, kv, kt, _taken(h, span, places - 1),
-                        within[..., :, None] & used[..., None, :] & _mat(update))
+        _, h, _ = while_loop_op(_first_any, _columns_chunk, (update & (kbot + 1 <= order), h, kbot + 1),
+                                (order, nho, kwtop, jw, v, kv, kt))
     if wantz:
-        z = _times_right(z, kwtop, jw, v, _vec(update) & _span(_counted(z), iloz, ihiz))
-        places, used = _last_chunk(iloz, ihiz, nve, z.shape[-2])
-        h = _region_put(h, kwv, one, _taken(z, places - 1, span),
-                        used[..., :, None] & within[..., None, :] & _mat(update))
+        _, h, z, _ = while_loop_op(_first_any, functools.partial(_rows_chunk, True),
+                                   (update & (iloz <= ihiz), h, z.contiguous(), iloz.clone()),
+                                   (ihiz, nve, kwtop, jw, v, kwv))
     w = _vec_put(w, kwtop, sh, within & _vec(main))
     found = torch.where(single, torch.where(negligible, 0, 1), 0)
     return (h, z, w, torch.where(main, ns - infqr, found), torch.where(main, jw - ns, torch.where(negligible, 1, 0)))

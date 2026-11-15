@@ -3,15 +3,42 @@
 # numerical67(b): custom-method bodies and operands (operations.py, decompose.py)
 
 Session 211a403e, turn numerical67b (consolidated brief), on top of supervisor checkpoint 8cbc2ab9. The supervisor
-has since preserved four WIP checkpoints, none of which accepts the method:
+has since preserved five WIP checkpoints, none of which accepts the method:
 - 43aa1f2e: DLADIV;
 - c4bf33fe: the LAQR1/LAQR5/LARFG group;
 - e908087a: the LAQR5 stage order and the LAHQR argument lists;
 - 4d5d3436: the xLAQR3 dependency group (`_larf1f`, `_gehrd`'s ZGEHD2, `_zlartg`, `_rotated`, `_ztrexc`, `_unm2r`,
-  `_unmhr`).
+  `_unmhr`);
+- 53af5eda: the complex xLAQR3/xLAQR0/ZHSEQR group below and GEEV's complex ZHSEQR call. Its xLAQR3 DO 60/70/80 and
+  xLAQR5 DO 150/160/170 were whole-slab products with a synthesized last-chunk workspace residue (`_times_right`,
+  `_times_left`, `_last_chunk`). The supervisor rejected that as a manual rewrite of the source's chunk sequence.
 
-The operations.py delta on top of 4d5d3436 is uncommitted: the complex xLAQR3/xLAQR0/ZHSEQR group below, and GEEV's
-complex ZHSEQR call. No native import, build or workload has been run.
+The operations.py delta on top of 53af5eda is uncommitted:
+- It replaces those three helpers with the source's per-chunk passes (`_rows_chunk`, `_columns_chunk`), used by
+  `_laqr3` and `_laqr5_columns`. It also drops the two functions' unused locals and rewrites their comments.
+- `_zlartg`'s S now follows v3.12.1 zlartg.f90 206-208, 226, 262-264 and 282: S = CONJG(G) (F / SQRT(F2 H2)), else
+  CONJG(G) (R / H2), and S = CONJG(G) (F / D). The checkpointed (F / SQRT(F2)) (CONJG(G) / SQRT(H2)) was master's.
+- `_larf1f` no longer has the M ≤ 0 or N ≤ 0 return. That return is master's; v3.12.1 zlarf1f.f 196-299 and
+  dlarf1f.f 193-288 have none. Every caller passes M, N ≥ 1 at its source call site.
+
+No native import, build or workload has been run.
+
+Source provenance found during this delta:
+- The /tmp/n67c and /tmp/n67e batches were fetched from Reference-LAPACK `master`, not v3.12.1.
+- The v3.12.1 copies are now in /tmp/n67i/lapack (n67c's names, plus ztrevc3.f and dtrevc3.f) and /tmp/n67j/lapack
+  (n67e's names).
+- After normalizing spelling (`IMPLICIT NONE`, DCONJG/CONJG, DIMAG/AIMAG, DCMPLX/CMPLX KIND), the executable
+  differences are:
+  - zlartg.f90's S (corrected above);
+  - xLARF1F's M,N ≤ 0 return (corrected above) and INCV < 0 indexing (INCV = 1 here);
+  - xLARF's INCV indexing;
+  - xUNMQR/xORMQR's LWKOPT and reduced NB: v3.12.1 has NW·NB + TSIZE and (LWORK − TSIZE)/LDWORK;
+  - ilaenv.f's master-only entries;
+  - EXTERNAL lists.
+- The repo's `*.reference.f` files that match these batches are also master copies.
+- zgeev.reference.f's `INFO = -4` NaN/overflow return is master's; v3.12.1 zgeev.f has none (OPEN below).
+- The line citations written from the master batches are mostly 1-29 lines off v3.12.1. Remapping them is OPEN; only
+  this delta's own new citations are v3.12.1 numbers.
 
 Checks were static only:
 - `py_compile`;
@@ -21,8 +48,9 @@ Checks were static only:
 - the reachability cut from every name other modules import.
 
 No body has been traced or executed. The read-only review delegates were stopped. The supervisor's own source review
-covered DLADIV (43aa1f2e) and the LAQR5 stage order (the c4bf33fe review, applied below). The source compared against
-is Reference-LAPACK v3.12.1 SRC, held read-only and never executed.
+covered DLADIV (43aa1f2e) and the LAQR5 stage order (the c4bf33fe review, applied below). The semantic owner is
+Reference-LAPACK v3.12.1 SRC, held read-only and never executed. As recorded above, the n67c/n67e batches compared
+against before this delta were master copies.
 
 ## Removed this turn: the record compiler and its method path
 
@@ -149,19 +177,26 @@ v3.12.1. The complex branch is reached through `_laqr0_pass`. The real branch wa
     - DO 100/90, rows of the far columns MAX(KTOP, KRCOL + 2M)..JBOT (`_laqr5_rows`);
     - DO 120 into U (with ACCUM), or DO 140 into Z (`_laqr5_products`).
   - Each stage is its own while_loop over M. They are not fused (supervisor's c4bf33fe review).
-  - After DO 145, the far-from-diagonal updates go through U, chunked into WH/WV as the source chunks them. The source
-    rows of the residue regions are rewritten to their last chunk.
+  - xLAQR5 reaches H(KU,1) only through its argument U. U is held as its own array through ZLASET and DO 145, then
+    put into H(KU,1) before DO 150.
+  - zlaqr5.f 765-810 (where ACCUM) sets JTOP/JBOT, K1 and NU. It then runs DO 150, DO 160 and DO 170 (WANTZ) as
+    while_loops, one source chunk per pass, in the source's order:
+    - DO 150 (`_columns_chunk`): ZGEMM('C', 'N', NU, JLEN, NU) of U(K1,K1) and H(INCOL+K1,JCOL) into H's own WH
+      positions, then ZLACPY back to H(INCOL+K1,JCOL);
+    - DO 160 and DO 170 (`_rows_chunk`): ZGEMM('N', 'N', JLEN, NU, NU) of H(JROW,INCOL+K1) or Z(JROW,INCOL+K1) by
+      U(K1,K1) into H's own WV positions, then ZLACPY back.
   - `_vigilant` is the source's vigilant deflation check.
 
 ### xLAQR3 dependency group (checkpoint 4d5d3436; called by `_gehrd` and `_laqr3`)
 
-- **`_larf1f(left, m, n, v, tau, x, r0, c0, when)`:** zlarf1f.f 196-308, and dlarf1f.f in the same body:
+- **`_larf1f(left, m, n, v, tau, x, r0, c0, when)`:** v3.12.1 zlarf1f.f 196-299, and dlarf1f.f 193-288 in the same
+  body. There is no M ≤ 0 or N ≤ 0 return (master's):
   - LASTV, scanning down past V(1) while V(LASTV) = 0, where TAU ≠ 0;
   - LASTC = ILAZLC(LASTV, N, C) or ILAZLR(M, LASTV, C), where a NaN counts as nonzero; the LASTC = 0 return;
   - with LASTV = 1, the ZSCAL by ONE - TAU;
   - else the ZGEMV, the first-row (left) or first-column (right) correction (zlarf1f's loops or ZAXPYs, dlarf1f's
     DAXPYs), and ZGERC/DGER skipping a zero WORK(J) (left) or a zero v(J) (right).
-- **`_zlartg`:** zlartg.f90 3.12.1, branch by branch.
+- **`_zlartg`:** v3.12.1 zlartg.f90 147-288, branch by branch, with S as at 206-208, 226, 262-264 and 282.
 - **`_rotated`:** zrot.f DO 30 (drot.f alike), with the real C's products taken by parts.
 - **`_ztrexc(wantq, order, t, q, ifst, ilst, when)`:** ztrexc.f 182-224.
   - The N ≤ 1 / IFST = ILST return.
@@ -175,7 +210,7 @@ v3.12.1. The complex branch is reached through `_laqr0_pass`. The real branch wa
   - ZUNMQR(MI, NI, NH, A(ILO+1,ILO), TAU(ILO), C(I1,I2)), reaching zunmqr.f 274-279's ZUNM2R where NB = 32 ≥ K.
   - The blocked ZLARFT/ZLARFB path (K > 32) is OPEN.
 
-### Complex xLAQR3 / xLAQR0 / ZHSEQR group (uncommitted on 4d5d3436; called by `_geev_routine` for complex)
+### Complex xLAQR3 / xLAQR0 / ZHSEQR group (checkpoint 53af5eda, chunk passes uncommitted; called by `_geev_routine` for complex)
 
 These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr3.f, zlaqr0.f, zhseqr.f and iparmq.f
 3.12.1 line ranges.
@@ -184,8 +219,14 @@ These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr
   - `nested` False is zlaqr2.f. Checked by diff of the executable statements, zlaqr2.f differs only at zlaqr3.f
     416-425 (ZLAHQR for every JW).
   - V = H(KV,1), T = H(KV,KT) and WV = H(KWV,1) are zlaqr0.f 516-520's regions. Each is SIZE × SIZE, with SIZE =
-    (n − 1)/3 ≥ NWMAX ≥ NW ≥ JW. T and V are held apart from the window copy until their write-back into the same H
-    positions. DO 70's T and DO 60/DO 80's WV are then rewritten to their last chunks (`_last_chunk`).
+    (n − 1)/3 ≥ NWMAX ≥ NW ≥ JW.
+  - ZLAQR3 reaches H(KV,KT) and H(KV,1) only through its arguments T and V. They are taken from those positions at
+    entry and put back there after ZUNMHR, their last write before DO 60.
+  - zlaqr3.f 527-563 then runs DO 60, DO 70 (WANTT) and DO 80 (WANTZ) as while_loops, one source chunk per pass:
+    - DO 60 and DO 80 (`_rows_chunk`): ZGEMM('N', 'N', KLN, JW, JW) of H(KROW,KWTOP) or Z(KROW,KWTOP) by V into H's
+      own WV positions, then ZLACPY back;
+    - DO 70 (`_columns_chunk`): ZGEMM('C', 'N', JW, KLN, JW) of V and H(KWTOP,KCOL) into H's own T positions, then
+      ZLACPY back.
   - In order:
     - the KTOP > KBOT and NW < 1 returns;
     - SMLNUM, JW, KWTOP and S, then the KBOT = KWTOP window;
@@ -316,8 +357,12 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
   arranged statically, not observed.
 - **Complex ZHSEQR:** the source is now written (see the group above), but none of it has been traced or executed.
   Still OPEN within it are the blocked routines that its own calls reach:
-  - The blocked ZUNMQR (zunmqr.f with zlarft.f/zlarfb.f) for xLAQR3's ZUNMHR. It is reached where K = NS − 1 > 32,
-    so NS ≥ 34, which needs (N − 1)/3 ≥ 34, i.e. N ≥ 103.
+  - The blocked ZUNMQR (zunmqr.f with zlarft.f/zlarfb.f) for xLAQR3's ZUNMHR. It needs ILAENV's NB = 32 < K =
+    NS − 1, so NS ≥ 34, which needs (N − 1)/3 ≥ 34, i.e. N ≥ 103. Its NB also depends on the exact LWORK, against
+    v3.12.1's LWKOPT = NW·NB + TSIZE (not master's): ZUNMHR gets LWORK − JW.
+    - ATen passes lwork = ceil(nextafter(WORK(1))), i.e. zgeev's MAXWRK + 1.
+    - MAXWRK takes the maximum over the ZGEHRD/ZUNGHR terms, N + ZTREVC3's query with vectors, and ZHSEQR's query.
+    - This query chain is not yet transcribed; the earlier entries use only its lower bound 33N.
   - The blocked ZGEHRD (DO 40 with zlahr2.f/zlarfb.f) for xLAQR3's ZGEHRD(JW, 1, NS), reached where NS ≥ 130, and for
     GEEV's own ZGEHRD where NH ≥ 130.
   - Their sources are fetched, read-only, and not yet transcribed. Until they are, those members run the unblocked
@@ -327,6 +372,12 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
   Unwritten: dlaqr0.f/dlaqr4.f (real shift pairs), dlaqr3.f/dlaqr2.f (2 × 2 blocks with DLANV2), dtrexc.f with
   dlaexc.f/dlasy2.f/dlarfx.f, and dormhr.f's blocked DORMQR. `_laqr5`'s real branch (dlaqr5.f) and `_laqr1` are
   written but not yet called.
+- **GEEV's INFO = −4 (OPEN):** `_geev_routine` returns INFO = −4 where ANRM is NaN or above overflow. That return is
+  master zgeev.f's (the repo's zgeev.reference.f). v3.12.1 zgeev.f has none: it scales and proceeds. dgeev.f has the
+  same split.
+- **Line citations (OPEN):** the comments written from the master batches are 1-29 lines off v3.12.1. These cover
+  zlahqr/dlahqr, dlanv2, zgehrd/zgehd2, ztrexc, zunm2r, zunmhr, zunmqr, iparmq, ilaenv, and zlaqr0/3/4 with
+  zhseqr. Each needs remapping against /tmp/n67i and /tmp/n67j.
 - **`_unghr` exactness (OPEN):** ZUNGHR still applies its reflectors with the generic `_dlarf`, not with zung2r.f's own
   reflector code. GEEV's ZGEHD2 now uses `_larfg_vector` and `_larf1f`.
 - **Rounding differences from the reference:**
