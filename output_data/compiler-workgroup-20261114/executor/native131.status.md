@@ -693,3 +693,50 @@ and MSL resource parameters) into the access operand that readiness and placemen
   `RaisedModule`; the later-pass binding in `UpstreamPasses`; `TransportMask` consuming `physical`; the archive's
   `physical` (`AccessMap`); the append shift. The construct-time relation and effects stay source-stage and are an
   open consumer.
+
+## Unit record, refreshed 2026-11-15 (source checkpoint 3330ed9b; unbuilt)
+
+Each row runs from the producer, through the original specification it follows, to the retained result, its consumers,
+and its state. The rows labelled "mine, HOLD" below are the source subsequently checkpointed as Metal `3330ed9b`; they do not establish full consumer coverage.
+
+| Boundary | Original specification | Retained result | Consumers | State |
+|---|---|---|---|---|
+| GPU module body | Dawn `GetTintProgram`; `ProgramToLoweredIR` | `Upstream.program`/`lowered`/`moduleEntry`/`argumentOf` | `LoweredModule`, `ModulePass`, archive (IR codec) | committed |
+| Target options | `PrepareMslCompilationRequest` through `CreateUninitializedComputePipeline`, under the device guard | `Upstream.target` (the shared prepared result) | `ModulePass` options, the Dawn-stream archive | committed |
+| Launch and builtins | provider `body.grid`/`group`/`grouped` | `Upstream.builtinGroup`/`builtinGroups` | `LoweredBody`, `ModulePass` entry | committed |
+| Argument bound | the `ConstructKernels` binding (dense: the value's root origin; paged: 0) | `Upstream.bounds`, made once at registration | the binding; source and physical maps; sizes word; append (projected once) | mine, HOLD |
+| Source accesses | the typed lowering of the lowered module | `Upstream.accesses` | effects/relation (construct), append, archive | committed (guard fix included) |
+| Target-stage accesses | the one `Raise`'s module: robustness, polyfills, `ModuleScopeVars`, `ArrayLengthFromImmediates` | `Upstream.physical[2]`, `analyzed[2]` | readiness (`Mask`), archive, append | mine, HOLD; **open: construct-time effects/relation still use the source stage** |
+| Storage-buffer sizes | `ArrayLengthOptions` (`buffer_sizes_offset`, `bindpoint_to_size_index`), `StorageBufferLengthTracker` (bound length) | `Upstream.sizes` (CONSTANT u32, slot per pass) | both passes' bindings, `RaisedModule` (`valueAt`) | mine, HOLD; **open: user immediates** |
+| Divisor fixedness | Tint's constant first; else isl over the domain box | `mesh_graph_index_fixed`, retained per operand | `LoweredBody` divisors | mine, HOLD (`rdma/mesh-graph.c/h`) |
+| CPU compile command | Inductor `CppTorchDeviceOptions` (`get_compiler()` first) | `Upstream.compile`/`link`, run as given | `NativeBuild` (`posix_spawnp`; native adds the composed-header include directory, input and output) | mine, HOLD |
+| CPU source language | the producer's declaration | `Upstream.language` (required for a CPU pass) | source file extension, `UpstreamRunner` (C or C++ casts, `extern "C"`) | mine, HOLD; **pairing: 66 and 133 set `metal_ir_upstream_emission.language`, and 66's mirror appends the field** |
+| Compilation unit | producer `LiteRtMeshKernel.unit` | `Upstream.unit` (+1; renumbered on append; archived in 132's line) | `Emit` `compiledBy` (one compiler across passes), `UpstreamTask` (one library) | committed (`c384f1df`, `51988113`) |
+| Symbol identity | `NativeSymbol` (unit source + typed runner) for exports; original declarations with internal linkage at the producer (`codegen_group`/`defined_source`; 133's unit) | runner symbols | `NativeBuild` exports; `LowerProgram` (an object linked once per new symbol) | **pairing: producers emit internal linkage; prepare/release aliases (132) through the same `NativeSymbol`** |
+| Image dependency | `LC_UUID` from `LiteRtMeshImageUuid` | `NativeBinary.images`/`dependencies` (owned references) | task and program compile, bind, archive, `Close` | committed (`cc65c230`) |
+| Prepared unit operand | 133's `b3273f38` prepare/release | handed to 132 (`native131-to-132-prepared-unit.handoff.md`) | 132's | 132 |
+
+**Corrections in this round** (working tree):
+- The sizes word, the maps and the binding all borrow one retained bound per argument (`Upstream.bounds`). That
+  replaces both the per-consumer recomputation and the maps' `Bytes(value) - 1` extent, which was too long by the
+  value's own origin.
+- `NativeBuild` no longer prefixes `xcrun clang++` to a producer's command or overrides its `-x`. Before, Inductor's
+  own compiler name was passed in as an input.
+- The CPU language is the producer's declaration; no default.
+
+**HOLD paths, mine:**
+- `metal_ir.h`: `UpstreamExtent`; `Upstream` `language`, `bounds`, `physical`, `analyzed`, `sizes`; the emission's
+  `language` field and its comment.
+- `metal_ir.mm`: `UpstreamBound`; bounds at registration; append projection; the `LoweredBody` extension;
+  `RaisedModule`; the language intake.
+- `metal_lower.h`: the `RaisedModule` declaration.
+- `metal_lower.mm`: the `NativeBuild` command and language; `UpstreamRunner`'s language; `UpstreamTask`'s language;
+  the `ConstructKernels` bound.
+- `metal_transport.mm`: the `ModulePass` immediate slot, sizes and `RaisedModule` call; the `UpstreamPasses` sizes
+  binding; `Mask`'s physical consumer.
+- `metal_archive.mm`: `UpstreamModule`'s physical, sizes and bounds.
+- mesh `rdma/mesh-graph.c/h`: `mesh_graph_index_fixed`.
+
+**Not mine, in the same files:** 132's handed hunks (listed in the handoff) and 135's neural hunks.
+
+Supervisor checkpoint: Metal `3330ed9b` contains only131 physical/bounds/compile-language hunks;132 prepared-unit and135 feature work remain excluded. The paired graph fixed-value query in this Mesh commit uses original ISL over the retained domain and is consumed by the staged typed analysis. Executor independently checked staged `metal_ir.mm`, `metal_lower.mm`, `metal_archive.mm` against index headers through the compiler VFS overlay (each exit0), and canonical `mesh-graph.c` strict syntax (exit0). Worker checked all eight native translation units and both recorder sources with the same index-header correction. Earlier staged-source checks that accidentally read working-tree headers were not evidence for the index and are superseded. No library was rebuilt or loaded; native137 remains fixed. Compile-language Python/provider pairing, source-to-physical effects, other immediate/resource forms, original linkage and the prepared-unit owner remain open.

@@ -393,6 +393,9 @@ struct mesh_graph_index *mesh_graph_index_compare(uint32_t relation, const struc
    exactly (x mod 2^bits, or its two's-complement signed value where `is_signed`), as the type's arithmetic, conversion
    and bitcast define it */
 struct mesh_graph_index *mesh_graph_index_wrap(const struct mesh_graph_index *x, uint32_t bits, int is_signed);
+/* x's one value: 1 and `*value` it where isl proves x the same integer at every point of its domain's box (a typed
+   producer's operand fixed by its constants, its overrides' values or its CONSTANT data, however computed), else 0 */
+int mesh_graph_index_fixed(const struct mesh_graph_index *x, int64_t *value);
 struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_or(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_not(const struct mesh_graph_index *);

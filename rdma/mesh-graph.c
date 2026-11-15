@@ -2854,6 +2854,21 @@ struct mesh_graph_index *mesh_graph_index_wrap(const struct mesh_graph_index *x,
   pthread_mutex_unlock(&d->context->lock);
   return made;
 }
+int mesh_graph_index_fixed(const struct mesh_graph_index *x, int64_t *value) {
+  if (!x || !x->value) return 0;
+  struct mesh_graph_domain *d = x->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_ctx *ctx = d->context->ctx;
+  isl_pw_aff *over = isl_pw_aff_intersect_domain(isl_pw_aff_copy(x->value), isl_set_copy(d->box));
+  isl_val *least = isl_pw_aff_min_val(isl_pw_aff_copy(over)), *greatest = isl_pw_aff_max_val(over);
+  isl_val *low = isl_val_int_from_si(ctx, INT64_MIN), *high = isl_val_int_from_si(ctx, INT64_MAX);
+  const int fixed = least && greatest && isl_val_is_int(least) && isl_val_eq(least, greatest) == isl_bool_true &&
+                    isl_val_ge(least, low) == isl_bool_true && isl_val_le(least, high) == isl_bool_true;
+  if (fixed) *value = (int64_t)isl_val_get_num_si(least);
+  isl_val_free(least); isl_val_free(greatest); isl_val_free(low); isl_val_free(high);
+  pthread_mutex_unlock(&d->context->lock);
+  return fixed;
+}
 struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
   if (!index_predicates(a, b)) return NULL;
   INDEX_LOCKED(a->domain, index_made(a->domain, NULL, isl_set_intersect(isl_set_copy(a->predicate), isl_set_copy(b->predicate))));
