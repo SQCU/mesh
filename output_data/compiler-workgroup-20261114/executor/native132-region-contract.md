@@ -1,10 +1,6 @@
 # Native132: region, order, lifetime, replay, selection and prepared-unit results: current ownership
 
-Claude Opus 5.5, 2026-11-15. Metal HEAD `3330ed9b`. Committed: `38b5ea61` through `f2ae6bb2` (archive v45). The
-prepared-unit hunks are staged for Codex's commit, unbuilt. Strict syntax-only checks (`-Wall -Wextra -Werror`) of the
-staged snapshot pass for `metal_ir.mm`, `metal_lower.mm`, `metal_transport.mm`, `metal_capture.m` and
-`metal_program.m`; `metal_archive.mm` cannot be compiled here (the Dawn-native generated headers its includes need are
-absent). Nothing has been built or run by me.
+Claude Opus 5.5, 2026-11-15. The prepared-unit source is committed in Metal `669535a7`; the native ownership metadata is in `b850050b` and its canonical allocator consumer in Mesh `15e00e26`. Frontend `1d132af4` retains the same fields through Python. The actual native138 canonical build is in progress under Codex. Earlier strict source checks and these checkpoints are not runtime evidence. All owned C sources remain held through the build.
 
 ## Mine
 
@@ -25,7 +21,7 @@ absent). Nothing has been built or run by me.
 | capture `-plan:`, native gating | Range table; arm edges kept only where the projected commands' switch or branch differs; `NATIVE_SELECT_BEGIN`/`END` around host steps and regions | generated program |
 | archive | v45, sole version owner | load |
 
-## Prepared unit (staged)
+## Prepared unit (checkpointed source)
 
 - **Producer** (133, `b3273f38`): each unit's prepare and release declarations and its entries' trailing pool parameter at slot `LITERT_MESH_UNIT_PREPARED`. The names reach the upstream records through `metal_ir_upstream_unit`, handed over by 131.
 - **Value.** One CONSTANT U64 per unit (`Upstream::prepared`, shared by the unit's upstreams, remapped by append), holding 8 zero placeholder bytes and one `METAL_IR_RELOCATE_PREPARED` relocation. No live address is held or archived.
@@ -44,7 +40,7 @@ absent). Nothing has been built or run by me.
 
 ## Open in this unit
 
-- **XNNPACK operator-context persistence across calls: connected in source** (uncommitted; strict syntax-only checks pass for `mesh-collective.c`, `mesh-dataflow.c`, `mesh-call.c` and the Metal sources).
+- **XNNPACK operator-context persistence across calls: connected in source** (checkpointed above; earlier strict syntax-only checks passed for `mesh-collective.c`, `mesh-dataflow.c`, `mesh-call.c` and the Metal sources).
   - `metal_ir_value_info` carries `owned`, its storage root's `Value::owned` (struct now 128 bytes).
   - `MetalStandIns` sets each stand-in's `mesh_value.owned` from it.
   - `mesh_value` gains `owned`, taking half of the former 8-byte `padding1`; the record stays 64 bytes and is saved as is.
