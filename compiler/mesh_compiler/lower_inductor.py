@@ -293,7 +293,15 @@ class Seeds:
 # `selected` the conversion's own operands as given (ct.convert's keywords: convert_to, compute_units,
 # compute_precision, minimum_deployment_target, skip_model_load; FLOAT32 coremltools' precision selection, no fp16
 # rewrite, not a binary64 result), `received` each (user input position, RECV body node) it binds as an input,
-# `handles` {debug_handle: the original body nodes of that program node}
+# `handles` {debug_handle: the original body nodes of that program node}; the converter's own correspondence
+# (compiler/patches/coremltools-exir-correspondence.patch: its function's exir_inputs, exir_outputs and exir_buffers,
+# by the function's own input and output positions, which its MIL passes keep), each declared feature by its final
+# name: `inputs` each (feature, its ExportedProgram user input, whether the converter wrapped that rank-0 input as
+# rank-1 size-1), `outputs` each output occurrence (feature, its index among the converter's graph.outputs, i.e.
+# user_outputs and output_info, its ExportedProgram user output), `states` each (feature, its buffer, the
+# ExportedProgram inputs the converter reads it from: input_name_to_source_buffer_name, the outputs it writes it
+# from: output_name_to_target_buffer_name); `aliases` the AOT record as export.aot_aliases returns it (its
+# ViewAndMutationMeta, each input's role, the input prototypes, every forward output prototype, hidden bases included)
 @dataclasses.dataclass(eq=False)
 class Model:
     program: object
@@ -301,6 +309,10 @@ class Model:
     selected: dict
     received: tuple
     handles: dict
+    inputs: tuple
+    outputs: tuple
+    states: tuple
+    aliases: tuple
 
 
 # one processor body's returned upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
@@ -880,6 +892,9 @@ def _engine(module, body, sources, sent, processor, kind, device):
     body.recompile()
     program = torch.export.export(body, tuple(n.meta["val"] for n in _placeholders(graph)),
                                   strict=False).run_decompositions()
+    from torch.export.graph_signature import ConstantArgument, OutputKind
+    from .export import aot_aliases
+    aliases = aot_aliases(program)
     handles = {}
     for k, node in enumerate(program.graph.nodes, 1):
         node.meta["debug_handle"] = k
@@ -892,14 +907,25 @@ def _engine(module, body, sources, sent, processor, kind, device):
     named = {node.name: node for node in program.graph.nodes}
     placeholders = _placeholders(module.graph)
     returned = _returned(module)
+
+    users = [spec for spec in signature.output_specs if spec.kind in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT)]
+    main = model._mil_program.functions["main"]
+    reads, writes = main.exir_buffers
+    placed = list(zip(main.inputs, main.exir_inputs, strict=True))
     entry = Model(program, model, selected, tuple((len(placeholders) + k, node) for k, node in enumerate(received)),
-                  handles)
+                  handles, tuple((feature, name, wrapped) for feature, (state, name, wrapped) in placed if not state),
+                  tuple((var.name, index, name) for var, (index, name) in zip(main.outputs, main.exir_outputs,
+                                                                              strict=True)),
+                  tuple((feature, name, tuple(x for x, of in reads.items() if of == name),
+                         tuple(x for x, of in writes.items() if of == name))
+                        for feature, (state, name, _) in placed if state), aliases)
     return Produced(
         processor, kind, device, module, body, sources, sent, None, signature,
         tuple(Input(k, node, signature.user_inputs[k], named[signature.user_inputs[k]])
               for k, node in enumerate(placeholders)),
-        tuple(Output(k, node, signature.user_outputs[k], named[signature.user_outputs[k]], k >= len(returned))
-              for k, node in enumerate(returned + sent)),
+        tuple(Output(k, node, signature.user_outputs[k],
+                     spec.arg.value if isinstance(spec.arg, ConstantArgument) else named[spec.arg.name], k >= len(returned))
+              for k, (node, spec) in enumerate(zip(returned + sent, users, strict=True))),
         {}, (), (), entry)
 
 

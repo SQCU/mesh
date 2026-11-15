@@ -1556,34 +1556,32 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                         "metal_ir_symbol)" % (p, n.name, target, type(line).__name__, n.meta.get("val")))
 
         # a Neural Engine member (lower_inductor.py Model): one operation, its original Core ML program saved once
-        # (MLModel.save: its package, its debug-handle mapping), each feature its MLModel declares
-        # (model.get_spec().description) bound to its original source value at the declared array (Tensor.view at its
-        # shape over that value's storage), by the converter's own association:
-        # - an input: the ExportedProgram user input of its name (coremltools exir_utils.py 81-87: a rank-0 one named
-        #   with WRAPPED_SCALAR_INPUT_SUFFIX), its machine value (a placeholder's, a received channel's landing; a
-        #   machine-local received input its sent value, received_view), read;
-        # - an output: the ExportedProgram user output of its name (exir_utils.py 292-297), its own value (an output that
-        #   is an input placeholder that input's machine value, else one TEMPORARY per output node at its fake's
-        #   layout), written;
-        # - a state: the buffer its read_state names in the converted program's own scope (Model.model._mil_program;
-        #   converter.py 1365-1416 read_{buffer}, past the sanitized names; exir_utils.py 254-258 and converter.py
-        #   640-654 one per buffer graph_signature.inputs_to_buffers reads and buffers_to_mutate mutates): its machine
-        #   value (its target's attribute), read and written in place (metal_ir_upstream_state `read` and `written` one
-        #   argument, access 3), its storage the program's state across calls (KINDS: an ExportedProgram BUFFER's role).
+        # (MLModel.save: its package, its debug-handle mapping), each declared feature bound by the converter's own
+        # correspondence (Model.inputs, .outputs, .states; compiler/patches/coremltools-exir-correspondence.patch):
+        # - an input its ExportedProgram user input's machine value (a placeholder's, a received channel's landing; a
+        #   machine-local received input its sent value, received_view), the one the converter wrapped as rank-1 size-1
+        #   (converter.py 1347-1360) that value's element at that declared shape, read;
+        # - an output occurrence the result of torch's own AOT runtime over Model.aliases (export.py Captured.captured:
+        #   torch/_functorch/_aot_autograd/runtime_wrappers.py _RuntimeForwardEpilogue capture_orig_inputs and finalize,
+        #   make_output_handler and gen_alias_from_base over the forward output prototypes, hidden bases included, through
+        #   one FakeTensorConverter seeded with each input prototype's actual fake, in the program's own fake mode,
+        #   torch/_export/utils.py _detect_fake_mode_from_gm): where its regenerated tensor views an
+        #   actual input's storage, that input's machine storage at its view; else one value per regenerated storage at
+        #   its view, written; a forward result that is no tensor (a static leaf) that result itself;
+        # - a state its buffer's machine value (its target's attribute; KINDS: an ExportedProgram BUFFER's role, the
+        #   program's state across calls), read where the converter reads it (input_name_to_source_buffer_name;
+        #   read_state) and written where it writes it (output_name_to_target_buffer_name; coreml_update_state), each a
+        #   metal_ir_upstream_state side of its own (NONE where the converter has none).
         # The declared element types are the native projection's to check against these values (metal_neural.mm
-        # EmitNeural); a declared width other than its source's is the conversion's (lower_inductor.py Model.selected,
-        # its states), never a cast here
+        # EmitNeural); a declared width other than its source's is the conversion's (Model.selected), never a cast here
         def neural(p):
-            from coremltools.converters.mil.frontend.torch.exir_utils import WRAPPED_SCALAR_INPUT_SUFFIX
-            from coremltools.converters.mil.mil.scope import ScopeSource
+            from torch._export.utils import _detect_fake_mode_from_gm
+            from torch._functorch._aot_autograd.runtime_wrappers import _RuntimeForwardEpilogue
+            from torch._subclasses.fake_tensor import FakeTensorConverter
+            from torch.multiprocessing.reductions import StorageWeakRef
             made_, model = produced[p], produced[p].model
-            spec, program = model.model.get_spec(), model.program
-            nodes_ = {n.name: n for n in program.graph.nodes}
-
-            def viewed(b, array):
-                view = torch.empty_strided(b.size, b.stride, dtype=b.dtype, device="meta").view(tuple(array.shape))
-                return Bound(b.storage, b.dtype, tuple(view.shape), tuple(view.stride()), b.offset)
-
+            program = model.program
+            signature, nodes_ = program.graph_signature, {n.name: n for n in program.graph.nodes}
             sources = {i.value.name: env.get(copied.get(originals[p].get(i.node))) for i in made_.inputs}
             for at_, n in model.received:
                 channel, placeholder = n.args[0], nodes_[made_.signature.user_inputs[at_]]
@@ -1604,29 +1602,58 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                     if m is not None:
                         env[m] = b
                 sources[placeholder.name] = b
-            made, outs = {}, {}
-            for out in made_.outputs:
-                node = out.value
-                if node.name not in made:
-                    fake = node.meta["val"]
-                    made[node.name] = sources[node.name] if node.op == "placeholder" else Bound(
-                        stored(TEMPORARY, fake.dtype, _extent(fake.shape, fake.stride()) * fake.element_size()),
-                        fake.dtype, tuple(fake.shape), tuple(fake.stride()), 0)
-                outs[out] = made[node.name]
+            held = {}
+
+            def lifted(target):
+                if target not in held:
+                    held[target] = attribute(fetched(module, target))
+                return held[target]
+
             ins = []
-            for f in spec.description.input:
-                name = f.name[:-len(WRAPPED_SCALAR_INPUT_SUFFIX)] if f.name.endswith(WRAPPED_SCALAR_INPUT_SUFFIX) else f.name
-                ins.append((f.name, viewed(sources[name], f.type.multiArrayType), 1))
-            exits = [(f.name, viewed(made[f.name], f.type.multiArrayType), 2) for f in spec.description.output]
-            buffer_of = {op.input.name: trace[len("read_"):]
-                         for op in model.model._mil_program.functions[model.model.function_name].operations
-                         if op.op_type == "read_state"
-                         for trace in op.scopes.get(ScopeSource.EXIR_STACK_TRACE, ()) if trace.startswith("read_")}
+            for feature, name, wrapped in model.inputs:
+                b = sources[name]
+                ins.append((feature, Bound(b.storage, b.dtype, (1,), (1,), b.offset) if wrapped else b, 1))
+            metadata, roles, prototypes, results = model.aliases
+            lifts = {spec.target: spec.arg.name for spec in signature.input_specs if spec.kind != InputKind.USER_INPUT}
+            actual, machine = [], {}
+            for kind, k in roles:
+                name = signature.user_inputs[k] if kind == InputKind.USER_INPUT else lifts[k]
+                value = nodes_[name].meta["val"]
+                actual.append(value)
+                if isinstance(value, torch.Tensor):
+                    machine[StorageWeakRef(value.untyped_storage())] = (
+                        sources[name] if kind == InputKind.USER_INPUT else lifted(k), value)
+            converter = FakeTensorConverter()
+            for prototype, value in zip(prototypes, actual, strict=True):
+                if isinstance(prototype, torch.Tensor) and isinstance(value, torch.Tensor):
+                    converter.set_tensor_memo(prototype, value)
+            mode = _detect_fake_mode_from_gm(program.graph_module)
+            epilogue = _RuntimeForwardEpilogue(metadata, trace_joint=False, keep_input_mutations=False)
+            with mode, torch.enable_grad():
+                outs_ = [converter.from_real_tensor(mode, v) if isinstance(v, torch.Tensor) else v for v in results]
+                forward = list(epilogue.finalize(epilogue.capture_orig_inputs(actual), outs_))
+            made, regenerated = {}, {}
+            for index, r in enumerate(forward):
+                if not isinstance(r, torch.Tensor):
+                    made[index] = r
+                    continue
+                key = StorageWeakRef(r.untyped_storage())
+                if key in machine:
+                    b, v = machine[key]
+                    storage, at = b.storage, b.offset * b.dtype.itemsize - v.storage_offset() * v.element_size()
+                else:
+                    if key not in regenerated:
+                        regenerated[key] = stored(TEMPORARY, r.dtype, r.untyped_storage().nbytes())
+                    storage, at = regenerated[key], 0
+                made[index] = Bound(storage, r.dtype, tuple(r.shape), tuple(r.stride()),
+                                    (at + r.storage_offset() * r.element_size()) // r.element_size())
+            outs = {out: made[out.position] for out in made_.outputs}
+            exits = [(feature, made[index], 2) for feature, index, _ in model.outputs]
             states = []
-            for f in spec.description.state:
-                b = attribute(fetched(module, buffer_of[f.name]))
+            for feature, buffer, reads, writes in model.states:
+                b = lifted(buffer)
                 b.storage.role = KINDS[InputKind.BUFFER][1]
-                states.append((f.name, viewed(b, f.type.stateType.arrayType), 3))
+                states.append((feature, b if reads else None, b if writes else None))
             handles = dict.fromkeys(n for nodes__ in model.handles.values() for n in nodes__)
             owners = [owner_of(p, n) for n in handles]
             lead = next((o for o in owners if o[0] is not None), None)
@@ -1810,7 +1837,17 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                     operands[op] = tuple(b for _, b, _, _ in arguments if b is not None)
                 elif kind == "neural":
                     result, model, package, saved, (ins, outs, states), at_ = payload
-                    bound = ins + outs + states
+
+                    def stated(k, states):
+                        for name, read, written in states:
+                            r = k if read is not None else NONE
+                            k += read is not None
+                            yield name, r, k if written is not None else NONE
+                            k += written is not None
+
+                    sided = [(name, b, access) for name, read, written in states
+                             for b, access in ((read, 1), (written, 2)) if b is not None]
+                    bound = ins + outs + sided
                     domain, accesses, made_ = features(context, [(b, access) for _, b, access in bound])
                     try:
                         op = builder.upstream(result, ANE, at_, [(UPSTREAM_BUFFER, value_of(b), access)
@@ -1822,9 +1859,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                                           model.selected["compute_units"].name,
                                           tuple((name, k) for k, (name, _, _) in enumerate(ins)),
                                           tuple((name, len(ins) + k) for k, (name, _, _) in enumerate(outs)),
-                                          tuple((name, k, k) for k, (name, _, _) in enumerate(states,
-                                                                                               len(ins) + len(outs))),
-                                          saved))
+                                          tuple(stated(len(ins) + len(outs), states)), saved))
                     operands[op] = tuple(b for _, b, _ in bound)
                 elif kind == "repeat":
                     record, init, passed, condition, carried = payload

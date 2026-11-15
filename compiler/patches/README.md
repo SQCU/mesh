@@ -578,12 +578,21 @@ Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), on top of
 - `cpp_template_kernel.py`, `common.py` and `lowering.py` before are upstream's.
 
 It is the original AOT compilation's lowered result, taken at compile_fx's original `graph.aot_mode` branch
-(`cpp_wrapper`). `compile_fx_aot` returns the `LoweredAOTI` itself:
-- `graph`: its GraphLowering after `codegen_with_cpp_wrapper`. Its scheduler codegen has run, and its own wrapper_code
-  (CppWrapperCpu or CppWrapperMps) has emitted its wrapper and kernel code.
-- `compiled`: `AotCodeCompiler.compile`'s `AotCompiled` (`torch-inductor-cpp-build-result.patch`). Its object, header,
-  constants and link actions are held there; its wrapper's and kernel's objects are not compiled, and its shared
-  library is not linked.
+(`cpp_wrapper`) at its codegen's planned stage: after the wrapper's IR passes (its memory plan), before any line
+prints. `compile_fx_aot` returns the `LoweredAOTI` itself:
+- `graph`: its GraphLowering. Its scheduler codegen has run, and its own wrapper_code (CppWrapperCpu or CppWrapperMps)
+  holds its planned lines and its planner's result owner (`memory_planner` or `past_planning_states`). Nothing is
+  printed.
+- `planned`: those planned lines (`wrapper_code.lines`).
+- `resume`, run by `emit(supplied)`: the same generation resumed with the supplied operands (`wrapper_code.supplied`),
+  its print and section assembly, then the branch's own emission. That emission is the original logs, the extern
+  node serializer and `AotCodeCompiler.compile`. It runs under the config and virtualized handlers as they were at
+  the stage.
+- `compiled`: that emission's result, `AotCodeCompiler.compile`'s `AotCompiled`
+  (`torch-inductor-cpp-build-result.patch`), or None before `emit`.
+
+A const graph (`use_runtime_constant_folding`) is not split. Its emitted code is what its main graph's GraphLowering
+takes, so it emits at once.
 
 The revision after `6d56f939` replaces the fx-wrapper return (`GraphLowering.codegen` after `FxConverter.generate`).
 That return is not removed by deletion alone: this patch's `wrapper_fxir.py` hunks remain, unused under `cpp_wrapper`,
@@ -594,15 +603,38 @@ result through it. Fields: `output_data/compiler-workgroup-20261114/compiler/num
 
 - **`config.aot_inductor.lowered: bool = False`**: the operand that asks for the lowered result. With it False, every
   output is unchanged.
-- **`GraphLowering.codegen`**: unchanged. The earlier `(self, None)` return under `lowered` is gone, because
-  `codegen_with_cpp_wrapper` consumes `codegen()`'s own result. `graph.py` is no longer in this patch.
-- **`output_code.py` `LoweredAOTI(OutputCode)`**: a new dataclass with `graph` (the GraphLowering), `device_type` and
-  `compiled` (`AotCompiled`). Its `post_compile` and `set_triton_bundle` do nothing, because there is no emitted
-  callable to load.
+- **`codegen/wrapper.py` `PythonWrapperCodegen`**, the planned stage at the original owner:
+  - `_generate`'s original body is now `_generation`, which yields `self.lines` once, right after
+    `run_wrapper_ir_passes` and before `set_writeline` and the line `codegen` loop. `_generate` starts it.
+  - Under `lowered` (and not for a const graph), `_generate` returns that planned list. Otherwise it resumes at once,
+    so its output is unchanged.
+  - `resume_generation(supplied)` sets `self.supplied` and resumes the print and section assembly. It returns their
+    result.
+  - `memory_plan` keeps its original planner instance as `self.memory_planner`: its buffer groups, allocations and live
+    ranges. Each `PoolMemoryPlanningLine.group` is one of its groups.
+  - `memory_plan_reuse` keeps its own `past_planning_states` as `self.past_planning_states`: each scope's
+    `MemoryPlanningState` in exit order, the root's last.
+  - `run_wrapper_ir_passes` sets both to None first, so exactly one of them is set.
+  - `CppWrapperCpu.generate` (`write_wrapper_decl`, then `super().generate`) and the GPU/MPS overrides pass through
+    unchanged.
+- **`GraphLowering.codegen`**: under `lowered` (not a const graph), it returns the wrapper's planned stage without
+  popping its codegened graph. `resumed_codegen(supplied)` resumes the wrapper's print, pops the graph and returns the
+  code. For CPU and MPS, `codegen_with_cpp_wrapper` is `return self.codegen()`.
+- **`output_code.py` `LoweredAOTI(OutputCode)`**: a new dataclass with fields `graph`, `device_type`, `planned`,
+  `resume` and `compiled` (None until set), and `emit(supplied)`, which sets and returns `compiled`. Its `post_compile`
+  and `set_triton_bundle` do nothing, because there is no emitted callable to load.
 - **`compile_fx.py`**:
-  - `codegen_and_compile` takes its original `graph.aot_mode` branch unchanged: `codegen_with_cpp_wrapper`, the extern
-    node serializer, then `AotCodeCompiler.compile`, which under `lowered` returns `AotCompiled`. Its
-    `V.aot_compilation` return is `LoweredAOTI(graph=graph, device_type=graph.device_type, compiled=compiled_fn)`.
+  - `codegen_and_compile`'s original `graph.aot_mode` branch keeps its emission after codegen, moved unchanged into
+    `aot_compiled(wrapper_code, kernel_code)`: its logs, the extern node serializer, then `AotCodeCompiler.compile`.
+    Without `lowered` it runs at once on `codegen_with_cpp_wrapper()`'s result.
+  - Under `lowered`:
+    - `codegen_with_cpp_wrapper()` gives the planned stage.
+    - The branch captures `config.get_config_copy()` and `dict(vars(virtualized.threadlocal))`.
+    - Its `resumed(supplied)` runs `aot_compiled(*graph.resumed_codegen(supplied))` under `config.patch` of that copy
+      and `_virtualized_as` of those handlers. `_virtualized_as` is new: it sets this thread's V handlers and restores
+      them after.
+  - Its `V.aot_compilation` return is
+    `LoweredAOTI(graph=graph, device_type=graph.device_type, planned=planned, resume=compiled_fn)`.
   - `_compile_fx_main` keeps the AOT export's own signature: `unlifted_gm.meta["graph_signature"] = graph_signature`.
   - `compile_fx_aot` returns the `LoweredAOTI` itself. Its annotation adds `LoweredAOTI`.
 - **`codegen/wrapper_fxir.py` `WrapperFxCodegen`**:
@@ -705,14 +737,14 @@ result through it. Fields: `output_data/compiler-workgroup-20261114/compiler/num
 | Item | Value |
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
-| `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `3647ae6d2286dd2c277a4b919895d04a0beae7afe029dcbbf9373dde66afa3bd` (revision; installed `8a229766…`) |
+| `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `0a1460a62a59ac0a7877ebcf3aa5327e1a36447063ff041dded7f7925db23556` (revision; installed `8a229766…`) |
 | `torch/_inductor/config.py` | before `9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a`, after `adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5` (installed) |
-| `torch/_inductor/graph.py` | no longer patched: reversing installed `d3a42366…` returns it to `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591` |
+| `torch/_inductor/graph.py` | before `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591` (reversing installed `d3a42366…` gives it), after `2c83b47f9e25b956fbfea16d44702eb7b4637b47d92cc9bd641960191646d0a2` (revision) |
 | `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `e53a6377ff2a9d7678d639dedccbbf662d946367a6dac1be0f83ab29a10ebfa7` (installed6d56f939) |
 | `torch/_inductor/lowering.py` | before `c2ea8692e9948b82175cf8fc3ad9fa67e98b04c9b9e1fba5ae2ac77902d18e0c` (upstream), after `5869663abf8440cbc4d11688acce36d080904ed6b96038028d4fb4e88291a394` (installed6d56f939) |
-| `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `7784b80f42c7e16c24f7a587987b4f88747a0afc6e7a7bbc676181144f81e961` (revision; installed `908714f1…`) |
+| `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `8a468b93162b105ff963868bd6fd5a5b0a2f985d5eb0b9fc0e14caca2ed0f7d5` (revision; installed `908714f1…`) |
 | `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` (installed) |
-| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d9d77265fd62a5debb212113250809b37704e1e6400ef747c68a8adbaf695e52` (installed) |
+| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `c504b6a9862b7cabb76c27207eb9e0c1c407b31559d181e5aebce47979c768f9` (revision; installed `d9d77265…`) |
 | `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `1b9b5e525c9822cc3fd8df0e05acbb6713e013f6c0badec4bac9e7dd4c281131` (installed6d56f939) |
 | `torch/_inductor/codegen/common.py` | before `3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466` (upstream), after `0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44` (installed) |
 | `torch/_inductor/codegen/cpp.py` | before `0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3` (`torch-inductor-cpu-kernel-results.patch`'s after), after `c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2` (installed) |
@@ -742,25 +774,36 @@ reverse-old dry run and application, new dry run and application, and reverse-ne
 matches the projected hash in `numerical68-patch-preflight.json`; `numerical68-upstream-install.json` records the
 commands. No Torch or Mesh import, fake-dispatch observation, compilation or workload was run.
 
-The `cpp_wrapper` return revision (patch `415b82a4…`, 12 files) is not installed. It was checked in an isolated
-temporary index:
+The planned-stage revision (patch `87c0520c…`, 13 files) is not installed. It was checked in an isolated temporary
+index:
 - the installed 13 blobs, reversed by the installed `6d56f939` patch, gave the "before" blobs;
 - this revision applied to them and reversed back exactly;
-- its `config.py`, `ir.py`, `lowering.py`, `pattern_matcher.py`, `wrapper.py`, `wrapper_fxir.py`, `common.py`, `cpp.py`,
+- `torch-inductor-cpp-build-result.patch` and `torch-inductor-cpp-wrapper-binding.patch` applied on top;
+- its `config.py`, `ir.py`, `lowering.py`, `pattern_matcher.py`, `wrapper_fxir.py`, `common.py`, `cpp.py`,
   `cpp_template_kernel.py` and `mps.py` results equal the installed blobs;
-- `compile_fx.py` and `output_code.py` take the revision's hashes, and `graph.py` its "before".
+- `compile_fx.py`, `graph.py`, `output_code.py` and `wrapper.py` take the revision's hashes.
 
-Both changed files compile, with no pyflakes finding beyond the before file's. To install, reverse the `6d56f939`
-patch (`git show 6d56f939:compiler/patches/torch-inductor-aot-lowered-result.patch`), then apply this one, then
-`torch-inductor-cpp-build-result.patch`.
+The four changed files compile, with no pyflakes finding beyond each before file's. To install, reverse the
+`6d56f939` patch (`git show 6d56f939:compiler/patches/torch-inductor-aot-lowered-result.patch`), then apply this one,
+then `torch-inductor-cpp-build-result.patch`.
 
 Open items:
+- **The resumption's consumer.** `LoweredAOTI.emit(supplied)` has no caller yet. `supplied` is given to the print as
+  `wrapper_code.supplied`, which 66's allocation, view and pool hooks are to consume. It is passed through as given;
+  this patch defines no schema for it. The canonical prepared owner that supplies it (per instance and per residue)
+  is 132's.
+- **Resumable paths.** Only `codegen()`'s own planned stage is resumable. The GPU two-pass tails of
+  `codegen_with_cpp_wrapper` are not; Mesh's CPU and MPS do not reach them. `distributed_autotune.graph_context` is
+  not re-entered on resume.
+- **Global provenance state.** `torch._inductor.debug`'s provenance state is not part of the captured config or
+  handlers. A body resumed after another body's compile prints with that later state.
 - **`wrapper_fxir.py`'s lowered hunks are unused.** These are the selected-call intrinsic, the lowered subgraphs and
   the converted correspondence. They are to be removed with 66's consumer once the cpp_wrapper consumer replaces
   them.
 - **`lower_inductor._inductor`'s selection is paired in source.** It passes no `fx_wrapper` (so `cpp_wrapper`), and
-  takes `LoweredAOTI.graph` and `.compiled` into `Produced.graph` and the new, announced `Produced.compiled`. That
-  source cannot run until this patch and `torch-inductor-cpp-build-result.patch` are installed.
+  takes `LoweredAOTI.graph` into `Produced.graph` and the `LoweredAOTI` itself into `Produced.lowered` (announced; it
+  replaces `Produced.compiled`). That source cannot run until this patch and `torch-inductor-cpp-build-result.patch`
+  are installed.
 
 ### Apply, check, reverse
 
@@ -770,7 +813,7 @@ From the repository root, after `torch-inductor-upstream-composition.patch`,
 ```sh
 SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
 I=$SITE/torch/_inductor
-F="$I/compile_fx.py $I/config.py $I/ir.py $I/lowering.py $I/output_code.py $I/pattern_matcher.py $I/codegen/wrapper.py $I/codegen/wrapper_fxir.py $I/codegen/common.py $I/codegen/cpp.py $I/codegen/cpp_template_kernel.py $I/codegen/mps.py"
+F="$I/compile_fx.py $I/config.py $I/graph.py $I/ir.py $I/lowering.py $I/output_code.py $I/pattern_matcher.py $I/codegen/wrapper.py $I/codegen/wrapper_fxir.py $I/codegen/common.py $I/codegen/cpp.py $I/codegen/cpp_template_kernel.py $I/codegen/mps.py"
 shasum -a 256 $F
 patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
 patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
@@ -794,16 +837,18 @@ Both "before" files are upstream's, and no other patch here changes them. Its `a
 It returns AOT compilation's own build actions from their original owners, at one exact stage:
 - **Already run by the original:**
   - the headers' precompilation (`PrecompiledHeader`). Its products persist under `_HEADER_DIR`. Its preprocessing
-    output is removed with its temporary directory, so its result is retained before that removal, as `digest`.
-  - the constants object's build (`AotConstants`). Its object persists. Its source file is removed, so its content is
-    retained before that removal, as `code` and `extension`.
+    output is removed with its temporary directory. Only that output's hash is kept, as `digest`; the output itself is
+    not retained, and no later action reads it.
+  - the constants object's build (`AotConstants`). Its source file is removed, so its content is retained before that
+    removal, as `code` and `extension`. Its object's bytes are retained as `object_bytes`, read after its build (and
+    any postprocessing), since a later compile can write the same object path.
 - **Not run:**
   - the wrapper's and kernel's object actions (`wrapper_builder` and `kernel_builder`, `compile_only`);
   - the shared library's link action (`so_builder`), a separate, later action.
 
 A retained action that already ran is a record of what ran: the original's provenance. Its removed paths are not
-inputs to run it again; what it produced is retained as content (`code`, `digest`) or as a persisting file (`object`,
-`path`).
+inputs to run it again. What it produced is retained as content (`code`, `object_bytes`) or as a persisting file
+(`path`); `digest` is a hash only.
 
 It replaces this patch's rejected `CppCodeCache.load_async` revision (never installed), which exposed a per-kernel
 linked Python module's builders.
@@ -812,7 +857,9 @@ linked Python module's builders.
 
 - **`CppBuildAction`**, a new NamedTuple in `cpp_builder.py`, is one builder's action as its command assembly makes it
   and `build()` realizes it:
-  - `command`: its whole argument vector, compiler executable first;
+  - `command`: its whole argument vector. Its first word is the compiler as given (it can be a bare name or a
+    wrapper command); it is not resolved here. `_run_compile_cmd`'s `subprocess.run` resolves it with the inherited
+    environment, in `working_directory`.
   - `sources` and `target`: the positions of its source operands and its target operand;
   - `ldflags`, `libraries` and `library_directories`: the positions of its link inputs and their resolution. These are
     empty unless the action links.
@@ -839,7 +886,7 @@ linked Python module's builders.
   - `preprocessing`: the preprocessor's action, in its own temporary directory;
   - `checksum`: the `openssl sha512` command, now one retained argument list;
   - `digest`: that command's result over the preprocessing output (`preprocessor_hash`), taken before the temporary
-    directory holding that output is removed;
+    directory holding that output is removed. It is a hash only: the output is not retained;
   - `path`: the header file written under `_HEADER_DIR`, named by that digest;
   - `precompiling`: the precompile action, which `_worker_compile_cpp` skips if the product exists;
   - `lock`.
@@ -854,9 +901,18 @@ linked Python module's builders.
     - `consts`;
     - `link`: the `so_builder` action;
     - `extern_kernel_nodes`: the serialized extern table it was given;
-    - `generated_files`.
-  - Its stage, exactly: after its sources are written, its headers precompiled and its constants object built; before
-    any wrapper/kernel compile or link.
+    - `generated_files`;
+    - `wrapper_code` and `kernel_code`: the sources' content as this compile produced it, with the compile/link
+      comments it appended (`wrapper_appended`, `kernel_appended`, the same bytes it writes). `write` does not rewrite
+      an existing path, so under a fixed `model_name_for_generated_files` the files at `wrapper` and `kernel` can be an
+      earlier compile's; the content fields are this compile's;
+    - `model_class`: `aoti_model_class_name` (`AOTInductorModel{suffix}`, with the suffix under static linkage);
+    - `model_header` and `model_header_code`: under static linkage, the renamed `model.h` header's path and content
+      as written (codecache 2713–2740). Both are `""` under dynamic linkage, where the wrapper inlines
+      `aoti_runtime/interface.cpp` instead.
+  - Its stage, exactly: after the wrapper's final print, its sources written, its headers precompiled and its
+    constants object built; before any wrapper/kernel compile or link. It is the result of the aot patch's resumed
+    emission (`LoweredAOTI.emit`), after that patch's planned stage.
   - `link` is the whole `so_builder` action:
     - its command over its objects (wrapper's, kernel's, constants', GPU kernels');
     - its target, its link inputs and their resolution;
@@ -869,7 +925,10 @@ linked Python module's builders.
     `use_consts_asm_build` off and zero-size constants; otherwise `assembly` is None.
   - `postprocessed`: whether the constants' data was then written over the object's magic number (large constants
     under `use_consts_asm_build`);
-  - `object`.
+  - `object`;
+  - `object_bytes`: that object's content, read after its build and postprocessing, before `os.remove` of its
+    source. Its path is keyed by model name or by `consts_code`'s hash, which leaves out the postprocessed data, so a
+    later compile can write over it.
 
   `compile` uses `.object` where it used the path.
 - **`run_asm_build_object`** now returns the command it ran (`shlex.split` of it, as `_run_compile_cmd` splits it). Its
@@ -880,22 +939,27 @@ linked Python module's builders.
 | Item | Value |
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
-| `torch/_inductor/cpp_builder.py` | before `fad619f890b25f0f15a7f563ea00e36da16d800f37f3060330be2de9304db373` (upstream; installed), after `0d8c8abb7594a6c4cef4365eed0d76b8be0769b2e3eceffec917f23a37c02e46` |
-| `torch/_inductor/codecache.py` | before `1edadc1e1229adbd7c6f84cef43a04c031add6e1793be0f12b73f22798966156` (upstream; installed), after `8954eba36af6573dc7ae10286aba4be3dc305d2852f80aea254c7ed7e9215e5e` |
+| `torch/_inductor/cpp_builder.py` | before `fad619f890b25f0f15a7f563ea00e36da16d800f37f3060330be2de9304db373` (upstream; installed), after `fa98d76f45751abb6cf88bd8cb1e48d6fd8a0defe16077090185b229279a963a` |
+| `torch/_inductor/codecache.py` | before `1edadc1e1229adbd7c6f84cef43a04c031add6e1793be0f12b73f22798966156` (upstream; installed), after `83409729b8f8f1c29cfb6e2fdfe82871a8ffa94e118309a78e7b8d94414b8ae8` |
 
 Open items:
 - **Constants object.** It is built here by its original owner, and retained in `AotConstants`. Whether the archive
   binds constants through it or through native values (`constants_->at(idx)`) is for 104/131 to pair.
-- **Reached through the uninstalled aot revision.** `torch-inductor-aot-lowered-result.patch` `415b82a4…` returns
-  `LoweredAOTI.compiled` from compile_fx's original `graph.aot_mode` branch under `cpp_wrapper`. Neither patch is
-  installed; together they are one dependency unit for preflight (install order in that section).
-- **Source operands are the wrapper's final print.** `wrapper` and `kernel` are what `codegen_with_cpp_wrapper`'s
-  final `generate` wrote. The typed body/allocation/binding/transport operands before that print are not returned
-  here. They are 66's hooks' (`cpp_wrapper_cpu.py`, reserved), and the stage that returns or consumes them is open.
+- **Reached through the uninstalled aot revision.** `torch-inductor-aot-lowered-result.patch` `87c0520c…` returns
+  `LoweredAOTI` from compile_fx's original `graph.aot_mode` branch under `cpp_wrapper`, at its planned stage. Its
+  `emit` is what reaches `compile` and returns `AotCompiled`. Neither patch is installed; together they are one
+  dependency unit for preflight (install order in that section).
+- **After-print result.** `AotCompiled` follows the wrapper's final print. Its `wrapper_code` and `kernel_code` are
+  that print's source operands. The planned lines and planner owners before that print are the aot patch's
+  `LoweredAOTI.planned` and `wrapper_code`'s. The supplied bindings that print takes are 66's hooks'.
+- **Multiplicity (WIP).** One `emit` per `LoweredAOTI` resumes its one generation. Several configurations of one
+  planned owner (`Target.instanced` rows over one function) need one final emission each. `compile` would then run
+  `_compile_consts` again for each, though the constants do not depend on the configuration. Open.
 - **Unit identity.** Its emitter runs with upstream's `aot_inductor.dynamic_linkage` (True), so `aoti_model_class_name`
   carries no unit suffix. The static composition's unit identity (`dynamic_linkage` False and
-  `model_name_for_generated_files` from the body's existing unit) is not selected yet; its operand is to be paired
-  with 131.
+  `model_name_for_generated_files`) is not selected. No local ordinal is used, and no name is derived from a repr.
+  `compiled_fx_graph_hash` (codecache 1772), the canonical graph/input/config key, is not computed under `aot_mode`
+  (compile_fx 1031: `use_cache` False), so it is not present here. The usable unit result is to be assessed with 131.
 
 Not installed yet. It was checked in an isolated temporary index holding the installed blobs:
 - `git apply --cached` gives the "after" hashes, with no offset;
@@ -919,6 +983,78 @@ shasum -a 256 $F
 - The first `shasum` must print the "before" hashes above, and the second the "after" hashes.
 - To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpp-build-result.patch`.
 - This is pure Python source, so no rebuild is needed.
+
+## `coremltools-exir-correspondence.patch`
+
+Mechanism: installed coremltools 9.0 (`/Users/mdot/.venv-mesh-uv`).
+
+- `coremltools/converters/mil/frontend/torch/converter.py` `TorchConverter.convert` binds each ExportedProgram user
+  input and each mutated buffer's state to its MIL function input, in the function's input order.
+  - It strips its own rank-0 wrap there (1347–1360).
+  - It reads and writes states through `input_name_to_source_buffer_name` and `output_name_to_target_buffer_name`
+    (1366–1416).
+  - It assembles the outputs in `self.graph.outputs` order, dropping None ones.
+- `exir_utils.py` `_extract_outputs_from_exir_program` (292–317) is the extraction owner of `self.graph.outputs`. It
+  appends `output_spec.arg.name` for every `USER_OUTPUT`, in signature order. For a `ConstantArgument` (torch
+  graph_signature.py `_make_argument_spec` 599 and 627) that name is `""` or a node name, and neither need be a context
+  entry, so `convert`'s `self.context[name]` (`TranscriptionContext.__getitem__`) raises ValueError.
+- The MIL passes that rewrite a function's outputs are each that rewrite's owner:
+  - `preprocess.py` `update_output_dtypes` (one new output per old, at its index);
+  - `optimize_repeat_ops.py` (one identity sink per output, later restored);
+  - `quantization.py` (an input-cast var replacing its occurrences);
+  - `symbol_transform.py` (a new target function from a source function's outputs).
+- `Block._replace_var` replaces per index. The input renames and casts keep the function's input order:
+  `_sanitize_block_input_vars` and `quantization.py` 235.
+
+### What it changes
+
+- **`_extract_outputs_from_exir_program`** keeps each static user output's own `ConstantArgument` at its signature
+  position in `user_outputs`, and the name otherwise. This is the distinction torch's
+  `ExportGraphSignature.user_outputs` makes. So `self.graph.outputs` index k is user output k.
+- **`convert`** resolves a `ConstantArgument` occurrence to no Var: it is the original's None constant output, dropped
+  from the MIL outputs. Its value stays at its one owner, the signature's `ConstantArgument.value`.
+- **`convert`** records the converter's own correspondence on its main function:
+  - `exir_inputs`: each function input's `(state, torch name or buffer, unwrapped)`;
+  - `exir_outputs`: each kept output occurrence's `(user output position, torch name)`, parallel to the function's
+    outputs;
+  - `exir_buffers`: its read and write maps, in the torch.export frontends that have them.
+- **Each output-rewrite owner** carries `exir_outputs` through its own rewrite. Each new output occurrence takes its
+  source occurrence's record: `update_output_dtypes`, both `optimize_repeat_ops` output rewrites, `quantization.py`'s
+  output replacement, and `symbol_transform.py`, which carries all three records to the target function.
+
+`compiler/mesh_compiler/lower_inductor.py` `_engine` reads these into `Model.inputs`, `.outputs` and `.states`.
+- Each static output reaches its consumers from the torch owners. `Produced.Output` takes `ConstantArgument.value`.
+  In `lower_metal.py` `neural`, `aot_aliases`' forward result at that position is the literal: export.py 149 keeps a
+  non-Node leaf, and its `OutputType.non_alias` handler returns it unchanged.
+- `USER_INPUT_MUTATION` still raises in the original (`exir_utils.py` 301). Mutated user inputs, and their Neural
+  Engine mapping, are not covered.
+
+### Target
+
+| File (under `coremltools/converters/mil/`) | Before (sha256) | After (sha256) |
+|---|---|---|
+| `frontend/torch/converter.py` | `fb081deff06839df6bb80221fd77ee8c00422db2f44a0c9f78b9fb1418f85ed9` | `8fba601485e31d4a5440fa0d74b8737b3b262d052bfefbf12937eca99ba39f66` |
+| `frontend/torch/exir_utils.py` | `59ed5998063775f4b223ead46cef0c7048a1e934eeb1d35579877706a9f56e9b` | `7ad40697304590c172493e8c6b1f55568df915bf225bc43398135a96add4533c` |
+| `mil/passes/defs/preprocess.py` | `06f2b1c42906bb364861761e199c22461341fb26b0702fae7f1a78158d76cb7f` | `e00cf45fe1cadb918c7dab27518c7cc81ec37778e09bb0ec0d2d5e701c63173f` |
+| `mil/passes/defs/optimize_repeat_ops.py` | `b7d0486e9bf1ac341f1cdf84691b07d180d4d1873852f7f8ef2da3fef0cc2ce6` | `21475a1a70a27540949d9631b01b969c63c7eb03f5333e500cf9c5547ef9ef17` |
+| `mil/passes/defs/quantization.py` | `14e7fcd3f00423bdae42e970f483ddb8c9d82da4b904016ac0b5055ea2fa19a2` | `5d4b5425fcc054c943c8dbf401aae19becd8fa753faf4726e7b5e29fa4cba749` |
+| `mil/passes/defs/symbol_transform.py` | `4d054c4e883eb3a32f5ae70b431aff45cdf58cce8c0bab697a2a86c641d5c9af` | `31b2a7c665dd01fc2661f368c9bffcac111afa05766050b475199202683796d2` |
+
+### Apply, check, reverse
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+D=$SITE/coremltools/converters/mil
+F="$D/frontend/torch/converter.py $D/frontend/torch/exir_utils.py $D/mil/passes/defs/preprocess.py $D/mil/passes/defs/optimize_repeat_ops.py $D/mil/passes/defs/quantization.py $D/mil/passes/defs/symbol_transform.py"
+shasum -a 256 $F
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/coremltools-exir-correspondence.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/coremltools-exir-correspondence.patch
+shasum -a 256 $F
+```
+
+- The first `shasum` must print the "before" hashes above, and the second the "after" hashes.
+- To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/coremltools-exir-correspondence.patch`.
+- This is pure Python source, so no rebuild is needed. It is not applied here; the executor owns installation.
 
 ## `torch-inductor-cpp-wrapper-binding.patch`
 

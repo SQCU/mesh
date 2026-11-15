@@ -1,0 +1,223 @@
+--- a/coremltools/converters/mil/frontend/torch/converter.py
++++ b/coremltools/converters/mil/frontend/torch/converter.py
+@@ -1301,8 +1301,11 @@
+             user_names = list(ssa_func_inputs.keys())
+             internal_names = list(self.graph.inputs.keys())
+             internal_names.extend(user_names[len(internal_names) :])
++            states = {state.name for state in self.states}
++            inputs = []
+             for torch_name, ssa_name in zip(internal_names, user_names):
+                 input_var = ssa_func.inputs[ssa_name]
++                source_name = torch_name
+                 if self.context.frontend == TorchFrontend.TORCHSCRIPT:
+                     # To create fp16 Core ML model from fp32 torch script model, we
+                     # 1. Cast input to fp32 (if specified fp16 input)
+@@ -1361,6 +1364,7 @@
+                             input_var = mb.squeeze(x=input_var, name=torch_name)
+                 else:
+                     raise ValueError(f"Invalid PyTorch frontend {self.context.frontend}")
++                inputs.append((ssa_name in states, torch_name, torch_name != source_name))
+                 self.context.add(input_var, torch_name=torch_name)
+ 
+             # EXIR lifts buffer references as inputs, so we need to create them by reading states
+@@ -1422,6 +1426,9 @@
+             for g in graph_outputs:
+                 if g is None:
+                     logger.warning(f"Dropping output {g} which is None")
++            if self.context.frontend in TORCH_EXPORT_BASED_FRONTENDS:
++                occurrences = [(position, name) for position, name, g in
++                               zip(self.graph.output_positions, self.graph.outputs, graph_outputs) if g is not None]
+             graph_outputs = [g for g in graph_outputs if g is not None]
+ 
+             # Output renaming occurs
+@@ -1438,6 +1445,11 @@
+ 
+             ssa_func.set_outputs(graph_outputs)
+             prog.add_function("main", ssa_func)
++            ssa_func.exir_inputs = inputs
++            if self.context.frontend in TORCH_EXPORT_BASED_FRONTENDS:
++                ssa_func.exir_outputs = occurrences
++                ssa_func.exir_buffers = (dict(self.context.torch_graph.input_name_to_source_buffer_name),
++                                         dict(self.context.torch_graph.output_name_to_target_buffer_name))
+             if self.use_default_fp16_io:
+                 # If the output type is not specified by the user and use_default_fp16_io
+                 # is True. Make the default output type to fp16
+--- a/coremltools/converters/mil/frontend/torch/exir_utils.py
++++ b/coremltools/converters/mil/frontend/torch/exir_utils.py
+@@ -290,10 +290,14 @@
+             i.e. these output variables are "written" to mutable buffer
+     """
+     user_outputs = []
++    output_positions, position = [], 0
+     output_name_to_target_buffer_name = {}
+     for output_spec in exported_program.graph_signature.output_specs:
+         if output_spec.kind == torch.export.graph_signature.OutputKind.USER_OUTPUT:
+-            user_outputs.append(output_spec.arg.name)
++            if not isinstance(output_spec.arg, torch.export.graph_signature.ConstantArgument):
++                user_outputs.append(output_spec.arg.name)
++                output_positions.append(position)
++            position += 1
+ 
+         elif output_spec.kind == torch.export.graph_signature.OutputKind.BUFFER_MUTATION:
+             output_name_to_target_buffer_name[output_spec.arg.name] = output_spec.target
+@@ -314,7 +318,7 @@
+                 f"But got {output_spec.kind}"
+             )
+ 
+-    return user_outputs, output_name_to_target_buffer_name
++    return user_outputs, output_positions, output_name_to_target_buffer_name
+ 
+ 
+ def extract_io_from_exir_program(
+@@ -322,6 +326,7 @@
+ ) -> Tuple[
+     List[TensorType],
+     List[str],
++    List[int],
+     Dict[str, torch.Tensor],
+     Dict[str, torch.Tensor],
+     Dict[str, str],
+@@ -358,12 +363,13 @@
+         buffers,
+         input_name_to_source_buffer_name,
+     ) = _extract_inputs_from_exir_program(exported_program)
+-    user_outputs, output_name_to_target_buffer_name = _extract_outputs_from_exir_program(
+-        exported_program
++    user_outputs, output_positions, output_name_to_target_buffer_name = (
++        _extract_outputs_from_exir_program(exported_program)
+     )
+     return (
+         user_inputs,
+         user_outputs,
++        output_positions,
+         constants,
+         buffers,
+         input_name_to_source_buffer_name,
+--- a/coremltools/converters/mil/frontend/torch/internal_graph.py
++++ b/coremltools/converters/mil/frontend/torch/internal_graph.py
+@@ -448,6 +448,7 @@
+         buffers: Optional[Dict[str, torch.Tensor]] = None,
+         input_name_to_source_buffer_name: Optional[Dict[str, str]] = None,
+         output_name_to_target_buffer_name: Optional[Dict[str, str]] = None,
++        output_positions: Optional[List[int]] = None,
+     ):
+         """
+         Arguments:
+@@ -470,6 +471,7 @@
+         self.buffers = buffers
+         self.input_name_to_source_buffer_name = input_name_to_source_buffer_name
+         self.output_name_to_target_buffer_name = output_name_to_target_buffer_name
++        self.output_positions = output_positions
+ 
+         self.params_scope = {}
+ 
+@@ -570,6 +572,7 @@
+         (
+             user_inputs,
+             user_outputs,
++            output_positions,
+             params,
+             buffers,
+             input_name_to_source_buffer_name,
+@@ -580,7 +583,7 @@
+ 
+         # Add outputs, cutting if @cut_at_symbols is set
+         if cut_at_symbols is not None:
+-            outputs = cut_at_symbols
++            outputs, output_positions = cut_at_symbols, list(range(len(cut_at_symbols)))
+         else:
+             outputs = user_outputs
+ 
+@@ -612,6 +615,7 @@
+             buffers=buffers,
+             input_name_to_source_buffer_name=input_name_to_source_buffer_name,
+             output_name_to_target_buffer_name=output_name_to_target_buffer_name,
++            output_positions=output_positions,
+         )
+ 
+     def __str__(self):
+--- a/coremltools/converters/mil/mil/passes/defs/preprocess.py
++++ b/coremltools/converters/mil/mil/passes/defs/preprocess.py
+@@ -352,7 +352,7 @@
+             )
+             raise ValueError(msg.format(len(user_provided_output_types), len(output_vars)))
+ 
+-        new_outputs = []
++        new_outputs, occurrences = [], getattr(func, "exir_outputs", None)
+         for i, output_type in enumerate(user_provided_output_types):
+             required_output_dtype = output_type.dtype
+             output_var = output_vars[i]
+@@ -387,6 +387,8 @@
+                 new_outputs.append(new_output_var)
+ 
+         func.set_outputs(new_outputs)
++        if occurrences is not None:
++            func.exir_outputs = [occurrences[i] for i in range(len(user_provided_output_types))]
+ 
+     def apply(self, prog: Program):
+         for func in prog.functions.values():
+--- a/coremltools/converters/mil/mil/passes/defs/optimize_repeat_ops.py
++++ b/coremltools/converters/mil/mil/passes/defs/optimize_repeat_ops.py
+@@ -829,6 +829,7 @@
+     def _add_output_sinks(self):
+         # We add an identity sink for all outputs.
+         self.old_output_vars = {var: var.name for var in self.block.outputs}
++        self.occurrences = getattr(self.block, "exir_outputs", None)
+         new_outputs = []
+         output_sinks_var = {}
+         for out_var in self.block.outputs:
+@@ -840,6 +841,8 @@
+             new_outputs.append(out_sink)
+             self.output_sink_ops.append(out_sink.op)
+         self.block.set_outputs(new_outputs)
++        if self.occurrences is not None:
++            self.block.exir_outputs = [self.occurrences[j] for j, _ in enumerate(new_outputs)]
+ 
+     def _visit_unary_like_op(self, op, input_var=None):
+         # pass the input var's hypothetical_value to the output var's, since shape invariant ops do
+@@ -1265,6 +1268,8 @@
+         for transpose_op in self.transpose_op_to_cancel_ops:
+             self._remove_transpose_ops(transpose_op)
+         self.block.set_outputs([sink_op.x for sink_op in self.output_sink_ops])
++        if self.occurrences is not None:
++            self.block.exir_outputs = [self.occurrences[j] for j, _ in enumerate(self.output_sink_ops)]
+         self.block.remove_ops(list(self.output_sink_ops))
+ 
+         if self._DEBUG:
+--- a/coremltools/converters/mil/mil/passes/defs/quantization.py
++++ b/coremltools/converters/mil/mil/passes/defs/quantization.py
+@@ -212,7 +212,10 @@
+                     new_outputs = []
+                     for val in func.outputs:
+                         new_outputs.append(new_input if val == v else val)
++                    occurrences = getattr(func, "exir_outputs", None)
+                     func.set_outputs(new_outputs)
++                    if occurrences is not None:
++                        func.exir_outputs = [occurrences[j] for j, _ in enumerate(new_outputs)]
+ 
+                 new_func_inputs[k] = new_input
+                 cast_input = mb.cast(
+--- a/coremltools/converters/mil/mil/passes/defs/symbol_transform.py
++++ b/coremltools/converters/mil/mil/passes/defs/symbol_transform.py
+@@ -337,5 +337,8 @@
+                         for source_output_var in source_function.outputs
+                     ]
+                 )
++                for record in ("exir_inputs", "exir_outputs", "exir_buffers"):
++                    if hasattr(source_function, record):
++                        setattr(target_function, record, getattr(source_function, record))
+ 
+                 prog.add_function(target_function_name, target_function)
+--- a/coremltools/converters/mil/backend/mil/passes/adjust_io_to_supported_types.py
++++ b/coremltools/converters/mil/backend/mil/passes/adjust_io_to_supported_types.py
+@@ -207,7 +207,10 @@
+             output_var.set_name(output_var_name)
+             Block._copy_scope_info(old_output_var, output_var)
+         new_outputs.append(output_var)
++    occurrences = getattr(func, "exir_outputs", None)
+     func.set_outputs(new_outputs)
++    if occurrences is not None:
++        func.exir_outputs = [occurrences[j] for j, _ in enumerate(new_outputs)]
+ 
+ 
+ def _adjust_func_inputs(func):

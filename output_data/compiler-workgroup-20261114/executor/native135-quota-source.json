@@ -1,0 +1,34 @@
+{
+  "time": "2026-11-15T10:53:15.829871+00:00",
+  "status": "unaccepted source-history WIP after quota limit; no install/import",
+  "sources": {
+    "compiler/mesh_compiler/lower_inductor.py": "ee2c28e7b8e4f10238940b884104e67a36aa472bd853533cb7d3ba1cc339f782",
+    "compiler/mesh_compiler/lower_metal.py": "e720210df00e61dec6982ab2fef799521c4f6b667e17489505507033fc30c837",
+    "compiler/patches/coremltools-exir-correspondence.patch": "7d9697ae35803436fc4dfcce05555c63cb5e01819cb412b4e338ea2721f65574",
+    "compiler/patches/README.md": "93e19fb3e3d125fbe0cb121ee78cb8b8cfcc7b593b53bab3b300983916a45ffc"
+  },
+  "checks": {
+    "python_ast": true,
+    "patch_dry_run_fuzz0": true
+  },
+  "owners": {
+    "lower_inductor": "135 Model/_engine only",
+    "lower_metal": "135 neural and encode neural only",
+    "coreml_patch": "135 original converter/output correspondence",
+    "README": "whole68+135 WIP granted by compiler supervisor"
+  },
+  "review": [
+    "Original full AOT alias epilogue replaces meta tensor/debug-name/three-case alias reconstruction",
+    "Original converter input/output/state records feed Model and neural",
+    "Latest static extraction filters ConstantArgument from numerical graph.outputs and retains original output_positions; constants stay original signature/AOT result",
+    "Output positions propagate through original frontend and backend MIL output rewrites",
+    "Native optional state sides paired to actual absent read/write sides"
+  ],
+  "remaining": [
+    "Whole precision/state/mutation/alias domain not complete; original USER_INPUT_MUTATION still rejected",
+    "No connected Model native execution/save/load observation",
+    "README68 stage prose and135 six-file hashes precede final eight-file patch; source and supervisor accounts are authoritative, not those stale claims",
+    "Patch not installed; Model source depends on it",
+    "CoreML output and AOT association semantic correctness unobserved"
+  ]
+}
