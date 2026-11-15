@@ -1,0 +1,251 @@
+--- a/torch/_inductor/compile_fx.py
++++ b/torch/_inductor/compile_fx.py
+@@ -85,6 +85,7 @@
+     copy_strided_storage_,
+     get_expanded_dims,
+     index_expanded_dims,
++    LoweredAOTI,
+     OutputCode,
+ )
+ from torch._inductor.runtime.cache_dir_utils import cache_dir
+@@ -1691,7 +1692,11 @@
+                     with dynamo_timed(
+                         "GraphLowering.compile_to_fn", log_pt2_compile_event=True
+                     ):
+-                        if graph.aot_mode and graph.fx_wrapper:
++                        if graph.aot_mode and config.aot_inductor.lowered:
++                            # compiler/patches/torch-inductor-aot-lowered-result.patch:
++                            # GraphLowering.codegen to its lowered result, before its wrapper's generate
++                            graph.codegen()
++                        elif graph.aot_mode and graph.fx_wrapper:
+                             if graph.cpp_wrapper:
+                                 raise AssertionError(
+                                     "Expected cpp_wrapper to be False for fx_wrapper AOT mode"
+@@ -1863,6 +1868,10 @@
+ 
+                     # pyrefly: ignore [unbound-name]
+                     if V.aot_compilation:
++                        # compiler/patches/torch-inductor-aot-lowered-result.patch:
++                        # aot_inductor.lowered, the lowered result itself
++                        if config.aot_inductor.lowered:
++                            return LoweredAOTI(graph=graph, device_type=graph.device_type)
+                         if not isinstance(
+                             compiled_fn,
+                             # pyrefly: ignore [unbound-name]
+@@ -2239,7 +2248,7 @@
+     example_inputs_: list[InputType],
+     inner_compile: _CompileFxCallable = compile_fx_inner,
+     config_patches: dict[str, Any] | None = None,
+-) -> list[str | Weights] | str | GraphModule:
++) -> list[str | Weights] | str | GraphModule | GraphLowering:
+     if not isinstance(model_, GraphModule):
+         raise AssertionError(f"Expected GraphModule, got {type(model_)}: {model_}")
+ 
+@@ -2298,6 +2307,10 @@
+             config_patches=config_patches,
+         )
+ 
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the
++        # lowered result's GraphLowering
++        if isinstance(compiled_artifacts, LoweredAOTI):
++            return compiled_artifacts.graph
+         if not isinstance(compiled_artifacts, CompiledAOTI):
+             raise AssertionError(
+                 f"Expected CompiledAOTI, got {type(compiled_artifacts)}"
+@@ -3279,6 +3292,9 @@
+                             node.meta["val"] = target
+ 
+             unlifted_gm = _unlift_graph(model_, gm, graph_signature)
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: the export's own GraphSignature
++            # of the graph it lowers, held by that graph (the GraphLowering's module)
++            unlifted_gm.meta["graph_signature"] = graph_signature
+             if "dynamo_flat_name_to_original_fqn" in model_.meta:
+                 unlifted_gm.meta["dynamo_flat_name_to_original_fqn"] = model_.meta[
+                     "dynamo_flat_name_to_original_fqn"
+--- a/torch/_inductor/config.py
++++ b/torch/_inductor/config.py
+@@ -2345,6 +2345,13 @@
+     # and del'd at their last consumer (faster but higher peak memory).
+     autotune_per_kernel_alloc: bool = False
+ 
++    # compiler/patches/torch-inductor-aot-lowered-result.patch: the AOT compilation's result its lowered
++    # result (output_code.py LoweredAOTI): its GraphLowering after GraphLowering.codegen's scheduler codegen (each
++    # backend's kernel codegen and define_kernel, its kernel sources made), its wrapper's lines as written, before the
++    # wrapper's generate (no memory planning, wrapper conversion or wrapper source) and before any module or kernel
++    # compile or load; each control subgraph its own (fx_wrapper)
++    lowered: bool = False
++
+     # AOTInductor output path
+     # If an absolute path is specified, the generated lib files will be stored under the directory;
+     # If a relative path is specified, it will be used as a subdirectory under the default caching path;
+--- a/torch/_inductor/graph.py
++++ b/torch/_inductor/graph.py
+@@ -3050,6 +3050,11 @@
+                 V.graph.all_codegen_kernel_names,
+             )
+ 
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, this graph
++            # itself as its scheduler's codegen left it, before its wrapper's generate
++            if config.aot_inductor.lowered:
++                self.wrapper_code.pop_codegened_graph()
++                return self, None
+             result = self.wrapper_code.generate(self.is_inference)
+             self.wrapper_code.pop_codegened_graph()
+             return result
+--- a/torch/_inductor/ir.py
++++ b/torch/_inductor/ir.py
+@@ -9507,8 +9507,11 @@
+         # that it's true).  But we're code generating the actual runtime assert here!!
+         symbol = next(iter(self.get_free_symbol_uses(unbacked_only=False)))
+         if V.graph.fx_wrapper:
+-            # TODO fix
+-            pass
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: the assertion as the
++            # wrapper's own line, its scalar unsimplified
++            from .codegen.wrapper import AssertScalarLine
++
++            wrapper.writeline(AssertScalarLine(wrapper, self))
+         elif V.graph.cpp_wrapper:
+             symbol_str = f"std::to_string({symbol})"
+             sizevar = V.graph.wrapper_code.codegen_cpp_sizevar(
+--- a/torch/_inductor/output_code.py
++++ b/torch/_inductor/output_code.py
+@@ -1169,6 +1169,31 @@
+ 
+ 
+ @dataclasses.dataclass
++class LoweredAOTI(OutputCode):
++    """
++    compiler/patches/torch-inductor-aot-lowered-result.patch: an AOT compilation's lowered
++    result (aot_inductor.lowered): `graph` its GraphLowering as GraphLowering.codegen's scheduler codegen left it (its
++    backends' kernel sources made and defined), its wrapper's lines before generate; no wrapper source, and no module
++    or kernel compiled or loaded. compile_fx_aot returns `graph`.
++    """
++
++    graph: Any
++    device_type: str
++
++    def post_compile(
++        self,
++        example_inputs: Sequence[InputType],
++        constants: CompiledFxGraphConstants,
++        graph_kwargs: _CompileFxKwargs,
++    ) -> None:
++        # a lowered result has no emitted callable to load
++        pass
++
++    def set_triton_bundle(self, triton_bundle: Any) -> None:
++        pass
++
++
++@dataclasses.dataclass
+ class MockFXGraphCacheOutput(OutputCode):
+     gm: Any = None
+ 
+--- a/torch/_inductor/pattern_matcher.py
++++ b/torch/_inductor/pattern_matcher.py
+@@ -156,6 +156,22 @@
+ 
+ # Sentinel indicating multiple quantities can be matched
+ MULTIPLE = Multiple()
++
++
++def _transfer_matched(
++    new_nodes: Sequence[torch.fx.Node], match: Match, pass_name: str = ""
++) -> None:
++    # compiler/patches/torch-inductor-aot-lowered-result.patch: the rewrite's own
++    # correspondence at its result, before the match is erased: every matched node (Match.nodes) a source of every
++    # node the rewrite added, after each one's existing from_node chain
++    from torch.fx.traceback import NodeSource, NodeSourceAction
++
++    if config.effective_provenance_tracking_level() == 1:
++        matched = [
++            NodeSource(node, pass_name, NodeSourceAction.REPLACE) for node in match.nodes
++        ]
++        for node in new_nodes:
++            node.meta["from_node"] = [*node.meta.get("from_node", ()), *matched]
+ 
+ 
+ def _transfer_meta(
+@@ -1382,6 +1398,7 @@
+             node.replace_all_uses_with(replacement)
+         if match.nodes[-1] is not node:
+             raise AssertionError("expected match.nodes[-1] to be node")
++        _transfer_matched([replacement], match)
+         match.erase_nodes()
+ 
+ 
+@@ -1637,6 +1654,7 @@
+                     )
+                 replace(output_nodes[0], replacement)
+ 
++        _transfer_matched(added_replacement_nodes, match, pass_name or "")
+         match.erase_nodes()
+ 
+         # Remove dead replacement nodes so they don't inflate user counts
+--- a/torch/_inductor/codegen/wrapper.py
++++ b/torch/_inductor/codegen/wrapper.py
+@@ -617,6 +617,24 @@
+     @staticmethod
+     def codegen_fx(converter: FxConverter) -> FxConversionFunc:
+         return converter._generate_dynamic_scalar
++
++
++# compiler/patches/torch-inductor-aot-lowered-result.patch: ir.AssertScalar under fx_wrapper, its
++# scalar (unsimplified: runtime asserts simplify it to True) and message; its Python form ir.py AssertScalar.codegen's
++@dataclasses.dataclass
++class AssertScalarLine(WrapperLine):
++    wrapper: PythonWrapperCodegen
++    node: ir.AssertScalar
++
++    def codegen(self, code: IndentedBuffer) -> None:
++        sizevar = self.wrapper.codegen_python_sizevar(self.node.scalar, simplify=False)
++        code.writeline(f"if not ({sizevar}):")
++        code.writeline(f"    raise RuntimeError({repr(self.node.msg)})")
++        code.writeline(f"{self.node.get_name()} = None")
++
++    @staticmethod
++    def codegen_fx(converter: FxConverter) -> FxConversionFunc:
++        return converter._generate_assert_scalar
+ 
+ 
+ @dataclasses.dataclass
+--- a/torch/_inductor/codegen/wrapper_fxir.py
++++ b/torch/_inductor/codegen/wrapper_fxir.py
+@@ -156,6 +156,9 @@
+     def __init__(self, *args: Any, **kwargs: Any):
+         super().__init__(*args, **kwargs)
+         self.subgms: dict[str, torch.fx.GraphModule] = {}
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, each
++        # subgraph's own GraphLowering as its codegen returned it
++        self.lowered_subgraphs: dict[str, Any] = {}
+ 
+     def codegen_inputs(self) -> None:
+         """
+@@ -178,6 +181,11 @@
+         """
+         Record subgms as they're generated.
+         """
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the
++        # subgraph's GraphLowering (GraphLowering.codegen's result), never converted
++        if config.aot_inductor.lowered:
++            self.lowered_subgraphs[name] = subgraph_code
++            return
+         if not isinstance(subgraph_code, FileBackedGraphModule):
+             raise AssertionError(
+                 f"expected FileBackedGraphModule, got {type(subgraph_code)}"
+@@ -819,6 +827,14 @@
+         if not isinstance(line, CommentLine):
+             raise AssertionError(f"expected CommentLine, got {type(line)}")
+         # We ignore comments in FX IR.
++
++    def _generate_assert_scalar(self, line: WrapperLine) -> None:
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aten._assert_scalar of the
++        # line's scalar, as the graph's other symbolic expressions are generated
++        self.gm.graph.call_function(
++            aten._assert_scalar.default,
++            args=(self._sympy_interp(line.node.scalar).node, line.node.msg),
++        )
+ 
+     def _generate_dynamic_scalar(self, line: WrapperLine) -> None:
+         if not isinstance(line, DynamicScalarLine):

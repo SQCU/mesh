@@ -2,11 +2,12 @@
 # replacement; design/aot-compilation-change-request.md A1, A5, A6 and A8 to A10; design/torch-source-lowering-change-
 # request.md items 1 to 3, 5 and 6; /Users/mdot/schedule-emit/schedule_emit/lower_inductor.py at f41c64a (adapt,
 # recv_strided, lower): each processor's scheduled body given to its target's installed upstream compiler (torch 2.14.0
-# torch/_inductor: compile_fx.py compile_fx, the inductor backend's entry, its GraphLowering, Scheduler and the selected
-# backend; coremltools 9.0 for the Neural Engine), its result retained as that compiler's own objects. Fields and
-# pairing: output_data/compiler-workgroup-20261114/compiler/numerical65-operands.md; upstream hooks:
-# compiler/patches/torch-inductor-graph-lowering-factory.patch, torch-inductor-mps-kernel-operands.patch and
-# torch-inductor-upstream-composition.patch
+# torch/_inductor: compile_fx.py compile_fx_aot, the AOT entry, its GraphLowering, Scheduler and the selected backend;
+# coremltools 9.0 for the Neural Engine), its returned pre-terminal result retained as that compiler's own objects.
+# Fields: output_data/compiler-workgroup-20261114/compiler/numerical68-result.md; upstream hooks:
+# compiler/patches/torch-inductor-aot-lowered-result.patch, torch-inductor-graph-lowering-factory.patch,
+# torch-inductor-mps-kernel-operands.patch and torch-inductor-upstream-composition.patch
+import contextlib
 import dataclasses
 import functools
 from pathlib import Path
@@ -14,14 +15,12 @@ from pathlib import Path
 import coremltools as ct
 import torch
 from torch import Tensor
-from torch._guards import TracingContext
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch._inductor import config
 from torch._inductor import ir as upstream
 from torch._inductor.codegen.cpp import CppScheduling, KernelGroup
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
-from torch._inductor.codegen.simd import DisableReduction, EnableReduction
-from torch._inductor.compile_fx import compile_fx, compile_fx_inner
+from torch._inductor.compile_fx import compile_fx_aot, compile_fx_inner
 from torch._inductor.cpp_builder import CppTorchDeviceOptions
 from torch._inductor.cpu_vec_isa import pick_vec_isa
 from torch._inductor.graph import GraphLowering, SubgraphLowering
@@ -33,11 +32,6 @@ from torch.utils._cpp_embed_headers import _embed_headers
 from .ir import RECV, SEND, channel_of
 
 WITH_EFFECTS = torch.ops.higher_order.with_effects
-# torch/fx/proxy.py _COPY_META_FIELDS "custom", copied under fx/traceback.py preserve_node_meta (AOT autograd's
-# create_functional_call runs a GraphModule through an Interpreter under it; a control body's through
-# torch/_higher_order_ops/utils.py _maybe_run_with_interpreter), by _inductor/pattern_matcher.py _transfer_meta and by
-# torch.export: each lowered node's original body node, its index in Produced.sources
-SOURCE = "mesh_source"
 # driver.py ENGINES: the Neural Engine's target name in Scheduled.engines
 ENGINE = "ane"
 
@@ -98,78 +92,110 @@ def _lower_received(*arguments):
     return made
 
 
-# ---- the retained result (numerical65-operands.md): the upstream compiler's own objects and their correspondence ----
+# ---- the returned result (numerical68-result.md): the upstream compiler's own objects and their correspondence ----
 
-# body input `position`: `node` the scheduled body's placeholder, `name` the upstream compiler's input (GraphLowering:
-# its graph_inputs_original key, storage offset graph_input_storage_offsets[name]; Neural Engine: its ExportedProgram
-# user input)
-@dataclasses.dataclass(frozen=True)
+# body input `position`: `node` the scheduled body's placeholder, `name` the AOT export's user input of that position
+# (GraphSignature.user_inputs: export keeps each flat input its own placeholder), `value` its GraphLowering
+# placeholder's own result (MeshLowering.mesh_placeholders[qualify_name(name)]: a TensorBox, a sympy expression, a
+# TorchBindObject, a generator's, or None for an admitted None input; Neural Engine: its ExportedProgram placeholder)
+@dataclasses.dataclass(frozen=True, eq=False)
 class Input:
     position: int
     node: object
     name: str
+    value: object
 
 
 # compiled output `position`: `node` the body node it returns (a SEND's value where `sent`: schedule-emit adapt returns
-# every sent value, keep_output_stride), `value` the upstream compiler's (GraphLowering.graph_outputs after AOT
-# autograd's runtime-applied input mutations, graph_capture_wrappers.py fn_input_mutations_to_outputs; Neural Engine:
-# its ExportedProgram user output name)
-@dataclasses.dataclass(frozen=True)
+# every sent value, keep_output_stride), `name` the AOT export's user output (GraphSignature.user_outputs; _unlift_graph
+# makes every mutation an in-graph copy_, so the outputs are the user outputs only), `value` GraphLowering
+# graph_outputs[position] (Neural Engine: its ExportedProgram output node)
+@dataclasses.dataclass(frozen=True, eq=False)
 class Output:
     position: int
     node: object
+    name: str
     value: object
     sent: bool
 
 
 # codegen/simd.py codegen_node_schedule_with_kernel's second pass for SchedulerNode `node` (after finalize_indexing and
-# its LoopBody's indexing_dtype_strength_reduction and convert_index_expr_to_value_expr): `variables` its
-# split_and_set_ranges result (each a range-tree entry symbol of the kernel's range_tree_nodes, whose expr is its tree
-# root's FloorDiv or ModularIndexing), `reduction` the kernel's inside_reduction there (False inside DisableReduction),
-# `accesses` each memory access its node.codegen made, in order, as the kernel received it (MetalKernel load, store and
-# store_reduction: (method, buffer name, index, store mode), the index LoopBody.__call__ bound and SimplifyIndexing
-# simplified, over those variables and the kernel's indirect symbols, MeshMetalKernel.mesh_indirect)
+# its LoopBody's indexing_dtype_strength_reduction): `variables` its split_and_set_ranges result, which node.codegen
+# gives its LoopBody (each a range-tree entry symbol of the kernel's range_tree_nodes), `reduction` the kernel's
+# inside_reduction there (False inside DisableReduction), `accesses` each memory access its node.codegen made, in order,
+# as the kernel received it: (method, buffer name, index, store mode, graph, fx node), MetalKernel load, store and
+# store_reduction with the index LoopBody bound and SimplifyIndexing simplified, over those variables and the kernel's
+# indirect symbols (MeshMetalKernel.mesh_indirect); `graph` and `fx node` loop_body.py InterpreterShim's (V.interpreter)
+# at that call: the LoopBodyBlock's own FX graph (the root block's or a subblock's, node._body.subblocks) and its node
+# that made the access
 @dataclasses.dataclass(eq=False)
 class Ranges:
     node: object
     variables: tuple
     reduction: bool
-    accesses: tuple
+    accesses: list
 
 
-# one upstream-generated kernel of `graph` (its GraphLowering, a control body's own): `place` "mps" or "cpu",
-# `scheduled` the Scheduler nodes it implements in order (their read_writes the Scheduler's own accesses), `owner` the
-# backend's kernel (MeshMetalKernel: range trees, body, KernelArgs, workspace_args, headers, mesh_indirect,
-# metal_entry, metal_source; MeshKernelGroup: its KernelArgs and CppKernelProxy loop nests), `launch` its call record
-# as produced (mps: torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error: its error
-# buffer's argument index, c10/metal/error.h ErrorMessages as its declaration names it); cpu: (kernel name, arg_defs,
-# call_args, arg_types) of KernelArgs.cpp_argdefs), `ranges` (mps) its Ranges or (cpu) each finalize_kernel's
-# (CppKernelProxy, nodes), `origins` the original body nodes it implements
+# one selected-backend kernel call, its KernelCallLine `line` in its wrapper's lines (line.wrapper), `graph` the
+# GraphLowering whose body it implements (a control body's SubgraphLowering), `scheduler` the Scheduler whose codegen
+# made it (an inlined control body's: Inlined.scheduler of that inlining), `place` "mps" or "cpu", `owner` the
+# backend's kernel (MeshMetalKernel: range trees, body, KernelArgs and workspace_args, headers, mesh_indirect,
+# metal_entry, metal_source; MeshKernelGroup: its KernelArgs, loops and scheduled nodes), `launch` its call record as
+# produced (mps: torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error: its error buffer's
+# argument index, c10/metal/error.h ErrorMessages as its declaration names it); cpu: (kernel name, arg_defs, call_args,
+# arg_types) of KernelArgs.cpp_argdefs). `produced` its (entry, source) as its backend made and defined it before
+# its call (mps: metal_entry and metal_source; cpu: define_kernel's declared entry and final source).
+# `schedule`: mps the node_schedule codegen_node_schedule_with_kernel received,
+# its DisableReduction and EnableReduction scopes in it; cpu the group's scheduled nodes. `ranges`: mps each second-pass
+# SchedulerNode's Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes), its loop nests and outer loop.
+# `scheduled` its SchedulerNodes, `origins` the original body nodes their IR implements
 @dataclasses.dataclass(eq=False)
 class Kernel:
     place: str
     graph: object
-    scheduled: tuple
+    scheduler: object
+    line: object
     owner: object
     launch: tuple
+    produced: tuple
+    schedule: tuple
     ranges: tuple
+    scheduled: tuple
     origins: tuple
 
 
-# one upstream extern of `graph` (ExternKernelSchedulerNode `scheduled`, its node the ir.py ExternKernel: FallbackKernel,
-# EffectfulKernel, ExternKernelOut, RandomSeeds, MultiOutput, mesh send and receive ...), `origins` the original body
-# nodes, `bodies` a control extern's (Conditional, WhileLoop, InvokeSubgraph: ir.py get_subgraphs) each subgraph's name
-# and its own entries, lowered and scheduled by its own GraphLowering (subgraph.graph)
-@dataclasses.dataclass(eq=False)
-class Extern:
+# one extern call of a scheduler (scheduler.py codegen_extern_call), its record made at its return: `node` its ir node
+# as lowered (an ExternKernel: a FallbackKernel, a MultiOutput, a DynamicScalar or AssertScalar; ir.WhileLoop
+# cond_subgraph, body_subgraph, carried_inputs, additional_inputs, outputs and stack_output; ir.InvokeSubgraph subgraph,
+# inputs and outputs; ir.Conditional its branches, each lowered on its own: wrapper_fxir.py lowered_subgraphs), `graph`
+# the GraphLowering it was called in, `scheduler` that scheduler, `lines` every wrapper line its codegen wrote, the line
+# objects themselves in order (upstream's control scaffolding among them as its own str lines), `inlined` each control
+# body inlining that codegen made, in order (Inlined; while_loop: its cond before the loop, its body, its cond at the
+# loop's end)
+@dataclasses.dataclass(frozen=True, eq=False)
+class ExternCall:
+    node: object
     graph: object
-    scheduled: object
-    origins: tuple
-    bodies: dict
+    scheduler: object
+    lines: tuple
+    inlined: tuple
+
+
+# one inlining of a control body (GraphLowering.codegen_subgraph from wrapper.py codegen_subgraph_by_inlining):
+# `graph` its SubgraphLowering (the ir node's subgraph's graph: cond_subgraph.graph, body_subgraph.graph,
+# subgraph.graph), `scheduler` this inlining's own Scheduler (_update_scheduler: each inlining schedules the body
+# again; Kernel.scheduler and ExternCall.scheduler of what it made), `lines` the wrapper lines it wrote, `externs` its
+# scheduler's ExternCall records; its inputs and outputs the body's own (graph.mesh_placeholders, graph.graph_outputs)
+@dataclasses.dataclass(frozen=True, eq=False)
+class Inlined:
+    graph: object
+    scheduler: object
+    lines: tuple
+    externs: tuple
 
 
 # fx_passes/replace_random.py: ir.py RandomSeeds `buffer` the body's random state it draws through, `uses` each
-# inductor_lookup_seed index and the original random node it serves; its words the body's Generator (operations.py)
+# inductor_lookup_seed index and the original random nodes it serves; its words the body's Generator (operations.py)
 @dataclasses.dataclass(eq=False)
 class Seeds:
     buffer: object
@@ -177,40 +203,51 @@ class Seeds:
 
 
 # a Neural Engine body's upstream result: `program` its torch.export ExportedProgram (Core ATen), `model` coremltools'
-# MLModel (an ML program for ComputeUnit.CPU_AND_NE at the body's own precision; its MIL Program each operation's
-# EXIR_DEBUG_HANDLE scope its SOURCE), `received` each (user input position, RECV body node) it binds as an input
+# MLModel (its MIL Program each operation's EXIR_DEBUG_HANDLE scope, its control flow and state as converted),
+# `selected` the conversion's own operands as given (ct.convert's keywords: convert_to, compute_units,
+# compute_precision, minimum_deployment_target, skip_model_load; FLOAT32 coremltools' precision selection, no fp16
+# rewrite, not a binary64 result), `received` each (user input position, RECV body node) it binds as an input,
+# `handles` {debug_handle: the original body nodes of that program node}
 @dataclasses.dataclass(eq=False)
 class Model:
     program: object
     model: object
+    selected: dict
     received: tuple
-    origins: tuple
+    handles: dict
 
 
-# one processor body's retained upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
-# `sources` its nodes and its control bodies' (SOURCE), `lowered` the graph the upstream compiler lowered (its
-# GraphLowering's module, after compile_fx's own passes; Neural Engine: its ExportedProgram), `signature` AOT autograd's
-# forward metadata for that graph (schemas.py ViewAndMutationMeta: input_info, output_info, input mutations and their
-# runtime indices, tokens; Neural Engine: ExportedProgram.graph_signature), `graph` its GraphLowering (buffers, layouts
-# and aliases, graph_inputs_original, graph_input_storage_offsets, mutated_inputs, removed_buffers, effectful_ops,
-# scheduler, wrapper_code; None for the Neural Engine), `entries` Kernel and Extern in its Scheduler's emission order (a
-# Neural Engine body's one Model), `wrapper` compile_fx's result (AOT autograd's compiled function over the
-# CompiledFxGraph of GraphLowering.compile_to_module)
+# one processor body's returned upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
+# `body` the adapted copy the upstream compiler traced (its graph and its control bodies' the provenance roots),
+# `sources` {(id(copy graph), copy node name): original node}, `sent` the original sent values in output order, `graph`
+# compile_fx_aot's own result (aot_inductor.lowered: output_code.py LoweredAOTI's GraphLowering after its scheduler's
+# codegen, before its wrapper's generate: buffers, layouts and aliases, graph_inputs, graph_outputs, mutated_inputs,
+# never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its lines and lowered_subgraphs;
+# None for the Neural Engine), `signature` the AOT export's GraphSignature of that graph (graph.module.meta; Neural
+# Engine: ExportedProgram.graph_signature), `kernels` {id(KernelCallLine): Kernel} over its wrapper and every subgraph
+# wrapper, `externs` its scheduler's ExternCall records in emission order (a lowered cond branch's: its own
+# scheduler's mesh_externs), `model` the Neural Engine's Model
 @dataclasses.dataclass(eq=False)
 class Produced:
     processor: str
     kind: str
     device: object
     module: object
-    sources: tuple
-    lowered: object
-    signature: object
+    body: object
+    sources: dict
+    sent: tuple
     graph: object
+    signature: object
     inputs: tuple
     outputs: tuple
-    entries: tuple
+    kernels: dict
+    externs: tuple
     seeds: tuple
-    wrapper: object
+    model: object
+
+    # each original body node of FX nodes `nodes` (an IR node's get_origins(), a program's nodes), in order
+    def origins(self, nodes):
+        return _origins(self.sources, nodes)
 
 
 # ---- the selected upstream backends, retaining their own results ----
@@ -224,119 +261,144 @@ class MeshMetalOverrides(MetalOverrides):
         return made
 
 
-# codegen/mps.py MetalKernel: its second-pass ranges (split_and_set_ranges after finalize_indexing) and each access as
-# it receives it
+# codegen/mps.py MetalKernel: its node schedule, each second-pass node's ranges (split_and_set_ranges, then
+# set_current_node) and access as it receives it, and its call's line
 class MeshMetalKernel(MetalKernel):
     overrides = MeshMetalOverrides
 
     def __init__(self, tiling, **kwargs):
         super().__init__(tiling, **kwargs)
-        self.mesh_indexed, self.mesh_ranges, self.mesh_schedule = False, [], []
-        self.mesh_accesses, self.mesh_indirect = [], {}
-
-    def finalize_indexing(self, indices):
-        super().finalize_indexing(indices)
-        self.mesh_indexed = True
+        self.mesh_indirect, self.mesh_ranges, self.mesh_schedule, self.mesh_split = {}, [], (), None
 
     def split_and_set_ranges(self, lengths):
         made = super().split_and_set_ranges(lengths)
-        if self.mesh_indexed:
-            self.mesh_ranges.append((tuple(map(tuple, made)), self.inside_reduction))
+        self.mesh_split = (tuple(map(tuple, made)), self.inside_reduction)
         return made
 
+    @contextlib.contextmanager
+    def set_current_node(self, node):
+        self.mesh_ranges.append(Ranges(node, *self.mesh_split, []))
+        with super().set_current_node(node):
+            yield
+
+    def _accessed(self, method, name, index, mode):
+        shim = V.interpreter
+        self.mesh_ranges[-1].accesses.append((method, name, index, mode, shim.graph, shim.current_node))
+
     def load(self, name, index):
-        self.mesh_accesses.append((self.current_node, ("load", name, index, None)))
+        self._accessed("load", name, index, None)
         return super().load(name, index)
 
     def store(self, name, index, value, mode=None):
-        self.mesh_accesses.append((self.current_node, ("store", name, index, mode)))
+        self._accessed("store", name, index, mode)
         return super().store(name, index, value, mode)
 
     def store_reduction(self, name, index, value):
-        self.mesh_accesses.append((self.current_node, ("store_reduction", name, index, None)))
+        self._accessed("store_reduction", name, index, None)
         return super().store_reduction(name, index, value)
+
+    # each call's own record, completed at that call: the operands patch's (kernel, launch), then the KernelCallLine
+    # its generate_kernel_call wrote (the wrapper's last line), the graph it was called in, that graph's scheduler
+    # making it (an inlined control body's own for that inlining) and its source as made and defined (simd.py
+    # codegen_node_schedule: codegen_kernel, then define_kernel, before this call): (metal_entry, metal_source)
+    def call_kernel(self, name, node=None, deallocate_ws=True):
+        wrapper = V.graph.wrapper_code
+        super().call_kernel(name, node, deallocate_ws)
+        wrapper.launched_kernels[-1] += (wrapper.lines[-1], V.graph, V.graph.scheduler,
+                                         (self.metal_entry, self.metal_source))
 
 
 class MeshMetalScheduling(MetalScheduling):
     kernel_type = MeshMetalKernel
 
     def codegen_node_schedule_with_kernel(self, node_schedule, kernel):
+        kernel.mesh_schedule = tuple(node_schedule)
         super().codegen_node_schedule_with_kernel(node_schedule, kernel)
-        kernel.mesh_indexed = False
-        kernel.mesh_schedule = [n for n in node_schedule if n is not DisableReduction and n is not EnableReduction]
-
-    def codegen_node(self, node):
-        launched = V.graph.wrapper_code.__dict__.setdefault("launched_kernels", [])
-        start = len(launched)
-        super().codegen_node(node)
-        self.scheduler.mesh_made.append(("simd", node, tuple(launched[start:])))
 
 
-# codegen/cpp.py KernelGroup: each finalize_kernel's CppKernelProxy (its loop nests and local buffers) and its call
+# codegen/cpp.py KernelGroup: each finalize_kernel's CppKernelProxy (its loop nests, local buffers and outer loop) and
+# each call's own record, as MeshMetalKernel.call_kernel's (wrapper.launched_kernels): (group, launch, its
+# KernelCallLine, the graph it was called in, its scheduler, its (declared entry, final source) as define_kernel defined
+# it: torch-inductor-upstream-composition.patch defined_kernels)
 class MeshKernelGroup(KernelGroup):
     def __init__(self):
         super().__init__()
-        self.mesh_proxies, self.mesh_launch = [], None
+        self.mesh_proxies = []
 
     def finalize_kernel(self, new_kernel, nodes):
         self.mesh_proxies.append((new_kernel, tuple(nodes)))
         super().finalize_kernel(new_kernel, nodes)
 
     def call_kernel(self, wrapper, kernel_name):
-        self.mesh_launch = (kernel_name, *map(tuple, self.args.cpp_argdefs()))
+        launch = (kernel_name, *map(tuple, self.args.cpp_argdefs()))
         super().call_kernel(wrapper, kernel_name)
+        wrapper.__dict__.setdefault("launched_kernels", []).append((self, launch, wrapper.lines[-1], V.graph,
+                                                                    V.graph.scheduler,
+                                                                    wrapper.defined_kernels[kernel_name]))
 
 
 class MeshCppScheduling(CppScheduling):
     def reset_kernel_group(self):
         self.kernel_group = MeshKernelGroup()
 
-    def flush(self):
-        group = self.kernel_group
-        super().flush()
-        if group.mesh_launch is not None:
-            self.scheduler.mesh_made.append(("cpp", group))
-
 
 SELECTED = {"mps": MeshMetalScheduling, "cpu": MeshCppScheduling}
 
 
-# scheduler.py Scheduler with the selected backends (create_backend) and its emission order (codegen_extern_call)
+# scheduler.py Scheduler with the selected backends, its own create_backend's selection
 class MeshScheduler(Scheduler):
-    def __init__(self, nodes, selected):
-        self.mesh_selected, self.mesh_made = selected, []
+    def __init__(self, nodes):
+        self.mesh_externs = []
         super().__init__(nodes)
 
     def create_backend(self, device):
         V.graph.add_device_info(device)
-        return self.mesh_selected[device.type](self)
+        return SELECTED[device.type](self)
 
+    # each extern call's own record (codegen_extern_call: its ir node's codegen into its graph's wrapper), made at its
+    # return with the control body inlinings that codegen made (MeshSubgraph.codegen_subgraph), in order
     def codegen_extern_call(self, scheduler_node):
+        wrapper, inlined = V.graph.wrapper_code, []
+        start, self.mesh_inlined = len(wrapper.lines), inlined
         super().codegen_extern_call(scheduler_node)
-        self.mesh_made.append(("extern", scheduler_node))
+        self.mesh_externs.append(ExternCall(scheduler_node.node, V.graph, self, tuple(wrapper.lines[start:]),
+                                            tuple(inlined)))
 
 
-def _update_scheduler(self):
-    with config.patch("triton.store_cubin", False):
-        self.scheduler = MeshScheduler(self.operations, self.mesh_selected)
+# the compilation's own operand: graph.py GraphLowering as torch-inductor-graph-lowering-factory.patch's graph_lowering
+# constructs it, and its control bodies' SubgraphLowering (make_subgraph: torch-inductor-upstream-composition.patch
+# subgraph_lowering): each scheduled with the selected backends (upstream's _update_scheduler, with MeshScheduler);
+# each placeholder's own result by its qualified name (GraphLowering.placeholder as it returned it, keyed as it keys
+# graph_inputs and graph_input_names: qualify_name, a named SubgraphLowering's prefixed; a TensorBox, a sympy
+# expression, a TorchBindObject, a generator's, or None, which graph_inputs does not hold)
+class _Lowering:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mesh_placeholders = {}
+
+    def placeholder(self, target, args, kwargs):
+        made = super().placeholder(target, args, kwargs)
+        self.mesh_placeholders[self.qualify_name(target)] = made
+        return made
+
+    def _update_scheduler(self):
+        with config.patch("triton.store_cubin", False):
+            self.scheduler = MeshScheduler(self.operations)
 
 
-# graph.py GraphLowering and its control bodies' SubgraphLowering (make_subgraph: torch-inductor-upstream-
-# composition.patch subgraph_lowering), each scheduled with the selected backends
-class MeshLowering(GraphLowering):
-    def __init__(self, gm, *, selected, **kwargs):
-        self.mesh_selected = selected
-        super().__init__(gm, **kwargs)
-
-    _update_scheduler = _update_scheduler
+class MeshLowering(_Lowering, GraphLowering):
+    pass
 
 
-class MeshSubgraph(SubgraphLowering):
-    def __init__(self, parent, *args, **kwargs):
-        self.mesh_selected = parent.mesh_selected
-        super().__init__(parent, *args, **kwargs)
-
-    _update_scheduler = _update_scheduler
+class MeshSubgraph(_Lowering, SubgraphLowering):
+    # one inlining of this control body (wrapper.py codegen_subgraph_by_inlining, in aot_mode: while_loop's cond
+    # before its loop, its body, its cond at the loop's end; invoke_subgraph), recorded for the extern call making it
+    def codegen_subgraph(self, parent_graph):
+        wrapper = parent_graph.wrapper_code
+        start = len(wrapper.lines)
+        super().codegen_subgraph(parent_graph)
+        parent_graph.scheduler.mesh_inlined.append(Inlined(self, self.scheduler, tuple(wrapper.lines[start:]),
+                                                           tuple(self.scheduler.mesh_externs)))
 
 
 MeshLowering.subgraph_lowering = MeshSubgraph.subgraph_lowering = MeshSubgraph
@@ -345,20 +407,21 @@ MeshLowering.subgraph_lowering = MeshSubgraph.subgraph_lowering = MeshSubgraph
 # ---- the producer ----
 
 # a copy of `module` (torch/fx/graph.py graph_copy: each node's meta a shallow copy) and of each control body it holds
-# (get_attr of a GraphModule), each copied node's SOURCE its original's index in `sources`. Returns (graph, its returned
-# values, {get_attr target: its body's copy})
+# (get_attr of a GraphModule), each copied node's original by (id(its graph), its name) in `sources`, each body's copy
+# its own output as its HOP's signature has it and then adapted (_adapt). Returns (graph, its returned values,
+# {get_attr target: its body's copy})
 def _copied(module, sources):
     graph, copied = torch.fx.Graph(), {}
     returned = graph.graph_copy(module.graph, copied)
     for node, made in copied.items():
-        made.meta["custom"] = {**made.meta.get("custom", {}), SOURCE: len(sources)}
-        sources.append(node)
+        sources[id(graph), made.name] = node
     bodies = {}
-    for node in module.graph.nodes:
-        held = functools.reduce(getattr, node.target.split("."), module) if node.op == "get_attr" else None
+    for node in module.graph.find_nodes(op="get_attr"):
+        held = functools.reduce(getattr, node.target.split("."), module)
         if isinstance(held, torch.fx.GraphModule):
             body, made, nested = _copied(held, sources)
             body.output(made)
+            _adapt(body, sources)
             bodies[node.target] = _module(held, body, nested)
     return graph, returned, bodies
 
@@ -370,14 +433,13 @@ def _module(root, graph, bodies):
     return made
 
 
-# schedule-emit lower_inductor.py adapt over that copy: with_effects as its operator with the token passed through
-# (effects.py with_effects_dense: (token, *results), one result itself), which AOT autograd's functionalization makes
-# again for each effectful operator on its own tokens; each RECV as recv_strided at its node's value; every SEND's value
-# also returned. Returns (copy, the body's and its control bodies' nodes by SOURCE, the sent values' original nodes)
-def adapted(module):
-    sources = []
-    graph, returned, bodies = _copied(module, sources)
-    sent = []
+# schedule-emit lower_inductor.py adapt, over one copied graph (the body's and each control body's alike): with_effects
+# as its operator with the token passed through (effects.py with_effects_dense: (token, *results), one result itself;
+# a control body's token its own placeholder, returned as its signature returns it: torch 2.14.0
+# invoke_subgraph.py, the one HOP whose body threads an effect token), which AOT autograd's functionalization makes
+# again for each effectful operator on its own tokens (invoke_subgraph's in its body); each RECV as recv_strided at its
+# node's value
+def _adapt(graph, sources):
     for node in list(graph.nodes):
         if node.target is WITH_EFFECTS:
             token, operator, *arguments = node.args
@@ -385,6 +447,7 @@ def adapted(module):
             with graph.inserting_before(node):
                 call = graph.call_function(operator, tuple(arguments), dict(node.kwargs))
             call.meta = {**node.meta, "val": tuple(value[1:]) if len(value) > 2 else value[1] if len(value) > 1 else None}
+            sources[id(graph), call.name] = sources[id(graph), node.name]
             for getitem in list(node.users):
                 k = getitem.args[1]
                 if k and len(value) > 2:
@@ -394,70 +457,80 @@ def adapted(module):
                     graph.erase_node(getitem)
             graph.erase_node(node)
             node = call
-        if node.target is SEND:
-            sent.append(node.args[0])
-        elif node.target is RECV:
+        if node.target is RECV:
             value = node.meta["val"]
             node.target = RECV_STRIDED
             node.args = (node.args[0], list(value.shape), list(value.stride()), value.dtype, value.device)
-    sent = tuple(dict.fromkeys(sent))
-    returned = tuple(returned) if isinstance(returned, (tuple, list)) else (returned,)
-    graph.output(returned + sent)
-    sources = tuple(sources)
-    return _module(module, graph, bodies), sources, tuple(_source(value, sources) for value in sent)
 
 
-def _source(node, sources):
-    k = node.meta.get("custom", {}).get(SOURCE)
-    return None if k is None else sources[k]
+# the processor body adapted: its copy and its control bodies' (_copied, _adapt), every SEND's value also returned
+# after its own results (schedule-emit adapt; keep_output_stride). A SEND and a RECV are root nodes only:
+# compiler/mesh_compiler/placement.py insert_send_recv, their one constructor, inserts them into the function's graph,
+# a HOP call one node of one processor, and schedule.py assemble copies that graph's nodes, each HOP's bodies borrowed
+# from its owner as they are; a sent value never crosses a HOP's interface. Returns (copy, its sources, the sent
+# values' original nodes)
+def adapted(module):
+    sources = {}
+    graph, returned, bodies = _copied(module, sources)
+    output = graph.output(tuple(returned) if isinstance(returned, (tuple, list)) else (returned,))
+    _adapt(graph, sources)
+    sent = tuple(dict.fromkeys(node.args[0] for node in graph.find_nodes(op="call_function", target=SEND)))
+    output.args = (output.args[0] + sent,)
+    return _module(module, graph, bodies), sources, tuple(sources[id(graph), value.name] for value in sent)
 
 
-def _origins(nodes, sources):
-    return tuple(dict.fromkeys(s for n in nodes if (s := _source(n, sources)) is not None))
-
-
-def _node_origins(scheduled, sources):
-    return _origins([o for node in scheduled for member in node.get_nodes() if member.node is not None
-                     for o in member.node.get_origins()], sources)
-
-
-# a SIMD kernel's launch record as its Kernel, its Ranges in its second pass's node order, each with its accesses
-def _simd(graph, scheduled, kernel, launch, sources):
-    ranges = tuple(Ranges(node, variables, reduction, tuple(a for n, a in kernel.mesh_accesses if n is node))
-                   for node, (variables, reduction) in zip(kernel.mesh_schedule, kernel.mesh_ranges))
-    return Kernel("mps", graph, (scheduled,), kernel, launch, ranges, _node_origins((scheduled,), sources))
-
-
-def _cpp(graph, group, sources):
-    scheduled = tuple(group.scheduled_nodes)
-    return Kernel("cpu", graph, scheduled, group, group.mesh_launch, tuple(group.mesh_proxies),
-                  _node_origins(scheduled, sources))
-
-
-# `graph`'s Scheduler emission (MeshScheduler.mesh_made) as entries, each control extern's bodies their own
-def _entries(graph, sources):
-    made = []
-    for kind, *record in graph.scheduler.mesh_made:
-        if kind == "extern":
-            (scheduled,) = record
-            made.append(Extern(graph, scheduled, _node_origins((scheduled,), sources),
-                               {body.name: _entries(body.graph, sources) for body in scheduled.node.get_subgraphs()}))
-        elif kind == "simd":
-            scheduled, launched = record
-            made += [_simd(graph, scheduled, kernel, launch, sources) for kernel, launch in launched]
-        else:
-            made.append(_cpp(graph, record[0], sources))
+# torch/fx/traceback.py NodeSource: each node's from_node chain (set_current_meta's CREATE under preserve_node_meta, the
+# pattern matcher's REPLACE and torch-inductor-aot-lowered-result.patch _transfer_matched's every matched node), nested,
+# to each (graph id, name) of `sources`: every original body node, in order
+def _origins(sources, nodes):
+    made = {}
+    for node in nodes:
+        _sourced(sources, node.meta.get("from_node", ()), made)
     return tuple(made)
 
 
-# each RandomSeeds buffer by its origin (the lowered inductor_seeds node), each lookup's index and original random node
-def _seeds(graph, lowered, sources):
+def _sourced(sources, entries, made):
+    for entry in entries:
+        if (key := (entry.graph_id, entry.name)) in sources:
+            made.setdefault(sources[key])
+        _sourced(sources, entry.from_node, made)
+
+
+def _scheduled_origins(scheduled, sources):
+    return _origins(sources, [o for node in scheduled for member in node.get_nodes() for o in member.node.get_origins()])
+
+
+# one call record (owner, launch, line, graph, scheduler, produced) as its call made it
+def _mps(owner, launch, line, graph, scheduler, produced, sources):
+    scheduled = tuple(r.node for r in owner.mesh_ranges)
+    return Kernel("mps", graph, scheduler, line, owner, launch, produced, owner.mesh_schedule,
+                  tuple(owner.mesh_ranges), scheduled, _scheduled_origins(scheduled, sources))
+
+
+def _cpu(owner, launch, line, graph, scheduler, produced, sources):
+    scheduled = tuple(owner.scheduled_nodes)
+    return Kernel("cpu", graph, scheduler, line, owner, launch, produced, scheduled, tuple(owner.mesh_proxies),
+                  scheduled, _scheduled_origins(scheduled, sources))
+
+
+PLACED = {MeshMetalKernel: _mps, MeshKernelGroup: _cpu}
+
+
+# a graph's wrapper and each cond branch's own (wrapper_fxir.py lowered_subgraphs); an inlined control body
+# (while_loop, invoke_subgraph in aot_mode) writes into its parent's
+def _wrappers(graph):
+    yield graph.wrapper_code
+    for lowered in graph.wrapper_code.lowered_subgraphs.values():
+        yield from _wrappers(lowered)
+
+
+# each RandomSeeds buffer by its origin (the lowered inductor_seeds node), each lookup's index and original nodes
+def _seeds(graph, sources):
     owned = {origin: buffer for buffer in graph.buffers if isinstance(buffer, upstream.RandomSeeds)
              for origin in buffer.origins}
     uses = {}
-    for node in lowered.graph.nodes:
-        if node.target is torch.ops.prims.inductor_lookup_seed.default:
-            uses.setdefault(owned[node.args[0]], []).append((node.args[1], _source(node, sources)))
+    for node in graph.module.graph.find_nodes(op="call_function", target=torch.ops.prims.inductor_lookup_seed.default):
+        uses.setdefault(owned[node.args[0]], []).append((node.args[1], _origins(sources, (node,))))
     return tuple(Seeds(buffer, tuple(made)) for buffer, made in uses.items())
 
 
@@ -467,49 +540,45 @@ def _returned(module):
 
 
 def _placeholders(graph):
-    return [n for n in graph.nodes if n.op == "placeholder"]
+    return graph.find_nodes(op="placeholder")
 
 
-# one adapted body by compile_fx.py compile_fx, the inductor backend's entry (schedule-emit lower_inductor.py lower's
-# torch.compile backend "inductor"), at its scheduled placeholders' fake values under no_grad (aot_autograd.py: no
-# output requires grad, so AOT autograd's inference compiler, its forward compile_fx_inner at is_inference); its own
-# pre-grad passes, functionalization and effect tokens (unlift_effect_tokens), keep_inference_input_mutations,
-# post-grad passes, GraphLowering run and output form (compile_to_module). config_patches: force_disable_caches (a cached
-# OutputCode holds no GraphLowering) and schedule-emit's assume_unaligned_fallback_output for a receiving body. Its one
-# GraphLowering made by torch-inductor-graph-lowering-factory.patch's graph_lowering: MeshLowering with the selected
-# backends (SELECTED), held with AOT autograd's forward metadata of that graph (graph_compile.py
-# _aot_stage2b_compile_forward_or_inference sets TracingContext.fw_metadata before its compiler runs). The body's
-# inputs are the graph's last ones (aot_module_simplified: its lifted parameters and buffers first), its outputs after
-# the runtime-applied input mutations (num_mutated_inp_runtime_indices)
+# one adapted body by compile_fx.py compile_fx_aot, the original AOT entry (V.aot_compilation: _compile_fx_main's
+# run_pre_grad_passes, aot_export_module under unlift_effect_tokens, _unlift_graph, its inference compiler's joint and
+# post-grad passes, compile_fx_inner without the empty-graph bailout or cache), at its scheduled placeholders' fake
+# values under no_grad, `graph_lowering` MeshLowering (the selected backends). config_patches: fx_wrapper (its wrapper
+# lines typed, cpp_wrapper off), aot_inductor.lowered (its lowered result: the GraphLowering after its scheduler's
+# codegen, its backends' kernel sources made, before its wrapper's generate and any module or kernel compile or load),
+# schedule-emit's assume_unaligned_fallback_output for a receiving body, and trace.provenance_tracking_level 1 (every
+# rewrite's REPLACE sources)
 def _inductor(module, body, sources, sent, processor, kind, device):
-    inputs = [n.meta["val"] for n in _placeholders(body.graph)]
     received = any(n.target is RECV_STRIDED for n in body.graph.nodes)
-    returned, made = _returned(module), []
-
-    def lowering(gm, **kwargs):
-        made.append((MeshLowering(gm, selected=SELECTED, **kwargs), TracingContext.get().fw_metadata))
-        return made[-1][0]
-
     with torch.no_grad():
-        compiled = compile_fx(body, inputs, inner_compile=functools.partial(compile_fx_inner, graph_lowering=lowering),
-                              config_patches={"force_disable_caches": True,
-                                              "assume_unaligned_fallback_output": received})
-    ((graph, signature),) = made
-    names, shift = graph.graph_input_names, signature.num_mutated_inp_runtime_indices
+        graph = compile_fx_aot(body, [n.meta["val"] for n in _placeholders(body.graph)],
+                               inner_compile=functools.partial(compile_fx_inner, graph_lowering=MeshLowering),
+                               config_patches={"fx_wrapper": True, "aot_inductor.lowered": True,
+                                               "assume_unaligned_fallback_output": received,
+                                               "trace.provenance_tracking_level": 1})
+    signature = graph.module.meta["graph_signature"]
+    returned = _returned(module)
+    names = signature.user_inputs
     return Produced(
-        processor, kind, device, module, sources, graph.module, signature, graph,
-        tuple(Input(k, node, name)
-              for k, (node, name) in enumerate(zip(_placeholders(module.graph), names[len(names) - len(inputs):]))),
-        tuple(Output(k, node, graph.graph_outputs[shift + k], k >= len(returned))
+        processor, kind, device, module, body, sources, sent, graph, signature,
+        tuple(Input(k, node, names[k], graph.mesh_placeholders[graph.qualify_name(names[k])])
+              for k, node in enumerate(_placeholders(module.graph))),
+        tuple(Output(k, node, signature.user_outputs[k], graph.graph_outputs[k], k >= len(returned))
               for k, node in enumerate(returned + sent)),
-        _entries(graph, sources), _seeds(graph, graph.module, sources), compiled)
+        {id(record[2]): PLACED[type(record[0])](*record, sources)
+         for wrapper in _wrappers(graph) for record in wrapper.__dict__.get("launched_kernels", ())},
+        tuple(graph.scheduler.mesh_externs), _seeds(graph, sources), None)
 
 
-# the Neural Engine's upstream compiler over one adapted body: each received value an input of its own (the model
-# runs once its receives have landed), each SEND erased (its value is returned), torch.export's non-strict export at
-# its fake values and Core ATen decomposition (run_decompositions), each node's debug_handle its SOURCE, coremltools'
-# torch.export frontend (converters/mil/frontend/torch ops.py: the EXIR_DEBUG_HANDLE scope) to an ML program for
-# ComputeUnit.CPU_AND_NE, compute_precision FLOAT32 (no fp16 rewrite: each value at its own dtype), not loaded
+# the Neural Engine's upstream compiler over one adapted body (its control bodies adapted by _copied): each received
+# value an input of its own (the model runs once its receives have landed), each SEND erased (its value is returned;
+# both root nodes only, adapted), torch.export's non-strict export at its fake values and Core ATen decomposition
+# (run_decompositions), each program node's debug_handle its position from 1, coremltools' torch.export frontend
+# (converters/mil/frontend/torch ops.py: the EXIR_DEBUG_HANDLE scope) to an ML program for ComputeUnit.CPU_AND_NE,
+# compute_precision FLOAT32 (coremltools' selection: no fp16 rewrite), not loaded
 def _engine(module, body, sources, sent, processor, kind, device):
     graph = body.graph
     first = next(n for n in graph.nodes if n.op != "placeholder")
@@ -519,33 +588,37 @@ def _engine(module, body, sources, sent, processor, kind, device):
             with graph.inserting_before(first):
                 made = graph.placeholder(f"received_{node.args[0]}")
             made.meta = {**node.meta}
+            sources[id(graph), made.name] = sources[id(graph), node.name]
             node.replace_all_uses_with(made)
             graph.erase_node(node)
-            received.append(_source(made, sources))
+            received.append(sources[id(graph), made.name])
         elif node.target is SEND:
             graph.erase_node(node)
     graph.lint()
     body.recompile()
-    placeholders = _placeholders(graph)
-    program = torch.export.export(body, tuple(n.meta["val"] for n in placeholders), strict=False).run_decompositions()
-    for node in program.graph.nodes:
-        if (k := node.meta.get("custom", {}).get(SOURCE)) is not None:
-            node.meta["debug_handle"] = k
-    model = ct.convert(program, convert_to="mlprogram", compute_units=ct.ComputeUnit.CPU_AND_NE,
-                       compute_precision=ct.precision.FLOAT32, minimum_deployment_target=ct.target.macOS26,
-                       skip_model_load=True)
+    program = torch.export.export(body, tuple(n.meta["val"] for n in _placeholders(graph)),
+                                  strict=False).run_decompositions()
+    handles = {}
+    for k, node in enumerate(program.graph.nodes, 1):
+        node.meta["debug_handle"] = k
+        handles[k] = _origins(sources, (node,))
+    selected = {"convert_to": "mlprogram", "compute_units": ct.ComputeUnit.CPU_AND_NE,
+                "compute_precision": ct.precision.FLOAT32, "minimum_deployment_target": ct.target.macOS26,
+                "skip_model_load": True}
+    model = ct.convert(program, **selected)
     signature = program.graph_signature
-    count = len(_placeholders(module.graph))
+    named = {node.name: node for node in program.graph.nodes}
+    placeholders = _placeholders(module.graph)
     returned = _returned(module)
-    entry = Model(program, model, tuple((count + k, node) for k, node in enumerate(received)),
-                  _origins(program.graph.nodes, sources))
+    entry = Model(program, model, selected, tuple((len(placeholders) + k, node) for k, node in enumerate(received)),
+                  handles)
     return Produced(
-        processor, kind, device, module, sources, program, signature, None,
-        tuple(Input(k, node, name) for k, (node, name) in enumerate(zip(_placeholders(module.graph),
-                                                                         signature.user_inputs))),
-        tuple(Output(k, node, value, k >= len(returned))
-              for k, (node, value) in enumerate(zip(returned + sent, signature.user_outputs))),
-        (entry,), (), None)
+        processor, kind, device, module, body, sources, sent, None, signature,
+        tuple(Input(k, node, signature.user_inputs[k], named[signature.user_inputs[k]])
+              for k, node in enumerate(placeholders)),
+        tuple(Output(k, node, signature.user_outputs[k], named[signature.user_outputs[k]], k >= len(returned))
+              for k, node in enumerate(returned + sent)),
+        {}, (), (), entry)
 
 
 # one body at its processor's target: `kind` "cpu", "mps" or ENGINE, `device` the processor's torch.device
@@ -581,9 +654,9 @@ class Parameter:
 
 
 # the terminal composition of one pass of one Metal kernel, the patched MetalKernel.codegen_kernel's `composition`
-# (torch-inductor-upstream-composition.patch): `source` its definitions before the kernel (the executor's helper as
-# printed, never parsed); `parameters` its own kernel parameters and `builtins` its builtin ones; `enter` its
-# statements before the body, `grid` and `group` uint3 expressions the body's thread position in its grid and
+# (torch-inductor-upstream-composition.patch): `source` its definitions before the kernel (the executor's callable
+# collection as printed, never parsed); `parameters` its own kernel parameters and `builtins` its builtin ones; `enter`
+# its statements before the body, `grid` and `group` uint3 expressions the body's thread position in its grid and
 # threadgroup after them, `exit` its statements after the body's stores; `paged` {argument index: its arena slot},
 # each other argument at its own slot (argument i at buffer i, metal_lower.mm)
 @dataclasses.dataclass(frozen=True)
@@ -606,8 +679,8 @@ class Composition:
 
 # the terminal composition of one pass of one CPU kernel, the patched KernelGroup.codegen_group's `composition`
 # (torch-inductor-upstream-composition.patch): `source` its definitions after the prefix (the executor's host C++
-# helper as printed, never parsed), `parameters` its own after the group's arguments, `enter` its statements before the
-# body; `typed` those parameters as their Parameter records
+# callable collection as printed, never parsed), `parameters` its own after the group's arguments, `enter` its
+# statements before the body; `typed` those parameters as their Parameter records
 @dataclasses.dataclass(frozen=True)
 class Hosted:
     source: str
@@ -631,7 +704,7 @@ template <typename P> struct mesh_paged {
   }
 };
 """
-# metal-microbench metal_transport.mm UpstreamHelper: each function's parameters as Tint's MSL printer types them
+# metal-microbench metal_transport.mm: each protocol function's parameters as Tint's MSL printer types them
 # (tint/lang/msl/writer/printer: a storage runtime array `{const }device tint_array<T, 1>*`, host C++ (Options::host_cpp,
 # provider/dawn.patch) `{const }tint_array<T, 1>*`; an atomic `atomic_uint` or `atomic_ulong`, u64 `ulong`), `votes` its
 # workgroup array of 1024 / kSimd (metal_lower.h kSimd 32) u32
@@ -643,14 +716,17 @@ BUILTINS = ("uint3 mesh_lid [[thread_position_in_threadgroup]]", "uint3 mesh_gid
             "uint3 mesh_position [[thread_position_in_grid]]")
 
 
-# the helper's acquire parameters after its builtins, in its declared order (metal_ir.h metal_ir_upstream_helper)
+# the acquire function's parameters after its builtins, in its declared order (metal_ir.h struct
+# metal_ir_upstream_protocol: mesh_acquire_first, mesh_acquire_later)
 def _acquired(later):
-    return ["step", "phases", "counts", *(["status", "first", "list"] if later else ["flags"]), "classes", "spans",
+    return ["step", "phases", "counts", *(["status", "first", "list"] if later else ["flags"]), "classes", "members",
             "records"]
 
 
-# native composition `made`'s pass (`made.later`): each transport word, readiness table and record table by its helper
-# parameter name, its (slot, element type, written); and its sent values' arrival counters in `sent` order
+# native composition `made`'s pass (`made.later`): each transport word, readiness table (metal_ir.h struct
+# metal_ir_upstream_readiness: `classes` at class_slot or later_class_slot, `members` its classes' field membership at
+# member_slot or later_member_slot, CONSTANT u32) and record table by its protocol parameter name, its (slot, element
+# type, written); and its sent values' arrival counters in `sent` order
 def _views(made):
     later = bool(made.later)
     firsts, named, arrivals = ["first", "supplied"] if later else ["supplied"], {}, []
@@ -665,24 +741,25 @@ def _views(made):
     if made.readiness is not None:
         r = made.readiness
         named["classes"] = (r.later_class_slot if later else r.class_slot, "uint", False)
-        named["spans"] = (r.later_span_slot if later else r.span_slot, "uint", False)
+        named["members"] = (r.later_member_slot if later else r.member_slot, "uint", False)
     if made.table is not None:
         named["records"] = (made.table.later_slot if later else made.table.slot, "ulong", False)
     return named, arrivals
 
 
+# the pass's acquire function the collection makes (metal.Callables: `later` mesh_acquire_later for pass 1, `acquire`
+# mesh_acquire_first for pass 0; None where it makes none)
 def _acquire(made):
-    helper = made.helper
-    return None if helper is None else helper.later if made.later else helper.acquire
+    return made.callables.later if made.later else made.callables.acquire
 
 
-# a Metal kernel's pass: each view a parameter at its slot as the helper's parameters type it; the helper's
+# a Metal kernel's pass: each view a parameter at its slot as the protocol's parameters type it; the collection's
 # mesh_acquire_first (pass 0) or mesh_acquire_later (pass 1) first, its threadgroup returning where it does not run (.w
 # 0), the body at the position it gives (pass 0 its own: thread_position_in_grid; pass 1 its listed threadgroup's .xyz,
 # whole threadgroups, its further lanes outside the body's bound reaching mesh_release); mesh_release after the body's
 # stores, its arrival counters in `sent` order; each paged argument's accessor over its arena
 def _threaded(kernel, made):
-    helper, later, args, values = made.helper, bool(made.later), kernel.owner.args, kernel.launch[1]
+    callables, later, args, values = made.callables, bool(made.later), kernel.owner.args, kernel.launch[1]
     named, arrivals = _views(made)
     parameters = [f"{'device' if write else 'const device'} tint_array<{element}, 1>* mesh_{name} [[buffer({slot})]]"
                   for name, (slot, element, write) in named.items()]
@@ -703,18 +780,17 @@ def _threaded(kernel, made):
                   "if (mesh_acquired.w == 0) return;"]
         if later:
             grid = "(mesh_acquired.xyz * mesh_threads + mesh_lid)"
-    if helper is not None and helper.release is not None:
-        exit_.append(f"{helper.release}(" + ", ".join(["mesh_lid", "mesh_threads", "mesh_step", "mesh_status",
-                                                       "mesh_supplied", "mesh_records",
-                                                       *(f"mesh_{name}" for name in arrivals)]) + ");")
-    source = (helper.source if helper is not None else "") + (PAGED if made.pages else "")
-    return Composition(source, tuple(parameters), BUILTINS, tuple(enter), grid, "mesh_lid", tuple(exit_),
-                       {p.argument: p.slot for p in made.pages})
+    if callables.release is not None:
+        exit_.append(f"{callables.release}(" + ", ".join(["mesh_lid", "mesh_threads", "mesh_step", "mesh_status",
+                                                          "mesh_supplied", "mesh_records",
+                                                          *(f"mesh_{name}" for name in arrivals)]) + ");")
+    return Composition(callables.source + (PAGED if made.pages else ""), tuple(parameters), BUILTINS, tuple(enter),
+                       grid, "mesh_lid", tuple(exit_), {p.argument: p.slot for p in made.pages})
 
 
-# a CPU kernel's pass (a native task: its one invocation; its sends published by its Steps, no release): the helper's
-# bool mesh_acquire_first or mesh_acquire_later first, its body run where it returns true, each of its parameters the
-# kernel's own at its slot as the host C++ helper types it; a paged argument's binding its flat view
+# a CPU kernel's pass (a native task: its one invocation; its sends published by its Steps, no release): the
+# collection's bool mesh_acquire_first or mesh_acquire_later first, its body run where it returns true, each of its
+# parameters the kernel's own at its slot as the host C++ collection types it; a paged argument's binding its flat view
 def _hosted(kernel, made):
     named, _ = _views(made)
     acquire = _acquire(made)
@@ -722,14 +798,14 @@ def _hosted(kernel, made):
     typed = tuple(Parameter(f"{'' if named[name][2] else 'const '}tint_array<{named[name][1]}, 1>*", named[name][0], 1)
                   for name in used)
     enter = (f"if (!{acquire}(" + ", ".join(f"mesh_{name}" for name in used) + ")) return;",) if used else ()
-    return Hosted(made.helper.source if made.helper is not None else "",
-                  tuple(f"{p.type} mesh_{name}" for name, p in zip(used, typed)), enter, typed)
+    return Hosted(made.callables.source, tuple(f"{p.type} mesh_{name}" for name, p in zip(used, typed)), enter, typed)
 
 
 # kernel `kernel`'s composition for one pass from its native composition `made` (compiler/mesh_compiler/metal.py
 # Composed: metal_ir_upstream_composition's words, later words, pages (each with its argument binding's placed origin),
-# readiness and table, metal_ir_upstream_helper's Helper (None: no transport), `later` its pass): a Metal kernel's
-# Composition, a CPU kernel's Hosted
+# readiness and table, the kernel's one callable collection `callables` (metal.Callables: metal_ir_callables_emit's
+# source, its binary64 license notice its leading comment, and metal_ir_upstream_protocol's acquire, later and release),
+# `later` its pass): a Metal kernel's Composition, a CPU kernel's Hosted
 def composed(kernel, made):
     return (_hosted if kernel.place == "cpu" else _threaded)(kernel, made)
 
@@ -745,19 +821,19 @@ class Emission:
 
 
 # metal_ir.h metal_ir_upstream_emitted: the kernel's terminal emission by its own upstream emitter for one pass
-# (`composition` its composed() result; None: as produced). Metal: the patched MetalKernel.codegen_kernel of the
-# retained kernel, its headers expanded (torch/mps/__init__.py compile_shader's _embed_headers). CPU: cpp.py
-# define_kernel's final source and declared entry (torch-inductor-upstream-composition.patch defined_kernels), or the
-# retained group's patched codegen_group with its composition through define_kernel's defined_source; its parameters
-# its call's arguments in cpp_argdefs order (each at its own slot; its buffers, inplace, input and output, the bound
-# pointer, its sizevars after them the value) and the composition's; codecache.py CppCodeCache's build options
-# (CppTorchDeviceOptions for the cpu, CppPythonBindingsCodeCache: no libtorch, shared) in cpp_builder.py CppBuilder's
-# argument form
+# (`composition` its composed() result; None: as produced), from the same retained owner for each pass. Metal: the
+# patched MetalKernel.codegen_kernel of the retained kernel, its headers expanded (torch/mps/__init__.py
+# compile_shader's _embed_headers). CPU: cpp.py define_kernel's final source and declared entry
+# (torch-inductor-upstream-composition.patch defined_kernels of its line's wrapper), or the retained group's patched
+# codegen_group with its composition through define_kernel's defined_source; its parameters its call's arguments in
+# cpp_argdefs order (each at its own slot; its buffers, inplace, input and output, the bound pointer, its sizevars after
+# them the value) and the composition's; codecache.py CppCodeCache's build options (CppTorchDeviceOptions for the cpu,
+# CppPythonBindingsCodeCache: no libtorch, shared) in cpp_builder.py CppBuilder's argument form
 def emitted(kernel, composition=None):
     owner = kernel.owner
     if kernel.place == "cpu":
         name, _, _, types = kernel.launch
-        entry, source = kernel.graph.wrapper_code.defined_kernels[name]
+        entry, source = kernel.produced
         values = len(types) - len(owner.args.sizevars)
         parameters = tuple(Parameter(t, k, int(k < values)) for k, t in enumerate(types))
         if composition is not None:
@@ -771,8 +847,11 @@ def emitted(kernel, composition=None):
         link = (*[f"-{f}" for f in options.get_ldflags()], *[f"-L{d}" for d in options.get_libraries_dirs()],
                 *[f"-l{lib}" for lib in options.get_libraries()])
         return Emission(source, entry, parameters, compile_, link)
-    with V.set_graph_handler(kernel.graph), V.set_kernel_handler(owner):
-        owner.codegen_kernel(owner.metal_entry, composition)
-    source = _embed_headers([line + "\n" for line in owner.metal_source.split("\n")],
+    entry, source = kernel.produced
+    if composition is not None:
+        with V.set_graph_handler(kernel.graph), V.set_kernel_handler(owner):
+            owner.codegen_kernel(entry, composition)
+        source = owner.metal_source
+    source = _embed_headers([line + "\n" for line in source.split("\n")],
                             [Path(torch.__file__).parent / "include"], set())
-    return Emission(source, owner.metal_entry, (), (), ())
+    return Emission(source, entry, (), (), ())

@@ -448,12 +448,14 @@ independent of the other Inductor patches here.
 - Nothing else changes. The constant graph (`const_graph`), `graph.run`, the output strides and all three output forms
   (`fx_wrapper` module, `AotCodeCompiler`, `compile_to_module`) are untouched.
 
-`compiler/mesh_compiler/lower_inductor.py` `_inductor` calls `compile_fx(body, inputs, inner_compile=partial(compile_fx_inner,
-graph_lowering=lowering), config_patches=...)` under `torch.no_grad()`, which selects AOT autograd's inference compiler.
-`lowering` makes `MeshLowering` with the selected backends. It keeps that object, together with
-`TracingContext.get().fw_metadata` (set by `graph_compile.py` `_aot_stage2b_compile_forward_or_inference` before its
-compiler runs), as `Produced.graph` and `Produced.signature`. `force_disable_caches` is patched on. Otherwise a
-cache hit would return an `OutputCode` without running the factory, and no GraphLowering would be made.
+`compiler/mesh_compiler/lower_inductor.py` `_inductor` passes the factory as a compilation operand:
+`compile_fx_aot(body, inputs, inner_compile=partial(compile_fx_inner, graph_lowering=MeshLowering), config_patches=...)`
+under `torch.no_grad()`. `MeshLowering` is a `GraphLowering` subclass. Its `_update_scheduler` makes a `MeshScheduler`,
+whose `create_backend` selects the Mesh backends, and its `subgraph_lowering` (`torch-inductor-upstream-composition.patch`)
+gives every control body the same backends. Nothing is registered with `register_backend_for_device`, so other
+compilations in the process keep upstream's backends. The GraphLowering is returned by
+`torch-inductor-aot-lowered-result.patch`, not kept from inside the factory: no closure, no `TracingContext`, no
+`force_disable_caches` (`compile_fx_inner` has no FX cache in `aot_mode`).
 
 ### Target
 
@@ -481,3 +483,82 @@ shasum -a 256 $SITE/torch/_inductor/compile_fx.py
 - The first `shasum` must print the "before" hash above, and the second the "after" hash.
 - To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-graph-lowering-factory.patch`.
 - This is pure Python source, so no rebuild is needed. The patch adds no import hook or `sitecustomize`.
+
+## `torch-inductor-aot-lowered-result.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), on top of
+`torch-inductor-mps-kernel-operands.patch` (installed), `torch-inductor-upstream-composition.patch` and
+`torch-inductor-graph-lowering-factory.patch`, in that order. `graph.py` before is the composition patch's after, and
+`compile_fx.py` before is the factory patch's after. It is the original AOT compilation's lowered result:
+`compile_fx_aot` returns its GraphLowering after `GraphLowering.codegen`'s scheduler codegen. By then each backend's
+kernel codegen and `define_kernel` have run, so the kernel sources exist. The result is taken before the wrapper's
+`generate` (memory planning, FX conversion, wrapper source) and before any module or kernel is compiled or loaded. `compiler/mesh_compiler/lower_inductor.py` `_inductor`
+takes the producer's result through it. Fields:
+`output_data/compiler-workgroup-20261114/compiler/numerical68-result.md`.
+
+### What it changes
+
+- **`config.aot_inductor.lowered: bool = False`**: the operand that asks for the lowered result. With it False, every
+  output is unchanged.
+- **`GraphLowering.codegen`**: with `lowered`, after `scheduler.codegen()` and its debug log, it does
+  `wrapper_code.pop_codegened_graph()` and returns `(self, None)`.
+- **`output_code.py` `LoweredAOTI(OutputCode)`**: a new dataclass, `graph` (the GraphLowering) and `device_type`. Its
+  `post_compile` and `set_triton_bundle` do nothing, because there is no emitted callable to load.
+- **`compile_fx.py`**:
+  - `codegen_and_compile` calls `graph.codegen()` under `aot_mode` and `lowered`, in place of the fx-wrapper,
+    `AotCodeCompiler` or `compile_to_module` forms. Its `V.aot_compilation` return is
+    `LoweredAOTI(graph=graph, device_type=graph.device_type)`.
+  - `_compile_fx_main` keeps the AOT export's own signature: `unlifted_gm.meta["graph_signature"] = graph_signature`.
+  - `compile_fx_aot` returns `compiled_artifacts.graph` for a `LoweredAOTI`. Its annotation adds `GraphLowering`.
+- **`codegen/wrapper_fxir.py` `WrapperFxCodegen`**:
+  - `lowered_subgraphs: dict` is set in `__init__`.
+  - `define_subgraph_launcher_fn`, under `lowered`, records each cond branch's own lowered `SubgraphLowering` there by
+    name.
+  - `_generate_assert_scalar` converts an `AssertScalarLine` to `aten._assert_scalar`.
+- **`codegen/wrapper.py` `AssertScalarLine(WrapperLine)`**: `wrapper` and `node`. `codegen` writes the Python wrapper's
+  own form, and `codegen_fx` is the converter's `_generate_assert_scalar`.
+- **`ir.py` `AssertScalar.codegen`**: under `fx_wrapper`, it writes `AssertScalarLine(wrapper, self)`. Upstream wrote
+  nothing ("TODO fix").
+- **`pattern_matcher.py` `_transfer_matched(new_nodes, match, pass_name="")`**: under
+  `effective_provenance_tracking_level() == 1`, it appends `NodeSource(m, pass_name, REPLACE)` for every
+  `m in match.nodes` to each new node's `from_node`.
+  - It is called before `match.erase_nodes()` in `LoweringPatternEntry.apply` and `ReplacementPatternEntry.replace_with_graph`.
+  - So every rewrite keeps its many-to-many correspondence. `_transfer_meta` pairs only the old output with its
+    replacement.
+
+### Target
+
+| Item | Value |
+|---|---|
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `97e1a585cd0d0172ea014ff63d33f40d92cb619da608683eeaf15a1a1eceeadf` |
+| `torch/_inductor/config.py` | before `9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a`, after `f56964af7357aeaa5e1b601f00d94317251049856a4de6a12f6b378cd631ce1f` |
+| `torch/_inductor/graph.py` | before `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591`, after `c9b55b3c5167e89301496d79a8cc33aec467260e90287f81619cbe352ffdd17d` |
+| `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `60ad9e8aee38558011efeb7432803402de08bae2911cbb7f3062be247cede6c3` |
+| `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `10c6bb2bcdab8fc74ec85a76b061fcd4e32d40744bc22c76da4d854396c8aac3` |
+| `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` |
+| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386` |
+| `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `2d87d9247e23640662bba136c899a274fa278d3c98da96b630810882c3fdaa2a` |
+
+A fuzz-0 dry run of the four patches in order passes, on a temporary copy of the installed files. Every output parses
+(`ast.parse`). The patch is not applied; the supervisor applies it.
+
+### Apply, check, reverse
+
+From the repository root, after `torch-inductor-upstream-composition.patch` and
+`torch-inductor-graph-lowering-factory.patch`:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+I=$SITE/torch/_inductor
+F="$I/compile_fx.py $I/config.py $I/graph.py $I/ir.py $I/output_code.py $I/pattern_matcher.py $I/codegen/wrapper.py $I/codegen/wrapper_fxir.py"
+shasum -a 256 $F
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
+shasum -a 256 $F
+```
+
+- The first `shasum` must print the "before" hashes above, and the second the "after" hashes.
+- To reverse, reverse this patch before the factory and composition patches:
+  `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch`.
+- This is pure Python source, so no rebuild is needed.
