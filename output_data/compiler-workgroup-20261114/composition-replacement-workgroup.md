@@ -1,5 +1,12 @@
 # Complete compiler composition replacement — work order, 14 November 2026
 
+Through completion of this integration, every Codex and Claude assignment and
+corrective follow-up begins with the complete text of both four-sentence memoranda:
+[functional compilation](../../design/functional-compilation-memorandum.md) and
+[access by view](../../design/access-by-view-memorandum.md), as the operator directed
+on 15 November 2026. Codex continues to use the defect manifests for its judgments
+and supplies concrete positive implementation tasks.
+
 This dated order applies the operator's whole-flow correction to the existing
 [composition request](../../design/compilation-composition-change-request.md),
 especially its numerical lowerer boundary, items 2/3/5/6/7, S8, and complete

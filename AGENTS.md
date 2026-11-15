@@ -258,6 +258,12 @@ lives in `bin/` for the same reason.
 
 ## Collectives and tensor parallelism
 
+Through completion of this integration, preface every Codex and Claude subagent
+assignment and corrective follow-up in the Mesh/compiler scope with the complete
+text of both four-sentence memoranda:
+[functional compilation](design/functional-compilation-memorandum.md) and
+[access by view](design/access-by-view-memorandum.md).
+
 Read `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
 `~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. Collectives are transcribed
 from the literature (`rdma/mesh-collective.c`) and selected from an explicit link map. Where nodes or
