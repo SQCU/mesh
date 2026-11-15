@@ -2660,17 +2660,13 @@ static int view_hull_end(const struct view_part *v, __int128 *end) {
   return !__builtin_add_overflow((__int128)v->offset, w, end);
 }
 /* mesh-graph.h struct mesh_graph_context: one isl_ctx (its errors returned as NULL results: ISL_ON_ERROR_CONTINUE)
-   under one recursive lock, refcounted */
+   under one lock, each isl operation of the context made by the one holder of it, refcounted */
 struct mesh_graph_context { isl_ctx *ctx; pthread_mutex_t lock; size_t references; };
 int mesh_graph_context_create(struct mesh_graph_context **out) {
   *out = NULL;
   struct mesh_graph_context *c = calloc(1, sizeof *c);
   if (!c) return ENOMEM;
-  pthread_mutexattr_t recursive;
-  pthread_mutexattr_init(&recursive);
-  pthread_mutexattr_settype(&recursive, PTHREAD_MUTEX_RECURSIVE);
-  const int status = pthread_mutex_init(&c->lock, &recursive);
-  pthread_mutexattr_destroy(&recursive);
+  const int status = pthread_mutex_init(&c->lock, NULL);
   if (status) { free(c); return status; }
   if (!(c->ctx = isl_ctx_alloc())) { pthread_mutex_destroy(&c->lock); free(c); return ENOMEM; }
   isl_options_set_on_error(c->ctx, ISL_ON_ERROR_CONTINUE);
@@ -2790,6 +2786,14 @@ struct mesh_graph_index *mesh_graph_index_python_mod(const struct mesh_graph_ind
   if (!index_values(a, b)) return NULL;
   INDEX_LOCKED(a->domain, index_made(a->domain, index_mod(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
 }
+struct mesh_graph_index *mesh_graph_index_tdiv_q(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, isl_pw_aff_tdiv_q(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_tdiv_r(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, isl_pw_aff_tdiv_r(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
 struct mesh_graph_index *mesh_graph_index_modular_indexing(const struct mesh_graph_index *x,
                                                            const struct mesh_graph_index *divisor,
                                                            const struct mesh_graph_index *modulus) {
@@ -2819,6 +2823,36 @@ struct mesh_graph_index *mesh_graph_index_compare(uint32_t relation, const struc
                                                              isl_pw_aff_ge_set, isl_pw_aff_eq_set, isl_pw_aff_ne_set};
   if (relation >= sizeof compare / sizeof *compare) return NULL;
   INDEX_LOCKED(a->domain, index_made(a->domain, NULL, compare[relation](isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value))));
+}
+struct mesh_graph_index *mesh_graph_index_wrap(const struct mesh_graph_index *x, uint32_t bits, int is_signed) {
+  if (!x || !x->value || !bits || bits > 64) return NULL;
+  struct mesh_graph_domain *d = x->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_ctx *ctx = d->context->ctx;
+  /* x itself where isl proves its values over the domain's box within the type's range (the reduction its identity
+     there); else signed: ((x + 2^(bits - 1)) mod 2^bits) - 2^(bits - 1), unsigned: x mod 2^bits (isl's mod) */
+  isl_val *half = isl_val_2exp(isl_val_int_from_ui(ctx, bits - 1));
+  isl_pw_aff *over = isl_pw_aff_intersect_domain(isl_pw_aff_copy(x->value), isl_set_copy(d->box));
+  isl_val *least = isl_pw_aff_min_val(isl_pw_aff_copy(over)), *greatest = isl_pw_aff_max_val(over);
+  isl_val *low = is_signed ? isl_val_neg(isl_val_copy(half)) : isl_val_zero(ctx);
+  isl_val *high = isl_val_sub_ui(is_signed ? isl_val_copy(half) : isl_val_2exp(isl_val_int_from_ui(ctx, bits)), 1);
+  const int within = least && greatest && isl_val_is_int(least) && isl_val_is_int(greatest) &&
+                     isl_val_ge(least, low) == isl_bool_true && isl_val_le(greatest, high) == isl_bool_true;
+  isl_val_free(least); isl_val_free(greatest); isl_val_free(low); isl_val_free(high);
+  if (within) {
+    isl_val_free(half);
+    struct mesh_graph_index *same = index_made(d, isl_pw_aff_copy(x->value), NULL);
+    pthread_mutex_unlock(&d->context->lock);
+    return same;
+  }
+  isl_pw_aff *v = isl_pw_aff_copy(x->value);
+  if (is_signed) v = isl_pw_aff_add(v, isl_pw_aff_val_on_domain(isl_pw_aff_domain(isl_pw_aff_copy(x->value)), isl_val_copy(half)));
+  v = isl_pw_aff_mod_val(v, isl_val_2exp(isl_val_int_from_ui(ctx, bits)));
+  if (is_signed) v = isl_pw_aff_sub(v, isl_pw_aff_val_on_domain(isl_pw_aff_domain(isl_pw_aff_copy(x->value)), isl_val_copy(half)));
+  isl_val_free(half);
+  struct mesh_graph_index *made = index_made(d, v, NULL);
+  pthread_mutex_unlock(&d->context->lock);
+  return made;
 }
 struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
   if (!index_predicates(a, b)) return NULL;
@@ -2855,13 +2889,13 @@ static isl_basic_map *access_bound(isl_basic_map *m, isl_local_space *local, isl
                                                               (int)(k < ins ? k : k - ins), isl_val_int_from_si(ctx, coefficient[k]));
   return isl_basic_map_add_constraint(m, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, constant)));
 }
-/* { [i] -> [b] : origin + element i <= b <= origin + element i + element - 1 } */
-static isl_map *access_elements(isl_ctx *ctx, uint64_t origin, uint64_t element) {
+/* { [i] -> [b] : origin + scale i <= b <= origin + scale i + width - 1 } */
+static isl_map *access_elements(isl_ctx *ctx, uint64_t origin, uint64_t scale, uint64_t width) {
   isl_space *space = isl_space_alloc(ctx, 0, 1, 1);
   isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
   isl_basic_map *m = isl_basic_map_universe(space);
-  m = access_bound(m, local, ctx, 1, (const int64_t[]){-(int64_t)element, 1}, 2, -(int64_t)origin);
-  m = access_bound(m, local, ctx, 1, (const int64_t[]){(int64_t)element, -1}, 2, (int64_t)origin + (int64_t)element - 1);
+  m = access_bound(m, local, ctx, 1, (const int64_t[]){-(int64_t)scale, 1}, 2, -(int64_t)origin);
+  m = access_bound(m, local, ctx, 1, (const int64_t[]){(int64_t)scale, -1}, 2, (int64_t)origin + (int64_t)width - 1);
   isl_local_space_free(local);
   return isl_map_from_basic_map(m);
 }
@@ -2880,20 +2914,23 @@ static int access_measured(struct mesh_graph_access_map *a) {
   isl_set_free(bytes);
   return status;
 }
+/* a relation of `domain`, made under its context's lock (the caller's, held): a relation it cannot measure disposed
+   there, its domain not retained */
 static struct mesh_graph_access_map *access_new(struct mesh_graph_domain *domain, isl_map *relation, isl_set *guard,
                                             uint32_t flags, uint64_t guard_source) {
   struct mesh_graph_access_map *a = relation ? calloc(1, sizeof *a) : NULL;
   if (!a) { isl_map_free(relation); isl_set_free(guard); return NULL; }
-  mesh_graph_domain_retain(domain);
   *a = (struct mesh_graph_access_map){1, domain, relation, guard, flags, guard_source, 1, 0, 0};
   /* its identity: 64 random bits, made once with the relation, kept by every copy of it saved and loaded */
   arc4random_buf(&a->identity, sizeof a->identity);
-  if (access_measured(a)) { mesh_graph_access_map_free(a); return NULL; }
+  if (access_measured(a)) { isl_map_free(a->relation); isl_set_free(a->guard); free(a); return NULL; }
+  mesh_graph_domain_retain(domain);
   return a;
 }
 int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const struct mesh_graph_index *index, int64_t lo,
-                             int64_t hi, const struct mesh_graph_index *guard, uint32_t guard_data,
-                             uint64_t guard_source, uint64_t origin, uint64_t element, struct mesh_graph_access_map **out) {
+                                 int64_t hi, const struct mesh_graph_index *guard, uint32_t flags,
+                                 uint64_t guard_source, uint64_t origin, uint64_t scale, uint64_t width,
+                                 struct mesh_graph_access_map **out) {
   struct mesh_graph_domain *d = (struct mesh_graph_domain *)domain;
   isl_ctx *ctx = d->context->ctx;
   pthread_mutex_lock(&d->context->lock);
@@ -2918,9 +2955,11 @@ int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const s
   isl_set *where = guard && guard->predicate ? isl_set_copy(guard->predicate) : NULL;
   isl_set *reached = isl_set_copy(d->box);
   if (where) reached = isl_set_intersect(reached, isl_set_copy(where));
-  isl_map *relation = isl_map_intersect_domain(isl_map_apply_range(indexed, access_elements(ctx, origin, element)), reached);
+  isl_map *relation = isl_map_intersect_domain(isl_map_apply_range(indexed, access_elements(ctx, origin, scale, width)),
+                                               reached);
   *out = access_new(d, relation, where, (index && index->value ? 0 : MESH_GRAPH_ACCESS_MAP_BOUND) |
-                                        (guard_data ? MESH_GRAPH_ACCESS_MAP_GUARD_DATA : 0), guard_source);
+                                        (flags & (MESH_GRAPH_ACCESS_MAP_GUARD_DATA | MESH_GRAPH_ACCESS_MAP_UNKNOWN)),
+                    guard_source);
   pthread_mutex_unlock(&d->context->lock);
   return *out ? 0 : ENOMEM;
 }

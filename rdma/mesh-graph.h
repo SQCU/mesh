@@ -377,6 +377,10 @@ struct mesh_graph_index *mesh_graph_index_modular_indexing(const struct mesh_gra
                                                            const struct mesh_graph_index *divisor,
                                                            const struct mesh_graph_index *modulus);
 struct mesh_graph_index *mesh_graph_index_python_mod(const struct mesh_graph_index *, const struct mesh_graph_index *);
+/* isl's truncated division and remainder (isl_pw_aff_tdiv_q, isl_pw_aff_tdiv_r: the quotient rounded toward zero, the
+   remainder the dividend's sign; a constant divisor) */
+struct mesh_graph_index *mesh_graph_index_tdiv_q(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_tdiv_r(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_minimum(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_maximum(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_where(const struct mesh_graph_index *predicate, const struct mesh_graph_index *a,
@@ -385,19 +389,27 @@ enum { MESH_GRAPH_INDEX_LT, MESH_GRAPH_INDEX_LE, MESH_GRAPH_INDEX_GT, MESH_GRAPH
        MESH_GRAPH_INDEX_NE };
 struct mesh_graph_index *mesh_graph_index_compare(uint32_t relation, const struct mesh_graph_index *,
                                                   const struct mesh_graph_index *);
+/* An integer of a typed producer's `bits`-wide type (WGSL/Tint u32, i32, u64, i64): x reduced into that type's range
+   exactly (x mod 2^bits, or its two's-complement signed value where `is_signed`), as the type's arithmetic, conversion
+   and bitcast define it */
+struct mesh_graph_index *mesh_graph_index_wrap(const struct mesh_graph_index *x, uint32_t bits, int is_signed);
 struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_or(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_not(const struct mesh_graph_index *);
 void mesh_graph_index_free(struct mesh_graph_index *);
-/* An access's retained relation { d -> byte : origin + element index(d) <= byte < origin + element (index(d) + 1),
-   guard(d), d in its domain }: `index` its element index (integer), or NULL where its producer's value is not
+/* An access's retained relation { d -> byte : origin + scale index(d) <= byte < origin + scale index(d) + width,
+   guard(d), d in its domain } (an element index: scale and width its element's bytes; a byte offset: scale 1, width
+   the bytes accessed): `index` its element index (integer), or NULL where its producer's value is not
    quasi-affine (data it loaded): then its original value range [lo, hi] (BOUND, never claimed exact); `guard` its
-   predicate (NULL unguarded), or `guard_data` 1 where its predicate reads data (GUARD_DATA: it may run anywhere in its
-   domain), `guard_source` the predicate's own identity (its LoopBody node's, 0 none). Refcounted; retains its domain. */
-enum { MESH_GRAPH_ACCESS_MAP_BOUND = 1, MESH_GRAPH_ACCESS_MAP_GUARD_DATA = 2 };
+   predicate (NULL unguarded); `flags` GUARD_DATA where its predicate is held only by its identity (data it reads, or a
+   predicate its producer keeps unevaluated: it may run anywhere in its domain), UNKNOWN where its producer has no range
+   of its index ([lo, hi] then the binding's bytes, stated, never exact); `guard_source` the predicate's own identity
+   (its LoopBody node's or its If's, 0 none). Refcounted; retains its domain. */
+enum { MESH_GRAPH_ACCESS_MAP_BOUND = 1, MESH_GRAPH_ACCESS_MAP_GUARD_DATA = 2, MESH_GRAPH_ACCESS_MAP_UNKNOWN = 4 };
 int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const struct mesh_graph_index *index, int64_t lo,
-                             int64_t hi, const struct mesh_graph_index *guard, uint32_t guard_data,
-                             uint64_t guard_source, uint64_t origin, uint64_t element, struct mesh_graph_access_map **out);
+                                 int64_t hi, const struct mesh_graph_index *guard, uint32_t flags,
+                                 uint64_t guard_source, uint64_t origin, uint64_t scale, uint64_t width,
+                                 struct mesh_graph_access_map **out);
 void mesh_graph_access_map_retain(const struct mesh_graph_access_map *);
 void mesh_graph_access_map_free(const struct mesh_graph_access_map *);
 /* its flags, guard identity and domain, and its bytes' least and greatest (an empty relation: 1 and 0) */
