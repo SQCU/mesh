@@ -13,7 +13,7 @@ requested explanation and its compilation, execution or lifecycle phase.
 Ordinary direct foreign-function calls and stored IR operation identities are
 distinguished from callbacks using their actual callers and registrations.
 
-| Assigned source | Existing worker | Source account |
+| Assigned source | Original Claude worker | Source account |
 | --- | --- | --- |
 | Compiler Python, excluding `export.py`, `ir.py`, `metal.py` | 68 | [Compiler](compiler/whole-lowering-ownership-20261114.md) |
 | Mesh-owned compiler patches | 66 | [Compiler](compiler/whole-lowering-ownership-20261114.md) |
@@ -22,10 +22,10 @@ distinguished from callbacks using their actual callers and registrations.
 
 ## Source checkpoints
 
-The source inventory contains 1,057 marker occurrences across the assigned
-slices. This counts error sites, not unique callbacks or measured runtime calls;
-some callbacks have both a registration marker and a body marker. The complete
-repository sweep remains unfinished.
+At the checkpoints below, the source inventory contained 1,057 marker occurrences
+across the assigned slices. This counts error sites, not unique callbacks or measured runtime calls;
+some callbacks have both a registration marker and a body marker. This was the
+partial state before the Codex continuation below.
 
 | Slice | Markers | Preserved source |
 | --- | ---: | --- |
@@ -48,7 +48,7 @@ Patch projection checks preserve the original upstream bodies. These are
 source-preservation checks: no Mesh/Torch import, callback invocation, native
 build or workload ran. The deliberately undefined symbol remains undefined.
 
-## Unfinished slices and executor stops
+## State at the Claude executor stops
 
 At `1beab98e`, worker104's partial result contains 16 marker references across
 `export.py`, `ir.py` and `rdma/mesh_compile.py`. Removing only those markers
@@ -67,15 +67,88 @@ lines 15064–15071.
 
 Worker66 subsequently received an API safeguard refusal tagged
 `[reasoning_extraction]`, request `req_011Ch5ZDD2CA1T3DSuUzYMKH`, at result34.
-No subsequent source edit occurred in that slice. The registered
+No subsequent Claude source edit occurred in that slice. At `fd05ee5f`, the registered
 `invoke_subgraph` lowering and the returned `_generate_kernel_call` and
-`_generate_kernel_definition` methods remain three concrete unmarked callbacks.
-Additional protocol/operation-target classifications remain in the compiler
-account; they are not silently counted as covered.
+`_generate_kernel_definition` methods remained three concrete unmarked callbacks.
+Additional protocol/operation-target classifications were recorded in the compiler
+account rather than silently counted as covered.
 
-Both stopped slices remain held. The pending operator question asks whether
-Codex may complete their remaining source-only edits and supersedes the earlier
-frontend-only question. Neither blocked action was retried, rephrased or routed
-to another executor. The other workers completed their previously assigned,
-disjoint slices; the native workers are idle and producer integration remains
-paused.
+Both stopped slices were held through `3cb27a27` while the operator was asked
+whether Codex could finish them. Neither blocked action was retried or routed
+to another executor during that hold. The other workers completed their
+previously assigned, disjoint slices.
+
+## Operator-directed Codex continuation
+
+The operator subsequently directed:
+
+> in this situation instead of trying to use more claude subagents, address this scope by using codex subagents. also grab the exact claude transcripts which lead up to the reasoning extraction classifiers for me and throw them into a different directory under ~/ somewhere for further review/analysis
+
+The existing Codex frontend and compiler agents completed their remaining
+slices directly. The Codex native agent also completed the previously uninspected
+Mesh-serving provider patches. No Claude implementation session was resumed for
+this work. The existing post-commit review hooks retain their configured model
+readers; they are separate from the implementation workers. General producer
+integration remains separate from this callback sweep.
+
+The requested transcript export is at
+`/Users/mdot/claude-safeguard-review-20261115/README.md`. It contains the four
+complete session/stream logs (198,882,778 bytes), SHA-256 hashes checked against
+the unchanged originals, exact contiguous lead-up excerpts, and readable message
+text with source line references. The compiler's explicit classifier event is
+stream line 17520; its exact refused user message is at stream line 17518 and
+canonical-session line 10899. The recorded explanation refers to restrictions
+on reverse engineering or duplicating model outputs; this records the API's
+explanation rather than independently establishing a cause. The frontend log
+contains an unspecified safeguard notice, not an explicit `reasoning_extraction`
+classification.
+
+## Completed Codex checkpoints
+
+| Maintained slice | Final error sites | Completion evidence |
+| --- | ---: | --- |
+| Compiler Python modules | 358 | Earlier `22d5cb96` and `cb7dfb50`, 11 modules. |
+| Compiler patches | 61 | `abba01f8` adds 23 markers, closing the three known omissions and the remaining source-proven deferred/lifecycle registrations. All 20 affected upstream projections parse, preserve the original AST after marker removal, and reverse to their exact base blobs. |
+| Frontend/RDMA and Mesh-owned Python tools | 468 | `c906de24` changes 45 Python files; the count includes the earlier marker in unchanged `export.py`. The [frontend inventory](frontends/callback-sweep-20261115.md) records the 74 scanned Python paths, admitted source, exclusions and actual callback consumers. |
+| Ordinary shell traps | 6 | `c906de24`, six traps in four scripts; original trap bodies remain after the explicit failing command/exit prefix. Source stripping and shell syntax checks passed without invoking handlers. |
+| Native/Swift/Metal Python and maintained provider patches | 698 | Earlier native checkpoints plus Metal `1703f8df`, with the combined inventory in Mesh `e9ca926b`. The provider continuation adds 53 markers across 22 original LiteRT/XNNPACK/MLDrift files. Original dependency commits are `fbde6d03`, `877af3f`, and `239994d`; all three patch layers and the canonical LiteRT source match. |
+
+Total: **1,591 error sites**, including **534 added by this Codex continuation**.
+Original bodies remain in place. The Python AST checks preserve even the
+pre-existing malformed reference headers through temporary, in-memory parsing
+normalization; those headers were not repaired on disk. The provider source
+restores byte-for-byte after removing only the comments and markers. No modified
+compiler/data-engine callback, trap or workload was invoked to validate these
+intentional errors.
+
+The inventory distinguishes actual callbacks from direct calls, source-program
+operands, represented IR/function identities and null function-pointer values.
+Review removed a false positive around `RELEASE()`: that zero-argument ctypes
+constructor supplies a null release pointer, whereas `RELEASE(actual_function)`
+registers a callback. The outward ctypes registrations now fail before ABI
+crossing, rather than depending on an exception raised inside a C-invoked Python
+callback.
+
+Operational oversight remains intact: `bin/mesh-brief-gate.py`,
+`bin/mesh-post-commit.py`, `bin/mesh-shell-guard.sh` and `bin/mesh-kill-guard.sh`
+are byte-identical to their pre-continuation source. The historical
+`measurements/training-continuation-20260906/check-viewer.py` artifact is also
+unchanged. Unmodified vendor bodies and generated evidence are outside the
+maintained-code sweep. These are explicit scope boundaries, not claims that
+those external or operational callbacks were disabled.
+
+## Post-commit review receipt
+
+The frontend agent incorrectly used `core.hooksPath=/dev/null` for `c906de24`.
+Root then ran the unchanged `bin/mesh-post-commit.py` for that exact commit with
+the hook's normal personal configuration. It exited successfully; the
+`measurements` git note contains commit, source and new-inventory review records
+at 23:53:24–23:53:50 UTC. No hook source or repository hook configuration changed.
+The compiler and provider checkpoints also have their normal review notes.
+
+The reviewers recorded the requested explanatory comments and truncated some
+large diffs. The provider review also flagged producer structure visible in the
+nested patch text. Source-preservation checks establish that this sweep retains
+the original projected bodies; they do not establish that the earlier producer
+integration is complete or correct. This receipt closes the callback-invalidation
+and transcript-export work, not the broader compiler integration objective.
