@@ -921,6 +921,32 @@
           "missing actual declared-feature projection"
         ]
       }
+    },
+    {
+      "date": "2026-11-15",
+      "unit": "67 static query result handoff",
+      "source_sha256": "c2fc9cd5b4a0db85897d33fefd20635840e9592fd4f9ddf5f943367359e9b85b",
+      "producer": "Reference-LAPACK typed query on static N/JOB/dtype through original make_fx/proxy_tensor constant evaluation",
+      "result": "literal LWORK",
+      "consumers": [
+        "_geev_routine",
+        "_zhseqr",
+        "_laqr0",
+        "_laqr0_pass",
+        "_laqr3"
+      ],
+      "rejected_before_snapshot": [
+        "handwritten _single rounding",
+        "duplicated _iparmq_static",
+        "runtime-derived static query"
+      ],
+      "checks": [
+        "AST",
+        "pyflakes",
+        "diff --check"
+      ],
+      "execution": false,
+      "status": "WIP; complete query/callee source and real/blocked methods remain unfinished"
     }
   ]
 }

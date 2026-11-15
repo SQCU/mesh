@@ -3226,6 +3226,67 @@ def _iparmq_shifts(nh):
     return torch.clamp(ns - ns % 2, min=2)
 
 
+# iparmq.f 260-280 and 305-311's NWR (ISPEC 13) and NSR (ISPEC 15) as xLAQR0 takes them (zlaqr0.f 363-374, dlaqr0.f
+# 368-379): NS = _iparmq_shifts(NH), NWR = MIN(IHI - ILO + 1, (N - 1) / 3, MAX(2, NWR)) and NSR = MAX(2, MIN(NSR,
+# (N - 3) / 6, IHI - ILO) made even); the one computation both xLAQR0's run (_laqr0) and its query (_laqr0_query) take
+def _laqr0_windows(order, ilo, ihi):
+    nh = ihi - ilo + 1
+    shifts = _iparmq_shifts(nh)
+    nwr = torch.minimum(torch.minimum(nh, (order - 1) // 3), torch.clamp(torch.where(nh <= 500, shifts,
+                                                                                     3 * shifts // 2), min=2))
+    nsr = torch.minimum(torch.minimum(shifts, (order - 3) // 6), ihi - ilo)
+    return shifts, nwr, torch.clamp(nsr - nsr % 2, min=2)
+
+
+# Reference-LAPACK 3.12.1 workspace queries (LWORK = -1) of xLAQR0 and xLAQR4 (zlaqr0.f 322-392, dlaqr0.f 327-397: N = 0
+# one, N <= NTINY = 15 LWKOPT = 1, else _laqr0_windows at ILO = 1, IHI = N and MAX(3 NSR / 2, the query of xLAQR3, or
+# xLAQR2 where `four`, with NW = NWR + 1, KTOP = 1, KBOT = N), and of xLAQR3 and xLAQR2 (zlaqr3.f 322-348, zlaqr2.f
+# 323-342, dlaqr3.f and dlaqr2.f alike: JW = MIN(NW, KBOT - KTOP + 1), JW <= 2 one, else JW + MAX(LWK1, LWK2), for
+# xLAQR3 the larger with LWK3, xLAQR4(JW)'s): LWK1 is xGEHRD(JW, 1, JW - 1)'s N NB + TSIZE (zgehrd.f 226-238: NH =
+# JW - 1 > 1, NB = MIN(NBMAX = 64, ILAENV(1, 'xGEHRD') = 32, ilaenv.f 340-345), TSIZE = LDT NBMAX = 65 64), LWK2
+# xUNMHR('R', 'N', JW, JW, 1, JW - 1)'s NW NB (zunmhr.f 246-255: NW = MAX(1, M) = JW, NB = ILAENV(1, 'xUNMQR') = 32,
+# ilaenv.f 405-432)
+def _laqr0_query(order, four):
+    one = torch.ones_like(order)
+    _, nwr, nsr = _laqr0_windows(order, one, order)
+    jw = torch.minimum(nwr + 1, order)
+    made = jw + torch.maximum(jw * 32 + 65 * 64, jw * 32)
+    if not four:
+        made = torch.maximum(made, _laqr0_query(jw, True))
+    return torch.where(order <= 15, 1, torch.maximum(3 * nsr // 2, torch.where(jw <= 2, 1, made)))
+
+
+# ATen's lwork for LAPACK_xGEEV(JOBVL = 'N', JOBVR) as the non-CPU method takes it (the CPU route's query is the
+# native owner's LAPACK call): BatchLinearAlgebraKernel.cpp 253-257 at torch 2.14.0 git 08187d9e, lapack_work_to_int
+# (202-212) of the query's WORK(1), MAX(1, CEIL(NEXTAFTER(WORK(1), +INF))) in the routine's precision `dtype`, of
+# zgeev.f 264-300 (`whole`) or dgeev.f 278-321 at ORDER = N: N = 0 one; ZGEEV MAXWRK = N + 32 N (ILAENV(1, 'ZGEHRD')),
+# with vectors the larger with N + 32 (N - 1) (ZUNGHR, ilaenv.f 419-425) and N + ZTREVC3's MAX(1, N + 2 N NB), NB =
+# ILAENV(1, 'ZTREVC') = 64 (ztrevc3.f 326-327, ilaenv.f 472-477), then MAX(MAXWRK, HSWORK, MINWRK = 2 N); DGEEV MAXWRK
+# = 2 N + 32 N, with vectors MINWRK = 4 N and the larger with 2 N + 32 (N - 1) (DORGHR), N + 1, N + HSWORK, N +
+# DTREVC3's (dtrevc3.f 301-302) and 4 N, else MINWRK = 3 N and N + 1, N + HSWORK, then MAX(MAXWRK, MINWRK). HSWORK is
+# xHSEQR's query (zhseqr.f 391-407, dhseqr.f alike: past its N = 0 return, MAX(xLAQR0's, MAX(1, N))). Its operands
+# are the static configuration (ORDER = N = the static extent, JOBVR, the dtype): _geev_routine evaluates it once at
+# specialization on 0-d constants (the tracer's constant propagation) and takes the int, the LWORK the method's
+# routines then take; the run's own _laqr0_windows over the balanced ILO, IHI is the source's distinct ILAENV call
+def _geev_lwork(order, vectors, whole, dtype):
+    hswork = torch.maximum(_laqr0_query(order, False), torch.clamp(order, min=1))
+    trevc = torch.clamp(order + 2 * order * 64, min=1)
+    if whole:
+        maxwrk = order + order * 32
+        if vectors:
+            maxwrk = torch.maximum(torch.maximum(maxwrk, order + (order - 1) * 32), order + trevc)
+        maxwrk = torch.maximum(torch.maximum(maxwrk, hswork), 2 * order)
+    else:
+        maxwrk = torch.maximum(torch.maximum(2 * order + order * 32, order + 1), order + hswork)
+        if vectors:
+            maxwrk = torch.maximum(torch.maximum(maxwrk, 2 * order + (order - 1) * 32), order + trevc)
+            maxwrk = torch.maximum(maxwrk, 4 * order)
+        else:
+            maxwrk = torch.maximum(maxwrk, 3 * order)
+    work = torch.where(order == 0, 1, maxwrk).to(dtype)
+    return torch.clamp(torch.ceil(torch.nextafter(work, torch.full_like(work, math.inf))), min=1).to(order.dtype)
+
+
 # Reference-LAPACK 3.12.1 SRC/zlaqr3.f 361-577, ZLAQR3(WANTT, WANTZ, N, KTOP, KBOT, NW, H, ILOZ, IHIZ, Z, NS, ND, SH,
 # V, NH, T, NV, WV) where `proceed`, N the member's ORDER, as zlaqr0.f 516-520 calls it: V = H(KV,1), T = H(KV,KT),
 # WV = H(KWV,1), NH = NHO, NV = NVE. ZLAQR3 reaches H(KV,KT) and H(KV,1) only as its T and V: here SIZE x SIZE
@@ -3244,7 +3305,8 @@ def _iparmq_shifts(nh):
 # DO 70 (WANTT: columns KBOT+1..N) and DO 80 (WANTZ: Z's rows ILOZ..IHIZ); 569-577 ND = JW - NS, NS - INFQR.
 # ZGEHRD and ZUNMHR are _gehrd's ZGEHD2 and _unmhr's ZUNM2R (OPEN: their blocked code, NS >= 130 and NS - 1 > 32).
 # Returns H, Z, W (SH), NS, ND. OPEN: dlaqr3.f and dlaqr2.f, the real routines
-def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, w, kv, kt, nho, kwv, nve, proceed):
+def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, w, kv, kt, nho, kwv, nve, proceed,
+           lwork):
     limits = torch.finfo(h.real.dtype)
     ulp = limits.eps
     smlnum = limits.tiny * (order.to(h.real.dtype) / ulp)
@@ -3269,7 +3331,7 @@ def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, 
     small, infqr = main, torch.zeros_like(ktop)
     if nested and size > 75:
         large = main & (jw > 75)
-        t, sh, v, infqr = _laqr0(True, True, True, jw, one, jw, t, sh, one, jw, v, large)
+        t, sh, v, infqr = _laqr0(True, True, True, jw, one, jw, t, sh, one, jw, v, large, lwork)
         small = main & ~large
     t, sh, v, info = _zlahqr(True, True, jw, one, jw, t, sh, one, jw, v, small)
     infqr = torch.where(small, info, infqr)
@@ -3337,15 +3399,13 @@ def _laqr3_sorted(live, t, v, i, jw, ns):
 # N = 0 return; 328-335 N <= NTINY = 15 (263), ZLAHQR (alone where n <= 15); 355-372 iparmq.f's NWR (ISPEC 13: NS
 # where NH <= KNWSWP = 500, else 3 NS / 2) and NSR (15: NS) of NH = IHI - ILO + 1 (ilaenv.f 773's N2, N3); 397-410
 # NMIN = 75 (12), NIBBLE = 14 (14), KACC22 = 2 where its NS >= KACMIN = K22MIN = 14 (16: iparmq.f 384-389 for
-# 'LAQR'), else 0, so ACCUM (zlaqr5.f 339) is NS >= 14; 416-423 NWMAX = (N - 1) / 3 and NSMAX = (N - 3) / 6 made even:
-# LWORK / 2 and 2 LWORK / 3 are the larger where LWORK is ATen's (BatchLinearAlgebraKernel.cpp 252-258 at torch
-# 2.14.0 git 08187d9e: lapack_work_to_int, 204-212, of the query's WORK(1)), zgeev.f 269 and 298-300's MAXWRK >=
-# N + N ILAENV(1, 'ZGEHRD') = 33 N (ilaenv.f 349-354), passed whole to ZHSEQR (zgeev.f 352, 377-379, 410-412 and
-# 420-422: IWRK = ITAU = 1) and on by zhseqr.f 441-444 and 463-464, zlaqr0.f 516-520 and 573-575 and zlaqr3.f
-# 418-420, or NL = 49 on zhseqr.f 480-482's HL (16 < 24, 7 < 32); 431 ITMAX = MAX(30, 2 KEXSH) MAX(10, NH); 435
-# KBOT = IHI; 439-690 DO 70 as one while_loop whose pass is one IT; 693 INFO = KBOT once IT passes ITMAX (also where
-# that pass left KBOT < ILO). Returns H, W, Z, INFO
-def _laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed):
+# 'LAQR'), else 0, so ACCUM (zlaqr5.f 339) is NS >= 14; 415-422 NWMAX = MIN((N - 1) / 3, LWORK / 2) and NSMAX =
+# MIN((N - 3) / 6, 2 LWORK / 3) made even, LWORK the static `lwork`: _geev_lwork's at specialization, passed whole to
+# ZHSEQR (zgeev.f 377-379, 410-412 and 420-422: IWRK = ITAU = 1; DHSEQR LWORK - N) and on by zhseqr.f 441-443 and
+# 464-465, zlaqr0.f 516-519 and 572-574 and zlaqr3.f 418-419, or NL = 49 on zhseqr.f 479-481's HL; 431 ITMAX =
+# MAX(30, 2 KEXSH) MAX(10, NH); 435 KBOT = IHI; 439-690 DO 70 as one while_loop whose pass is one IT; 693 INFO = KBOT
+# once IT passes ITMAX (also where that pass left KBOT < ILO). Returns H, W, Z, INFO
+def _laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed, lwork):
     n = h.shape[-1]
     go = proceed & (order > 0)
     h, w, z, info = _zlahqr(wantt, wantz, order, ilo, ihi, h, w, iloz, ihiz, z, go & (order <= 15))
@@ -3353,18 +3413,15 @@ def _laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed):
     if n <= 15:
         return h, w, z, info
     nh = ihi - ilo + 1
-    shifts = _iparmq_shifts(nh)
-    nwr = torch.minimum(torch.minimum(nh, (order - 1) // 3), torch.clamp(torch.where(nh <= 500, shifts,
-                                                                                     3 * shifts // 2), min=2))
-    nsr = torch.minimum(torch.minimum(shifts, (order - 3) // 6), ihi - ilo)
-    nsr = torch.clamp(nsr - nsr % 2, min=2)
-    nwmax, nsmax = (order - 1) // 3, (order - 3) // 6
+    shifts, nwr, nsr = _laqr0_windows(order, ilo, ihi)
+    nwmax = torch.clamp((order - 1) // 3, max=lwork // 2)
+    nsmax = torch.clamp((order - 3) // 6, max=2 * lwork // 3)
     nsmax = nsmax - nsmax % 2
     itmax = 30 * torch.clamp(nh, min=10)
     ones = torch.ones_like(ihi)
     carried = (go & (ihi >= ilo), h.contiguous(), z.contiguous() if wantz else h.new_zeros(()), w.contiguous(),
                ihi.clone(), nwmax.clone(), ones, -ones, ones.clone())
-    _, h, z, w, kbot, _, _, _, it = while_loop_op(_first_any, functools.partial(_laqr0_pass, wantt, wantz, four),
+    _, h, z, w, kbot, _, _, _, it = while_loop_op(_first_any, functools.partial(_laqr0_pass, wantt, wantz, four, lwork),
                                                   carried, (order, ilo, iloz, ihiz, itmax, nwr, nsr, nwmax, nsmax,
                                                             shifts >= 14))
     return h, w, z, torch.where(go, torch.where(it > itmax, kbot, 0), info)
@@ -3379,10 +3436,11 @@ def _laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed):
 # KS + INF, and where KS >= KBOT the 2 x 2 shifts (S, AA..DD = H / S, TR2, DET, RTDISC = SQRT(-DET), KS = KBOT - 1);
 # 609-628 where KBOT - KS + 1 > NS DO 50/40's bubble sort; 635-642 KBOT - KS + 1 = 2's nearer shift; 649-668 NS, KS,
 # KDU, KU, KWH, NHO, KWV, NVE; 673-676 ZLAQR5; 681-685 NDFL
-def _laqr0_pass(wantt, wantz, four, live, h, z, w, kbot, nw, ndfl, ndec, it, order, ilo, iloz, ihiz, itmax, nwr, nsr,
-                nwmax, nsmax, accum):
+def _laqr0_pass(wantt, wantz, four, lwork, live, h, z, w, kbot, nw, ndfl, ndec, it, order, ilo, iloz, ihiz, itmax, nwr,
+                nsr, nwmax, nsmax, accum):
     n, k, one = h.shape[-1], _counted(h), torch.ones_like(kbot)
-    nsb = max(2, (n - 3) // 6 - (n - 3) // 6 % 2)
+    nsb = min((n - 3) // 6, 2 * lwork // 3)
+    nsb = max(2, nsb - nsb % 2)
     sub = torch.cat([torch.zeros_like(h[..., :1, 0]), h.diagonal(-1, dim1=-2, dim2=-1)], -1)
     found = torch.where((sub == 0) & (k >= _vec(ilo + 1)) & (k <= _vec(kbot)), k, 0).amax(-1)
     ktop = torch.where(found > 0, found, ilo)
@@ -3399,8 +3457,9 @@ def _laqr0_pass(wantt, wantz, four, live, h, z, w, kbot, nw, ndfl, ndec, it, ord
     ndec = torch.where(bump & (nw - ndec < 2), 0, ndec)
     nw = torch.where(bump, nw - ndec, nw)
     kt = nw + 1
-    h, z, w, ls, ld = _laqr3(wantt, wantz, not four, max(1, (n - 1) // 3), order, ktop, kbot, nw, h, iloz, ihiz, z, w,
-                             order - nw + 1, kt, (order - nw - 1) - kt + 1, nw + 2, (order - nw) - (nw + 2) + 1, live)
+    h, z, w, ls, ld = _laqr3(wantt, wantz, not four, max(1, min((n - 1) // 3, lwork // 2)), order, ktop, kbot, nw, h,
+                             iloz, ihiz, z, w, order - nw + 1, kt, (order - nw - 1) - kt + 1, nw + 2,
+                             (order - nw) - (nw + 2) + 1, live, lwork)
     kbot = torch.where(live, kbot - ld, kbot)
     ks = kbot - ls + 1
     sweep = live & ((ld == 0) | ((100 * ld <= nw * 14) & (kbot - ktop + 1 > torch.clamp(nwmax, max=75))))
@@ -3421,7 +3480,7 @@ def _laqr0_pass(wantt, wantz, four, live, h, z, w, kbot, nw, ndfl, ndec, it, ord
     hs, ws, small, inf = _region_at(h, top, one, nsb, nsb), _vec_at(w, first, nsb), few, torch.zeros_like(kbot)
     if not four and nsb > 75:
         large = few & (ns > 75)
-        hs, ws, _, inf = _laqr0(False, False, True, ns, one, ns, hs, ws, one, one, hs.new_zeros(()), large)
+        hs, ws, _, inf = _laqr0(False, False, True, ns, one, ns, hs, ws, one, one, hs.new_zeros(()), large, lwork)
         small = few & ~large
     hs, ws, _, info = _zlahqr(False, False, ns, one, ns, hs, ws, one, one, hs.new_zeros(()), small)
     inf = torch.where(small, info, inf)
@@ -3472,23 +3531,24 @@ def _laqr0_swapped(live, w, i, sorted_, k):
     return live & (i <= k - 1), w, i, sorted_ & ~swap
 
 
-# Reference-LAPACK 3.12.1 SRC/zhseqr.f 435-487 past 428-431's ILO = IHI return, where `proceed`, N = n (zgeev.f's
-# order): NMIN = MAX(NTINY = 15, ILAENV(12) = 75) (iparmq.f 288); 441-444 N > NMIN, ZLAQR0; else 448-450 ZLAHQR and,
-# where its INFO > 0, 458 KBOT = INFO and ZLAQR0(WANTT, WANTZ, N or NL, ILO, KBOT, ..., ILO, IHI, Z): 460-464 on H
-# where N >= NL = 49 (330), else 475-484 on HL, the NL x NL local (ZLACPY of H, HL(N+1,N) = 0 and ZLASET of its
-# columns N+1..NL; its rows N+1..NL left of column N otherwise uninitialized in the source and reached there only as
-# xLAQR0, xLAQR3 and xLAQR5 workspace written before it is read, zero here), with W and Z themselves (ZLAQR0 reaches
-# W(1:KBOT) and Z's rows ILOZ..IHIZ and columns 1..KBOT, KBOT <= N; W and Z padded to NL here for the static extent)
-# and WORKL, NL; HL back into H where WANTT or INFO /= 0. Returns H, W, Z, INFO
-def _zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed):
+# Reference-LAPACK 3.12.1 SRC/zhseqr.f 434-486 past 427-430's ILO = IHI return, where `proceed`, N = n (zgeev.f's
+# order): 434-436 NMIN = MAX(NTINY = 15, ILAENV(12) = 75) (iparmq.f 288); 440-443 N > NMIN, ZLAQR0; else 448-450
+# ZLAHQR and, where its INFO > 0, 457 KBOT = INFO and ZLAQR0(WANTT, WANTZ, N or NL, ILO, KBOT, ..., ILO, IHI, Z):
+# 464-465 on H where N >= NL = 49 (329), else 474-483 on HL, the NL x NL local (ZLACPY of H, HL(N+1,N) = 0 and
+# ZLASET of its columns N+1..NL; its rows N+1..NL left of column N otherwise uninitialized in the source and reached
+# there only as xLAQR0, xLAQR3 and xLAQR5 workspace written before it is read, zero here), with W and Z themselves
+# (ZLAQR0 reaches W(1:KBOT) and Z's rows ILOZ..IHIZ and columns 1..KBOT, KBOT <= N; W and Z padded to NL here for the
+# static extent) and WORKL, NL; HL back into H where WANTT or INFO /= 0. LWORK is the caller's (`lwork`, the batch's
+# int64 LWORK) on 441-443 and 464-465's H, NL on 479-481's HL. Returns H, W, Z, INFO
+def _zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed, lwork):
     n = h.shape[-1]
     order = torch.full_like(ilo, n)
     if n > 75:
-        return _laqr0(wantt, wantz, False, order, ilo, ihi, h, w, ilo, ihi, z, proceed)
+        return _laqr0(wantt, wantz, False, order, ilo, ihi, h, w, ilo, ihi, z, proceed, lwork)
     h, w, z, info = _zlahqr(wantt, wantz, order, ilo, ihi, h, w, ilo, ihi, z, proceed)
     retry = proceed & (info > 0)
     if n >= 49:
-        h, w, z, again = _laqr0(wantt, wantz, False, order, ilo, info, h, w, ilo, ihi, z, retry)
+        h, w, z, again = _laqr0(wantt, wantz, False, order, ilo, info, h, w, ilo, ihi, z, retry, lwork)
         return h, w, z, torch.where(retry, again, info)
     pad = 49 - n
 
@@ -3497,19 +3557,23 @@ def _zhseqr(wantt, wantz, ilo, ihi, h, w, z, proceed):
         return torch.cat([x, x.new_zeros((*x.shape[:-2], pad, 49))], -2)
     hl, wl, zl, again = _laqr0(wantt, wantz, False, torch.full_like(ilo, 49), ilo, info, padded(h),
                                torch.cat([w, w.new_zeros((*w.shape[:-1], pad))], -1), ilo, ihi,
-                               padded(z) if wantz else z, retry)
+                               padded(z) if wantz else z, retry, 49)
     info = torch.where(retry, again, info)
     back = retry if wantt else retry & (info != 0)
     return (torch.where(_mat(back), hl[..., :n, :n], h), wl[..., :n], zl[..., :n, :n] if wantz else zl, info)
 
 
-# Reference-LAPACK SRC/zgeev.f 319-517 and dgeev.f 330-560 (JOBVL = 'N', JOBVR = `jobvr`) on a non-CPU engine,
-# the results of LAPACK_ZGEEV (w, vr, info) or LAPACK_DGEEV (wr, wi, vr, info) and their shapes (vr column-major, or
-# (0,) where JOBVR = 'N'): ANRM = ZLANGE('M') (the largest modulus, a NaN kept), INFO = -4 where it is NaN or above
-# overflow (the member's remaining work its own and unused), SCALEA and CSCALE (SMLNUM = SQRT(SAFMIN) / EPS) and
-# ZLASCL(ANRM -> CSCALE); ZGEBAL('B'); ZGEHRD; with vectors ZUNGHR into Z and ZHSEQR('S', 'V'), else ZHSEQR('E', 'N')
-# (zhseqr.f 415-419: W(1:ILO-1) and W(IHI+1:N) from H's diagonal, 428-431's ILO = IHI W(ILO) = H(ILO,ILO) return,
-# 435-487 _zhseqr, then 491-492's H(3:N,1:N-2) lower part zero where WANTT or INFO /= 0 and N > 2); where INFO = 0
+# Reference-LAPACK 3.12.1 SRC/zgeev.f 321-513 and dgeev.f 342-542 (JOBVL = 'N', JOBVR = `jobvr`) on a non-CPU
+# engine, the results of LAPACK_ZGEEV (w, vr, info) or LAPACK_DGEEV (wr, wi, vr, info) and their shapes (vr
+# column-major, or (0,) where JOBVR = 'N'), with LWORK ATen's (_geev_lwork): ANRM = ZLANGE('M') (the largest modulus,
+# a NaN kept); INFO = -4 where it is NaN or above overflow, the API's error contract that the CPU route's LAPACK_xGEEV
+# returns to _linalg_check_errors and 3.12.1 lacks (Reference-LAPACK master zgeev.reference.f 332-340, dgeev.reference.f
+# 349-357, beside this note: DISNAN(ANRM) or ANRM > DLAMCH('Overflow') returns before SCALEA; the member's remaining
+# work here its own and unused); SCALEA and CSCALE (SMLNUM = SQRT(SAFMIN) / EPS) and ZLASCL(ANRM -> CSCALE);
+# ZGEBAL('B'); ZGEHRD (IWRK = N + 1, LWORK - N; DGEHRD 2 N + 1, LWORK - 2 N, zgeev.f 352-355, dgeev.f 371-374); with
+# vectors ZUNGHR into Z and ZHSEQR('S', 'V'), else ZHSEQR('E', 'N') (IWRK = ITAU = 1, LWORK; DHSEQR N + 1, LWORK - N)
+# (zhseqr.f 414-418: W(1:ILO-1) and W(IHI+1:N) from H's diagonal, 427-430's ILO = IHI W(ILO) = H(ILO,ILO) return,
+# 434-486 _zhseqr, then 490-491's H(3:N,1:N-2) lower part zero where WANTT or INFO /= 0 and N > 2); where INFO = 0
 # and with vectors ZTREVC3, ZGEBAK('B', 'R') and the normalization (VR as ZHSEQR left Z elsewhere); label 50's undo
 # scaling ZLASCL(CSCALE -> ANRM) of W(INFO+1:N), and of W(1:ILO-1) where INFO > 0, where SCALEA and INFO >= 0. OPEN,
 # not yet source here: dhseqr.f's DLAQR0 selection (N > NMIN = 75) and its DLAQR0 retry where DLAHQR returns INFO > 0
@@ -3526,6 +3590,7 @@ def _geev_routine(a, jobvr):
     scalea = ~bad & (low | (anrm > bignum))
     cscale = torch.where(low, smlnum, torch.full_like(anrm, bignum))
     h, scale, perm, ilo, ihi = _gebal(_lascl(a, anrm, cscale, scalea), ~bad)
+    lwork = int(_geev_lwork(torch.tensor(n), vectors, whole, a.real.dtype))
     h, taus = _gehrd(torch.full_like(ilo, n), ilo, ihi, h)
     z = _unghr(h, taus, ilo, ihi) if vectors else h.new_zeros(())
     isolated = ~_span(k, ilo, ihi) | _vec(ilo == ihi)
@@ -3535,7 +3600,7 @@ def _geev_routine(a, jobvr):
     info = torch.zeros_like(ilo)
     searched = ~bad & (ilo != ihi)
     if n > 1 and whole:
-        h, *eigen, z, info = _zhseqr(vectors, vectors, ilo, ihi, h, *eigen, z, searched)
+        h, *eigen, z, info = _zhseqr(vectors, vectors, ilo, ihi, h, *eigen, z, searched, lwork)
     elif n > 1:
         h, *eigen, z, info = _dlahqr(vectors, vectors, torch.full_like(ilo, n), ilo, ihi, h, *eigen, ilo, ihi, z,
                                      searched)
