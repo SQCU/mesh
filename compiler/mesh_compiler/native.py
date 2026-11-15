@@ -441,11 +441,13 @@ class Target:
 
     # metal_recording.h MetalRecorderPrepare, MetalRecorderPlan and MetalRecorderReplay (metal_capture.m MetalRecorder:
     # no capture is prepared after the recorder's first replay): the one recorder of the whole machine's rows, every
-    # row's program, in order, transport-prepared, captured from its lowered typed program, placed (metal_ir_place),
-    # its replay planned on its capture (segments, cuts, ranges: MetalRecorderPlan), then finalized once (or relocated,
-    # an archive's: metal_ir_loaded), each capture and its transport and placement owners retained with `owned`; then
-    # those same captures replayed in original row order, a row with no program a NULL call; each call its planned
-    # call's
+    # row's program, in order, transport-prepared, captured from its lowered typed program, its placement descriptors
+    # given (values, step, callable operands, transport state), its replay planned on its capture (segments, cuts,
+    # ranges: MetalRecorderPlan), then finalized once (or relocated, an archive's: metal_ir_loaded), each capture and
+    # its transport and placement owners retained with `owned`; then those same (row, capture, program) in original
+    # row order, each replayed (its argument storage and range workspace bound: MetalRecorderReplay), the replay
+    # retained, then its program's physical accesses made on that storage (metal_ir_place), a CPU-only program's too;
+    # a row with no program a NULL call; each call its planned call's
     def placed(self, owned, libs, gpu, owner, programs, finalize):
         M, compiler, (lib, _), transport = libs
         error, planned = C.create_string_buffer(ROOM), owner.planned
@@ -454,7 +456,7 @@ class Target:
         buffer, captured = owner.bound(owned, M), []
         for r, (row, program) in enumerate(zip(self.rows, programs)):
             if program is None:
-                captured.append((row, None))
+                captured.append((row, None, None))
                 continue
             marks, wires, call = row.marks, None, row.planned
             if marks["transfers"]:
@@ -506,19 +508,19 @@ class Target:
             if wires is not None:
                 checked(lib.MetalRecorderState(recorder, ready, wires.state, word.value, error, ROOM), error,
                         "the transport state")
-            checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
             checked(lib.MetalRecorderPlan(recorder, ready, error, ROOM), error, "replay plan")
             emitted = compiler.metal_ir_finalize if finalize else compiler.metal_ir_loaded
             checked(emitted(program, error, ROOM), error, "emission" if finalize else "relocation")
-            captured.append((row, ready))
+            captured.append((row, ready, program))
         calls = []
-        for row, ready in captured:
+        for row, ready, program in captured:
             if ready is None:
                 calls.append(M.Call(None, row.planned + 1, None, 0))
                 continue
             replay = M.Replay()
             checked(lib.MetalRecorderReplay(recorder, ready, C.byref(replay), error, ROOM), error, "replay")
             owned(lambda replay=replay: lib.MetalReplayDestroy(C.byref(replay)))
+            checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
             calls.append(M.Call(C.pointer(replay), row.planned + 1, None, 0))
         return recorder, (M.Call * len(calls))(*calls)
 

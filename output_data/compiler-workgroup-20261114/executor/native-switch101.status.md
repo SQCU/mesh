@@ -67,3 +67,32 @@ paired C unit's obligation. Fresh imports stay held until its matching build.
   held until the matching build. Full range-access geometry and other conditional consumers remain unfinished.
 - **Checks:** `py_compile`, `pyflakes` and `git diff --check` pass. My hunks are native.py +5/−3 (3 hunks) and
   metal.py +1. metal.py's one line over 120 characters (`:685`) is SAME64's uncommitted scalar-if hunk.
+
+## Update (selector107: physical accesses after replay storage)
+
+> Move the ONE existing checked metal_ir_place call from the first prepare loop to after successful Replay in the
+> second loop
+
+- **`Target.placed`** (native.py, comment `:442–450`):
+  - **First loop, per row:**
+    1. transport;
+    2. `MetalRecorderPrepare` (`:496`);
+    3. value, step and operand placement, then `MetalRecorderState`;
+    4. `MetalRecorderPlan` (`:511`);
+    5. finalize or relocate (`:512–513`).
+
+    It retains `(row, ready, program)` (`:514`); a row without a program retains `(row, None, None)` (`:459`).
+  - **Second loop** (`:516`), over the same triples in row order:
+    1. `MetalRecorderReplay` (`:521`);
+    2. Owned `MetalReplayDestroy` at once (`:522`);
+    3. `checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")` on that row's own program
+       (`:523`), a CPU-only program's too;
+    4. the call (`:524`).
+
+    A row without a program is a NULL call, with no placement.
+- **Unchanged:** every Prepare happens before the first Replay; there is one finalization per row; `MetalRecorderPlan`'s
+  ABI stays; there is one `metal_ir_place` call (the AST shows a single site); other Owned order is unchanged.
+- **No conflict:** this assumes native123's `metal_ir_replay_planned` order is prepared at Plan, so Replay no longer
+  needs the early `metal_ir_place`. That is in e48's same source unit, and the binding needs the matching build.
+- **Checks:** `py_compile`, `pyflakes` and `git diff --check` pass, with no line over 120 characters (native.py
+  +11/−9).

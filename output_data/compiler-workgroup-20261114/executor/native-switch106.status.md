@@ -89,3 +89,30 @@ No conditional workload has run. Joined completion, later compaction control, CP
     the branch-edge barrier is unverified.
   - BLIT, later INDIRECT and host steps inside a branch are not gated.
   - Nested inactive safety beyond ICB runs, joined completion, CPU and MIL.
+
+## native123: range workspace accesses through the existing projection (source; strict checks only)
+- **Stage.** Prepare → placements, `MetalRecorderState` → `MetalRecorderPlan` → `metal_ir_finalize`/`metal_ir_loaded`
+  → `MetalRecorderReplay` → `metal_ir_place` → native program. Both tools follow this order; SAME047 pairs
+  `Target.placed`.
+  - `int metal_ir_replay_planned(p, struct metal_ir_replay_plan *, char *error, size_t room)` makes the replay order
+    once and returns the retained plan. `ReplayOrder` left `metal_ir_place` and finalize.
+  - `-replay:` calls the new `void metal_ir_ranges_placed(p, buffer, offsets, copies)`: argument storage, borrowed, row
+    e at `table->offset + e·stride`.
+- **Retained correspondence.** `metal_ir_replay_plan` (fresh plans only) produces `ReplayPlan::stores` {switch, step,
+  arm} once with `SwitchArm`'s climb. It is archived with the plan. `SwitchBodies` literals and the physical writes
+  both consume it; `SwitchRecords` is removed.
+- **Projection.** In `metal_ir_place`, each store's selector dispatch (`switches[s].select`) writes 4 bytes at row +
+  8·range + 4, and each ranged step's head dispatch reads 8 bytes at row + 8·range, in that dispatch's part. Both are
+  keyed to the real buffer, like every placed access. Original EffectViews and the source relation are unchanged.
+  Residency (held argument storage) and the plan's branch-edge barriers are the existing mechanisms.
+- **Deleted.**
+  - The capture's effect copy (`capture->effects`, `MetalRecordedDispatch.effect`/`effects`, slot bookkeeping, the
+    copy check), after proving nothing reads it.
+  - `Ranges()`, `Program::ranges`, its specialize copy and its v40 archive slot. No version bump.
+- **Checks.** Strict `-Werror` rc=0 on the eight IR sources, capture, program and both tools; `git diff --check` clean.
+  `metal_recording.m` unchanged. Nothing built, imported or run.
+- **Open.**
+  - BLIT, later INDIRECT (zeros and compaction) and host steps inside a branch are not gated.
+  - Nested inactive safety beyond ICB runs.
+  - A switch with no ranged ICB run has no table placement for its selector binding.
+  - Joined completion, CPU and MIL. Full conditional execution is not claimed.
