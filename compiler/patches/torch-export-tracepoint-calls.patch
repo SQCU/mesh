@@ -1,0 +1,135 @@
+--- a/torch/_export/passes/collect_tracepoints_pass.py
++++ b/torch/_export/passes/collect_tracepoints_pass.py
+@@ -11,7 +11,6 @@
+
+ if TYPE_CHECKING:
+     from torch.export.exported_program import ModuleCallSignature
+-    from torch.export.graph_signature import ExportGraphSignature
+
+
+ __all__ = ["CollectTracepointsPass"]
+@@ -22,12 +21,11 @@
+     Performs constant folding and constant propagation.
+     """
+
+-    def __init__(
+-        self, specs: dict[str, ModuleCallSignature], sig: ExportGraphSignature
+-    ) -> None:
++    def __init__(self, specs: dict[str, ModuleCallSignature]) -> None:
+         super().__init__()
+         self.specs = specs
+-        self.sig = sig
++        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/export/_trace.py _get_module_call_graph
++        self.replaced: list[tuple[torch.fx.Node, torch.fx.Node]] = []
+
+     def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
+         def get_arg_spec(arg) -> TensorArgument | ConstantArgument:
+@@ -56,7 +54,8 @@
+                         nn_module_stack = None
+                     else:
+                         raise AssertionError(f"Unknown tracepoint kind: {kind}")
+-                elif node.meta["nn_module_stack"] == nn_module_stack:
++                # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/utils.py 603–647
++                elif nn_module_stack is not None and node.meta.get("nn_module_stack") == nn_module_stack:
+                     node.meta["nn_module_stack"].popitem()
+                 else:
+                     nn_module_stack = None
+@@ -72,7 +71,8 @@
+                         nn_module_stack = None
+                     else:
+                         raise AssertionError(f"Unknown tracepoint kind: {kind}")
+-                elif node.meta["nn_module_stack"] == nn_module_stack:
++                # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/utils.py 603–647
++                elif nn_module_stack is not None and node.meta.get("nn_module_stack") == nn_module_stack:
+                     node.meta["nn_module_stack"].popitem()
+                 else:
+                     nn_module_stack = None
+@@ -143,7 +143,7 @@
+                                     )
+                                 if user.args[1] == i:
+                                     user.replace_all_uses_with(arg)
+-                                    self.sig.replace_all_uses(user.name, arg.name)
++                                    self.replaced.append((user, arg))
+                                     break
+                     users = list(node.users)
+                     for user in users:
+--- a/torch/_export/wrappers.py
++++ b/torch/_export/wrappers.py
+@@ -15,7 +15,7 @@
+     to_graphable,
+ )
+ from torch._higher_order_ops.strict_mode import strict_mode
+-from torch._higher_order_ops.utils import autograd_not_implemented, register_fake
++from torch._higher_order_ops.utils import register_fake
+ from torch._ops import HigherOrderOperator
+ from torch.fx.experimental.proxy_tensor import (
+     PreDispatchTorchFunctionMode,
+@@ -79,9 +79,11 @@
+         return args
+
+
+-_export_tracepoint.py_impl(DispatchKey.Autograd)(
+-    autograd_not_implemented(_export_tracepoint, deferred_error=True)
+-)
++# mesh compiler/patches/torch-export-tracepoint-calls.patch: export_tracepoint_functional, export_tracepoint_cpu
++@_export_tracepoint.py_impl(DispatchKey.Autograd)
++def export_tracepoint_autograd(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
++    with torch._C._AutoDispatchBelowAutograd():
++        return _export_tracepoint(*args, **kwargs)
+
+
+ @_export_tracepoint.py_impl(DispatchKey.CPU)
+--- a/torch/export/_trace.py
++++ b/torch/export/_trace.py
+@@ -1630,6 +1630,23 @@
+     return args, kwargs, original_in_spec, out_dynamic_shapes, verify_additional_inputs
+
+
++# mesh compiler/patches/torch-export-tracepoint-calls.patch: _get_module_call_graph's module signatures
++def _make_module_call_signatures(
++    module_call_specs: dict[str, dict[str, TreeSpec]], strict_mode_export: bool
++) -> dict[str, ModuleCallSignature]:
++    module_call_signatures: dict[str, ModuleCallSignature] = {}
++    for fqn, specs in module_call_specs.items():
++        mod_fqn = _strip_root(fqn) if not strict_mode_export else fqn
++        module_call_signatures[mod_fqn] = ModuleCallSignature(
++            inputs=[],
++            outputs=[],
++            in_spec=specs["in_spec"],
++            out_spec=specs["out_spec"],
++            forward_arg_names=None,  # we only propagate forward_arg_names for the top level module
++        )
++    return module_call_signatures
++
++
+ def _get_module_call_graph(
+     export_artifact: ExportArtifact,
+     preserve_module_call_signature: tuple[str, ...],
+@@ -1648,22 +1665,16 @@
+     in_spec: TreeSpec = export_artifact.in_spec
+     out_spec: TreeSpec = export_artifact.out_spec
+
+     # Make module signatures.
+-    module_call_signatures: dict[str, ModuleCallSignature] = {}
+-    for fqn, specs in module_call_specs.items():
+-        mod_fqn = _strip_root(fqn) if not strict_mode_export else fqn
+-        module_call_signatures[mod_fqn] = ModuleCallSignature(
+-            inputs=[],
+-            outputs=[],
+-            in_spec=specs["in_spec"],
+-            out_spec=specs["out_spec"],
+-            forward_arg_names=None,  # we only propagate forward_arg_names for the top level module
+-        )
++    module_call_signatures = _make_module_call_signatures(module_call_specs, strict_mode_export)
+
+     if len(preserve_module_call_signature) > 0:
+         if not strict_mode_export:
+             _rewrite_tracepoint_node(gm)
+-        res = CollectTracepointsPass(module_call_signatures, export_graph_signature)(gm)
++        collect = CollectTracepointsPass(module_call_signatures)
++        res = collect(gm)
+         if res is None:
+             raise AssertionError("CollectTracepointsPass returned None")
++        for user, arg in collect.replaced:
++            export_graph_signature.replace_all_uses(user.name, arg.name)
+         gm = res.graph_module

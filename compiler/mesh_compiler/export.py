@@ -1,25 +1,22 @@
 # design/data-flow.md
-import dataclasses
 import functools
-import inspect
 import itertools
 import math
 import operator
 
 import torch
-from torch._export.non_strict_utils import make_constraints
+from torch._export.passes.collect_tracepoints_pass import CollectTracepointsPass
 from torch._export.utils import node_inline_
+from torch._export.wrappers import _wrap_submodules
 from torch._functorch.aot_autograd import aot_export_joint_with_descriptors
 from torch._guards import detect_fake_mode
 from torch._higher_order_ops.map import map_dense
 from torch._higher_order_ops.scan import generic_scan
-from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode, extract_tensor_metadata
-from torch.export._trace import (_export_to_torch_ir, _get_inline_constraints, _get_param_buffer_mapping,
-                                 _lstsq_fixed_selected)
-from torch.export.graph_signature import InputKind, OutputKind
-from torch.fx._symbolic_trace import PHWithMeta
+from torch._subclasses.fake_tensor import FakeTensorConverter
+from torch.export._trace import (_export_to_torch_ir, _get_param_buffer_mapping, _lstsq_fixed_selected,
+                                 _make_module_call_signatures)
+from torch.export.graph_signature import OutputKind
 from torch.fx.experimental.proxy_tensor import make_fx
-from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.utils import _pytree as pytree
 
 from .ir import Call, CapturedProgram, Exported, TrainingResult
@@ -88,12 +85,13 @@ def expand(graph_module, node):
 # /Users/mdot/schedule-emit/schedule_emit/export.py export and driver.py 14–21;
 # design/compilation-composition-change-request.md "Numerical lowerer boundary"; torch 2.14.0 torch/export/_trace.py
 # _strict_export (_export_to_torch_ir, restore_fqn False, preserve_module_call_signature; _lstsq_fixed_selected of
-# compiler/patches/torch-lstsq-fixed-results.patch; _get_param_buffer_mapping), _non_strict_export 2341 and
-# _export_to_aten_ir 1202–1211; torch/_export/wrappers.py _wrap_submodules and _export_tracepoint 82–84;
-# torch/_functorch/aot_autograd.py aot_export_module 1668–1672 and aot_export_joint_with_descriptors 1320–1455
-# (compiler/patches/torch-aot-joint-params-buffers.patch)
+# compiler/patches/torch-lstsq-fixed-results.patch; _get_param_buffer_mapping), _non_strict_export 2341,
+# _export_to_aten_ir 1211 and _get_module_call_graph 1633–1679; torch/_export/wrappers.py _wrap_submodules;
+# torch/_export/passes/collect_tracepoints_pass.py CollectTracepointsPass
+# (compiler/patches/torch-export-tracepoint-calls.patch); torch/_functorch/aot_autograd.py
+# aot_export_joint_with_descriptors 1320–1455 (compiler/patches/torch-aot-joint-params-buffers.patch)
 def export(stack, module, args, loss=None, kwargs=None, strict=True, functions=()):
-    preserved = () if loss is not None else tuple(path for path in functions if isinstance(path, str))
+    preserved = tuple(path for path in functions if isinstance(path, str))
     if strict:
         source = _export_to_torch_ir(module, args, kwargs, preserve_module_call_signature=preserved, restore_fqn=False,
                                      _log_export_usage=False)
@@ -101,30 +99,23 @@ def export(stack, module, args, loss=None, kwargs=None, strict=True, functions=(
         specs = source.meta["module_call_specs"]
     else:
         source, specs = module, {}
-    if loss is None:
-        stack.enter_context(torch.no_grad())
     with _wrap_submodules(module, () if strict else preserved, specs):
         joint = aot_export_joint_with_descriptors(stack, source, args, kwargs,
                                                   decompositions=torch.export.default_decompositions(),
                                                   _record_nn_module_stack=True)
+    collected = CollectTracepointsPass(_make_module_call_signatures(specs, strict))
+    if preserved:
+        collected(joint.graph_module)
+        joint.graph_module.recompile()
     return Exported(joint, source, _get_param_buffer_mapping(module, source) if strict else None, module, args, kwargs,
-                    loss, functions, specs)
+                    loss, functions, specs, collected.specs, collected.replaced)
 
 
 # compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py
 # create_graph_signature `aot_aliases`, carried by torch/export/experimental/__init__.py
-# _copy_graph_module_and_signature); torch/export/graph_signature.py InputSpec: an AOT result's retained forward
-# record, popped from that program once: its ViewAndMutationMeta, each AOT input's role by that program's own input spec
-# of the input's Node (a parameter, buffer or constant its InputKind and target, a user input USER_INPUT and its
-# position among the user inputs), and each AOT input's and forward output's prototype value (no Node kept)
+# _copy_graph_module_and_signature)
 def aot_aliases(program):
-    metadata, inputs, outputs = program.graph_module.meta.pop("aot_aliases")
-    specs = {spec.arg.name: spec for spec in program.graph_signature.input_specs}
-    users = [spec.arg.name for spec in program.graph_signature.input_specs if spec.kind == InputKind.USER_INPUT]
-    roles = tuple((specs[node.name].kind, users.index(node.name) if specs[node.name].kind == InputKind.USER_INPUT
-                   else specs[node.name].target) for node in inputs)
-    return metadata, roles, *(tuple(leaf.meta.get("val") if isinstance(leaf, torch.fx.Node) else leaf for leaf in leaves)
-                               for leaves in (inputs, outputs))
+    return program.graph_module.meta["aot_aliases"]
 
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and
@@ -141,251 +132,25 @@ def returned(forward, outputs, backward):
                                                 inputs))
 
 
-# torch 2.14.0 torch/_subclasses/fake_tensor.py FakeTensorMode, the capture's one owner of values: the program's
-# arguments and each function's state as its fakes, storages shared where the actual ones are; torch.fx Interpreter:
-# the program interpreted once at compile time on them, each call's function exported once per key (its target, its
-# arguments' structure, each leaf's dtype, device, requires_grad, shape, stride, offset, storage among the call's
-# leaves and tensor object among them: torch/_functorch/_aot_autograd/runtime_wrappers.py AOTDedupeWrapper, a trace of
-# f(x, x) valid only for a call passing one tensor so, distinct aliasing tensors another case, by tensor identity);
-# compiler/mesh_compiler/ir.py Exported.aliases and torch/_functorch/_aot_autograd/runtime_wrappers.py
-# _RuntimeForwardEpilogue (capture_orig_inputs, finalize: input mutations, make_output_handler alias replay through
-# gen_alias_from_base and the retained ViewMetaSequence): the call's actual fakes in the AOT input order (each state
-# target's fake, each user input's leaf), the AOT outputs (mutated inputs, forward outputs, intermediate bases) the
-# prototypes realized by this call's one FakeTensorConverter (seeded with each input prototype's actual fake), the
-# epilogue applying the mutations to the call's fakes and returning the forward outputs (the intermediate bases only its
-# alias operands); its user and loss outputs those values, a mutation output the written fake itself, a token output its exported
-# output's own value and each gradient output its exported output's own value through the same converter (so a call
-# of a reused export has its own results, keeping their views and storages among themselves); the call's value its
-# function's own result (compiler/mesh_compiler/ir.py RETURNED outputs under its out_spec, a TrainingResult with a
-# loss), read between calls by item or by a named field; an attribute the program reads its actual value, a tensor's
-# the capture mode's fake of it (its target and real tensor recorded); no source forward is run and no actual state or
-# argument is read for its contents or written
-def described(tensor):
-    metadata = extract_tensor_metadata(tensor)
-    return tuple(getattr(metadata, field.name) for field in dataclasses.fields(metadata))
+# design/aot-compilation-change-request.md A10; compiler/mesh_compiler/export.py export and capture
+def calls(stack, program, args, functions, loss=None, kwargs=None, strict=True):
+    return capture(export(stack, program, args, loss, kwargs, strict, functions))
 
 
-class Captured(torch.fx.Interpreter):
-    def __init__(self, stack, module, functions, options, fake):
-        super().__init__(module)
-        self.stack = stack
-        self.functions, self.options, self.fake, self.exported, self.bound = functions, options, fake, {}, {}
-        self.attributes = {}
-
-    def run_node(self, node):
-        self.calling = node
-        return super().run_node(node)
-
-    def get_attr(self, target, args, kwargs):
-        value = super().get_attr(target, args, kwargs)
-        if not isinstance(value, torch.Tensor):
-            return value
-        self.attributes[self.calling] = target, value
-        return self.fake.from_tensor(value)
-
-    # /Users/mdot/schedule-emit/schedule_emit/export.py export; torch 2.14.0
-    # torch/_functorch/_aot_autograd/collect_metadata_analysis.py run_functionalized_fw_and_collect_metadata 841–842,
-    # schemas.py ViewAndMutationMeta num_mutated_inp_runtime_indices and num_outputs
-    # (compiler/patches/torch-aot-joint-params-buffers.patch); torch/utils/_pytree.py tree_unflatten
-    def captured(self, stack, module, args, kwargs):
-        self.exported[self.calling] = export(stack, module, args, kwargs=kwargs, **self.options)
-        self.bound[self.calling] = (args, kwargs), (self.calling.args, self.calling.kwargs)
-        joint = self.exported[self.calling].joint
-        start = joint.fw_metadata.num_mutated_inp_runtime_indices
-        return pytree.tree_unflatten(joint.fw_metadata.fw_graph_outs[start:start + joint.fw_metadata.num_outputs],
-                                     joint.out_spec)
-
-    def call_module(self, target, args, kwargs):
-        return self.captured(self.stack, self.fetch_attr(target), args, kwargs)
-
-    def call_function(self, target, args, kwargs):
-        if target in self.functions:
-            return self.captured(self.stack, Function(target), args, kwargs)
-        return super().call_function(target, args, kwargs)
+# design/aot-compilation-change-request.md A1; compiler/mesh_compiler/export.py export and capture
+def called(stack, module, args, loss=None, kwargs=None, strict=True):
+    return capture(export(stack, module, args, loss, kwargs, strict))
 
 
-# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/fx/_symbolic_trace.py PHWithMeta,
-# _transfer_attrs and Tracer.create_args_for_root (a placeholder for every forward parameter, variadics last); Python
-# inspect Signature.bind and BoundArguments.apply_defaults: the program's call graph, its placeholders the flat leaves
-# of every forward parameter's bound value (an omitted default's its default), each placeholder Node's `ordinal` its
-# leaf's position in those bound values' flat order
-def calls(program, args, functions, **export_options):
-    bound = inspect.signature(program.forward).bind(*args)
-    bound.apply_defaults()
-    ordinals = itertools.count()
-
-    def leaf(_):
-        marked = PHWithMeta()
-        marked.ordinal = next(ordinals)
-        return marked
-    graph = Calls(functions, bound.signature.parameters).trace(program, concrete_args={
-        name: pytree.tree_map(leaf, value) for name, value in bound.arguments.items()})
-    # rejection filters are forbidden: a traced node of no capture owner raises here, never dropped from the program.
-    # torch 2.14.0 torch/fx/_symbolic_trace.py replace_ph (a flat placeholder's args its parameter's default) and
-    # torch/fx/graph.py CodeGen free_vars: every flat placeholder here is an already-bound leaf (bind and apply_defaults
-    # above; the defaults the original Signature's, Exported.interface), so none keeps a default argument
-    for node in graph.nodes:
-        if node.op not in ("placeholder", "get_attr", "call_module", "call_function", "output"):
-            raise NotImplementedError(f"{node.name} runs between the program's compiled calls; every function of a "
-                                      "program is captured")
-        if node.op == "placeholder":
-            node.args = ()
-    return capture(torch.fx.GraphModule(program, graph), bound, functions, export_options, program)
-
-
-# design/aot-compilation-change-request.md A1; Python inspect Signature.bind, BoundArguments.apply_defaults, args and
-# kwargs: a module compiled alone, its program one call of it; its placeholders the flat leaves of every forward
-# parameter's bound value (an omitted default's its default) in parameter order, each placeholder Node's `ordinal` its
-# leaf's position there, passed by the BoundArguments of those placeholders' parameter tree as its positional and
-# keyword operands; capture's binding the original real bound values
-def called(module, args, **export_options):
-    root, graph = torch.nn.Module(), torch.fx.Graph()
-    root.function = module
-    bound = inspect.signature(module.forward).bind(*args)
-    bound.apply_defaults()
-    leaves, spec = pytree.tree_flatten(tuple(bound.arguments.values()))
-
-    def placeholder(k):
-        node = graph.placeholder(f"arg_{k}")
-        node.ordinal = k
-        return node
-    given = inspect.BoundArguments(bound.signature, dict(zip(bound.arguments, pytree.tree_unflatten(
-        [placeholder(k) for k in range(len(leaves))], spec))))
-    graph.output(graph.call_module("function", given.args, given.kwargs))
-    return capture(torch.fx.GraphModule(root, graph), bound, {"function"}, export_options, module)
-
-
-# design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/export/graph_signature.py InputKind and
-# OutputKind: each call node's arguments its function's placeholders in order (the state it reads, its effect tokens,
-# its flat arguments), each the outer node holding that value at the call, and each output spec of its function one
-# node after it with its role in its function's outputs; a value held by its latest node (an output, or a buffer or
-# user input mutation of it, the mutation's value the written fake, Captured.captured), a state placeholder's target
-# its tensor's name in `root` (else its call's name and key) and its kind the function's; each tensor attribute the
-# program reads (Captured.get_attr, torch.fx Interpreter get_attr) its fake's holder: a state placeholder of its name
-# in `root` (else its attribute target) and its role there (PARAMETER, BUFFER, else CONSTANT_TENSOR, its real tensor
-# kept), unless that fake is already held, so a written attribute is a BUFFER_MUTATION; the program's outputs its
-# token chain, each written state or argument with its role and target, and each leaf of its actual result (the calls'
-# own results, a training call's TrainingResult among them) a USER_OUTPUT, under that result's structure; its user
-# leaves those of `bound` (Python inspect BoundArguments of `root.forward`), and its call interface (Exported.interface)
-# the Signature of exactly the bound parameters (their own Parameter objects, kinds and defaults) and the TreeSpec of
-# the bound values in parameter order
-def capture(module, bound, functions, options, root):
-    fake = FakeTensorMode(shape_env=ShapeEnv(tracked_fakes=[]), static_shapes=True, allow_non_fake_inputs=True)
-    values, combined = tuple(bound.arguments.values()), dict(bound.arguments)
-    interface = (inspect.Signature([bound.signature.parameters[name] for name in bound.arguments]),
-                 pytree.tree_structure(values))
-    leaves = [fake.from_tensor(leaf) if isinstance(leaf, torch.Tensor) else leaf for leaf in pytree.tree_leaves(values)]
-    graph, interpreter = module.graph, Captured(module, functions, options, fake)
-    # `first` stays the insertion anchor for every new state and token placeholder: an attribute's get_attr node, which
-    # may be it, keeps its place until the final cleanup erases it unused; each placeholder Node's `ordinal` (calls'
-    # PHWithMeta, called's own) is its leaf's position in `leaves`, so the FX placeholders take their leaves by it and
-    # the user inputs are those placeholders in leaf order
-    first, inputs = next(iter(graph.nodes)), [node for node in graph.nodes if node.op == "placeholder"]
-    users = sorted(inputs, key=lambda node: node.ordinal)
-    outcome = graph.process_outputs(interpreter.run(*(leaves[node.ordinal] for node in inputs),
-                                                    enable_io_processing=False))
-    named = {id(tensor): name for name, tensor in reversed([*root.named_parameters(remove_duplicate=False),
-                                                            *root.named_buffers(remove_duplicate=False)])}
-    held, roots, chain, written, state, kinds, tokens, bound = {}, {}, [], {}, {}, {}, [], {}
-
-    def hold(node, value):
-        node.meta["val"] = value
-        if isinstance(value, torch.Tensor):
-            held[id(value)] = value, node
-        return node
-
-    def holder(value):
-        return held[id(value)][1] if isinstance(value, torch.Tensor) else value
-
-    for node, value in zip(users, leaves, strict=True):
-        roots[id(value)] = hold(node, value)
-    parameters = {id(tensor) for _, tensor in root.named_parameters(remove_duplicate=False)}
-    buffers = {id(tensor) for _, tensor in root.named_buffers(remove_duplicate=False)}
-    for node, (target, tensor) in interpreter.attributes.items():
-        value = fake.from_tensor(tensor)
-        if id(value) not in held:
-            path = named.get(id(tensor), target)
-            with graph.inserting_before(first):
-                roots[id(value)] = hold(graph.placeholder(path.replace(".", "_")), value)
-            state[roots[id(value)].name] = path, tensor
-            kinds[roots[id(value)].name] = (InputKind.PARAMETER if id(tensor) in parameters else InputKind.BUFFER
-                                            if id(tensor) in buffers else InputKind.CONSTANT_TENSOR)
-        node.replace_all_uses_with(holder(value))
-    # a user input value's node for one call: the outer placeholder the call's own FX argument names where that
-    # placeholder still holds the value (no mutation has re-held it), so a tensor the caller passes in several positions
-    # keeps each call's own position (torch.export's AOTDedupeWrapper then treating a call's duplicate leaves as its
-    # own); else the value's latest holder
-    def provenance(value, origin):
-        if (isinstance(origin, torch.fx.Node) and origin.op == "placeholder" and origin.meta.get("val") is value
-                and isinstance(value, torch.Tensor) and held[id(value)][1].op == "placeholder"):
-            return origin
-        return holder(value)
-    for call, (key, values, produced, sources) in interpreter.bound.items():
-        function, names, arguments = interpreter.exported[key], placeholders(interpreter.exported[key]), []
-        for name, value in zip(names, values):
-            if name in function.tokens:
-                while len(chain) <= function.tokens.index(name):
-                    with graph.inserting_before(first):
-                        chain.append(graph.placeholder("token"))
-                    chain[-1].meta["val"] = value
-                    tokens.append(chain[-1].name)
-                arguments.append(chain[function.tokens.index(name)])
-                continue
-            if name in function.state and id(value) not in held:
-                target, tensor = function.state[name]
-                path = named.get(id(tensor), f"{call.name}_{target}")
-                with graph.inserting_before(first):
-                    roots[id(value)] = hold(graph.placeholder(path.replace(".", "_")), value)
-                state[roots[id(value)].name], kinds[roots[id(value)].name] = (path, tensor), function.state_kinds[name]
-            arguments.append(provenance(value, sources[name]) if name in sources else holder(value))
-        call.args, call.kwargs, outputs, token = tuple(arguments), {}, [], 0
-        with graph.inserting_before(call.next):
-            for k, ((kind, target), value) in enumerate(zip(function.outputs, produced, strict=True)):
-                node = graph.call_function(operator.getitem, (call, k))
-                if kind == OutputKind.TOKEN:
-                    node.meta["val"], chain[token], token = value, node, token + 1
-                else:
-                    hold(node, value)
-                    if kind in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION) and id(value) in roots:
-                        # a user input mutation's written base the outer node this call passed for that input (its
-                        # own provenance), a buffer's its state placeholder
-                        given = arguments[names.index(target)] if kind == OutputKind.USER_INPUT_MUTATION else None
-                        written[given if isinstance(given, torch.fx.Node) and given.op == "placeholder"
-                                else roots[id(value)]] = node
-                outputs.append(node)
-        bound[call] = Call(key, arguments, outputs)
-    results = [(OutputKind.TOKEN, None, node) for node in chain]
-    results += [(OutputKind.BUFFER_MUTATION, state[base.name][0], node) if base.name in state
-                else (OutputKind.USER_INPUT_MUTATION, base.name, node) for base, node in written.items()]
-    results += [(OutputKind.USER_OUTPUT, None, holder(value)) for value in pytree.tree_leaves(outcome)]
-    graph.output_node().args = (tuple(node for *_, node in results),)
-    made = {node for call in bound.values() for node in call.outputs}
-    for node in reversed(list(graph.nodes)):
-        if node.op in ("call_function", "get_attr") and node not in bound and node not in made and not node.users:
-            graph.erase_node(node)
-    graph.set_codegen(torch.fx.graph.CodeGen())
-    module.recompile()
-    # torch 2.14.0 torchgen/model.py Tag nondeterministic_seeded (OpOverload.tags); J. K. Salmon et al., SC 2011, §3.1:
-    # each seeded source operation's draw site, and each source eigh's (DRAWING), one source namespace numbered from 1
-    # over the captured functions in their order and each one's graph order, once before placement
+# design/aot-compilation-change-request.md A1 and A10; compiler/mesh_compiler/ir.py CapturedProgram
+def capture(exported):
+    # torch 2.14.0 torchgen/model.py Tag nondeterministic_seeded (OpOverload.tags); J. K. Salmon et al., SC 2011, §3.1
     sites = itertools.count(1)
-    for function in interpreter.exported.values():
-        for node in function.graph_module.graph.nodes:
-            if node.op == "call_function" and (torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())
-                                               or getattr(node.target, "overloadpacket", None) in DRAWING):
-                node.meta["site"] = next(sites)
-    # Exported.specialized: each outer user placeholder some call's ConstantArgument input came from (Captured.captured),
-    # once, in user input order; a call's literal from a source constant or a prior call's result is no user input.
-    # Exported.range_constraints: torch/export/_trace.py's own sequence (_get_inline_constraints into the GraphModule's
-    # inline_constraints, then _get_range_constraints' make_constraints, no dynamic shapes stated) over this capture's
-    # FakeTensorMode, the one every call's export traced in, its non-user placeholders the state and tokens first
-    module.meta["inline_constraints"] = _get_inline_constraints(fake)
-    exported = Exported(module, state, tokens, [node.name for node in users],
-                        [(kind, target) for kind, target, _ in results], pytree.tree_structure(outcome), kinds,
-                        interface=interface, specialized=tuple((node.name, interpreter.specialized[node])
-                                                               for node in users if node in interpreter.specialized),
-                        range_constraints=make_constraints(fake, module, combined, None, len(state) + len(tokens)))
-    return CapturedProgram(exported, interpreter.exported, bound)
+    for node in exported.joint.graph_module.graph.nodes:
+        if node.op == "call_function" and (torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", ())
+                                           or getattr(node.target, "overloadpacket", None) in DRAWING):
+            node.meta["site"] = next(sites)
+    return CapturedProgram(exported)
 
 
 # design/aot-compilation-change-request.md A10; compiler/mesh_compiler/decompose.py outline: every call of function
