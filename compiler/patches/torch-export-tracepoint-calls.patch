@@ -310,75 +310,194 @@
 
 
  @_export_tracepoint.py_impl(DispatchKey.CPU)
-@@ -99,6 +101,11 @@
-     if path == "":
-         raise AssertionError("path must not be empty")
-     submodule = torch.fx.graph_module._get_attr(mod, path)
-+    # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/
-+    # collect_metadata_analysis.py run_functionalized_fw_and_collect_metadata 193–197
-+    from torch._functorch._aot_autograd.utils import KNOWN_TYPES
-+    from torch._library.opaque_object import is_custom_class
-+
+@@ -89,81 +91,115 @@
+     return args
 
-     def update_module_call_signatures(
-         path: str, in_spec: pytree.TreeSpec, out_spec: pytree.TreeSpec
-@@ -117,6 +124,6 @@
-     def check_flattened(flat_args: list[Any]) -> None:
-         for a in flat_args:
+
+-def _wrap_submodule(
+-    mod: torch.nn.Module,
+-    path: str,
+-    module_call_specs: dict[str, dict[str, pytree.TreeSpec]],
+-) -> tuple["RemovableHandle", "RemovableHandle"]:
+-    if not isinstance(mod, torch.nn.Module):
+-        raise AssertionError(f"expected torch.nn.Module, got {type(mod)}")
+-    if path == "":
+-        raise AssertionError("path must not be empty")
+-    submodule = torch.fx.graph_module._get_attr(mod, path)
+-
+-    def update_module_call_signatures(
+-        path: str, in_spec: pytree.TreeSpec, out_spec: pytree.TreeSpec
+-    ) -> None:
+-        if path in module_call_specs:
+-            if module_call_specs[path]["in_spec"] != in_spec:
+-                raise AssertionError(
+-                    f"in_spec mismatch for {path}: {module_call_specs[path]['in_spec']} != {in_spec}"
+-                )
+-            if module_call_specs[path]["out_spec"] != out_spec:
+-                raise AssertionError(
+-                    f"out_spec mismatch for {path}: {module_call_specs[path]['out_spec']} != {out_spec}"
+-                )
+-        module_call_specs[path] = {"in_spec": in_spec, "out_spec": out_spec}
+-
+-    def check_flattened(flat_args: list[Any]) -> None:
+-        for a in flat_args:
 -            if not (isinstance(a, (torch.Tensor, str, int, float, bool)) or a is None):
-+            if not (isinstance(a, tuple(KNOWN_TYPES)) or is_custom_class(type(a))):
-                 raise AssertionError(
+-                raise AssertionError(
 -                    f"Only Tensors or scalars are supported as pytree flattened inputs, got: {a}"
-+                    f"all flat_args must be KNOWN_TYPES or opaque types, got: {a}"
-                 )
-@@ -146,24 +153,48 @@
-     pre_handle = submodule.register_forward_pre_hook(pre_hook, with_kwargs=True)
-     post_handle = submodule.register_forward_hook(post_hook, with_kwargs=True)
-     return pre_handle, post_handle
-
-
-+# mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_dynamo/symbolic_convert.py
-+# InliningInstructionTranslator.inline_call
-+_preserved_functions: dict[Callable[..., object], str] = {}
-+_preserved_specs: dict[str, dict[str, dict[str, pytree.TreeSpec]]] = {}
-+
-+
-+def _export_function_call(path: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-+    flat_args, in_spec = pytree.tree_flatten((args, kwargs))
-+    flat_args = _export_tracepoint(*flat_args, kind="module_call_inputs", path=path)
-+    args, kwargs = pytree.tree_unflatten(flat_args, in_spec)
-+    res = fn(*args, **kwargs)
-+    flat_res, out_spec = pytree.tree_flatten(res)
-+    flat_res = _export_tracepoint(*flat_res, kind="module_call_outputs", path=path)
-+    _preserved_specs[path][path] = {"in_spec": in_spec, "out_spec": out_spec}
-+    return pytree.tree_unflatten(flat_res, out_spec)
-+
-+
- @contextmanager
- def _wrap_submodules(
-     f: torch.nn.Module | Callable[..., object],
-     preserve_signature: Iterable[str],
-     module_call_signatures: dict[str, dict[str, pytree.TreeSpec]],
- ) -> Generator[None, None, None]:
-     handles: list[RemovableHandle] = []
-
-     try:
-         for path in preserve_signature:
+-                )
+-
+-    def pre_hook(
+-        module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+-        flat_args, in_spec = pytree.tree_flatten((args, kwargs))
+-        check_flattened(flat_args)
+-        flat_args = _export_tracepoint(*flat_args, kind="module_call_inputs", path=path)
+-        args, kwargs = pytree.tree_unflatten(flat_args, in_spec)
+-        return args, kwargs
+-
+-    def post_hook(
+-        module: torch.nn.Module,
+-        args: tuple[Any, ...],
+-        kwargs: dict[str, Any],
+-        res: Any,
+-    ) -> Any:
+-        _, in_spec = pytree.tree_flatten((args, kwargs))
+-        flat_res, out_spec = pytree.tree_flatten(res)
+-        check_flattened(flat_res)
+-        flat_res = _export_tracepoint(*flat_res, kind="module_call_outputs", path=path)
+-        update_module_call_signatures(path, in_spec, out_spec)
+-        return pytree.tree_unflatten(flat_res, out_spec)
+-
+-    pre_handle = submodule.register_forward_pre_hook(pre_hook, with_kwargs=True)
+-    post_handle = submodule.register_forward_hook(post_hook, with_kwargs=True)
+-    return pre_handle, post_handle
+-
+-
+-@contextmanager
+-def _wrap_submodules(
+-    f: torch.nn.Module | Callable[..., object],
+-    preserve_signature: Iterable[str],
+-    module_call_signatures: dict[str, dict[str, pytree.TreeSpec]],
+-) -> Generator[None, None, None]:
+-    handles: list[RemovableHandle] = []
+-
+-    try:
+-        for path in preserve_signature:
 -            # pyrefly: ignore[bad-argument-type]  # TODO f is an nn.Module at runtime (asserted in _wrap_submodule)
 -            handles.extend(_wrap_submodule(f, path, module_call_signatures))
+-        yield
+-    finally:
+-        for handle in handles:
+-            handle.remove()
++def _module_call_hooks(
++    path: str,
++    module_call_specs: dict[str, dict[str, Any]],
++) -> tuple[Callable[..., Any], Callable[..., Any]]:
++    # mesh compiler/patches/torch-export-tracepoint-calls.patch: _wrap_submodule's hooks; torch/_functorch/
++    # _aot_autograd/collect_metadata_analysis.py run_functionalized_fw_and_collect_metadata 193–197
++    def update_module_call_signatures(
++        path: str, in_spec: pytree.TreeSpec, out_spec: pytree.TreeSpec, module: Any
++    ) -> None:
++        if path in module_call_specs:
++            if module_call_specs[path]["in_spec"] != in_spec:
++                raise AssertionError(
++                    f"in_spec mismatch for {path}: {module_call_specs[path]['in_spec']} != {in_spec}"
++                )
++            if module_call_specs[path]["out_spec"] != out_spec:
++                raise AssertionError(
++                    f"out_spec mismatch for {path}: {module_call_specs[path]['out_spec']} != {out_spec}"
++                )
++        module_call_specs[path] = {"in_spec": in_spec, "out_spec": out_spec, "module": module}
++
++    def check_flattened(flat_args: list[Any]) -> None:
++        for a in flat_args:
++            if not (
++                isinstance(a, tuple(torch._functorch._aot_autograd.utils.KNOWN_TYPES))
++                or torch._library.opaque_object.is_custom_class(type(a))
++            ):
++                raise AssertionError(
++                    f"all flat_args must be KNOWN_TYPES or opaque types, got: {a}"
++                )
++
++    def pre_hook(
++        module: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
++    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
++        flat_args, in_spec = pytree.tree_flatten((args, kwargs))
++        check_flattened(flat_args)
++        flat_args = _export_tracepoint(*flat_args, kind="module_call_inputs", path=path)
++        args, kwargs = pytree.tree_unflatten(flat_args, in_spec)
++        return args, kwargs
++
++    def post_hook(
++        module: Any,
++        args: tuple[Any, ...],
++        kwargs: dict[str, Any],
++        res: Any,
++    ) -> Any:
++        _, in_spec = pytree.tree_flatten((args, kwargs))
++        flat_res, out_spec = pytree.tree_flatten(res)
++        check_flattened(flat_res)
++        flat_res = _export_tracepoint(*flat_res, kind="module_call_outputs", path=path)
++        update_module_call_signatures(path, in_spec, out_spec, module)
++        return pytree.tree_unflatten(flat_res, out_spec)
++
++    return pre_hook, post_hook
++
++
++def _wrap_submodule(
++    mod: torch.nn.Module,
++    path: str,
++    module_call_specs: dict[str, dict[str, pytree.TreeSpec]],
++) -> tuple["RemovableHandle", "RemovableHandle"]:
++    if not isinstance(mod, torch.nn.Module):
++        raise AssertionError(f"expected torch.nn.Module, got {type(mod)}")
++    if path == "":
++        raise AssertionError("path must not be empty")
++    submodule = torch.fx.graph_module._get_attr(mod, path)
++    pre_hook, post_hook = _module_call_hooks(path, module_call_specs)
++    pre_handle = submodule.register_forward_pre_hook(pre_hook, with_kwargs=True)
++    post_handle = submodule.register_forward_hook(post_hook, with_kwargs=True)
++    return pre_handle, post_handle
++
++
++# mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/nn/modules/module.py Module._call_impl;
++# torch/_dynamo/symbolic_convert.py InliningInstructionTranslator.inline_call
++def _module_call(
++    path: str, module_call_specs: dict[str, dict[str, Any]], fn: Callable[..., Any], *args: Any, **kwargs: Any
++) -> Any:
++    pre_hook, post_hook = _module_call_hooks(path, module_call_specs)
++    args, kwargs = pre_hook(fn, args, kwargs)
++    return post_hook(fn, args, kwargs, fn(*args, **kwargs))
++
++
++@contextmanager
++def _wrap_submodules(
++    f: torch.nn.Module | Callable[..., object],
++    preserve_signature: Iterable[str],
++    module_call_signatures: dict[str, dict[str, pytree.TreeSpec]],
++) -> Generator[None, None, None]:
++    handles: list[RemovableHandle] = []
++    # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_higher_order_ops/invoke_subgraph.py
++    # mark_compile_region's attributes on the declared function itself
++    declared: list[tuple[Callable[..., object], Any]] = []
++
++    try:
++        for path in preserve_signature:
 +            if isinstance(path, str):
 +                # pyrefly: ignore[bad-argument-type]  # TODO f is an nn.Module at runtime (asserted in _wrap_submodule)
 +                handles.extend(_wrap_submodule(f, path, module_call_signatures))
 +            else:
-+                _preserved_functions[path] = f"{path.__module__}.{path.__qualname__}"
-+                _preserved_specs[_preserved_functions[path]] = module_call_signatures
-         yield
-     finally:
-         for handle in handles:
-             handle.remove()
-+        for path in preserve_signature:
-+            if not isinstance(path, str):
-+                _preserved_specs.pop(_preserved_functions.pop(path, None), None)
++                declared.append((path, vars(path).get("__export_module_call_specs__")))
++                path.__export_module_call_specs__ = module_call_signatures
++        yield
++    finally:
++        for handle in handles:
++            handle.remove()
++        for fn, previous in reversed(declared):
++            if previous is None:
++                del fn.__export_module_call_specs__
++            else:
++                fn.__export_module_call_specs__ = previous
 
 
  def _mark_strict_experimental(cls: type[_R]) -> type[_R]:
@@ -435,34 +554,33 @@
          gm = res.graph_module
 --- a/torch/_dynamo/symbolic_convert.py
 +++ b/torch/_dynamo/symbolic_convert.py
-@@ -5982,6 +5982,30 @@
+@@ -5982,6 +5982,29 @@
          kwargs: dict[str, VariableTracker],
          allow_nested_graph_breaks: bool = False,
      ) -> VariableTracker:
 +        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_export/wrappers.py _wrap_submodules and
-+        # _export_function_call; torch/_dynamo/variables/nn_module.py record_nn_module_stack 159–166
-+        from torch._export.wrappers import _export_function_call, _preserved_functions
++        # _module_call; torch/_dynamo/variables/nn_module.py record_nn_module_stack
++        from torch._export.wrappers import _module_call
 +
 +        if (
 +            isinstance(func, UserFunctionVariable)
-+            and func.get_function() in _preserved_functions
-+            and parent.f_code is not _export_function_call.__code__
++            and "__export_module_call_specs__" in vars(func.get_function())
++            and parent.f_code is not _module_call.__code__
 +        ):
-+            path = _preserved_functions[func.get_function()]
-+            num_calls = parent.num_calls.get(path, 0)
-+            module_key = f"{path}@{num_calls}" if num_calls > 0 else path
-+            parent.nn_module_stack[module_key] = (path, path)
-+            parent.num_calls[path] = num_calls + 1
-+            try:
++            from .source import AttrSource
++            from .variables.nn_module import record_nn_module_stack
++
++            function = func.get_function()
++            with record_nn_module_stack(str(id(function)), func.source, parent, function):
++                specs = AttrSource(func.source, "__export_module_call_specs__")
 +                return cls.inline_call(
 +                    parent,
-+                    UserFunctionVariable(_export_function_call),
-+                    [ConstantVariable.create(path), func, *args],
++                    UserFunctionVariable(_module_call),
++                    [ConstantVariable.create(func.source.name),
++                     VariableTracker.build(parent, function.__export_module_call_specs__, specs), func, *args],
 +                    kwargs,
 +                    allow_nested_graph_breaks=allow_nested_graph_breaks,
 +                )
-+            finally:
-+                del parent.nn_module_stack[module_key]
          tracer = None
          with profile_inline_call(
              parent.output, func.get_code(), lambda: parent.inline_depth + 1
