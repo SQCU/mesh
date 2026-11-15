@@ -95,7 +95,7 @@ NATIVE = {"gesdd": LAPACK_GESDD, "heevd": LAPACK_HEEVD, "geev": LAPACK_GEEV, "ge
 CHECK_ERRORS = torch.ops.aten._linalg_check_errors.default
 # torch 2.14.0 torch/_inductor/codegen/wrapper_fxir.py FxConverter.generate: the wrapper lines its conversion makes no
 # value or effect of (memory planning's frees and nulls, comments, kernel definitions, device contexts, symbolic call
-# arguments, taken here at their size hints, size and stride assertions, subgraph scopes, line contexts)
+# arguments, taken here at their guarding hints, size and stride assertions, subgraph scopes, line contexts)
 INERT = (wrapper_lines.FreeLine, wrapper_lines.FreeIfNotReusedLine, wrapper_lines.NullLine, wrapper_lines.CommentLine,
          wrapper_lines.KernelDefinitionLine, wrapper_lines.EnterDeviceContextManagerLine,
          wrapper_lines.ExitDeviceContextManagerLine, wrapper_lines.SymbolicCallArgLine,
@@ -301,11 +301,13 @@ def _element(dtype):
     return dtype.to_real() if dtype.is_complex else dtype
 
 
+# an expression's concrete value from its backed symbols' hints alone (torch 2.14.0 sizevars.py SizeVarAllocator
+# guarding_hint_or_throw: no fallback or heuristic for an unbacked symbol; it raises GuardOnDataDependentSymNode)
 def _hint(graph, expr):
-    return int(graph.sizevars.size_hint(expr))
+    return int(graph.sizevars.guarding_hint_or_throw(expr))
 
 
-# a layout's storage bytes (ir.py Layout.storage_size, at its size hint)
+# a layout's storage bytes (ir.py Layout.storage_size, at its guarding hint)
 def _bytes(graph, layout):
     return _hint(graph, layout.storage_size()) * layout.dtype.itemsize
 
@@ -1078,7 +1080,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             x, layout = layout_of(x)
             return placed(hold(p, graph, x.get_name()), layout, graph)
 
-        # an operand or interface value: a tensor's Bound; a symbolic one its size hint (ShapeAsConstantBuffer's
+        # an operand or interface value: a tensor's Bound; a symbolic one its guarding hint (ShapeAsConstantBuffer's
         # expression, a sympy expression); NoneAsConstantBuffer or None none; any other value itself
         def operand_of(p, graph, x):
             if isinstance(x, upstream.ShapeAsConstantBuffer):
@@ -1104,8 +1106,8 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                          h.at // layout.dtype.itemsize)
 
         # a control body occurrence's inputs (body.graph.graph_inputs, in order) bound to the operands `given` its call
-        # passes (codegen_subgraph_by_inlining's prefix: a tensor's Bound; a symbolic one its size hint, the value every
-        # launch reads), each recorded at that occurrence
+        # passes (codegen_subgraph_by_inlining's prefix: a tensor's Bound; a symbolic one its guarding hint, the value
+        # every launch reads), each recorded at that occurrence
         def bind(p, body, given, occurrence):
             for name, b in zip(body.graph.graph_inputs, given, strict=True):
                 if isinstance(b, Bound):
@@ -1113,7 +1115,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 bindings_.append((p, occurrence, body, name, body.graph.graph_inputs[name], b))
 
         # a launch's scalar argument: an int64 CONSTANT holding its value (a sizevar or a SymbolicCallArg's numel at
-        # its size hint)
+        # its guarding hint)
         def scalar(graph, expr):
             data = torch.tensor([_hint(graph, getattr(expr, "inner_expr", expr))], dtype=SIZEVAR)
             return (UPSTREAM_SCALAR, Bound(stored(CONSTANT, SIZEVAR, SIZEVAR.itemsize, data), SIZEVAR, (1,), (1,), 0),

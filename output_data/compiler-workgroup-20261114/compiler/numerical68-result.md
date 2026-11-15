@@ -11,11 +11,10 @@ All three patches are installed in `/Users/mdot/.venv-mesh-uv` as committed at `
 then AOT result. The supervisor applied them at fuzz 0, and every installed file has its README "after" hash and parses.
 No Torch or Mesh module was imported. The manifest is `numerical68-upstream-install.json`.
 
-A fourth patch, `compiler/patches/torch-inductor-cpu-kernel-results.patch`, is new and **not installed**. It changes
-`cpp.py` from `74b2de26…` (composition's after) to `0eb0c1e9…`. The fuzz-0 dry run, application, reverse dry run and
-parse all passed on a temporary copy of the installed file. The lowerer's CPU records below need it: the call record
-reads its `KernelGroup.arg_defs`, and its `codegen_conditions` hunk keeps the scalar factory subclass's emission as
-upstream's. The supervisor owns its installation.
+A fourth patch, `compiler/patches/torch-inductor-cpu-kernel-results.patch`, is installed. The supervisor's evidence
+is at `ec3334b5`: `cpp.py` went from `74b2de26…` (composition's after) to `0eb0c1e9…` at fuzz 0, and the apply and
+reverse AST checks passed. The lowerer's CPU records below need it: the call record reads its `KernelGroup.arg_defs`,
+and its `codegen_conditions` hunk keeps the scalar factory subclass's emission as upstream's.
 
 Nothing here is a proposal. This revision replaces four parts of the earlier note, all rejected by root:
 - the `CompiledAOTI.filename` carrier;
@@ -252,6 +251,17 @@ The domain as the original emits it is the retained objects' own fields, not rep
 
 A scalar kernel that `codegen_functions` made but did not select (the vector-tail case) is not in `proxy.kernels`.
 
+One operand was missing from the retained objects, and is now kept at its producer: `proxy.mesh_aggregated`.
+- It is the `(inner_loop_reduction_outer_not, outer_loop)` that `codegen_functions` passed to
+  `aggregate_reduction_buffers`. Both returns of `codegen_functions` call it exactly once.
+- Those two arguments decide which kernels' `reduction_suffix` the proxy emits, after its first reduction LoopLevel:
+  - where `inner_loop_reduction_outer_not` is true: `kernels[0]`'s and `kernels[-1]`'s, each under its own active
+    range of `outer_loop.var`. A scalar tail's suffix is moved under that range's inner loop
+    (`move_code_under_inner_loop`).
+  - otherwise: `kernels[0]`'s alone, unconditioned.
+  - No other kernel's suffix is emitted.
+- They were only method arguments, so nothing retained held them.
+
 Outer-loop fusion:
 - The finalized proxy's `loop_nest.kernel` is an `OuterLoopFusedKernel`, and each of its `inner` LoopNests' kernel is a
   fused proxy.
@@ -281,10 +291,77 @@ Template epilogues are rendered through cpp_template_kernel.py's own `CppKernelP
   - 104's `ranged["cpu"]` reads `r[0]` and `r[1]`, which are unchanged.
 - `Kernel.launch` (cpu group): the same 4-tuple shape, from the new sources above. `arg_defs`, `call_args` and
   `arg_types` are tuples.
+- New on each CPU proxy (`MeshCppKernelProxy`, fused or not): `mesh_aggregated`, above.
 - New on each `proxy.kernels` entry: `mesh_ranges`, `mesh_indirect`, `mesh_split` and `mesh_suffix`.
   - Their classes are the `MeshCpp*Kernel` subclasses, so 104's `type(kernel)` now records those.
   - `isinstance` against the upstream classes holds.
 - `MeshMetalOverrides` is now `MeshIndirect` plus `MetalOverrides`, with the same method and the same behavior.
+
+## The CPU consumer: `_cpu_relations` (lower_metal.py, 68's spans)
+
+68 owns three spans of 66's `lower_metal.py`:
+- the import `from torch._inductor.codegen.cpp import OuterLoopFusedKernel`;
+- the dispatch at the head of `relations`: `kernel.place == "cpu"` → `_cpu_relations(context, kernel, kinds, described)`;
+- `_cpu_relations` itself, which replaces the stale `unrelated`. 66 removed the `unrelated(kernel_)` call.
+
+It returns `(domain, accesses, made)`, as `relations` does. It reuses `_Index`, `_Ops`, `InterpreterShim`, `_hint`,
+`_ranged` and `released`, and native137's API unchanged.
+
+**Domain.** The domain is the call's whole invocation: the product of every LoopNest's levels.
+- Each LoopLevel of each proxy's LoopNest is a LOOP over `[offset, size - 1]`, with `reduction` set to its
+  `is_reduction`.
+  - An `OuterLoopFusedKernel`'s shared outer levels appear once, then each inner LoopNest's levels.
+  - Each lane of a tiled level is a point of its dimension: a vector kernel's `tiling_factor` lanes, a tail's
+    `tail_size` lanes, and a scalar tail's inner loop all lie within its active range.
+- Then come each selected kernel's `mesh_indirect` symbols, with the same ranges as on MPS.
+- Sizes and active-range bounds are the kernel's renamed expressions (`rename_indexing`'s `ks` names). They are
+  evaluated at the hints of the graph's own symbols, by inverting `KernelArgs.sizevars` with the same `sympy_subs`.
+- **Zero size.** A dimension with no value must not empty the product, or every other scope of the call would lose
+  its accesses. This follows `features()`' empty feature. Such a dimension becomes the point `[lo, lo]`, with a false
+  guard on what depends on it:
+  - a zero-trip LoopLevel: every access under it;
+  - for a suffix access, only the levels above the first reduction level count;
+  - a checked indirect of size 0: every access whose index contains that symbol.
+
+**Accesses.** Every access recorded by each kernel in `proxy.kernels` is kept, with the MPS fields:
+- `argument`, `write`, `index` (int64, cpp_utils.py `INDEX_TYPE`), and the `bounds()` value range where the index is
+  not quasi-affine;
+- masked-subblock masks, guard data and identities, keyed by CppRanges ordinal in the call.
+- The known guard also includes the condition the code runs under:
+  - a body access: its kernel's `active_ranges`;
+  - a suffix access (`CppRanges.suffix` or `store_reduction`): selected by `mesh_aggregated`, as above.
+- A vector `load_seed` records an `int` offset. It is sympified; loop_body.py's own index for it is
+  `sympy.Integer(offset)`.
+
+**Co-review proof: the recorded `_load_mask` (the seventh field) adds no guard.**
+- Its only producer is `CppKernel.masked`, which conjoins it with the prior mask.
+- `CppKernel.masked` is entered only by `CppVecOverrides.masked` (cpp.py 1834).
+- `CppVecOverrides.masked` and `CppOverrides.masked` (the scalar lambda) are reached only through
+  `LoopBody.bind_masked_shim` (loop_body.py 605). That is one masked subblock's call, whose mask is the call's
+  `args[0]`, run as that subblock's own InterpreterShim.
+- So the mask is exactly the conjunction over the parent masked subblocks that the walk computes.
+- Its uses (cpp.py 2306, 3076, 3138, 3914) all lie within such a subblock.
+- Every other condition on the emitted code is a LoopLevel, an active range, a tail's lanes, or a scalar tail's inner
+  loop. These are also in the guard.
+
+**Co-review proof: which accesses are dropped.**
+- *Removed stores.* Every CPU store line is a `DeferredLine(name, …)` (cpp.py 2338, 2554, 3207, 3217, 3235, 3551,
+  3975, 4032). At render, it is dropped by `is_buffer_removed`. The flush render runs with `V.kernel` set to the
+  `NullKernelHandler`, whose sets are empty (virtualized.py 202). So a store is dropped iff its name is in the graph's
+  `removed_buffers` or `inplaced_to_remove`.
+- *Loads are never dropped for removal.* Loads are not DeferredLines. Each takes its parameter from `KernelArgs.input`,
+  which raises if the name is already removed (common.py 1698). So the name is the group's own argument: its input, or
+  its output where an earlier kernel in the group stored it.
+- *Local-buffer accesses* (r[3]) are dropped: they touch storage allocated inside the call, which has no argument.
+
+**For 66, in shared or MPS code (not 68's spans):**
+- 66 corrected `_hint` to `graph.sizevars.guarding_hint_or_throw` (sizevars.py 1085), the original backed-symbol
+  concrete-value query. The removed `SizeVarAllocator.size_hint` call does not exist in Torch 2.14.0;
+  `optimization_hint` permits unbacked heuristics and is not used. The correction is shared by both relation paths.
+- The MPS `relations` skips loads of removed names as well as stores. On CPU, loads are not DeferredLines; check
+  whether the same holds for `MetalKernel.load`.
+- An MPS checked indirect of size 0 gives `[0, -1]`, which empties the whole MPS domain. The CPU handling above is
+  available to use.
 
 ## Control: `ExternCall`, `Inlined` and `Lifted` (each occurrence, at the original method boundaries)
 
@@ -431,8 +508,9 @@ There is no combine subgraph owner to publish for these targets.
     - the epilogue proxies, made through the selected factory rather than cpp_template_kernel.py's
       `CppKernelProxy(KernelGroup())`;
     - the template's own body owner and a composition hook.
-- **`torch-inductor-cpu-kernel-results.patch` is not installed.** Until it is:
-  - `MeshKernelGroup.call_kernel` finds no `arg_defs` and raises `AttributeError`;
-  - upstream's `type(self) is CppKernel` test would not select the scalar factory subclass.
+- **A CPU template's relations.** Its `Kernel.ranges` is `TEMPLATE_RANGES`, an `Unretained`, which is not iterable.
+  `_cpu_relations` therefore stops at that record. The remaining work is the producer's, listed above.
+- **The normal CPU pair is not full-domain completion.** General-extern and full-precision obligations remain next and
+  explicit.
 - **`Input.value` for a None input is None.** This is the original placeholder's result, so `name` and position remain
   its interface.
