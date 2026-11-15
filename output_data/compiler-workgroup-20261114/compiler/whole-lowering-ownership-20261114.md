@@ -413,3 +413,31 @@ The operator explicitly requested deliberate compile/runtime errors at every act
 The same68 process now owns the callback sweep of compiler/mesh_compiler Python except export.py, ir.py and metal.py. Same66 owns compiler/patches and compiler-native files (none found by the source-file enumeration). Frontend owns export.py/ir.py and non-compiler Python; executor owns metal.py. Frontend tracepoint WIP was preserved in acea9422 before its patch write scope passed to66. Both sweep assignments include the two full architectural memoranda. Actual tool acceptance was observed at22:45:35Z for68 and22:45:37Z for66, not inferred from message delivery. Python uses explicit unresolved `_mesh_callback_outside_specification_()` markers; no definition, exception recovery, replacement dispatcher or compatibility callback is authorized. Native sites, if encountered, require a compiler-diagnosed invalid function-pointer binding, never unsafe dereference. Bodies and original operands remain in place.
 
 No imports, tests, installed-dependency mutation, build or workload may execute these deliberate failures. Source syntax and patch checks are distinct from execution. The pre-existing malformed lower_coreml.py remains an intentional dead reference, not a repair assignment. Coverage and uncertain indirect sites will be recorded from actual changed source before completion is reported.
+
+Exact sweep marker convention, received22:49 UTC: the parent superseded the earlier marker spelling/call suggestion with bare `mesh_callbacks_are_outside_spec` in named callback bodies and `mesh_callbacks_are_outside_spec(original_expression)` for lambdas/external callback operands. The missing callee prevents original expression evaluation. No marker definition or exception stub is permitted. Replay receipts were68 `e3466fda` and66 `2fe4a8c9`; actual source reads followed. The first lower_inductor sweep has41 occurrences. Independent AST comparison removed only those deliberate marker nodes and restored the exact previous HEAD AST, establishing retention of the original expressions/bodies for that snapshot without executing them. All source comments distinguish the actual phase from the runtime-overhead design restriction.
+
+
+### Callback sweep first source checkpoint,68 result28
+
+This checkpoint preserves85 deliberate marker occurrences in six modules. It is not the complete sweep: lower_metal.py, native.py, operations.py, placement.py and schedule.py remain assigned to the same68 process, which was immediately resumed after its unrequested partial HOLD. No missing permission or external blocker was established.
+
+| Module | Markers | Actual callback family |
+|---|---:|---|
+| archive.py |18| Pickle reducer/reconstruction, map callbacks, registered-result builders, View readers and Owned finalization; archive save/load phases. |
+| bridge.py |3| _retired finalization and _lent load/result callbacks; runtime program load/finalization. |
+| decompose.py |19| Formulation/selection registries, make_fx source function, graph walk/node-copy/adjacency operands; capture/compile-time transforms. |
+| devices.py |1| FX replace_all_uses_with predicate; compile-time device placement. |
+| lower_inductor.py |41| Registered custom-op/fake/lowering functions, selected backend recording hooks/factories, configured-emitter registry functions, map/reduce operands; runtime dispatch or compile-time lowering/codegen as labelled. |
+| shares.py |3| Returned load callback and extrema key functions; compile-time sharing analysis. |
+
+Codex independently parsed each changed file and normalized only the bare marker statements and one-argument marker wrappers. Every normalized AST equals its exact previous HEAD AST, demonstrating retained original body expressions for this source snapshot. None was imported/executed. The marker has no definition, fallback or exception stub. Source comments include the requested inversion-of-control and runtime-overhead restriction while recording the actual phase.
+
+Known classification notes: lower_coreml.py remains the malformed dead reference; directly called local lambdas and represented FX operation targets are not labelled callbacks solely from syntax. Class factory/registration operands are sometimes unchanged where their actual callback bodies already contain the deliberate failure. These are documented sites, not callback exemptions. The actual recv_strided runtime dispatch route has not been executed in this sweep.
+
+Source SHA256:
+- `archive.py` `50131bb417461086ac4e5a69467ed8cbbc604b95249af4127f465b0fa5dadde9`
+- `bridge.py` `c7ce884d295aa7f1b948f19584cce25a1bded2bb3c33fc4738926b81d4f5c809`
+- `decompose.py` `65d4f185c569ac7fca62a99f0dd93821e3cf2a3b22571d2bb86d65e5287c33ab`
+- `devices.py` `71a57760cdb239f1fa97749e731a35b80590e370eb6ebb12a3e9785b277793f6`
+- `lower_inductor.py` `42a228147da6570ba0c8b660999212fd3411bfd2983c8e3168bbe69e4c0c9078`
+- `shares.py` `5246a23078b83749aa60bc24d6c689f036d0e308348bf42e0da5ee1c09c814e5`

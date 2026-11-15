@@ -419,6 +419,9 @@ def load(rows, current, part):
         return next(iter(current[p, k]))
 
     def loaded(j, held):
+        # Callback inversion of control is outside the working specification (phase: compile-time share planning).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return sum(fixed + sum(c * share(p, k, held) for (p, k), c in terms.items())
                    for fixed, terms, ranks in rows.values() if j in ranks)
     return loaded
@@ -429,11 +432,15 @@ def shifted(units, upper, load):
     units = list(units)
     while True:
         use = [unit / sum(units) / most for unit, most in zip(units, upper)]
-        peak = max(range(len(units)), key=use.__getitem__)
+        # Callback inversion of control is outside the working specification (phase: compile-time share planning).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        peak = max(range(len(units)), key=mesh_callbacks_are_outside_spec(use.__getitem__))
         if use[peak] <= 1:
             return tuple(units)
         free = [j for j, most in enumerate(upper) if (units[j] + 1) / sum(units) <= most]
-        units[min(free, key=lambda j: load(j, units))] += 1
+        # Callback inversion of control is outside the working specification (phase: compile-time share planning).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        units[min(free, key=lambda j: mesh_callbacks_are_outside_spec(load(j, units)))] += 1
         units[peak] -= 1
 
 

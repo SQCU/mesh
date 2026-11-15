@@ -57,7 +57,10 @@ def copies(module, wires):
     group = {}
     for node in sends:
         _, value, _, (offset, element, pairs), _ = wires[channel_of(node)]
-        group[node] = (node.args[0], value, offset, element, tuple(map(tuple, pairs)),
+        # Callback inversion of control is outside the working specification (phase: compile-time lowering, copy
+        # grouping).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        group[node] = (node.args[0], value, offset, element, tuple(map(mesh_callbacks_are_outside_spec(tuple), pairs)),
                        frozenset(writes.get(node, ())))
     index = {key: k for k, key in enumerate(dict.fromkeys(group.values()))}
     member = {}
@@ -75,11 +78,18 @@ def copies(module, wires):
 @torch.library.custom_op("mesh::recv_strided", mutates_args=())
 def recv_strided(channel: int, shape: list[int], stride: list[int], dtype: torch.dtype,
                  device: torch.device) -> Tensor:
+    # Callback inversion of control is outside the working specification (phase: runtime dispatch of
+    # mesh::recv_strided).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return RECV(channel)
 
 
 @recv_strided.register_fake
 def _recv_strided_fake(channel, shape, stride, dtype, device):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return torch.empty_strided(shape, stride, dtype=dtype, device=device)
 
 
@@ -90,6 +100,9 @@ _received = fallback_handler(RECV_STRIDED, add_to_fallback_set=False)
 
 @register_lowering(RECV_STRIDED, type_promotion_kind=None)
 def _lower_received(*arguments):
+    # Callback inversion of control is outside the working specification (phase: compile-time Inductor lowering).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     made = _received(*arguments)
     V.graph.never_reuse_buffers.add(made.get_name())
     return made
@@ -358,6 +371,9 @@ def _defined(wrapper, name):
 # fact its accesses' indices carry; each backend's own overrides with it
 class MeshIndirect:
     def indirect_indexing(self, var, size, check=True, wrap_neg=True):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         made = super().indirect_indexing(var, size, check, wrap_neg)
         V.kernel.mesh_indirect[made] = (var, size, check)
         return made
@@ -373,15 +389,24 @@ class MeshMetalKernel(MetalKernel):
     overrides = MeshMetalOverrides
 
     def __init__(self, tiling, **kwargs):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         super().__init__(tiling, **kwargs)
         self.mesh_indirect, self.mesh_ranges, self.mesh_schedule, self.mesh_split = {}, [], (), None
 
     def split_and_set_ranges(self, lengths):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_split = super().split_and_set_ranges(lengths)
         return self.mesh_split
 
     @contextlib.contextmanager
     def set_current_node(self, node):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_ranges.append(Ranges(node, self.mesh_split, self.inside_reduction, []))
         with super().set_current_node(node):
             yield
@@ -391,14 +416,23 @@ class MeshMetalKernel(MetalKernel):
         self.mesh_ranges[-1].accesses.append((method, name, index, mode, shim.graph, shim.current_node))
 
     def load(self, name, index):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self._accessed("load", name, index, None)
         return super().load(name, index)
 
     def store(self, name, index, value, mode=None):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self._accessed("store", name, index, mode)
         return super().store(name, index, value, mode)
 
     def store_reduction(self, name, index, value):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self._accessed("store_reduction", name, index, None)
         return super().store_reduction(name, index, value)
 
@@ -406,6 +440,9 @@ class MeshMetalKernel(MetalKernel):
     # (wrapper.launched_kernels), the KernelCallLine its generate_kernel_call wrote (the wrapper's last line), the graph
     # it was called in and that graph's scheduler making it (an inlined control body's own for that inlining)
     def call_kernel(self, name, node=None, deallocate_ws=True):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         wrapper = V.graph.wrapper_code
         super().call_kernel(name, node, deallocate_ws)
         line = wrapper.lines[-1]
@@ -417,6 +454,9 @@ class MeshMetalScheduling(MetalScheduling):
     kernel_type = MeshMetalKernel
 
     def codegen_node_schedule_with_kernel(self, node_schedule, kernel):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         kernel.mesh_schedule = tuple(node_schedule)
         super().codegen_node_schedule_with_kernel(node_schedule, kernel)
 
@@ -444,22 +484,34 @@ class MeshCppTile2DOverrides(MeshIndirect, CppTile2DOverrides):
 # own V.kernel.load among them
 class MeshCppAccesses:
     def __init__(self, *args):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         super().__init__(*args)
         self.mesh_indirect, self.mesh_ranges, self.mesh_suffix = {}, [], False
 
     @contextlib.contextmanager
     def write_to_suffix(self):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_suffix = True
         with super().write_to_suffix():
             yield
         self.mesh_suffix = False
 
     def run_function(self, fn, var_sizes, *args):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_ranges.append(CppRanges(fn, var_sizes, None, args, self.mesh_suffix, []))
         super().run_function(fn, var_sizes, *args)
 
     @contextlib.contextmanager
     def set_current_node(self, node):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_ranges[-1].node = node
         with super().set_current_node(node):
             yield
@@ -470,14 +522,23 @@ class MeshCppAccesses:
                                               self._load_mask))
 
     def load(self, name, index):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self._accessed("load", name, index, None)
         return super().load(name, index)
 
     def store(self, name, index, value, mode=None):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self._accessed("store", name, index, mode)
         return super().store(name, index, value, mode)
 
     def store_reduction(self, name, index, value):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self._accessed("store_reduction", name, index, None)
         return super().store_reduction(name, index, value)
 
@@ -512,6 +573,9 @@ class MeshCppKernelProxy(CppKernelProxy):
     kernel_cls, vec_kernel_cls, tile2d_kernel_cls = MeshCppKernel, MeshCppVecKernel, MeshCppTile2DKernel
 
     def aggregate_reduction_buffers(self, inner_loop_reduction_outer_not, outer_loop):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_aggregated = (inner_loop_reduction_outer_not, outer_loop)
         super().aggregate_reduction_buffers(inner_loop_reduction_outer_not, outer_loop)
 
@@ -533,16 +597,25 @@ class MeshCppKernelProxy(CppKernelProxy):
 # KernelGroup.call_kernel's generate_kernel_call wrote them
 class MeshKernelGroup(KernelGroup):
     def __init__(self):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         super().__init__()
         self.mesh_proxies = []
 
     def finalize_kernel(self, new_kernel, nodes):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         context = V.local_buffer_context
         local = dict(context.local_buffers) if isinstance(context, LocalBufferContext) else {}
         self.mesh_proxies.append((new_kernel, tuple(nodes), context, local))
         super().finalize_kernel(new_kernel, nodes)
 
     def call_kernel(self, wrapper, kernel_name):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         super().call_kernel(wrapper, kernel_name)
         line = wrapper.lines[-1]
         wrapper.__dict__.setdefault("mesh_calls", {})[id(line)] = (self, line, V.graph, V.graph.scheduler)
@@ -555,6 +628,9 @@ class MeshCppScheduling(CppScheduling):
     kernel_group_cls, kernel_proxy_cls = MeshKernelGroup, MeshCppKernelProxy
 
     def __init__(self, scheduler):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_defined = []
         super().__init__(scheduler)
 
@@ -563,6 +639,9 @@ class MeshCppScheduling(CppScheduling):
     # handler is its CppTemplateKernel (codegen_template defines under V.set_kernel_handler(kernel)); a group's flush
     # sets none of its own
     def define_kernel(self, src_code, nodes, kernel_args=None):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         name = super().define_kernel(src_code, nodes, kernel_args)
         self.mesh_defined.append((V.kernel, nodes, name))
         return name
@@ -573,6 +652,9 @@ class MeshCppScheduling(CppScheduling):
     # node schedule that definition received). The kernel and nodes are the one definition this codegen made; the
     # line is the one KernelCallLine it wrote (call_kernel's generate_kernel_call)
     def codegen_template(self, template_node, epilogue_nodes, prologue_nodes):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         wrapper = V.graph.wrapper_code
         lines, defined = len(wrapper.lines), len(self.mesh_defined)
         super().codegen_template(template_node, epilogue_nodes, prologue_nodes)
@@ -587,10 +669,16 @@ SELECTED = {"mps": MeshMetalScheduling, "cpu": MeshCppScheduling}
 # scheduler.py Scheduler with the selected backends, its own create_backend's selection
 class MeshScheduler(Scheduler):
     def __init__(self, nodes):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         self.mesh_externs = []
         super().__init__(nodes)
 
     def create_backend(self, device):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         V.graph.add_device_info(device)
         return SELECTED[device.type](self)
 
@@ -598,6 +686,9 @@ class MeshScheduler(Scheduler):
     # return with the control body inlinings (MeshSubgraph.codegen_subgraph) and liftings (MeshSubgraph.codegen) that
     # codegen made, each in order
     def codegen_extern_call(self, scheduler_node):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         wrapper, inlined, lifted = V.graph.wrapper_code, [], []
         start, self.mesh_inlined, self.mesh_lifted = len(wrapper.lines), inlined, lifted
         super().codegen_extern_call(scheduler_node)
@@ -615,20 +706,32 @@ class MeshScheduler(Scheduler):
 # create and SubgraphBuffer)
 class _Lowering:
     def __init__(self, *args, **kwargs):
+        # Callback inversion of control is outside the working specification (phase: compile-time Inductor lowering).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         super().__init__(*args, **kwargs)
         self.mesh_placeholders, self.mesh_subgraphs = {}, []
 
     def placeholder(self, target, args, kwargs):
+        # Callback inversion of control is outside the working specification (phase: compile-time Inductor lowering).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         made = super().placeholder(target, args, kwargs)
         self.mesh_placeholders[self.qualify_name(target)] = made
         return made
 
     def make_subgraph(self, gm, example_inputs, subgraph_name):
+        # Callback inversion of control is outside the working specification (phase: compile-time Inductor lowering).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         made = super().make_subgraph(gm, example_inputs, subgraph_name)
         self.mesh_subgraphs.append(made)
         return made
 
     def _update_scheduler(self):
+        # Callback inversion of control is outside the working specification (phase: compile-time Inductor codegen).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         with config.patch("triton.store_cubin", False):
             self.scheduler = MeshScheduler(self.operations)
 
@@ -641,6 +744,9 @@ class MeshSubgraph(_Lowering, SubgraphLowering):
     # one inlining of this control body (wrapper.py codegen_subgraph_by_inlining, in aot_mode: while_loop's cond
     # before its loop, its body, its cond at the loop's end; invoke_subgraph), recorded for the extern call making it
     def codegen_subgraph(self, parent_graph):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         wrapper = parent_graph.wrapper_code
         start = len(wrapper.lines)
         super().codegen_subgraph(parent_graph)
@@ -651,6 +757,9 @@ class MeshSubgraph(_Lowering, SubgraphLowering):
     # branch under fx_wrapper), recorded for its parent's extern call making it (`parent` make_subgraph's, the graph
     # whose scheduler codegens that call)
     def codegen(self):
+        # Callback inversion of control is outside the working specification (phase: compile-time codegen record).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         made = super().codegen()
         self.parent.scheduler.mesh_lifted.append(Lifted(self, self.scheduler, self.wrapper_code,
                                                         tuple(self.scheduler.mesh_externs)))
@@ -673,7 +782,9 @@ def _copied(module, sources):
         sources[id(graph), made.name] = node
     bodies = {}
     for node in module.graph.find_nodes(op="get_attr"):
-        held = functools.reduce(getattr, node.target.split("."), module)
+        # Callback inversion of control is outside the working specification (phase: compile-time body copy).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        held = functools.reduce(mesh_callbacks_are_outside_spec(getattr), node.target.split("."), module)
         if isinstance(held, torch.fx.GraphModule):
             body, made, nested = _copied(held, sources)
             body.output(made)
@@ -1029,6 +1140,9 @@ def _acquire(made):
 # whole threadgroups, its further lanes outside the body's bound reaching mesh_release); mesh_release after the body's
 # stores, its arrival counters in `sent` order; each paged argument's accessor over its arena
 def _threaded(made, kernel, launch, *_):
+    # Callback inversion of control is outside the working specification (phase: compile-time emission composition).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     callables, later, args, values = made.callables, bool(made.later), kernel.args, launch[1]
     named, arrivals = _views(made)
     parameters = [f"{'device' if write else 'const device'} tint_array<{element}, 1>* mesh_{name} [[buffer({slot})]]"
@@ -1062,6 +1176,9 @@ def _threaded(made, kernel, launch, *_):
 # collection's bool mesh_acquire_first or mesh_acquire_later first, its body run where it returns true, each of its
 # parameters the kernel's own at its slot as the host C++ collection types it; a paged argument's binding its flat view
 def _hosted(made, *_):
+    # Callback inversion of control is outside the working specification (phase: compile-time emission composition).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     named, _ = _views(made)
     acquire = _acquire(made)
     used = _acquired(bool(made.later)) if acquire is not None else []
@@ -1099,6 +1216,9 @@ def configured(call, composition):
 
 
 def _group_defined(composition, group, line, graph, scheduler):
+    # Callback inversion of control is outside the working specification (phase: compile-time emission definition).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     with V.set_graph_handler(graph):
         kernel_body, cpp_definition = CppScheduling.kernel_definition(group.codegen_group(None, composition),
                                                                       line.kernel_name, group.args)
@@ -1107,6 +1227,9 @@ def _group_defined(composition, group, line, graph, scheduler):
 
 
 def _metal_defined(composition, kernel, launch, line, graph, scheduler):
+    # Callback inversion of control is outside the working specification (phase: compile-time emission definition).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     with V.set_graph_handler(graph), V.set_kernel_handler(kernel):
         src_code = kernel.codegen_kernel(kernel.metal_entry, composition)
     return dataclasses.replace(_defined(line.wrapper, line.kernel_name),

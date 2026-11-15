@@ -59,7 +59,9 @@ def _axes_onto(source, result, mapping, within=True):
     # (the source's own `result`); each tensor node of `result` the source's operand axes and the output axes of the
     # projections whose image it is, those projections its image
     images = {source: result}
-    for node in mesh_graph.walk(list(source.graph.nodes), [source], lambda n: [u for u in n.users if projection(u)]):
+    # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    for node in mesh_graph.walk(list(source.graph.nodes), [source], lambda n: mesh_callbacks_are_outside_spec([u for u in n.users if projection(u)])):
         if node is not source:
             images[node] = node.target(images[node.args[0]], node.args[1])
     for made in [n for n in pytree.tree_leaves(result) if isinstance(n, torch.fx.Node)
@@ -95,8 +97,10 @@ def _whole(node, processor):
 # `max_iterations` unused here (outline's QDWH bound)
 def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
     formulation = functools.partial(_matrix_exponential, max_squarings=max_squarings)
-    return _expanded(graph_module, targets, {A.linalg_matrix_exp.default: lambda node: formulation,
-                                             FRAGMENT: lambda node: _fragment_decoded})
+    # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    return _expanded(graph_module, targets, {A.linalg_matrix_exp.default: lambda node: mesh_callbacks_are_outside_spec(formulation),
+                                             FRAGMENT: lambda node: mesh_callbacks_are_outside_spec(_fragment_decoded)})
 
 
 # each node of a `formulations` target expanded into its source formulation (formulations[target](node)) of the node's
@@ -107,7 +111,9 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
 # map's keys the graph's nodes, its values the source's), whose uses (the graph's outputs among them), work axes and
 # input parts take the formulation's result; the nodes whose uses or operands changed (the original's operands, its
 # expanded nodes and its uses) are given to ir.views, which makes their view and destination metadata again
-def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
+# Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+# Runtime callback overhead is inadmissible in performance-critical code.
+def _expanded(graph_module, targets, formulations, chosen=lambda node: mesh_callbacks_are_outside_spec(True)):
     table = torch.export.default_decompositions()
     graph = graph_module.graph
     sources = graph_module.meta.setdefault("decomposed", {})
@@ -121,6 +127,9 @@ def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
         held = [k for k, item in enumerate(flat) if isinstance(item, torch.fx.Node)]
 
         def formula(*operands, flat=flat, spec=spec, held=held, formulation=formulation):
+            # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            mesh_callbacks_are_outside_spec
             given = list(flat)
             for k, operand in zip(held, operands):
                 given[k] = operand
@@ -228,16 +237,29 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
         return [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
 
     def pseudoinverse(node):
+        # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         dtype = torch.float32 if targets[node.meta["processor"]][1].type in ("mps", "metal") else torch.float64
-        return lambda *args, **kwargs: _pseudoinverse(**_operands(node.target, args, kwargs), tolerance_dtype=dtype)
+        # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        return lambda *args, **kwargs: mesh_callbacks_are_outside_spec(_pseudoinverse(**_operands(node.target, args, kwargs), tolerance_dtype=dtype))
 
     def singular(node):
+        # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         made, kept = shapes(node), {} if on_cpu(node) else {"max_iterations": max_iterations}
         formulation = _lapack_singular if on_cpu(node) else _singular_qdwh
-        return lambda *args, **kwargs: formulation(**_operands(node.target, args, kwargs), shapes=made, **kept)
+        # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        return lambda *args, **kwargs: mesh_callbacks_are_outside_spec(formulation(**_operands(node.target, args, kwargs), shapes=made, **kept))
 
     # operations.LSTSQ_FIXED: the same formulation's solution, rank and singular_values, no residuals produced
     def least_squares(node):
+        # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         made = shapes(node)
         read = ir_given(node)[1]
         driver = _lstsq_driver(read["self"].meta["val"], read.get("driver"))
@@ -245,23 +267,40 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
             _least_squares_svd if driver in ("gelsd", "gelss") else _least_squares_qr
         if node.target is LSTSQ_FIXED:
             solution, rank, singular = made
-            return lambda *args, **kwargs: (lambda result: (result[0], result[2], result[3]))(formulation(
-                **_operands(node.target, args, kwargs), shapes=(solution, None, rank, singular)))
-        return lambda *args, **kwargs: formulation(**_operands(node.target, args, kwargs), shapes=made)
+            # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            return lambda *args, **kwargs: mesh_callbacks_are_outside_spec((lambda result: (result[0], result[2], result[3]))(formulation(
+                **_operands(node.target, args, kwargs), shapes=(solution, None, rank, singular))))
+        # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        return lambda *args, **kwargs: mesh_callbacks_are_outside_spec(formulation(**_operands(node.target, args, kwargs), shapes=made))
 
     # Reference-LAPACK zgeev.f and dgeev.f: an eig or eigvals, complex or real input, through Accelerate's routine on
     # the CPU (operations.LAPACK_ZGEEV, LAPACK_DGEEV), else the routine's body (operations._geev_routine), both through
     # operations._eigen's INFO check and complex assembly
     def eigen(node):
+        # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         wanted = node.target.overloadpacket is A.linalg_eig
         formulation = _lapack_eigen if on_cpu(node) else _eigen_geev
-        return lambda *args, **kwargs: formulation(**_operands(node.target, args, kwargs), vectors=wanted)
+        # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        return lambda *args, **kwargs: mesh_callbacks_are_outside_spec(formulation(**_operands(node.target, args, kwargs), vectors=wanted))
 
     def hermitian(node):
+        # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         made = shapes(node)
-        return lambda *args, **kwargs: _lapack_hermitian(**_operands(node.target, args, kwargs), shapes=made)
+        # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        return lambda *args, **kwargs: mesh_callbacks_are_outside_spec(_lapack_hermitian(**_operands(node.target, args, kwargs), shapes=made))
 
     def held(node):
+        # Callback inversion of control is outside the working specification (phase: compile-time decomposition).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return on_cpu(node) or not ir_given(node)[1]["A"].meta["val"].numel()
     for key in pending:
         placed = staged[key][0]
@@ -395,7 +434,9 @@ class _Part:
             if held not in self.env:
                 self.env[held] = self.graph.node_copy(held)
         for node in self.nodes:
-            self.env[node] = self.graph.node_copy(node, lambda n: self.env[n])
+            # Callback inversion of control is outside the working specification (phase: compile-time outlining).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            self.env[node] = self.graph.node_copy(node, lambda n: mesh_callbacks_are_outside_spec(self.env[n]))
         for node in self.nodes:
             _axes_moved(self.env[node], self.env, within=False)
         self.decomposed.update((self.env[node], self.sources[node]) for node in self.nodes if node in self.sources)
@@ -454,8 +495,10 @@ def _outlined(key, exported, placed, eigh, max_iterations):
     # rdma/mesh_graph.py Graph.adjacency and Graph.reach: the placed graph's nodes (its output node apart), each one's
     # direct users and a SEND its arrival (placement.py transfers), searched once from the eigh's results' users; the
     # Reached membership is the suffix's, and with the relation and source graph the parts' `outline` record
-    relation = mesh_graph.Graph.adjacency([n for n in graph.nodes if n.op != "output"], lambda n: [
-        *(u for u in n.users if u.op != "output"), *([arrival[n]] if n in arrival else [])])
+    # Callback inversion of control is outside the working specification (phase: compile-time outlining).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    relation = mesh_graph.Graph.adjacency([n for n in graph.nodes if n.op != "output"], lambda n: mesh_callbacks_are_outside_spec([
+        *(u for u in n.users if u.op != "output"), *([arrival[n]] if n in arrival else [])]))
     reached = relation.reach([u for g in getitems for u in g.users if u.op != "output"])
     outlined = (placed, eigh, relation, reached)
     body = [n for n in graph.nodes if n.op == "call_function"]

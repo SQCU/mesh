@@ -76,10 +76,14 @@ class Published:
         record, program = source.saved(), source.program
         self.source, self.mapping, self.context = source, mapping, C.addressof(mapping.context)
         made = mesh.Local()
-        mesh.check(_lent(record, lambda release, owner: mesh.LIB.mesh_program_load(
+        # Callback inversion of control is outside the working specification (phase: runtime program load).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh.check(_lent(record, lambda release, owner: mesh_callbacks_are_outside_spec(mesh.LIB.mesh_program_load(
             C.byref(mapping.context), source.analysis_context.pointer, group, program,
             time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, record, len(record), release, owner,
-            C.byref(made)), lambda status: status == 0))
+            # Callback inversion of control is outside the working specification (phase: runtime program load).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            C.byref(made))), lambda status: mesh_callbacks_are_outside_spec(status == 0)))
         mapping.loaded.append(made)
         self.offset, view = (mesh.Q * max(made.offsets, 1))(), mesh.View()
         self.pages = (mesh.Q * max(made.planned.rows.count, 1))()
@@ -109,6 +113,10 @@ class Published:
 # a _Mapping's end: its loaded network result's publication closed (the bridge releases its rows and pages once no
 # port holds it) and that result freed (mesh_local_free), then its mapping detached
 def _retired(context, loaded):
+    # Callback inversion of control is outside the working specification (phase: runtime finalization of a program
+    # mapping).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     for local in loaded:
         mesh.LIB.mesh_retire(context.M, C.byref(local.planned))
         mesh.LIB.mesh_local_free(C.byref(local))
