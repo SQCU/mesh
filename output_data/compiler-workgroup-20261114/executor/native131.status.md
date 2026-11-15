@@ -1,5 +1,11 @@
 # Native131 status (SAME e48, 2026-11-14)
 
+## Codex checkpoint receipt: native140 and quota hold
+
+Current source is Metal `6a48588d`; canonical build/ABI evidence is `70345736` (`native140-build-result.json`). Build exit 0, source changes `{}`, five libraries loaded. Native Emission120 does **not** match Python Emission112; no workload or save/load execution ran. Archive v47 is built. Earlier sizes, framing, "uncommitted", "not built" and resumed-stream statements below describe their historical snapshots, not current status.
+
+All eight Claude streams reported the account quota resetting 17 November at 11am America/Los_Angeles. Existing processes are retained idle; no retry or replacement was made. These worker notes are preserved WIP, not an acceptance verdict. `native-flow-supervisor-account.md` records Codex's current whole-consumer review. Original Body entry/allocation/caller ownership, complete final-link action consumption, full coherence/publication coverage and target numerical/interface obligations remain unfinished. Provisional supplied name/geometry keys and consumer assumptions about bounded sizes, frees or lifetime do not supersede the original producer's semantic/resource operands and canonical lifetime result.
+
 ## SOURCE HOLD for the canonical build
 
 Every touched C and ObjC source passes strict syntax checks (`-Wall -Wextra -Werror -fsyntax-only`, each with its own
@@ -740,3 +746,185 @@ and its state. The rows labelled "mine, HOLD" below are the source subsequently 
 **Not mine, in the same files:** 132's handed hunks (listed in the handoff) and 135's neural hunks.
 
 Supervisor checkpoint: Metal `3330ed9b` contains only131 physical/bounds/compile-language hunks;132 prepared-unit and135 feature work remain excluded. The paired graph fixed-value query in this Mesh commit uses original ISL over the retained domain and is consumed by the staged typed analysis. Executor independently checked staged `metal_ir.mm`, `metal_lower.mm`, `metal_archive.mm` against index headers through the compiler VFS overlay (each exit0), and canonical `mesh-graph.c` strict syntax (exit0). Worker checked all eight native translation units and both recorder sources with the same index-header correction. Earlier staged-source checks that accidentally read working-tree headers were not evidence for the index and are superseded. No library was rebuilt or loaded; native137 remains fixed. Compile-language Python/provider pairing, source-to-physical effects, other immediate/resource forms, original linkage and the prepared-unit owner remain open.
+
+## After `3330ed9b`: the target stage reaches every effect consumer (source; strict exit 0; not staged)
+
+- **Effects, relation, order, actors.** `metal_ir_lower` runs `Lower`, then `Artifact`, and `Lower` starts with
+  `ModuleEmissions`, so the raised result exists before any view is made. Each consumer now takes it:
+  - `UpstreamEffects` takes the kernel's pass (`Kernel.upstreamPass`; the operation's own uses pass 0) and uses
+    `physical[pass]` where analyzed, else the source relations. Through `Effects`, that covers `Artifact` (views,
+    relation, `Order`), `Actor` and `Accesses`.
+  - `ModulePass` invalidates the operation's cached effects (`operationEffectsKnown`) once its physical result is made.
+  - Construct-time fusion keeps the source relations (`Accesses` before `Lower`) because no raised module exists then.
+- **Threadgroup.** The pass-0 kernel's `threads` come from the raised entry's `WorkgroupSizeAsConst()`, with overrides
+  substituted by the one Raise; the later pass copies the first's.
+- **Archive.** A view's relation is named `{upstream, set, access}`: set 0 is the source relations, `1 + pass` the
+  pass's physical ones.
+
+## Emitter language, linkage and export identity: exact pairings
+
+- **66** (`metal.py` `UpstreamEmission`): append `('language', C.c_char_p)` after `links`. The C struct is
+  `const char *language` at byte 64, 72 bytes in all. Pass `b"c++"`, which is cpp.py's own language for the
+  `CppTorchDeviceOptions` command already passed (`compile[0] = get_compiler()`). Linkage: the kernel's definition
+  needs internal linkage in its translation unit. Native appends its runner to that same unit, and that runner,
+  `NativeSymbol(source + typed call)`, is its only export. That has to be passed at the original emitter
+  (`KernelGroup.codegen_group` 6145 / `defined_source` 6029 / the 6180 declaration), with no text rewrite.
+- **133** (XNN unit, C):
+  - `language` `"c"`;
+  - `compile` starts with its compiler executable, followed by its own flags as now (`-x c -std=c11` …);
+  - entries, prepare and release are `static`, so the hashed runners are the unit's only external symbols and no
+    ordinal name collides across `LowerProgram`'s programs;
+  - `body.unit = record.unit + 1`.
+- **132** (prepared operand): with `static` prepare and release, the library exports them through aliases from the
+  same `NativeSymbol` owner, emitted beside the runners in the unit's own language:
+  - C: `void *SYM_P(void) { return PREPARE(); }` and `void SYM_R(void *o) { RELEASE(o); }`;
+  - C++: `extern "C" void *SYM_P() { return static_cast<void *>(PREPARE()); }` and
+    `extern "C" void SYM_R(void *o) { RELEASE(static_cast<decltype(PREPARE())>(o)); }`;
+  - `SYM_* = NativeSymbol("mesh_prepare_"/"mesh_release_", {&source, &name})`.
+
+  132's `Prepare` `dlsym`s those names in place of the raw `u.prepare`/`u.release`. Tell me whether 132 or I write the
+  alias lines in `UpstreamTask` (they sit next to its export hunk).
+
+## This round (source; strict exit 0; not staged)
+
+- **Protocol operands are typed; name matching is deleted.** `UpstreamProtocol` records each protocol function's
+  operands in parameter order (`metal_ir_callables::operands`): a view by its `Kernel::Transport` member, an arrival
+  counter by its word, plus readiness classes and members, the record table, votes and builtins. `ModulePass` makes each
+  word's variable and calls each protocol function by those operands. The `"mesh_"`-prefix and parameter-name matching
+  is gone.
+- **Original binding points.**
+  - `metal_ir_upstream.binding_group[arguments]` is required with `binding` for a module body; the `binding[a] : a`
+    default is deleted.
+  - `Upstream.argumentOf` maps `{group, binding}` to the argument.
+  - `LoweredBody` looks up by the full `BindingPoint`. The resource remap and the sizes packing take any group; the
+    `group == 0` filters are deleted.
+  - The archive saves `{group, binding, argument}`.
+  - The provider's GPU `Operation` passes group 0 per argument. That is ML Drift's own layout: `arguments.cc` 296/470–505
+    emit `@group(0)`, and 813–816 make one bind group layout.
+- **Storage-buffer length packing is each pass's own.** It is read from the raised module's resource type at the pass's
+  slot: the immediate block `PrepareImmediateData` laid out, with sizes at `buffer_sizes_offset`; or, where the
+  prepared options choose `ubo_binding`, `ArrayLengthFromUniform`'s buffer, now placed at the same slot, with sizes
+  from 0.
+  - The block's size is that type's `Size()`, and each original binding point's retained bound length goes at its size
+    index.
+  - The `value_or(0)` offset and the re-derived element count are deleted.
+  - Each pass has its own value (`Upstream.sizes.value[2]`, `bytes[2]`), reused only when the packed bytes equal an
+    earlier pass's.
+  - Needed lengths with no resource at the slot is an explicit error.
+- **Pairing (66):** the `Upstream` mirror appends `('image', C.c_void_p), ('binding_group', C.c_void_p)`; the
+  `UpstreamEmission` mirror appends `('language', C.c_char_p)`.
+
+## Compile command owner: environment and working directory (source; strict exit 0; not staged)
+
+- **API.** `metal_ir_upstream_emission` appends `const char *const *environment; const char *directory;
+  uint32_t environments, padding;` after `language`. A CPU pass with a `compile` command must declare both (an error
+  otherwise), so no parent environment is assumed.
+- **Retained** in `Upstream.environment`/`directory`, and archived in `UpstreamModule` after `language`.
+- **`NativeBuild` runs the producer's command as its owner gave it.**
+  - Its environment is exactly the given list.
+  - Its working directory is the child's alone, set by a `posix_spawn_file_actions_addchdir` file action: no global
+    `chdir` and no thread race.
+  - The executable is used as named: a path as given (a relative one resolves in that directory); a bare name on the
+    given environment's `PATH`, as Python's `subprocess` does with `env=`.
+  - Native's own commands (its link, its own sources) keep this process's environment and directory.
+- **Pairing (66 mirror, once):**
+  - `UpstreamEmission` appends `('language', C.c_char_p), ('environment', C.POINTER(C.c_char_p)),
+    ('directory', C.c_char_p), ('environments', mesh.U), ('padding', mesh.U)`.
+  - `Upstream` appends `('image', C.c_void_p), ('binding_group', C.c_void_p)`.
+  - Inductor's own CPU emission passes the environment and working directory its `cpp_builder` subprocess runs with.
+- **Pairing (133):** pass `MESH_UNIT_COMPILE` (tool first), `MESH_UNIT_LANGUAGE`, the environment
+  (`MESH_UNIT_ENVIRONMENT_FIXED` plus `MESH_UNIT_ENVIRONMENT`) and `MESH_UNIT_DIRECTORY` through these fields.
+  Review points:
+  - `MESH_UNIT_ENVIRONMENT` prints `$DEVELOPER_DIR`/`$SDKROOT` by shell. An unset variable becomes `NAME=` with an
+    empty value, which is a silently assumed environment, so an empty capture must fail the rule.
+  - `MESH_UNIT_DIRECTORY` is the action's execroot `$PWD`, which the command's relative toolchain paths need; it is
+    valid while that output base exists. A load never recompiles, since the library is saved.
+
+## SOURCE HOLD for the canonical Dawn and native build (2026-11-15)
+
+Strict checks exit 0 on the current tree: every native `.mm`, `metal_program.m`, `metal_capture.m`, and the Dawn TUs
+`raise.cc`, `array_length_from.cc`, `writer.cc`, `ShaderModuleMTL.mm` and `MetalBackend.mm` (Dawn's own compile
+commands). Nothing built.
+
+**Dawn** (checkout HEAD `b48811c71`; four files modified on top, needing your dependency-history commit):
+
+| File | Blob |
+|---|---|
+| `src/tint/lang/core/ir/transform/array_length_from.h` | `361ef2fc` |
+| `src/tint/lang/core/ir/transform/array_length_from.cc` | `70326836` |
+| `src/tint/lang/msl/writer/raise/raise.h` | `42341e1b` |
+| `src/tint/lang/msl/writer/raise/raise.cc` | `0f6e8e07` |
+
+`provider/dawn.patch` blob `54f3d1a0` equals the checkout's diff against `466163dc7`. `dawn.applied` is still 137-era
+(reconcile before the recipe runs).
+
+**Result fields:**
+- `ArrayLengthResult.used`;
+- `RaiseResult.remapped`, `array_lengths`, `buffer_sizes_offset`, `immediate_type`, `internal_immediates`.
+
+**Native** (metal HEAD `3330ed9b`; the working blobs below also hold 132's and 135's live hunks):
+
+| File | Blob |
+|---|---|
+| `metal_ir.h` | `262e58c6` |
+| `metal_ir.mm` | `676d492c` |
+| `metal_lower.h` | `867a22ca` |
+| `metal_lower.mm` | `c913389b` |
+| `metal_transport.mm` | `a0a89c97` |
+| `metal_archive.mm` | `f698fe75` |
+| `provider/litert_mesh.cc` | `929104ae` (my GPU `Operation` hunk with `binding_group`; the rest is 133's) |
+
+`Makefile` is modified by another owner, not by me in this round.
+
+**Declared ABI** (C, mirrored by 66):
+- `metal_ir_upstream` ends `… target, image, binding_group`;
+- `metal_ir_upstream_emission` ends `… parameters, compiles, links, language, environment, directory, environments,
+  padding`;
+- `metal_ir_upstream.unit` takes the former padding word.
+
+**C++ internal:**
+- `metal_ir_callables::operands` (typed protocol operands);
+- `Upstream`: `argumentOf` keyed by `{group, binding}`, `bounds`, `physical[2]`/`analyzed[2]`, `sizes` per pass,
+  `language`, `environment`, `directory`;
+- `UpstreamExtent`/`UpstreamBound`.
+
+**Open, explicit (checkpoint, not acceptance):**
+- textures;
+- user immediates (a named error);
+- resources and Work beyond the module path;
+- construct-time fusion on source relations;
+- 132's prepared unit;
+- 133's empty-environment capture check;
+- 66's mirror and internal linkage at `codegen_group`/`defined_source`.
+
+**HOLD update (same day):**
+- `NativeBuild`'s PATH walker is deleted. Every command goes to `posix_spawn` with `argv[0]` exactly as its producer
+  gave it, in its own environment and with the child's working directory set by a file action. The producer's
+  executable is the path it resolved: 133's `get_tool_for_action` tool, often relative to the execroot, which the
+  child's directory keeps; Inductor's compiler as torch's `get_compiler`/`CppBuilder` resolution gives it, passed by 66.
+  A bare or missing name is posix_spawn's own failure.
+- `metal_lower.mm` blob is now `a27edee6`; the other hashes are unchanged.
+
+## After NATIVE138 (`97492e29`): source only, strict exit 0, not built
+
+- **The original compile invocation.** `metal_ir_upstream_emission` replaces `padding` with
+  `compile_source, compile_output` and appends a new `padding` (the emission grows 96 → 104 bytes). These are the
+  positions in `compile` of the producer's own source and output operands: CppBuilder's own, with the command producing
+  an object (its compile-only invocation).
+  - They are required with `compile`, distinct and in range, else a named error.
+  - They are retained in `Upstream.compileSource`/`compileOutput` and archived.
+  - `NativeBuild` writes its composed source and its object at exactly those positions. The appended
+    `-c <file> -o <object>` is deleted. Native's one added operand is its composed-header `-isystem`.
+  - The link runs in the producer's own environment and directory when the producer gave the command.
+- **The protocol group** is the next group above every group the original module's own module-scope resources are
+  bound in, instead of a fixed group 1. Protocol words are bound there and remapped to their slots.
+- **Immediates.** Every member of the immediate block other than the storage-buffer sizes (a user immediate, or Raise's
+  depth-range internal one) has no producer value and is a named error.
+- **Pairing with 68 and 66:**
+  - the `UpstreamEmission` mirror appends `('compile_source', U), ('compile_output', U)` and keeps the final padding;
+  - 68 makes the command CppBuilder's compile-only argv as built, giving its own source and output operands' indices
+    from CppBuilder's own fields (no parsing of a formatted line);
+  - `environment`/`directory` are its subprocess's own, and the compiler is torch's resolved executable.
+- **Excluded:** 132's conditional Completions/publication block in `metal_transport.mm`.
+- **Blobs:** `metal_ir.h 34ee482c`, `metal_ir.mm 3a854575`, `metal_lower.mm 6c78e2c6`,
+  `metal_transport.mm e975b71b`, `metal_archive.mm bd641397`.
