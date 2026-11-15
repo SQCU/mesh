@@ -1,6 +1,6 @@
 --- a/torch/_export/passes/collect_tracepoints_pass.py
 +++ b/torch/_export/passes/collect_tracepoints_pass.py
-@@ -1,158 +1,107 @@
+@@ -1,158 +1,125 @@
 -# mypy: allow-untyped-defs
 -from __future__ import annotations
 -
@@ -181,7 +181,7 @@
 +        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/export/_trace.py _get_module_call_graph;
 +        # torch/fx/graph.py Graph.erase_node
 +        self.markers: list[tuple[torch.fx.GraphModule, torch.fx.Node, tuple]] = []
-+        self.occurrences: list[list] = []
++        self.occurrences: dict[tuple[str, str], list[tuple[torch.fx.GraphModule, torch.fx.Node, tuple]]] = {}
 +        self.replaced: list[tuple[torch.fx.Node, torch.fx.Node]] = []
 +
 +    def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
@@ -226,18 +226,36 @@
 +        for module in gm.modules():
 +            if not isinstance(module, torch.fx.GraphModule):
 +                continue
-+            opened: dict[str, list[list]] = {}
 +            for node in module.graph.nodes:
 +                if node.op != "call_function":
 +                    continue
 +                if node.target is torch.ops.higher_order._export_tracepoint:
++                    # There's some subtlety worth noting. Here fqn corresponds to
++                    # the call name, whereas path corresponds to the module name.
++                    # They are not necessarily the same! When a submodule is shared
++                    # through different aliases, there are as many _export_tracepoint
++                    # markers as there are aliases, since the shared submodule is
++                    # wrapped once for each alias.
++                    path = node.kwargs["path"]
++                    fqn, _ = next(reversed(node.meta["nn_module_stack"].values()))
++                    call_fqn = fqn
++
++                    module_key = next(reversed(node.meta["nn_module_stack"]))
++                    if "@" in module_key:
++                        suffix = module_key.split("@")[-1]
++                        path = f"{path}@{suffix}"
++
++                        call_fqn = f"{fqn}@{suffix}"
++
++                    # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/fx/graph.py Graph.erase_node
 +                    marker = (module, node, node.args)
 +                    self.markers.append(marker)
-+                    if node.kwargs["kind"] == "module_call_inputs":
-+                        self.occurrences.append([marker, None])
-+                        opened.setdefault(node.kwargs["path"], []).append(self.occurrences[-1])
-+                    else:
-+                        opened[node.kwargs["path"]].pop()[1] = marker
++                    # We only update the signature of the alias used to call
++                    # the submodule. Otherwise the signatures of all aliases
++                    # would get conflated; the inputs/outputs of every call
++                    # would be recorded in every other call as well.
++                    if call_fqn == path:
++                        self.occurrences.setdefault((fqn, call_fqn), []).append(marker)
 +                    for i, arg in enumerate(node.args):
 +                        if isinstance(arg, torch.fx.Node):
 +                            for user in node.users:
@@ -315,7 +333,7 @@
                  )
 --- a/torch/export/_trace.py
 +++ b/torch/export/_trace.py
-@@ -1663,7 +1663,68 @@
+@@ -1663,7 +1663,47 @@
      if len(preserve_module_call_signature) > 0:
          if not strict_mode_export:
              _rewrite_tracepoint_node(gm)
@@ -351,37 +369,16 @@
 +                forward_arg_names=None,
 +            )
 +
-+        for _, node, args in collect.markers:
-+            # There's some subtlety worth noting. Here fqn corresponds to
-+            # the call name, whereas path corresponds to the module name.
-+            # They are not necessarily the same! When a submodule is shared
-+            # through different aliases, there are as many _export_tracepoint
-+            # markers as there are aliases, since the shared submodule is
-+            # wrapped once for each alias.
-+            path = node.kwargs["path"]
-+            fqn, _ = next(reversed(node.meta["nn_module_stack"].values()))
-+
-+            module_key = next(reversed(node.meta["nn_module_stack"]))
-+            if "@" in module_key:
-+                suffix = module_key.split("@")[-1]
-+                path = f"{path}@{suffix}"
-+
-+                call_fqn = f"{fqn}@{suffix}"
-+                if call_fqn not in module_call_signatures:
-+                    module_call_signatures[call_fqn] = copy_sig(module_call_signatures[fqn])
-+                fqn = call_fqn
-+
-+            kind = node.kwargs["kind"]
-+            for arg in args:
-+                # We only update the signature of the alias used to call
-+                # the submodule. Otherwise the signatures of all aliases
-+                # would get conflated; the inputs/outputs of every call
-+                # would be recorded in every other call as well.
-+                if fqn == path:
++        for (fqn, call_fqn), markers in collect.occurrences.items():
++            if call_fqn != fqn and call_fqn not in module_call_signatures:
++                module_call_signatures[call_fqn] = copy_sig(module_call_signatures[fqn])
++            for _, node, args in markers:
++                kind = node.kwargs["kind"]
++                for arg in args:
 +                    if kind == "module_call_inputs":
-+                        module_call_signatures[path].inputs.append(get_arg_spec(arg))
++                        module_call_signatures[call_fqn].inputs.append(get_arg_spec(arg))
 +                    elif kind == "module_call_outputs":
-+                        module_call_signatures[path].outputs.append(get_arg_spec(arg))
++                        module_call_signatures[call_fqn].outputs.append(get_arg_spec(arg))
 +                    else:
 +                        raise AssertionError(f"Unknown tracepoint kind: {kind}")
          gm = res.graph_module
