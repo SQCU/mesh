@@ -1,8 +1,12 @@
-# design/torch-source-lowering-change-request.md items 5 and 6: the placed graph's numerical operators expanded, after
-# compiler/mesh_compiler/devices.py on_devices and before the schedule, into the nodes of their source formulations
-# (compiler/mesh_compiler/operations.py); torch 2.14 torch/fx/experimental/proxy_tensor.py make_fx (decomposition_table,
-# tracing_mode "fake" over the node's own fake values), torch/fx/graph.py Graph.graph_copy, and
-# torch.export.default_decompositions, the table export's run_decompositions applies (compiler/mesh_compiler/export.py)
+# design/torch-source-lowering-change-request.md items 5 and 6 and design/compilation-composition-change-request.md,
+# numerical lowerer boundary: the placed graph's numerical operators expanded, after compiler/mesh_compiler/devices.py
+# on_devices and before the schedule, into the nodes of their selected source formulations
+# (compiler/mesh_compiler/operations.py). The expanded nodes are the same ATen IR as the captured program's (torch 2.14
+# torch/fx/experimental/proxy_tensor.py make_fx, decomposition_table torch.export.default_decompositions, the table
+# export's run_decompositions applies, compiler/mesh_compiler/export.py; tracing_mode "fake" over the node's own fake
+# values; torch/fx/graph.py Graph.graph_copy), torch HOPs (while_loop, cond, switch) among them, which the upstream
+# compiler lowers; on the CPU the typed LAPACK operators (operations.LAPACK), each an explicit routine call of that
+# body; and eig/eigvals off the CPU, whose geev body is still region records (operations.METHODS, GEEV_EIGEN)
 import functools
 import operator
 
@@ -16,9 +20,10 @@ from torch.utils import _pytree as pytree
 from .devices import on_devices
 from .ir import RETURNED, Exported, shape, views
 from .ir import given as ir_given
-from .operations import (LSTSQ_FIXED, QDWH_EIGH_STEP, _eigen_geev, _least_squares_svd, _lstsq_driver,
-                         _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_result, _qdwh_eigh_state,
-                         _singular_qdwh)
+from .operations import (FRAGMENT, LSTSQ_FIXED, _eigen_geev, _fragment_decoded, _lapack_eigen, _lapack_hermitian,
+                         _lapack_least_squares, _lapack_singular, _least_squares_qr, _least_squares_svd, _lstsq_driver,
+                         _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_pop, _qdwh_eigh_result,
+                         _qdwh_eigh_state, _singular_qdwh)
 from .placement import insert_send_recv
 from .schedule import carried
 
@@ -31,15 +36,6 @@ TRACED = ("val", "tensor_meta")
 # compiler/mesh_compiler/placement.py `work_axes`: a shard's (FX value, dimension, original full extent) triples, the
 # values its own graph's nodes, mapped through every replacement below
 AXES = ("work_axes",)
-# the formulation tracing's decomposition table: torch.export.default_decompositions less the operators a typed
-# structured owner consumes as they are (operations.SOURCES: tril and triu _triangular_part), whose torch/_refs
-# decompositions make int64 index data
-PRESERVED = (A.tril, A.triu)
-
-
-def _decompositions():
-    return {op: rule for op, rule in torch.export.default_decompositions().items()
-            if getattr(op, "overloadpacket", None) not in PRESERVED}
 
 
 # `node`'s work axes, each reference its image under `mapping`: within one graph (`within`) a reference `mapping`
@@ -82,11 +78,13 @@ def _whole(node, processor):
 
 # `targets` each processor's (engine, device) (compiler/mesh_compiler/driver.py). matrix_exp has no LAPACK driver
 # (item 5: "Item 6 writes it"), so it expands on every processor (item 6: scaling and squaring, `max_squarings` the
-# operand, JAX's 16); a spectral node (svd, eigh, eig, eigvals, lstsq) is kept as placed, pinv expanded already before
-# the eigh outline (outline); `max_iterations` unused here (outline's QDWH bound)
+# operand, JAX's 16), as does the fragment-coded weight's decode (operations._fragment_decoded); a spectral node (svd,
+# eigh, eig, eigvals, lstsq) is kept as placed, pinv expanded already before the eigh outline (outline);
+# `max_iterations` unused here (outline's QDWH bound)
 def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
     formulation = functools.partial(_matrix_exponential, max_squarings=max_squarings)
-    return _expanded(graph_module, targets, {A.linalg_matrix_exp.default: lambda node: formulation})
+    return _expanded(graph_module, targets, {A.linalg_matrix_exp.default: lambda node: formulation,
+                                             FRAGMENT: lambda node: _fragment_decoded})
 
 
 # each node of a `formulations` target expanded into its source formulation (formulations[target](node)) of the node's
@@ -98,12 +96,13 @@ def decompose(graph_module, targets, *, max_iterations=10, max_squarings=16):
 # input parts take the formulation's result; the nodes whose uses or operands changed (the original's operands, its
 # expanded nodes and its uses) are given to ir.views, which makes their view and destination metadata again
 def _expanded(graph_module, targets, formulations, chosen=lambda node: True):
-    table = _decompositions()
+    table = torch.export.default_decompositions()
     graph = graph_module.graph
     sources = graph_module.meta.setdefault("decomposed", {})
     changed = []
     # Rejection filters are not part of even temporary integration validation.
-    # `chosen` selects the target's formulation; an unchosen node keeps its placed lowering (operations._lowering).
+    # `chosen` selects the target's formulation; an unchosen node stays as placed (the upstream compiler's operation,
+    # or a later expansion's node).
     for node in [n for n in graph.nodes if n.op == "call_function" and n.target in formulations and chosen(n)]:
         formulation = formulations[node.target](node)
         flat, spec = pytree.tree_flatten((node.args, node.kwargs))
@@ -187,11 +186,11 @@ def _branch_owned(branch, kept, device, origin):
     branch.recompile()
 
 
-# design/torch-source-lowering-change-request.md item 6; JAX jax/_src/tpu/linalg/eigh.py _eigh_work; P. Barham et al.,
-# Pathways, arXiv:2203.12533, section 3: an eigh node placed on a non-CPU engine outlined (a CPU-placed one keeps its
-# LAPACK driver, item 5). Its function, split at that node, becomes three captured functions: the prefix (the
+# design/torch-source-lowering-change-request.md items 5 and 6; JAX jax/_src/tpu/linalg/eigh.py _eigh_work;
+# P. Barham et al., Pathways, arXiv:2203.12533, section 3: an eigh node with elements placed on a non-CPU engine
+# outlined. Its function, split at that node, becomes three captured functions: the prefix (the
 # function's nodes not reached from the eigh, the QDWH state of its operand: operations._qdwh_eigh_state), the one
-# reusable step (operations.QDWH_EIGH_STEP: one pop of the agenda, its block's split or its eigenvalues), and the suffix
+# reusable step (operations._qdwh_eigh_pop: one pop of the agenda, its block's split or its eigenvalues), and the suffix
 # (the eigenvalues ascending with their vectors, operations._qdwh_eigh_result, then the nodes the eigh reaches). Each
 # call of the function becomes the prefix's call, 2n - 1 calls of the step (termination_size 1: a split's children
 # both of positive size, pub13 section 5.2, so n leaves and n - 1 splits) and the suffix's (export.substitute). Each
@@ -199,63 +198,74 @@ def _branch_owned(branch, kept, device, origin):
 # reads crosses as a call output and input, on the eigh's processor; each part's placed graph keeps its nodes'
 # processors and its own transfers (renumbered), and is put on its devices (devices.on_devices) as the driver's staged
 # loop does. `staged` the driver's staged records by function key, `processors` and `machines` its maps. First each
-# function's non-CPU SVD-driver lstsq nodes (gelsd, gelss) expand into operations._least_squares_svd, then its pinv
-# nodes (every overload, on every processor) into operations._pseudoinverse, its tolerance dtype
-# the selected device's (float32 on MPS, float64 else), then its non-CPU _linalg_svd nodes (a pinv's among them) into
-# operations._singular_qdwh (QDWH-SVD, `max_iterations` its QDWH bound), and the function's placed graph is staged
-# again, so their eigh nodes are outlined below (a CPU pinv's or svd's keeps its LAPACK driver)
+# function's method nodes expand into their formulations: eig and eigvals (operations._lapack_eigen on the CPU,
+# _eigen_geev else), lstsq (_lapack_least_squares on the CPU; else gelsd and gelss _least_squares_svd, gels and gelsy
+# _least_squares_qr), pinv (every overload, on every processor, operations._pseudoinverse, its tolerance dtype the
+# selected device's: float32 on MPS, float64 else), _linalg_svd (a pinv's and an SVD driver's among them:
+# operations._lapack_singular on the CPU, _singular_qdwh, QDWH-SVD with `max_iterations` its QDWH bound, else) and
+# an eigh on the CPU or without elements (operations._lapack_hermitian; its canonical empty result has no routine
+# call); the function's placed graph is staged again, so its remaining eigh nodes are outlined below
 def outline(captured, staged, targets, processors, machines, *, max_iterations=10):
     from .export import substitute
     staged, pending = dict(staged), list(captured.functions)
+
+    def on_cpu(node):
+        return targets[node.meta["processor"]][0] == "cpu"
+
+    def shapes(node):
+        return [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
 
     def pseudoinverse(node):
         dtype = torch.float32 if targets[node.meta["processor"]][1].type in ("mps", "metal") else torch.float64
         return lambda *args, **kwargs: _pseudoinverse(**_operands(node.target, args, kwargs), tolerance_dtype=dtype)
 
     def singular(node):
-        shapes = [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
-        return lambda *args, **kwargs: _singular_qdwh(**_operands(node.target, args, kwargs), shapes=shapes,
-                                                      max_iterations=max_iterations)
+        made, kept = shapes(node), {} if on_cpu(node) else {"max_iterations": max_iterations}
+        formulation = _lapack_singular if on_cpu(node) else _singular_qdwh
+        return lambda *args, **kwargs: formulation(**_operands(node.target, args, kwargs), shapes=made, **kept)
 
     # operations.LSTSQ_FIXED: the same formulation's solution, rank and singular_values, no residuals produced
     def least_squares(node):
-        shapes = [(tuple(value.shape), value.dtype) for value in node.meta["val"]]
-        if node.target is LSTSQ_FIXED:
-            solution, rank, singular = shapes
-            return lambda *args, **kwargs: (lambda made: (made[0], made[2], made[3]))(_least_squares_svd(
-                **_operands(node.target, args, kwargs), shapes=(solution, None, rank, singular)))
-        return lambda *args, **kwargs: _least_squares_svd(**_operands(node.target, args, kwargs), shapes=shapes)
-
-    def svd_driver(node):
+        made = shapes(node)
         read = ir_given(node)[1]
-        return targets[node.meta["processor"]][0] != "cpu" and _lstsq_driver(
-            read["self"].meta["val"], read.get("driver")) in ("gelsd", "gelss")
+        driver = _lstsq_driver(read["self"].meta["val"], read.get("driver"))
+        formulation = _lapack_least_squares if on_cpu(node) else \
+            _least_squares_svd if driver in ("gelsd", "gelss") else _least_squares_qr
+        if node.target is LSTSQ_FIXED:
+            solution, rank, singular = made
+            return lambda *args, **kwargs: (lambda result: (result[0], result[2], result[3]))(formulation(
+                **_operands(node.target, args, kwargs), shapes=(solution, None, rank, singular)))
+        return lambda *args, **kwargs: formulation(**_operands(node.target, args, kwargs), shapes=made)
 
-    # Reference-LAPACK zgeev.f and dgeev.f through operations.GEEV_EIGEN: an eig or eigvals placed on a non-CPU engine,
-    # complex or real input (a CPU one keeps operations._eigen)
+    # Reference-LAPACK zgeev.f and dgeev.f: an eig or eigvals, complex or real input, through Accelerate's routine on
+    # the CPU (operations.LAPACK_ZGEEV, LAPACK_DGEEV), else operations.GEEV_EIGEN
     def eigen(node):
         wanted = node.target.overloadpacket is A.linalg_eig
-        return lambda *args, **kwargs: _eigen_geev(**_operands(node.target, args, kwargs), vectors=wanted)
+        formulation = _lapack_eigen if on_cpu(node) else _eigen_geev
+        return lambda *args, **kwargs: formulation(**_operands(node.target, args, kwargs), vectors=wanted)
 
-    def off_cpu(node):
-        return targets[node.meta["processor"]][0] != "cpu"
+    def hermitian(node):
+        made = shapes(node)
+        return lambda *args, **kwargs: _lapack_hermitian(**_operands(node.target, args, kwargs), shapes=made)
+
+    def held(node):
+        return on_cpu(node) or not ir_given(node)[1]["A"].meta["val"].numel()
     for key in pending:
         placed = staged[key][0]
         found = {n.target for n in placed.graph.nodes if n.op == "call_function"}
-        if found & {*PINV, *SVD, *LSTSQ, *EIG}:
-            _expanded(placed, targets, dict.fromkeys(EIG, eigen), off_cpu)
-            _expanded(placed, targets, dict.fromkeys(LSTSQ, least_squares), svd_driver)
+        if found & {*PINV, *SVD, *LSTSQ, *EIG, EIGH}:
+            _expanded(placed, targets, dict.fromkeys(EIG, eigen))
+            _expanded(placed, targets, dict.fromkeys(LSTSQ, least_squares))
             _expanded(placed, targets, dict.fromkeys(PINV, pseudoinverse))
-            _expanded(placed, targets, dict.fromkeys(SVD, singular),
-                      lambda node: targets[node.meta["processor"]][0] != "cpu")
+            _expanded(placed, targets, dict.fromkeys(SVD, singular))
+            _expanded(placed, targets, {EIGH: hermitian}, held)
             placed.meta["invariant"] = _invariant(placed)
             staged[key] = _staged(placed, processors, machines)
     while pending:
         key = pending.pop(0)
         placed = staged[key][0]
-        # an eigh whose operand A has no element (a zero matrix extent or an empty batch: its fake value's numel) is
-        # partially evaluated to its canonical empty result: it stays placed, and operations._eigen_hermitian returns
-        # no records for it (before any _Lapack, whatever the processor). Every eigh with elements is outlined
+        # a CPU eigh and one whose operand A has no element (a zero matrix extent or an empty batch: its fake value's
+        # numel) were expanded above (operations._lapack_hermitian); every other eigh is outlined
         eigh = next((n for n in placed.graph.nodes if n.op == "call_function" and n.target is EIGH
                      and targets[n.meta["processor"]][0] != "cpu" and ir_given(n)[1]["A"].meta["val"].numel()), None)
         if eigh is None:
@@ -277,7 +287,7 @@ SVD = tuple(getattr(A._linalg_svd, overload) for overload in A._linalg_svd.overl
 LSTSQ = (*(getattr(A.linalg_lstsq, overload) for overload in A.linalg_lstsq.overloads()), LSTSQ_FIXED)
 EIG = tuple(getattr(packet, overload) for packet in (A.linalg_eig, A.linalg_eigvals, A._linalg_eigvals)
             for overload in packet.overloads())
-# the Step's inputs: the state, the input's norm and its source draw site (operations.QDWH_EIGH_STEP); the prefix's
+# the Step's inputs: the state, the input's norm and its source draw site (operations._qdwh_eigh_pop); the prefix's
 # first outputs, each Step call the previous call's state and the prefix's norm and site
 STEP_INPUTS = ("blocks", "vectors", "agenda", "top", "norm", "site")
 STATE = len(STEP_INPUTS)
@@ -307,9 +317,11 @@ def _fresh(value):
 
 
 # torch 2.14.0 torch/fx/experimental/proxy_tensor.py make_fx over the operands' fake values, copied in at the graph's
-# end, its nodes the processor's and the source node's metadata, each in `decomposed` the source's original (`origin`)
-def _formulated(graph, formula, operands, source, processor, mapping, decomposed, origin):
-    table = _decompositions()
+# end, its nodes the processor's and the source node's metadata, each in `decomposed` the source's original (`origin`);
+# a HOP's subgraph GraphModules (while_loop's, cond's) assigned on `owner`, the GraphModule root the graph is built on
+# (_owned), their nodes the same metadata
+def _formulated(graph, formula, operands, source, processor, mapping, decomposed, origin, owner=None):
+    table = torch.export.default_decompositions()
     values = [operand.meta["val"] for operand in operands]
     with detect_fake_mode(values):
         traced = make_fx(formula, decomposition_table=table, tracing_mode="fake")(*values)
@@ -319,6 +331,8 @@ def _formulated(graph, formula, operands, source, processor, mapping, decomposed
     for made in [copied[n] for n in traced.graph.nodes if n.op not in ("placeholder", "output")]:
         made.meta.update(kept, processor=processor)
         decomposed[made] = origin
+    if owner is not None:
+        _owned(owner, traced, copied, {**kept, "processor": processor}, values[0].device, origin)
     _axes_onto(source, result, mapping, within=False)
     return result
 
@@ -486,29 +500,22 @@ def _outlined(key, exported, placed, eigh, max_iterations):
     prefix_module.meta["outline"] = outlined
     prefix_key = (key, "prefix", eigh.name)
 
-    # the step
+    # the step: operations._qdwh_eigh_pop traced over the state, its body upstream ATen and HOPs (cond, while_loop),
+    # its Haar draws reading the body's Generator through its own operations.GENERATOR node (the eigh's `site`)
     made = [prefix_module.graph.output_node().args[0][k].meta["val"] for k in range(STATE)]
     step_key = ("qdwh_eigh_step", processor, tuple(blocks_value.shape), str(blocks_value.dtype), max_iterations)
-    step = torch.fx.Graph()
+    step, step_root, step_decomposed = torch.fx.Graph(), torch.nn.Module(), {}
     inputs = []
     for name, value in zip(STEP_INPUTS, made):
         node = step.placeholder(name)
         node.meta.update(val=_fresh(value), stated=processor)
         inputs.append(node)
-    called = step.call_function(QDWH_EIGH_STEP, tuple(inputs), {"max_iterations": max_iterations})
-    with detect_fake_mode(made):
-        shapes = QDWH_EIGH_STEP(*[node.meta["val"] for node in inputs], max_iterations=max_iterations)
-    called.meta.update({key: value for key, value in eigh.meta.items() if key not in TRACED + VIEWED + AXES},
-                       processor=processor, val=tuple(shapes))
-    results = []
-    for k in range(4):
-        node = step.call_function(operator.getitem, (called, k))
-        node.meta.update(processor=processor, val=called.meta["val"][k])
-        results.append(node)
-    _axes_onto(eigh, results[:2], {a: inputs[0]}, within=False)
+    results = _formulated(step, functools.partial(_qdwh_eigh_pop, max_iterations=max_iterations), inputs, eigh,
+                          processor, {a: inputs[0]}, step_decomposed, origin, owner=step_root)
     step.output(tuple(results)).meta.update(processor=processor, destination={})
-    step_module = torch.fx.GraphModule(torch.nn.Module(), step)
-    step_module.meta.update(transfers={}, invariant={},
+    step_module = torch.fx.GraphModule(step_root, step)
+    views(step)
+    step_module.meta.update(transfers={}, invariant=_invariant(step_module), decomposed=step_decomposed,
                             input_parts={node: _whole(node, processor) for node in inputs})
     step_module.recompile()
     step_exported = Exported(step_module, {}, [], list(STEP_INPUTS), [(OutputKind.USER_OUTPUT, None)] * 4,

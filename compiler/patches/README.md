@@ -371,3 +371,62 @@ This records the producer interface; module/native consumer replacement and exec
   - `error` is the error buffer's argument index, or None. It is the count of those ordered typed arguments, each one
     positional, and the formatted `error_buf_idx=` argument prints it.
   It appends the kernel to `wrapper.launched_kernels` in call order.
+
+## `torch-inductor-upstream-composition.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), on top of `torch-inductor-mps-kernel-operands.patch`
+as installed (`mps.py` before is that patch's after). It changes three files: `torch/_inductor/codegen/mps.py`
+`MetalKernel`, `torch/_inductor/codegen/cpp.py` `CppScheduling.define_kernel`, and `torch/_inductor/graph.py`
+`GraphLowering.make_subgraph`. These are the upstream hooks `compiler/mesh_compiler/lower_inductor.py` takes the
+producer's results through: its terminal emission, the CPU final source and the control bodies' backends. Prepared
+from the installed source as read. Its fuzz-0 dry run against the "before" hashes below passes; it is not applied, and
+the supervisor applies it.
+
+### What it changes
+
+- **`MetalKernel.codegen_kernel(name, composition=None)`**: with `composition` None, its output is unchanged. Otherwise
+  the same emitter composes its terminal emission from these parts, each as given:
+  - `composition.source` goes after the headers.
+  - Each argument's declaration, in the launch's order (`call_kernel` `values`, then the error buffer), is written
+    as `composition.argument(index, declaration)`.
+  - `composition.parameters` follow the arguments, and `composition.builtins` replace the thread position
+    parameters.
+  - `composition.enter` statements open the body. The upstream thread position names (`thread_pos` or the one
+    tree's, and `group_pos`) are then bound from the `composition.grid` and `composition.group` uint3 expressions.
+  - The body runs within the launch's grid: each non-reduction tree's numel, which a partial last threadgroup's
+    further threads do not run.
+  - `composition.exit` statements follow the body.
+- **`MetalKernel.store` `atomic_add`**: the address is the argument's own subscript `&var[index]` at offset 0, as every
+  other load and store takes it. The value it adds is unchanged.
+- **`CppScheduling.define_kernel`** keeps each defined kernel's declared entry and final source (after its
+  placeholder substitutions) as `wrapper.defined_kernels[kernel_name] = (kernel_decl_name, src_code)`.
+- **`GraphLowering.make_subgraph`** makes `self.subgraph_lowering(...)`, with the same arguments as before.
+  `GraphLowering.subgraph_lowering = SubgraphLowering` follows `SubgraphLowering`, so the default is unchanged. A
+  subclass sets its own, so control bodies (`Conditional`, `WhileLoop`, `InvokeSubgraph`) are scheduled by its
+  backends.
+
+### Target
+
+| Item | Value |
+|---|---|
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/_inductor/codegen/mps.py` | before `0266b4cd4723ba7f7041e7cad1b4bfca577ca904c852b5d6692a1dc7d4c37ef1`, after `8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db` |
+| `torch/_inductor/codegen/cpp.py` | before `885b73279e8686181d3706c6d6a590d07102c44ea739e8c11bb5be5ef758292f`, after `c02487bedc48b66aea869af64004a069426cdf10998abf9786efd0672d2e6d93` |
+| `torch/_inductor/graph.py` | before `efffd6b54ed0e67ad1f41c840957780fae092708adf460ecc16914dcaaba27fe`, after `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591` |
+
+### Apply, check, reverse
+
+From the repository root:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+F="$SITE/torch/_inductor/codegen/mps.py $SITE/torch/_inductor/codegen/cpp.py $SITE/torch/_inductor/graph.py"
+shasum -a 256 $F
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-upstream-composition.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-upstream-composition.patch
+shasum -a 256 $F
+```
+
+- The first `shasum` must print the "before" hashes in the table above, and the second the "after" hashes.
+- To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-upstream-composition.patch`.
+- This is pure Python source, so no rebuild is needed.

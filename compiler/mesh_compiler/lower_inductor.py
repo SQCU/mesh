@@ -1,32 +1,55 @@
-# design/compilation-composition-change-request.md items 6, 6.4 and 7, and its numerical lowerer boundary
-import copy
+# design/compilation-composition-change-request.md, numerical lowerer boundary, items 2 and 5 to 7, S8 and Complete
+# replacement; design/aot-compilation-change-request.md A1, A5, A6 and A8 to A10; design/torch-source-lowering-change-
+# request.md items 1 to 3, 5 and 6; /Users/mdot/schedule-emit/schedule_emit/lower_inductor.py at f41c64a (adapt,
+# recv_strided, lower): each processor's scheduled body given to its target's installed upstream compiler (torch 2.14.0
+# torch/_inductor: compile_fx.py's inference sequence, GraphLowering, its Scheduler and the selected backend;
+# coremltools 9.0 for the Neural Engine), its result retained as that compiler's own objects. Fields and pairing:
+# output_data/compiler-workgroup-20261114/compiler/numerical65-operands.md; upstream hooks:
+# compiler/patches/torch-inductor-mps-kernel-operands.patch and torch-inductor-upstream-composition.patch
+import ctypes
 import dataclasses
+import functools
+from pathlib import Path
 
-import sympy
+import coremltools as ct
 import torch
-from torch._guards import detect_fake_mode
-from torch._inductor.codegen.common import OpDecompositions
-from torch._inductor.codegen.simd import SIMDScheduling
-from torch._inductor.codegen.simd_kernel_features import SIMDKernelFeatures
+from torch import Tensor
+from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+from torch._inductor import config
+from torch._inductor import ir as upstream
+from torch._inductor.codegen.cpp import CppScheduling, KernelGroup
+from torch._inductor.codegen.mps import MetalKernel, MetalScheduling
+from torch._inductor.codegen.simd import DisableReduction, EnableReduction
+from torch._inductor.compile_fx import (_recursive_joint_graph_passes, _recursive_post_grad_passes,
+                                        _recursive_record_original_output_strides, fake_tensor_prop)
+from torch._inductor.cpp_builder import CppTorchDeviceOptions
+from torch._inductor.cpu_vec_isa import pick_vec_isa
 from torch._inductor.debug import DebugContext
-from torch._inductor.dtype_propagation import DtypePropagationOpsHandler, promote_types
-from torch._inductor.graph import GraphLowering
-from torch._inductor.ir import NonOwningLayout, ReinterpretView, StorageBox, TensorBox
-from torch._inductor.ops_handler import DefaultHandler
-from torch._inductor.scheduler import ExternKernelSchedulerNode, NopKernelSchedulerNode
-from torch._inductor.utils import sympy_product
-from torch._inductor.virtualized import OpsWrapper, V
-from torch.utils._sympy.interp import sympy_interp
+from torch._inductor.decomposition import select_decomp_table
+from torch._inductor.fx_passes.post_grad import view_to_reshape
+from torch._inductor.graph import GraphLowering, SubgraphLowering
+from torch._inductor.lowering import fallback_handler, register_lowering
+from torch._inductor.scheduler import Scheduler
+from torch._inductor.virtualized import V
+from torch.fx import traceback as fx_traceback
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch.utils._cpp_embed_headers import _embed_headers
 
-from .ir import SEND, channel_of
-from .operations import BOOL, CLASS, PARALLEL, REDUCTION, SCALAR, U32, _convert, _Generic, _Region
+from .ir import RECV, SEND, channel_of
+
+WITH_EFFECTS = torch.ops.higher_order.with_effects
+# torch/fx/proxy.py _COPY_META_FIELDS "custom", copied by make_fx under fx/traceback.py preserve_node_meta (a control
+# body's through torch/_higher_order_ops/utils.py _maybe_run_with_interpreter), by _inductor/pattern_matcher.py
+# _transfer_meta and by torch.export: each lowered node's original body node, its index in Produced.sources
+SOURCE = "mesh_source"
+# driver.py ENGINES: the Neural Engine's target name in Scheduled.engines
+ENGINE = "ane"
 
 
 # compiler/mesh_compiler/schedule.py assemble, module.meta["writers"], Declarations.wires: the logical copies of a
 # scheduled body's declared transfers, before any plan. `wires`: channel -> (declared transfer, logical wire value, its
 # logical bytes, declared sent view, declared landed view). Each distinct (source, wire value, sent view, read-after-write
-# writers) is one write of its members, the SENDs sharing it, in source order. Consumed by
-# compiler/mesh_compiler/lower_metal.py construct (the typed program)
+# writers) is one write of its members, the SENDs sharing it, in source order
 @dataclasses.dataclass
 class Copies:
     group: dict
@@ -50,335 +73,639 @@ def copies(module, wires):
     return Copies(group, index, member)
 
 
-# torch 2.14.0 torch/_inductor/ops_handler.py OpsHandler and DefaultHandler, codegen/common.py OpDecompositions,
-# virtualized.py OpsWrapper, dtype_propagation.py DtypePropagationOpsHandler and promote_types
-# (output_data/compiler-workgroup-20261114/compiler/numerical59-masked-review.md, numerical60-scalar-boundary.md,
-# numerical61-scheduled-producer.md): an upstream scalar operation as the metal_ir.h binary/unary/builtin instruction of
-# that name over its operands in their upstream promoted dtype, else its OpDecompositions decomposition over ops
-PRIMITIVE = {'add': 'add', 'sub': 'sub', 'mul': 'mul', 'truediv': 'div', 'mod': 'rem', 'bitwise_and': 'and',
-             'bitwise_or': 'or', 'bitwise_xor': 'xor', 'bitwise_left_shift': 'shl', 'bitwise_right_shift': 'shr',
-             'logical_and': 'and', 'logical_or': 'or', 'logical_xor': 'xor', 'and_': 'and', 'or_': 'or', 'pow': 'pow',
-             'atan2': 'atan2'}
-COMPARED = ('eq', 'ne', 'lt', 'gt', 'le', 'ge')
-LOGICAL = ('logical_and', 'logical_or', 'logical_xor', 'and_', 'or_', 'logical_not', 'not_')
-UNARY = {'neg': 'neg', 'bitwise_not': 'complement', 'logical_not': 'not', 'not_': 'not',
-         **{name: name for name in ('exp', 'log', 'sqrt', 'tanh', 'abs', 'trunc', 'floor', 'ceil', 'round', 'sin',
-                                    'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'asinh', 'acosh', 'atanh',
-                                    'exp2', 'log2')}}
+# schedule-emit lower_inductor.py recv_strided and lower_recv_strided: a received value declared at its node's shape,
+# stride, dtype and device (Inductor's fake-result and stride contracts), its storage in GraphLowering's
+# never_reuse_buffers (Lam, PLDI 1988, section 2.3: the sender still holds it); torch/_inductor/lowering.py
+# with_effects: each ORDERED effectful operation after the previous one (V.graph.additional_star_deps, effectful_ops)
+@torch.library.custom_op("mesh::recv_strided", mutates_args=())
+def recv_strided(channel: int, shape: list[int], stride: list[int], dtype: torch.dtype,
+                 device: torch.device) -> Tensor:
+    return RECV(channel)
 
 
-def _kind(dtype):
-    return CLASS[SCALAR[dtype]]
+@recv_strided.register_fake
+def _recv_strided_fake(channel, shape, stride, dtype, device):
+    return torch.empty_strided(shape, stride, dtype=dtype, device=device)
 
 
-# the scalar operations of one region `r`; `env` the region values of the index symbols sympy_interp reads, each of
-# `index` (the kernel's index dtype, OpsHandler.index_expr); `dtypes` each region value's upstream dtype
-class _Scalar(DefaultHandler):
-    def __init__(self, r, env, index):
-        self.r, self.env, self.index, self.dtypes, self.carriers = r, env, index, {}, {}
-
-    def kind(self, x):
-        return self.r.kinds[x]
-
-    def typed(self, x, dtype):
-        self.dtypes[x] = dtype
-        return x
-
-    # dtype_propagation.py DTypeVar: a value's dtype as the propagation rules read it
-    def carrier(self, x):
-        dtype = self.dtypes[x]
-        if dtype not in self.carriers:
-            self.carriers[dtype] = torch.empty([1], dtype=dtype, device='meta')
-        return self.carriers[dtype]
-
-    def as_dtype(self, x, dtype):
-        if self.dtypes[x] == dtype:
-            return x
-        return self.typed(_convert(self.r, x, self.kind(x), _kind(dtype)), dtype)
-
-    def _default(self, name, args, kwargs):
-        r = self.r
-        if name in PRIMITIVE or name in COMPARED or name in UNARY:
-            carriers = [self.carrier(a) for a in args]
-            dtype = getattr(DtypePropagationOpsHandler(), name)(*carriers)
-            operand = torch.bool if name in LOGICAL else promote_types(carriers) if name in COMPARED else dtype
-            given = [self.as_dtype(a, operand) for a in args]
-            if name in UNARY:
-                return self.typed(r(UNARY[name], _kind(dtype), *given), dtype)
-            return self.typed(r(PRIMITIVE.get(name, name), _kind(dtype), *given), dtype)
-        decomposed = getattr(OpDecompositions, name, None)
-        if decomposed is not None:
-            return OpsWrapper._unwrap(decomposed(*args, **kwargs))
-        raise NotImplementedError('torch._inductor scalar operation %s: its target lowering is unfinished (design/'
-                                  'compilation-composition-change-request.md, numerical lowerer boundary)' % name)
-
-    def constant(self, value, dtype):
-        return self.typed(self.r.const(value, _kind(dtype)), dtype)
-
-    def to_dtype(self, x, dtype, src_dtype=None, use_compute_types=True):
-        return self.as_dtype(x, dtype)
-
-    def to_dtype_bitcast(self, x, dtype, src_dtype):
-        return self.typed(self.r('bitcast', _kind(dtype), x), dtype)
-
-    def where(self, condition, a, b):
-        dtype = DtypePropagationOpsHandler().where(*[self.carrier(x) for x in (condition, a, b)])
-        a, b = self.as_dtype(a, dtype), self.as_dtype(b, dtype)
-        return self.typed(self.r('select', _kind(dtype), self.as_dtype(condition, torch.bool), a, b), dtype)
-
-    # dtype_propagation.py DtypePropagationOpsHandler.index_expr, codegen/mps.py MetalOverrides.index_expr and
-    # codegen/cpp.py CppOverrides.index_expr: the index in its requested dtype (ops.to_dtype)
-    def index_expr(self, expr, dtype):
-        return self.to_dtype(self.indexed(expr), dtype)
-
-    def value_expr(self, expr, dtype):
-        return self.to_dtype(self.indexed(expr), dtype)
-
-    # torch/utils/_sympy/interp.py sympy_interp (its integer literals torch.int64) of an upstream index expression,
-    # in the kernel's index dtype
-    def indexed(self, expr):
-        return sympy_interp(_Indexing(self), self.env, sympy.sympify(expr), index_dtype=self.index)
+_register_effectful_op(recv_strided, _EffectType.ORDERED)
+RECV_STRIDED = torch.ops.mesh.recv_strided.default
+_received = fallback_handler(RECV_STRIDED, add_to_fallback_set=False)
+_sent = fallback_handler(SEND, add_to_fallback_set=False)
 
 
-# sympy_interp's operations in an index expression: its integer literals the kernel's index dtype, else `scalar`'s
-class _Indexing(DefaultHandler):
-    def __init__(self, scalar):
-        self.scalar = scalar
+def _ordered(made, count):
+    previous = V.graph.effectful_ops.get(_EffectType.ORDERED)
+    for operation in V.graph.operations[count:]:
+        operation.has_side_effects = lambda: True
+        if previous is not None:
+            V.graph.additional_star_deps[operation.get_name()].add(previous.get_name())
+        previous = operation
+    V.graph.effectful_ops[_EffectType.ORDERED] = previous
+    return made
 
-    def _default(self, name, args, kwargs):
-        return getattr(self.scalar, name)(*args, **kwargs)
 
-    def constant(self, value, dtype):
-        return self.scalar.constant(value, self.scalar.index if dtype == torch.int64 else dtype)
+@register_lowering(RECV_STRIDED, type_promotion_kind=None)
+def _lower_received(*arguments):
+    count = len(V.graph.operations)
+    made = _received(*arguments)
+    V.graph.never_reuse_buffers.add(made.get_name())
+    return _ordered(made, count)
 
-    # interp.py _run_sympy_handler's n-ary integral sympy.Add (`sym_sum`, which DefaultHandler.__getattr__ answers)
-    def sym_sum(self, args):
-        made = args[0]
-        for x in args[1:]:
-            made = self.scalar.add(made, x)
+
+@register_lowering(SEND, type_promotion_kind=None)
+def _lower_sent(*arguments):
+    count = len(V.graph.operations)
+    return _ordered(_sent(*arguments), count)
+
+
+# ---- the retained result (numerical65-operands.md): the upstream compiler's own objects and their correspondence ----
+
+# torch include/c10/metal/error.h struct ErrorMessage, ErrorMessages (error_message_count 30): the bytes of a launch's
+# error buffer (its launch record's `error` index; OperationUtils.mm setErrorBufferIndex), a TEMPORARY of that size
+class _ErrorMessage(ctypes.Structure):
+    _fields_ = [("file", ctypes.c_char * 128), ("func", ctypes.c_char * 128), ("message", ctypes.c_char * 250),
+                ("line", ctypes.c_uint)]
+
+
+class _ErrorMessages(ctypes.Structure):
+    _fields_ = [("count", ctypes.c_uint), ("msg", _ErrorMessage * 30)]
+
+
+ERROR_BYTES = ctypes.sizeof(_ErrorMessages)
+
+
+# body input `position`: `node` the scheduled body's placeholder, `name` the upstream compiler's input (GraphLowering:
+# its graph_inputs_original key, storage offset graph_input_storage_offsets[name]; Neural Engine: its ExportedProgram
+# user input)
+@dataclasses.dataclass(frozen=True)
+class Input:
+    position: int
+    node: object
+    name: str
+
+
+# compiled output `position`: `node` the body node it returns (a SEND's value where `sent`: schedule-emit adapt returns
+# every sent value, keep_output_stride), `value` the upstream compiler's (GraphLowering.graph_outputs[position]; Neural
+# Engine: its ExportedProgram user output name)
+@dataclasses.dataclass(frozen=True)
+class Output:
+    position: int
+    node: object
+    value: object
+    sent: bool
+
+
+# codegen/simd.py codegen_node_schedule_with_kernel's second pass for SchedulerNode `node`, after finalize_indexing:
+# `variables` its split_and_set_ranges result (each a range-tree entry symbol of the kernel's range_tree_nodes, whose
+# expr is its tree root's FloorDiv or ModularIndexing), `reduction` the kernel's inside_reduction there (False inside
+# DisableReduction), `indexing` its LoopBody's index expressions over them (loop_body.py indexing_from_args, the
+# expressions LoopBody.__call__ binds; indirect symbols node._body.indirect_var_ranges')
+@dataclasses.dataclass(eq=False)
+class Ranges:
+    node: object
+    variables: tuple
+    reduction: bool
+    indexing: dict
+
+
+# one upstream-generated kernel of `graph` (its GraphLowering, a control body's own): `place` "mps" or "cpu",
+# `scheduled` the Scheduler nodes it implements in order (their read_writes the Scheduler's own accesses), `owner` the
+# backend's kernel (MeshMetalKernel: range trees, body, KernelArgs, workspace_args, metal_entry, metal_source;
+# MeshKernelGroup: its KernelArgs and CppKernelProxy loop nests), `launch` its call record as produced (mps:
+# torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error); cpu: (kernel name, arg_defs,
+# call_args, arg_types) of KernelArgs.cpp_argdefs), `ranges` (mps) its Ranges or (cpu) each finalize_kernel's
+# (CppKernelProxy, nodes), `origins` the original body nodes it implements
+@dataclasses.dataclass(eq=False)
+class Kernel:
+    place: str
+    graph: object
+    scheduled: tuple
+    owner: object
+    launch: tuple
+    ranges: tuple
+    origins: tuple
+
+
+# one upstream extern of `graph` (ExternKernelSchedulerNode `scheduled`, its node the ir.py ExternKernel: FallbackKernel,
+# ExternKernelOut, RandomSeeds, MultiOutput, mesh send and receive ...), `origins` the original body nodes, `bodies` a
+# control extern's (Conditional, WhileLoop, InvokeSubgraph: ir.py get_subgraphs) each subgraph's name and its own
+# entries, lowered and scheduled by its own GraphLowering (subgraph.graph)
+@dataclasses.dataclass(eq=False)
+class Extern:
+    graph: object
+    scheduled: object
+    origins: tuple
+    bodies: dict
+
+
+# fx_passes/replace_random.py: ir.py RandomSeeds `buffer` the body's random state it draws through, `uses` each
+# inductor_lookup_seed index and the original random node it serves; its words the body's Generator (operations.py)
+@dataclasses.dataclass(eq=False)
+class Seeds:
+    buffer: object
+    uses: tuple
+
+
+# a Neural Engine body's upstream result: `program` its torch.export ExportedProgram (Core ATen), `model` coremltools'
+# MLModel (an ML program for ComputeUnit.CPU_AND_NE at the body's own precision; its MIL Program each operation's
+# EXIR_DEBUG_HANDLE scope its SOURCE), `received` each (user input position, RECV body node) it binds as an input
+@dataclasses.dataclass(eq=False)
+class Model:
+    program: object
+    model: object
+    received: tuple
+    origins: tuple
+
+
+# one processor body's retained upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
+# `sources` its nodes and its control bodies' (SOURCE), `lowered` the graph the upstream compiler lowered (the fx graph
+# after the canonical decomposition, joint and post-grad passes; Neural Engine: its ExportedProgram), `graph` its
+# GraphLowering (buffers, layouts and aliases, graph_inputs_original, graph_input_storage_offsets, mutated_inputs,
+# removed_buffers, scheduler, wrapper_code; None for the Neural Engine), `entries` Kernel and Extern in its Scheduler's
+# emission order (a Neural Engine body's one Model), `wrapper` GraphLowering.codegen's result
+@dataclasses.dataclass(eq=False)
+class Produced:
+    processor: str
+    kind: str
+    device: object
+    module: object
+    sources: tuple
+    lowered: object
+    graph: object
+    inputs: tuple
+    outputs: tuple
+    entries: tuple
+    seeds: tuple
+    wrapper: object
+
+
+# ---- the selected upstream backends, retaining their own results ----
+
+# codegen/mps.py MetalKernel: its second-pass ranges (split_and_set_ranges after finalize_indexing)
+class MeshMetalKernel(MetalKernel):
+    def __init__(self, tiling, **kwargs):
+        super().__init__(tiling, **kwargs)
+        self.mesh_indexed, self.mesh_ranges, self.mesh_schedule = False, [], []
+
+    def finalize_indexing(self, indices):
+        super().finalize_indexing(indices)
+        self.mesh_indexed = True
+
+    def split_and_set_ranges(self, lengths):
+        made = super().split_and_set_ranges(lengths)
+        if self.mesh_indexed:
+            self.mesh_ranges.append((tuple(map(tuple, made)), self.inside_reduction))
         return made
 
 
-# the retained upstream block: `node` the torch/_inductor/scheduler.py SchedulerNode (its ir node, read_writes and
-# origins) whose loop_body.py LoopBody `_body` (its var_ranges and indexing_exprs) is `record` (operations._Generic)
-# over `buffers` {upstream buffer name: its typed view}; `accesses` each logical access in emission order (load or
-# store, the upstream buffer name, its upstream index expression, the record's input or output slot)
-@dataclasses.dataclass
-class Lowered:
-    node: object
-    record: object
-    buffers: dict
-    accesses: list
+class MeshMetalScheduling(MetalScheduling):
+    kernel_type = MeshMetalKernel
+
+    def codegen_node_schedule_with_kernel(self, node_schedule, kernel):
+        super().codegen_node_schedule_with_kernel(node_schedule, kernel)
+        kernel.mesh_indexed = False
+        kernel.mesh_schedule = [n for n in node_schedule if n is not DisableReduction and n is not EnableReduction]
+
+    def codegen_node(self, node):
+        launched = V.graph.wrapper_code.__dict__.setdefault("launched_kernels", [])
+        start = len(launched)
+        super().codegen_node(node)
+        self.scheduler.mesh_made.append(("simd", node, tuple(launched[start:])))
 
 
-# loop_body.py LoopBodyBlock.__call__ (its InterpreterShim over V.ops) under this handler: each load a logical extract
-# (metal_ir.h metal_ir_extract) and each store a logical scatter (metal_ir_scatter) of the buffer's storage at its
-# interpreted index, in the block the upstream operation is in, an InputBuffer's index relative to its input's data
-# (graph.py GraphLowering.graph_input_storage_offsets, lowering.py as_strided); a mutated buffer its scheduler.py
-# mutation_real_name; OpsHandler.masked as codegen/mps.py MetalOverrides.masked's structured If (metal_ir_if_begin ..
-# metal_ir_if_end), `other` in its false block
-class _Loop(_Scalar):
-    def __init__(self, r, symbols, buffers, index):
-        kind = _kind(index)
-        super().__init__(r, {}, index)
-        self.env.update((s, self.typed(r.add(('convert', kind, r.add(('loop', d), U32)), kind), index))
-                        for d, s in enumerate(symbols))
-        self.buffers, self.views = buffers, {}
-        self.inputs, self.outputs, self.accesses = [], [], []
+# codegen/cpp.py KernelGroup: each finalize_kernel's CppKernelProxy (its loop nests and local buffers) and its call
+class MeshKernelGroup(KernelGroup):
+    def __init__(self):
+        super().__init__()
+        self.mesh_proxies, self.mesh_launch = [], None
 
-    def storage(self, name):
-        name = V.graph.scheduler.mutation_real_name.get(name, name)
-        if name not in self.views:
-            t = self.buffers[name]
-            self.views[name] = t.as_strided((t.untyped_storage().nbytes() // t.element_size(),), (1,), 0)
-        return name, self.views[name], V.graph.graph_input_storage_offsets.get(name, 0)
+    def finalize_kernel(self, new_kernel, nodes):
+        self.mesh_proxies.append((new_kernel, tuple(nodes)))
+        super().finalize_kernel(new_kernel, nodes)
 
-    def slot(self, operands, t):
-        for k, (held, _) in enumerate(operands):
-            if held is t:
-                return k
-        operands.append((t, None))
-        return len(operands) - 1
-
-    def load(self, name, index):
-        name, t, base = self.storage(name)
-        k = self.slot(self.inputs, t)
-        self.accesses.append(('load', name, index, k))
-        dtype = DtypePropagationOpsHandler().load(name, index)
-        return self.typed(self.r('extract', CLASS[SCALAR[t.dtype]], self.indexed(base + index), integer=k), dtype)
-
-    def store(self, name, index, value, mode=None):
-        if mode is not None:
-            raise NotImplementedError('torch._inductor store mode %s: its target lowering is unfinished' % mode)
-        name, t, base = self.storage(name)
-        k = self.slot(self.outputs, t)
-        self.accesses.append(('store', name, index, k))
-        self.r.scatter(k, [self.indexed(base + index)], self.as_dtype(value, V.graph.get_dtype(name)), None)
-
-    def masked(self, mask, body, other):
-        r = self.r
-        r.add(('if_begin', self.as_dtype(mask, torch.bool)), BOOL)
-        made = body()
-        values = list(made) if isinstance(made, (tuple, list)) else [made]
-        r.add(('if_else', tuple(values)), BOOL)
-        fallbacks = tuple(self.typed(r.const(other, self.kind(v)), self.dtypes[v]) for v in values)
-        first = r.add(('if_end', fallbacks), self.kind(values[0]))
-        results = [first] + [r.add(('if_result', first, k), self.kind(v)) for k, v in enumerate(values[1:], 1)]
-        for x, v in zip(results, values):
-            self.typed(x, self.dtypes[v])
-        return tuple(results) if isinstance(made, (tuple, list)) else results[0]
-
-    # metal_ir.h metal_ir_scatter: an output its scatters store, its yielded value unused; each yields a literal of
-    # its kind, made in the function's block
-    def made(self, sizes, iteration):
-        r = self.r
-        r.done(*[r.const(0, CLASS[SCALAR[t.dtype]]) for t, _ in self.outputs])
-        return _Generic(sizes, self.inputs, self.outputs, r,
-                        [PARALLEL] * iteration + [REDUCTION] * (len(sizes) - iteration))
+    def call_kernel(self, wrapper, kernel_name):
+        self.mesh_launch = (kernel_name, *map(tuple, self.args.cpp_argdefs()))
+        super().call_kernel(wrapper, kernel_name)
 
 
-# one upstream SchedulerNode `node` (its LoopBody `_body`) as its Lowered over `buffers`; `index` its kernel's index
-# dtype (torch/_inductor/codegen/simd_kernel_features.py SIMDKernelFeatures.select_index_dtype), from its producer
-def lowered(node, buffers, index):
-    body = node._body
-    r, symbols = _Region(), list(body.var_ranges)
-    loop, iteration = _Loop(r, symbols, buffers, index), len(body.iter_vars)
-    with V.set_ops_handler(loop):
-        body(symbols[:iteration], symbols[iteration:], allow_same_symbol_in_index=True)
-    return Lowered(node, loop.made([int(n) for n in body.var_ranges.values()], iteration), buffers, loop.accesses)
+class MeshCppScheduling(CppScheduling):
+    def reset_kernel_group(self):
+        self.kernel_group = MeshKernelGroup()
+
+    def flush(self):
+        group = self.kernel_group
+        super().flush()
+        if group.mesh_launch is not None:
+            self.scheduler.mesh_made.append(("cpp", group))
 
 
-# one upstream Scheduler node's result (torch 2.14.0 torch/_inductor/scheduler.py SchedulerNode and FusedSchedulerNode,
-# codegen/cpp.py OuterLoopFusedSchedulerNode outer_fused_nodes and outer_loop_fusion_depth): `scheduled` that node, its
-# fusion and loop structure; `members` each member SchedulerNode in its order with its Lowered; `origins` every
-# member's original body nodes; `index` its kernel index dtype (numerical62-retained-result.md)
-@dataclasses.dataclass(eq=False)
-class Group:
-    scheduled: object
-    members: list
-    origins: tuple
-    index: object
-    place: int = 0
-    node: int = 0
+SELECTED = {"mps": MeshMetalScheduling, "cpu": MeshCppScheduling}
 
 
-# the retained upstream compilation of one scheduled body: `graph` its GraphLowering (env, operations, buffers,
-# graph_inputs_original, graph_input_storage_offsets and its Scheduler, nodes as fused), `copied` each body node's node
-# in the lowered copy (copy.deepcopy's memo), `originals` the inverse, `held` {upstream buffer name: its typed view}
-@dataclasses.dataclass
-class Upstream:
-    graph: object
-    copied: dict
-    originals: dict
-    held: dict
+# scheduler.py Scheduler with the selected backends (create_backend) and its emission order (codegen_extern_call)
+class MeshScheduler(Scheduler):
+    def __init__(self, nodes, selected):
+        self.mesh_selected, self.mesh_made = selected, []
+        super().__init__(nodes)
 
-    # the typed view of upstream buffer `name`, its scheduler.py mutation_real_name: one given (an input's, a
-    # construction's value), a NonOwningLayout its view of the buffer it aliases, else its own layout over its storage
-    def buffer(self, name):
-        name = self.graph.scheduler.mutation_real_name.get(name, name)
-        if name not in self.held:
-            layout = self.graph.get_buffer(name).get_layout()
-            if isinstance(layout, NonOwningLayout):
-                self.held[name] = self.reinterpret(layout.view)
-            else:
-                storage = torch.empty(int(layout.storage_size()), dtype=layout.dtype, device='meta')
-                self.held[name] = storage.as_strided([int(n) for n in layout.size], [int(n) for n in layout.stride],
-                                                     int(layout.offset))
-        return self.held[name]
+    def create_backend(self, device):
+        V.graph.add_device_info(device)
+        return self.mesh_selected[device.type](self)
 
-    # an ir.py ReinterpretView's typed view: its buffer's at its layout, an InputBuffer's offset relative to its
-    # input's data (graph.py graph_input_storage_offsets)
-    def reinterpret(self, view):
-        name, layout = view.data.get_name(), view.get_layout()
-        base = self.buffer(name)
-        at = int(layout.offset) + int(self.graph.graph_input_storage_offsets.get(name, 0))
-        return base.as_strided([int(n) for n in layout.size], [int(n) for n in layout.stride], at)
-
-    # body node `node`'s value as GraphLowering.env holds it, None where it is not realized
-    def value(self, node):
-        made = self.graph.env.get(self.copied[node])
-        made = made.data if isinstance(made, TensorBox) else made
-        if isinstance(made, ReinterpretView):
-            return self.reinterpret(made)
-        if isinstance(made, StorageBox) and made.is_realized():
-            return self.buffer(made.data.get_name())
-        return None
-
-    # a value construction gave body node `node` (an explicit method's, a channel's) as its upstream buffer's view
-    def given(self, node, value):
-        made = self.graph.env.get(self.copied.get(node))
-        made = made.data if isinstance(made, TensorBox) else made
-        if isinstance(made, StorageBox) and isinstance(value, torch.Tensor):
-            self.held.setdefault(made.data.get_name(), value)
-
-    # the original body nodes of an upstream node's origins (ir.py get_origins)
-    def origins(self, scheduled):
-        return tuple(dict.fromkeys(self.originals[n] for member in scheduled.get_nodes() if member.node is not None
-                                   for n in member.node.get_origins() if n in self.originals))
-
-    # the Scheduler's nodes in order, each (it, its original body nodes, whether it computes a body: not an
-    # ExternKernelSchedulerNode or NopKernelSchedulerNode)
-    def nodes(self):
-        return [(scheduled, self.origins(scheduled),
-                 not isinstance(scheduled, (ExternKernelSchedulerNode, NopKernelSchedulerNode)))
-                for scheduled in self.graph.scheduler.nodes]
-
-    # the Group of upstream Scheduler node `scheduled`: its members' bodies at its kernel index dtype (codegen/simd.py
-    # SIMDScheduling: simd_kernel_features.py SIMDKernelFeatures.select_index_dtype; codegen/cpp.py's cpp_utils.py
-    # INDEX_TYPE int64_t)
-    def group(self, scheduled):
-        with V.set_graph_handler(self.graph), V.set_fake_mode(self.graph.fake_mode):
-            members = list(scheduled.get_nodes())
-            if isinstance(self.graph.scheduler.get_backend(scheduled.get_device()), SIMDScheduling):
-                numel, reduction = (sympy_product(s) for s in scheduled.group[1])
-                index = SIMDKernelFeatures(members, numel, reduction).select_index_dtype()
-            else:
-                index = torch.int64
-            made = [(member, lowered(member, {name: self.buffer(name) for name in [
-                *member.used_buffer_names(), *member.get_buffer_names()]}, index)) for member in members]
-        return Group(scheduled, made, self.origins(scheduled), index)
+    def codegen_extern_call(self, scheduler_node):
+        super().codegen_extern_call(scheduler_node)
+        self.mesh_made.append(("extern", scheduler_node))
 
 
-# design/compilation-composition-change-request.md, numerical lowerer boundary: the installed upstream compiler over one
-# scheduled body before any source emission (torch 2.14.0 torch/_inductor/graph.py GraphLowering run under
-# debug.py DebugContext, init_wrapper_code, _update_scheduler: its Scheduler's fusion), on a copy of the body, its
-# inputs the body's own placeholders (`held` their typed views by target)
-def compiled(module, held):
-    memo = {}
-    body = copy.deepcopy(module, memo)
-    copied = {node: memo[node] for node in module.graph.nodes}
-    inputs = [n.meta["val"] for n in body.graph.nodes if n.op == "placeholder"]
-    fake = detect_fake_mode(inputs)
-    with DebugContext(), V.set_fake_mode(fake):
-        graph = GraphLowering(body, example_inputs=inputs, shape_env=fake.shape_env if fake else None,
-                              is_inference=True)
-        with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]):
-            graph.run(*inputs)
-            graph.init_wrapper_code()
-            graph._update_scheduler()
-    return Upstream(graph, copied, {made: node for node, made in copied.items()},
-                    {n.name: held[n.target] for n in module.graph.nodes if n.op == "placeholder" and n.target in held})
+def _update_scheduler(self):
+    with config.patch("triton.store_cubin", False):
+        self.scheduler = MeshScheduler(self.operations, self.mesh_selected)
 
 
-# the explicit compiled numerical methods an upstream extern of a body node selects: Mesh's own operators
-# (compiler/mesh_compiler/operations.py, torch.ops.mesh) and the LAPACK drivers of operations.py _Lapack
-METHODS = (torch.ops.aten._linalg_svd.default, torch.ops.aten._linalg_eigh.default, torch.ops.aten.linalg_eig.default,
-           torch.ops.aten.linalg_lstsq.default)
+# graph.py GraphLowering and its control bodies' SubgraphLowering (make_subgraph: torch-inductor-upstream-
+# composition.patch subgraph_lowering), each scheduled with the selected backends
+class MeshLowering(GraphLowering):
+    def __init__(self, gm, *, selected, **kwargs):
+        self.mesh_selected = selected
+        super().__init__(gm, **kwargs)
+
+    _update_scheduler = _update_scheduler
 
 
-def method(node):
-    return getattr(node.target, 'namespace', None) == 'mesh' or node.target in METHODS
+class MeshSubgraph(SubgraphLowering):
+    def __init__(self, parent, *args, **kwargs):
+        self.mesh_selected = parent.mesh_selected
+        super().__init__(parent, *args, **kwargs)
+
+    _update_scheduler = _update_scheduler
 
 
-# compiler/mesh_compiler/ir.py Scheduled.compilation (numerical63-produced-body.md): each machine body's input roots
-# (compiler/mesh_compiler/lower_metal.py placeholders) once, its upstream result over them (`compiled`), then its
-# construction (lower_metal.py construct) of that result and its retained operands
-def lower(scheduled):
-    from .lower_metal import construct, placeholders
-    made = {}
-    for (key, group), operands in scheduled.compilation.items():
-        module = scheduled.modules[key][group]
-        roots = placeholders(list(module.graph.nodes), operands["kinds"], operands["sources"])
-        supplied = compiled(module, {node.target: root[0] for node, root in roots.items()})
-        made[key, group] = construct(module, roots=roots, supplied=supplied, **operands)
+MeshLowering.subgraph_lowering = MeshSubgraph.subgraph_lowering = MeshSubgraph
+
+
+# ---- the producer ----
+
+# a copy of `module` (torch/fx/graph.py graph_copy: each node's meta a shallow copy) and of each control body it holds
+# (get_attr of a GraphModule), each copied node's SOURCE its original's index in `sources`. Returns (graph, its returned
+# values, {get_attr target: its body's copy})
+def _copied(module, sources):
+    graph, copied = torch.fx.Graph(), {}
+    returned = graph.graph_copy(module.graph, copied)
+    for node, made in copied.items():
+        made.meta["custom"] = {**made.meta.get("custom", {}), SOURCE: len(sources)}
+        sources.append(node)
+    bodies = {}
+    for node in module.graph.nodes:
+        held = functools.reduce(getattr, node.target.split("."), module) if node.op == "get_attr" else None
+        if isinstance(held, torch.fx.GraphModule):
+            body, made, nested = _copied(held, sources)
+            body.output(made)
+            bodies[node.target] = _module(held, body, nested)
+    return graph, returned, bodies
+
+
+def _module(root, graph, bodies):
+    made = torch.fx.GraphModule(root, graph)
+    for target, body in bodies.items():
+        made.add_submodule(target, body)
     return made
+
+
+# schedule-emit lower_inductor.py adapt over that copy: with_effects as its operator, each RECV as recv_strided at its
+# node's value, every SEND's value also returned. Returns (copy, the body's and its control bodies' nodes by SOURCE,
+# the sent values' original nodes)
+def adapted(module):
+    sources = []
+    graph, returned, bodies = _copied(module, sources)
+    sent = []
+    for node in list(graph.nodes):
+        if node.target is WITH_EFFECTS:
+            token, operator, *arguments = node.args
+            with graph.inserting_before(node):
+                call = graph.call_function(operator, tuple(arguments), dict(node.kwargs))
+            call.meta = {**node.meta}
+            for getitem in list(node.users):
+                getitem.replace_all_uses_with(token if getitem.args[1] == 0 else call)
+                graph.erase_node(getitem)
+            graph.erase_node(node)
+            node = call
+        if node.target is SEND:
+            sent.append(node.args[0])
+        elif node.target is RECV:
+            value = node.meta["val"]
+            node.target = RECV_STRIDED
+            node.args = (node.args[0], list(value.shape), list(value.stride()), value.dtype, value.device)
+    sent = tuple(dict.fromkeys(sent))
+    returned = tuple(returned) if isinstance(returned, (tuple, list)) else (returned,)
+    graph.output(returned + sent)
+    sources = tuple(sources)
+    return _module(module, graph, bodies), sources, tuple(_source(value, sources) for value in sent)
+
+
+# torch/_inductor/decomposition.py select_decomp_table under make_fx, each traced node carrying its original's meta
+# (fx/interpreter.py run_node under preserve_node_meta)
+def traced(module, inputs):
+    with fx_traceback.preserve_node_meta():
+        return make_fx(torch.fx.Interpreter(module).run, decomposition_table=select_decomp_table(),
+                       tracing_mode="fake")(*inputs)
+
+
+def _source(node, sources):
+    k = node.meta.get("custom", {}).get(SOURCE)
+    return None if k is None else sources[k]
+
+
+def _origins(nodes, sources):
+    return tuple(dict.fromkeys(s for n in nodes if (s := _source(n, sources)) is not None))
+
+
+def _node_origins(scheduled, sources):
+    return _origins([o for node in scheduled for member in node.get_nodes() if member.node is not None
+                     for o in member.node.get_origins()], sources)
+
+
+# a SIMD kernel's launch record as its Kernel, its Ranges in its second pass's node order
+def _simd(graph, scheduled, kernel, launch, sources):
+    ranges = tuple(Ranges(node, variables, reduction, node._body.indexing_from_args(variables))
+                   for node, (variables, reduction) in zip(kernel.mesh_schedule, kernel.mesh_ranges))
+    return Kernel("mps", graph, (scheduled,), kernel, launch, ranges, _node_origins((scheduled,), sources))
+
+
+def _cpp(graph, group, sources):
+    scheduled = tuple(group.scheduled_nodes)
+    return Kernel("cpu", graph, scheduled, group, group.mesh_launch, tuple(group.mesh_proxies),
+                  _node_origins(scheduled, sources))
+
+
+# `graph`'s Scheduler emission (MeshScheduler.mesh_made) as entries, each control extern's bodies their own
+def _entries(graph, sources):
+    made = []
+    for kind, *record in graph.scheduler.mesh_made:
+        if kind == "extern":
+            (scheduled,) = record
+            made.append(Extern(graph, scheduled, _node_origins((scheduled,), sources),
+                               {body.name: _entries(body.graph, sources) for body in scheduled.node.get_subgraphs()}))
+        elif kind == "simd":
+            scheduled, launched = record
+            made += [_simd(graph, scheduled, kernel, launch, sources) for kernel, launch in launched]
+        else:
+            made.append(_cpp(graph, record[0], sources))
+    return tuple(made)
+
+
+# each RandomSeeds buffer by its origin (the lowered inductor_seeds node), each lookup's index and original random node
+def _seeds(graph, lowered, sources):
+    owned = {origin: buffer for buffer in graph.buffers if isinstance(buffer, upstream.RandomSeeds)
+             for origin in buffer.origins}
+    uses = {}
+    for node in lowered.graph.nodes:
+        if node.target is torch.ops.prims.inductor_lookup_seed.default:
+            uses.setdefault(owned[node.args[0]], []).append((node.args[1], _source(node, sources)))
+    return tuple(Seeds(buffer, tuple(made)) for buffer, made in uses.items())
+
+
+def _returned(module):
+    returned = module.graph.output_node().args[0]
+    return tuple(returned) if isinstance(returned, (tuple, list)) else (returned,)
+
+
+def _placeholders(graph):
+    return [n for n in graph.nodes if n.op == "placeholder"]
+
+
+# compile_fx.py's inference sequence over one adapted body (fw_compiler_base: original output strides, joint graph
+# passes; _InProcessFxCompile.codegen_and_compile: view_to_reshape, fake_tensor_prop, post-grad passes, GraphLowering run
+# and codegen), its Scheduler with the selected backends (SELECTED)
+def _inductor(module, body, sources, sent, processor, kind, device):
+    inputs = [n.meta["val"] for n in _placeholders(body.graph)]
+    received = any(n.target is RECV_STRIDED for n in body.graph.nodes)
+    with DebugContext(), config.patch(assume_unaligned_fallback_output=received):
+        lowered = traced(body, inputs)
+        _recursive_record_original_output_strides(lowered)
+        lowered = _recursive_joint_graph_passes(lowered, input_device=device)
+        view_to_reshape(lowered)
+        with torch.no_grad():
+            fake = fake_tensor_prop(lowered, inputs)
+        _recursive_record_original_output_strides(lowered)
+        with V.set_fake_mode(fake):
+            _recursive_post_grad_passes(lowered, is_inference=True)
+            graph = MeshLowering(lowered, selected=SELECTED, example_inputs=inputs, shape_env=fake.shape_env,
+                                 is_inference=True)
+            graph.freeze_runtime_asserts()
+            with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]):
+                graph.run(*inputs)
+                wrapper = graph.codegen()
+                names = [n.target for n in _placeholders(lowered.graph)]
+                returned = _returned(module)
+                return Produced(
+                    processor, kind, device, module, sources, lowered, graph,
+                    tuple(Input(k, node, name) for k, (node, name) in enumerate(zip(_placeholders(module.graph),
+                                                                                     names))),
+                    tuple(Output(k, node, value, k >= len(returned))
+                          for k, (node, value) in enumerate(zip(returned + sent, graph.graph_outputs))),
+                    _entries(graph, sources), _seeds(graph, lowered, sources), wrapper)
+
+
+# the Neural Engine's upstream compiler over one adapted body: each received value an input of its own (the model
+# runs once its receives have landed), each SEND erased (its value is returned), torch.export's non-strict export at
+# its fake values and Core ATen decomposition (run_decompositions), each node's debug_handle its SOURCE, coremltools'
+# torch.export frontend (converters/mil/frontend/torch ops.py: the EXIR_DEBUG_HANDLE scope) to an ML program for
+# ComputeUnit.CPU_AND_NE, compute_precision FLOAT32 (no fp16 rewrite: each value at its own dtype), not loaded
+def _engine(module, body, sources, sent, processor, kind, device):
+    graph = body.graph
+    first = next(n for n in graph.nodes if n.op != "placeholder")
+    received = []
+    for node in list(graph.nodes):
+        if node.target is RECV_STRIDED:
+            with graph.inserting_before(first):
+                made = graph.placeholder(f"received_{node.args[0]}")
+            made.meta = {**node.meta}
+            node.replace_all_uses_with(made)
+            graph.erase_node(node)
+            received.append(_source(made, sources))
+        elif node.target is SEND:
+            graph.erase_node(node)
+    graph.lint()
+    body.recompile()
+    placeholders = _placeholders(graph)
+    program = torch.export.export(body, tuple(n.meta["val"] for n in placeholders), strict=False).run_decompositions()
+    for node in program.graph.nodes:
+        if (k := node.meta.get("custom", {}).get(SOURCE)) is not None:
+            node.meta["debug_handle"] = k
+    model = ct.convert(program, convert_to="mlprogram", compute_units=ct.ComputeUnit.CPU_AND_NE,
+                       compute_precision=ct.precision.FLOAT32, minimum_deployment_target=ct.target.macOS26,
+                       skip_model_load=True)
+    signature = program.graph_signature
+    count = len(_placeholders(module.graph))
+    returned = _returned(module)
+    entry = Model(program, model, tuple((count + k, node) for k, node in enumerate(received)),
+                  _origins(program.graph.nodes, sources))
+    return Produced(
+        processor, kind, device, module, sources, program, None,
+        tuple(Input(k, node, name) for k, (node, name) in enumerate(zip(_placeholders(module.graph),
+                                                                         signature.user_inputs))),
+        tuple(Output(k, node, value, k >= len(returned))
+              for k, (node, value) in enumerate(zip(returned + sent, signature.user_outputs))),
+        (entry,), (), None)
+
+
+# one body at its processor's target: `kind` "cpu", "mps" or ENGINE, `device` the processor's torch.device
+def produced(module, processor, kind, device):
+    body, sources, sent = adapted(module)
+    return (_engine if kind == ENGINE else _inductor)(module, body, sources, sent, processor, kind, device)
+
+
+# design/compilation-composition-change-request.md, numerical lowerer boundary (schedule-emit lower_inductor.py lower):
+# each function's processor bodies (compiler/mesh_compiler/schedule.py schedule's third result, ir.py
+# Scheduled.processor_modules {function key: {processor: GraphModule}}) given to the upstream compiler at its
+# processor's target, from the full original processor maps: Scheduled.devices its torch.device, Scheduled.engines its
+# engine (ENGINE: the Neural Engine, whose fake values share the host's device; driver.py). Returns {function key:
+# {processor: Produced}}
+def lower(scheduled):
+    devices, engines = scheduled.devices, scheduled.engines
+    return {key: {processor: produced(module, processor, engines.get(processor, devices[processor].type),
+                                      devices[processor])
+                  for processor, module in bodies.items()}
+            for key, bodies in scheduled.processor_modules.items()}
+
+
+# ---- terminal emission ----
+
+# the terminal composition of one pass of one Metal kernel, the patched MetalKernel.codegen_kernel's `composition`
+# (torch-inductor-upstream-composition.patch): `source` its definitions before the kernel (the executor's helper as
+# printed, never parsed); `parameters` its own kernel parameters and `builtins` its builtin ones; `enter` its
+# statements before the body, `grid` and `group` uint3 expressions the body's thread position in its grid and
+# threadgroup after them, `exit` its statements after the body's stores; `paged` {argument index: its arena slot},
+# each other argument at its own slot (argument i at buffer i, metal_lower.mm)
+@dataclasses.dataclass(frozen=True)
+class Composition:
+    source: str
+    parameters: tuple
+    builtins: tuple
+    enter: tuple
+    grid: str
+    group: str
+    exit: tuple
+    paged: dict
+
+    def argument(self, index, declaration):
+        # a paged argument's declaration names its arena, the body's subscript its local accessor of the same name
+        if index in self.paged:
+            return f"{declaration}_arena [[buffer({self.paged[index]})]]"
+        return f"{declaration} [[buffer({index})]]"
+
+
+# metal_ir.h metal_ir_value_paged: byte b of a paged root at byte frames[b / page] page + b mod page of its arena (the
+# arena bound from its first byte, its frame table after the arguments: metal_lower.mm), element i of an argument at
+# byte origin + i sizeof(T) of its root; `P` the argument's own declared pointer type, every load and store its subscript
+PAGED = """
+template <typename P> struct mesh_paged {
+  P arena;
+  const device uint* frames;
+  ulong origin, page;
+  decltype(*P()) operator[](long i) const thread {
+    const ulong at = origin + ulong(i) * sizeof(arena[0]);
+    return arena[(ulong(frames[at / page]) * page + at % page) / sizeof(arena[0])];
+  }
+};
+"""
+# metal-microbench metal_transport.mm UpstreamHelper: each function's parameters as Tint's MSL printer types them
+# (tint/lang/msl/writer/printer: a storage runtime array `{const }device tint_array<T, 1>*`, an atomic `atomic_uint` or
+# `atomic_ulong`, u64 `ulong`), `votes` its workgroup array of 1024 / kSimd (metal_lower.h kSimd 32) u32
+VOTES = 1024 // 32
+# TransportViews: each word's (word, kind) its parameter; (1, 3) a later pass's `first` before its `supplied`
+WORDS = {(0, 1): "step", (1, 0): "phases", (1, 1): "counts", (1, 2): "status", (2, 0): "flags", (3, 0): "list"}
+BUILTINS = ("uint3 mesh_lid [[thread_position_in_threadgroup]]", "uint3 mesh_gid [[threadgroup_position_in_grid]]",
+            "uint mesh_lane [[thread_index_in_simdgroup]]", "uint3 mesh_threads [[threads_per_threadgroup]]",
+            "uint3 mesh_position [[thread_position_in_grid]]")
+
+
+def _view(name, slot, element, write):
+    return f"{'device' if write else 'const device'} tint_array<{element}, 1>* mesh_{name} [[buffer({slot})]]"
+
+
+# kernel `kernel`'s Composition for one pass from its native composition `made` (compiler/mesh_compiler/metal.py
+# Composed: metal_ir_upstream_composition's words, later words, pages (with each argument binding's origin), readiness
+# and table, metal_ir_upstream_helper's Helper (None: no transport), `later` its pass): each word, readiness table and
+# record table a parameter at its slot as the helper's parameters type it; the helper's mesh_acquire_first (pass 0) or
+# mesh_acquire_later (pass 1) first, its threadgroup returning where it does not run (.w 0), the body at the position it
+# gives (pass 0 its own: thread_position_in_grid; pass 1 its listed threadgroup's .xyz, whole threadgroups); mesh_release
+# after the body's stores, its arrival counters in `sent` order; each paged argument's accessor over its arena
+def composed(kernel, made):
+    helper, later, args = made.helper, bool(made.later), kernel.owner.args
+    values = kernel.launch[1]
+    parameters, enter, exit_, arrivals = [], [], [], []
+    firsts = ["first", "supplied"] if later else ["supplied"]
+    for w in made.later_words if later else made.words:
+        if w.word >= 4:
+            name = f"arrivals{w.word - 4}"
+            arrivals.append(f"mesh_{name}")
+        else:
+            name = WORDS[w.word, w.kind] if (w.word, w.kind) in WORDS else firsts.pop(0)
+        element = "ulong" if w.kind % 2 else "uint"
+        parameters.append(_view(name, w.slot, f"atomic_{element}" if w.kind >= 2 else element, w.write))
+    if made.readiness is not None:
+        r = made.readiness
+        parameters += [_view("classes", r.later_class_slot if later else r.class_slot, "uint", False),
+                       _view("spans", r.later_span_slot if later else r.span_slot, "uint", False)]
+    if made.table is not None:
+        parameters.append(_view("records", made.table.later_slot if later else made.table.slot, "ulong", False))
+    for slot in dict.fromkeys(p.frames for p in made.pages):
+        parameters.append(f"const device uint* mesh_frames{slot} [[buffer({slot})]]")
+    for p in made.pages:
+        outer = values[p.argument]
+        inner = args.output_buffers[outer] if outer in args.output_buffers else args.input_buffers[outer]
+        enter.append(f"const mesh_paged<decltype({inner}_arena)> {inner}{{{inner}_arena, mesh_frames{p.frames}, "
+                     f"{p.origin}ul, {p.page_bytes}ul}};")
+    grid = "mesh_position"
+    acquire = (helper.later if later else helper.acquire) if helper is not None else None
+    if acquire is not None:
+        common = ["mesh_lid", "mesh_gid", "mesh_lane", "mesh_threads", "mesh_step", "mesh_phases", "mesh_counts"]
+        own = ["mesh_status", "mesh_first", "mesh_list"] if later else ["mesh_flags"]
+        enter += [f"threadgroup tint_array<uint, {VOTES}> mesh_votes;",
+                  f"const uint4 mesh_acquired = {acquire}("
+                  + ", ".join(common + own + ["mesh_classes", "mesh_spans", "mesh_records", "&mesh_votes"]) + ");",
+                  "if (mesh_acquired.w == 0) return;"]
+        if later:
+            grid = "(mesh_acquired.xyz * mesh_threads + mesh_lid)"
+    if helper is not None and helper.release is not None:
+        exit_.append(f"{helper.release}(" + ", ".join(["mesh_lid", "mesh_threads", "mesh_step", "mesh_status",
+                                                       "mesh_supplied", "mesh_records", *arrivals]) + ");")
+    source = (helper.source if helper is not None else "") + (PAGED if made.pages else "")
+    return Composition(source, tuple(parameters), BUILTINS, tuple(enter), grid, "mesh_lid", tuple(exit_),
+                       {p.argument: p.slot for p in made.pages})
+
+
+# metal_ir.h struct metal_ir_upstream_emission
+@dataclasses.dataclass(frozen=True)
+class Emission:
+    source: str
+    entry: str
+    types: tuple
+    compile: tuple
+    link: tuple
+
+
+# metal_ir.h metal_ir_upstream_emitted: the kernel's terminal emission by its own upstream emitter. Metal: the patched
+# MetalKernel.codegen_kernel of the retained kernel with `composition` (None: as produced), its headers expanded
+# (torch/mps/__init__.py compile_shader's _embed_headers). CPU: cpp.py define_kernel's final source and declared entry
+# (torch-inductor-upstream-composition.patch defined_kernels), its call's C types, codecache.py CppCodeCache's build
+# options (CppTorchDeviceOptions for the cpu, CppPythonBindingsCodeCache: no libtorch, shared) in cpp_builder.py
+# CppBuilder's argument form; its pointers each its value's flat bytes
+def emitted(kernel, composition=None):
+    owner = kernel.owner
+    if kernel.place == "cpu":
+        entry, source = kernel.graph.wrapper_code.defined_kernels[kernel.launch[0]]
+        options = CppTorchDeviceOptions(vec_isa=pick_vec_isa(), include_pytorch=False, device_type="cpu", shared=True)
+        compile_ = (options.get_compiler(), *[f for d in options.get_definitions() for f in ("-D", d)],
+                    *[f"-I{d}" for d in options.get_include_dirs()], *[f"-{f}" for f in options.get_cflags()],
+                    *options.get_passthrough_args())
+        link = (*[f"-{f}" for f in options.get_ldflags()], *[f"-L{d}" for d in options.get_libraries_dirs()],
+                *[f"-l{lib}" for lib in options.get_libraries()])
+        return Emission(source, entry, kernel.launch[3], compile_, link)
+    with V.set_graph_handler(kernel.graph), V.set_kernel_handler(owner):
+        owner.codegen_kernel(owner.metal_entry, composition)
+    source = _embed_headers([line + "\n" for line in owner.metal_source.split("\n")],
+                            [Path(torch.__file__).parent / "include"], set())
+    return Emission(source, owner.metal_entry, (), (), ())

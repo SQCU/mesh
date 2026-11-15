@@ -1,0 +1,190 @@
+--- a/torch/_inductor/codegen/mps.py
++++ b/torch/_inductor/codegen/mps.py
+@@ -601,8 +601,10 @@
+         elif mode == "atomic_add":
+             self.headers.add("atomic")
+             atomic_type = f"c10::metal::AtomicType<{dtype_str}>"
+-            cast_var = f"reinterpret_cast<device {atomic_type}::type *>({var})"
+-            line = f"{atomic_type}::atomic_add({cast_var}, {self.index_to_str(index)}, {cast_val});"
++            # compiler/patches/torch-inductor-upstream-composition.patch: its address the argument's own
++            # subscript, as every other access's, at offset 0 of it
++            cast_var = f"reinterpret_cast<device {atomic_type}::type *>(&{var}[{self.index_to_str(index)}])"
++            line = f"{atomic_type}::atomic_add({cast_var}, 0, {cast_val});"
+         else:
+             raise RuntimeError(f"Unimplemented store mode {mode}")
+         if self.inside_reduction:
+@@ -962,8 +964,16 @@
+         self.compute.clear()
+         self.stores.clear()
+ 
+-    def codegen_kernel(self, name: str = "generated_kernel") -> str:
++    def codegen_kernel(
++        self, name: str = "generated_kernel", composition: Any = None
++    ) -> str:
+         """Called at the end to generate a final kernel string"""
++        # compiler/patches/torch-inductor-upstream-composition.patch: `composition` (None: the
++        # kernel as produced) its terminal composition, each part as given: `source` its definitions before the
++        # kernel; `argument(index, declaration)` the declaration of the launch's argument `index` (call_kernel's
++        # `values`, then the error buffer); `parameters` its own after them and `builtins` in place of the thread
++        # position's; `enter` its statements before the body, `grid` and `group` uint3 expressions the body's
++        # thread position in its grid and threadgroup after them, `exit` its statements after the body
+         self.codegen_body()
+         # compiler/patches/torch-inductor-mps-kernel-operands.patch: the Metal source is its own produced buffer,
+         # which the wrapper's opening and closing lines then enclose
+@@ -977,6 +987,8 @@
+             if not V.graph.cpp_wrapper:
+                 for header in self.headers:
+                     code.writeline(f"#include <c10/metal/{header}.h>")
++                if composition is not None:
++                    code.splice(composition.source)
+             else:
+                 headers = [
+                     f"#include <c10/metal/{header}.h>" for header in self.headers
+@@ -1004,11 +1016,18 @@
+                 )
+             code.writeline(f"kernel void {fn_name}(")
+             with code.indent():
++                declared = itertools.count()
++
++                def declare(declaration: str) -> None:
++                    if composition is not None:
++                        declaration = composition.argument(next(declared), declaration)
++                    code.writeline(f"{declaration},")
++
+                 for outer, inner in self.args.output_buffers.items():
+                     if outer in self.removed_buffers:
+                         continue
+                     dtype_str = self.dtype_to_str(V.graph.get_dtype(outer))
+-                    code.writeline(f"device {dtype_str}* {inner},")
++                    declare(f"device {dtype_str}* {inner}")
+                 for outer, inner in self.args.input_buffers.items():
+                     dtype = V.graph.get_dtype(outer)
+                     # MPS does not support float64, but scalar inputs are fine
+@@ -1019,20 +1038,20 @@
+                         dtype_str = "float"
+                     else:
+                         dtype_str = self.dtype_to_str(dtype)
+-                    code.writeline(f"constant {dtype_str}* {inner},")
++                    declare(f"constant {dtype_str}* {inner}")
+                 for inner in self.args.sizevars.values():
+-                    code.writeline(f"constant long& {inner},")
++                    declare(f"constant long& {inner}")
+ 
+                 # Write dynamic values as inputs
+                 for idx_var in idx_vars:
+                     if isinstance(idx_var.numel, sympy.Integer):
+                         pass
+                     else:
+-                        code.writeline(f"constant long& {idx_var.prefix}numel,")
++                        declare(f"constant long& {idx_var.prefix}numel")
+ 
+                 # Add error buffer parameter if error header is used
+                 if "error" in self.headers:
+-                    code.writeline("device c10::metal::ErrorMessages* error_buf,")
++                    declare("device c10::metal::ErrorMessages* error_buf")
+ 
+                 if len(idx_vars) >= 4:
+                     raise AssertionError("Up to 3 index variables are supported")
+@@ -1042,16 +1061,48 @@
+                 thread_pos_var_name = (
+                     idx_vars[0].name if len(idx_vars) == 1 else "thread_pos"
+                 )
+-                thread_pos_suffix = "," if self.inside_reduction else ""
+-                code.writeline(
+-                    f"{thread_pos_dtype} {thread_pos_var_name} [[thread_position_in_grid]]{thread_pos_suffix}"
+-                )
+-                if self.inside_reduction:
++                if composition is not None:
++                    for parameter in composition.parameters:
++                        code.writeline(f"{parameter},")
++                    builtins = list(composition.builtins)
++                    for idx, builtin in enumerate(builtins):
++                        code.writeline(builtin + ("," if idx + 1 < len(builtins) else ""))
++                else:
++                    thread_pos_suffix = "," if self.inside_reduction else ""
+                     code.writeline(
+-                        f"{thread_pos_dtype} group_pos [[thread_position_in_threadgroup]]"
++                        f"{thread_pos_dtype} {thread_pos_var_name} [[thread_position_in_grid]]{thread_pos_suffix}"
+                     )
++                    if self.inside_reduction:
++                        code.writeline(
++                            f"{thread_pos_dtype} group_pos [[thread_position_in_threadgroup]]"
++                        )
+             code.writeline(") {")
+             with code.indent():
++                if composition is not None:
++                    for line in composition.enter:
++                        code.writeline(line)
++                    swizzle = "xyz"[: len(idx_vars)]
++                    code.writeline(
++                        f"const {thread_pos_dtype} {thread_pos_var_name} = {composition.grid}.{swizzle};"
++                    )
++                    if self.inside_reduction:
++                        code.writeline(
++                            f"const {thread_pos_dtype} group_pos = {composition.group}.{swizzle};"
++                        )
++                    # the body within the launch's grid (call_kernel's: each tree's numel, a reduction tree's
++                    # within its threadgroup), which a partial last threadgroup's further threads do not run
++                    bounds = [
++                        f"{thread_pos_var_name}{'.' + swizzle[idx] if len(idx_vars) > 1 else ''} < "
++                        + (
++                            self.sexpr(var.numel)
++                            if isinstance(var.numel, sympy.Integer)
++                            else f"{var.prefix}numel"
++                        )
++                        for idx, var in enumerate(idx_vars)
++                        if not var.is_reduction
++                    ]
++                    code.writeline(f"if ({' && '.join(bounds) or 'true'}) {{")
++                    code.do_indent()
+                 if len(idx_vars) > 1:
+                     for idx, var in enumerate(idx_vars):
+                         code.writeline(
+@@ -1059,6 +1110,11 @@
+                         )
+                 code.splice(self.indexing_code)
+                 code.splice(self.body)
++                if composition is not None:
++                    code.do_unindent()
++                    code.writeline("}")
++                    for line in composition.exit:
++                        code.writeline(line)
+             code.writeline("}")
+ 
+         self.metal_source = code.getvalue()
+--- a/torch/_inductor/codegen/cpp.py
++++ b/torch/_inductor/codegen/cpp.py
+@@ -6041,6 +6041,12 @@
+             # TODO(voz): Ostensibly, we should not need this. But there are cases where C++ codegen does
+             # not use BracesBuffer, so we have no good indicator of a C++ buffer atm.
+             src_code = src_code.replace("#pragma CMT", "//")
++            # compiler/patches/torch-inductor-upstream-composition.patch: each defined kernel's
++            # declared entry and final source by its kernel name, as the wrapper's definition encloses it
++            wrapper.__dict__.setdefault("defined_kernels", {})[kernel_name] = (
++                kernel_decl_name,
++                src_code,
++            )
+ 
+             # Get the lines in the source code representing the function definition,
+             # excluding the first line including cpp_prefix.h.
+--- a/torch/_inductor/graph.py
++++ b/torch/_inductor/graph.py
+@@ -964,7 +964,8 @@
+         name. Note that the lifting of subgraph is supported for python wrapper
+         only. For cpp wrapper, we inline the subgraphs in the parent wrapper.
+         """
+-        return SubgraphLowering(
++        # compiler/patches/torch-inductor-upstream-composition.patch: the class's own subgraph lowering
++        return self.subgraph_lowering(
+             parent=self,
+             gm=gm,
+             example_inputs=example_inputs,
+@@ -3267,3 +3268,8 @@
+             subgraph_name=self.name,
+             parent_wrapper_code=self.parent.wrapper_code,
+         )
++
++
++# compiler/patches/torch-inductor-upstream-composition.patch: the subgraph lowering make_subgraph makes,
++# a subclass's own where it sets one
++GraphLowering.subgraph_lowering = SubgraphLowering

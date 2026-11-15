@@ -148,6 +148,10 @@ class Planning:
     program: int
 
 
+# compiler/mesh_compiler/driver.py compile_captured: `modules` {function key: {machine group: its orchestration body}};
+# `devices`, `machines` and `engines` the full original per-processor maps (every processor's torch.device, machine
+# and, for a Neural Engine processor, its engine), keyed as `processor_modules` is; grouping is `modules`, `functions`
+# and each body's meta["group"]
 @dataclass
 class Scheduled:
     exported: Exported
@@ -165,9 +169,15 @@ class Scheduled:
     stored: dict = None
     invariant: dict = None
     functions: dict = None
-    # compilation only (compiler/mesh_compiler/lower_inductor.py lower): {(function key, machine group): that body's
+    # compilation only (compiler/mesh_compiler/driver.py): {(function key, machine group): that body's
     # lower_metal.py construct operands}
     compilation: dict = None
+    # compiler/mesh_compiler/schedule.py schedule, its third result: {function key: {actual processor: its own body}},
+    # each body's meta["group"] its machine group and meta["copied"] the original source nodes' copies (the same
+    # originals as `modules[key][group].meta["copied"]`), its tasks, relation, transfers and interface; `modules` the
+    # machine orchestration of those same originals. The numerical lowerer's operand (lower_inductor.py lower) and the
+    # archive's retained source bodies (archive.py)
+    processor_modules: dict = None
 
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4, 6 and 8; design/review-warnings.md rule 5

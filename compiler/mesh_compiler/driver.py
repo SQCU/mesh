@@ -12,6 +12,7 @@ from .devices import ENGINES, HOST, on_devices
 from .export import called, calls
 from .ir import Scheduled
 from .lower_inductor import lower
+from .lower_metal import construct
 from .metal import _machines
 from .operations import Generator, seeded
 from .placement import place
@@ -82,11 +83,11 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
     elif machine is None:
         (machine,) = dict.fromkeys(machines.values())
     entry, words = represented[machine], seeded(torch.initial_seed())
-    compilation, declared, modules = {}, {}, {}
+    compilation, declared, modules, processor_modules = {}, {}, {}, {}
     for key, (placed, produced, channels, graph, between, _) in staged.items():
         exported = captured.functions[key]
-        modules[key], declared[key] = schedule(decompose(graph, targets), cost, between, machines, planning=planning,
-                                               groups=groups)
+        modules[key], declared[key], processor_modules[key] = schedule(
+            decompose(graph, targets), cost, between, machines, planning=planning, groups=groups)
         placeholder = {target: name for name, (target, _) in exported.state.items()}
         roles = [(kind, placeholder[target] if kind == OutputKind.BUFFER_MUTATION else target)
                  for kind, target in exported.outputs]
@@ -96,20 +97,24 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
                 sources={name: tensor.detach() for name, (_, tensor) in exported.state.items()},
                 wires=declared[key].wires(machines[group]), output_roles=roles if group == groups[produced] else (),
                 generator=Generator(words.clone()), machines=_machines() if group == entry else None)
-    used = list(dict.fromkeys(g for body in modules.values() for g in body))
-    # design/compilation-composition-change-request.md, numerical lowerer boundary: the complete scheduled operand,
-    # then its numerical lowering (compiler/mesh_compiler/lower_inductor.py lower), then analysis and the native target
-    scheduled = Scheduled(captured.exported, modules, {g: devices[g] for g in used}, {g: machines[g] for g in used},
+    # design/compilation-composition-change-request.md, numerical lowerer boundary: the complete scheduled operand
+    # (each function's machine bodies and its schedule's processor bodies), its numerical lowering
+    # (compiler/mesh_compiler/lower_inductor.py lower: {function key: {processor: that body's produced result}}), each
+    # machine body's program from its processors' produced results (compiler/mesh_compiler/lower_metal.py construct),
+    # then analysis and the native target
+    scheduled = Scheduled(captured.exported, modules, dict(devices), dict(machines),
                           groups[output_processor],
                           {key: stage[2] for key, stage in staged.items()},
                           {entry: [node.name for node in captured.exported.graph_module.graph.nodes
                                    if node.op == "placeholder"]}, [],
                           {key: [(channel, groups[sender], groups[receiver], *layout)
                                  for channel, sender, receiver, *layout in stage[4]] for key, stage in staged.items()},
-                          {g: engines[g] for g in used if g in engines},
+                          dict(engines),
                           invariant={key: stage[0].meta["invariant"] for key, stage in staged.items()},
-                          compilation=compilation)
-    constructions = lower(scheduled)
+                          compilation=compilation, processor_modules=processor_modules)
+    lowered = lower(scheduled)
+    constructions = {(key, group): construct(scheduled.modules[key][group], lowered[key], **made)
+                     for (key, group), made in compilation.items()}
     analysis = analyse(operands, constructions, declared)
     constructed = {key: made for (key, group), made in constructions.items() if group == entry}
     target = native.compile_program(captured, constructed, declared, analysis,
