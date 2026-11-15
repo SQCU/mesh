@@ -90,7 +90,8 @@ def checked(status, error, what):
 # nor the step; a CONSTANT or STATE root whose initial contents only `data` holds is planned, the recorder copying
 # them into each placed copy, metal_capture.m MetalInitialContents), and its step word (8 bytes, executions, lag 1)
 # where it has a step value (`word` METAL_IR_STEP, found in the same pass: metal_ir_step_value would construct one
-# after lowering) and the host writes it; the quantum the largest placed alignment
+# after lowering) and the host writes it; each value's `owned` its info's (its storage root's Value::owned,
+# mesh-collective.h struct mesh_value `owned`); the quantum the largest placed alignment
 def storages(program, explicit, intrinsic, libs):
     M, compiler, _, _ = libs
     storage = C.POINTER(M.Storage)()
@@ -106,7 +107,7 @@ def storages(program, explicit, intrinsic, libs):
         held = v not in explicit or v in intrinsic and not info.pages
         run = bool(stored.bytes and info.storage == v and held and v != step and not info.buffer)
         values[v] = mesh.Value(section=mesh.Section(bytes=stored.bytes), state=info.zeroed, begin=stored.begin,
-                               end=stored.end, run=int(run),
+                               end=stored.end, run=int(run), owned=info.owned,
                                kind=mesh.INVARIANT if info.role in (M.CONSTANT, M.STATE) else mesh.EXECUTION)
         quantum = max(quantum, stored.alignment) if run else quantum
     if stepped:

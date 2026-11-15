@@ -234,12 +234,14 @@ class CheckFailure(C.Structure):
 
 
 # metal_ir.h struct metal_ir_value_info (`received`, `sent` and `sendings` record counts: metal_ir_value_ranges,
-# metal_ir_value_releases, metal_ir_value_sendings; `page_bytes` at 104, 120 bytes) and struct metal_ir_storage
+# metal_ir_value_releases, metal_ir_value_sendings; `page_bytes` at 104, `owned` its storage root's Value::owned at
+# 120, 128 bytes) and struct metal_ir_storage
 class ValueInfo(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('role', 'scalar', 'storage', 'function', 'index', 'word', 'of', 'range',
                                           'received', 'sent', 'zeroed', 'sendings')] + [
         (name, mesh.Q) for name in ('identity', 'bytes', 'offset', 'at', 'data_bytes')] + [
-        ('data', C.c_void_p), ('buffer', C.c_void_p), ('page_bytes', mesh.Q), ('pages', mesh.U), ('source', mesh.U)]
+        ('data', C.c_void_p), ('buffer', C.c_void_p), ('page_bytes', mesh.Q), ('pages', mesh.U), ('source', mesh.U),
+        ('owned', mesh.U), ('padding', mesh.U)]
 
 
 class Storage(C.Structure):

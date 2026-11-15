@@ -73,9 +73,11 @@ class Section(C.Structure):
 # "The revisions of 55b9cbad"): Value's `view` gone (`padding1`) and `shares` out where `padding` was; struct
 # mesh_share (Share) mirrored, and Function's `share` and `shares` (72 bytes).  What must stay: the fields in the
 # headers' order and of their types
+# mesh-collective.h struct mesh_value `owned` (its producer's prepared operand, offset 56) and `padding1` (offset 60)
+# where the u64 `padding1` was (64 bytes, the header's assert)
 class Value(C.Structure):
     _fields_ = [('section', Section), ('kind', U), ('wire', U), ('state', U), ('begin', U), ('end', U), ('lag', U),
-                ('run', U), ('shares', U), ('padding1', Q)]
+                ('run', U), ('shares', U), ('owned', U), ('padding1', U)]
 
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The

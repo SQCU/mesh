@@ -808,5 +808,32 @@
       "archive.load local loaded() name shadows reference registry; reported to same104 for correction",
       "No target release; current native v45 mirrors require next matched build, native137 not assumed compatible"
     ]
+  },
+  "owned_lifetime_projection": {
+    "status": "source-only original owned-lifetime projection; next matching native build required",
+    "AST": "PASS",
+    "source_header_contract": {
+      "mesh_value": {
+        "bytes": 64,
+        "owned_offset": 56,
+        "padding1_offset": 60
+      },
+      "metal_ir_value_info": {
+        "bytes": 128,
+        "owned_offset": 120,
+        "padding_offset": 124
+      }
+    },
+    "projection": "native.storages copies info.owned directly; kind and EXECUTION copy count unchanged",
+    "staged_sha256": {
+      "compiler/mesh_compiler/native.py": "e0985b1d0f9bac0700c041df944d62f34794940419766d745cfe40fbef636e11",
+      "rdma/mesh.py": "0101ae56eacb5e39b890221a85d8eb633ce8d42597511de1bf6c6d7b3e3d533e",
+      "compiler/mesh_compiler/metal.py": "8dadcc99324ad06aaac84d25016d75763da7574fe5da1b0735ea0c50b402f603"
+    },
+    "native_headers": {
+      "rdma/mesh-collective.h": "f82979fcc6b9df013efefe48ccce632ea3180b5137c1ef2b0a97cfac726d268c",
+      "/Users/mdot/metal-microbench/metal_ir.h": "0bf6b3cc42557ca040d06a6482bb240cb94eeeb84e1258d9d884c07801b3acce"
+    },
+    "runtime": "not imported or observed; fixed137 incompatible with new ValueInfo128"
   }
 }
