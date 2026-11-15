@@ -1,6 +1,18 @@
 --- a/torch/_inductor/codegen/cpp.py
 +++ b/torch/_inductor/codegen/cpp.py
-@@ -2828,8 +2828,10 @@
+@@ -2792,6 +2792,11 @@
+         self.reduction_suffix.splice(self.stores)
+         (self.loads, self.compute, self.stores, self.cse) = prior
+ 
++    def run_function(self, fn, var_sizes, *args):
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: one function's run in this kernel
++        # (CppKernelProxy.codegen_functions run: `fn` of its fn_list, `var_sizes` its own, called with `args`)
++        fn(*args)
++
+     def create_cse_var(self, *args, **kwargs):
+         return CppCSEVariable(*args, **kwargs)
+ 
+@@ -2828,8 +2833,10 @@
                  if var == _var:
                      var_id = i
                      break
@@ -12,57 +24,169 @@
                  and var_id
                  and start == 0
                  and end == self.ranges[var_id]
-@@ -6163,6 +6165,9 @@
-         kernel_decl_name = str(Placeholder.KERNEL_NAME) if name is None else name
-         kernel_name = str(Placeholder.DESCRIPTIVE_NAME) if name is None else name
-         arg_defs, _, _ = self.args.cpp_argdefs()
-+        # compiler/patches/torch-inductor-cpu-kernel-results.patch: this definition's own parameter declarations
-+        # as it made them (the group's KernelArgs.cpp_argdefs, before any composition's parameters)
-+        self.arg_defs = tuple(arg_defs)
-         if composition is not None:
-             arg_defs = [*arg_defs, *composition.parameters]
-         arg_defs = ",\n".ljust(25).join(arg_defs)
+@@ -4721,7 +4728,7 @@
+                 ]:
+                     if in_suffix:
+                         raise AssertionError("expected not in_suffix")
+-                    fn(vars, reduction_vars)
++                    kernel.run_function(fn, var_sizes, vars, reduction_vars)
+                 else:
+                     in_suffix = True
+                     if not (
+@@ -4736,7 +4743,7 @@
+                         )
+                     # we can fuse in some extra pointwise into the suffix
+                     with kernel.write_to_suffix():
+-                        fn(vars, ())
++                        kernel.run_function(fn, var_sizes, vars, ())
+ 
+         scalar_kernel = codegen_kernel(self.kernel_cls)
+         V.graph.removed_buffers |= scalar_kernel.removed_buffers
+@@ -5144,7 +5151,8 @@
+         return tuple(tuple(map(V.graph.sizevars.simplify, s)) for s in sizes)
+ 
+     def reset_kernel_group(self):
+-        self.kernel_group = KernelGroup()
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its group class (kernel_group_cls)
++        self.kernel_group = self.kernel_group_cls()
+ 
+     def _get_indexing_ranges_exprs(self, node) -> ir.ExtraIndexingConstraints:
+         if isinstance(node, FusedSchedulerNode):
+@@ -5980,6 +5988,10 @@
+             flag_template_buffer_has_other_users=flag_template_buffer_has_other_users,
+             epilogue_nodes=epilogue_ir_nodes,
+         )
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its epilogues' group and proxy classes this
++        # scheduling's own (CppTemplateKernel.store_pointwise_nodes and store_grouped_gemm_pointwise_nodes)
++        kernel.kernel_group_cls = self.kernel_group_cls
++        kernel.kernel_proxy_cls = self.kernel_proxy_cls
+         with kernel:
+             if not is_multi_outputs_template(template_node.node):
+                 template_node.mark_run()  # type: ignore[attr-defined]
+@@ -6498,3 +6510,8 @@
+             raise AssertionError("expected len(self.loops) >= level")
+         loops = None if level == len(self.loops) else self.loops[level:]
+         return LoopNest(loops, self.kernel)
++
++
++# compiler/patches/torch-inductor-cpu-kernel-results.patch: CppScheduling's group class (reset_kernel_group's, its
++# templates' epilogues' too: codegen_template), which a CppScheduling subclass replaces as it does kernel_proxy_cls
++CppScheduling.kernel_group_cls = KernelGroup
 --- a/torch/_inductor/codegen/cpp_template_kernel.py
 +++ b/torch/_inductor/codegen/cpp_template_kernel.py
-@@ -46,11 +46,18 @@
+@@ -1,4 +1,5 @@
+ # mypy: allow-untyped-defs
++import functools
+ import itertools
+ from collections.abc import Callable, Iterable
+ from typing import Any
+@@ -41,16 +42,53 @@
+ 
+ 
+ class CppTemplateKernel(CppKernel):
++    # compiler/patches/torch-inductor-cpu-kernel-results.patch: its epilogues' group and proxy classes
++    # (CppScheduling.codegen_template gives its scheduling's)
++    kernel_group_cls = KernelGroup
++    kernel_proxy_cls = CppKernelProxy
++
+     def __init__(self, kernel_name, num_threads):
+         super().__init__(None, num_threads)
          self.kernel_name = kernel_name
          self.render_hooks = {}
          self.local_buffers = {}
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its own results as made. `declared` each
-+        # def_kernel declaration by its placeholder, (function_name, cpp_argdefs, call_args, arg_types) as its render
-+        # hook made them; `epilogues` each epilogue store_pointwise_nodes or store_grouped_gemm_pointwise_nodes made,
-+        # in order, (dst, nodes, offsets, reindexers, its LoopBodies, its KernelGroup, its CppKernelProxy)
++        # def_kernel declaration by its placeholder, (function_name, its hook), `declaring` the last one's
++        # placeholder, `opened` each def_body placeholder by the placeholder of the declaration whose body it opens;
++        # `epilogues` each epilogue store_pointwise_nodes or store_grouped_gemm_pointwise_nodes made, in order, (dst,
++        # nodes, offsets, reindexers, its LoopBodies, its group, its proxy), each object the one that epilogue holds
 +        self.declared = {}
++        self.declaring = None
++        self.opened = {}
 +        self.epilogues = []
  
      def render(self, template, **kwargs):
 -        return PartialRender(
 -            template.render(kernel=self, **kwargs), self.render_hooks
 -        ).finalize_all()
-+        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its selected template's render as made,
-+        # (template, its render operands, its code before its hooks' results replace their placeholders)
-+        self.rendered = (template, kwargs, template.render(kernel=self, **kwargs))
-+        return PartialRender(self.rendered[2], self.render_hooks).finalize_all()
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its selected template's render as made, its code
++        # before its hooks' results replace their placeholders (compose's too)
++        self.rendered = template.render(kernel=self, **kwargs)
++        return PartialRender(self.rendered, self.render_hooks).finalize_all()
++
++    def compose(self, composition):
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: a composed pass of this kernel's code from its
++        # render as made (`rendered`), `composition` its terminal composition as codegen_group's: `source` its
++        # definitions before the code, `parameters` its entry's own after its arguments, `enter` its entry's
++        # statements before its body. Each placeholder its render finalized (render_hooks) is replaced: its entry's
++        # declaration (the kernel's own function_name) by its def_kernel hook given the parameters, its entry's body
++        # opening (def_body) by the enter statements, each other by its own hook; its other code is its render's own
++        entry = str(self.kernel_name)
++
++        def composed(placeholder):
++            if placeholder in self.opened:
++                function_name, _ = self.declared[self.opened[placeholder]]
++                return "\n".join(composition.enter) if function_name == entry else ""
++            function_name, hook = self.declared[placeholder]
++            return hook(composition.parameters) if function_name == entry else hook()
++
++        hooks = {
++            placeholder: functools.partial(composed, placeholder)
++            for placeholder in self.render_hooks
++        }
++        return f"{composition.source}\n{PartialRender(self.rendered, hooks).finalize_all()}"
  
      def def_kernel(
          self,
-@@ -110,7 +117,14 @@
-                         )
+@@ -100,7 +138,7 @@
+         for sizevar in sizevars:
+             self.args.sizevars[sizevar] = f"k{sizevar}"
+ 
+-        def hook():
++        def hook(parameters=()):
+             # remove all aliases before generate function definition
+             if aliases is not None:
+                 for alias in aliases:
+@@ -111,11 +149,26 @@
                      if alias in self.args.output_buffers:
                          self.args.output_buffers[alias] = REMOVED
--            cpp_argdefs, _, _ = self.args.cpp_argdefs()
-+            cpp_argdefs, call_args, arg_types = self.args.cpp_argdefs()
-+            # compiler/patches/torch-inductor-cpu-kernel-results.patch: this declaration as made
-+            self.declared[placeholder] = (
-+                function_name,
-+                tuple(cpp_argdefs),
-+                tuple(call_args),
-+                tuple(arg_types),
-+            )
-             return f"void {function_name}({', '.join(cpp_argdefs)})"
+             cpp_argdefs, _, _ = self.args.cpp_argdefs()
+-            return f"void {function_name}({', '.join(cpp_argdefs)})"
++            # compiler/patches/torch-inductor-cpu-kernel-results.patch: `parameters` a composed pass's own after its
++            # arguments (compose)
++            return f"void {function_name}({', '.join([*cpp_argdefs, *parameters])})"
  
          if placeholder in self.render_hooks:
-@@ -324,6 +338,18 @@
+             raise AssertionError(f"placeholder already registered: {placeholder}")
+         self.render_hooks[placeholder] = hook
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: this declaration, the one whose body the next
++        # def_body opens
++        self.declared[placeholder] = (function_name, hook)
++        self.declaring = placeholder
++        return placeholder
++
++    def def_body(self):
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: the opening of the body of the function the last
++        # def_kernel declared, a whole line of its template (each CPU template's body's first): empty as produced (its
++        # line removed, PartialRender's empty result), its entry's composition.enter in a composed pass (compose)
++        placeholder = f"<DEF_BODY_{len(self.opened)}>"
++        self.opened[placeholder] = self.declaring
++        self.render_hooks[placeholder] = lambda: ""
+         return placeholder
+ 
+     def call_kernel(self, name: str, node: ir.CppTemplateBuffer):
+@@ -273,9 +326,9 @@
+                 f"expected {len(var_sizes[0])} offsets, got {len(offsets)}"
+             )
+         output_index = dst.get_layout().make_indexer()([*var_ranges.keys()])
+-        kernel_group = KernelGroup()
++        kernel_group = self.kernel_group_cls()
+         kernel_group.args = self.args
+-        cpp_kernel_proxy = CppKernelProxy(kernel_group)
++        cpp_kernel_proxy = self.kernel_proxy_cls(kernel_group)
+         bodies = []
+         var_sizes_list = []
+         for i, node in enumerate(nodes):
+@@ -324,6 +377,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])
@@ -70,10 +194,10 @@
 +        self.epilogues.append(
 +            (
 +                dst,
-+                tuple(nodes),
++                nodes,
 +                offsets,
 +                reindexers,
-+                tuple(bodies),
++                bodies,
 +                kernel_group,
 +                cpp_kernel_proxy,
 +            )
@@ -81,7 +205,19 @@
          return kernel_group.loops_code.getvalue()
  
      def store_grouped_gemm_pointwise_nodes(
-@@ -396,6 +422,18 @@
+@@ -345,9 +410,9 @@
+         if not all(len(offset) == len(var_sizes[0]) for offset in offsets):
+             raise AssertionError(f"expected all offsets of length {len(var_sizes[0])}")
+         output_index = ref_dst.get_layout().make_indexer()([*var_ranges.keys()])
+-        kernel_group = KernelGroup()
++        kernel_group = self.kernel_group_cls()
+         kernel_group.args = self.args
+-        cpp_kernel_proxy = CppKernelProxy(kernel_group)
++        cpp_kernel_proxy = self.kernel_proxy_cls(kernel_group)
+         bodies = []
+         var_sizes_list = []
+         for i, node in enumerate(nodes):
+@@ -396,6 +461,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])
@@ -89,10 +225,10 @@
 +        self.epilogues.append(
 +            (
 +                dst,
-+                tuple(nodes),
++                nodes,
 +                offsets,
 +                reindexers,
-+                tuple(bodies),
++                bodies,
 +                kernel_group,
 +                cpp_kernel_proxy,
 +            )
@@ -100,3 +236,51 @@
          return kernel_group.loops_code.getvalue()
  
      def store_output(
+--- a/torch/_inductor/codegen/cpp_bmm_template.py
++++ b/torch/_inductor/codegen/cpp_bmm_template.py
+@@ -44,6 +44,7 @@
+ extern "C"
+ {{kernel.def_kernel(inputs={"X": BX, "W": BW}, outputs={"Y": BY}, aliases=aliases)}}
+ {
++    {{kernel.def_body()}}
+     const int64_t B = {{kernel.size(BY_2d, 0)}};
+     {%- if num_threads > 1 %}
+     constexpr int64_t num_threads = {{num_threads}};
+--- a/torch/_inductor/codegen/cpp_flex_attention_template.py
++++ b/torch/_inductor/codegen/cpp_flex_attention_template.py
+@@ -223,6 +223,7 @@
+ extern "C"
+ {{kernel.def_kernel(inputs=kernel_args, outputs={"output": output}, extra_sizevars=template.extra_sizevars)}}
+ {
++  {{ kernel.def_body() }}
+   {{ kernel.maybe_codegen_profile() }}
+ 
+   // dtypes
+--- a/torch/_inductor/codegen/cpp_gemm_template.py
++++ b/torch/_inductor/codegen/cpp_gemm_template.py
+@@ -194,6 +194,7 @@
+ GEMM_TEMPLATE = r"""
+ {{ template.codegen_gemm_stub_def() }}
+ {
++    {{ kernel.def_body() }}
+     {{ kernel.maybe_codegen_profile(template.get_kernel_prefix_name()) }}
+     {{ template.codegen_blocks(
+         num_threads, N, K, micro_gemm, is_dynamic_M, kernel, GemmOut, config, L1_cache_size, L2_cache_size, X, W
+@@ -365,6 +366,7 @@
+ SMALL_M_GEMM_TEMPLATE = r"""
+ {{ template.codegen_gemm_stub_def() }}
+ {
++    {{ kernel.def_body() }}
+     {{ kernel.maybe_codegen_profile() }}
+     {{ template.codegen_blocks(
+         num_threads, N, K, micro_gemm, is_dynamic_M, kernel, GemmOut, config, L1_cache_size, L2_cache_size, X, W
+--- a/torch/_inductor/codegen/cpp_grouped_gemm_template.py
++++ b/torch/_inductor/codegen/cpp_grouped_gemm_template.py
+@@ -41,6 +41,7 @@
+ extern "C" {{export_declaration}}
+ {{kernel.def_kernel(inputs=kernel_args, outputs=Y_list, aliases=aliases)}}
+ {
++    {{kernel.def_body()}}
+     {{kernel.maybe_codegen_profile(template.get_kernel_prefix_name())}}
+     {{ template.codegen_blocks(
+         num_threads, N, K, micro_gemm, is_dynamic_M, kernel, GemmOuts[0], config, L1_cache_size, L2_cache_size, X_list[0], W_list[0]

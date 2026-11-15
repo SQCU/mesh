@@ -8,10 +8,10 @@
 # compiler/patches/torch-inductor-aot-lowered-result.patch, torch-inductor-graph-lowering-factory.patch,
 # torch-inductor-mps-kernel-operands.patch, torch-inductor-upstream-composition.patch,
 # torch-inductor-cpu-kernel-results.patch and torch-inductor-cpp-build-result.patch
+import collections
 import contextlib
 import dataclasses
 import functools
-from pathlib import Path
 
 import coremltools as ct
 import torch
@@ -24,15 +24,13 @@ from torch._inductor import ir as upstream
 from torch._inductor.compile_fx import compile_fx_aot, compile_fx_inner
 from torch._inductor.codegen.cpp import (CppKernel, CppKernelProxy, CppOverrides, CppScheduling, CppTile2DKernel,
                                          CppTile2DOverrides, CppVecKernel, CppVecOverrides, KernelGroup)
-from torch._inductor.codegen.cpp_template_kernel import CppTemplateKernel
 from torch._inductor.codegen.cpp_utils import LocalBufferContext
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
-from torch._inductor.codegen.wrapper import KernelCallLine
+from torch._inductor.codegen.wrapper import KernelCallLine, KernelDefinitionLine
 from torch._inductor.graph import GraphLowering, SubgraphLowering
 from torch._inductor.lowering import fallback_handler, register_lowering
 from torch._inductor.scheduler import Scheduler
 from torch._inductor.virtualized import V
-from torch.utils._cpp_embed_headers import _embed_headers
 
 from .ir import RECV, SEND, channel_of
 
@@ -141,12 +139,16 @@ class Ranges:
     accesses: list
 
 
-# codegen/cpp.py CppKernelProxy.codegen_functions: one of its kernels (codegen_kernel: kernel_group.new_kernel of its
-# kernel_cls, vec_kernel_cls or tile2d_kernel_cls, then run) codegening SchedulerNode `node` (SchedulerNode.codegen's
-# set_current_node): `variables` the (vars, reduction vars) that kernel's set_ranges returned to run, `suffix` whether
-# run gave the node to the kernel's write_to_suffix (its vars and no reduction vars: cpp.py run `fn(vars, ())`, its
-# code the kernel's reduction_suffix), `accesses` each memory access the node's codegen made, in order, as that kernel
-# received it: (method, buffer name, index, store mode, graph, fx node, mask), CppKernel, CppVecKernel or
+# codegen/cpp.py CppKernelProxy.codegen_functions: one function's run in one of its kernels (codegen_kernel:
+# kernel_group.new_kernel of its kernel_cls, vec_kernel_cls or tile2d_kernel_cls, then run, each function's call there
+# that kernel's run_function, torch-inductor-cpu-kernel-results.patch): `function` that function as run calls it (a
+# group's codegen_nodes function of its node, or its localize_function wrapper; a template epilogue's LoopBody itself,
+# codegen_loop_bodies'), `sizes` its var_sizes, `node` the SchedulerNode its codegen set (SchedulerNode.codegen's
+# set_current_node; None for a LoopBody, which run calls itself), `variables` the operands run called it with (the
+# vars and reduction vars that kernel's set_ranges returned; () reduction vars in the suffix), `suffix` whether run gave the function to the kernel's write_to_suffix (its vars and no
+# reduction vars: cpp.py run `fn(vars, ())`, its code the kernel's reduction_suffix), `accesses` each memory access
+# that function's run made, in order, as that kernel received it: (method, buffer name, index, store mode, graph, fx
+# node, mask), CppKernel, CppVecKernel or
 # CppTile2DKernel load, store and store_reduction with the index LoopBody bound and SimplifyIndexing simplified, over
 # those variables and the kernel's indirect symbols (its mesh_indirect); `graph` and `fx node` loop_body.py
 # InterpreterShim's at that call, as Ranges'; `mask` the kernel's _load_mask there (CppKernel.masked: CppVecOverrides
@@ -157,69 +159,40 @@ class Ranges:
 # inner_is_tiling_idx
 @dataclasses.dataclass(eq=False)
 class CppRanges:
+    function: object
+    sizes: tuple
     node: object
     variables: tuple
     suffix: bool
     accesses: list
 
 
-# an actual result a record does not hold: `result` what it is, `owner` the original producer making it, which keeps it
-# nowhere this compilation's result reaches. It is no value of that result: not empty, not iterable
-@dataclasses.dataclass(frozen=True)
-class Unretained:
-    result: str
-    owner: str
-
-
-# a CPU template call's unretained results (MeshCppScheduling.codegen_template): its parameter declarations, which
-# CppTemplateKernel.def_kernel's render hook prints into its source (cpp_template_kernel.py 113-114, cpp_argdefs at
-# render) and returns as text only; and its ranges: its template's own loops, indices and accesses, which its CppTemplate
-# renders as source (ir.CppTemplateBuffer.template, cpp_template.py make_kernel_render), and its epilogues', which
-# CppTemplateKernel renders through a CppKernelProxy of an upstream KernelGroup() of its own (cpp_template_kernel.py
-# 276-278, 348-350), not the selected backend's
-TEMPLATE_DECLARED = Unretained("the template definition's parameter declarations (arg_defs)",
-                               "cpp_template_kernel.py CppTemplateKernel.def_kernel render hook")
-TEMPLATE_RANGES = Unretained("the template's and its epilogues' loops, indices and accesses",
-                             "cpp_template.py CppTemplate render; cpp_template_kernel.py CppTemplateKernel epilogue "
-                             "CppKernelProxy(KernelGroup())")
-
-
-# one selected-backend kernel call, its KernelCallLine `line` in its wrapper's lines (line.wrapper), `graph` the
-# GraphLowering whose body it implements (a control body's SubgraphLowering), `scheduler` the Scheduler whose codegen
-# made it (an inlined control body's: Inlined.scheduler of that inlining; a lifted one's: Lifted.scheduler, its line in
-# Lifted.wrapper's lines), `place` "mps" or "cpu", `owner` the
-# backend's kernel (MeshMetalKernel: range trees, body, KernelArgs and workspace_args, headers, mesh_indirect,
-# metal_entry, metal_source; MeshKernelGroup: its KernelArgs, loops and scheduled nodes; a CPU template's
-# CppTemplateKernel: its KernelArgs, local and removed buffers), `launch` its call record as produced (mps:
-# torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error: its error buffer's argument
-# index, c10/metal/error.h ErrorMessages as its declaration names it); cpu: (kernel name, arg_defs, call_args,
-# arg_types), its KernelCallLine's kernel_name, call_args and arg_types as its call wrote them, arg_defs its
-# definition's own: a group's codegen_group arg_defs (torch-inductor-cpu-kernel-results.patch), a template's
-# TEMPLATE_DECLARED). `produced` its (entry, source) as its backend
-# made and defined it before its call (mps: metal_entry and metal_source; cpu, a group's and a template's alike:
-# define_kernel's declared entry and final source, torch-inductor-upstream-composition.patch defined_kernels).
-# `schedule`: mps the node_schedule codegen_node_schedule_with_kernel received,
-# its DisableReduction and EnableReduction scopes in it; cpu the group's scheduled nodes, a template's the nodes its
-# define_kernel received (its template node, then its epilogue nodes). `ranges`: mps each second-pass SchedulerNode's
-# Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes, local buffer context, local buffers) in order
-# (MeshKernelGroup),
-# each proxy's LoopNest and its kernels (MeshCppKernelProxy), each kernel's CppRanges in order with their accesses
-# (MeshCppAccesses); a template's TEMPLATE_RANGES (not retained: its effects are not empty; its scheduled nodes'
-# read_writes are its own).
-# `scheduled` its SchedulerNodes, `origins` the original body nodes their IR implements
-@dataclasses.dataclass(eq=False)
-class Kernel:
-    place: str
-    graph: object
-    scheduler: object
-    line: object
-    owner: object
-    launch: tuple
-    produced: tuple
-    schedule: tuple
-    ranges: tuple
-    scheduled: tuple
-    origins: tuple
+# each selected-backend kernel call, its record as its call made it (wrapper.mesh_calls, by its KernelCallLine's
+# identity), each part the original object itself: its backend's kernel, its KernelCallLine in its wrapper's lines
+# (line.wrapper: its kernel_name, call_args and arg_types as its generate_kernel_call wrote them), the GraphLowering whose
+# body it implements (a control body's SubgraphLowering) and the Scheduler whose codegen made it (an inlined control
+# body's: Inlined.scheduler of that inlining; a lifted one's: Lifted.scheduler, its line in Lifted.wrapper's lines):
+# - mps (MeshMetalKernel, launch, line, graph, scheduler): its kernel's own results (range trees, body, KernelArgs and
+#   workspace_args, headers, mesh_indirect, mesh_schedule (the node_schedule codegen_node_schedule_with_kernel
+#   received, its DisableReduction and EnableReduction scopes in it), mesh_ranges (each second-pass SchedulerNode's
+#   Ranges in order), metal_entry and metal_source (its last codegen_kernel pass's)), `launch`
+#   torch-inductor-mps-kernel-operands.patch's own (name, values, types, grid, group, error: its error buffer's argument
+#   index, c10/metal/error.h ErrorMessages as its declaration names it);
+# - cpu (MeshKernelGroup, line, graph, scheduler): its group's KernelArgs, loops, scheduled_nodes and mesh_proxies (each
+#   finalize_kernel's (CppKernelProxy, nodes, local buffer context, local buffers) in order, each proxy's LoopNest and
+#   its kernels (MeshCppKernelProxy), each kernel's CppRanges in order with their accesses (MeshCppAccesses));
+# - a cpu template (CppTemplateKernel, line, graph, scheduler, nodes): its kernel's KernelArgs, local_buffers and
+#   removed_buffers and (torch-inductor-cpu-kernel-results.patch) `rendered` its selected template's render as made
+#   (its code before its hooks' results replace their placeholders), `declared` each def_kernel declaration its hook
+#   made by its placeholder, and `epilogues` each epilogue as store_pointwise_nodes or store_grouped_gemm_pointwise_nodes
+#   made it, (dst, nodes, offsets, reindexers, LoopBodies, its group, its proxy), its group and proxy this scheduling's
+#   own (kernel_group_cls and kernel_proxy_cls: MeshKernelGroup.mesh_proxies, each kernel's CppRanges of each
+#   LoopBody's run); `nodes` the node schedule its definition received, its template SchedulerNode then its epilogue
+#   SchedulerNodes.
+# Its definition is the KernelDefinitionLine of its line's kernel_name in that wrapper's lines (_defined: wrapper.py
+# define_kernel's, as its backend's define_kernel wrote it before its call), the one each call of that name shares
+# (src_to_kernel: a later kernel of the same source is called by that name, its own line and kernel its own); the
+# original body nodes each scheduled node's IR implements are Produced.scheduled_origins'
 
 
 # one extern call of a scheduler (scheduler.py codegen_extern_call: every ExternKernelSchedulerNode it codegens, whatever
@@ -248,7 +221,7 @@ class ExternCall:
 # one inlining of a control body (GraphLowering.codegen_subgraph from wrapper.py codegen_subgraph_by_inlining):
 # `graph` its SubgraphLowering (the ir node's subgraph's graph: cond_subgraph.graph, body_subgraph.graph,
 # subgraph.graph), `scheduler` this inlining's own Scheduler (_update_scheduler: each inlining schedules the body
-# again; Kernel.scheduler and ExternCall.scheduler of what it made), `lines` the wrapper lines it wrote, `externs` its
+# again; the scheduler of each kernel call record and ExternCall it made), `lines` the wrapper lines it wrote, `externs` its
 # scheduler's ExternCall records; its inputs and outputs the body's own (graph.mesh_placeholders, graph.graph_outputs)
 @dataclasses.dataclass(frozen=True, eq=False)
 class Inlined:
@@ -263,7 +236,7 @@ class Inlined:
 # its converted graph the parent converter's subgms[graph.name], a get_attr its control node's HOP takes): `graph` its
 # SubgraphLowering (Switch.branches[b].graph, WhileLoop.cond_subgraph.graph and body_subgraph.graph,
 # InvokeSubgraph.subgraph.graph), `scheduler` the Scheduler of that codegen, `wrapper` its own wrapper (wrapper_fxir.py
-# SubgraphFxWrapperCodegen, its parent_wrapper its parent's: its lines, launched_kernels, lowered_subgraphs and
+# SubgraphFxWrapperCodegen, its parent_wrapper its parent's: its lines, mesh_calls, lowered_subgraphs and
 # fx_converter), `externs`
 # its scheduler's ExternCall records. A body is lowered once per wrapper (codegen_subgraph_common's
 # already_codegened_subgraphs): a later control node of the same body graph calls the one lowered by name, its
@@ -300,8 +273,13 @@ class Seeds:
 # rank-1 size-1), `outputs` each output occurrence (feature, its index among the converter's graph.outputs, i.e.
 # user_outputs and output_info, its ExportedProgram user output), `states` each (feature, its buffer, the
 # ExportedProgram inputs the converter reads it from: input_name_to_source_buffer_name, the outputs it writes it
-# from: output_name_to_target_buffer_name); `aliases` the AOT record as export.aot_aliases returns it (its
-# ViewAndMutationMeta, each input's role, the input prototypes, every forward output prototype, hidden bases included)
+# from: output_name_to_target_buffer_name); `aliases` the program's own AOT alias record, the object itself as
+# export.aot_aliases returns it, program.graph_module.meta["aot_aliases"] (torch-export-alias-metadata.patch: made by
+# input_output_analysis.py create_graph_signature, remapped to the copied graph's nodes by torch/export/experimental
+# _copy_graph_module_and_signature): its ViewAndMutationMeta, its input Nodes (the program's placeholders past its
+# tokens, in AOT input order) and its forward output leaves (its mutated inputs', its outputs' and its intermediate
+# bases', in that order; a leaf a Node of program.graph or its literal). Each input's role is its own input spec
+# (program.graph_signature.input_specs, by its node's name), and its value is its node's meta["val"]
 @dataclasses.dataclass(eq=False)
 class Model:
     program: object
@@ -324,19 +302,18 @@ class Model:
 # memory_planner or wrapper_code.past_planning_states; buffers, layouts and aliases, graph_inputs, graph_outputs,
 # mutated_inputs, never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its planned lines;
 # None for the Neural Engine), `signature` the AOT export's GraphSignature of that graph (graph.module.meta; Neural
-# Engine: ExportedProgram.graph_signature), `kernels` {id(KernelCallLine): Kernel} over its wrapper and every subgraph
-# wrapper (every selected-backend kernel call: an mps kernel's, a cpu group's and a cpu template's), `externs` its const
+# Engine: ExportedProgram.graph_signature), `kernels` each selected-backend kernel call's record by its KernelCallLine's
+# identity (an mps kernel's, a cpu group's and a cpu template's), a view over its wrapper's and every subgraph
+# wrapper's own (wrapper.mesh_calls, _wrappers order, each in call order), `externs` its const
 # graph's scheduler's ExternCall records (graph.const_module's, made first; none without one) then its own scheduler's,
 # each in emission order, each with its own scope (ExternCall.graph), every control body's reached through them
 # (ExternCall.inlined and .lifted, each with its own ExternCalls, nested), `seeds` the Seeds of every graph _graphs
 # yields (its const graph's, the root graph's and every body graph's made under each), `model` the Neural Engine's
-# Model, `lowered` the LoweredAOTI itself (None for the Neural Engine): its `planned` lines (graph.wrapper_code.lines)
-# and its resumption, lowered.emit(supplied), which resumes its wrapper's
-# print with the supplied operands for that stage (wrapper_code.supplied) and then compile_fx's AOT emission. Its result
-# is lowered.compiled, AotCodeCompiler.compile's AotCompiled (torch-inductor-cpp-build-result.patch: its wrapper and
-# kernel sources, their object actions, their precompiled headers' and its constants object's actions as run, its
-# link action, its extern kernel nodes; none of its wrapper's or kernel's objects compiled, its shared library not
-# linked), None until emitted
+# Model, `lowered` the LoweredAOTI itself (None for the Neural Engine): its planned stage and its whole emission
+# (emit: LoweredAOTI.emit, each wrapper's print from that stage, then AotCodeCompiler.compile's AotCompiled,
+# torch-inductor-cpp-build-result.patch: its wrapper and kernel sources, their object actions, their precompiled headers'
+# and its constants object's actions as run, its link action, its extern kernel nodes; none of its wrapper's or
+# kernel's objects compiled, its shared library not linked; lowered.emitted each emission's)
 @dataclasses.dataclass(eq=False)
 class Produced:
     processor: str
@@ -360,8 +337,21 @@ class Produced:
     def origins(self, nodes):
         return _origins(self.sources, nodes)
 
+    # each original body node the IR of SchedulerNodes `scheduled` implements (each member's IR node's origins), in order
+    def scheduled_origins(self, scheduled):
+        return _origins(self.sources, [o for node in scheduled for member in node.get_nodes()
+                                       for o in member.node.get_origins()])
+
 
 # ---- the selected upstream backends, retaining their own results ----
+
+# the KernelDefinitionLine of kernel name `name` in `wrapper`'s lines (wrapper.py define_kernel's), the one each call of
+# that name shares
+def _defined(wrapper, name):
+    definition, = (line for line in wrapper.lines
+                   if isinstance(line, KernelDefinitionLine) and line.kernel_name == name)
+    return definition
+
 
 # codegen/common.py CSEProxy.indirect_indexing: each indirect symbol its kernel's overrides make (its parent_handler's
 # indirect_indexing), with the value it indexes by and its size (and whether its bounds are checked), the indirect
@@ -387,13 +377,12 @@ class MeshMetalKernel(MetalKernel):
         self.mesh_indirect, self.mesh_ranges, self.mesh_schedule, self.mesh_split = {}, [], (), None
 
     def split_and_set_ranges(self, lengths):
-        made = super().split_and_set_ranges(lengths)
-        self.mesh_split = (tuple(map(tuple, made)), self.inside_reduction)
-        return made
+        self.mesh_split = super().split_and_set_ranges(lengths)
+        return self.mesh_split
 
     @contextlib.contextmanager
     def set_current_node(self, node):
-        self.mesh_ranges.append(Ranges(node, *self.mesh_split, []))
+        self.mesh_ranges.append(Ranges(node, self.mesh_split, self.inside_reduction, []))
         with super().set_current_node(node):
             yield
 
@@ -413,15 +402,15 @@ class MeshMetalKernel(MetalKernel):
         self._accessed("store_reduction", name, index, None)
         return super().store_reduction(name, index, value)
 
-    # each call's own record, completed at that call: the operands patch's (kernel, launch), then the KernelCallLine
-    # its generate_kernel_call wrote (the wrapper's last line), the graph it was called in, that graph's scheduler
-    # making it (an inlined control body's own for that inlining) and its source as made and defined (simd.py
-    # codegen_node_schedule: codegen_kernel, then define_kernel, before this call): (metal_entry, metal_source)
+    # this call's own record (wrapper.mesh_calls): the kernel, the operands patch's launch of this call
+    # (wrapper.launched_kernels), the KernelCallLine its generate_kernel_call wrote (the wrapper's last line), the graph
+    # it was called in and that graph's scheduler making it (an inlined control body's own for that inlining)
     def call_kernel(self, name, node=None, deallocate_ws=True):
         wrapper = V.graph.wrapper_code
         super().call_kernel(name, node, deallocate_ws)
-        wrapper.launched_kernels[-1] += (wrapper.lines[-1], V.graph, V.graph.scheduler,
-                                         (self.metal_entry, self.metal_source))
+        line = wrapper.lines[-1]
+        wrapper.__dict__.setdefault("mesh_calls", {})[id(line)] = (
+            self, wrapper.launched_kernels[-1][1], line, V.graph, V.graph.scheduler)
 
 
 class MeshMetalScheduling(MetalScheduling):
@@ -447,20 +436,16 @@ class MeshCppTile2DOverrides(MeshIndirect, CppTile2DOverrides):
 
 
 # codegen/cpp.py CppKernel, CppVecKernel and CppTile2DKernel as their CppKernelProxy's factory makes each
-# (codegen_functions' codegen_kernel), each retaining its set_ranges result, its suffix scope, each node it codegens
-# (CppRanges) with each access as it receives it, and its indirect symbols (mesh_indirect). An access is taken at the
+# (codegen_functions' codegen_kernel), each retaining its set_ranges result, its suffix scope, each function's run in
+# it (run_function, torch-inductor-cpu-kernel-results.patch: CppRanges, the node its codegen sets, if any, its own)
+# with each access as it receives it, and its indirect symbols (mesh_indirect). An access is taken at the
 # outermost of its class's load, store and store_reduction, before the original's own rename_indexing, a tile's
 # transform_indexing or a vector load's scalar load, none of which reaches this class again; CppVecOverrides.load_seed's
 # own V.kernel.load among them
 class MeshCppAccesses:
     def __init__(self, *args):
         super().__init__(*args)
-        self.mesh_indirect, self.mesh_ranges, self.mesh_split, self.mesh_suffix = {}, [], None, False
-
-    def set_ranges(self, lengths, reduction_lengths):
-        made = super().set_ranges(lengths, reduction_lengths)
-        self.mesh_split = tuple(map(tuple, made))
-        return made
+        self.mesh_indirect, self.mesh_ranges, self.mesh_suffix = {}, [], False
 
     @contextlib.contextmanager
     def write_to_suffix(self):
@@ -469,9 +454,13 @@ class MeshCppAccesses:
             yield
         self.mesh_suffix = False
 
+    def run_function(self, fn, var_sizes, *args):
+        self.mesh_ranges.append(CppRanges(fn, var_sizes, None, args, self.mesh_suffix, []))
+        super().run_function(fn, var_sizes, *args)
+
     @contextlib.contextmanager
     def set_current_node(self, node):
-        self.mesh_ranges.append(CppRanges(node, self.mesh_split, self.mesh_suffix, []))
+        self.mesh_ranges[-1].node = node
         with super().set_current_node(node):
             yield
 
@@ -536,14 +525,12 @@ class MeshCppKernelProxy(CppKernelProxy):
 # holds it at the finalize, {local name: ir.Buffer}, the same Buffer objects add_local_buffer registered, the
 # kernel-local buffers its accesses name and codegen_loops_impl declares (cpp.py 2717: under the same isinstance
 # test). Its __exit__ clears local_buffers in place (cpp_utils.py 384), so the mapping is taken here; outside a
-# LocalBufferContext the kernel's KernelArgs.input and output are unpatched and no name is local ({}). Each call's own
-# record, as
-# MeshMetalKernel.call_kernel's (wrapper.launched_kernels): (group, launch, its KernelCallLine, the graph it was called
-# in, its scheduler, its (declared entry, final source) as define_kernel defined it: torch-inductor-upstream-composition
-# .patch defined_kernels); its launch (kernel name, arg_defs, call_args, arg_types): its definition's own parameter
-# declarations (torch-inductor-cpu-kernel-results.patch codegen_group arg_defs, flush's codegen_group before this call)
-# and that KernelCallLine's kernel_name, call_args and arg_types as KernelGroup.call_kernel's generate_kernel_call wrote
-# them
+# LocalBufferContext the kernel's KernelArgs.input and output are unpatched and no name is local ({}). A group is
+# its scheduling's (reset_kernel_group, flush) or a template epilogue's (cpp_template_kernel.py store_pointwise_nodes
+# and store_grouped_gemm_pointwise_nodes: its CppTemplateKernel's kernel_group_cls, codegen_template's), which no call
+# follows. Each call's own record, as MeshMetalKernel.call_kernel's (wrapper.mesh_calls): (group, its KernelCallLine,
+# the graph it was called in, its scheduler), that line's kernel_name, call_args and arg_types as
+# KernelGroup.call_kernel's generate_kernel_call wrote them
 class MeshKernelGroup(KernelGroup):
     def __init__(self):
         super().__init__()
@@ -558,20 +545,18 @@ class MeshKernelGroup(KernelGroup):
     def call_kernel(self, wrapper, kernel_name):
         super().call_kernel(wrapper, kernel_name)
         line = wrapper.lines[-1]
-        wrapper.__dict__.setdefault("launched_kernels", []).append(
-            (self, (line.kernel_name, self.arg_defs, tuple(line.call_args), tuple(line.arg_types)), line, V.graph,
-             V.graph.scheduler, wrapper.defined_kernels[kernel_name]))
+        wrapper.__dict__.setdefault("mesh_calls", {})[id(line)] = (self, line, V.graph, V.graph.scheduler)
 
 
+# codegen/cpp.py CppScheduling with the selected group and proxy classes, its groups' and its templates' epilogues'
+# (kernel_group_cls and kernel_proxy_cls; codegen_template gives them to its CppTemplateKernel,
+# torch-inductor-cpu-kernel-results.patch)
 class MeshCppScheduling(CppScheduling):
-    kernel_proxy_cls = MeshCppKernelProxy
+    kernel_group_cls, kernel_proxy_cls = MeshKernelGroup, MeshCppKernelProxy
 
     def __init__(self, scheduler):
         self.mesh_defined = []
         super().__init__(scheduler)
-
-    def reset_kernel_group(self):
-        self.kernel_group = MeshKernelGroup()
 
     # each kernel definition, the common definition producer of a group (flush) and a template (codegen_template) as
     # made: (the kernel handler it was defined under, the nodes it received, the kernel name it returned). A template's
@@ -579,25 +564,21 @@ class MeshCppScheduling(CppScheduling):
     # sets none of its own
     def define_kernel(self, src_code, nodes, kernel_args=None):
         name = super().define_kernel(src_code, nodes, kernel_args)
-        self.mesh_defined.append((V.kernel, tuple(nodes), name))
+        self.mesh_defined.append((V.kernel, nodes, name))
         return name
 
     # a CPU template's call, its own record made at the return of the original codegen making it (cpp.py
-    # codegen_template: render, then define_kernel, then CppTemplateKernel.call_kernel), as MeshKernelGroup.call_kernel
-    # makes a group's (wrapper.launched_kernels): (its CppTemplateKernel, launch, its KernelCallLine, the graph it was
-    # called in, its scheduler, its (declared entry, final source) as define_kernel defined it, the nodes that
-    # definition received). The kernel and nodes are the one definition this codegen made; the line is the one
-    # KernelCallLine it wrote (call_kernel's generate_kernel_call, its one call), the launch that line's own call
-    # arguments and types as the call produced them
+    # codegen_template: make_kernel_render, render, define_kernel, then CppTemplateKernel.call_kernel;
+    # wrapper.mesh_calls): (its CppTemplateKernel, its KernelCallLine, the graph it was called in, its scheduler, the
+    # node schedule that definition received). The kernel and nodes are the one definition this codegen made; the
+    # line is the one KernelCallLine it wrote (call_kernel's generate_kernel_call)
     def codegen_template(self, template_node, epilogue_nodes, prologue_nodes):
         wrapper = V.graph.wrapper_code
         lines, defined = len(wrapper.lines), len(self.mesh_defined)
         super().codegen_template(template_node, epilogue_nodes, prologue_nodes)
-        (kernel, nodes, name), = self.mesh_defined[defined:]
+        (kernel, nodes, _), = self.mesh_defined[defined:]
         line, = (made for made in wrapper.lines[lines:] if isinstance(made, KernelCallLine))
-        wrapper.__dict__.setdefault("launched_kernels", []).append(
-            (kernel, (line.kernel_name, TEMPLATE_DECLARED, tuple(line.call_args), tuple(line.arg_types)), line,
-             V.graph, V.graph.scheduler, wrapper.defined_kernels[name], nodes))
+        wrapper.__dict__.setdefault("mesh_calls", {})[id(line)] = (kernel, line, V.graph, V.graph.scheduler, nodes)
 
 
 SELECTED = {"mps": MeshMetalScheduling, "cpu": MeshCppScheduling}
@@ -771,32 +752,6 @@ def _sourced(sources, entries, made):
         _sourced(sources, entry.from_node, made)
 
 
-def _scheduled_origins(scheduled, sources):
-    return _origins(sources, [o for node in scheduled for member in node.get_nodes() for o in member.node.get_origins()])
-
-
-# one call record (owner, launch, line, graph, scheduler, produced) as its call made it
-def _mps(owner, launch, line, graph, scheduler, produced, sources):
-    scheduled = tuple(r.node for r in owner.mesh_ranges)
-    return Kernel("mps", graph, scheduler, line, owner, launch, produced, owner.mesh_schedule,
-                  tuple(owner.mesh_ranges), scheduled, _scheduled_origins(scheduled, sources))
-
-
-def _cpu(owner, launch, line, graph, scheduler, produced, sources):
-    scheduled = tuple(owner.scheduled_nodes)
-    return Kernel("cpu", graph, scheduler, line, owner, launch, produced, scheduled, tuple(owner.mesh_proxies),
-                  scheduled, _scheduled_origins(scheduled, sources))
-
-
-# a CPU template's call record (MeshCppScheduling.codegen_template), `nodes` its definition's
-def _template(owner, launch, line, graph, scheduler, produced, nodes, sources):
-    return Kernel("cpu", graph, scheduler, line, owner, launch, produced, nodes, TEMPLATE_RANGES, nodes,
-                  _scheduled_origins(nodes, sources))
-
-
-PLACED = {MeshMetalKernel: _mps, MeshKernelGroup: _cpu, CppTemplateKernel: _template}
-
-
 # each wrapper of GraphLowering `graph` and of every body graph made under it (_graphs), once: a control body's
 # GraphLowering.codegen_subgraph writes into its parent's (its wrapper_code its parent_graph's; cpp_wrapper_cpu.py
 # codegen_subgraph)
@@ -868,8 +823,7 @@ def _inductor(module, body, sources, sent, processor, kind, device):
               for k, node in enumerate(_placeholders(module.graph))),
         tuple(Output(k, node, signature.user_outputs[k], graph.graph_outputs[k], k >= len(returned))
               for k, node in enumerate(returned + sent)),
-        {id(record[2]): PLACED[type(record[0])](*record, sources)
-         for wrapper in _wrappers(graph) for record in wrapper.__dict__.get("launched_kernels", ())},
+        collections.ChainMap(*reversed([wrapper.__dict__.get("mesh_calls", {}) for wrapper in _wrappers(graph)])),
         tuple(extern for scope in (graph.const_module, graph) if scope is not None
               for extern in scope.scheduler.mesh_externs),
         _seeds(graph, sources), None, lowered)
@@ -1074,8 +1028,8 @@ def _acquire(made):
 # 0), the body at the position it gives (pass 0 its own: thread_position_in_grid; pass 1 its listed threadgroup's .xyz,
 # whole threadgroups, its further lanes outside the body's bound reaching mesh_release); mesh_release after the body's
 # stores, its arrival counters in `sent` order; each paged argument's accessor over its arena
-def _threaded(kernel, made):
-    callables, later, args, values = made.callables, bool(made.later), kernel.owner.args, kernel.launch[1]
+def _threaded(made, kernel, launch, *_):
+    callables, later, args, values = made.callables, bool(made.later), kernel.args, launch[1]
     named, arrivals = _views(made)
     parameters = [f"{'device' if write else 'const device'} tint_array<{element}, 1>* mesh_{name} [[buffer({slot})]]"
                   for name, (slot, element, write) in named.items()]
@@ -1107,7 +1061,7 @@ def _threaded(kernel, made):
 # a CPU kernel's pass (a native task: its one invocation; its sends published by its Steps, no release): the
 # collection's bool mesh_acquire_first or mesh_acquire_later first, its body run where it returns true, each of its
 # parameters the kernel's own at its slot as the host C++ collection types it; a paged argument's binding its flat view
-def _hosted(kernel, made):
+def _hosted(made, *_):
     named, _ = _views(made)
     acquire = _acquire(made)
     used = _acquired(bool(made.later)) if acquire is not None else []
@@ -1117,63 +1071,57 @@ def _hosted(kernel, made):
     return Hosted(made.callables.source, tuple(f"{p.type} mesh_{name}" for name, p in zip(used, typed)), enter, typed)
 
 
-# kernel `kernel`'s composition for one pass from its native composition `made` (compiler/mesh_compiler/metal.py
+# kernel call `call`'s composition (its record, Produced.kernels) for one pass from its native composition `made` (compiler/mesh_compiler/metal.py
 # Composed: metal_ir_upstream_composition's words, later words, pages (each with its argument binding's placed origin),
 # readiness and table, the kernel's one callable collection `callables` (metal.Callables: metal_ir_callables_emit's
 # source, its binary64 license notice its leading comment, and metal_ir_upstream_protocol's acquire, later and release),
-# `later` its pass): a Metal kernel's Composition, a CPU kernel's Hosted
-def composed(kernel, made):
-    return (_hosted if kernel.place == "cpu" else _threaded)(kernel, made)
+# `later` its pass): a Metal kernel's Composition, a CPU group's Hosted, each from the call's own record
+def composed(call, made):
+    return COMPOSED[type(call[0])](made, *call)
 
 
-# metal_ir.h struct metal_ir_upstream_emission. No pass has a build of its own: (), (), None, (), None, (), None.
-# A CPU kernel's build is its body's, Produced.lowered.compiled once emitted (AotCompiled,
-# compiler/patches/torch-inductor-cpp-build-result.patch):
-# the original AOT kernel_builder's compile_only object action over its kernel code, with its wrapper's, its
-# precompiled headers', its constants object's and its link actions (cpp_builder.py CppBuildAction, each whole: its
-# command, its source, target and link operand positions from their own assembled parts, product, directories, working
-# directory and environment).
-@dataclasses.dataclass(frozen=True)
-class Emission:
-    source: str
-    entry: str
-    parameters: tuple
-    compile: tuple
-    link: tuple
-    language: str | None
-    environment: tuple
-    directory: str | None
-    sources: tuple
-    output: int | None
+COMPOSED = {MeshMetalKernel: _threaded, MeshKernelGroup: _hosted}
 
 
-# metal_ir.h metal_ir_upstream_emitted: the kernel's terminal emission by its own upstream emitter for one pass
-# (`composition` its composed() result; None: as produced), from the same retained owner for each pass. Metal: the
-# patched MetalKernel.codegen_kernel of the retained kernel, its headers expanded (torch/mps/__init__.py
-# compile_shader's _embed_headers). CPU: cpp.py define_kernel's final source and declared entry
-# (torch-inductor-upstream-composition.patch defined_kernels of its line's wrapper; a group's and a template's alike),
-# or the retained group's patched codegen_group with its composition through define_kernel's defined_source (a
-# template's composed pass needs its own upstream hook, cpp_template_kernel.py CppTemplateKernel.def_kernel and its
-# body's opening, which no patch has yet: numerical68-result.md); its parameters its call's arguments in
-# cpp_argdefs order (each at its own slot; its buffers, inplace, input and output, the bound pointer, its sizevars after
-# them the value) and the composition's. Its build is its body's (Emission; Produced.lowered.compiled).
-def emitted(kernel, composition=None):
-    owner = kernel.owner
-    if kernel.place == "cpu":
-        name, _, _, types = kernel.launch
-        entry, source = kernel.produced
-        values = len(types) - len(owner.args.sizevars)
-        parameters = tuple(Parameter(t, k, int(k < values)) for k, t in enumerate(types))
-        if composition is not None:
-            with V.set_graph_handler(kernel.graph):
-                source = CppScheduling.defined_source(owner.codegen_group(None, composition), entry, name)
-            parameters += composition.typed
-        return Emission(source, entry, parameters, (), (), None, (), None, (), None)
-    entry, source = kernel.produced
-    if composition is not None:
-        with V.set_graph_handler(kernel.graph), V.set_kernel_handler(owner):
-            owner.codegen_kernel(entry, composition)
-        source = owner.metal_source
-    source = _embed_headers([line + "\n" for line in source.split("\n")],
-                            [Path(torch.__file__).parent / "include"], set())
-    return Emission(source, entry, (), (), (), None, (), None, (), None)
+# the composed definition of kernel call `call` (its record, Produced.kernels) for one pass's composition
+# `composition` (composed()), by that call's own kernel and its backend's own definition producer, under the
+# configuration its emission prints with (its caller's config.patch, as the produced pass ran under its compile's):
+# the KernelDefinitionLine its call's name defines (_defined, its planned line) as that pass defines it, the planned
+# line's own wrapper, kernel_name, metadata and gpu with the composed pass's kernel_body and cpp_definition. A CPU group:
+# its patched codegen_group with the composition, defined by cpp.py CppScheduling.kernel_definition under its call's
+# name (torch-inductor-upstream-composition.patch), its body's prefix, argument declarations and body the group's own.
+# A Metal kernel: its patched MetalKernel.codegen_kernel at its own entry with the composition under its own handler,
+# defined by mps.py MetalScheduling.kernel_definition under its call's name (its library source). Its call's own
+# operands for the composed parameters are its emission's (`supplied`). A definition is shared by every call of its
+# name (src_to_kernel): one composed definition serves each of them
+def configured(call, composition):
+    return DEFINED[type(call[0])](composition, *call)
+
+
+def _group_defined(composition, group, line, graph, scheduler):
+    with V.set_graph_handler(graph):
+        kernel_body, cpp_definition = CppScheduling.kernel_definition(group.codegen_group(None, composition),
+                                                                      line.kernel_name, group.args)
+    return dataclasses.replace(_defined(line.wrapper, line.kernel_name), kernel_body=kernel_body,
+                               cpp_definition=cpp_definition)
+
+
+def _metal_defined(composition, kernel, launch, line, graph, scheduler):
+    with V.set_graph_handler(graph), V.set_kernel_handler(kernel):
+        src_code = kernel.codegen_kernel(kernel.metal_entry, composition)
+    return dataclasses.replace(_defined(line.wrapper, line.kernel_name),
+                               kernel_body=MetalScheduling.kernel_definition(src_code, line.kernel_name))
+
+
+DEFINED = {MeshMetalKernel: _metal_defined, MeshKernelGroup: _group_defined}
+
+
+# the whole emission of processor body `produced` for one configuration, its lowered result's own emitter
+# (output_code.py LoweredAOTI.emit, torch-inductor-aot-lowered-result.patch: compile_fx's emission, each wrapper's
+# print from its planned stage, then AotCodeCompiler.compile's AotCompiled, its wrapper and kernel sources, ABI and
+# build actions together), its operands passed whole as given: its configuration's bindings (`supplied`,
+# `const_supplied`) and its configured definitions ({id(planned KernelDefinitionLine): configured()'s line}), each
+# planned definition line its print reaches printed as its configured one (its own codegen, the selected wrapper's
+# _define_kernel_helper); every other its planned line as planned
+def emit(produced, *args, **kwargs):
+    return produced.lowered.emit(*args, **kwargs)

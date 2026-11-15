@@ -31,16 +31,18 @@
          self.codegen_body()
          # compiler/patches/torch-inductor-mps-kernel-operands.patch: the Metal source is its own produced buffer,
          # which the wrapper's opening and closing lines then enclose
-@@ -977,6 +987,8 @@
-             if not V.graph.cpp_wrapper:
-                 for header in self.headers:
-                     code.writeline(f"#include <c10/metal/{header}.h>")
-+                if composition is not None:
-+                    code.splice(composition.source)
-             else:
-                 headers = [
-                     f"#include <c10/metal/{header}.h>" for header in self.headers
-@@ -1004,11 +1016,18 @@
+@@ -987,6 +997,10 @@
+                     OrderedSet(),  # type: ignore[arg-type]
+                 )
+                 code.writeline(header_contents)
++            # compiler/patches/torch-inductor-upstream-composition.patch: the composition's definitions after the
++            # kernel's headers (their includes, or under cpp_wrapper their contents)
++            if composition is not None:
++                code.splice(composition.source)
+ 
+             if self.inside_reduction:
+                 total_reduction_size = math.prod(
+@@ -1004,11 +1018,18 @@
                  )
              code.writeline(f"kernel void {fn_name}(")
              with code.indent():
@@ -60,7 +62,7 @@
                  for outer, inner in self.args.input_buffers.items():
                      dtype = V.graph.get_dtype(outer)
                      # MPS does not support float64, but scalar inputs are fine
-@@ -1019,20 +1038,20 @@
+@@ -1019,20 +1040,20 @@
                          dtype_str = "float"
                      else:
                          dtype_str = self.dtype_to_str(dtype)
@@ -85,7 +87,7 @@
  
                  if len(idx_vars) >= 4:
                      raise AssertionError("Up to 3 index variables are supported")
-@@ -1042,16 +1061,48 @@
+@@ -1042,16 +1063,48 @@
                  thread_pos_var_name = (
                      idx_vars[0].name if len(idx_vars) == 1 else "thread_pos"
                  )
@@ -94,8 +96,6 @@
 -                    f"{thread_pos_dtype} {thread_pos_var_name} [[thread_position_in_grid]]{thread_pos_suffix}"
 -                )
 -                if self.inside_reduction:
--                    code.writeline(
--                        f"{thread_pos_dtype} group_pos [[thread_position_in_threadgroup]]"
 +                if composition is not None:
 +                    for parameter in composition.parameters:
 +                        code.writeline(f"{parameter},")
@@ -104,7 +104,8 @@
 +                        code.writeline(builtin + ("," if idx + 1 < len(builtins) else ""))
 +                else:
 +                    thread_pos_suffix = "," if self.inside_reduction else ""
-+                    code.writeline(
+                     code.writeline(
+-                        f"{thread_pos_dtype} group_pos [[thread_position_in_threadgroup]]"
 +                        f"{thread_pos_dtype} {thread_pos_var_name} [[thread_position_in_grid]]{thread_pos_suffix}"
                      )
 +                    if self.inside_reduction:
@@ -141,7 +142,7 @@
                  if len(idx_vars) > 1:
                      for idx, var in enumerate(idx_vars):
                          code.writeline(
-@@ -1059,6 +1110,11 @@
+@@ -1059,6 +1112,11 @@
                          )
                  code.splice(self.indexing_code)
                  code.splice(self.body)
@@ -153,18 +154,52 @@
              code.writeline("}")
  
          self.metal_source = code.getvalue()
+@@ -1231,6 +1289,19 @@
+     def __init__(self, scheduler: Scheduler | None) -> None:
+         super().__init__(scheduler)
+ 
++    @staticmethod
++    def kernel_definition(src_code: str, mps_lib_name: str, metadata: str) -> dict[str, Any]:
++        # compiler/patches/torch-inductor-upstream-composition.patch: define_kernel's C++ wrapper definition of the
++        # library source `src_code` named `mps_lib_name` (`metadata` its origins), moved here unchanged: the operands
++        # of its wrapper's define_kernel. A composed pass of the same kernel (codegen_kernel's `composition`) is
++        # defined by it under the same name
++        return dict(
++            kernel_name=mps_lib_name,
++            kernel_body=f"const char* {mps_lib_name}_source = " + src_code,
++            metadata=metadata,
++            gpu=False,
++        )
++
+     def define_kernel(
+         self, src_code: str, node_schedule: list[SchedulerNode], kernel: MetalKernel
+     ) -> str:
+@@ -1243,10 +1314,11 @@
+             mps_lib_name = f"mps_lib_{wrapper.next_kernel_suffix()}"
+             kernel_name = mps_lib_name
+             wrapper.src_to_kernel[src_code] = kernel_name
+-            src_code = f"const char* {mps_lib_name}_source = " + src_code
+             origins, detailed_origins = get_kernel_metadata(node_schedule, wrapper)
+             wrapper.define_kernel(
+-                mps_lib_name, src_code, f"{origins}\n{detailed_origins}", gpu=False
++                **self.kernel_definition(
++                    src_code, mps_lib_name, f"{origins}\n{detailed_origins}"
++                )
+             )
+             return kernel_name
+ 
 --- a/torch/_inductor/codegen/cpp.py
 +++ b/torch/_inductor/codegen/cpp.py
-@@ -6023,6 +6023,39 @@
+@@ -6023,6 +6023,44 @@
      def codegen_sync(self):
          pass
  
 +    @staticmethod
 +    def kernel_definition(src_code, kernel_name, args):
 +        # compiler/patches/torch-inductor-upstream-composition.patch: define_kernel's definition of `src_code`
-+        # named `kernel_name` (`args` its KernelArgs), moved here unchanged: its KernelDefinitionLine's kernel_body
-+        # and cpp_definition. A composed pass of the same group (codegen_group's `composition`) is defined by it
-+        # under the same name
++        # named `kernel_name` (`args` its KernelArgs), moved here unchanged: the operands of its wrapper's
++        # define_kernel. A composed pass of the same group (codegen_group's `composition`) or template
++        # (CppTemplateKernel.compose) is defined by it under the same name
 +        kernel_decl_name = kernel_name if V.graph.cpp_wrapper else "kernel"
 +        src_code = src_code.replace(str(Placeholder.KERNEL_NAME), kernel_decl_name)
 +        src_code = src_code.replace(str(Placeholder.DESCRIPTIVE_NAME), kernel_name)
@@ -190,12 +225,17 @@
 +        compile_wrapper.splice(src_code, strip=True)
 +        if not V.graph.cpp_wrapper:
 +            compile_wrapper.writeline("''')")
-+        return compile_wrapper.getvalue(), kernel_definition
++        return dict(
++            kernel_name=kernel_name,
++            kernel_body=compile_wrapper.getvalue(),
++            gpu=False,
++            cpp_definition=kernel_definition,
++        )
 +
      def define_kernel(self, src_code, nodes, kernel_args=None):
          wrapper = V.graph.wrapper_code
          if src_code in wrapper.src_to_kernel:
-@@ -6035,35 +6068,13 @@
+@@ -6035,38 +6073,8 @@
              )
              kernel_name = "_".join(["cpp", fused_name, wrapper.next_kernel_suffix()])
              wrapper.src_to_kernel[src_code] = kernel_name
@@ -225,17 +265,17 @@
 -            compile_wrapper.splice(src_code, strip=True)
 -            if not V.graph.cpp_wrapper:
 -                compile_wrapper.writeline("''')")
-+            kernel_body, kernel_definition = self.kernel_definition(
-+                src_code, kernel_name, args
-+            )
-             wrapper.define_kernel(
-                 kernel_name,
+-            wrapper.define_kernel(
+-                kernel_name,
 -                compile_wrapper.getvalue(),
-+                kernel_body,
-                 gpu=False,
-                 cpp_definition=kernel_definition,
-             )
-@@ -6128,7 +6139,10 @@
+-                gpu=False,
+-                cpp_definition=kernel_definition,
+-            )
++            wrapper.define_kernel(**self.kernel_definition(src_code, kernel_name, args))
+         return kernel_name
+ 
+     def flush(self):
+@@ -6128,7 +6136,10 @@
          args_num = len(arg_defs)
          return args_num
  
@@ -247,7 +287,7 @@
          self.stack.close()
          if not self.scheduled_nodes:
              return ""
-@@ -6142,11 +6156,15 @@
+@@ -6142,11 +6153,15 @@
          if enable_kernel_profile:
              code.writelines(["#include <torch/csrc/inductor/aoti_runtime/utils.h>"])
          code.writeline("#include <torch/csrc/inductor/cpp_prefix.h>")
@@ -263,7 +303,7 @@
          arg_defs = ",\n".ljust(25).join(arg_defs)
          func_export_decl = get_export_declaration()
          inline_attr = (
-@@ -6158,6 +6176,9 @@
+@@ -6158,6 +6173,9 @@
  
          # 3. Function body
          with code.indent():
