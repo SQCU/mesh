@@ -243,7 +243,8 @@ def constructed(machine):
 # export name: its GraphLowering graph_inputs key) and Output's (position, body node, export name, sent); the
 # upstream objects by identity, each once by index (first seen first): `owners` the distinct backend kernels' count
 # (Kernel.owner), `schedulers` the distinct Schedulers' count (each call, extern and inlining naming its own),
-# `loops` each LoopBody a call's ranges name (`body_of`); `kernels` each call (Produced.kernels order: each
+# `loops` each LoopBody a call's ranges name (`body_of`), `proxies` each cpu CppKernelProxy its ranges or a fused nest
+# name (`proxy_of`), `subkernels` the distinct CppKernels' count; `kernels` each call (Produced.kernels order: each
 # KernelCallLine its own) as its own record (`calling`); each ExternCall (`called`) as (its GraphLowering's
 # module, its IR operation's name there (GraphLowering.register_operation), its FX origins, its scheduler's index, each
 # Inlined (`inlining`) in order), each Inlined as (its SubgraphLowering's module, its scheduler's index, its own
@@ -268,13 +269,36 @@ def producing(made):
     def looped(body):
         return loops.setdefault(id(body), (len(loops), body))[0]
 
+    # torch 2.14.0 codegen/cpp.py CppKernelProxy, each once by identity, its index in `proxies`; each of its
+    # subkernels (CppKernelProxy.kernels: the scalar, vector, tail and tile2d CppKernels) once by identity
+    proxies, subkernels = {}, {}
+
+    def proxied(proxy):
+        return proxies.setdefault(id(proxy), (len(proxies), proxy))[0]
+
+    # a LoopNest: its loops (each LoopLevel as it is: var, size, offset, tiled_size, steps, parallel, simd_omp,
+    # simd_vec, collapsed, is_reduction, simd_nelements) and its kernel, the proxy its own nest's (set_kernel) or an
+    # OuterLoopFusedKernel (merge_outer_fusion_kernels: each `inner` LoopNest from_loop_level of a fused proxy's)
+    def nested(nest):
+        from torch._inductor.codegen.cpp import OuterLoopFusedKernel
+        kernel = nest.kernel
+        return nest.loops, (("outer", tuple(map(nested, kernel.inner))) if isinstance(kernel, OuterLoopFusedKernel)
+                            else ("proxy", proxied(kernel)))
+
+    # one proxy: its call ranges, each subkernel as (its index, its class) and its loop nest
+    def proxy_of(proxy):
+        return {"call_ranges": proxy.call_ranges,
+                "kernels": tuple((subkernels.setdefault(id(kernel), len(subkernels)), type(kernel))
+                                 for kernel in proxy.kernels),
+                "loop_nest": nested(proxy.loop_nest)}
+
     # lower_inductor.py Ranges (an mps second-pass SchedulerNode): its node's name and LoopBody, its variables,
     # reduction and accesses as received (method, buffer name, index, store mode, its LoopBodyBlock graph, that graph's
-    # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes) its nodes' names and LoopBodies
-    # (torch 2.14.0 codegen/cpp.py codegen_node and codegen_outer_loop_node: each node a SchedulerNode of get_nodes(),
-    # every one's _body called by CppKernelProxy.codegen_nodes; a template's finalize_kernel nodes none)
+    # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes) its proxy's index and its nodes'
+    # names and LoopBodies (codegen/cpp.py codegen_node and codegen_outer_loop_node: each node a SchedulerNode of
+    # get_nodes(), every one's _body called by CppKernelProxy.codegen_nodes; a template's finalize_kernel nodes none)
     ranged = {"mps": lambda r: (r.node.get_name(), looped(r.node._body), r.variables, r.reduction, tuple(r.accesses)),
-              "cpu": lambda r: tuple((node.get_name(), looped(node._body)) for node in r[1])}
+              "cpu": lambda r: (proxied(r[0]), tuple((node.get_name(), looped(node._body)) for node in r[1]))}
 
     # one Kernel call record as its call made it: its backend kernel's index (Kernel.owner, by identity), its
     # scheduler's index, its GraphLowering's module, its launch, place and (entry, source) as produced, its original
@@ -287,6 +311,10 @@ def producing(made):
                 tuple(node.get_name() for node in kernel.scheduled), tuple(map(ranged[kernel.place], kernel.ranges)))
     kernels = tuple(map(calling, made.kernels.values()))
     externs = tuple(map(called, made.externs))
+    # every proxy a range or a fused nest names, each record once, an inner proxy's as it is registered
+    proxy_records = []
+    while len(proxy_records) < len(proxies):
+        proxy_records.append(proxy_of(list(proxies.values())[len(proxy_records)][1]))
 
     # torch/_inductor/loop_body.py LoopBody as produced: its sizes, iteration and reduction variables, variable
     # ranges, indexing expressions, indirect variables and their ranges, memory usage, operation counts, partial
@@ -311,7 +339,8 @@ def producing(made):
             "inputs": tuple((given.position, given.node, given.name) for given in made.inputs),
             "outputs": tuple((given.position, given.node, given.name, given.sent) for given in made.outputs),
             "kernels": kernels, "owners": len(owners), "schedulers": len(schedulers),
-            "loops": tuple(body_of(body) for _, body in loops.values()), "externs": externs,
+            "loops": tuple(body_of(body) for _, body in loops.values()), "proxies": tuple(proxy_records),
+            "subkernels": len(subkernels), "externs": externs,
             "seeds": tuple(seeds.uses for seeds in made.seeds),
             "model": model and (model.program.graph_module, model.program.graph_signature, model.selected,
                                 model.received, model.handles)}

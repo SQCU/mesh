@@ -75,8 +75,8 @@
   "current_limits": [
     "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
     "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
-    "CPU CppKernelProxy loop nests are not retained here; the original per-call emitted entry/source, scheduled names and LoopBody graphs are retained. Scan clone partials may contain a local combine closure; its serialized owner has not been observed.",
-    "Native135 is adding the original model package/protobuf and debug-handle mapping; current native NeuralFields retains compiled bundle plus IO. Model.program/handles/selected here does not replace the original model result.",
+    "CPU CppKernelProxy loop annotations and proxy/subkernel identities are now retained from their actual results. Scan combine owner remains under source review with compiler68; CPU/MPS do not advertise SCAN, so no hypothetical local-closure loss is claimed as an observed admitted path.",
+    "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. This source addition and the Python Model.program/handles/selected pairing have not yet been observed through a matching complete save/load invocation.",
     "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner; corresponding source graphs and call/provenance records use this shared graph payload."
   ],
   "previous_source_checkpoint": "da96b082",
@@ -200,6 +200,70 @@
       "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
       "CPU CppKernelProxy loop nests are not retained here; the original per-call emitted entry/source, scheduled names and LoopBody graphs are retained. Scan clone partials may contain a local combine closure; its serialized owner has not been observed.",
       "Native135 is adding the original model package/protobuf and debug-handle mapping; current native NeuralFields retains compiled bundle plus IO. Model.program/handles/selected here does not replace the original model result.",
+      "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner; corresponding source graphs and call/provenance records use this shared graph payload."
+    ],
+    "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
+  },
+  "cpu_loop_result_checkpoint": {
+    "stage": "Source-only original CPU LoopNest/LoopLevel result handoff; full saved-compilation unit remains incomplete",
+    "time_utc": "2026-11-15T06:32:51.670600+00:00",
+    "source_parent": "b4f980a211b54dadc86a271bf5a8e77e2d36dc4b",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 104,
+      "process": 32089,
+      "handle": 58844,
+      "last_result_index": 18,
+      "last_result": "success/source HOLD"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "158d8c850cda535a84684e32dc3c6189b0efbfe8b8d902fa1dc05d85d4546510"
+    },
+    "references_sha256": {
+      "compiler/mesh_compiler/lower_inductor.py": "6bf357b3039d17b49ad5c8c4ee048b19173b9d2b7fb74d7cf4ae60d95d6e9752",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp.py": "74b2de2698fcb01ced737ca10238d16f0721a6e1271314fbec65170e66451934",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp_template_kernel.py": "b02db66a50404e4aa3ba5783238b95992be1041f74666cd9824cb0ac7cc397e9"
+    },
+    "checks": [
+      {
+        "kind": "ast",
+        "result": "PASS"
+      },
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "changed_during_checks": [],
+    "retained": [
+      "Original LoopLevel fields including offsets, tiles, steps, parallel/vector/reduction annotations and stored simd_nelements use canonical pickle without rebuilding loops or selecting ISA on load.",
+      "CppKernelProxy call ranges, proxy and subkernel identities, actual subkernel classes and OuterLoopFusedKernel.inner nest references retain produced order. No CppKernel/GraphLowering pickle or code generation on load.",
+      "Actual cpp_template_kernel.py codegen_loop_bodies precedes finalize_kernel(proxy, []); no new missing-loop guard or admission restriction was introduced."
+    ],
+    "limits": [
+      "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
+      "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
+      "CPU CppKernelProxy loop annotations and proxy/subkernel identities are now retained from their actual results. Scan combine owner remains under source review with compiler68; CPU/MPS do not advertise SCAN, so no hypothetical local-closure loss is claimed as an observed admitted path.",
+      "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. This source addition and the Python Model.program/handles/selected pairing have not yet been observed through a matching complete save/load invocation.",
       "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner; corresponding source graphs and call/provenance records use this shared graph payload."
     ],
     "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
