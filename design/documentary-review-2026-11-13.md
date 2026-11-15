@@ -407,3 +407,9 @@ repository's actual `driver.compile_module`, `ir.Scheduled` and `lower_inductor.
 distinguishes those demonstrated fields from Mesh's retained allocation and dependency results, and locates the
 custom implementation at the same explicit numerical-lowering boundary. This documents a valid interface; it
 does not assign a new numerical algorithm or report a new target implementation.
+
+The operator then confirmed the reference:
+
+> sorry, schedule-emit, yes
+
+The reference path in the numerical-lowerer boundary is therefore confirmed.
