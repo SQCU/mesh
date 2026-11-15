@@ -579,7 +579,79 @@
  
      def codegen(self, code: IndentedBuffer) -> None:
          self.wrapper._generate_kernel_call_helper(
-@@ -2537,6 +2595,73 @@
+@@ -1443,6 +1501,71 @@
+ 
+ BufferName = str
+ Line = MemoryPlanningLine | LineContext
++
++
++# compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the original
++# wrapper's planned result: PythonWrapperCodegen._generate at its planned stage, its wrapper IR passes run
++# (run_wrapper_ir_passes) and none of its lines printed, its entry's declaration not written. Each field its producer's
++# own result as that stage made it:
++# - `wrapper` its emitter, whose lines these are (each WrapperLine's own), `graph` its GraphLowering (V.graph
++#   at that stage: its root scope), `is_inference` its generation's;
++# - `lines` its planned lines in order (run_wrapper_ir_passes's: MemoryPlanningLines planned, AllocateLine,
++#   ReuseLine, FreeIfNotReusedLine, AllocFromPoolLine, DeallocFromPoolLine, NullLine; each other line as its scheduler
++#   wrote it, control scopes' included), `planning` its passes' result (memory_plan's MemoryPlanner: its buffer groups,
++#   allocations and pools, each PoolMemoryPlanningLine's group one of them; or memory_plan_reuse's planning states, each
++#   control scope's in the order it exited, the root's last; or what an override's passes return);
++# - `state` its output state at that stage (planned_output_state: what its scheduler wrote, each emission's start);
++# - the entry's own operands, taken before its declaration is written: `inputs` (name, value) of each graph input in
++#   entry order (graph_inputs: a TensorBox, a TorchBindObject or a sympy expression), `constants` (name, tensor) of each
++#   constant in entry order (graph.constants: AOTI's constants_ index), `outputs` each graph output (graph_outputs), in
++#   order
++@dataclasses.dataclass(frozen=True)
++class PlannedWrapper:
++    wrapper: PythonWrapperCodegen
++    graph: Any
++    is_inference: bool
++    lines: tuple[Line, ...]
++    planning: Any
++    state: dict[str, Any]
++    inputs: tuple[tuple[str, Any], ...]
++    constants: tuple[tuple[str, Any], ...]
++    outputs: tuple[Any, ...]
++
++
++# compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, one emission of a planned result
++# (PythonWrapperCodegen.emit), each field as that emission made it:
++# - `planned` the planned result it prints (PlannedWrapper), `configuration` the inductor config it printed under,
++#   `supplied` its bindings;
++# - `code` and `kernel_declarations` the original generation's result (its assembled sections and its kernel
++#   declarations, each with its line map);
++# - `printed` each planned line's own print in order, (line, ((section, what it wrote), ...)): the line its
++#   occurrence (a KernelDefinitionLine its kernel's one definition, each KernelCallLine its own call, each
++#   EnterSubgraphLine and ExitSubgraphLine its control scope's entry and exit), each section by its name (a
++#   DualIndentedBuffer's AOT side name.aot), what the line wrote there that section's own lines, as written;
++# - `bindings` its print's binding records (emitted_bindings: CppWrapperCpu's entry, allocation, view, seed and
++#   output ownership)
++@dataclasses.dataclass(frozen=True)
++class EmittedWrapper:
++    planned: PlannedWrapper
++    configuration: dict[str, Any]
++    supplied: Any
++    code: Any
++    kernel_declarations: Any
++    printed: tuple[tuple[Line, tuple[tuple[str, tuple[Any, ...]], ...]], ...]
++    bindings: dict[str, Any]
++
++
++def _emission_buffer(planned: IndentedBuffer) -> IndentedBuffer:
++    # compiler/patches/torch-inductor-aot-lowered-result.patch: an emission's own section, a new buffer of `planned`'s
++    # kind (make_codegen_buffer's or IndentedBuffer) at its indent, holding its lines (a DualIndentedBuffer's AOT side
++    # its own too)
++    from ..utils import DualIndentedBuffer
++
++    buffer = type(planned)(planned._indent)
++    buffer._lines = list(planned._lines)
++    if isinstance(planned, DualIndentedBuffer):
++        buffer.aot = _emission_buffer(planned.aot)
++    return buffer
+ 
+ 
+ class PythonWrapperCodegen(CodeGen):
+@@ -2537,6 +2660,172 @@
              self.header.splice(kernel_defs)
  
      def _generate(self, is_inference):
@@ -587,73 +659,172 @@
 +        # wrapper IR passes (its memory plan), then its emission (resume_generation). The passes come before the
 +        # emission's first writes (write_triton_header_once, its wrapper call's indent, profiler mark and graph
 +        # start), which write no line and which the passes do not read. Under aot_inductor.lowered it returns its
-+        # planned lines, with this wrapper's own state at that stage (planned_state). Each emission is then
-+        # restore_planned and resume_generation(supplied), one for each supplied configuration, each from that same
-+        # stage, none rerunning its passes. Otherwise its one emission follows at once.
-+        self.run_wrapper_ir_passes(is_inference)
++        # planned result (PlannedWrapper: its lines, its passes' planning result, its output state and its entry's
++        # operands); each emission is then emit's, one for each configuration, each from that result, none
++        # rerunning its passes. Otherwise its one emission follows at once, over this wrapper's own state.
++        planning = self.run_wrapper_ir_passes(is_inference)
 +        if config.aot_inductor.lowered:
-+            self.planned_state = self._planned_state()
-+            return self.lines
-+        return self.resume_generation(None)
++            return PlannedWrapper(
++                self,
++                V.graph,
++                is_inference,
++                tuple(self.lines),
++                planning,
++                self.planned_output_state(planning),
++                tuple(V.graph.graph_inputs.items()),
++                tuple(V.graph.constants.items()),
++                tuple(V.graph.graph_outputs),
++            )
++        return self.resume_generation()
 +
-+    def _planned_state(self):
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: this wrapper's state at its planned stage, what
-+        # an emission changes: its own attributes (each list, dict, set and OrderedSet by its content), its code
-+        # buffers' lines and indent (a DualIndentedBuffer's AOT side too), and each graph's removed_buffers and
-+        # inplaced_to_remove (its own and each control body's its lines enter), as
-+        # CppWrapperCpu._preserve_codegen_state keeps some of them across codegen_switch's two passes
-+        import copy
++    def planned_output_state(self, planning):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, this wrapper's output state
++        # at its planned stage, what its scheduler wrote before any line prints, each emission's start
++        # (construct_emission): its sections (as __init__ constructs them, and as written since); the print state
++        # that gates what an emission writes (each size, symbol, numel and meta declared, each input assert and
++        # alignment copy pending, its autotune block's names and example arguments); its once-writers unset here
++        # (cache_on_self, each its own key) that its print may first call; and its pools' print state (memory_plan's
++        # MemoryPlanner: each AllocationPool's names to delete and views made, as AllocFromPoolLine and
++        # DeallocFromPoolLine write them). Its scheduler-time state (its device guard's, its allocations and frees,
++        # its reuses, its kernels and subgraphs defined) no print writes. Each held as this stage made it, none
++        # written by an emission
++        from .memory_planning import MemoryPlanner
 +
++        return dict(
++            imports=self.imports,
++            header=self.header,
++            prefix=self.prefix,
++            suffix=self.suffix,
++            kernel_declarations=self.kernel_declarations,
++            wrapper_call=self.wrapper_call,
++            kernel_autotune_defs=self.kernel_autotune_defs,
++            kernel_autotune_calls=self.kernel_autotune_calls,
++            subgraph_definitions=self.subgraph_definitions,
++            computed_sizes=self.computed_sizes,
++            unbacked_symbol_decls=self.unbacked_symbol_decls,
++            kernel_numel_expr=self.kernel_numel_expr,
++            metas=self._metas,
++            meta_vars=self._meta_vars,
++            pending_input_asserts=self._pending_input_asserts,
++            pending_alignment_copies=self._pending_alignment_copies,
++            multistream_alignment_copies=self._multistream_alignment_copies,
++            alignment_orig_saved=self._alignment_orig_saved,
++            alignment_aligned_stream=self._alignment_aligned_stream,
++            kernel_autotune_names=self.kernel_autotune_names,
++            kernel_autotune_example_args=self.kernel_autotune_example_args,
++            kernel_autotune_tmp_arg_idx=self.kernel_autotune_tmp_arg_idx,
++            once=tuple(
++                method
++                for method in (
++                    PythonWrapperCodegen.write_triton_header_once,
++                    PythonWrapperCodegen.write_get_raw_stream_header_once,
++                    PythonWrapperCodegen.get_output_refs,
++                    PythonWrapperCodegen.write_memory_track_allocation_once,
++                )
++                if not hasattr(self, f"__{method.__name__}_cache")
++            ),
++            pools=tuple(
++                (pool, pool.names_to_del, pool.creation_cache)
++                for pools in (planning.pools.device_to_pools.values() if isinstance(planning, MemoryPlanner) else ())
++                for pool in pools
++            ),
++        )
++
++    def construct_emission(self, planned, supplied):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, an emission's own output
++        # state, constructed from its planned result's (planned.state) as __init__ constructs this wrapper's: each
++        # section a new buffer of its kind holding what its scheduler wrote (_emission_buffer), each gating set and
++        # map a new one of its planned entries, each once-writer unset at its planned stage unset (clear_cache), each
++        # pool's print state its planned one; `printed` its print's record (resume_generation). `supplied` its
++        # bindings, which a wrapper whose print consumes them takes (CppWrapperCpu.construct_emission). Its derived
++        # caches no output reads go on (its counters: each emission's names its own)
++        state = planned.state
++        self.imports = _emission_buffer(state["imports"])
++        self.header = _emission_buffer(state["header"])
++        self.prefix = _emission_buffer(state["prefix"])
++        self.suffix = _emission_buffer(state["suffix"])
++        self.kernel_declarations = _emission_buffer(state["kernel_declarations"])
++        self.wrapper_call = _emission_buffer(state["wrapper_call"])
++        self.kernel_autotune_defs = _emission_buffer(state["kernel_autotune_defs"])
++        self.kernel_autotune_calls = _emission_buffer(state["kernel_autotune_calls"])
++        self.subgraph_definitions = _emission_buffer(state["subgraph_definitions"])
++        self.computed_sizes = OrderedSet(state["computed_sizes"])
++        self.unbacked_symbol_decls = OrderedSet(state["unbacked_symbol_decls"])
++        self.kernel_numel_expr = OrderedSet(state["kernel_numel_expr"])
++        self._metas = dict(state["metas"])
++        self._meta_vars = OrderedSet(state["meta_vars"])
++        self._pending_input_asserts = dict(state["pending_input_asserts"])
++        self._pending_alignment_copies = OrderedSet(state["pending_alignment_copies"])
++        self._multistream_alignment_copies = OrderedSet(state["multistream_alignment_copies"])
++        self._alignment_orig_saved = OrderedSet(state["alignment_orig_saved"])
++        self._alignment_aligned_stream = dict(state["alignment_aligned_stream"])
++        self.kernel_autotune_names = OrderedSet(state["kernel_autotune_names"])
++        self.kernel_autotune_example_args = dict(state["kernel_autotune_example_args"])
++        self.kernel_autotune_tmp_arg_idx = state["kernel_autotune_tmp_arg_idx"]
++        for method in state["once"]:
++            method.clear_cache(self)
++        for pool, names_to_del, creation_cache in state["pools"]:
++            pool.names_to_del = list(names_to_del)
++            pool.creation_cache = dict(creation_cache)
++        self.printed = []
++
++    def emit(self, planned, configuration, supplied):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the original emission of
++        # its planned result `planned` (this wrapper's _generate's PlannedWrapper) for one configuration: under its
++        # graph (planned.graph, V's graph handler, as GraphLowering.codegen generates under it) and `configuration`
++        # (the inductor config it prints under, config.patch: its compile's, which its caller supplies; the print
++        # reads no other context), its own output state (construct_emission, `supplied` its bindings), then the
++        # original generation's print and assembly (resume_generation). Returns its result (EmittedWrapper)
++        with V.set_graph_handler(planned.graph), config.patch(configuration):
++            self.construct_emission(planned, supplied)
++            code, kernel_declarations = self.resume_generation()
++            return EmittedWrapper(
++                planned,
++                configuration,
++                supplied,
++                code,
++                kernel_declarations,
++                tuple(self.printed),
++                self.emitted_bindings(),
++            )
++
++    def emitted_bindings(self):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: an emission's binding records, as its print made
++        # them (CppWrapperCpu's); this wrapper's print records none
++        return {}
++
++    def _section_lines(self):
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: each of this emission's sections by its name and
++        # its own lines (a DualIndentedBuffer's AOT side its own, name.aot), as its print writes them
 +        from ..utils import DualIndentedBuffer
 +
-+        values = {
-+            name: copy.copy(value) if isinstance(value, (list, dict, set, OrderedSet)) else value
-+            for name, value in vars(self).items()
-+        }
-+        buffers = [
-+            (buffer, list(buffer._lines), buffer._indent)
-+            for value in values.values()
-+            if isinstance(value, IndentedBuffer)
-+            for buffer in (value, *((value.aot,) if isinstance(value, DualIndentedBuffer) else ()))
-+        ]
-+        graphs = [
-+            (graph, OrderedSet(graph.removed_buffers), OrderedSet(graph.inplaced_to_remove))
-+            for graph in dict.fromkeys(
-+                [V.graph, *(line.graph for line in self.lines if isinstance(line, EnterSubgraphLine))]
++        sections = (
++            ("imports", self.imports),
++            ("header", self.header),
++            ("prefix", self.prefix),
++            ("suffix", self.suffix),
++            ("kernel_declarations", self.kernel_declarations),
++            ("wrapper_call", self.wrapper_call),
++            ("kernel_autotune_defs", self.kernel_autotune_defs),
++            ("kernel_autotune_calls", self.kernel_autotune_calls),
++            ("subgraph_definitions", self.subgraph_definitions),
++        )
++        return [
++            (side, buffer._lines)
++            for name, section in sections
++            for side, buffer in (
++                (name, section),
++                *(((f"{name}.aot", section.aot),) if isinstance(section, DualIndentedBuffer) else ()),
 +            )
 +        ]
-+        return values, buffers, graphs
 +
-+    def restore_planned(self):
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, this wrapper set back to
-+        # its planned state (planned_state) before an emission, so that each emission starts from the same plan
-+        # with none of an earlier one's writes. Its counters (itertools.count) go on, as across codegen_switch's two
-+        # passes: each emission's names are its own.
-+        import copy
-+
-+        values, buffers, graphs = planned = self.planned_state
-+        vars(self).clear()
-+        vars(self).update(
-+            (name, copy.copy(value) if isinstance(value, (list, dict, set, OrderedSet)) else value)
-+            for name, value in values.items()
-+        )
-+        for buffer, lines, indent in buffers:
-+            buffer._lines[:] = lines
-+            buffer._indent = indent
-+        for graph, removed_buffers, inplaced_to_remove in graphs:
-+            graph.removed_buffers = OrderedSet(removed_buffers)
-+            graph.inplaced_to_remove = OrderedSet(inplaced_to_remove)
-+        self.planned_state = planned
-+
-+    def resume_generation(self, supplied):
++    def resume_generation(self):
 +        # compiler/patches/torch-inductor-aot-lowered-result.patch: the original generation's emission from its
-+        # planned stage, given `supplied`, the operands it takes for that stage (self.supplied; None from
-+        # _generate): its print of its planned lines and its sections' assembly. Returns its result.
-+        self.supplied = supplied
++        # planned stage: its print of its planned lines and its sections' assembly. Returns its result
          if config.profile_bandwidth:
              self.write_triton_header_once()
  
-@@ -2546,8 +2671,6 @@
+@@ -2546,20 +2835,34 @@
                  self.generate_profiler_mark_wrapper_call(stack)
              if config.profile_bandwidth:
                  self.generate_start_graph()
@@ -662,39 +833,72 @@
  
              if config.triton.store_cubin and not config.triton.autotune_at_compile_time:
                  self.generate_reset_kernel_saved_flags()
-@@ -2678,7 +2801,10 @@
+ 
+             # At this point, we shouldn't generate any new memory planning lines.
+             # Override writeline to point at the wrapper call, in case it gets called.
+             with self.set_writeline(self.wrapper_call, self.wrapper_call.writeline):
+                 for line in self.lines:
++                    # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, each line's
++                    # own print as it is made: what it writes into each of its emission's sections (printed)
++                    if config.aot_inductor.lowered:
++                        written = self._section_lines()
++                        extents = [len(lines) for _, lines in written]
+                     if isinstance(line, WrapperLine):
+                         # pyrefly: ignore [missing-attribute]
+                         line.codegen(self.wrapper_call)
+                     else:
+                         self.wrapper_call.writeline(line)
++                    if config.aot_inductor.lowered:
++                        self.printed.append(
++                            (
++                                line,
++                                tuple(
++                                    (name, tuple(lines[extent:]))
++                                    for (name, lines), extent in zip(written, extents)
++                                    if len(lines) > extent
++                                ),
++                            )
++                        )
+ 
+             self._write_multi_kernel_defs()
+@@ -2678,7 +2981,12 @@
      def memory_plan(self):
          from .memory_planning import MemoryPlanner
  
 -        self.lines = MemoryPlanner(self).plan(self.lines)
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: the planner itself, kept as its result's owner
-+        # (its buffer groups, allocations and live ranges; each PoolMemoryPlanningLine's group is one of them)
-+        self.memory_planner = MemoryPlanner(self)
-+        self.lines = self.memory_planner.plan(self.lines)
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: the planner itself, its plan's
++        # result's owner (its buffer groups, allocations, pools, live ranges; each PoolMemoryPlanningLine's group one of
++        # them), returned
++        planner = MemoryPlanner(self)
++        self.lines = planner.plan(self.lines)
++        return planner
  
      def memory_plan_reuse(self):
          outputs = self.get_graph_outputs()
-@@ -2716,6 +2842,9 @@
-             raise AssertionError(
-                 f"expected no remaining planning states, got {len(planning_states)}"
-             )
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: each scope's planning state, kept as its reuse
-+        # result's owner, in the order its scope exited (the root's last)
-+        self.past_planning_states = past_planning_states
- 
-         # conservatively use the sum of all allocated buffer sizes
-         # in potentially nested scopes as the total allocated size
-@@ -2725,6 +2854,9 @@
+@@ -2723,15 +3031,20 @@
+         _total_allocated_buffer_size = sum(
+             s.total_allocated_buffer_size for s in past_planning_states
          )
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: each scope's planning state,
++        # its reuse result's owner, in the order its scope exited (the root's last), returned
++        return past_planning_states
  
      def run_wrapper_ir_passes(self, is_inference: bool):
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: the owner of its planner's result, whichever
-+        # plans: memory_plan's MemoryPlanner or memory_plan_reuse's planning states (the other stays None)
-+        self.memory_planner = self.past_planning_states = None
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: returns its passes' planning
++        # result: memory_plan's MemoryPlanner or memory_plan_reuse's planning states
          # We disable planning during training because it presently increases peak memory consumption.
          if is_inference and config.memory_planning:
-             self.memory_plan()
-@@ -4048,6 +4180,8 @@
+-            self.memory_plan()
++            return self.memory_plan()
+         else:
+             if config.allow_buffer_reuse:
+                 self.estimate_peak = EfficientPeakEstimate()
+-            self.memory_plan_reuse()
++            return self.memory_plan_reuse()
+ 
+     def maybe_emit_replacement_aliases(
+         self,
+@@ -4048,6 +4361,8 @@
          triton_meta: TritonMeta | None = None,
          inductor_meta=None,
          original_fxnode_name=None,
@@ -703,7 +907,7 @@
      ):
          """
          Generates kernel call code.
-@@ -4088,6 +4222,8 @@
+@@ -4088,6 +4403,8 @@
                  # pyrefly: ignore [bad-argument-type]
                  original_fxnode_name=original_fxnode_name,
                  current_stream_idx=current_stream_idx,
@@ -712,7 +916,7 @@
              )
          )
  
-@@ -4453,7 +4589,7 @@
+@@ -4453,7 +4770,7 @@
          debug_handle: int | None = None,
      ):
          if debug_handle is not None:
