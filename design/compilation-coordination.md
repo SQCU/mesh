@@ -8,6 +8,11 @@ split, the names files share, every decision taken where the change requests are
 provisional operand values, what each source says and where it was read; then the record of the work, its reviews, the
 builds and what is open.
 
+The historical quotations below of A9's "Nothing else is serialized" and "No kernel is written" do not state the
+current scope. A9 and the [14 November composition clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
+now explicitly cover retained compiler results, source lowering and reuse of the transport algorithms across
+compilation scopes. The entries below remain observations about their named revisions.
+
 What already stands, as implemented: design/disjoint-pages-change-request.md C3 and its Appendix D items D.3.2 to D.3.6
 (design/disjoint-pages-rulings-coordination.md). Its D.2 model, D.3.1 and D.5 are superseded.
 

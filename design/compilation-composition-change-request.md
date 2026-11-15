@@ -32,8 +32,9 @@ function from a value to a value:
 | runtime | `runtime.py` `Program(scheduled, functions)` | the scheduled value; the compiled functions | the program's results, each call |
 | archive | `archive.py` `save(directory, scheduled)`, `load(directory)` | the scheduled value | files; the scheduled value again |
 
-There is one schedule. Lowering, the runtime and the archive each take the scheduled value and nothing else from the
-stages before it.
+There is one schedule. Lowering, the runtime and the archive consume its result, including references to retained
+inputs and derived results. The [14 November clarification](#clarification-2026-11-14-one-compilation-over-retained-results)
+states how this composition extends the algorithms already used for transport to the other compilation scopes.
 
 ## Sources
 
@@ -494,16 +495,16 @@ The operator, 2026-11-09:
 - **Applies to:** requirements 1–6, all nine composed requests, and the complete replacement above.
 - **The data structure** is the scheduled value: typed numerical IR with its dependencies, placement, storage and
   communication annotations, and requirement 4's static schedule. Analysis solves the abstract problem
-  once and supplies a lowerable program to its optimizing consumers. Typed numerical IR, dependencies, placement,
-  storage and communication annotations stay available until their last compiler consumer. Each may then be realized
-  in instructions, addresses, target commands and synchronization without preserving its original runtime encoding.
-  A property is preserved through the meaning of the generated program, whether its descriptive metadata is
-  erased or retained separately for loading, inspection or the required signature.
+  once and supplies its results to optimizing consumers. Typed numerical IR, dependencies, placement, storage and
+  communication annotations are ordinary values, available through retained references. Derived structures may be
+  appended alongside their inputs in paged storage. Lowering realizes their decisions in instructions, addresses,
+  target commands and synchronization. Removing repeated interpretation from execution does not require deleting
+  the solved results or their page-table references, or moving them to a separate diagnostic representation.
 - **The algorithm** is lowering of the algorithm and its schedule into an imperative program and its storage (S9),
   with storage decided by analysis before the rewriting that consumes the decision (S8), static operands specialized
   into the program (S6), and self-timed execution of what remains (S7).
 - **Composes:** the schedule produces the scheduled value. Lowering takes it and emits the native program: the table
-  below gives, per operand, what the emitted program preserves and what it does not read. The runtime calls that
+  below gives, per operand, what the emitted program preserves and which repeated work it removes. The runtime calls that
   program; the archive stores the scheduled value.
 - **Replaces:** the code of `MetalProgramExecute`/`MetalNativeStep` that reads positions, tasks, guards and a loop
   stack at run time; `MetalLoopTest` and the whole-queue waits it makes, which are deleted and not replaced; and
@@ -515,18 +516,19 @@ The operator, 2026-11-09:
   composition; they are not reduced before it to opaque function pointers. The executor bodies this replaces are
   deleted with it.
 
-| Compiler operand or solved result | Property preserved in the emitted program | Representation that execution does not read |
+| Compiler operand or solved result | Property preserved in the emitted program | Repeated work removed from execution |
 |---|---|---|
-| Typed numerical operations, shapes, views and alias/effect relations | Specified numerical semantics, permitted floating-point transformations, mutations, addressing and required lifetimes | Type objects, shape inference, operation names, alias-analysis graphs |
-| Partitioned computation, transfer dependencies and compiled order | Required producer/consumer ordering, publication and readiness; legal overlap and fused work | Original vertices, edges, partitions and an independent scheduling solve |
+| Typed numerical operations, shapes, views and alias/effect relations | Specified numerical semantics, permitted floating-point transformations, mutations, addressing and required lifetimes | Repeating type, shape or alias analysis; decoding known operation kinds |
+| Partitioned computation, transfer dependencies and compiled order | Required producer/consumer ordering, publication and readiness; legal overlap and fused work | Reconstructing vertices, edges or partitions; repeating the scheduling solve |
 | Realized storage, copies and completion dependencies | Correct value instance, non-overlapping live storage where required, reuse only after completion | Repeated lifetime analysis or parsing allocation metadata on each task |
-| Selected ICB runs, bindings, copies/fills, barriers and API boundaries | The selected target commands with their required ordering and operands | Static command-kind switches, pass scans, cut discovery and generic callback tables |
-| Lowered synchronization and the cause recorded for each | The required externally observable synchronization property of this executable | Runtime reconstruction of the compiler graph; the signature remains an associated observation artifact |
+| Selected ICB runs, bindings, copies/fills, barriers and API boundaries | The selected target commands with their required ordering and operands | Rediscovering command kinds, passes, cuts, bindings or callable targets |
+| Lowered synchronization and the cause recorded for each | The required externally observable synchronization property of this executable | Reconstructing the compiler graph to recover synchronization causes already retained with the result |
 
-Graph transformations may fuse vertices, remove edges made internal to fused work, and replace storage
-representations. The contract preserves the required observations and ordering, not a literal source graph or
-one runtime action per vertex. Dropping an annotation before its consumer, reparsing emitted source to recover it,
-or silently forgetting its property is an incomplete lowering.
+Graph transformations may fuse vertices, internalize edges and derive storage representations. The transformed
+graph retains references to its source relations and solved results; it need not execute one action per source
+vertex. A consumer whose decisions have been specialized no longer has to interpret those relations. That does
+not make the relations themselves disposable. Dropping an annotation or reference and reconstructing it later,
+reparsing emitted source to recover it, or silently forgetting its property is an incomplete lowering.
 
 Residual runtime operands are actual changing data: inputs, supported dynamic indexes, addresses bound
 at preparation/load, arrival/completion and resource state. Their arithmetic and necessary API work
@@ -536,7 +538,7 @@ repeat placement or dependency analysis.
 
 Performance is an independent requirement of this replacement (the operator above: "the performance ceiling of our
 final lowering is paramount"). Semantic equivalence does not excuse an extra run-time decoder, launch, transfer,
-guard or wait introduced only to maintain an erased abstraction. Removing the outermost decoder while the same
+guard or wait introduced only to interpret already-solved compiler decisions. Removing the outermost decoder while the same
 dispatch runs underneath it does not satisfy the requirement.
 
 ## Withdrawn, 2026-11-09
@@ -553,7 +555,52 @@ The operator, 2026-11-09, in order:
 
 > strike out anything and everything which contradicts the remarks reaffirmed (yet again) that we still aren't creating fake problems for ourselves wrt 'what if there's an arbitrary python program pretended to be part of a torch program and we need to play geometry dash for 12 hours inside of a graph for a larped reason gosh what are we gonna do now'.
 
-A program's graph has no node that branches or repeats on tensor data, and its shapes are fixed when it is compiled.
+The outer call graph and tensor shapes are known for AOT compilation. Conditions and iterations inside the
+called numerical algorithms remain part of those algorithms, including the methods in source-lowering items 5/6.
+They do not authorize an execution mechanism that repeatedly chooses placement, ordering or lowering rules.
+
+## Clarification, 2026-11-14: one compilation over retained results
+
+The operator, in order, verbatim:
+
+> "Once dependencies have determined instruction order, the executable need not carry a graph object to maintain that order." otoh the graph object can be presented literally as a serialized format which has a header supplied list of functions to interact with it, which is readable from within the 'page table' scheme of accessible buffers as any other sort of value. in this sense we can 'preserve' properties of an IR or lowering by literally concatenating more derived data structures to the pages where we already wrote sections of IR, lowering, typing, optimizatino, whatever. if we think about this model seriously, the only thing we need to 'preserve' the results of an optimization or IR or lowering stage are to 1: make them efficient and compact in how they are data-structured 2: refusing to delete them or the references to their page tabling for no reason
+> try to think about this from the user's persepctive here. the user doesn't want something that has tenso f thousands of lines of code. the user thinks that this project has simple, compact requirements. the user leaves ceratin scopes of this problem loosely defined because the right solutions are abstract, airy, simple, and relatively free.
+
+> somewhat clearly an aot compilation can have branches inside of a called algorithm. but there are probably no needs to have branches inside of the 'thing we do to lower the results of optimizing compiling' into a runtime, and a runtime should probably be branchless-in-control-flow (it does one boring thing voer and over again, even if that boring thing might involve branching 'data flow' that involves applying pure functions to explicit operands over and over again)
+
+> okay lets clean up undermining wording and 'reactivate' (derrida) what it is that we are working on with this project as we do so. we know, for example, that we already have wroking dependency solvers nad loop unrolling optimizers and optimizing allocators which were written and tested for the subproblem of *transport*. most of what we need to do for the 'full problem' is to simply modularize those algorithms and use them the same way for all of the other scopes that the optimizing compiler must handle: placing and scheduling function parameters, placing and scheduling function operands, placing and scheduling function execution, and i suppose some epilogue and prologue fusion to overlap execution of some kinds of transport and operations with each other within runtimes. most of this is extremely generic abstract programming over callgraphs; there is reference literature to consult mostly to orient us towards our requirements being very simple and easy (as we are only interested in handling aot cases involving exported serialiations of a language which already exists (pytorch) with known parsers (pytorch) and a known emitter (pytorch... and fxgraphs i guess).).
+
+**Applies to:** items 2–7 here; AOT A1/A5/A6/A8–A10; source-lowering items 2/3/5/6; and their implementation
+assignments across mesh and metal-microbench. This clarifies the existing work; it does not add a compiler framework.
+
+**Sources and roles:** AOT A1 supplies PyTorch's capture and exported representation. AOT A5 and its appendix item 1
+supply Lam's unrolling and modulo variable expansion, happens-before and chain-based allocation. AOT A6 supplies
+the scheduling algorithms; A10 supplies call independence and graph analysis. S3 supplies graph substitutions for
+computation and communication together; S6 supplies specialization; S8/S9 supply consumers of solved analysis and
+schedule results. These citations identify reusable problems and methods, not separate implementations for each use.
+
+| Compilation scope | Operands of the shared algorithms | Result consumed by lowering |
+|---|---|---|
+| Function parameters and operand values | Known shapes, layouts, aliases, uses and placement | Bound storage, addresses and lifetimes |
+| Repeated calls and their values | Call dependencies, delays and known iteration bounds | Expanded occurrences, copies and reuse assignments |
+| Function execution and transport | Tasks, resources, costs and dependency relations | Scheduled operations and required synchronization |
+| Prologue/epilogue fusion | Numerical bodies, accesses and the same producer/consumer relations | Composed operations with internal edges and fused publication/acquisition where applicable |
+
+**Write:** expose and reuse the cited algorithms through their owning modules, with explicit operands and retained
+results. Complete the consumer connections in item 6; do not copy transport-specific orchestration into each scope.
+A compact serialized result and the header functions that access it can use the same paged storage as other values.
+Append derived structures and retain their references instead of serializing and reparsing equivalent facts.
+Retained sections use ordinary ownership and lifetime rules.
+Final emission consumes the solved choices; execution repeatedly invokes the compiled operations on their operands.
+Preserve the numerical algorithms' conditions and selected-work semantics without introducing an interpreter for
+static scheduling or lowering decisions. Deliberately open representation choices call for the smallest composition
+that satisfies these requirements, recorded as implementation choices under AOT's existing documentary rule.
+
+Implementation starting points from the source reading at mesh `774f08e4`: `rdma/mesh-graph.h` exposes retained
+relations, `mesh_graph_chains`, `mesh_graph_completion_times` and `mesh_graph_heap_order`; `rdma/mesh-collective.c`
+contains `plan_unroll`, their transport consumers and local storage planning. `mesh_graph_relation_save/load` in
+`rdma/mesh-graph.c` are concrete places to inspect retained serialized relations and borrowed views. These are
+locations for modularization and reuse, not a claim that every required consumer or runtime path is complete.
 
 ## Reusable form
 
@@ -564,7 +611,8 @@ The same change-request form can name several existing requests in one requireme
 - **The data structure** is `<the named graph, type, table or schedule, with its source>`.
 - **The algorithm** is `<the named method, with its source and its steps>`.
 - **Composes:** `<the function that produces the value>` → `<the type and its fields>` → `<the function that takes
-  it>`.
-- **Property preserved:** `<what the emitted program preserves of each operand>`.
+  it, through the existing result or its reference/view>`.
+- **Property preserved:** `<what the emitted program preserves, which decisions it specializes, and how the
+  solved results remain accessible>`.
 - **Replaces:** `<the code deleted>`.
 - **Write:** `<the changes, by file>`.

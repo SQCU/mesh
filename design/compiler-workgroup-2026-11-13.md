@@ -74,9 +74,11 @@ the complete compilation data flow, including callable alternative paths, serial
 execution consumers. Its dated inventory and implementation status are in
 [the result-retention review](../output_data/compiler-workgroup-20261113/discard-mechanisms.md).
 Producer and consumer edits belong to the same replacement even when recorded in several working commits.
-The inventory distinguishes information lost before a consumer needs it from metadata whose obligation has
-already been discharged into a final compiled artifact. It adds no requirement to retain dead compiler data at
-runtime, no new input rejection policy, and no formal type-system project.
+The [14 November clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
+governs this inventory: specializing a consumer does not make its input result or references disposable. Preserve
+compact results as accessible values while removing repeated interpretation from execution. Reuse the cited graph,
+unrolling and allocation algorithms already used for transport across the other compiler scopes. Extracting those
+algorithms and connecting their results does not authorize copying the inherited executor or adding a second solve.
 
 These are initial editing responsibilities for coordination, not walls across interfaces. When a complete
 connection needs another owner's file, the supervisors agree the change immediately and one worker writes it.

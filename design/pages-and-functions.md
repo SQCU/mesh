@@ -15,6 +15,11 @@ fixed destinations, offsets, fan-out and invocation targets. Runtime page indice
 represent incoming storage; they do not authorize walking descriptors to discover
 an already-known destination or interpreting the declared call graph again.
 
+The operator's [14 November clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
+includes compiler results among the values pages can hold: serialized IR, graphs, allocation and scheduling results,
+with derived sections and references to their inputs. Ordinary header functions can expose views of those sections.
+Compiling their consumers removes repeated interpretation; it does not require deleting the sections or references.
+
 Functions consume available indexed input regions and publish their output regions
 after the corresponding writes are visible. A publication does not finish or pause
 the enclosing operation. Other producer work and consumers with available inputs

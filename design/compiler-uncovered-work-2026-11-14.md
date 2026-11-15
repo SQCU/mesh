@@ -30,6 +30,12 @@ old module under a new name. There is one live implementation of each required a
 
 ## Connected implementation units
 
+Apply the operator's [14 November clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
+across these units. Parameters, operand storage, calls and transport supply explicit operands to the shared graph,
+unrolling, allocation and scheduling algorithms. Complete those handoffs and retain the solved values and their
+references. Numerical conditions belong to compiled algorithms; they do not require repeated runtime interpretation
+of the compiler's decisions. File ownership below does not partition these algorithms into separate implementations.
+
 | Owner | Producer → result → actual consumer | Applicable clauses and displaced work |
 |---|---|---|
 | Frontends / Torch | Captured known functions, call graph, shape/alias/state/output roles → explicit compilation operands → the current machine compiler, callable and archive | AOT A1/A10; composition 1–7; schedule-emit's stage composition. Connect call-graph compilation to the current typed machine path, including user-input gradients and inter-call mutations. Retire the dead closure orchestration, not its required semantics. |

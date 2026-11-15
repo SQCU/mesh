@@ -505,6 +505,9 @@ its function and type names are given beside each stage.
   - A10's output.
 - **No algorithm of its own.** MSCCLang carries its instruction DAG the same way, from lowering to scheduling (Cowan et
   al., 2023, §4 and §5).
+  The [composition clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
+  applies these shared graph, unrolling and allocation algorithms to parameters, operands, function execution and
+  transport. Their inputs and derived results remain accessible through retained references or views.
 - **Produced by, consumed by.** A2 partitions it. `mesh_plan` takes it for A4's routing and lowering, A5's allocator
   and A6's ordering, as `struct mesh_function` with its `struct mesh_declared`, `struct mesh_weight` and
   `struct mesh_dependence` (rdma/mesh-collective.h). `struct mesh_function` has no field named for A2's placement
@@ -529,10 +532,12 @@ its function and type names are given beside each stage.
     a relay's forward on its receive's phase field; a receive writes its phase field and raises its count. These are
     the static schedule's struct mesh_hop lists (design/plan-to-bridge-change-request.md R5);
   - the page table's bindings and the static schedule's state section (C3);
-  - the GPU's program: the function's own existing kernels, bound to their placed pages. No kernel is written by the
-    compilation. For a delegate's program these are the recorder's command buffers.
-- The bridge consumes the lists and the GPU runs the existing kernels. Nothing else is serialized but each entry's
-  `set` (appendix item 5).
+  - the target programs, bound to their placed pages: source-lowering and composition specify their numerical
+    lowering and fusion, including the CPU. Retained delegate programs pass through the same composition boundary.
+- The bridge consumes the transfer lists; the target runs the compiled program. Each entry's `set` (appendix item 5)
+  is also serialized. This execution representation does not exclude the source IR, derived graphs, allocation
+  results or their references from the stored operand. They can occupy accessible sections of the same paged storage;
+  loading supplies views and address bindings rather than repeating the analyses that produced them.
 - **The algorithm the bridge runs it by is the self-timed strategy.**
   > you can't convince me that we have complete fxgrtaph capture and an equivalent data structure to the cudagraph but
   > then 'uhhh we have uhhh we have uhhh... list???'

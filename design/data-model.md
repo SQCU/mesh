@@ -133,9 +133,11 @@ Our PyTorch code can already record a whole function as a graph of steps before 
 which results each step needs. It can include the work that finds an answer and the work used to train the
 model. With that graph, we can choose which nodes do each part of the work before we run it.
 
-We turn those choices into page lists and steps. This is compilation. A hard rule and a simple rule can give
-the same list, which takes the same time to read. The work spent choosing the list is done before the call.
-Each step then finds its data through the list.
+Compilation turns those choices into page lists, bound operands and executable operations. The work spent choosing
+them is done before the call. Known addressing and order can be specialized into the operations themselves.
+The [14 November clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
+also places compiler results in accessible pages: later stages can append derived structures and retain references
+to earlier results. Keeping those values available does not require interpreting them on each invocation.
 
 The receiver uses the lists to set the places where data will land (section 3). The sender can then write
 there as each part is ready. This gives us one-sided writes. A node can use a part or send it on from that

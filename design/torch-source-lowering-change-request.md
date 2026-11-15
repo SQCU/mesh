@@ -190,10 +190,11 @@ Item 3's ordering is the schedule stage's.
     function, with every shape compiled.
   - This is the export stage's scope. The export stage produces the exported graph. The operator lowerings (items 1, 5
     and 6) and then placement consume it.
-  - A program with dynamic control flow is not compiled, whether the control flow is based on CPU data or on GPU data,
-    and whether or not it is written with a higher order operator (`torch.cond`, `while_loop`, `map`, `scan`). The
-    exception in the PyTorch sentence quoted above is not taken. A program with a dimension known only at run time
-    is not compiled either (design/aot-compilation-change-request.md A1: "shapes are compiled").
+  - The outer call graph and tensor shapes are known for AOT compilation (AOT A1: "shapes are compiled"). Arbitrary
+    Python control between calls is outside that scope. Conditions and iterations within the numerical algorithms
+    in items 5/6 are compiled as part of those algorithms; the presence of a `cond`, `switch`, `while_loop`, `map`
+    or `scan` in their representation is not itself a rejection criterion. See the operator's
+    [14 November clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results).
 
 ### 3. Self-timed lowering of dependences into Metal orderings
 
@@ -291,7 +292,7 @@ what "them" names)
   - The data structure is one node of the exported graph (item 2), with fixed shapes. The algorithm is the LAPACK
     driver for the node's problem, called through Accelerate. `torch.linalg.svd`, `eigh`, `eig` and `eigvals`, and
     `lstsq` with the gelsd and gelss drivers, are each one such node. The iteration is inside that one function.
-    Nothing in the graph branches or repeats on tensor data.
+    The outer call graph fixes the call; the driver's internal conditions and iteration remain its numerical work.
   - This is an operator lowering. It produces that node in the exported graph; placement and the schedule (item 3)
     consume it as they do any other node.
   - For `lstsq` the quoted page names the routine: `gelsd` and `gelss`. For `svd`, `eigh`, `eig` and `eigvals` no
@@ -382,8 +383,8 @@ The operator:
     non-symmetric eigendecomposition is only implemented on the CPU and GPU backends."
 - **Write:**
   - This is an operator lowering. Each operator below becomes nodes of the exported graph (item 2): matrix
-    multiplications, QR factorizations, Cholesky factorizations, triangular solves and selections among computed
-    values. Placement and the schedule (item 3) consume them as they do any other node. The placement operand names
+    multiplications, QR factorizations, Cholesky factorizations, triangular solves and the conditional regions or
+    selections specified by the cited method. Placement and the schedule (item 3) consume them. The placement operand names
     each node's processor, on the GPU, the CPU or the Neural Engine, and its sharding across machines. No node of
     these compositions is confined to one processor by this request.
   - The algorithm for the polar decomposition is QDWH as `_qdwh` states it (jax/_src/tpu/linalg/qdwh.py). The

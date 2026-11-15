@@ -29,7 +29,11 @@ revise, never a reason to reject the work order.
 
 For a request composing other requests in externally cited roles, see the
 [example and reusable form](compilation-composition-change-request.md#reusable-form).
-For compilation work, that form identifies the properties preserved, representations consumed or eliminated,
-and actual residual runtime operands. Its [reference systems](compilation-composition-change-request.md#s8-analysis-results-become-lower-ir-abstract-operations-disappear)
-show how solved abstract problems become optimized programs; retaining the original abstraction at runtime is
-not the preservation criterion. State performance obligations separately from semantic preservation.
+For compilation work, that form identifies the existing result consumed, derived result produced, decisions
+specialized into executable operations, and remaining runtime operands. Its
+[reference systems](compilation-composition-change-request.md#s8-analysis-results-become-lower-ir-abstract-operations-disappear)
+show how solved abstract problems become optimized programs. The operator's
+[14 November clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
+requires compact retained results and references while removing repeated interpretation from execution. Use the
+shared algorithms across their consumers; leave simple representation choices as implementation choices rather
+than expanding the requirements. State performance obligations separately from semantic preservation.
