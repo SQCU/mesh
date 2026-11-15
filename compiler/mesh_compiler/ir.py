@@ -85,6 +85,14 @@ class Exported:
     # the source record the fields above project; None for a program no torch.export produced (export.capture's outer
     # program, a part decompose.py builds)
     signature: object = None
+    # torch 2.14.0 torch/export/exported_program.py ExportedProgram.range_constraints, torch/export/_trace.py
+    # _get_inline_constraints and _get_range_constraints, torch/_export/non_strict_utils.py make_constraints: the
+    # program's range constraints as their own producer returned them, a function's its ExportedProgram's, an outer
+    # program's make_constraints' over its capture's own FakeTensorMode, outer GraphModule (its inline_constraints the
+    # capture ShapeEnv's unbacked symbol ranges) and bound arguments (export.capture), the constraints
+    # torch/_export/utils.py _check_input_constraints_for_graph reads (runtime.Arguments); None for a part decompose.py
+    # builds
+    range_constraints: dict = None
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order
@@ -117,6 +125,11 @@ class CapturedProgram:
     exported: Exported
     functions: dict
     calls: dict
+    # compiler/mesh_compiler/export.py substitute: each function an outline replaced, in replacement order, as (its
+    # original Exported, its parts' own Exported objects in part order, a repeated step's the same object each time):
+    # the original source owner of its parts (its signature and AOT stage records among it), once; a part a later
+    # outline replaced its own entry's original, the same object
+    outlined: tuple = ()
 
 
 # rdma/mesh-collective.h struct mesh_function, mesh_plan, mesh_plan_save
@@ -198,9 +211,25 @@ CAT, PAD, RESHAPE, VIEW = ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.r
 CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format
 
 
-def shape(node):
+# a node's value's shape: result `k`'s for a list or tuple value (its own producer FakeTensor's); without `k`, a list or
+# tuple value's one shape where every result has it (an operation's one iteration space: topk's values and indices)
+def shape(node, k=None):
     value = node.meta["val"]
-    return tuple((value[0] if isinstance(value, (tuple, list)) else value).shape)
+    if not isinstance(value, (tuple, list)):
+        return tuple(value.shape)
+    if k is not None:
+        return tuple(value[k].shape)
+    return produced(node)
+
+
+# a node's one output iteration space: its value's shape, a list or tuple value's where every result has one shape;
+# None for a value whose results differ in shape (each result's its own: `shape(node, k)`)
+def produced(node):
+    value = node.meta["val"]
+    if not isinstance(value, (tuple, list)):
+        return tuple(value.shape)
+    shapes = {tuple(result.shape) for result in value if isinstance(result, torch.Tensor)}
+    return shapes.pop() if len(shapes) == 1 else None
 
 
 # design/problems-of-14b9a757-change-request.md item 6; torch 2.14.0 torch/_tensor_docs.py view, reshape and contiguous
@@ -253,76 +282,90 @@ def results_of(node):
     return range(len(value)) if isinstance(value, (tuple, list)) else range(1)
 
 
-# result `k` of `node`'s value and, of an argument's value `given` (a Node, or a Tensor[] argument's Nodes: pytree
-# leaves), the one leaf whose producer FakeTensor that result's own storage aliases (torch._C._is_alias_of), None where
-# none or several do
-def leaf_of(node, k, given):
-    value = node.meta["val"]
-    result = value[k] if isinstance(value, (tuple, list)) else value
-    held = [leaf for leaf in pytree.tree_leaves(given) if isinstance(leaf, torch.fx.Node) and isinstance(
-        result, torch.Tensor) and isinstance(leaf.meta.get("val"), torch.Tensor)
-            and torch._C._is_alias_of(result, leaf.meta["val"])]
-    return held[0] if len(held) == 1 else None
+# each item once by identity, in order (a Tensor[] argument's list unhashable)
+def once(items):
+    kept = []
+    for item in items:
+        if all(item is not other for other in kept):
+            kept.append(item)
+    return tuple(kept)
 
 
-# the argument leaf result `k` of call `node` aliases without writing it: of the argument get_alias_info's read-only
-# matches give that result, the leaf its storage aliases (`leaf_of`); None where it aliases none
+# the FX Node leaves of argument values (a Tensor argument its Node, a Tensor[] argument each of its Nodes), once each
+def leaves_of(values):
+    return once(leaf for value in values for leaf in pytree.tree_leaves(value) if isinstance(leaf, torch.fx.Node))
+
+
+# torch 2.14.0 torch/utils/_python_dispatch.py _correct_storage_aliasing (every read_only_alias_match_indexes entry):
+# the argument values result `k` of call `node` aliases without writing them, each of that result's read-only matches'
+# args[arg_idx], in match order (a list result's every element each of them); () where none
 def aliased(node, k=0):
     info = alias_info(node)
     if info is None:
-        return None
+        return ()
     _, read = given(node)
-    return next((leaf for a, r in info.read_only_alias_match_indexes if r == result_of(info, k)
-                 and info.args[a].name in read for leaf in [leaf_of(node, k, read[info.args[a].name])]
-                 if leaf is not None), None)
+    return once(read[info.args[a].name] for a, r in info.read_only_alias_match_indexes
+                if r == result_of(info, k) and info.args[a].name in read)
 
 
-# ExecuTorch documentation, Concepts, Out variant: the argument leaf result `k` of call `node` writes: of the argument
-# written with that result's alias (get_alias_info's outs_write_aliases), the leaf its storage aliases (`leaf_of`);
-# None where it writes none
+# ExecuTorch documentation, Concepts, Out variant; torch/utils/_python_dispatch.py return_and_correct_aliasing (an
+# in-place or out= call returns its written argument itself): the argument values result `k` of call `node` writes,
+# each one written with that result's alias (get_alias_info's outs_write_aliases), of a list result its element k (the
+# result is that list); () where it writes none
 def written(node, k=0):
     info = alias_info(node)
     if info is None or info.outs_write_aliases is None:
-        return None
+        return ()
     _, read = given(node)
     alias = info.outs_write_aliases[result_of(info, k)]
-    return next((leaf for a in info.args if a.is_write and alias in a.alias_set and a.name in read
-                 for leaf in [leaf_of(node, k, read[a.name])] if leaf is not None), None)
+    return once(held[k] if isinstance(held, (tuple, list)) else held for held in (
+        read[a.name] for a in info.args if a.is_write and alias in a.alias_set and a.name in read))
 
 
-# the argument leaf `node`'s value aliases: a getitem's, its call's result's at its index (`aliased`, else `written`);
-# a call's, the one leaf every result aliases (`aliased` of each), else the one every result writes (`written`)
+# result `k` of `node`'s relation: the argument values that result aliases (`aliased`), else writes (`written`); a
+# getitem's its call's result at its index, its own result
+def related(node, k=0):
+    if node.target is operator.getitem:
+        return related(node.args[0], node.args[1])
+    return aliased(node, k) or written(node, k)
+
+
+# the argument Nodes `node`'s value aliases, each once: every result's relation's leaves (`related`, `leaves_of`)
 def source(node):
     if node.target is operator.getitem:
-        return aliased(node.args[0], node.args[1]) or written(node.args[0], node.args[1])
-    for found in (aliased, written):
-        held = {found(node, k) for k in results_of(node)}
-        if len(held) == 1 and None not in held:
-            return held.pop()
-    return None
+        return leaves_of(related(node))
+    return leaves_of(value for k in results_of(node) for value in related(node, k))
 
 
+# each result of `node` its own view: of its relation's Node leaves, each its value aliases (torch._C._is_alias_of: the
+# producer FakeTensors' own storage), every one so; a getitem's its own result's
 def view(node):
-    held = source(node)
-    if held is None:
-        return None
     value = node.meta["val"]
-    return held if all(torch._C._is_alias_of(v, held.meta["val"]) for v in (
-        value if isinstance(value, (tuple, list)) else [value])) else None
+    if node.target is operator.getitem or not isinstance(value, (tuple, list)):
+        results = [(value, related(node))]
+    else:
+        results = [(value[k], related(node, k)) for k in results_of(node)]
+    return once(n for result, values in results for n in leaves_of(values)
+                if isinstance(result, torch.Tensor) and torch._C._is_alias_of(result, n.meta["val"]))
 
 
+# a Tensor value's bases (its `view`); a list or tuple value's results each have their own (their getitems')
 def bases_of(node):
-    return [held for held in [view(node)] if held is not None]
+    return list(view(node)) if isinstance(node.meta.get("val"), torch.Tensor) else []
 
 
 def based(node, read, destined=False):
     value = node.meta.get("val")
     if not read:
         return node, value.storage_offset() if isinstance(value, torch.Tensor) else 0
-    (base, first), = read
+    # every base of a value one root at one offset (they alias one storage: ir.view)
+    found = set(read)
+    if len(found) != 1:
+        raise ValueError(f"{node.name}: its bases {sorted(found)} are no one root and offset")
+    base, first = found.pop()
     if isinstance(value, torch.Tensor):
         record = base.name, value.storage_offset() - first, tuple(value.shape), tuple(value.stride())
-        if destined or written(node) is not None:
+        if destined or written(node):
             node.meta["out"] = record
             return base, first
         node.meta["view"] = record
@@ -361,11 +404,11 @@ def views(nodes):
         output = graph.output_node()
         for k, name in output.meta.get("destination", {}).items():
             value = output.args[0][k]
-            if isinstance(value, torch.fx.Node) and value.op != "placeholder" and written(value) is None:
+            if isinstance(value, torch.fx.Node) and value.op != "placeholder" and not written(value):
                 destination[value] = named[name]
-    nodes = mesh_graph.walk(universe(), starts, lambda n: [u for u in n.users if source(u) is n])
+    nodes = mesh_graph.walk(universe(), starts, lambda n: [u for u in n.users if n in source(u)])
     inside = mesh_graph.Reached(nodes.owner)
-    for node in mesh_graph.postorder(nodes, nodes[::-1], lambda n: [m for m in [source(n)] if m in inside]):
+    for node in mesh_graph.postorder(nodes, nodes[::-1], lambda n: [m for m in source(n) if m in inside]):
         node.meta.pop("to", None)
         node.meta.pop("out", None)
         if node in destination:

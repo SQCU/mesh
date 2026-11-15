@@ -11,8 +11,8 @@ import torch
 from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
 
-from .ir import (CLONE, JOIN, PAGES, RECV, SEND, aliased, aliasing, constant, evaluated, given, results_of, shape,
-                 view, views)
+from .ir import (CLONE, JOIN, PAGES, RECV, SEND, aliased, aliasing, constant, evaluated, given, leaves_of, produced,
+                 results_of, shape, view, views)
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -38,6 +38,14 @@ def operands(node):
     found = []
     map_arg((node.args, node.kwargs), found.append)
     return found
+
+
+# each operand's shape as `node` reads it: a getitem's its producer's selected result's (ir.shape at its index), any
+# other's its operand's own
+def read_shapes(node):
+    if node.target is operator.getitem:
+        return [shape(node.args[0], node.args[1])]
+    return [shape(n) for n in operands(node)]
 
 
 def call(graph, target, arguments, processor, **kwargs):
@@ -625,7 +633,7 @@ def laid(value, like):
 def meshed(graph, node, held, replaced):
     value = next(v for v in held if several(v))
     dims, extents, grid, nodes = value
-    leaves, out, shapes = flat(grid), shape(node), [shape(n) for n in operands(node)]
+    leaves, out, shapes = flat(grid), produced(node), read_shapes(node)
     index = list(itertools.product(*(range(n) for n in spans(grid, len(dims)))))
     found = windows(node) if RULES.get(node.target) is windowed else {}
 
@@ -704,7 +712,7 @@ def partitioned(graph, node, held, want, replaced, whole):
             first = want if isinstance(want, str) else want[2][0]
             held = [partitioned(graph, product, held[1:], first, replaced, whole), held[0]]
             node.target, node.args = ADD, (product, node.args[0])
-        shapes, out = [shape(n) for n in operands(node)], shape(node)
+        shapes, out = read_shapes(node), produced(node)
         if node.target is VIEW:
             rows = [intact(shapes[0], out)]
             if held[0][0] is not None:
@@ -883,33 +891,56 @@ def place(graph_module, placement):
     results = [n for k, n in enumerate(output.args[0])
                if k not in mutated and isinstance(n, torch.fx.Node) and isinstance(n.meta.get("val"), torch.Tensor)]
 
-    # a pure source alias's replay predecessors: a getitem's call where that result aliases an argument without writing
-    # it (ir.aliased); an aliasing call's own aliased argument leaves, each result's (ir.aliased: its schema's read-only
-    # match and the leaf its storage aliases), each once, realize replacing each of those leaves by its realization
+    # a pure source alias's replay predecessors: a getitem's call where that result is a view of an argument it aliases
+    # without writing it (ir.view over ir.aliased); an aliasing call's own aliased argument Nodes, every result's
+    # (ir.aliased: every get_alias_info read-only match, torch's _correct_storage_aliasing pairing; ir.leaves_of: a
+    # Tensor[] argument's each Node), each once, realize replacing each by its realization
     def parent(node):
         if node.target is operator.getitem:
-            return [node.args[0]] if view(node) is not None and aliased(node.args[0], node.args[1]) is not None else []
+            return [node.args[0]] if set(view(node)) & set(leaves_of(aliased(node.args[0], node.args[1]))) else []
         if not aliasing(node):
             return []
-        return [leaf for leaf in dict.fromkeys(aliased(node, k) for k in results_of(node)) if leaf is not None]
+        return list(leaves_of(value for k in results_of(node) for value in aliased(node, k)))
     order = mesh_graph.postorder(nodes, results, parent)
     retained = {node: (parent(node), node.args, node.kwargs, node.meta["val"]) for node in order}
 
-    def transfer(node, held):
-        want = stated[node] if node in stated else flat(held[0][2])[0]
-        if not isinstance(want, str) and several(want):
-            dimension, processors, units = want
-            want = dimension, tuple(counts(shape(node)[d], unit, shards) for d, unit, shards in zip(
+    # the stated placement of a value: its own, a getitem's its producer's (every result of a multi-result value under
+    # its producer's one statement)
+    def wanted(node):
+        return stated[node] if node in stated else wanted(node.args[0])
+
+    # a stated placement at result `k` of `node`'s own shape (ir.shape): a sharded one's sizes counted over that
+    # result's extents
+    def measured(want, node, k=None):
+        if isinstance(want, str):
+            return want
+        dimension, processors, units = want
+        if several(want):
+            return dimension, tuple(counts(shape(node, k)[d], unit, shards) for d, unit, shards in zip(
                 dimension, units, spans(processors, len(dimension)))), processors
-        elif not isinstance(want, str):
-            dimension, processors, units = want
-            want = dimension, counts(shape(node)[dimension], units, len(processors)), processors
+        return dimension, counts(shape(node, k)[dimension], units, len(processors)), processors
+
+    # each value placed once and then resharded to its own measured placement: a getitem projecting its producer's
+    # selected result where the producer holds it (its first processor, its own partition the getitem rule's
+    # alignment), then that result resharded to its producer's statement at its own shape; a multi-result value's
+    # shared operation partitioned under its statement, one partition where every result's measured placement is the
+    # same, else each result's own (Measured), the value itself never resharded (its getitems' transfers reshard each
+    # result); any other value under its own statement at its own shape
+    def transfer(node, held):
+        if node.target is operator.getitem:
+            want, resharded = flat(held[0][2])[0], measured(wanted(node), node)
+        elif isinstance(node.meta.get("val"), (tuple, list)):
+            wants = [measured(stated[node], node, k) for k in results_of(node)]
+            want, resharded = wants[0] if all(w == wants[0] for w in wants) else (
+                stated[node][0], Measured(w[1] for w in wants), stated[node][1]), None
+        else:
+            want = resharded = measured(stated[node], node)
         with graph.inserting_before(placed[0] if node.op == "placeholder" else node):
             value = ((None, None, (None,), [node]) if node.op == "placeholder" else
                      partitioned(graph, node, held, want, replaced, whole))
-        if not isinstance(want, str) and value[:3] != want:
+        if resharded is not None and not isinstance(resharded, str) and value[:3] != resharded:
             with graph.inserting_before(placed[0] if node.op == "placeholder" else node.next):
-                value = *want, reshard(graph, plainly(graph, value), *want)
+                value = *resharded, reshard(graph, plainly(graph, value), *resharded)
         return value
 
     # torch.fx Graph.output_node, the graph's last node: every other node placed first; then torch 2.14.0
@@ -957,7 +988,7 @@ def place(graph_module, placement):
     views(graph)
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
-        "state" in n.meta if n.op == "placeholder" else view(n) is not None and all(read)))
+        "state" in n.meta if n.op == "placeholder" else bool(view(n)) and all(read)))
     # design/unequal-shards-change-request.md item 8: a call replicated where invariant or of no placeholder (the
     # placeholders' users' incoming search, once), each replicated call onto the processors of its users and of their
     # sets, an unreplicated vertex's set empty (one labelled closure over the incoming rows, its columns the processors)

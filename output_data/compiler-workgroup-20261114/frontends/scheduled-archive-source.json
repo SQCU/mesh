@@ -776,5 +776,37 @@
       "Original replaced function AOT/result owner still needs preserved function-to-part correspondence."
     ],
     "accepted_boundary": "Use original get_alias_info result and retain original graph_signature; full consumer correction remains under review."
+  },
+  "whole_family_wip42": {
+    "kind": "whole-public-family-WIP",
+    "acceptance": "unaccepted; original AOT wrapper chain and per-result placement incomplete; no imports or runtime observation",
+    "AST": "PASS",
+    "hashes": {
+      "compiler/mesh_compiler/archive.py": "4c138dd3f3921e1ef82324fe7a6eadf091fd2b6088bf5f82987aebf0d303b1fb",
+      "compiler/mesh_compiler/export.py": "47a16c18fb72b1b6245c2f35a614c2c491ac1f6a2136c13fe9ecdd80c9a36385",
+      "compiler/mesh_compiler/ir.py": "16f250a46f8b83da787c6c39d4cfad7ccd4c38210aeff8c19a3a68060e7e8b7a",
+      "compiler/mesh_compiler/placement.py": "d77043dc9c23c578c832b2bae0daa8934e0d4d0e447a949878d0d1a2686a7c30",
+      "compiler/mesh_compiler/runtime.py": "33cc09693b56dab4d97e2b706520ed66745ac07ab885576637ce77761420ea2b",
+      "compiler/mesh_compiler/bridge.py": "3ab949db41eaa79e9707a85ef5c539e1191a807179217341968b00168f6571e8"
+    },
+    "pyflakes": [
+      {
+        "file": "compiler/mesh_compiler/archive.py",
+        "count": 1,
+        "output": "compiler/mesh_compiler/archive.py:884:5: redefinition of unused 'loaded' from line 852\n"
+      },
+      {
+        "file": "compiler/mesh_compiler/placement.py",
+        "count": 1,
+        "output": "compiler/mesh_compiler/placement.py:935:34: undefined name 'Measured'\n"
+      }
+    ],
+    "known_open": [
+      "Actual AOTGraphCapture wrapper-chain/public binding/archive connection pending",
+      "Mixed-result placement remains under implementation; no new first-processor fallback accepted",
+      "Outlined source record must retain intermediate actual Exported references, not only surviving part ordinals",
+      "archive.load local loaded() name shadows reference registry; reported to same104 for correction",
+      "No target release; current native v45 mirrors require next matched build, native137 not assumed compatible"
+    ]
   }
 }

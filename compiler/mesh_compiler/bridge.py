@@ -118,8 +118,9 @@ def _retired(context, loaded):
 # design/compilation-composition-change-request.md item 7; rdma/mesh-dataflow.h mesh_attach, mesh_nodes_read;
 # compiler/mesh_compiler/native.py Target.prepare: the selected machine entry's completed native target relocated onto
 # its run-time owner (a local program's own arena, or the published plan), its constant roots the exported constants
+# themselves (Exported.state's own tensors, their identity the source state's)
 def prepare(scheduled, entry=None):
-    constants = {name: tensor.detach() for name, (_, tensor) in scheduled.exported.state.items()
+    constants = {name: tensor for name, (_, tensor) in scheduled.exported.state.items()
                  if scheduled.exported.state_kinds[name] == InputKind.CONSTANT_TENSOR}
     if scheduled.plan is None:
         key = scheduled.output_processor if entry is None else entry

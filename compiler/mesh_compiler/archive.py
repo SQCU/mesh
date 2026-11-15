@@ -452,11 +452,16 @@ def producing(made, p, index, bindings, sources):
 
     def wrapped(wrapper):
         return wrappers.setdefault(id(wrapper), (len(wrappers), [], wrapper))
-    for graph in (*((made.graph,) if made.graph is not None else ()), *(k.graph for k in made.kernels.values()),
-                  *(record.graph for kind in objects.values() for record in kind)):
-        held_by = wrapped(graph.wrapper_code)[1]
+
+    # a GraphLowering's module among its wrapper's graphs, once; its wrapper's Record
+    def wrote(graph):
+        number, held_by, _ = wrapped(graph.wrapper_code)
         if not any(module is graph.module for module in held_by):
             held_by.append(graph.module)
+        return Record("wrapper", p, number)
+    for graph in (*((made.graph,) if made.graph is not None else ()), *(k.graph for k in made.kernels.values()),
+                  *(record.graph for kind in objects.values() for record in kind)):
+        wrote(graph)
 
     # a typed line's operand: its wrapper by `wrappers` (Record "wrapper"), a GraphLowering by its module, an IR node
     # by the node table (Lowered), an OutputSpec by its class and canonical state (Stated), a sequence, namedtuple or
@@ -542,18 +547,34 @@ def producing(made, p, index, bindings, sources):
     sequences = {"extern": tuple(tuple(map(lined, extern.lines)) for extern in objects["extern"]),
                  "inlined": tuple(tuple(map(lined, inlined.lines)) for inlined in objects["inlined"]),
                  "lifted": tuple(Record("wrapper", p, wrapped(lifted.wrapper)[0]) for lifted in objects["lifted"])}
-    # every wrapper's lines, line and IR node each recorded once as registered (a line's operand may name another
-    # wrapper or node, a layout another node)
-    wrapper_lines, line_records, node_records = [], [], []
+    # torch 2.14.0 torch/_inductor/codegen/wrapper_fxir.py WrapperFxCodegen and FxConverter
+    # (torch-inductor-aot-lowered-result.patch): one wrapper's converted result as its generate left it, its
+    # `fx_converter`'s `gm` (the converted typed-wrapper GraphModule, by Ref; each subwrapper's converted gm its
+    # get_attr branch there, subgms[name], the same object), its `line_nodes` (each converted WrapperLine, the planned
+    # line run_wrapper_ir_passes left, by the one line table, with the gm's nodes its own conversion created, in graph
+    # order), its `definitions` (each selected non-Triton kernel's KernelDefinitionLine by its definition name, by the
+    # line table) and its `lowered_subgraphs` (each subgraph's own GraphLowering by name, by its module, its wrapper
+    # registered: wrote)
+    def converted(wrapper):
+        converter = wrapper.fx_converter
+        return (converter.gm, tuple((lined(line), made_nodes) for line, made_nodes in converter.line_nodes),
+                {name: lined(line) for name, line in converter.definitions.items()},
+                {name: (graph.module, wrote(graph)) for name, graph in wrapper.lowered_subgraphs.items()})
+
+    # every wrapper's lines and converted result, line and IR node each recorded once as registered (a line's operand
+    # may name another wrapper or node, a layout another node; a converted result another wrapper)
+    wrapper_lines, converted_records, line_records, node_records = [], [], [], []
     while (len(wrapper_lines), len(line_records), len(node_records)) != (len(wrappers), len(table), len(nodes)):
         if len(wrapper_lines) < len(wrappers):
-            wrapper_lines.append(tuple(map(lined, list(wrappers.values())[len(wrapper_lines)][2].lines)))
+            wrapper = list(wrappers.values())[len(wrapper_lines)][2]
+            wrapper_lines.append(tuple(map(lined, wrapper.lines)))
+            converted_records.append(converted(wrapper))
         elif len(line_records) < len(table):
             line_records.append(line_of(list(table.values())[len(line_records)][1]))
         else:
             node_records.append(node_of(list(nodes.values())[len(node_records)][1]))
-    lines = {**sequences, "wrappers": tuple(wrapper_lines), "table": tuple(line_records),
-             "nodes": tuple(node_records)}
+    lines = {**sequences, "wrappers": tuple(wrapper_lines), "converted": tuple(converted_records),
+             "table": tuple(line_records), "nodes": tuple(node_records)}
 
     # torch/_inductor/loop_body.py LoopBody as produced: its sizes, iteration and reduction variables, variable
     # ranges, indexing expressions, indirect variables and their ranges, memory usage, operation counts, partial
@@ -656,13 +677,33 @@ def sourced(held, ordinal, operands, query):
             held["nested"].setdefault(branch, (held["owners"][outer], f"function_{k}.{path}"))
     existing = [n for n in outer.graph.nodes if n.op == "placeholder" and isinstance(n.meta.get("val"), torch.Tensor)
                 and StorageWeakRef(n.meta["val"].untyped_storage()) in operands.existing]
+
+    # one function's Exported record: its graph module, state (each target and its state.pt index), tokens, user
+    # inputs, outputs, out spec, state kinds, specialized literals, AOT stage records (whether `decomposed` is
+    # `aliases`), signature and range constraints
+    def exported(f):
+        return (f.graph_module, {name: (target, tensors.setdefault(id(t), (len(tensors), t))[0])
+                                 for name, (target, t) in f.state.items()}, f.tokens, f.user_inputs, f.outputs,
+                pytree.treespec_dumps(f.out_spec), f.state_kinds, f.specialized, f.aliases, f.decomposed is f.aliases,
+                f.decomposed, f.signature, f.range_constraints)
+
+    # every Exported once by identity, its index in `exporteds`: each final function's, then each outlined original's
+    # and each of its parts' (a part a later outline replaced, a repeated step: the one object, one record)
+    records = {}
+
+    def recorded(f):
+        return records.setdefault(id(f), (len(records), f))[0]
+    finals = {k: recorded(f) for k, f in functions.items()}
+    outlined = tuple((recorded(original), tuple(map(recorded, parts))) for original, parts in captured.outlined)
     return encoded(held, {
         "graph": outer,
-        "functions": {k: (f.graph_module, {name: (target, tensors.setdefault(id(t), (len(tensors), t))[0])
-                                           for name, (target, t) in f.state.items()}, f.tokens, f.user_inputs,
-                          f.outputs, pytree.treespec_dumps(f.out_spec), f.state_kinds, f.specialized, f.aliases,
-                          f.decomposed is f.aliases, f.decomposed, f.signature)
-                      for k, f in functions.items()},
+        # the public Exported's range constraints (Exported.range_constraints, export.capture's make_constraints)
+        "range_constraints": captured.exported.range_constraints,
+        "exporteds": tuple(exported(f) for _, f in records.values()),
+        "functions": finals,
+        # CapturedProgram.outlined: each replaced function's original Exported and its parts' Exported objects in part
+        # order, each by its `exporteds` index
+        "outlined": outlined,
         "calls": [(node, ordinal[call.function], call.inputs, call.outputs) for node, call in captured.calls.items()],
         "operands": (operands.nodes, [holder for _, holder in operands.storages], operands.views, operands.accesses,
                      operands.results, operands.root_sources, sorted(operands.held),
@@ -838,17 +879,20 @@ def load(directory):
                         pytree.treespec_loads(about["out_spec"]),
                         {name: InputKind[kind] for name, kind in about["state_kinds"].items()},
                         interface=(signature, pytree.treespec_loads(about["interface"]["spec"])),
-                        specialized=specialized)
-    captured = {k: Exported(module, {name: (key, tensors[t]) for name, (key, t) in kept.items()}, tokens, inputs,
-                            results, pytree.treespec_loads(spec), kinds, aliases, specialized=literals,
-                            decomposed=aliases if same else decomposed, signature=signature)
-                for k, (module, kept, tokens, inputs, results, spec, kinds, literals, aliases, same, decomposed,
-                        signature) in source["functions"].items()}
+                        specialized=specialized, range_constraints=source["range_constraints"])
+    # an Exported record (`sourced`'s) as its loaded Exported, `decomposed` the same object as `aliases` where saved so
+    def loaded(module, kept, tokens, inputs, results, spec, kinds, literals, aliases, same, decomposed, signature,
+               ranges):
+        return Exported(module, {name: (key, tensors[t]) for name, (key, t) in kept.items()}, tokens, inputs, results,
+                        pytree.treespec_loads(spec), kinds, aliases, specialized=literals,
+                        decomposed=aliases if same else decomposed, signature=signature, range_constraints=ranges)
+    captured = {k: loaded(*record) for k, record in source["functions"].items()}
+    outlined = tuple((loaded(*record), parts) for record, parts in source["outlined"])
     calls = {node: Call(k, inputs, results) for node, k, inputs, results in source["calls"]}
     (nodes, holders, views, accesses, results, roots, kept, ports, existing, produced, placements, machines,
      output) = source["operands"]
     operands = schedule.CallOperands(
-        CapturedProgram(exported, captured, calls), nodes, tuple(captured), [calls[node] for node in nodes],
+        CapturedProgram(exported, captured, calls, outlined), nodes, tuple(captured), [calls[node] for node in nodes],
         {k: k for k in captured}, [(StorageWeakRef(h.meta["val"].untyped_storage()), h) for h in holders], views,
         accesses, results, roots, frozenset(kept), tuple(schedule.CallPort(*port) for port in ports),
         {StorageWeakRef(p.meta["val"].untyped_storage()) for p in existing}, produced, placements, machines, output)
