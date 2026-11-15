@@ -27,27 +27,25 @@ HOST = torch.device("cpu")
 
 @torch.library.custom_op("mesh::send", mutates_args=())
 def send(value: Tensor, channel: int) -> None:
-    # unresolved callback (runtime dispatch: torch.library.custom_op kernel of mesh::send): callback inversion of
-    # control is outside the working specification, and runtime callback overhead is inadmissible in
-    # performance-critical code
-    raise NotImplementedError("unresolved callback: mesh::send custom_op kernel")
+    # runtime dispatch callback (torch.library.custom_op kernel of mesh::send): callback inversion of control is
+    # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    mesh_callbacks_are_outside_spec
     LOCAL.channels[channel].put(value)
 
 
 @send.register_fake
 def send_fake(value, channel):
-    # unresolved callback (compile-time dispatch: register_fake kernel of mesh::send): callback inversion of control
-    # is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    raise NotImplementedError("unresolved callback: mesh::send register_fake kernel")
+    # compile-time dispatch callback (register_fake kernel of mesh::send): callback inversion of control is outside
+    # the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    mesh_callbacks_are_outside_spec
     return None
 
 
 @torch.library.custom_op("mesh::recv", mutates_args=())
 def recv(channel: int) -> Tensor:
-    # unresolved callback (runtime dispatch: torch.library.custom_op kernel of mesh::recv): callback inversion of
-    # control is outside the working specification, and runtime callback overhead is inadmissible in
-    # performance-critical code
-    raise NotImplementedError("unresolved callback: mesh::recv custom_op kernel")
+    # runtime dispatch callback (torch.library.custom_op kernel of mesh::recv): callback inversion of control is
+    # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    mesh_callbacks_are_outside_spec
     return LOCAL.channels[channel].get()
 
 
@@ -220,10 +218,9 @@ def viewable(value, sizes):
 
 
 def evaluated(node, processor):
-    # unresolved callback (compile-time: torch.fx.node.map_arg's per-Node function): callback inversion of control is
-    # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    arguments = map_arg((node.args, node.kwargs), lambda n: (
-        (_ for _ in ()).throw(NotImplementedError("unresolved callback: ir.evaluated map_arg lambda")), n.meta["val"])[1])
+    # compile-time callback (torch.fx.node.map_arg's per-Node function): callback inversion of control is outside the
+    # working specification, and runtime callback overhead is inadmissible in performance-critical code
+    arguments = map_arg((node.args, node.kwargs), lambda n: mesh_callbacks_are_outside_spec(n.meta["val"]))
     with detect_fake_mode(arguments):
         if node.target in (RESHAPE, VIEW) and not viewable(*arguments[0]):
             with node.graph.inserting_before(node):
@@ -390,18 +387,15 @@ def views(nodes):
             value = output.args[0][k]
             if isinstance(value, torch.fx.Node) and value.op != "placeholder" and not written(value):
                 destination[value] = named[name]
-    # unresolved callback (compile-time: rdma/mesh_graph.py walk's successor function): callback inversion of control
-    # is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    nodes = mesh_graph.walk(universe(), starts, lambda n: (
-        (_ for _ in ()).throw(NotImplementedError("unresolved callback: ir.views walk lambda")),
-        [u for u in n.users if n in source(u)])[1])
+    # compile-time callback (rdma/mesh_graph.py walk's successor function): callback inversion of control is outside
+    # the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    nodes = mesh_graph.walk(universe(), starts,
+                            lambda n: mesh_callbacks_are_outside_spec([u for u in n.users if n in source(u)]))
     inside = mesh_graph.Reached(nodes.owner)
-    # unresolved callback (compile-time: rdma/mesh_graph.py postorder's predecessor function): callback inversion of
-    # control is outside the working specification, and runtime callback overhead is inadmissible in
-    # performance-critical code
-    for node in mesh_graph.postorder(nodes, nodes[::-1], lambda n: (
-            (_ for _ in ()).throw(NotImplementedError("unresolved callback: ir.views postorder lambda")),
-            [m for m in source(n) if m in inside])[1]):
+    # compile-time callback (rdma/mesh_graph.py postorder's predecessor function): callback inversion of control is
+    # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    for node in mesh_graph.postorder(nodes, nodes[::-1],
+                                     lambda n: mesh_callbacks_are_outside_spec([m for m in source(n) if m in inside])):
         node.meta.pop("to", None)
         node.meta.pop("out", None)
         if node in destination:
@@ -413,18 +407,14 @@ def views(nodes):
         elif node.target is operator.getitem and aliasing(node.args[0]):
             node.meta["val"] = node.args[0].meta["val"][node.args[1]]
     computed = {node: target for node, target in destination.items() if node.target is not RECV}
-    # unresolved callback (compile-time: rdma/mesh_graph.py postorder's and forward's predecessor function): callback
-    # inversion of control is outside the working specification, and runtime callback overhead is inadmissible in
-    # performance-critical code
-    bases = lambda n: ((_ for _ in ()).throw(NotImplementedError("unresolved callback: ir.views bases lambda")),
-                       [computed[n]] if n in computed else bases_of(n))[1]
-    # unresolved callback (compile-time: rdma/mesh_graph.py forward's per-edge function): callback inversion of
+    # compile-time callback (rdma/mesh_graph.py postorder's and forward's predecessor function): callback inversion of
     # control is outside the working specification, and runtime callback overhead is inadmissible in
     # performance-critical code
+    bases = lambda n: mesh_callbacks_are_outside_spec([computed[n]] if n in computed else bases_of(n))
+    # compile-time callback (rdma/mesh_graph.py forward's per-node function): callback inversion of control is outside
+    # the working specification, and runtime callback overhead is inadmissible in performance-critical code
     mesh_graph.forward(mesh_graph.postorder(universe(), nodes, bases), bases,
-                       lambda node, read: ((_ for _ in ()).throw(
-                           NotImplementedError("unresolved callback: ir.views forward lambda")),
-                           based(node, read, node in computed))[1])
+                       lambda node, read: mesh_callbacks_are_outside_spec(based(node, read, node in computed)))
     for node, target in destination.items():
         if node.target is RECV:
             node.meta["to"] = target.name, 0, shape(target), tuple(target.meta["val"].stride())

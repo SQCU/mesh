@@ -1252,6 +1252,9 @@ def _over(ir):
     items, places = {item[2]: item for item in ir.program if item[0] != 'output'}, ir.places[min(ir.coords)]
 
     def rule(key, sets):
+        # compile-time callback (mesh_graph.forward's per-key function): callback inversion of control is outside the
+        # working specification, and runtime callback overhead is inadmissible in performance-critical code
+        mesh_callbacks_are_outside_spec
         kind, reads, _, operand = items[key]
         joined = frozenset().union(*sets)
         if key in ir.inside:
@@ -3951,6 +3954,9 @@ def _lstsq_driver(a, driver):
 
 @torch.library.register_fake('aten::geqrf')
 def _geqrf_metadata(self):
+    # compile-time dispatch callback (torch.library.register_fake of aten::geqrf): callback inversion of control is
+    # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    mesh_callbacks_are_outside_spec
     torch._check(self.dim() >= 2, lambda: 'torch.geqrf: input must have at least 2 dimensions')
     m, n = self.shape[-2:]
     return (self.new_empty((*self.shape[:-2], n, m)).transpose(-2, -1),
@@ -3959,6 +3965,9 @@ def _geqrf_metadata(self):
 
 @torch.library.register_fake('aten::linalg_lstsq')
 def _lstsq_metadata(self, b, rcond=None, *, driver=None):
+    # compile-time dispatch callback (torch.library.register_fake of aten::linalg_lstsq): callback inversion of control
+    # is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    mesh_callbacks_are_outside_spec
     torch._check(self.dim() >= 2 and b.dim() >= 1,
                  lambda: 'torch.linalg.lstsq: input must have at least 2 dimensions and other at least 1')
     torch._check(0 <= self.dim() - b.dim() <= 1,
@@ -7024,6 +7033,9 @@ def _released(owned):
 
 # Python documentation, weakref.finalize; Lib/weakref.py, finalize
 def _dropped(context, state):
+    # lifetime callback (weakref.finalize(run, _dropped, context, state)): callback inversion of control is outside
+    # the working specification, and runtime callback overhead is inadmissible in performance-critical code
+    mesh_callbacks_are_outside_spec
     if state['mapping'] is not None or state['owned']:
         _retire(context, state)
     _released(state.get('constructed', {}))
@@ -7041,6 +7053,10 @@ HOLDERS = {}
 
 @RELEASE
 def _released_constant(owner):
+    # lifetime callback (ctypes RELEASE passed to native borrowers, e.g. MetalBufferBorrow): callback inversion of
+    # control is outside the working specification, and runtime callback overhead is inadmissible in
+    # performance-critical code
+    mesh_callbacks_are_outside_spec
     HOLDERS.pop(owner, None)
 
 
@@ -7720,6 +7736,9 @@ class _TensorLocation:
 
 def _outputs(recipe, bound):
     def tensor(x):
+        # runtime result-binding callback (pytree.tree_map over the recipe): callback inversion of control is outside
+        # the working specification, and runtime callback overhead is inadmissible in performance-critical code
+        mesh_callbacks_are_outside_spec
         if not isinstance(x, _TensorLocation):
             return x
         copy = bound[x.function][3][x.value][x.copy]
@@ -8116,6 +8135,9 @@ class _Export(torch.fx.Interpreter):
         placed = torch.device(device or value.device)
         converter = self.converters.setdefault(placed, MetaConverter())
         def make(meta, device):
+            # compile-time callback (MetaConverter's callback=make): callback inversion of control is outside the
+            # working specification, and runtime callback overhead is inadmissible in performance-critical code
+            mesh_callbacks_are_outside_spec
             with no_dispatch():
                 return FakeTensor(self.mode, meta(), placed)
         return converter(value, callback=make)
