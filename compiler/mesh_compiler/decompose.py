@@ -24,7 +24,7 @@ from .operations import (FRAGMENT, LSTSQ_FIXED, _eigen_geev, _fragment_decoded, 
                          _lapack_least_squares, _lapack_singular, _least_squares_qr, _least_squares_svd, _lstsq_driver,
                          _matrix_exponential, _operands, _pseudoinverse, _qdwh_eigh_pop, _qdwh_eigh_result,
                          _qdwh_eigh_state, _singular_qdwh)
-from .placement import insert_send_recv
+from .placement import insert_send_recv, subscript
 from .schedule import carried
 
 import mesh_graph
@@ -56,17 +56,18 @@ def _axes_onto(source, result, mapping, within=True):
     if "work_axes" not in source.meta:
         return
     # the source itself at path (), each of its projections (its getitems, theirs, ...: rdma/mesh_graph.py walk, a
-    # getitem after the value it selects from) at its value's path and its own index's SequenceKey (a getitem's
-    # container an operation's tuple or list result, torch/utils/_pytree.py's tuple and list flatten keying each child
-    # by SequenceKey); each replacement node at its own tree_flatten_with_path KeyPath
+    # getitem after the value it selects from) at its value's path and its own index; each replacement node at its own
+    # torch/utils/_pytree.py tree_flatten_with_path KeyPath, each key by what it selects with (placement.subscript:
+    # its own KeyEntry.get)
     paths = {source: ()}
     for node in mesh_graph.walk(list(source.graph.nodes), [source],
                                 lambda n: [u for u in n.users if u.target is operator.getitem]):
         if node is not source:
-            paths[node] = (*paths[node.args[0]], pytree.SequenceKey(node.args[1]))
-    for path, made in pytree.tree_flatten_with_path(result)[0]:
+            paths[node] = (*paths[node.args[0]], node.args[1])
+    for keys, made in pytree.tree_flatten_with_path(result)[0]:
         if not (isinstance(made, torch.fx.Node) and isinstance(made.meta.get("val"), torch.Tensor)):
             continue
+        path = tuple(map(subscript, keys))
         made.meta["work_axes"] = tuple(axis for axis in source.meta["work_axes"] if paths.get(axis[0], path) == path)
         _axes_moved(made, {**mapping, **{node: made for node, at in paths.items() if at == path}}, within)
 

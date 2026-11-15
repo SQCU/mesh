@@ -911,5 +911,36 @@
     ],
     "execution": "No imports, no target or save/load invocation. Native138 is last matched build; current newer native source is not attributed to it.",
     "history": "Preserved before continuing whole responsibility correction; no reset, stash or source backup."
+  },
+  "per_result_owner_wip55": {
+    "status": "unaccepted source-history checkpoint before whole TreeSpec/interface replacement",
+    "worker": {
+      "uuid": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "pid": 32089,
+      "exec": 58844,
+      "last_collected_result": 55
+    },
+    "sources": {
+      "compiler/mesh_compiler/placement.py": {
+        "sha256": "45b770e2e8254eaa448f4aa59f350059b8c90a555d5f5268cdbe6d78f7ff84f0",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      },
+      "compiler/mesh_compiler/decompose.py": {
+        "sha256": "20b259a6d2a8d8b2254e10654183ad31bd9b12d0452376487844ecde875c64de",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      }
+    },
+    "retained": "Original literal leaves and each whole/partitioned Tensor result projection; replicated copies consumed by existing reshard/across; DCE retains actual work-axis references.",
+    "review_open": [
+      "Rejected _Subscript key probe and tuple/list-only recognition; whole TreeSpec/source projection replacement remains required.",
+      "Complete per-result partition/summed destination and native actual result-operand association remain open.",
+      "Original JD/AOTState/AOTGraphCapture continuation must run in supplied ExitStack lifetime; no partial metadata tuple or old GraphSignature convention repair.",
+      "Actual original native-wrapper/planner/AotCompiled saved result replaces displaced FxConverter-only projection.",
+      "Full public alias/mutation/gradient/RNG/static metadata family and dependent consumers remain incomplete."
+    ],
+    "execution": "No imports or native/save-load invocation. Native138 is separate matched-build evidence; newer native source unbuilt.",
+    "history": "Forward source checkpoint; no reset, stash or backup. Withdrawn intermediate AOT hook has no net diff and was not installed."
   }
 }
