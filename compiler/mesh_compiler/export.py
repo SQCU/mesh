@@ -115,26 +115,43 @@ def lifted(program, module):
 # (with a loss a distinct stage result, else the same record); the export's own stage-2 callable (`aot_compiled`,
 # compiler/patches/torch-export-alias-metadata.patch) popped from the first program before any later pass, its
 # `compiled`
-def export(module, args, loss=None, **export_options):
-    program, aliases = torch.export.export(module, args, **{"strict": True, **export_options}), None
-    graph_module = program.graph_module
-    compiled = graph_module.meta.pop("aot_compiled")
-    while pending := [n for n in graph_module.graph.nodes if n.op == "call_function" and n.target in STATIC]:
-        expand(graph_module, pending[0])
-    graph_module.recompile()
-    program = lifted(program, module)
-    if loss is not None:
-        with sdpa_kernel(SDPBackend.MATH):
-            program = _export_forward_backward(program, joint_loss_index=loss)
-        aliases = aot_aliases(program)
-    table = torch.export.default_decompositions()
-    for node in program.graph_module.graph.nodes:
-        if (node.op == "call_function" and isinstance(node.target, torch._ops.OpOverload)
-                and torch.Tag.view_copy in node.target.tags and node.target.has_kernel_for_dispatch_key(VIEW_COPY)):
-            table[node.target] = functools.partial(node.target._op_dk, VIEW_COPY)
-    program = lifted(program.run_decompositions(table), module)
-    later = aot_aliases(program)
-    return read(program, later if aliases is None else aliases, later, compiled)
+def export(module, args, loss=None, kwargs=None, strict=True):
+    kwargs = {} if kwargs is None else kwargs
+    # torch 2.14.0 torch/export/_trace.py _export_to_torch_ir (strict Dynamo capture, restore_fqn False as
+    # _strict_export passes it) and _lstsq_fixed_selected (compiler/patches/torch-lstsq-fixed-results.patch,
+    # _strict_export's own selection), its source names by _get_param_buffer_mapping; else the module itself
+    source = _export_to_torch_ir(module, args, kwargs, restore_fqn=False, _log_export_usage=False) if strict else module
+    if strict:
+        _lstsq_fixed_selected(source)
+    names = _get_param_buffer_mapping(module, source) if strict else {}
+    # torch/_functorch/aot_autograd.py aot_export_joint_with_descriptors and its companion
+    # aot_compile_joint_with_descriptors, both inside the one ExitStack the joint export requires live through its
+    # compilation, over torch.export.default_decompositions; each compiler the companion's own default
+    # (boxed_nop_preserve_node_meta, an abstract compilation) recording the graph and arguments it is given and, for
+    # each call of what it returns, the arguments that call receives (the forward's: its graph's own placeholder values)
+    stages = {"forward": [], "backward": []}
+
+    def recording(stage):
+        def compiler(graph_module, example_inputs):
+            made = boxed_nop_preserve_node_meta(graph_module, example_inputs)
+
+            def called(arguments):
+                stages[stage][-1][2].append(list(arguments))
+                return made(arguments)
+            called._boxed_call = True
+            stages[stage].append((graph_module, example_inputs, []))
+            return called
+        return compiler
+    with contextlib.ExitStack() as stack, sdpa_kernel(SDPBackend.MATH):
+        joint = aot_export_joint_with_descriptors(stack, source, args, kwargs,
+                                                  decompositions=torch.export.default_decompositions())
+        graph_module = joint.graph_module
+        while pending := [n for n in graph_module.graph.nodes if n.op == "call_function" and n.target in STATIC]:
+            expand(graph_module, pending[0])
+        graph_module.recompile()
+        compiled = aot_compile_joint_with_descriptors(joint, fw_compiler=recording("forward"),
+                                                      bw_compiler=recording("backward"))
+    return read(module, joint, names, compiled, stages, loss)
 
 
 # compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py

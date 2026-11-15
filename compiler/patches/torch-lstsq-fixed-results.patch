@@ -151,17 +151,19 @@
 
 --- a/torch/export/_trace.py
 +++ b/torch/export/_trace.py
-@@ -1775,6 +1775,37 @@
-         _log_export_usage=False,
-     )
- 
+@@ -1749,6 +1749,40 @@
+         torch._C._jit_set_texpr_fuser_enabled(original_state)
+
+
++def _lstsq_fixed_selected(gm_torch_level: torch.fx.GraphModule) -> None:
 +    # each torch.linalg.lstsq product of torch/_dynamo/variables/torch.py handle_linalg_lstsq (its node marked
 +    # meta["lstsq_fixed"], kept through torch/_dynamo/functional_export.py DynamoGraphTransformer.run_node; its
 +    # arguments torch.linalg.lstsq's bound input, b, rcond and driver) whose residuals this source graph does not use
 +    # is that call's mesh::linalg_lstsq_fixed. Its users are its results' getitems, each its result slot in its own
 +    # args[1]: the residuals (slot 1) are unused where no slot-1 getitem with users remains (none at all where it was
 +    # eliminated); solution, rank and singular_values (slots 0, 2, 3) become its results 0, 1 and 2. A product with
-+    # any other user is left as it is (mesh compiler/patches/torch-lstsq-fixed-results.patch)
++    # any other user is left as it is (mesh compiler/patches/torch-lstsq-fixed-results.patch: _strict_export's and the
++    # mesh compiler's direct frontend's one selection)
 +    import operator
 +
 +    selected = False
@@ -185,6 +187,16 @@
 +        selected = True
 +    if selected:
 +        gm_torch_level.recompile()
++
++
+ def _strict_export(
+     mod: torch.nn.Module,
+     args: tuple[Any, ...],
+@@ -1775,6 +1809,8 @@
+         _log_export_usage=False,
+     )
+
++    _lstsq_fixed_selected(gm_torch_level)
 +
      # We detect the fake_mode by looking at gm_torch_level's placeholders, this is the fake_mode created in dynamo.
      (

@@ -1000,5 +1000,41 @@
       "status": "Rejected old-path hook preserved before complete direct-entry replacement"
     },
     "diff_check": "PASS after worker trimmed EOF context and paired hunk counts"
+  },
+  "direct_aot_entry_quota_wip": {
+    "status": "INCOMPLETE SOURCE HISTORY; no implementation acceptance or execution",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "pid": 32089,
+      "exec": 58844,
+      "error_results": [
+        69,
+        70
+      ],
+      "api_error_status": 429,
+      "reported": "weekly limit; resets Nov 17 at 11am America/Los_Angeles",
+      "action": "No retry or alternate account/worker. Persistent process retained; source preserved."
+    },
+    "source": {
+      "compiler/mesh_compiler/export.py": "5a45bf210f564549aac62f181ecbf514f484071cf463a9d24b96954b73c93c57",
+      "compiler/patches/torch-export-alias-metadata.patch": "3b78f2a89c92af83fc21a4bb181e58559b304758313fc86940827c46db40cab6",
+      "compiler/patches/torch-lstsq-fixed-results.patch": "f000873c967877a2e6663b7bafc4a6f705fbc4d36e605e2c811a5be8b8dff210"
+    },
+    "written": "export.export no longer enters torch.export.export/stage2_export/create_graph_signature. It calls original strict Dynamo source capture and one factored lstsq helper, then original aot_export_joint_with_descriptors and aot_compile_joint_with_descriptors in one ExitStack; callback delegates to original boxed_nop_preserve_node_meta and records its supplied graph/input objects. Rejected alias-patch late hook removed.",
+    "checks": {
+      "AST": "PASS export.py",
+      "patch_format": "Both patches parse with git apply --numstat",
+      "diff_check": "PASS",
+      "pyflakes": "FAIL: 7 undefined imports and 1 stale unused import, accurately preserved"
+    },
+    "missing": [
+      "export.py has not imported contextlib, _export_to_torch_ir, _lstsq_fixed_selected, _get_param_buffer_mapping, boxed_nop_preserve_node_meta, aot_export_joint_with_descriptors, aot_compile_joint_with_descriptors.",
+      "export.export calls read(module,joint,names,compiled,stages,loss), but read still has old 4-argument ExportedProgram/GraphSignature convention. Original JD/result is not yet retained in Exported.",
+      "Captured.captured still reconstructs inputs from old user_inputs/state and output roles; state ordering does not yet consume JD params_spec/buffers_spec, and joint/backward gradients and subclass/synthetic inputs are not paired.",
+      "archive.sourced/restored still omits compiled/JD/callback/cache result; public runtime Arguments/Program still does not consume original dispatch-wrapper identity/synthetic-base contract.",
+      "Existing strict source fake/state provenance, compile-known specialization and replaced export options require actual original owner pairing, not copied export cleanup.",
+      "Original default boxed_nop callable is not OutputCode: bundled cache make_entry asserts OutputCode; actual existing cacheable compiler result must be supplied, without new interpreter or closure pickle.",
+      "The lstsq helper patch is source-only and not installed. Original metadata/runtime safety and full per-result/native/RNG correspondence remain open."
+    ]
   }
 }
