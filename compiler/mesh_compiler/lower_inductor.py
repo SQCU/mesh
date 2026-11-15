@@ -19,13 +19,15 @@ from torch import Tensor
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch._inductor import config
 from torch._inductor import ir as upstream
+# the upstream entry first, as torch's own: compile_fx.py 126 graph, graph.py 92 lowering, lowering.py 9694 kernel,
+# whose CPU templates import cpp_template_kernel once lowering is initialized (cpp_template_kernel.py 15 imports it)
+from torch._inductor.compile_fx import compile_fx_aot, compile_fx_inner
 from torch._inductor.codegen.cpp import (CppKernel, CppKernelProxy, CppOverrides, CppScheduling, CppTile2DKernel,
                                          CppTile2DOverrides, CppVecKernel, CppVecOverrides, KernelGroup)
 from torch._inductor.codegen.cpp_template_kernel import CppTemplateKernel
 from torch._inductor.codegen.cpp_utils import LocalBufferContext
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
 from torch._inductor.codegen.wrapper import KernelCallLine
-from torch._inductor.compile_fx import compile_fx_aot, compile_fx_inner
 from torch._inductor.cpp_builder import CppTorchDeviceOptions
 from torch._inductor.cpu_vec_isa import pick_vec_isa
 from torch._inductor.graph import GraphLowering, SubgraphLowering
