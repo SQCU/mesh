@@ -35,6 +35,117 @@ composition? use that strategy.” This workgroup replaces complete
 producer/result/consumer connections. Its units include every alternative
 implementation and lost-result consumer identified in the accounts below.
 
+## Reference-based review, 15 November 2026
+
+Operator:
+
+> why are these secitons of the optimization and IR transformatino data incomplete or basically shit instead of satisfying the properties tehy were assigned? review the other program, schedule-emit or whatever it was called to figure out review standards to set this right in concrete and tangible terms
+
+This source review reads `schedule-emit` at `f41c64a` and Mesh at `027ab655`.
+The reference's tracked `schedule_emit` source matches that commit. Its existing
+modified emitted archives were left untouched. The observations below concern
+source structure; this review supplies no numerical or performance measurement.
+All eight Claude workers are held during this review.
+
+The assigned properties come from [composition](../../design/compilation-composition-change-request.md)
+items 2/3/6/7 and its numerical-lowerer boundary, and
+[AOT](../../design/aot-compilation-change-request.md) A1/A5/A6/A8/A9/A10.
+The reference demonstrates how responsibilities compose. Mesh's full numerical
+domain, retained analysis results, native execution and saved compilation remain
+the assigned scope; the reference's smaller domain and threaded runtime serve
+their stated demonstration roles.
+
+| Property reviewed | Concrete reference mechanism | Evidence in an implementation review |
+| --- | --- | --- |
+| A producer returns the result required by its next stage. | `export.export/read` supplies the graph, signature roles, state and output TreeSpec; `driver.compile_module` passes returned values directly through placement, devices and schedule. | Identify the original producing symbol, its returned operand, and the immediate consumer's actual reads. Account for the complete result convention, including state, mutation, aliases and effects where the assigned source contains them. |
+| A transformation completes its graph change. | `placement.insert_send_recv` creates the channel's send/receive and replaces every remote reader's operand. `devices.on_devices` inserts the copy, redirects the send and updates the receive prototype. | Show the input relation and the resulting relation, including all affected uses and annotations. The output graph implements the specified transformation before another stage consumes it. |
+| One algorithm owns each solved decision. | `schedule.heft_placed` returns orders; `assemble` consumes those orders using original Node references. `argument_buffers` returns `inputs/feedforward`; `runtime.Program` reads those values. | Trace the solver's actual result into the next consumer. For Mesh, retain the original analysis/witness/allocation result as A8 and composition 6/7 require, alongside its compiled realization. Changed operands and their new analyses have explicit source correspondence. |
+| An adapter satisfies the original consumer's complete contract. | `lower_inductor.adapt` supplies received shape/stride/dtype/device, returns sent values for Inductor's output-stride contract, and `lower_recv_strided` marks the original buffer in Inductor's lifetime set. | Name the consumer function and its actual operand convention, then identify the original operation that establishes each required property. A field's presence establishes retention; the consumer's use establishes the handoff. |
+| Numerical compilation belongs to the original compiler. | `lower_inductor.lower` gives each scheduled GraphModule to `torch.compile(backend="inductor")`. | Follow the scheduled body into the cited compiler entry and its complete returned result. Mesh's added access, binding, source and reusable-emission operands come from their original producers and reach their named consumers. |
+| Saved and executable forms consume the same decisions. | `archive.save/load` uses `torch.export` for the scheduled graphs and stores the associated inputs, channels, feedforward and result metadata; `Program` consumes those fields. | Identify the saved sections/references and the loaded operand read by execution. Mesh additionally preserves the source and derived results required by A8/A9 and composition 7. |
+
+A concrete reference example is a result on processor `p` read by two operations
+on processor `q`. `insert_send_recv` gives both readers the same receive Node and
+channel. `on_devices` gives that receive its actual destination-device prototype
+and puts the copy in the graph. `schedule` includes the send-to-receive dependence
+and `assemble` maps the readers' operands through `copied`. The lowerer compiles
+that returned graph. The review follows those actual objects and uses; a record
+containing a channel number by itself would establish only one part of the work.
+
+### Findings at this source checkpoint
+
+- `export.Captured.captured` now retains the original capture result, but its
+  slice of `fw_graph_outs` supplies only public prototypes to the next interpreted
+  call. Input mutation, returned-input identity and the original alias/autograd
+  conventions remain unestablished there. The original AOT forward epilogues own
+  these semantics and expect their own output conventions. Commits `1296425f`
+  and `027ab655` establish data wiring and explicit context ownership, **not a
+  completed capture transformation**. This is the immediate unfinished boundary.
+- The subsequent `export.capture` still invokes the displaced constructor,
+  unpacks the old four-part `bound` record and constructs the displaced
+  `Exported` interface. Its `held/roots/chain/written` tables reconstruct roles
+  and bindings around those old fields. It remains halted under the producer-first
+  sequence. Its ordinary outer operations also need explicit destinations when
+  that direct consumer is assigned.
+- `lower_inductor.TEMPLATE_DECLARED/TEMPLATE_RANGES` are `Unretained` values;
+  `_template` puts the latter into `Kernel.ranges`. Original template declaration
+  and access producers have yet to return their results through this interface.
+  The markers identify unfinished coverage of the assigned domain.
+- `torch-inductor-aot-lowered-result.patch` retains original planning owners,
+  but `LoweredAOTI.emission`, `_emission_context`, `_planned_state` and
+  `restore_planned` resume through a closure and selected copies of ambient or
+  mutable state. They leave the emitter's complete explicit operand contract
+  unfinished. A successful patch application or build establishes neither
+  reusable emission nor saved ownership.
+
+The existing change-request reusable form supplies the work order: **producer
+and operands; mechanism and source; complete result and immediate consumer;
+composition with the other requests in their cited roles**. Codex review records
+the actual source symbols and follows one complete transformation through that
+boundary. AST, import, patch and build observations retain their narrower meaning.
+The user-ordered sequence advances outward when the local semantic handoff is
+established. The subsequent instruction below sets the complete module units for
+this correction.
+
+## Complete affected-module revision, 15 November 2026
+
+Operator:
+
+> x omits y z wtill ws, and l depends on k. all of these are a manifest of specific defects or revisions that must be made all at once. write them out explicitly into the repo as documentation then address them all (alongside all other errors in the same module) all at once before further work
+
+The following defects form one correction workgroup. The linked module accounts
+enumerate the affected functions and remaining same-module defects before their
+implementing workers resume. These are assignments for complete module revisions;
+individual field or method edits remain ordinary intermediate commits.
+
+| Defect | Required revision | Module unit and review account |
+| --- | --- | --- |
+| C1. `Captured.captured` returns a public-output slice while mutation, identity, alias, autograd, token and subclass conventions remain incomplete at the next call. | Establish the complete capture result and its original upstream public-call convention, preserving all of those operands and properties through the immediate use. | Capture: `export.py`, its result definitions and original capture-result patches; [frontend account](frontends/whole-composition-ownership-20261114.md). |
+| C2. `capture` consumes the displaced constructor, bound-record and Exported interfaces. | Replace this module's entire old producer/consumer composition with the established original result and explicit source correspondence. | Same complete capture unit. |
+| C3. `capture` reconstructs roles and bindings through holder tables and old projections; ordinary outer operations have incomplete destinations. `calls` retains a node-class rejection list. | Account for every source operation/result through the cited capture and graph transformation owners, with the complete assigned domain and explicit resulting uses. | Same complete capture unit; the function-by-function account includes obsolete helpers, comments and all remaining same-module assumptions. |
+| P1. CPU template declarations and ranges/accesses are represented by `Unretained`, including `Kernel.ranges`. | Return the complete original template/epilogue declaration, access, workspace and source results from their producing compiler stages into the same complete result used for other bodies. | Compiler production: `lower_inductor.py` and its directly relevant original-result patches; [compiler account](compiler/whole-lowering-ownership-20261114.md). |
+| P2. Reusable emission depends on a closure and selected copies/restoration of ambient and mutable state. | Expose the original emission stage's explicit operands and result; consume the retained planning result through that interface for each supplied configuration. | Same complete compiler-production unit, including `torch-inductor-aot-lowered-result.patch`. |
+| P3. The other result constructors and compiler adaptations in that module require a complete coverage account. | Review every serving function and direct producer patch for omitted results, recovered types/roles, duplicated compiler algorithms and incomplete original calling conventions, then address the recorded defects in this same revision. | Same complete compiler-production unit. |
+
+Codex owns the reference comparison, the complete interface specification and the
+review of the resulting module revisions. Existing Claude workers implement those
+documented units. The runtime, archive, placement and native-consumer work stays
+held while these producer units are completed. Original compiler mechanisms and
+the existing change-request requirements supply the implementation; the workgroup
+record identifies defects and their disposition rather than adding another
+parser, gate or compiler design.
+
+### Current native source corrects a historical allegation
+
+At Metal `b275b8c4`, `Synchronization.Before` retains operation IDs and calls the
+operation `Conflict` path. `Hazards` reaches `Decided`, which adds results for
+previously unanswered pairs; `Answer` reads `mesh_graph_relation_witness` and
+retains known answers, including absence of conflict. The witness query reads the
+existing relation. Source locations: `metal_lower.mm:1204`, `metal_ir.mm:831`,
+`:866`, `:903`, `:933`, and Mesh `rdma/mesh-graph.c:1502` at `027ab655`.
+This is positive evidence for that specific retained-result handoff. Its complete
+access coverage, transformations, archive and execution remain separate work.
+
 ## Evidence and source scope
 
 The compiler/frontend source checkpoint is Mesh `8cbc2ab9`, including the saved
@@ -54,12 +165,8 @@ compiler path remains unfinished.
   saved results and the graph/planner/bridge dependency set. Codex's account
   supersedes the Claude mechanical inventory's incorrect mapping-discard claim.
 
-The native account's barrier-consumer correction also applies here:
-`Synchronization.Add` in `metal_lower.mm` receives `Accesses(p, operation)` and
-partitions those unchanged views by internal memory space. `Before` concatenates
-them and calls the vector `Conflict` overload, which solves their intersections
-again and frees the witnesses. This consumer belongs in the same access/witness
-handoff as the other native relation consumers.
+The earlier barrier-consumer re-solve finding is historical. The current source
+trace above records the operation-based retained-witness handoff that replaced it.
 
 ## Connected assignments
 
