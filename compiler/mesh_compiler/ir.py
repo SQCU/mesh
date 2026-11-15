@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor
+from torch._functorch._aot_autograd.schemas import JointWithDescriptors
 from torch._guards import detect_fake_mode
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch.export.graph_signature import OutputKind
@@ -54,60 +55,20 @@ def channel_of(node):
     return node.args[0] if node.target is RECV else None
 
 
+# /Users/mdot/schedule-emit/schedule_emit/ir.py Exported; design/compilation-composition-change-request.md
+# "Numerical lowerer boundary"; torch 2.14.0 torch/_functorch/aot_autograd.py aot_export_joint_with_descriptors and
+# torch/_functorch/_aot_autograd/schemas.py JointWithDescriptors, AOTState, AOTGraphCapture
+# (compiler/patches/torch-aot-joint-params-buffers.patch); torch/export/_trace.py _export_to_torch_ir and
+# _get_param_buffer_mapping; compiler/mesh_compiler/export.py export
 @dataclass
 class Exported:
-    graph_module: torch.fx.GraphModule
-    state: dict
-    tokens: list
-    user_inputs: list
-    outputs: list
-    out_spec: object
-    state_kinds: dict
-    # compiler/patches/torch-export-alias-metadata.patch; compiler/mesh_compiler/export.py export: compilation only, the
-    # export's AOT forward metadata (ViewAndMutationMeta), each AOT input's (InputKind, state target or user input
-    # position), each AOT input's and output's prototype value
-    aliases: tuple = None
-    # Python inspect Signature.bind and BoundArguments; torch/utils/_pytree.py tree_structure: an outer captured
-    # program's call interface, the inspect.Signature of exactly its compiled slot parameters (export.capture) and the
-    # TreeSpec of their bound values in parameter order (one child a parameter); None for a function's own export
-    interface: tuple = None
-    # torch 2.14.0 torch/export/graph_signature.py InputSpec ConstantArgument; compiler/mesh_compiler/export.py read and
-    # capture: each specialized literal user input as (its input placeholder's name, the literal compiled for it); a
-    # function's from its own ConstantArgument input specs, an outer program's each outer user placeholder some call's
-    # ConstantArgument input came from, in user input order
-    specialized: tuple = ()
-    # compiler/mesh_compiler/export.py export: the final program's own AOT record (run_decompositions' aot_aliases, as
-    # `aliases` is: its ViewAndMutationMeta, input roles and input and output prototypes), a stage result distinct from
-    # `aliases` (the forward epilogue's authority) where a loss's forward and backward record is that one, else the same
-    # object as `aliases`
-    decomposed: tuple = None
-    # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature: the final program's own signature as its export
-    # returned it (each InputSpec's kind, argument, target and persistent; each OutputSpec's kind, argument and target),
-    # the source record the fields above project; None for a program no torch.export produced (export.capture's outer
-    # program, a part decompose.py builds)
-    signature: object = None
-    # torch 2.14.0 torch/export/exported_program.py ExportedProgram.range_constraints, torch/export/_trace.py
-    # _get_inline_constraints and _get_range_constraints, torch/_export/non_strict_utils.py make_constraints: the
-    # program's range constraints as their own producer returned them, a function's its ExportedProgram's, an outer
-    # program's make_constraints' over its capture's own FakeTensorMode, outer GraphModule (its inline_constraints the
-    # capture ShapeEnv's unbacked symbol ranges) and bound arguments (export.capture), the constraints
-    # torch/_export/utils.py _check_input_constraints_for_graph reads (runtime.Arguments); None for a part decompose.py
-    # builds
-    range_constraints: dict = None
-    # compiler/mesh_compiler/export.py export and read (torch/_functorch/aot_autograd.py aot_export_joint_with_descriptors
-    # and aot_compile_joint_with_descriptors, one ExitStack): the companion's compiled callable (the original calling
-    # convention: parameters and buffers in params_spec and buffers_spec order, then the user arguments; its original
-    # wrappers), the call boundary's (export.Captured.captured), a product distinct from `graph_module`; the joint
-    # export itself (JointWithDescriptors: its AOTState and AOTGraphCapture, params_spec, buffers_spec, in_spec,
-    # out_spec; `graph_module` its captured graph); the companion's compiler operands and results ({"forward",
-    # "backward": [(graph module, example inputs, compiled result)]}); the stage fields kept before its stage 2's
-    # make_runtime_safe (export.staged); each tangent placeholder's output descriptor; each None for a program no
-    # joint export produced (export.capture's outer program, a part decompose.py builds, a loaded one)
-    compiled: object = None
-    joint: object = None
-    compilations: dict = None
-    stage: tuple = None
-    tangents: dict = None
+    joint: JointWithDescriptors
+    source: torch.nn.Module
+    names: dict | None
+    module: torch.nn.Module
+    args: tuple
+    kwargs: dict | None
+    loss: object
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

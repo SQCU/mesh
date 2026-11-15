@@ -1,5 +1,4 @@
 # design/data-flow.md
-import contextlib
 import dataclasses
 import functools
 import inspect
@@ -10,11 +9,8 @@ import operator
 import torch
 from torch._export.non_strict_utils import make_constraints
 from torch._export.utils import node_inline_
-from torch._functorch._aot_autograd.descriptors import (BufferAOTInput, ForwardTokenAOTInput, ForwardTokenAOTOutput,
-                                                        GradAOTOutput, InputMutationAOTOutput, ParamAOTInput,
-                                                        PlainAOTInput, PlainAOTOutput, TangentAOTInput)
-from torch._functorch.aot_autograd import (aot_compile_joint_with_descriptors, aot_export_joint_with_descriptors,
-                                           boxed_nop_preserve_node_meta)
+from torch._functorch._aot_autograd.descriptors import PlainAOTInput
+from torch._functorch.aot_autograd import aot_export_joint_with_descriptors
 from torch._guards import detect_fake_mode
 from torch._higher_order_ops.map import map_dense
 from torch._higher_order_ops.scan import generic_scan
@@ -26,10 +22,9 @@ from torch.fx._symbolic_trace import PHWithMeta
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.multiprocessing.reductions import StorageWeakRef
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils import _pytree as pytree
 
-from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult, written
+from .ir import RETURNED, Call, CapturedProgram, Exported, TrainingResult
 from .operations import LSTSQ_FIXED
 
 COPY = torch.ops.aten.copy.default
@@ -92,44 +87,20 @@ def expand(graph_module, node):
             made.meta.setdefault(key, value)
 
 
-# design/unequal-shards-change-request.md item 8; design/torch-source-lowering-change-request.md item 2; torch 2.14.0
-# torch/export/_trace.py _export_to_torch_ir and _get_param_buffer_mapping; torch/_functorch/aot_autograd.py
-# aot_export_joint_with_descriptors, aot_compile_joint_with_descriptors and boxed_nop_preserve_node_meta: the
-# program's one capture and its stage 2, before it is read. Its source graph torch.export's strict Dynamo one unless
-# the caller states `strict` (restore_fqn False, as _strict_export passes it; then _strict_export's own fixed-lstsq
-# selection, _lstsq_fixed_selected, compiler/patches/torch-lstsq-fixed-results.patch), else the module itself; its
-# source names by _get_param_buffer_mapping. Its joint export over torch.export.default_decompositions and its
-# companion's stage 2 (aot_stage2_compile over the same JointWithDescriptors) inside the one ExitStack the joint export
-# requires live through that compilation; each fixed map or scan call of the captured graph expanded (`expand`, each
-# call once, a call the expansion exposes after it) before that stage 2. Each compiler the companion's own default
-# (boxed_nop_preserve_node_meta, an abstract compilation), its own operands (the graph module and example inputs
-# aot_stage2_compile gives it) and its result kept as it returns them. The captured stage's own source fields that stage
-# 2's make_runtime_safe replaces are kept by that transition itself, on each metadata object as its `source`
-# (compiler/patches/torch-aot-runtime-safe-source.patch)
-def export(module, args, loss=None, kwargs=None, strict=True):
-    kwargs = {} if kwargs is None else kwargs
+# /Users/mdot/schedule-emit/schedule_emit/export.py export and driver.py 14–21;
+# design/compilation-composition-change-request.md "Numerical lowerer boundary"; torch 2.14.0 torch/export/_trace.py
+# _strict_export (_export_to_torch_ir with restore_fqn False, _lstsq_fixed_selected of
+# compiler/patches/torch-lstsq-fixed-results.patch, _get_param_buffer_mapping); torch/_functorch/aot_autograd.py
+# aot_export_joint_with_descriptors 1320–1455 (its `stack` the caller's entered ExitStack, AOTState.stack;
+# compiler/patches/torch-aot-joint-params-buffers.patch)
+def export(stack, module, args, loss=None, kwargs=None, strict=True):
     source = _export_to_torch_ir(module, args, kwargs, restore_fqn=False, _log_export_usage=False) if strict else module
     if strict:
         _lstsq_fixed_selected(source)
-    names = _get_param_buffer_mapping(module, source) if strict else {}
-    compilations = {"forward": [], "backward": []}
-
-    def compiling(stage):
-        def compiler(graph_module, example_inputs):
-            made = boxed_nop_preserve_node_meta(graph_module, example_inputs)
-            compilations[stage].append((graph_module, example_inputs, made))
-            return made
-        return compiler
-    with contextlib.ExitStack() as stack, sdpa_kernel(SDPBackend.MATH):
-        joint = aot_export_joint_with_descriptors(stack, source, args, kwargs,
-                                                  decompositions=torch.export.default_decompositions())
-        graph_module = joint.graph_module
-        while pending := [n for n in graph_module.graph.nodes if n.op == "call_function" and n.target in STATIC]:
-            expand(graph_module, pending[0])
-        graph_module.recompile()
-        compiled = aot_compile_joint_with_descriptors(joint, fw_compiler=compiling("forward"),
-                                                      bw_compiler=compiling("backward"))
-    return read(module, joint, names, compiled, compilations, loss)
+    joint = aot_export_joint_with_descriptors(stack, source, args, kwargs,
+                                              decompositions=torch.export.default_decompositions())
+    return Exported(joint, source, _get_param_buffer_mapping(module, source) if strict else None, module, args, kwargs,
+                    loss)
 
 
 # compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py
@@ -146,101 +117,6 @@ def aot_aliases(program):
                    else specs[node.name].target) for node in inputs)
     return metadata, roles, *(tuple(leaf.meta.get("val") if isinstance(leaf, torch.fx.Node) else leaf for leaf in leaves)
                                for leaves in (inputs, outputs))
-
-
-# torch 2.14.0 torch/_functorch/aot_autograd.py aot_export_joint_with_descriptors (its graph's inputs and outputs
-# schematized by descriptors, each placeholder's and the output node's meta["desc"], _aot_autograd/descriptors.py):
-# the captured function read from its own joint export. Each placeholder by its own AOTInput: a ParamAOTInput or
-# BufferAOTInput state, its target the source name of its traced one (_get_param_buffer_mapping) and its tensor the
-# module's own; a ForwardTokenAOTInput a token; a TangentAOTInput a tangent, its output's descriptor; any other (a
-# PlainAOTInput, a synthetic or view base) a user input of its calling convention, one with a literal value
-# specialized. Each output by its own AOTOutput: a PlainAOTOutput a user output (the loss's index `loss` its loss); an
-# InputMutationAOTOutput its mutated input's mutation (a state one a buffer's, by its target; else its user input's,
-# by its placeholder); a ForwardTokenAOTOutput a token; a GradAOTOutput its input's gradient (a parameter's by its
-# target, else its user input's). The record keeps the joint export itself, its companion's compiled callable, the
-# companion's compiler operands and results (`compilations`) and the stage fields kept before make_runtime_safe
-def read(module, joint, names, compiled, compilations, stage, loss=None):
-    graph_module = joint.graph_module
-    nodes = list(graph_module.graph.nodes)
-
-    # rejection filters are forbidden, even in temporary integration validation: a dimension, input kind or output
-    # kind this owner cannot compile raises here
-    for node in nodes:
-        value = node.meta.get("val")
-        if isinstance(value, torch.Tensor) and not all(isinstance(d, int) for d in value.shape):
-            raise NotImplementedError(
-                f"{node.name} has shape {tuple(value.shape)}: shapes are compiled; a dimension "
-                "known only at run time is out of scope")
-
-    tensors = {**dict(module.named_parameters(remove_duplicate=False)),
-               **dict(module.named_buffers(remove_duplicate=False))}
-    placeholders = [node for node in nodes if node.op == "placeholder"]
-    state, state_kinds, tokens, user_inputs, tangents = {}, {}, [], [], {}
-    for node in placeholders:
-        desc = node.meta["desc"]
-        if isinstance(desc, (ParamAOTInput, BufferAOTInput)):
-            target = names.get(desc.target, desc.target)
-            state[node.name] = target, tensors[target]
-            state_kinds[node.name] = InputKind.PARAMETER if isinstance(desc, ParamAOTInput) else InputKind.BUFFER
-            node.meta["state"] = target
-        elif isinstance(desc, ForwardTokenAOTInput):
-            tokens.append(node.name)
-        elif isinstance(desc, TangentAOTInput):
-            tangents[node.name] = desc.output
-        else:
-            user_inputs.append(node.name)
-    specialized = tuple((node.name, node.meta["val"]) for node in placeholders
-                        if node.name in user_inputs and not isinstance(node.meta.get("val"), torch.Tensor))
-
-    def placeholder_of(desc):
-        found, = [node for node in placeholders if node.meta["desc"] == desc]
-        return found
-
-    outputs = []
-    for desc in graph_module.graph.output_node().meta["desc"]:
-        if isinstance(desc, PlainAOTOutput):
-            outputs.append((OutputKind.LOSS_OUTPUT if desc.idx == loss else OutputKind.USER_OUTPUT, None))
-        elif isinstance(desc, InputMutationAOTOutput):
-            mutated = placeholder_of(desc.mutated_input)
-            outputs.append((OutputKind.BUFFER_MUTATION, state[mutated.name][0]) if mutated.name in state
-                           else (OutputKind.USER_INPUT_MUTATION, mutated.name))
-        elif isinstance(desc, ForwardTokenAOTOutput):
-            outputs.append((OutputKind.TOKEN, None))
-        elif isinstance(desc, GradAOTOutput):
-            of = placeholder_of(desc.grad_of)
-            outputs.append((OutputKind.GRADIENT_TO_PARAMETER, state[of.name][0]) if of.name in state
-                           else (OutputKind.GRADIENT_TO_USER_INPUT, of.name))
-        else:
-            # rejection filters are forbidden: an output role this owner does not yet read (an intermediate base, a
-            # metadata mutation: the runtime epilogue's own) raises here
-            raise NotImplementedError(f"output {desc}")
-
-    # design/compilation-composition-change-request.md items 6 and 7; torch 2.14.0 torch/export/graph_signature.py
-    # OutputKind.USER_INPUT_MUTATION (its target the input placeholder) and BUFFER_MUTATION (its target the buffer,
-    # its placeholder the state's): the output node's meta "destination", each mutation output's position to its target
-    # placeholder's name, the value at that position computing into it (ir.views), a mutation whose value is another
-    # placeholder first copying it there (aten.copy)
-    graph, stated = graph_module.graph, {target: name for name, (target, _) in state.items()}
-    output = graph.output_node()
-    named, values, destinations = {node.name: node for node in nodes}, list(output.args[0]), {}
-    for k, (kind, target) in enumerate(outputs):
-        if kind not in (OutputKind.BUFFER_MUTATION, OutputKind.USER_INPUT_MUTATION):
-            continue
-        destination = named[stated[target] if kind == OutputKind.BUFFER_MUTATION else target]
-        value = values[k]
-        if value is destination or not isinstance(value, torch.fx.Node) or written(value):
-            continue
-        if value.op == "placeholder":
-            with graph.inserting_before(output):
-                values[k] = graph.call_function(COPY, (destination, value))
-            with detect_fake_mode([destination.meta["val"]]):
-                values[k].meta["val"] = COPY(destination.meta["val"], value.meta["val"])
-        destinations[k] = destination.name
-    output.args, output.meta["destination"] = (tuple(values),), destinations
-    graph_module.recompile()
-    return Exported(graph_module, state, tokens, user_inputs, outputs, returned(joint.out_spec, outputs, loss is not None),
-                    state_kinds, specialized=specialized, compiled=compiled, joint=joint, compilations=compilations,
-                    stage=stage, tangents=tangents)
 
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and

@@ -1,0 +1,24 @@
+--- a/torch/_functorch/aot_autograd.py
++++ b/torch/_functorch/aot_autograd.py
+@@ -1450,6 +1450,9 @@
+         _aot_graph_capture=aot_graph_capture,
+         params_spec=params_spec,
+         buffers_spec=buffers_spec,
++        # mesh compiler/patches/torch-aot-joint-params-buffers.patch: prepare_aot_module_simplified's
++        # params_buffers_flat (prepare_aot_config, `mod`'s)
++        params_buffers_flat=_params_buffers_flat,
+         in_spec=in_spec,
+         out_spec=out_spec.spec,
+     )
+--- a/torch/_functorch/_aot_autograd/schemas.py
++++ b/torch/_functorch/_aot_autograd/schemas.py
+@@ -1541,5 +1541,9 @@
+     params_spec: list[str]
+     buffers_spec: list[str]
+
++    # mesh compiler/patches/torch-aot-joint-params-buffers.patch: aot_autograd.py prepare_aot_config
++    # params_buffers_flat, in params_spec then buffers_spec order
++    params_buffers_flat: list[torch.nn.Parameter | Tensor]
++
+     in_spec: pytree.TreeSpec
+     out_spec: pytree.TreeSpec
