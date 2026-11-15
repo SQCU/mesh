@@ -76,6 +76,7 @@ class Exported:
     module_call_specs: dict
     module_call_signatures: dict
     replaced: list
+    markers: list
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

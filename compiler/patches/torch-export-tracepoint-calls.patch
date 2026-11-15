@@ -15,7 +15,7 @@
 
 
  __all__ = ["CollectTracepointsPass"]
-@@ -22,24 +21,12 @@
+@@ -22,24 +21,13 @@
      Performs constant folding and constant propagation.
      """
 
@@ -28,6 +28,7 @@
 -        self.sig = sig
 +        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/export/_trace.py _get_module_call_graph
 +        self.replaced: list[tuple[torch.fx.Node, torch.fx.Node]] = []
++        self.markers: list[tuple[str, str, torch.fx.GraphModule, torch.fx.Node, tuple]] = []
 
      def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
 -        def get_arg_spec(arg) -> TensorArgument | ConstantArgument:
@@ -43,7 +44,7 @@
 -
          for module in gm.modules():
              if not isinstance(module, torch.fx.GraphModule):
-@@ -56,7 +43,8 @@
+@@ -56,7 +44,8 @@
                          nn_module_stack = None
                      else:
                          raise AssertionError(f"Unknown tracepoint kind: {kind}")
@@ -53,7 +54,7 @@
                      node.meta["nn_module_stack"].popitem()
                  else:
                      nn_module_stack = None
-@@ -72,7 +60,8 @@
+@@ -72,7 +61,8 @@
                          nn_module_stack = None
                      else:
                          raise AssertionError(f"Unknown tracepoint kind: {kind}")
@@ -63,7 +64,16 @@
                      node.meta["nn_module_stack"].popitem()
                  else:
                      nn_module_stack = None
-@@ -122,7 +111,7 @@
+@@ -115,14 +105,16 @@
+                         fqn = call_fqn
+
+                     kind = node.kwargs["kind"]
++                    # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/fx/graph.py Graph.erase_node
++                    self.markers.append((fqn, path, module, node, node.args))
+                     for i, arg in enumerate(node.args):
+                         # We only update the signature of the alias used to call
+                         # the submodule. Otherwise the signatures of all aliases
+                         # would get conflated; the inputs/outputs of every call
                          # would be recorded in every other call as well.
                          if fqn == path:
                              if kind == "module_call_inputs":
@@ -73,7 +83,7 @@
 -                                self.specs[path].outputs.append(get_arg_spec(arg))
 +                                self.specs[path].outputs.append(_make_argument_spec(arg, ()))
                              else:
-@@ -143,16 +132,14 @@
+@@ -143,16 +135,14 @@
                                      )
                                  if user.args[1] == i:
                                      user.replace_all_uses_with(arg)
@@ -120,6 +130,27 @@
 
 
  @_export_tracepoint.py_impl(DispatchKey.CPU)
+@@ -99,6 +101,11 @@
+     if path == "":
+         raise AssertionError("path must not be empty")
+     submodule = torch.fx.graph_module._get_attr(mod, path)
++    # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/
++    # collect_metadata_analysis.py run_functionalized_fw_and_collect_metadata 193–197
++    from torch._functorch._aot_autograd.utils import KNOWN_TYPES
++    from torch._library.opaque_object import is_custom_class
++
+
+     def update_module_call_signatures(
+         path: str, in_spec: pytree.TreeSpec, out_spec: pytree.TreeSpec
+@@ -117,6 +124,6 @@
+     def check_flattened(flat_args: list[Any]) -> None:
+         for a in flat_args:
+-            if not (isinstance(a, (torch.Tensor, str, int, float, bool)) or a is None):
++            if not (isinstance(a, tuple(KNOWN_TYPES)) or is_custom_class(type(a))):
+                 raise AssertionError(
+-                    f"Only Tensors or scalars are supported as pytree flattened inputs, got: {a}"
++                    f"all flat_args must be KNOWN_TYPES or opaque types, got: {a}"
+                 )
 --- a/torch/export/_trace.py
 +++ b/torch/export/_trace.py
 @@ -1630,6 +1630,23 @@
