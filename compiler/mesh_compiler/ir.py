@@ -212,10 +212,15 @@ CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format
 
 
 # a node's value's shape: a Tensor value's own; a list or tuple value's result `k`'s (its own producer FakeTensor's,
-# each result its own shape)
+# each result its own shape), `k` a getitem index or a result's key path (torch/utils/_pytree.py key_get over its
+# tree_flatten_with_path KeyPath: placement.result_paths)
 def shape(node, k=None):
     value = node.meta["val"]
-    return tuple((value[k] if isinstance(value, (tuple, list)) else value).shape)
+    if isinstance(k, tuple):
+        value = pytree.key_get(value, k)
+    elif isinstance(value, (tuple, list)):
+        value = value[k]
+    return tuple(value.shape)
 
 
 # design/problems-of-14b9a757-change-request.md item 6; torch 2.14.0 torch/_tensor_docs.py view, reshape and contiguous

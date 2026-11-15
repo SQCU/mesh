@@ -48,14 +48,27 @@ def _axes_moved(node, mapping, within=True):
 
 
 # `source`'s work axes onto each tensor node of `result`, its replacement: the source's own output that node, its
-# operands their images (`mapping`; within one graph `within`, an unmoved operand itself)
+# operands their images (`mapping`; within one graph `within`, an unmoved operand itself); each node of a
+# multi-result source's replacement at its own result path (its index in `result`'s tree, nested lists included) the
+# source's operand axes and the output axes of the source's projection at that same path (its getitem, a getitem of
+# that getitem, ...: compiler/mesh_compiler/placement.py projected), that projection its image, none of another path's
 def _axes_onto(source, result, mapping, within=True):
     if "work_axes" not in source.meta:
         return
-    for made in [n for n in pytree.tree_leaves(result) if isinstance(n, torch.fx.Node)
-                 and isinstance(n.meta.get("val"), torch.Tensor)]:
-        made.meta["work_axes"] = source.meta["work_axes"]
-        _axes_moved(made, {**mapping, source: made}, within)
+    # the source itself at path (), each of its projections (its getitems, theirs, ...: rdma/mesh_graph.py walk, a
+    # getitem after the value it selects from) at its value's path and its own index's SequenceKey (a getitem's
+    # container an operation's tuple or list result, torch/utils/_pytree.py's tuple and list flatten keying each child
+    # by SequenceKey); each replacement node at its own tree_flatten_with_path KeyPath
+    paths = {source: ()}
+    for node in mesh_graph.walk(list(source.graph.nodes), [source],
+                                lambda n: [u for u in n.users if u.target is operator.getitem]):
+        if node is not source:
+            paths[node] = (*paths[node.args[0]], pytree.SequenceKey(node.args[1]))
+    for path, made in pytree.tree_flatten_with_path(result)[0]:
+        if not (isinstance(made, torch.fx.Node) and isinstance(made.meta.get("val"), torch.Tensor)):
+            continue
+        made.meta["work_axes"] = tuple(axis for axis in source.meta["work_axes"] if paths.get(axis[0], path) == path)
+        _axes_moved(made, {**mapping, **{node: made for node, at in paths.items() if at == path}}, within)
 
 
 # compiler/mesh_compiler/placement.py place `input_parts`: each placeholder's (processor, partition Node, landing

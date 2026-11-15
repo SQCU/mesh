@@ -869,5 +869,47 @@
     },
     "review": "The draft collapses per-result correspondences into synthetic scalar dimension labels, drops other mappings when one result has None, and substitutes an input extent for disagreeing result extents. This is not the required original per-result result/consumer handoff. No acceptance or completed boundary claim.",
     "runtime": "No imports, target, save/load or numerical observation. Native138 ABI is separate evidence."
+  },
+  "per_result_owner_wip50": {
+    "status": "unaccepted source-history checkpoint; whole per-result/AOT/public family incomplete",
+    "worker": {
+      "uuid": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "pid": 32089,
+      "exec": 58844,
+      "last_collected_result": 50
+    },
+    "sources": {
+      "compiler/mesh_compiler/ir.py": {
+        "sha256": "19f7a04967b1654a6303be93bd403e978da0c22f6ce71a5356a81429fd363397",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      },
+      "compiler/mesh_compiler/placement.py": {
+        "sha256": "04c3e10f5de9ac216c3397b42e46ef51d62c8f15cc34d82d7de8afe8b5412ffd",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      },
+      "compiler/mesh_compiler/decompose.py": {
+        "sha256": "ced82f12137d627666f2f634e7fa6350ffd31a2b7d944aaf008939788af2db02",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      }
+    },
+    "checks": [
+      "staged-source AST PASS",
+      "staged-source pyflakes PASS",
+      "git diff --cached --check PASS"
+    ],
+    "produced": "Actual result leaf paths, per-result placement records, result projection Nodes in work_axes; canonical graph walk and pytree paths feed decomposition remaps.",
+    "review_open": [
+      "Full KeyPath projection semantics remain under review; decompose currently constructs SequenceKey for original getitem paths.",
+      "local_piece duplicates existing reshard/across geometry; original placed-value/reshard owner must consume replicated whole values.",
+      "Two-dimensional summed-result destination remains incomplete; pre-existing first-processor gather/ADDMM choices are not newly certified.",
+      "lower_metal NONE fallback drops exact result identity before native metric association; compiler66 owns actual Binding-to-operand pairing.",
+      "Produced.Seeds is retained but current construct does not consume it; compiler66/68 own original RNG state/token consumption.",
+      "Original AOTGraphCapture/JD wrapper chain, normalized schema arguments, multi-base/input identity, written-result and static outer metadata handoffs remain open."
+    ],
+    "execution": "No imports, no target or save/load invocation. Native138 is last matched build; current newer native source is not attributed to it.",
+    "history": "Preserved before continuing whole responsibility correction; no reset, stash or source backup."
   }
 }
