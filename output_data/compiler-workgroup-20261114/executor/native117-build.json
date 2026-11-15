@@ -1,0 +1,61 @@
+{
+  "metal_commit": "9ed98f4d86d50574b44df015666ccfceedaee3a5",
+  "mesh_commit": "2135f02ff1e2843d2679ca5a2d783bf07a0a107e",
+  "build": {
+    "exit": 0,
+    "targets": [
+      ".build/libmetal_ir.dylib",
+      ".build/libmetal_recording.dylib",
+      ".build/libmesh_metal.dylib",
+      ".build/native_bench",
+      ".build/e2b_replay"
+    ],
+    "log": "output_data/compiler-workgroup-20261114/executor/native117-build.log",
+    "log_sha256": "bc55126d0b6b0649f8eb71c47de0d8e6e771ae5732f08dd5b2d7724e2cf2259b"
+  },
+  "sha256": {
+    ".build/libmetal_ir.dylib": "00ed2db22fc34d7ae27d9803f33e2a7c166f98b147cdfecd999806f8d6524aca",
+    ".build/libmetal_recording.dylib": "72221b6c2bd25e40609196081ead1e52cb07e3faf901c1f54e407e1517419a63",
+    ".build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303",
+    ".build/native_bench": "f0c5c32dd1deb907387bdb6c013d92608d2afa1921765989ad7013e156cf0c7e",
+    ".build/e2b_replay": "e27b6e6a53fce3ffc87fa009a572be7382097adcae0696b9da6d61417cd50cf4"
+  },
+  "source_sha256": {
+    "metal_ir.h": "62026fc08c7ec917646713a7898744a6e6bc367c5608d3c078797d999d39ce83",
+    "metal_ir.mm": "b33f6208e28c088da99cae184f83ff5f33aafb44275f889cfb99a12f990e9381",
+    "metal_clone.mm": "8f6bbe8d513e273ca0756770811bdffb913712971195bada31e2c8ef667dceae",
+    "metal_transform.mm": "6bb774b5e973411f1ae1ba51c5704f9bec7faf0cc9c75af9e7ba39c10be4d03b",
+    "metal_lower.mm": "ce02f89961bcc0f70b4aa259af12c76904b5eb869fe51dd5192982169858d937",
+    "metal_native.mm": "0506290a08c7d860d54539578a033ed7f17b2811d2a580c937a564c53ab43e8d",
+    "metal_transport.mm": "71665905539649c6d6c84b4be9e5ccf669eafd94d3ebfdbe64af0315afd0b20f",
+    "metal_neural.mm": "7eb9437e2556b609cc534a24da289cdf9f3af0ec5f61c90f660010c463158613",
+    "metal_archive.mm": "8752578dfbc32d46f0b13635ccaa8aa364d25949369b580121111b6a9bf52a71",
+    "metal_capture.h": "5fcb8e1a6a8a2808e242864dbd70717c313a52676ed768ae03e4b4e21f0544ac",
+    "metal_capture.m": "10ab04d168e175107200f995bede18e67173e4cda4d2db58dd1d56aff6500e5c",
+    "metal_program.h": "336f9dae4d405d98c1173a1f48ecd1595dbb5b4175a28943713ad974ebf52cd0",
+    "metal_program.m": "2f26531ca56f674cf0eff2b973e11f4d6a2de9c50c89c3618e906365ede7caa9",
+    "metal_submission.h": "ea8ea9c811954c47b1e4c836b2a27406cfa2a48b949d74c8b7657a5cc03fcfbd"
+  },
+  "abi": {
+    "Repeat": 44,
+    "Switch": 48,
+    "Child": 12,
+    "ValueInfo": 120,
+    "Signature": 416,
+    "Function": 168,
+    "Planned": 152,
+    "Local": 376
+  },
+  "symbols": [
+    "metal_ir_switch",
+    "metal_ir_switch_selector",
+    "metal_ir_switches",
+    "metal_ir_order_cuts",
+    "metal_ir_region_above",
+    "metal_ir_repeat_enclosing",
+    "MetalRecorderState",
+    "MetalProgramIssued",
+    "MetalProgramEnd"
+  ],
+  "scope": "Build/link and actual Python ABI import passed. Retained spans and lifetime owner are connected. Switch selector literal stores and full conditional execution remain incomplete; no workload executed."
+}
