@@ -1,0 +1,19 @@
+Torch version 2.14.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+Traceback (most recent call last):
+  File "<stdin>", line 32, in <module>
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 31, in compile_program
+    return compile_captured(calls(program, args, functions, **export_options), processors, placement, cost, planning,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 119, in compile_captured
+    constructions = {(key, group): construct(scheduled.modules[key][group], lowered[key], context=context, **made)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1686, in construct
+    consume(p, graph, graph.wrapper_code.lines, produced[p].externs, bodies[p], ())
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1481, in consume
+    extern(p, graph, call, into, occurrence)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1464, in extern
+    called(p, graph, record, into)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1399, in called
+    out, channel = node.outputs[0], given["channel"]
+                   ~~~~~~~~~~~~^^^
+IndexError: list index out of range

@@ -64,3 +64,11 @@ already exists; compiler68/66 owns that producer classification correction.
 No numerical execution or save/load was reached. Runtime inputs remained
 unchanged; materialized-output-upstream-2.* records the exact command hash,
 source/library hashes and traceback. The command itself was not modified.
+
+The unchanged third observation on f47fa9d8 passed the typed provenance-comment
+handoff, then exited 1 during receive-result projection after 2.75 s.
+lower_metal.called indexed node.outputs[0], but the original single-Tensor
+FallbackKernel result had no multi-output child list. Compiler66 owns the
+complete original result/binding correction. No numerical execution or save/load
+was reached; runtime inputs remained unchanged. materialized-output-upstream-3.*
+retains the actual traceback and the same command/native137 identity.

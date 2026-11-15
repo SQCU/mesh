@@ -73,7 +73,7 @@
     "Scheduled.operands retains original reference through exact driver keyword. Fresh prepared network keeps original CallAnalysis; loaded compilation retains its saved query record."
   ],
   "current_limits": [
-    "The unchanged public retry passed import and reached construction, then stopped when the original wrapper provenance-comment string had no typed native consumer. No numerical execution or save/load observation; exact second outcome and stable source/library hashes are materialized-output-upstream-2.*. The unchanged caller remains queued after the original typed-comment producer correction.",
+    "The third unchanged public observation passed the typed-comment handoff and stopped during receive-result projection: lower_metal.called indexed the empty multi-output list on the original single-result node. No numerical execution or save/load observation; exact outcome and stable source/library hashes are materialized-output-upstream-3.*. The unchanged caller remains queued after the original result-binding correction.",
     "Original wrapper binding occurrences now retain their actual source operand and final native value. Compiler66 binding/control/alias semantics remain separately reviewed producer behavior; this serialization does not itself validate runtime correctness.",
     "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
     "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
@@ -700,5 +700,21 @@
     "compiler_source": "8385bd92",
     "archive_source": "eb56bbcb",
     "correction_owner": "compiler SAME68/66 original wrapper typed-comment handoff; installed wrapper.py write_provenance_debug_handle uses writeline(str) while adjacent make_comment owns CommentLine"
+  },
+  "third_connected_public_outcome": {
+    "time_utc": "2026-11-15T08:04:58.407010+00:00",
+    "result": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-3.result.json",
+    "before": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-3.before.json",
+    "after": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-3.after.json",
+    "stdout": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-3.stdout",
+    "stderr": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-3.stderr",
+    "exit": 1,
+    "stage": "receive_result_projection_failed_before_execution",
+    "changed_runtime_inputs": [],
+    "code_sha256": "ce72ab0229f326297e725fd9b460f2a2b3edc4c3bdf1c399b2e11d381dc200d5",
+    "native_manifest": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/executor/native137-build-result.json",
+    "compiler_source": "f47fa9d8",
+    "archive_source": "eb56bbcb",
+    "correction_owner": "compiler SAME66 actual original direct-Tensor result/held/binding consumer; no fabricated multi-output list or caller change"
   }
 }
