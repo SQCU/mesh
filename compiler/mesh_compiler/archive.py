@@ -403,13 +403,15 @@ def producing(made, p, index):
 
     # lower_inductor.py Ranges (an mps second-pass SchedulerNode): its node's name and LoopBody, its variables,
     # reduction and accesses as received (method, buffer name, index, store mode, its LoopBodyBlock graph, that graph's
-    # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes, local buffer context) its proxy's
-    # index, its nodes' names and LoopBodies (codegen/cpp.py codegen_node and codegen_outer_loop_node: each node a
-    # SchedulerNode of get_nodes(), every one's _body called by CppKernelProxy.codegen_nodes; a template's
-    # finalize_kernel nodes none) and its context's index
+    # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes, local buffer context, its local
+    # buffers at that finalize) its proxy's index, its nodes' names and LoopBodies (codegen/cpp.py codegen_node and
+    # codegen_outer_loop_node: each node a SchedulerNode of get_nodes(), every one's _body called by
+    # CppKernelProxy.codegen_nodes; a template's finalize_kernel nodes none), its context's index and that finalize's
+    # own local buffers ({name: IR buffer}, lower_inductor.py MeshKernelGroup.finalize_kernel's copy before the
+    # context's __exit__ clears them; {} outside one), each buffer by the node table
     ranged = {"mps": lambda r: (r.node.get_name(), looped(r.node._body), r.variables, r.reduction, r.accesses),
               "cpu": lambda r: (proxied(r[0]), tuple((node.get_name(), looped(node._body)) for node in r[1]),
-                                contexted(r[2]))}
+                                contexted(r[2]), operand(r[3]))}
 
     # one Kernel call record as its call made it: its backend kernel's index (Kernel.owner, by identity), its
     # scheduler's index, its GraphLowering's module, its launch, place and (entry, source) as produced, its original
@@ -420,7 +422,6 @@ def producing(made, p, index):
                 kernel.launch, kernel.place, kernel.produced, kernel.origins,
                 tuple(entry if isinstance(entry, type) else entry.get_name() for entry in kernel.schedule),
                 tuple(node.get_name() for node in kernel.scheduled), tuple(map(ranged[kernel.place], kernel.ranges)))
-    kernels = tuple(map(calling, made.kernels.values()))
     externs = tuple(map(called, made.externs))
 
     # torch 2.14.0 torch/_inductor/codegen/wrapper.py: each wrapper (PythonWrapperCodegen) once by identity, its index
@@ -483,22 +484,22 @@ def producing(made, p, index):
         return (type(node), node.maybe_get_name(), operand(node.maybe_get_layout()),
                 tuple(lowered.get(id(node), ())))
 
-    # every proxy a range or a fused nest names, each record once, an inner proxy's as it is registered; then each
-    # subkernel its proxies select
+    # each call's record (its ranges' local buffers by `operand`, so after it), then every proxy a range or a fused
+    # nest names, each record once, an inner proxy's as it is registered; then each subkernel its proxies select
+    kernels = tuple(map(calling, made.kernels.values()))
     proxy_records = []
     while len(proxy_records) < len(proxies):
         proxy_records.append(proxy_of(list(proxies.values())[len(proxy_records)][1]))
     subkernel_records = tuple(sub_of(kernel) for _, kernel in subkernels.values())
 
-    # one finalize's local buffer context (codegen/cpp_utils.py LocalBufferContext: its local_buffers,
-    # global_buffers and global_to_local, each name's IR buffer by the node table, and removed_buffers; its
-    # kernel_args the group's own, its exit_stack its scope's, neither a saved value), or virtualized.py's NullHandler
-    # (no local buffer context) as it is
+    # one finalize's local buffer context (codegen/cpp_utils.py LocalBufferContext: its global_buffers and
+    # global_to_local, each name's IR buffer by the node table, and removed_buffers; its local_buffers cleared at its
+    # __exit__, each finalize's own copy its range entry's; its kernel_args the group's own, its exit_stack its scope's,
+    # neither a saved value), or virtualized.py's NullHandler (no local buffer context) as it is
     def context_of(context):
         from torch._inductor.codegen.cpp_utils import LocalBufferContext
         if isinstance(context, LocalBufferContext):
-            return {"local_buffers": operand(context.local_buffers),
-                    "global_buffers": operand(context.global_buffers),
+            return {"global_buffers": operand(context.global_buffers),
                     "global_to_local": operand(context.global_to_local), "removed_buffers": context.removed_buffers}
         return context
     context_records = tuple(context_of(context) for _, context in contexts.values())
