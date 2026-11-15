@@ -854,5 +854,20 @@
     ],
     "clarification": "Produced.kernels is already keyed by id(KernelCallLine); the variable-name clarification is not a repaired kernel-reference defect",
     "runtime": "No compiler import, native invocation or save/load observation; pending complete Python and matching native ABI release"
+  },
+  "per_result_rejected_wip": {
+    "status": "unaccepted source-history checkpoint before whole result-handling replacement",
+    "sources": {
+      "compiler/mesh_compiler/ir.py": {
+        "sha256": "9f74b4425a376a1c2e9c274705a62e65ab0e8770cad8ad0b24a52f5682ad8bf5",
+        "AST": "PASS"
+      },
+      "compiler/mesh_compiler/placement.py": {
+        "sha256": "9b57f78a82dbe234d8b42bb83b626c1d467187b7d0ea29313bd936ca9afe3a7d",
+        "AST": "PASS"
+      }
+    },
+    "review": "The draft collapses per-result correspondences into synthetic scalar dimension labels, drops other mappings when one result has None, and substitutes an input extent for disagreeing result extents. This is not the required original per-result result/consumer handoff. No acceptance or completed boundary claim.",
+    "runtime": "No imports, target, save/load or numerical observation. Native138 ABI is separate evidence."
   }
 }

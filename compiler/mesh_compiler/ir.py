@@ -211,25 +211,11 @@ CAT, PAD, RESHAPE, VIEW = ATEN.cat.default, ATEN.constant_pad_nd.default, ATEN.r
 CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format
 
 
-# a node's value's shape: result `k`'s for a list or tuple value (its own producer FakeTensor's); without `k`, a list or
-# tuple value's one shape where every result has it (an operation's one iteration space: topk's values and indices)
+# a node's value's shape: a Tensor value's own; a list or tuple value's result `k`'s (its own producer FakeTensor's,
+# each result its own shape)
 def shape(node, k=None):
     value = node.meta["val"]
-    if not isinstance(value, (tuple, list)):
-        return tuple(value.shape)
-    if k is not None:
-        return tuple(value[k].shape)
-    return produced(node)
-
-
-# a node's one output iteration space: its value's shape, a list or tuple value's where every result has one shape;
-# None for a value whose results differ in shape (each result's its own: `shape(node, k)`)
-def produced(node):
-    value = node.meta["val"]
-    if not isinstance(value, (tuple, list)):
-        return tuple(value.shape)
-    shapes = {tuple(result.shape) for result in value if isinstance(result, torch.Tensor)}
-    return shapes.pop() if len(shapes) == 1 else None
+    return tuple((value[k] if isinstance(value, (tuple, list)) else value).shape)
 
 
 # design/problems-of-14b9a757-change-request.md item 6; torch 2.14.0 torch/_tensor_docs.py view, reshape and contiguous
