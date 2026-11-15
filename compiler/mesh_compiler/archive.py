@@ -50,8 +50,15 @@ GraphOf = collections.namedtuple("GraphOf", "module")
 # same object one index)
 Tensored = collections.namedtuple("Tensored", "index")
 # a construction's upstream record by identity (`producing`'s registration): its kind ("produced", "input", "output",
-# "kernel", "extern", "inlined", "lifted"), its processor, its index in that processor's record (None: the Produced)
+# "kernel", "extern", "inlined", "lifted", "wrapper"), its processor, its index in that processor's record (None: the
+# Produced)
 Record = collections.namedtuple("Record", "kind processor index")
+# a wrapper line's IR node operand (torch/_inductor/ir.py IRNode) by its index in its Produced's IR node table (each
+# node once by identity), a wrapper line by its index in its Produced's line table, and an ir.py OutputSpec (a
+# Layout) as its class and its canonical pickle state (its __dict__), each IR node in it a Lowered
+Lowered = collections.namedtuple("Lowered", "index")
+Lined = collections.namedtuple("Lined", "index")
+Stated = collections.namedtuple("Stated", "cls state")
 
 
 # torch 2.14.0 torch/fx/_graph_pickler.py GraphPickler (this archive's one payload codec): a raw torch.fx Graph as
@@ -240,9 +247,9 @@ def queried(analysis, ordinal, target):
 # `regions` each registered repeat or switch (metal.py Region, postorder) as (its ExternCall's record, kind, region
 # index, first and end operations, selector), its region index this construction's (native.py Target.composite appends
 # one body after only typed copies: metal_ir.mm AppendSource keeps the ordinals and shifts the operations by
-# Row.offset); `inlinings` each consumed control body interval ConstructedMachine.inlinings records (its record by
-# identity, an Inlined's or a Lifted's; lower_metal.py records an invoke_subgraph inlining's only, so far: a repeat's
-# cond and body and a switch's lifted branches have no interval record there) as (its
+# Row.offset); `inlinings` each consumed control body interval ConstructedMachine.inlinings records (lower_metal.py
+# inline: a repeat's cond before, body and cond after, a switch's Lifted branches, an invoke_subgraph's Inlined; its
+# record by identity, an Inlined's or a Lifted's) as (its
 # record, first and end operations); `emitted` each projection's emission (metal.py Emitted) as (its record: a
 # registered one's (a Kernel, ExternCall, Inlined, Produced), a machine body node or landing as it is; its operation,
 # first and end operations); `upstream` each produced kernel's Launched as (operation, its Kernel's record, its launch
@@ -276,11 +283,14 @@ def constructed(machine):
 # it as lower_inductor.py _origins reads it, and `graphs` each body graph's ID's GraphModule; its `sent`; the lowered FX
 # graph its GraphLowering was built over (`lowered`, graph.module: its control subgraphs nested in it), None for the
 # Neural Engine; its AOT `signature` (graph.module.meta's, the same object); each Input's (position, body placeholder,
-# export name: its GraphLowering graph_inputs key) and Output's (position, body node, export name, sent); the
+# export name: its GraphLowering graph_inputs key, value) and Output's (position, body node, export name, sent,
+# value), each value by its operand (an IR node by the one node table; constructed's `interfaces` its native value by
+# the same Input or Output record); the
 # upstream objects by identity, each once by index (first seen first): `owners` the distinct backend kernels' count
 # (Kernel.owner), `schedulers` the distinct Schedulers' count (each call, extern and inlining naming its own),
 # `loops` each LoopBody a call's ranges name (`body_of`), `proxies` each cpu CppKernelProxy its ranges or a fused nest
-# name (`proxy_of`), `subkernels` the distinct CppKernels' count; `kernels` each call (Produced.kernels order: each
+# name (`proxy_of`), `subkernels` each CppKernel a proxy selects (`sub_of`), `contexts` each cpu finalize's local
+# buffer context (`context_of`); `kernels` each call (Produced.kernels order: each
 # KernelCallLine its own) as its own record (`calling`); the control records, each registered once by identity in
 # preorder (`registered`: its kind's table index in `index`, constructed's): `externs` its scheduler's ExternCalls'
 # indices, `extern_calls` each ExternCall (`called`) as (its GraphLowering's module, its IR operation's name there
@@ -291,12 +301,20 @@ def constructed(machine):
 # index: that IR node's own calls); the Neural Engine's Model as (its ExportedProgram's graph module, graph signature,
 # state dict, range constraints, module call graph, example inputs, constants and verifiers, its conversion's selected
 # operands, received, handles). Each control record's native correspondence is constructed's (its regions, inlinings
-# and emissions by these records); its wrapper lines (ExternCall.lines, Inlined.lines, a Lifted's own wrapper: the
-# typed allocation, free, scope and control lines) are not here, and no native record of those lines' typed effects
-# is retained here either
+# and emissions by these records); its wrapper lines (`lines`): `table` each line once by identity (`line_of`: a str
+# line its text, a produced kernel's call its record, a typed line its class and fields' operands), the owner
+# sequences by that table (`wrappers` each wrapper's own lines, `extern` and `inlined` each record's, `lifted` each
+# Lifted's wrapper), `nodes` each IR node its lines name once by identity (`node_of`: class, own name and layout,
+# ExternCall records); `wrappers` each wrapper's GraphLowering modules. Their effects are the native artifact's
+# (metal_archive Records: Upstreams, Values, views and regions, by the records constructed pairs); an IR node's native
+# values have no record here: each occurrence's projection (the root, view or literal a consuming line or an Inlined's,
+# Lifted's or Produced's operand binds it to, one node possibly several, a reused or inlined body's each its own) is
+# not retained by lower_metal.py (its Held per name), the pending operand, to be paired by these line, node and
+# record identities
 def producing(made, p, index):
     model, schedulers, owners, loops = made.model, {}, {}, {}
-    controls, lowered = {"extern": [], "inlined": [], "lifted": []}, {}
+    controls, objects, lowered = ({kind: [] for kind in ("extern", "inlined", "lifted")},
+                                  {kind: [] for kind in ("extern", "inlined", "lifted")}, {})
     index[id(made)] = Record("produced", p, None)
     index.update((id(given), Record("input", p, k)) for k, given in enumerate(made.inputs))
     index.update((id(given), Record("output", p, k)) for k, given in enumerate(made.outputs))
@@ -311,6 +329,7 @@ def producing(made, p, index):
         if id(record) not in index:
             index[id(record)] = Record(kind, p, len(controls[kind]))
             controls[kind].append(None)
+            objects[kind].append(record)
             controls[kind][index[id(record)].index] = filled()
         return index[id(record)].index
 
@@ -338,11 +357,33 @@ def producing(made, p, index):
         return loops.setdefault(id(body), (len(loops), body))[0]
 
     # torch 2.14.0 codegen/cpp.py CppKernelProxy, each once by identity, its index in `proxies`; each of its
-    # subkernels (CppKernelProxy.kernels: the scalar, vector, tail and tile2d CppKernels) once by identity
-    proxies, subkernels = {}, {}
+    # subkernels (CppKernelProxy.kernels: the scalar, vector, tail and tile2d CppKernels) once by identity in
+    # `subkernels`; each finalize's local buffer context once by identity in `contexts`
+    proxies, subkernels, contexts = {}, {}, {}
 
     def proxied(proxy):
         return proxies.setdefault(id(proxy), (len(proxies), proxy))[0]
+
+    def contexted(context):
+        return contexts.setdefault(id(context), (len(contexts), context))[0]
+
+    # one subkernel (lower_inductor.py MeshCppKernel, MeshCppVecKernel, MeshCppTile2DKernel): its class, its domain as
+    # it emits it (CppKernel's itervars, ranges, reduction_depth, active_ranges, inner_itervars and call_ranges; a
+    # CppVecKernel's tiling_factor, tiling_idx, tail_size and num_elems; a CppTile2DKernel's tiling_indices, outer_idx,
+    # inner and outer tail sizes and num_elems and inner_is_tiling_idx), each CppRanges (its node's name and LoopBody,
+    # its variables, suffix and accesses as received: method, buffer name, index, store mode, its LoopBodyBlock graph
+    # and node, mask) and its indirect symbols (mesh_indirect: each its value, size and check)
+    def sub_of(kernel):
+        from torch._inductor.codegen.cpp import CppTile2DKernel, CppVecKernel
+        named = (("itervars", "ranges", "reduction_depth", "active_ranges", "inner_itervars", "call_ranges")
+                 + (("tiling_factor", "tiling_idx", "tail_size", "num_elems")
+                    if isinstance(kernel, CppVecKernel) else ())
+                 + (("tiling_indices", "outer_idx", "inner_tail_size", "outer_tail_size", "inner_num_elems",
+                     "outer_num_elems", "inner_is_tiling_idx") if isinstance(kernel, CppTile2DKernel) else ()))
+        return {"class": type(kernel), "domain": {name: getattr(kernel, name) for name in named},
+                "ranges": tuple((r.node.get_name(), looped(r.node._body), r.variables, r.suffix, r.accesses)
+                                for r in kernel.mesh_ranges),
+                "indirect": kernel.mesh_indirect}
 
     # a LoopNest: its loops (each LoopLevel as it is: var, size, offset, tiled_size, steps, parallel, simd_omp,
     # simd_vec, collapsed, is_reduction, simd_nelements) and its kernel, the proxy its own nest's (set_kernel) or an
@@ -353,20 +394,22 @@ def producing(made, p, index):
         return nest.loops, (("outer", tuple(map(nested, kernel.inner))) if isinstance(kernel, OuterLoopFusedKernel)
                             else ("proxy", proxied(kernel)))
 
-    # one proxy: its call ranges, each subkernel as (its index, its class) and its loop nest
+    # one proxy: its call ranges, each subkernel's index (its selection, in its order) and its loop nest
     def proxy_of(proxy):
         return {"call_ranges": proxy.call_ranges,
-                "kernels": tuple((subkernels.setdefault(id(kernel), len(subkernels)), type(kernel))
+                "kernels": tuple(subkernels.setdefault(id(kernel), (len(subkernels), kernel))[0]
                                  for kernel in proxy.kernels),
                 "loop_nest": nested(proxy.loop_nest)}
 
     # lower_inductor.py Ranges (an mps second-pass SchedulerNode): its node's name and LoopBody, its variables,
     # reduction and accesses as received (method, buffer name, index, store mode, its LoopBodyBlock graph, that graph's
-    # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes) its proxy's index and its nodes'
-    # names and LoopBodies (codegen/cpp.py codegen_node and codegen_outer_loop_node: each node a SchedulerNode of
-    # get_nodes(), every one's _body called by CppKernelProxy.codegen_nodes; a template's finalize_kernel nodes none)
+    # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes, local buffer context) its proxy's
+    # index, its nodes' names and LoopBodies (codegen/cpp.py codegen_node and codegen_outer_loop_node: each node a
+    # SchedulerNode of get_nodes(), every one's _body called by CppKernelProxy.codegen_nodes; a template's
+    # finalize_kernel nodes none) and its context's index
     ranged = {"mps": lambda r: (r.node.get_name(), looped(r.node._body), r.variables, r.reduction, r.accesses),
-              "cpu": lambda r: (proxied(r[0]), tuple((node.get_name(), looped(node._body)) for node in r[1]))}
+              "cpu": lambda r: (proxied(r[0]), tuple((node.get_name(), looped(node._body)) for node in r[1]),
+                                contexted(r[2]))}
 
     # one Kernel call record as its call made it: its backend kernel's index (Kernel.owner, by identity), its
     # scheduler's index, its GraphLowering's module, its launch, place and (entry, source) as produced, its original
@@ -379,10 +422,112 @@ def producing(made, p, index):
                 tuple(node.get_name() for node in kernel.scheduled), tuple(map(ranged[kernel.place], kernel.ranges)))
     kernels = tuple(map(calling, made.kernels.values()))
     externs = tuple(map(called, made.externs))
-    # every proxy a range or a fused nest names, each record once, an inner proxy's as it is registered
+
+    # torch 2.14.0 torch/_inductor/codegen/wrapper.py: each wrapper (PythonWrapperCodegen) once by identity, its index
+    # in `wrappers` with each GraphLowering module whose wrapper_code it is (an inlined control body writes into its
+    # parent's: one wrapper, several graphs), a Lifted's own wrapper among them
+    from torch._inductor import ir as upstream_ir
+    from torch._inductor.codegen.wrapper import PythonWrapperCodegen
+    from torch._inductor.graph import GraphLowering
+    wrappers, nodes, table = {}, {}, {}
+    called_lines = {line: Record("kernel", p, n) for n, line in enumerate(made.kernels)}
+
+    def wrapped(wrapper):
+        return wrappers.setdefault(id(wrapper), (len(wrappers), [], wrapper))
+    for graph in (*((made.graph,) if made.graph is not None else ()), *(k.graph for k in made.kernels.values()),
+                  *(record.graph for kind in objects.values() for record in kind)):
+        held_by = wrapped(graph.wrapper_code)[1]
+        if not any(module is graph.module for module in held_by):
+            held_by.append(graph.module)
+
+    # a typed line's operand: its wrapper by `wrappers` (Record "wrapper"), a GraphLowering by its module, an IR node
+    # by the node table (Lowered), an OutputSpec by its class and canonical state (Stated), a sequence, namedtuple or
+    # mapping of them its own type, any other value (a str, int, sympy expression, dtype, SymbolicCallArg, key path)
+    # as it is
+    def operand(value):
+        if isinstance(value, PythonWrapperCodegen):
+            return Record("wrapper", p, wrapped(value)[0])
+        if isinstance(value, GraphLowering):
+            return value.module
+        if isinstance(value, upstream_ir.IRNode):
+            return Lowered(nodes.setdefault(id(value), (len(nodes), value))[0])
+        if isinstance(value, upstream_ir.OutputSpec):
+            return Stated(type(value), operand(dict(vars(value))))
+        if isinstance(value, dict):
+            return {key: operand(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            items = [operand(item) for item in value]
+            return type(value)(*items) if hasattr(type(value), "_fields") else type(value)(items)
+        return value
+
+    # one wrapper line once by identity in `table`, its index: a str line the original text, a produced kernel's
+    # KernelCallLine its call's record (Produced.kernels' keys), a typed line (a WrapperLine dataclass) its class and
+    # each field's operand, any other line its operand (torch/utils/_indented_buffer.py LineContext, a NamedTuple,
+    # its context's; codegen/common.py DeferredLine, its name and line state, as it is, never called)
+    def lined(line):
+        return Lined(table.setdefault(id(line), (len(table), line))[0])
+
+    def line_of(line):
+        if isinstance(line, str):
+            return line
+        if id(line) in called_lines:
+            return called_lines[id(line)]
+        if dataclasses.is_dataclass(line):
+            return type(line), {field.name: operand(getattr(line, field.name)) for field in dataclasses.fields(line)}
+        return operand(line)
+
+    # each IR node once by identity: its class, its own name and layout (IRNode.maybe_get_name, maybe_get_layout:
+    # None where it has none) and its ExternCall records' indices by its identity; its native values are per
+    # occurrence, not the node's (pending)
+    def node_of(node):
+        return (type(node), node.maybe_get_name(), operand(node.maybe_get_layout()),
+                tuple(lowered.get(id(node), ())))
+
+    # every proxy a range or a fused nest names, each record once, an inner proxy's as it is registered; then each
+    # subkernel its proxies select
     proxy_records = []
     while len(proxy_records) < len(proxies):
         proxy_records.append(proxy_of(list(proxies.values())[len(proxy_records)][1]))
+    subkernel_records = tuple(sub_of(kernel) for _, kernel in subkernels.values())
+
+    # one finalize's local buffer context (codegen/cpp_utils.py LocalBufferContext: its local_buffers,
+    # global_buffers and global_to_local, each name's IR buffer by the node table, and removed_buffers; its
+    # kernel_args the group's own, its exit_stack its scope's, neither a saved value), or virtualized.py's NullHandler
+    # (no local buffer context) as it is
+    def context_of(context):
+        from torch._inductor.codegen.cpp_utils import LocalBufferContext
+        if isinstance(context, LocalBufferContext):
+            return {"local_buffers": operand(context.local_buffers),
+                    "global_buffers": operand(context.global_buffers),
+                    "global_to_local": operand(context.global_to_local), "removed_buffers": context.removed_buffers}
+        return context
+    context_records = tuple(context_of(context) for _, context in contexts.values())
+
+    # each Input's (position, body placeholder, export name, value) and Output's (position, body node, export name,
+    # sent, value), its value as produced by its operand: GraphLowering graph_inputs[name] or graph_outputs[k] (a
+    # TensorBox, buffer or TorchBindObject by the node table; a sympy expression, a generator's or None as it is), the
+    # Neural Engine's ExportedProgram node (a Ref)
+    inputs = tuple((given.position, given.node, given.name, operand(given.value)) for given in made.inputs)
+    outputs = tuple((given.position, given.node, given.name, given.sent, operand(given.value))
+                    for given in made.outputs)
+
+    # the owner sequences, each line by the one table: each wrapper's own lines, each ExternCall's and Inlined's lines
+    # (the same line objects, its codegen's), each Lifted its wrapper's
+    sequences = {"extern": tuple(tuple(map(lined, extern.lines)) for extern in objects["extern"]),
+                 "inlined": tuple(tuple(map(lined, inlined.lines)) for inlined in objects["inlined"]),
+                 "lifted": tuple(Record("wrapper", p, wrapped(lifted.wrapper)[0]) for lifted in objects["lifted"])}
+    # every wrapper's lines, line and IR node each recorded once as registered (a line's operand may name another
+    # wrapper or node, a layout another node)
+    wrapper_lines, line_records, node_records = [], [], []
+    while (len(wrapper_lines), len(line_records), len(node_records)) != (len(wrappers), len(table), len(nodes)):
+        if len(wrapper_lines) < len(wrappers):
+            wrapper_lines.append(tuple(map(lined, list(wrappers.values())[len(wrapper_lines)][2].lines)))
+        elif len(line_records) < len(table):
+            line_records.append(line_of(list(table.values())[len(line_records)][1]))
+        else:
+            node_records.append(node_of(list(nodes.values())[len(node_records)][1]))
+    lines = {**sequences, "wrappers": tuple(wrapper_lines), "table": tuple(line_records),
+             "nodes": tuple(node_records)}
 
     # torch/_inductor/loop_body.py LoopBody as produced: its sizes, iteration and reduction variables, variable
     # ranges, indexing expressions, indirect variables and their ranges, memory usage, operation counts, partial
@@ -404,12 +549,13 @@ def producing(made, p, index):
                                                 if isinstance(module, torch.fx.GraphModule)},
             "sent": made.sent, "lowered": made.graph and made.graph.module, "signature": made.signature,
             "processor": made.processor,
-            "inputs": tuple((given.position, given.node, given.name) for given in made.inputs),
-            "outputs": tuple((given.position, given.node, given.name, given.sent) for given in made.outputs),
+            "inputs": inputs, "outputs": outputs,
             "kernels": kernels, "owners": len(owners), "schedulers": len(schedulers),
             "loops": tuple(body_of(body) for _, body in loops.values()), "proxies": tuple(proxy_records),
-            "subkernels": len(subkernels), "externs": externs, "extern_calls": tuple(controls["extern"]),
-            "inlined": tuple(controls["inlined"]), "lifted": tuple(controls["lifted"]),
+            "subkernels": subkernel_records, "contexts": context_records, "externs": externs,
+            "extern_calls": tuple(controls["extern"]),
+            "inlined": tuple(controls["inlined"]), "lifted": tuple(controls["lifted"]), "lines": lines,
+            "wrappers": tuple(tuple(held_by) for _, held_by, _ in wrappers.values()),
             "seeds": tuple((seeds.graph.module, seeds.buffer.get_operation_name(), seeds.buffer.get_name(),
                             tuple(seeds.buffer.origins), seeds.uses, tuple(lowered[id(seeds.buffer)]))
                            for seeds in made.seeds),

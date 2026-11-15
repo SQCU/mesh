@@ -73,11 +73,11 @@
     "Scheduled.operands retains original reference through exact driver keyword. Fresh prepared network keeps original CallAnalysis; loaded compilation retains its saved query record."
   ],
   "current_limits": [
-    "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
-    "The actual returned interfaces, regions, inlinings, emissions and neural associations are saved. Compiler66 lower_metal remains unaccepted WIP: current inlinings contains InvokeSubgraph intervals only; WhileLoop cond/body and Lifted branch interval production is being corrected. Other binding/order/effect semantics remain under compiler review; serialization is not validation of those semantics.",
-    "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
-    "Native135 original model package source and this original ExportedProgram/state/native-operation correspondence have not yet been observed through a matching complete save/load invocation.",
-    "Wrapper line objects and opaque GraphLowering/Scheduler/backend objects are not serialized or reconstructed. Actual native Values/access/configuration/region/replay/solved sections remain their original native owner. Coverage of original intermediate line-to-native typed values is paired with compiler66, not inferred by names."
+    "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler Python coherence and the matching native release.",
+    "Compiler66 now returns intervals for WhileLoop cond/body/cond and Switch Lifted branches as well as InvokeSubgraph; the existing archive association consumes these original records. Binding/order/effect semantics remain under compiler review. Original intermediate IR operand to native value associations for every consumed occurrence are still pending its actual returned result; archive does not recover them by name or shape.",
+    "LocalBufferContext.__exit__ clears local_buffers after MeshKernelGroup.finalize_kernel retains the context. Compiler68 is preserving the actual declarations before that clear; current archive context projection cannot retain already-cleared data. No reconstruction from surviving maps is substituted.",
+    "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
+    "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
   ],
   "previous_source_checkpoint": "da96b082",
   "pending_source_layer": {
@@ -406,6 +406,75 @@
       "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
       "Native135 original model package source and this original ExportedProgram/state/native-operation correspondence have not yet been observed through a matching complete save/load invocation.",
       "Wrapper line objects and opaque GraphLowering/Scheduler/backend objects are not serialized or reconstructed. Actual native Values/access/configuration/region/replay/solved sections remain their original native owner. Coverage of original intermediate line-to-native typed values is paired with compiler66, not inferred by names."
+    ],
+    "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
+  },
+  "wrapper_cpu_result_checkpoint": {
+    "stage": "Source-only original wrapper/interface and normal CPU access result retention; full saved-compilation handoff remains incomplete",
+    "time_utc": "2026-11-15T07:10:48.578292+00:00",
+    "source_parent": "b0507c7974d4c716a87adc4d4a3b4de949ddbe39",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 104,
+      "process": 32089,
+      "handle": 58844,
+      "last_result_index": 30,
+      "last_result": "success/source HOLD"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "510bf96dd288af4c17eed01072436eeea30423c507e90649a24a6002419871bf"
+    },
+    "references_sha256": {
+      "compiler/mesh_compiler/lower_inductor.py": "c2033deda2493f0f5639eb785e6ed0f3d8da79703a1de28c8eff60ade1034069",
+      "compiler/mesh_compiler/lower_metal.py": "1578a3e073f36aa66e629955b9a0dfe25c13abf9f37bfa6159669cb534ed83c0",
+      "compiler/mesh_compiler/metal.py": "cb277334497bf722d0b2334b0a7765c5e49ff82f12f3de614974aed28f8e0838",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp_utils.py": "8e907c4a725f48a54cce8c2cdc38148b5b915c417a4e8cf5eb055886d0f7029c",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp.py": "0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/wrapper.py": "d667391a2f419f06ba152db86ed2e639fa537d5cc89de6e07045a24828b53386"
+    },
+    "checks": [
+      {
+        "kind": "AST",
+        "result": "PASS"
+      },
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "changed_during_checks": [],
+    "retained": [
+      "One original wrapper-line table by object identity, with original root, ExternCall, Inlined and Lifted owner sequences referring to that table. Typed lines retain their original classes and field operands; no wrapper code execution or text parser.",
+      "One original IR-node table links source Input.value/Output.value and line operands to their class, existing name/layout and ExternCall identities. Layout state retains original node references; interfaces independently retain the existing original Input/Output record to native root/view/literal association. No opaque GraphLowering or TensorBox serialization.",
+      "Normal CPU proxy selection retains actual subkernel identities, loop nest, scalar/vector/tile domains, CppRanges variables/suffix/accesses including original raw FX graph/node/mask and indirect symbols. Finalize local-context maps use the same IR-node table, subject to the recorded producer-clear gap.",
+      "LineContext namedtuples, DeferredLine source fields, and CppCSEVariable/NullHandler plain state use the existing canonical pickle owner. Shared raw graphs, graph annotations and tensor payload remain in the existing GraphPickler/reference/state path.",
+      "Physical effects, ValueIDs, configured accesses, native regions/replay and solved arrays stay in the existing native archive owner; they are not duplicated as a Python effect compiler."
+    ],
+    "limits": [
+      "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler Python coherence and the matching native release.",
+      "Compiler66 now returns intervals for WhileLoop cond/body/cond and Switch Lifted branches as well as InvokeSubgraph; the existing archive association consumes these original records. Binding/order/effect semantics remain under compiler review. Original intermediate IR operand to native value associations for every consumed occurrence are still pending its actual returned result; archive does not recover them by name or shape.",
+      "LocalBufferContext.__exit__ clears local_buffers after MeshKernelGroup.finalize_kernel retains the context. Compiler68 is preserving the actual declarations before that clear; current archive context projection cannot retain already-cleared data. No reconstruction from surviving maps is substituted.",
+      "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
+      "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
     ],
     "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
   }
