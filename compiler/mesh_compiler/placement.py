@@ -11,7 +11,7 @@ import torch
 from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
 
-from .ir import JOIN, PAGES, RECV, SEND, constant, evaluated, given, shape, view, views
+from .ir import CLONE, JOIN, PAGES, RECV, SEND, aliasing, constant, evaluated, given, shape, view, views
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
@@ -23,7 +23,7 @@ EXPAND, RESHAPE, VIEW = ATEN.expand.default, ATEN.reshape.default, ATEN.view.def
 SLICE_SCATTER, ZEROS = ATEN.slice_scatter.default, ATEN.new_zeros.default
 BMM, FLIP, SOFTMAX = ATEN.bmm.default, ATEN.flip.default, ATEN._softmax.default
 ARANGE, LE, AND, NOT = ATEN.arange.start_step, ATEN.le.Scalar, ATEN.logical_and.default, ATEN.logical_not.default
-PAD = ATEN.constant_pad_nd.default
+PAD, EMPTY_STRIDED, AS_STRIDED = ATEN.constant_pad_nd.default, ATEN.empty_strided.default, ATEN.as_strided.default
 CONVOLUTION = ATEN.convolution.default
 MAXIMA = {ATEN.max_pool2d_with_indices.default, ATEN.max_pool3d_with_indices.default}
 AVERAGES = {ATEN.avg_pool1d.default, ATEN.avg_pool2d.default, ATEN.avg_pool3d.default}
@@ -591,6 +591,34 @@ def plainly(graph, value):
     return *value[:3], [plain(graph, node, holder) for node, holder in zip(value[3], flat(value[2]))]
 
 
+# the whole-value cache: `node`'s placed value gathered whole onto `processor` once (reshard)
+def gathered(graph, whole, node, value, processor):
+    if (node, processor) not in whole:
+        whole[node, processor] = reshard(graph, plainly(graph, value), None, None, (processor,))[0]
+    return whole[node, processor]
+
+
+# torch 2.14.0 torch/_inductor/ir.py ExternKernel.require_strides, its exact-strides geometry: each required
+# zero-stride dimension of size two or more sliced to [0:1], the value copied (ir.evaluated's CLONE out) into the
+# source prototype's own geometry, aten.as_strided at its offset and strides over an empty_strided allocation of its
+# storage's whole extent in its dtype, then expanded back to its size, so no expanded element is written twice
+def required(graph, node, like, processor):
+    expanded = [d for d, (size, stride) in enumerate(zip(like.shape, like.stride())) if stride == 0 and size >= 2]
+    for d in expanded:
+        node = call(graph, SLICE, (node, d, 0, 1), processor)
+    storage = constant(graph, EMPTY_STRIDED, ([like.untyped_storage().nbytes() // like.element_size()], [1]), node,
+                       processor, dtype=like.dtype)
+    out = call(graph, AS_STRIDED, (storage, list(shape(node)), list(like.stride()), like.storage_offset()), processor)
+    node = call(graph, CLONE, (node,), processor, memory_format=torch.preserve_format, out=out)
+    return call(graph, EXPAND, (node, list(like.shape)), processor) if expanded else node
+
+
+# torch 2.14.0 torch/_tensor_docs.py stride, storage_offset and untyped_storage: the same layout in the same extent
+def laid(value, like):
+    return (tuple(value.stride()), value.storage_offset(), value.untyped_storage().nbytes()) == (
+        tuple(like.stride()), like.storage_offset(), like.untyped_storage().nbytes())
+
+
 # design/problems-of-14b9a757-change-request.md item 4 steps 2 and 3; Y. Xu et al., GSPMD, arXiv:2105.04663,
 # section 4.3 and appendix A.2
 def meshed(graph, node, held, replaced):
@@ -700,10 +728,7 @@ def partitioned(graph, node, held, want, replaced, whole):
         target = target[0], counts(out[target[0]], units, len(target[2])), target[2]
     if target is None:
         processor = want if isinstance(want, str) else want[2][0]
-        for u, v in zip(operands(node), held, strict=True):
-            if (u, processor) not in whole:
-                whole[u, processor] = reshard(graph, plainly(graph, v), None, None, (processor,))[0]
-        arguments = iter([whole[u, processor] for u in operands(node)])
+        arguments = iter([gathered(graph, whole, u, v, processor) for u, v in zip(operands(node), held, strict=True)])
         node.args, node.kwargs = map_arg((node.args, node.kwargs), lambda n: next(arguments))
         node.meta["processor"] = processor
         return None, None, (processor,), [node]
@@ -845,6 +870,23 @@ def place(graph_module, placement):
         if node.op == "placeholder":
             node.meta["stated"] = stated[node]
     replaced, whole = [], {}
+    # design/compilation-composition-change-request.md item 7; ir.view and ir.aliasing, the source alias owner: each
+    # node of a user output position (a mutation's, export.read "destination", keeps its own producer) and each pure
+    # source alias parent it is read through (an aliasing call's self; an aliasing call's getitem's call), in their
+    # postorder from those outputs, retained before placement rewrites or erases them: (its parent, its original
+    # operands, its prototype); the layout normalization's domain the Tensor-valued output Nodes, every other output
+    # operand placed by the output's own transfer as before
+    output = graph.output_node()
+    mutated = output.meta.get("destination", {})
+    mutations = {output.args[0][k] for k in mutated}
+    results = [n for k, n in enumerate(output.args[0])
+               if k not in mutated and isinstance(n, torch.fx.Node) and isinstance(n.meta.get("val"), torch.Tensor)]
+
+    def parent(node):
+        return [node.args[0]] if view(node) is not None and aliasing(
+            node.args[0] if node.target is operator.getitem else node) else []
+    order = mesh_graph.postorder(nodes, results, parent)
+    retained = {node: (parent(node), node.args, node.kwargs, node.meta["val"]) for node in order}
 
     def transfer(node, held):
         want = stated[node] if node in stated else flat(held[0][2])[0]
@@ -863,7 +905,30 @@ def place(graph_module, placement):
                 value = *want, reshard(graph, plainly(graph, value), *want)
         return value
 
-    values = mesh_graph.forward(nodes, operands, transfer)
+    # torch.fx Graph.output_node, the graph's last node: every other node placed first; then torch 2.14.0
+    # torch/_inductor/ir.py ExternKernel.require_strides and ir.views: each retained node realized whole on the output
+    # processor once, from those placed values, by the alias forward over `order` (a shared base realized once for all
+    # its aliases): a source alias the replay of its original operation on its parent's realization (a tuple producer's
+    # then its getitem's); an input placeholder that input itself; a mutation's value its whole value (ir.views computes
+    # it into its input); another its whole value in its original layout and extent (`required` where that differs);
+    # each user output's realization its whole value there, then the output's own transfer once
+    values = mesh_graph.forward(nodes[:-1], operands, transfer)
+    processor = stated[output]
+
+    def realize(node, read):
+        upstream, args, kwargs, like = retained[node]
+        if read:
+            arguments = map_arg((args, kwargs), lambda n: read[0] if n is upstream[0] else gathered(
+                graph, whole, n, values[n], processor))
+            return evaluated(graph.call_function(node.target, *arguments), processor)
+        if node.op == "placeholder":
+            return node
+        value = gathered(graph, whole, node, values[node], processor)
+        return value if node in mutations or laid(value.meta["val"], like) else required(graph, value, like, processor)
+    with graph.inserting_before(output):
+        made = mesh_graph.forward(order, lambda node: retained[node][0], realize)
+    whole.update(((node, processor), made[node]) for node in results)
+    values[output] = transfer(output, [values[u] for u in operands(output)])
     # each placeholder's own placed value: its holders' partition Nodes in holder order, or a whole one its stated
     # processor's and the placeholder itself, each with its landing geometry, (storage offset, shape, stride) of its
     # source view in the placeholder's storage (`landed`; a whole one's its own value's), None for a non-tensor
@@ -877,6 +942,10 @@ def place(graph_module, placement):
         for node in nodes if node.op == "placeholder"}
     for node in reversed(replaced):
         graph.erase_node(node)
+    # torch 2.14.0 torch/fx/graph.py Graph.eliminate_dead_code and torch/fx/node.py Node.is_impure: every node the
+    # rewired outputs no longer read removed before any transfer, each recorded input part (input_parts) kept
+    parts = {part for held in graph_module.meta["input_parts"].values() for _, part, _ in held}
+    graph.eliminate_dead_code(is_impure_node=lambda node: node.is_impure() or node in parts)
     views(graph)
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
