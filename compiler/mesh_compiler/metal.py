@@ -1,9 +1,10 @@
 # design/compilation-composition-change-request.md items 1, 3, 6 and 7; design/aot-compilation-change-request.md A8 and
 # A9: the live native owner. The C ABI's types and library bindings (metal-microbench metal_ir.h, metal_recording.h;
-# rdma/mesh-metal.h), the Objective-C/Metal resource primitives, borrowed buffers, archive byte ownership, the typed C
-# encoder (_Builder) of the direct native projections (values and views, a produced kernel, a typed LAPACK call, an
-# INFO check, an elementwise copy or fill over program values) and of the transitional records native.py still gives
-# it (compiler/mesh_compiler/operations.py _Generic, _Repeat, _Switch, _Sort, _Check)
+# rdma/mesh-metal.h), the Objective-C/Metal resource primitives, borrowed buffers, archive byte ownership, and the
+# typed C encoder (_Builder) of the direct native projections over program values: values and views, a produced
+# kernel's operand (metal_ir_upstream), a typed LAPACK call, an INFO check, the canonical logical copy (metal_ir_copy)
+# and a fill; a produced kernel's composed callable collection (native129: metal_ir_upstream_callables,
+# metal_ir_callables_emit) and its numerical body's binary64 numeric collection (Numeric)
 import collections
 import ctypes as C
 import ctypes.util
@@ -11,11 +12,12 @@ import errno
 import os
 import pathlib
 import sys
+import weakref
 
 import torch
 
-from .operations import (CLASS, CPU, GPU, KINDS, SCALAR, _Check, _Repeat, _Sort, _Switch, _Words, _bits, _copy, _key,
-                         _placed, _stored)
+from .operations import CPU, GPU
+from .operations import SCALAR as SCALAR
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -27,9 +29,6 @@ INPUT, CONSTANT, TEMPORARY, OUTPUT, STATE = range(5)
 BODY, COMBINE, FINALIZE = range(3)
 NONE = 0xFFFFFFFF
 METAL_IR_STEP = 2
-# metal_ir.h METAL_IR_PARALLEL (linalg iterator_types), METAL_IR_ASSIGN (an output's combination where the operation
-# has none) and METAL_IR_IDENTITY (its starting value): a direct elementwise operation's (_Builder.elementwise)
-PARALLEL, ASSIGN, IDENTITY = 0, 0, 0
 # metal_ir.h METAL_IR_GESDD .. METAL_IR_GELSS (struct metal_ir_lapack_call `routine`) and METAL_IR_CHECK_LU ..
 # METAL_IR_CHECK_NATIVE (metal_ir_check `code`)
 LAPACK_GESDD, LAPACK_HEEVD, LAPACK_GEEV, LAPACK_GELSD, LAPACK_GELSS = range(5)
@@ -351,22 +350,18 @@ class RegionChild(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('kind', 'region', 'arm')]
 
 
-# metal_ir.h metal_ir_operations: one structured record's actual emission by _Builder.generic: `record` the record
-# itself (compiler/mesh_compiler/operations.py, the source owner), `operation` its returned operation ID, [first, end)
-# the operations it created (metal_ir_sort several)
+# metal_ir.h metal_ir_operations: one direct projection's actual emission by _Builder: `record` the producer object it
+# implements (lower_inductor.py Kernel or Extern, a source node), `operation` its returned operation ID, [first, end)
+# the operations it created
 Emitted = collections.namedtuple("Emitted", "record operation first end")
-# metal_ir.h metal_ir_repeat: one registered repetition: `record` the operations.py _Repeat, `region` its
-# metal_ir_repeats index (never an operation), [first, end) its pass's operation interval, nested ones included
-Repeated = collections.namedtuple("Repeated", "record region first end")
 
 
-# metal-microbench metal_ir.h (transitional) metal_ir_upstream and its stages: METAL_IR_UPSTREAM_BUFFER .. _ERROR (an
-# argument's kind), struct metal_ir_upstream_argument and struct metal_ir_upstream (a produced kernel's operand before
-# metal_ir_construct; its views rdma/mesh-graph.h struct mesh_graph_view, mesh_graph.Viewed), what
-# metal_ir_upstream_composition returns (struct metal_ir_upstream_word, _received, _sent, _page, _readiness, _table,
-# _composed), the transport helper metal_ir_upstream_helper prints (struct metal_ir_upstream_helper), a pass's terminal
-# emission (struct metal_ir_upstream_emission), the first pass's configured launch (struct
-# metal_ir_upstream_configuration) and a threadgroup's footprint (mesh-graph.h struct mesh_graph_footprint)
+# metal-microbench metal_ir.h metal_ir_upstream and its stages: METAL_IR_UPSTREAM_BUFFER .. _ERROR (an argument's
+# kind), struct metal_ir_upstream_argument and struct metal_ir_upstream (a produced kernel's operand before
+# metal_ir_construct), what metal_ir_upstream_composition returns (struct metal_ir_upstream_word, _received, _sent,
+# _page, _readiness, _table, _composed), the composed callable collection's protocol names and printed source (struct
+# metal_ir_upstream_protocol, struct metal_ir_callable_source), a pass's terminal emission (struct
+# metal_ir_upstream_emission) and the first pass's configured launch (struct metal_ir_upstream_configuration)
 UPSTREAM_BUFFER, UPSTREAM_SCALAR, UPSTREAM_ERROR = range(3)
 
 
@@ -417,8 +412,29 @@ class UpstreamComposed(C.Structure):
         (name, mesh.U) for name in ('words', 'later_words', 'receives', 'sends', 'pages', 'padding')]
 
 
-class UpstreamHelper(C.Structure):
-    _fields_ = [(name, C.c_char_p) for name in ('source', 'acquire', 'later', 'release')] + [('bytes', mesh.Q)]
+# struct metal_ir_upstream_protocol (the protocol functions a composed collection made, NULL none) and struct
+# metal_ir_callable_source (its one print: `source` of `bytes`, its leading license notices `notice` of `notice_bytes`)
+class UpstreamProtocol(C.Structure):
+    _fields_ = [(name, C.c_char_p) for name in ('acquire', 'later', 'release')]
+
+
+class CallableSource(C.Structure):
+    _fields_ = [('source', C.c_void_p), ('notice', C.c_void_p), ('bytes', mesh.Q), ('notice_bytes', mesh.Q)]
+
+
+# metal_ir.h METAL_IR_BINARY64_BINARY .. _UNARY, struct metal_ir_binary64_primitive (a request: `code` a metal_ir_binary,
+# metal_ir_unary or metal_ir_builtin_named code, a CONVERT's scalars `from` and `to`) and struct
+# metal_ir_binary64_function (the library function serving it: its name, parameter kinds, result kind, GPU work)
+BINARY64_BINARY, BINARY64_BUILTIN, BINARY64_CONVERT, BINARY64_UNARY = range(4)
+
+
+class Binary64Primitive(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('kind', 'code', 'from_', 'to')]
+
+
+class Binary64Function(C.Structure):
+    _fields_ = [('name', C.c_char_p), ('parameter', C.POINTER(mesh.U)), ('parameters', mesh.U), ('result', mesh.U),
+                ('work', mesh_graph.Work)]
 
 
 # struct metal_ir_upstream_parameter: one parameter of a CPU pass's final entry, its C type as its emitter printed it,
@@ -437,26 +453,23 @@ class UpstreamConfiguration(C.Structure):
     _fields_ = [(name, mesh.U * 3) for name in ('grid', 'group', 'groups')] + [('padding', mesh.U)]
 
 
-class Footprint(C.Structure):
-    _fields_ = [(name, mesh.U) for name in ('dispatch', 'binding', 'exact', 'first', 'terms', 'padding')] + [
-        ('start', C.c_int64), ('extent', mesh.Q)]
-
-
 # one produced kernel's composition as the native program made it for pass `later` (0 its first, 1 its later), each
 # record copied out of the program's borrowed arrays: its first and later passes' transport words
 # (UpstreamWord), received ranges (value, range, its mesh_metal_range), sent values (value, counter, slot, its
 # mesh_metal_releases), paged arguments (Paged), readiness table (UpstreamReadiness or None), prepared record table
-# (UpstreamTable or None) and transport helper (Helper, None where it has no transport: ENODATA); the operand the
-# producer's terminal emission composes with (compiler/mesh_compiler/lower_inductor.py emitted)
-Composed = collections.namedtuple("Composed", "words later_words received sent pages readiness table helper later")
+# (UpstreamTable or None) and its one callable collection (Callables), the operand the producer's terminal emission
+# composes with (compiler/mesh_compiler/lower_inductor.py composed)
+Composed = collections.namedtuple("Composed", "words later_words received sent pages readiness table callables later")
 # a paged argument as the native composition placed it (struct metal_ir_upstream_page): its argument, its arena's
 # slot, its frame table's slot, its pages of `page_bytes`, `origin` its value's byte origin in its root (the dense
 # binding's offset), which its body adds before the page division
 Paged = collections.namedtuple("Paged", "argument slot frames pages page_bytes origin")
-# struct metal_ir_upstream_helper: its printed source (Tint MSL library mode) and the declarations of the functions its
-# final emitter calls (`acquire` mesh_acquire_first, `later` mesh_acquire_later where it receives, `release`
-# mesh_release where it sends; None where absent)
-Helper = collections.namedtuple("Helper", "source acquire later release")
+# metal_ir_upstream_callables and metal_ir_callables_emit: the kernel's one callable collection in its program (its
+# first and later pass share it), printed once: `source` (Tint MSL library mode, host C++ for a CPU task's), `notice`
+# the binary64 library's license notices where it holds its primitives ("" none), and the protocol functions its
+# final emitter calls (struct metal_ir_upstream_protocol: `acquire` mesh_acquire_first, `later` mesh_acquire_later
+# where it receives, `release` mesh_release where it sends; None where the collection makes none)
+Callables = collections.namedtuple("Callables", "source notice acquire later release")
 
 
 # dlfcn.h dladdr; metal-microbench metal_recording.h: the recorder (libmetal_recording) and the checkout it was built
@@ -616,6 +629,7 @@ def _compiler():
                 ('metal_ir_generic', U, [P, U, C.POINTER(Q), C.POINTER(U), U, C.POINTER(U), U, C.POINTER(U),
                                          C.POINTER(U), C.POINTER(U), C.POINTER(U), C.POINTER(Expr), U, C.POINTER(Term),
                                          U, U, Q]),
+                ('metal_ir_copy', U, [P, U, U, U, C.POINTER(Q), U, Q]),
                 ('metal_ir_states', None, [P, U, U, C.POINTER(U), C.POINTER(Q)]),
                 ('metal_ir_symbol', U, [P, U, U, Q]), ('metal_ir_loop_extent', None, [P, U, U, U]),
                 ('metal_ir_check', U, [P, U, U, Q]),
@@ -657,7 +671,7 @@ def _compiler():
     return COMPILER[0]
 
 
-# metal-microbench metal_ir.h (transitional, the executor's native release): the produced-kernel stages' calls, bound
+# metal-microbench metal_ir.h: the produced-kernel stages' calls and the binary64 numeric collection's (native129), bound
 # on their first use over the loaded compiler (_compiler), apart from its construction bindings
 UPSTREAM = []
 
@@ -668,11 +682,15 @@ def _upstream():
         for name, result, arguments in (
                 ('metal_ir_upstream', U, [P, C.POINTER(Upstream)]),
                 ('metal_ir_upstream_composition', C.c_int, [P, U, C.POINTER(UpstreamComposed)]),
-                ('metal_ir_upstream_helper', C.c_int, [P, U, C.POINTER(UpstreamHelper), C.c_char_p, C.c_size_t]),
+                ('metal_ir_upstream_callables', P, [P, U, P, C.POINTER(UpstreamProtocol), C.c_char_p, C.c_size_t]),
+                ('metal_ir_callables_emit', C.c_int, [P, C.POINTER(CallableSource), C.c_char_p, C.c_size_t]),
+                ('metal_ir_binary64_open', P, [C.c_char_p, C.c_size_t]),
+                ('metal_ir_binary64_request', C.c_int, [P, C.POINTER(Binary64Primitive), C.POINTER(Binary64Function),
+                                                        C.c_char_p, C.c_size_t]),
+                ('metal_ir_binary64_free', None, [P]),
                 ('metal_ir_upstream_emitted', C.c_int, [P, U, U, C.POINTER(UpstreamEmission), C.c_char_p,
                                                          C.c_size_t]),
                 ('metal_ir_upstream_configured', C.POINTER(UpstreamConfiguration), [P, U]),
-                ('metal_ir_upstream_footprints', None, [P, U, U, C.POINTER(Footprint), U, C.POINTER(Term)]),
                 ('metal_ir_upstream_error_workspace', U, [P]),
                 ('metal_ir_value_zeroed', None, [P, U])):
             function = getattr(lib, name)
@@ -689,15 +707,46 @@ def _text(value):
     return None if value is None else value.decode()
 
 
-# metal_ir_upstream_composition and metal_ir_upstream_helper of produced kernel `op` of `program` (after its ports are
-# declared) for pass `later`, copied out (Composed), each paged argument's origin the native composition's own
-def _composition(program, op, later=0):
-    lib, made, helper, error = _upstream(), UpstreamComposed(), UpstreamHelper(), C.create_string_buffer(4096)
-    status = lib.metal_ir_upstream_composition(program, op, C.byref(made))
+# metal_ir.h metal_ir_binary64_open, metal_ir_binary64_request and metal_ir_binary64_free: one upstream numerical body's
+# binary64 numeric collection, its IR only, which its backend kernel's own emitter fills as it meets each typed
+# operation (`request`: a primitive's kind BINARY64_*, its metal_ir_binary / metal_ir_unary / metal_ir_builtin_named
+# code, a CONVERT's scalars) and every composition of that kernel clones (metal_ir_upstream_callables `numeric`), never
+# re-requested; `functions` each request's function as the library returned it (name, parameter kinds, result kind,
+# its GPU work), freed once with its owner
+class Binary64:
+    def __init__(self):
+        lib, error = _upstream(), C.create_string_buffer(4096)
+        self.handle, self.functions = lib.metal_ir_binary64_open(error, len(error)), {}
+        if not self.handle:
+            raise OSError(errno.ENOMEM, 'a binary64 numeric collection (metal_ir_binary64_open): %s'
+                          % error.value.decode())
+        self.close = weakref.finalize(self, lib.metal_ir_binary64_free, self.handle)
+
+    def request(self, kind, code, from_=0, to=0):
+        key = (kind, code, from_, to)
+        if key not in self.functions:
+            made, error = Binary64Function(), C.create_string_buffer(4096)
+            status = _upstream().metal_ir_binary64_request(self.handle, C.byref(Binary64Primitive(*key)),
+                                                           C.byref(made), error, len(error))
+            if status:
+                raise OSError(status, 'binary64 primitive %r (metal_ir_binary64_request): %s'
+                              % (key, error.value.decode()))
+            self.functions[key] = (made.name.decode(), tuple(made.parameter[k] for k in range(made.parameters)),
+                                   made.result, _copied(made.work))
+        return self.functions[key]
+
+
+# metal_ir_upstream_composition of produced kernel `op` of `program` (after its ports are declared) for pass `later`,
+# copied out (Composed), each paged argument's origin the native composition's own; its callable collection made and
+# printed once (_callables, cloning the kernel's binary64 collection `numeric`, a Binary64 or None), the later pass
+# given its first pass's (`callables`)
+def _composition(program, op, numeric=None, later=0, callables=None):
+    made = UpstreamComposed()
+    status = _upstream().metal_ir_upstream_composition(program, op, C.byref(made))
     if status:
         raise OSError(status, 'operation %d: no constructed upstream kernel (metal_ir_upstream_composition)' % op)
     pages = [made.page[k] for k in range(made.pages)]
-    composed = Composed(
+    return Composed(
         tuple(_copied(made.word[k]) for k in range(made.words)),
         tuple(_copied(made.later_word[k]) for k in range(made.later_words)),
         tuple((r.value, r.range, _copied(r.record[0])) for r in (made.received[k] for k in range(made.receives))),
@@ -705,27 +754,36 @@ def _composition(program, op, later=0):
               for s in (made.sent[k] for k in range(made.sends))),
         tuple(Paged(p.argument, p.slot, p.frames, p.pages, p.page_bytes, p.origin) for p in pages),
         _copied(made.readiness[0]) if made.readiness else None, _copied(made.table[0]) if made.table else None,
-        None, later)
-    status = lib.metal_ir_upstream_helper(program, op, C.byref(helper), error, len(error))
-    if status == errno.ENODATA:
-        return composed
-    if status:
-        raise OSError(status, 'operation %d: its transport helper (metal_ir_upstream_helper): %s'
+        _callables(program, op, numeric) if callables is None else callables, later)
+
+
+# metal_ir_upstream_callables then metal_ir_callables_emit: produced kernel `op`'s one callable collection in `program`
+# (its transport protocol and its numerical body's binary64 primitives, `numeric` cloned) printed once (Callables)
+def _callables(program, op, numeric):
+    lib, protocol, emitted = _upstream(), UpstreamProtocol(), CallableSource()
+    error = C.create_string_buffer(4096)
+    collection = lib.metal_ir_upstream_callables(program, op, None if numeric is None else numeric.handle,
+                                                 C.byref(protocol), error, len(error))
+    if not collection:
+        raise OSError(errno.ENODATA, 'operation %d: its callable collection (metal_ir_upstream_callables): %s'
                       % (op, error.value.decode()))
-    return composed._replace(helper=Helper(C.string_at(helper.source, helper.bytes).decode(), _text(helper.acquire),
-                                           _text(helper.later), _text(helper.release)))
+    status = lib.metal_ir_callables_emit(collection, C.byref(emitted), error, len(error))
+    if status:
+        raise OSError(status, 'operation %d: its callable collection (metal_ir_callables_emit): %s'
+                      % (op, error.value.decode()))
+    notice = C.string_at(emitted.notice, emitted.notice_bytes).decode() if emitted.notice else ""
+    return Callables(C.string_at(emitted.source, emitted.bytes).decode(), notice, _text(protocol.acquire),
+                     _text(protocol.later), _text(protocol.release))
 
 
-# metal_ir_upstream_emitted: pass `number` of produced kernel `op`, its terminal emission (the producer's Emission:
-# source, entry, types, compile, link); a CPU pass's final parameters (struct metal_ir_upstream_parameter) its
-# Emission.types, each its C type as the emitter printed it, paired in order with `bindings`, each (the kernel binding
-# it receives, 1 the bound pointer or 0 its pointee) as the consumer bound it (lower_metal.py emitted)
-def _emitted(program, op, number, emission, bindings=()):
+# metal_ir_upstream_emitted: pass `number` of produced kernel `op`, its terminal emission as its final emitter made it
+# (lower_inductor.py Emission: source, entry, compile, link; a CPU pass's `parameters`, each Parameter(type, slot,
+# pointer) as that emitter declared it: struct metal_ir_upstream_parameter)
+def _emitted(program, op, number, emission):
     lib, error = _upstream(), C.create_string_buffer(4096)
     source = emission.source.encode() if isinstance(emission.source, str) else bytes(emission.source)
     texts = [_array(C.c_char_p, [t.encode() for t in texts]) for texts in (emission.compile, emission.link)]
-    parameters = [UpstreamParameter(t.encode(), slot, pointer)
-                  for t, (slot, pointer) in zip(emission.types, bindings, strict=True)]
+    parameters = [UpstreamParameter(p.type.encode(), p.slot, p.pointer) for p in emission.parameters]
     made = UpstreamEmission(source, emission.entry.encode(), _array(UpstreamParameter, parameters) if parameters
                             else None, texts[0], texts[1], len(source), len(parameters), len(emission.compile),
                             len(emission.link))
@@ -740,17 +798,6 @@ def _configured(program, op):
     if not made:
         raise OSError(errno.ENODATA, 'operation %d: no configured first pass (metal_ir_upstream_emitted)' % op)
     return {name: tuple(getattr(made[0], name)) for name in ('grid', 'group', 'groups')}
-
-
-# metal_ir_upstream_footprints: produced kernel `op`'s threadgroup footprints as its producer gives them (binding,
-# exact, start, extent, ((dim, coefficient, divisor, modulus), ...)), each its slice of the terms
-def _footprints(program, op, footprints):
-    made, terms = [], []
-    for binding, exact, start, extent, over in footprints:
-        made.append(Footprint(0, binding, exact, len(terms), len(over), 0, start, extent))
-        terms += [Term(d, 0, c, q, m) for d, c, q, m in over]
-    _upstream().metal_ir_upstream_footprints(program, op, len(made), _array(Footprint, made), len(terms),
-                                             _array(Term, terms))
 
 
 # mesh-call.h mesh_transfers_start and mesh-dataflow.h mesh_host_started, the program's `start` and `started`
@@ -770,47 +817,17 @@ def _execution_error(replay, status, message):
     return OSError(status, message)
 
 
-# metal-microbench metal_ir.h metal_ir_value, metal_ir_generic, metal_ir_states, metal_ir_check, metal_ir_lapack,
-# metal_ir_sort, metal_ir_repeat and the region builder: construction's typed records (compiler/mesh_compiler/
-# operations.py) encoded as one C program, each storage root one value with its role, each view a value over it;
-# `program` an existing program to encode into (metal_ir_append's destination), else a new one; `emitted` each leaf
-# record's actual emission (Emitted) and `repeated` each registered repetition (Repeated), in emission order
+# metal-microbench metal_ir.h metal_ir_value, metal_ir_upstream, metal_ir_copy, metal_ir_lapack and metal_ir_check: the
+# direct native projections over program values, encoded into `program` (an existing program, metal_ir_append's
+# destination), else a new one; `emitted` each projection's actual emission (Emitted: its record, its returned
+# operation and the operations it created), in emission order; `base` the caller's identity, `identity` the current
+# projection's (base | its source position)
 class _Builder:
-    def __init__(self, lib, identity, constants=None, program=None):
+    def __init__(self, lib, identity, program=None):
         self.lib = lib
         self.p = lib.metal_ir_program_new() if program is None else program
-        self.emitted, self.repeated, self.regions = [], [], []
-        self.values, self.roots, self.roles, self.builtins = {}, {}, {}, {}
-        self.constants = {} if constants is None else constants
+        self.emitted, self.values = [], {}
         self.base = self.identity = identity
-
-    def root(self, t):
-        key = _key(t)
-        if key in self.roots:
-            return self.roots[key]
-        base = _stored(t)
-        role = CONSTANT if key in self.constants or base.device.type != 'meta' else TEMPORARY
-        # metal-microbench metal_ir.h metal_ir_value `identity`, metal_ir.mm metal_ir_append
-        v = self.whole(base, role, 0 if role == CONSTANT else self.identity)
-        if role == CONSTANT:
-            self.attach(v, self.constants.get(key, base))
-        self.roots[key], self.roles[key] = v, role
-        return v
-
-    # metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE: a storage root whose role its caller states (an exported program's
-    # InputKind, a result, a received channel), with the initial contents `data` where the role is CONSTANT, and its
-    # caller's source identity (metal_ir_value `identity`; 0 none, so no definition is shared by identity alone)
-    def declare(self, t, role, data=None, identity=0):
-        key = _key(t)
-        if key not in self.roots:
-            v = self.whole(_stored(t), role, identity)
-            if data is not None:
-                self.attach(v, _stored(data))
-            self.roots[key], self.roles[key] = v, role
-        return self.roots[key]
-
-    def whole(self, base, role, identity):
-        return self.stored(role, SCALAR[base.dtype], base.untyped_storage().nbytes() // base.element_size(), identity)
 
     # metal_ir.h metal_ir_value: one storage root of role `role`, `elements` of metal_ir scalar `scalar`, its caller's
     # source identity (0 none)
@@ -841,12 +858,6 @@ class _Builder:
         _lent(base, lambda release, owner: self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0,
                                                                         owner, release), lambda _: True)
 
-    def value(self, t):
-        base, words = (t.tensor, 2) if isinstance(t, _Words) else (t, 1)
-        root = self.root(t)
-        return self.viewed(root, self.roles[_key(t)], SCALAR[t.dtype], t.shape, [s * words for s in base.stride()],
-                           base.storage_offset() * words)
-
     # metal_ir_upstream: one produced kernel (`record` the producer's Kernel, its retained owner) as one operation at
     # `place`, its identity the builder's base with source position `node`: `arguments` (kind UPSTREAM_*, ValueID,
     # access) in its launch's order, `views` (argument, byte offset, element bytes, ((size, byte stride), ...), write)
@@ -874,41 +885,17 @@ class _Builder:
         self.emitted.append(Emitted(record, operation, first, lib.metal_ir_operations(self.p)))
         return operation
 
-    # metal_ir.h metal_ir_generic over program values: one elementwise operation at `place` and source position
-    # `node`, its loops `sizes`, each operand's dimension d at loop d (its value's own layout the view), `inputs` their
-    # ValueIDs, one assigned output `output` of metal_ir scalar `scalar`; its BODY `body(region, parameters)` the
-    # element it yields from its inputs' elements (metal_ir_parameter k: input k's). The direct projection of a copy, a
-    # fill and a landing; `record` the producer object it implements, kept as its emission (Emitted)
-    def elementwise(self, record, place, node, sizes, inputs, output, scalar, body):
-        lib, p, rank = self.lib, self.p, len(sizes)
+    # metal_ir.h metal_ir_copy: the canonical logical copy into = convert(given) over its original transfer domain
+    # (`bounds` its loop extents, each view's dimension d at loop d), at `place` and source position `node` (0: newly
+    # produced physical-copy work), `into` and `given` (ValueID, ...) their views; `record` the producer object it
+    # implements (a CopyRecord, a landing), kept with its returned operation (Emitted)
+    def copy(self, record, place, node, bounds, into, given):
         self.identity = self.base | node
-        terms = [Term(d, 0, 1, 1, 0) for d in range(rank)]
-        exprs = [Expr(d, 1, 0) for _ in range(len(inputs) + 1) for d in range(rank)]
-        first = lib.metal_ir_operations(p)
-        operation = lib.metal_ir_generic(p, rank, _array(mesh.Q, sizes), _array(mesh.U, [PARALLEL] * rank),
-                                         len(inputs), _array(mesh.U, inputs), 1, _array(mesh.U, [output]),
-                                         _array(mesh.U, [ASSIGN]), _array(mesh.U, [IDENTITY]),
-                                         _array(mesh.U, [CLASS[scalar]]), _array(Expr, exprs), len(terms),
-                                         _array(Term, terms), 0, place, self.identity)
-        r = lib.metal_ir_region(p, operation, BODY)
-        made = body(r, [lib.metal_ir_parameter(p, r, k) for k in range(len(inputs))])
-        lib.metal_ir_yield(p, r, 1, _array(mesh.U, [made]))
-        self.emitted.append(Emitted(record, operation, first, lib.metal_ir_operations(p)))
+        first = self.lib.metal_ir_operations(self.p)
+        operation = self.lib.metal_ir_copy(self.p, into[0], given[0], len(bounds), _array(mesh.Q, bounds), place,
+                                           self.identity)
+        self.emitted.append(Emitted(record, operation, first, self.lib.metal_ir_operations(self.p)))
         return operation
-
-    # an elementwise copy of `given` into `into`, both (ValueID, metal_ir scalar) at loops `sizes`: its element as loaded
-    # (one metal_ir_convert where the stored kinds compute differently: operations.py CLASS)
-    def copy(self, record, place, node, sizes, into, given):
-        def body(r, parameters):
-            if CLASS[given[1]] == CLASS[into[1]]:
-                return parameters[0]
-            return self.lib.metal_ir_convert(self.p, r, CLASS[into[1]], parameters[0])
-        return self.elementwise(record, place, node, sizes, [given[0]], into[0], into[1], body)
-
-    # `into` (ValueID, metal_ir scalar) at loops `sizes` filled with the literal `bits` (metal_ir_literal's)
-    def fill(self, record, place, node, sizes, into, bits):
-        return self.elementwise(record, place, node, sizes, [], into[0], into[1],
-                                lambda r, parameters: self.lib.metal_ir_literal(self.p, r, CLASS[into[1]], bits))
 
     # metal_ir.h metal_ir_lapack: one typed LAPACK call (struct metal_ir_lapack_call: `routine` LAPACK_GESDD ..
     # LAPACK_GELSS, `job` its JOB characters, `rcond`) at source position `node` over `batch` (its batch extents): each
@@ -951,190 +938,3 @@ class _Builder:
         self.lib.metal_ir_check_message(self.p, operation, message.encode())
         self.emitted.append(Emitted(record, operation, first, self.lib.metal_ir_operations(self.p)))
         return operation
-
-    def builtin(self, name):
-        if name not in self.builtins:
-            self.builtins[name] = self.lib.metal_ir_builtin_named(name.encode())
-        return self.builtins[name]
-
-    def replay(self, r, region, inputs):
-        lib, p, h = self.lib, self.p, []
-        for record in region.code:
-            call = record[0]
-            if call == 'parameter':
-                h.append(lib.metal_ir_parameter(p, r, record[1]))
-            elif call == 'loop':
-                h.append(lib.metal_ir_parameter(p, r, inputs + record[1]))
-            elif call == 'literal':
-                h.append(lib.metal_ir_literal(p, r, record[1], record[2]))
-            elif call == 'binary':
-                h.append(lib.metal_ir_binary(p, r, record[1], h[record[2]], h[record[3]]))
-            elif call == 'unary':
-                h.append(lib.metal_ir_unary(p, r, record[1], h[record[2]]))
-            elif call == 'convert':
-                h.append(lib.metal_ir_convert(p, r, record[1], h[record[2]]))
-            elif call == 'bitcast':
-                h.append(lib.metal_ir_bitcast(p, r, record[1], h[record[2]]))
-            elif call == 'builtin':
-                given = _array(mesh.U, [h[x] for x in record[2]])
-                h.append(lib.metal_ir_builtin(p, r, self.builtin(record[1]), len(record[2]), given))
-            elif call == 'extract':
-                given = _array(mesh.U, [h[x] for x in record[2]])
-                h.append(lib.metal_ir_extract(p, r, record[1], len(record[2]), given))
-            elif call == 'extract_if':
-                given = _array(mesh.U, [h[x] for x in record[2]])
-                h.append(lib.metal_ir_extract_if(p, r, record[1], len(record[2]), given, h[record[3]], h[record[4]]))
-            elif call == 'scatter':
-                # metal_ir.h metal_ir_scatter: a predicate of None the store always (UINT32_MAX)
-                given = _array(mesh.U, [h[x] for x in record[2]])
-                lib.metal_ir_scatter(p, r, record[1], len(record[2]), given, h[record[3]],
-                                     NONE if record[4] is None else h[record[4]])
-                h.append(None)
-            elif call == 'yield':
-                given = _array(mesh.U, [h[x] for x in record[1]])
-                lib.metal_ir_yield(p, r, len(record[1]), given)
-                h.append(None)
-            # metal_ir.h metal_ir_if_begin .. metal_ir_if_end (compiler/mesh_compiler/lower_inductor.py _Loop.masked): the
-            # records between if_begin and if_else build its true block, those to if_end its false block; if_end's
-            # record the first merged result, ('if_result', that record, k) result k
-            elif call == 'if_begin':
-                lib.metal_ir_if_begin(p, r, h[record[1]])
-                h.append(None)
-            elif call == 'if_else':
-                given = _array(mesh.U, [h[x] for x in record[1]])
-                lib.metal_ir_if_else(p, r, len(record[1]), given)
-                h.append(None)
-            elif call == 'if_end':
-                given = _array(mesh.U, [h[x] for x in record[1]])
-                h.append(lib.metal_ir_if_end(p, r, len(record[1]), given))
-            elif call == 'if_result':
-                h.append(h[record[1]] + record[2])
-            else:
-                # Rejection filters are not part of even temporary integration validation: an operation operations.py
-                # _Region records that this encoder has no IR call for is unsupported here, not another one
-                raise NotImplementedError('a region\'s record %r (%s): no metal_ir.h instruction encodes it'
-                                          % (record[:2], KINDS.get(region.kinds[len(h)])))
-            if h[-1] == NONE:
-                raise NotImplementedError('a region\'s %s of %s: not an instruction of the IR (metal_ir.h, UINT32_MAX)'
-                                          % (' '.join(str(x) for x in record[:2]), KINDS.get(region.kinds[len(h) - 1])))
-
-    # one record: a repetition (operations.py _Repeat) through `repeat`, None (a repetition is no operation); a leaf
-    # record encoded (`encoded`), its actual emission kept (Emitted: the record, its returned operation and the
-    # interval metal_ir_operations gives around it), its operation returned
-    def generic(self, g):
-        if isinstance(g, _Repeat):
-            return self.repeat(g)
-        if isinstance(g, _Switch):
-            return self.switch(g)
-        first = self.lib.metal_ir_operations(self.p)
-        operation = self.encoded(g)
-        self.emitted.append(Emitted(g, operation, first, self.lib.metal_ir_operations(self.p)))
-        return operation
-
-    # `regions` the open regions while their records are emitted, innermost last, each [its direct children
-    # (RegionChild), its open arm: a switch's branch, UINT32_MAX a repetition's]: a region registered there (postorder)
-    # the innermost open one's child in that arm
-    def enclosed(self, kind, region):
-        if self.regions:
-            children, arm = self.regions[-1]
-            children.append(RegionChild(kind, region, arm))
-
-    # metal_ir.h metal_ir_repeat: one pass's records emitted in order through `generic` (each region in it registered
-    # first, its direct child), then the pass's whole operation interval registered once with its condition's ValueID
-    # (a one-element int32 view), its carried tensors' storage roots and its direct children; the region (Repeated)
-    # kept beside the leaves' emissions, never as an operation
-    def repeat(self, g):
-        first, children = self.lib.metal_ir_operations(self.p), []
-        self.regions.append([children, NONE])
-        for record in g.records:
-            self.generic(record)
-        self.regions.pop()
-        end, carried = self.lib.metal_ir_operations(self.p), [self.root(t) for t in g.carried]
-        region = self.lib.metal_ir_repeat(self.p, first, end, self.value(g.condition), len(carried),
-                                          _array(mesh.U, carried), len(children), _array(RegionChild, children))
-        self.repeated.append(Repeated(g, region, first, end))
-        self.enclosed(REGION_REPEAT, region)
-
-    # metal_ir.h metal_ir_switch_selector and metal_ir_switch (registration only: it constructs no copy), in
-    # postorder: at the switch's source control point, before its branches' operations, its selector, one operation of
-    # its index's ValueID (a one-element integer view, operations._stored as each operand) at the switch's place and
-    # identity (`identity`, as `encoded`), emitted as its record's (Emitted); then each branch k's records emitted once
-    # in order through `generic` (each region in it registered first, its direct child in arm k), then
-    # operations._copy of each of its yields into its common output, at the switch's own place and node, inside that
-    # branch, its interval [first, end) taken around both; then the switch registered once with its index, the yields'
-    # own ValueIDs branch-major and the common outputs', its selector and its direct children (`regions`); itself so
-    # the innermost open region's child. The switch region is no operation
-    def switch(self, g):
-        first, end, yielded, children = [], [], [], []
-        self.identity = self.base | g.node
-        index, before = self.value(_stored(g.index)), self.lib.metal_ir_operations(self.p)
-        selector = self.lib.metal_ir_switch_selector(self.p, index, len(g.branches), g.place, self.identity)
-        self.emitted.append(Emitted(g, selector, before, self.lib.metal_ir_operations(self.p)))
-        opened = [children, 0]
-        self.regions.append(opened)
-        for k, (records, yields) in enumerate(g.branches):
-            opened[1] = k
-            first.append(self.lib.metal_ir_operations(self.p))
-            for record in records:
-                self.generic(record)
-            for out, value in zip(g.outputs, yields, strict=True):
-                written = _copy(out, value)
-                _placed(written, g.place, g.node)
-                for record in written:
-                    self.generic(record)
-            end.append(self.lib.metal_ir_operations(self.p))
-            yielded += [self.value(_stored(value)) for value in yields]
-        self.regions.pop()
-        results = [self.value(_stored(out)) for out in g.outputs]
-        region = self.lib.metal_ir_switch(
-            self.p, index, len(g.branches), _array(mesh.U, first), _array(mesh.U, end), len(g.outputs),
-            _array(mesh.U, yielded), _array(mesh.U, results), selector, len(children), _array(RegionChild, children))
-        self.enclosed(REGION_SWITCH, region)
-
-    # metal_ir.h `identity`: the producer's identity of an operation and of the values it first names, (function,
-    # call ordinal, FX node position) of the call's graph, kept through every transformation (metal_ir_operation_info)
-    def encoded(self, g):
-        if isinstance(g, _Check):
-            self.identity = self.base | g.node
-            operation = self.lib.metal_ir_check(self.p, self.value(g.info), g.code, self.identity)
-            if g.message:
-                self.lib.metal_ir_check_message(self.p, operation, g.message.encode())
-            if g.dep_token is not None:
-                self.lib.metal_ir_check_dep_token(self.p, operation, self.value(_stored(g.dep_token)))
-            return operation
-        if isinstance(g, _Sort):
-            self.identity = self.base | g.node
-            return self.lib.metal_ir_sort(self.p, self.value(g.x), g.axis, g.k, int(g.descending),
-                                          self.value(g.values), self.value(g.indices),
-                                          0xFFFFFFFF if g.extent is None else self.value(g.extent), g.place,
-                                          self.identity)
-        self.identity = self.base | g.node
-        lib, p = self.lib, self.p
-        inputs, outputs = [self.value(t) for t, _ in g.inputs], [self.value(t) for t, _ in g.outputs]
-        exprs, terms, loops = [], [], len(g.sizes)
-        dims = loops + len(g.symbols)
-        for t, rows in g.inputs + g.outputs:
-            for d in range(len(t.shape)):
-                row = rows[d] if rows is not None else (0,) * (dims + 1)
-                first = len(terms)
-                terms += [Term(l, 0, c, 1, 0) for l, c in enumerate(row[:dims]) if c]
-                exprs.append(Expr(first, len(terms) - first, row[dims]))
-        op = lib.metal_ir_generic(p, loops, _array(mesh.Q, g.sizes), _array(mesh.U, g.iterators), len(inputs),
-                                  _array(mesh.U, inputs), len(outputs), _array(mesh.U, outputs),
-                                  _array(mesh.U, g.combiner), _array(mesh.U, g.start), _array(mesh.U, g.accumulator),
-                                  _array(Expr, exprs), len(terms), _array(Term, terms), g.precision, g.place,
-                                  self.identity)
-        if g.states:
-            lib.metal_ir_states(p, op, len(g.states), _array(mesh.U, [kind for kind, _ in g.states]),
-                                _array(mesh.Q, [_bits(identity, kind) for kind, identity in g.states]))
-        # metal_ir_symbol in the record's order (its dimension loops + k), each scalar its own typed value, then each
-        # loop's metal_ir_loop_extent where a symbol clips it
-        symbol = [lib.metal_ir_symbol(p, op, self.value(t), bound) for t, bound in g.symbols]
-        for loop, k in enumerate(g.extents):
-            if k is not None:
-                lib.metal_ir_loop_extent(p, op, loop, symbol[k])
-        self.replay(lib.metal_ir_region(p, op, BODY), g.body, len(inputs))
-        if g.states:
-            self.replay(lib.metal_ir_region(p, op, COMBINE), g.combine, 0)
-            self.replay(lib.metal_ir_region(p, op, FINALIZE), g.finalize, 0)
-        return op
