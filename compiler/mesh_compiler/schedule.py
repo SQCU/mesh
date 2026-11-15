@@ -281,7 +281,11 @@ def declarations(module, transfers, carried, machines, cost, functions, before, 
 # design/torch-source-lowering-change-request.md item 3; design/aot-compilation-change-request.md A6;
 # design/integration-finishing-change-request.md item 2; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
 # Res. 22(3), 1997, section 2; M. Cowan et al., MSCCLang, ASPLOS 2023, section 5.2, step 3; compiler/mesh_compiler/ir.py
-# Planning; design/compilation-composition-change-request.md items 2, 3, 6 and 7; rdma/mesh-graph.h mesh_graph_contract
+# Planning; design/compilation-composition-change-request.md items 2, 3, 6 and 7; rdma/mesh-graph.h mesh_graph_contract:
+# each machine group's body (`assemble` over its member processors, a pair local to the group discharged), the
+# declarations, and each processor's own body (`assemble` over that processor alone, discharging no transfer: each
+# keeps its SEND and RECV; meta["group"] its machine group, meta["copied"] the original source nodes' copies, the
+# same originals the group body's meta["copied"] keys)
 def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), planning=None, groups=None):
     transfers = module.meta["transfers"]
     nodes, functions, writers, source = dependence(module, transfers)
@@ -291,7 +295,8 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     processors = dict.fromkeys(n.meta["processor"] for n in nodes if n.op != "placeholder")
     lane = {processor: k for k, processor in enumerate(processors)}
     tasks = [(cost(node), lane[node.meta["processor"]]) for node in functions]
-    edges = [(task[earlier], task[later]) for earlier, later in graph.edges()]
+    every = graph.edges()
+    edges = [(task[earlier], task[later]) for earlier, later in every]
     before = graph.ancestors(functions[::-1], successors=True)
     # Rejection filters are not part of even temporary integration validation.
     # Zero-byte payloads need no transport row; their source operations and dependence causes remain above.
@@ -303,14 +308,20 @@ def schedule(module, cost=unit_cost, carried=(), machines=None, mutated=(), plan
     local = {end for ends in transfers.values() if len({side[end.meta["processor"]] for end in ends}) == 1
              for end in ends}
     pairs = graph.contract([node not in local or landing(node) for node in graph.vertices]).edges() if local else \
-        graph.edges()
+        every
     identity = {node: (k, resource) for k, (node, (_, resource)) in enumerate(zip(functions, tasks))}
     members = {group: tuple(p for p in processors if side[p] == group) for group in dict.fromkeys(side.values())}
     sequence = tuple(identity[node] for node in listed)
+    decomposed, parts = module.meta["decomposed"], module.meta.get("input_parts", {})
+    bodies = {}
+    for processor in processors:
+        bodies[processor] = assemble(processor, (processor,), [n for n in listed if n.meta["processor"] == processor],
+                                     nodes, every, transfers, set(), identity, writers, sequence, source, decomposed,
+                                     parts, module)
+        bodies[processor].meta["group"] = side[processor]
     return {group: assemble(group, held, [node for node in listed if node.meta["processor"] in held], nodes, pairs,
-                            transfers, local, identity, writers, sequence, source, module.meta["decomposed"],
-                            module.meta.get("input_parts", {}), module)
-            for group, held in members.items()}, declared
+                            transfers, local, identity, writers, sequence, source, decomposed, parts, module)
+            for group, held in members.items()}, declared, bodies
 
 
 # design/compilation-composition-change-request.md items 2, 3 and 6; M. Abadi et al., TensorFlow, arXiv:1603.04467,

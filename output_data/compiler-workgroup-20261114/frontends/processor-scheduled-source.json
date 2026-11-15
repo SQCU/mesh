@@ -1,0 +1,28 @@
+{
+  "scope": "Actual per-processor Scheduled body producer; source checks only",
+  "source": "compiler/mesh_compiler/schedule.py",
+  "sha256": "c790eefcb3978ead4827b894754a33721e11524fc97e8366151988478715dd0d",
+  "changed_during_checks": false,
+  "checks": {
+    "ast": "PASS",
+    "pyflakes": {
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "diff_check": {
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "producer": "schedule returns (machine_modules, declared, processor_modules); original listed order, task identities and edge View feed existing assemble projections without another solve.",
+  "correspondence": "processor_modules[p].meta[group] identifies the machine module; both copied maps key the same original Nodes. Source relation, transfers, writes, decomposed and input_parts are retained.",
+  "consumer": "Compiler-owned driver/Scheduled/lower_inductor pairing remains in progress; no target import or execution.",
+  "reference_reads": {
+    "session88": "Literal schedule-emit read denied; not accepted as direct-read evidence.",
+    "session89": "Successful returned contents inspected for driver.py, schedule.py, lower_inductor.py and ir.py under /Users/mdot/schedule-emit/schedule_emit, plus original AOT/composition/source-lowering clauses."
+  },
+  "worker": "Same Claude Opus5.5 session9740398d-f513-4c78-8578-f80b79fa2225; turns88/89/90 terminal.",
+  "orders": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/processor-scheduled-{1,2,3}.md"
+}
