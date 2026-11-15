@@ -151,94 +151,31 @@ def _lstsq_fixed_backward(ctx, solution, rank, singular):
 torch.library.register_autograd('mesh::linalg_lstsq_fixed', _lstsq_fixed_backward, setup_context=_lstsq_fixed_context)
 
 
-# design/torch-source-lowering-change-request.md item 5: the CPU drivers, Accelerate's LAPACK (clapack.h, MacOSX.sdk
-# Accelerate.framework/Frameworks/vecLib.framework/Headers/clapack.h; __CLPK_integer int; LAPACK 3.2.1, as PyTorch
-# v2.14.0 aten/src/ATen/native/LinearAlgebraUtils.h computeLRWorkDim states for Accelerate). Each routine family is
-# one typed operator (mesh::lapack_*), its operands and results the routine's own: a matrix operand LAPACK reads and
-# overwrites (A, B) is copied into the call's own column-major buffer (its leading dimension the stated one), a result
-# matrix is that buffer (column-major, as the fake gives it), INFO the routine's int32 per batch member, and the
-# selected symbol is the operand dtype's (s, d, c, z). The operators have no eager kernel: their implementation is the
-# LAPACK call LAPACK[packet] states (library, symbols, clapack.h arguments in prototype order, workspace, error), never
-# a Torch kernel. Workspace: a `query` buffer is sized by the routine's own LWORK = -1 call (its first element's real
-# part; LIWORK, LRWORK alike), a `size` buffer by its stated length; every buffer is the call's own. Error: INFO as
-# PyTorch v2.14.0 BatchLinearAlgebra.cpp 1610-1690 _linalg_check_errors(info, api, is_matrix) raises it (INFO < 0 its
-# illegal-argument RuntimeError, INFO > 0 its torch.linalg.LinAlgError for `api`), after the call, is_matrix where the
-# routine's batch has at most one member
-LAPACK_LIBRARY = '/System/Library/Frameworks/Accelerate.framework/Accelerate'
-Routine = collections.namedtuple('Routine', 'symbols arguments error')
-# `kind`: 'char' a str operand's name (or a literal), 'int' a dimension (by pointer), 'matrix' the call's column-major
-# buffer (`value` (operand copied in or None, result read out or None, leading dimension)), 'vector' a result buffer,
-# 'scalar' a float operand in the real kind (by pointer), 'unused' an argument the job does not reference (a
-# one-element buffer), 'work' a workspace buffer, zero on entry (dgelsy's JPVT: every column free) (`value` ('query' |
-# 'size', element kind 'value' | 'real' | 'int', length)), 'length' a workspace's length (-1 in the query call), 'info'
-# INFO. A dimension or length is a function of the call's sizes `g` (m and n the extents of a's last two dimensions,
-# nrhs b's last, and the str operands by name)
-Argument = collections.namedtuple('Argument', 'name kind value')
-
-
-def _clapack(*arguments):
-    return tuple(Argument(*argument) for argument in arguments)
-
-
-def _lead(*sizes):
-    return lambda g: max(1, *(g[size] if isinstance(size, str) else size(g) for size in sizes))
-
-
-def _k(g):
-    return min(g['m'], g['n'])
-
-
-# dgesdd.f/zgesdd.f: JOBZ 'A' (U m x m, VT n x n), 'S' (U m x k, VT k x n), 'N' (neither); IWORK 8 min(m, n);
-# zgesdd's LRWORK PyTorch computeLRWorkDim (Accelerate's LAPACK 3.2.1: 7 min(m, n) for 'N')
-def _gesdd_rwork(g):
-    k, top = _k(g), max(g['m'], g['n'])
-    if g['jobz'] == 'N':
-        return 7 * k
-    return 5 * k * k + 5 * k if top > 10 * k else max(5 * k * k + 5 * k, 2 * top * k + 2 * k * k + k)
-
-
-def _vt_rows(g):
-    return g['n'] if g['jobz'] == 'A' else _k(g) if g['jobz'] == 'S' else 1
-
-
-def _u_lead(g):
-    return max(1, g['m']) if g['jobz'] != 'N' else 1
-
-
-_GESDD = (('jobz', 'char', 'jobz'), ('m', 'int', 'm'), ('n', 'int', 'n'), ('a', 'matrix', ('a', None, _lead('m'))),
-          ('lda', 'int', _lead('m')), ('s', 'vector', 's'), ('u', 'matrix', (None, 'u', _u_lead)),
-          ('ldu', 'int', _u_lead), ('vt', 'matrix', (None, 'vt', _lead(_vt_rows))),
-          ('ldvt', 'int', lambda g: max(1, _vt_rows(g))), ('work', 'work', ('query', 'value', None)),
-          ('lwork', 'length', 'work'))
-# dsyevd.f/zheevd.f: JOBZ 'V' (A overwritten by the eigenvectors, the result z) or 'N'; UPLO the stored triangle
-_HEEVD = (('jobz', 'char', 'jobz'), ('uplo', 'char', 'uplo'), ('n', 'int', 'n'), ('a', 'matrix', ('a', 'z', _lead('n'))),
-          ('lda', 'int', _lead('n')), ('w', 'vector', 'w'), ('work', 'work', ('query', 'value', None)),
-          ('lwork', 'length', 'work'))
-# dgeev.f/zgeev.f: JOBVL 'N' (VL unreferenced), JOBVR 'V' or 'N'; zgeev's RWORK 2 n
-def _vr_lead(g):
-    return max(1, g['n']) if g['jobvr'] == 'V' else 1
-
-
-_GEEV = (('jobvl', 'char', 'N'), ('jobvr', 'char', 'jobvr'), ('n', 'int', 'n'),
-         ('a', 'matrix', ('a', None, _lead('n'))), ('lda', 'int', _lead('n')))
-_GEEV_VECTORS = (('vl', 'unused', None), ('ldvl', 'int', lambda g: 1),
-                 ('vr', 'matrix', (None, 'vr', _vr_lead)), ('ldvr', 'int', _vr_lead),
-                 ('work', 'work', ('query', 'value', None)), ('lwork', 'length', 'work'))
-# dgels.f, dgelsy.f, dgelsd.f, dgelss.f and their z forms: B (max(m, n) x nrhs, LDB max(1, m, n)) holds the
-# right-hand sides on entry (rows m on zero) and the solution (and dgels' residual rows) on exit, the result x
-_LEAST = (('m', 'int', 'm'), ('n', 'int', 'n'), ('nrhs', 'int', 'nrhs'), ('a', 'matrix', ('a', None, _lead('m'))),
-          ('lda', 'int', _lead('m')), ('b', 'matrix', ('b', 'x', _lead('m', 'n'))), ('ldb', 'int', _lead('m', 'n')))
-_WORK = (('work', 'work', ('query', 'value', None)), ('lwork', 'length', 'work'))
-_INFO = (('info', 'info', 'info'),)
-
+# design/torch-source-lowering-change-request.md item 5: the CPU drivers, each one Reference-LAPACK driver routine the
+# native owner calls once (metal-microbench metal_ir.h METAL_IR_GESDD .. METAL_IR_GELSY, struct metal_ir_lapack_call;
+# metal_native.mm LapackStages, LapackWorkspace32/64 and LapackMember, 9404b7b2 and 633068d4): its symbol by the
+# operand's kind (s, d, c, z), its Accelerate ILP64 prototype order, its workspace queries and buffers (WORK, IWORK,
+# RWORK, gelsy's JPVT zeroed per batch member), gels' fixed TRANS 'N', and INFO and RANK staged at __LAPACK_int and
+# converted once on copy-out to the result's own dtype are the native owner's alone. Each routine family is one typed
+# operator (mesh::lapack_*), its operands and results the routine's own: a matrix operand LAPACK reads and overwrites
+# (A, B) is the call's own column-major buffer, a result matrix is that buffer (column-major, as the fake gives it),
+# INFO the routine's per batch member. The operators have no eager kernel, never a Torch kernel. LAPACK[packet] is
+# the routine's selection and its operands, by the operator's schema names (Call): `routine` the driver the native
+# owner selects (geev for dgeev and zgeev), `jobs` its str operands in job order, `rcond` its float operand (gelsy,
+# gelsd, gelss) or None, `inputs` its matrix operands, `matrices` its matrix results (a matrix per batch member where
+# the job computes it, else the fake's (0,) placeholder), `info` its INFO result; every result, in schema order, is
+# the call's own output. Error: INFO as PyTorch v2.14.0 BatchLinearAlgebra.cpp 1610-1690 _linalg_check_errors(info,
+# api, is_matrix) raises it (INFO < 0 its illegal-argument RuntimeError, INFO > 0 its torch.linalg.LinAlgError for
+# `api`), after the call, in each formulation below
+Call = collections.namedtuple('Call', 'routine jobs rcond inputs matrices info')
 LAPACK = {}
 
 
-def _lapack(name, schema, fake, symbols, real, complex_, api):
+def _lapack(name, schema, fake, *call):
     torch.library.define('mesh::lapack_' + name, schema)
     torch.library.register_fake('mesh::lapack_' + name)(fake)
     target = getattr(torch.ops.mesh, 'lapack_' + name).default
-    LAPACK[target.overloadpacket] = Routine(symbols, {False: _clapack(*real), True: _clapack(*complex_)}, api)
+    LAPACK[target.overloadpacket] = Call(*call)
     return target
 
 
@@ -296,52 +233,28 @@ def _gelsd_fake(a, b, rcond):
 
 LAPACK_GESDD = _lapack(
     'gesdd', '(Tensor a, str jobz) -> (Tensor s, Tensor u, Tensor vt, Tensor info)', _gesdd_fake,
-    {torch.float32: 'sgesdd_', torch.float64: 'dgesdd_', torch.complex64: 'cgesdd_', torch.complex128: 'zgesdd_'},
-    _GESDD + (('iwork', 'work', ('size', 'int', lambda g: 8 * _k(g))),) + _INFO,
-    _GESDD + (('rwork', 'work', ('size', 'real', _gesdd_rwork)), ('iwork', 'work', ('size', 'int', lambda g: 8 * _k(g))))
-    + _INFO, 'linalg.svd')
+    'gesdd', ('jobz',), None, ('a',), ('u', 'vt'), 'info')
 LAPACK_HEEVD = _lapack(
     'heevd', '(Tensor a, str jobz, str uplo) -> (Tensor w, Tensor z, Tensor info)', _heevd_fake,
-    {torch.float32: 'ssyevd_', torch.float64: 'dsyevd_', torch.complex64: 'cheevd_', torch.complex128: 'zheevd_'},
-    _HEEVD + (('iwork', 'work', ('query', 'int', None)), ('liwork', 'length', 'iwork')) + _INFO,
-    _HEEVD + (('rwork', 'work', ('query', 'real', None)), ('lrwork', 'length', 'rwork'),
-              ('iwork', 'work', ('query', 'int', None)), ('liwork', 'length', 'iwork')) + _INFO, 'linalg.eigh')
+    'heevd', ('jobz', 'uplo'), None, ('a',), ('z',), 'info')
 LAPACK_DGEEV = _lapack(
     'dgeev', '(Tensor a, str jobvr) -> (Tensor wr, Tensor wi, Tensor vr, Tensor info)', _dgeev_fake,
-    {torch.float32: 'sgeev_', torch.float64: 'dgeev_'},
-    _GEEV + (('wr', 'vector', 'wr'), ('wi', 'vector', 'wi')) + _GEEV_VECTORS + _INFO, (), 'torch.linalg.eig')
+    'geev', ('jobvr',), None, ('a',), ('vr',), 'info')
 LAPACK_ZGEEV = _lapack(
     'zgeev', '(Tensor a, str jobvr) -> (Tensor w, Tensor vr, Tensor info)', _zgeev_fake,
-    {torch.complex64: 'cgeev_', torch.complex128: 'zgeev_'}, (),
-    _GEEV + (('w', 'vector', 'w'),) + _GEEV_VECTORS + (('rwork', 'work', ('size', 'real', lambda g: 2 * g['n'])),)
-    + _INFO, 'torch.linalg.eig')
+    'geev', ('jobvr',), None, ('a',), ('vr',), 'info')
 LAPACK_GELS = _lapack(
     'gels', '(Tensor a, Tensor b) -> (Tensor x, Tensor info)', _gels_fake,
-    {torch.float32: 'sgels_', torch.float64: 'dgels_', torch.complex64: 'cgels_', torch.complex128: 'zgels_'},
-    (('trans', 'char', 'N'),) + _LEAST + _WORK + _INFO, (('trans', 'char', 'N'),) + _LEAST + _WORK + _INFO,
-    'torch.linalg.lstsq')
-_JPVT = (('jpvt', 'work', ('size', 'int', lambda g: g['n'])),)
-_RANK = (('rcond', 'scalar', 'rcond'), ('rank', 'vector', 'rank'))
+    'gels', (), None, ('a', 'b'), ('x',), 'info')
 LAPACK_GELSY = _lapack(
     'gelsy', '(Tensor a, Tensor b, float rcond) -> (Tensor x, Tensor rank, Tensor info)', _gelsy_fake,
-    {torch.float32: 'sgelsy_', torch.float64: 'dgelsy_', torch.complex64: 'cgelsy_', torch.complex128: 'zgelsy_'},
-    _LEAST + _JPVT + _RANK + _WORK + _INFO,
-    _LEAST + _JPVT + _RANK + _WORK + (('rwork', 'work', ('size', 'real', lambda g: 2 * g['n'])),) + _INFO,
-    'torch.linalg.lstsq')
-_SINGULAR = (('s', 'vector', 's'),)
+    'gelsy', (), 'rcond', ('a', 'b'), ('x',), 'info')
 LAPACK_GELSD = _lapack(
     'gelsd', '(Tensor a, Tensor b, float rcond) -> (Tensor x, Tensor s, Tensor rank, Tensor info)', _gelsd_fake,
-    {torch.float32: 'sgelsd_', torch.float64: 'dgelsd_', torch.complex64: 'cgelsd_', torch.complex128: 'zgelsd_'},
-    _LEAST + _SINGULAR + _RANK + _WORK + (('iwork', 'work', ('query', 'int', None)),) + _INFO,
-    _LEAST + _SINGULAR + _RANK + _WORK + (('rwork', 'work', ('query', 'real', None)),
-                                         ('iwork', 'work', ('query', 'int', None))) + _INFO,
-    'torch.linalg.lstsq')
+    'gelsd', (), 'rcond', ('a', 'b'), ('x',), 'info')
 LAPACK_GELSS = _lapack(
     'gelss', '(Tensor a, Tensor b, float rcond) -> (Tensor x, Tensor s, Tensor rank, Tensor info)', _gelsd_fake,
-    {torch.float32: 'sgelss_', torch.float64: 'dgelss_', torch.complex64: 'cgelss_', torch.complex128: 'zgelss_'},
-    _LEAST + _SINGULAR + _RANK + _WORK + _INFO,
-    _LEAST + _SINGULAR + _RANK + _WORK + (('rwork', 'work', ('size', 'real', lambda g: 5 * _k(g))),) + _INFO,
-    'torch.linalg.lstsq')
+    'gelss', (), 'rcond', ('a', 'b'), ('x',), 'info')
 
 
 # the CPU formulations, each torch.linalg operator's own result through its routine: torch 2.14.0 aten _linalg_svd
@@ -1392,7 +1305,7 @@ def _rotation(app, aqq, apq, active):
 # to the rows above), the triangular solve of Q^H b's leading rank rows, the RZ reflectors applied back and the pivot
 # exchanges undone in reverse
 def _gelsy_solution(packed, tau, pivots, rank, b):
-    (m, n), k = packed.shape[-2:], min(packed.shape[-2:])
+    n, k = packed.shape[-1], min(packed.shape[-2:])
     matrix, indices = packed[..., :k, :].triu(), torch.arange(n, device=packed.device)
     reflectors = []
     for j in reversed(range(k)):
