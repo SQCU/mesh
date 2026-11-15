@@ -191,7 +191,7 @@ The `KernelCallLine` is the call's identity. `CppTemplateKernel` has no subclass
 | `launch` | `(name, values, types, grid, group, error)` | `(line.kernel_name, arg_defs, line.call_args, line.arg_types)`, `arg_defs` its `codegen_group`'s (new patch) | `(line.kernel_name, TEMPLATE_DECLARED, line.call_args, line.arg_types)` |
 | `produced` | `(metal_entry, metal_source)` at the call, as `codegen_kernel` made and `define_kernel` defined it | `defined_kernels[name]`: (declared entry, final source) | same |
 | `schedule` | the `node_schedule` received, with its DisableReduction/EnableReduction markers | `scheduled_nodes` | the nodes its `define_kernel` received: the template node, then its epilogue nodes |
-| `ranges` | one `Ranges` for each second-pass SchedulerNode | `(CppKernelProxy, nodes, local_buffer_context)` for each `finalize_kernel`; each proxy's kernels hold their `CppRanges` (below) | `TEMPLATE_RANGES` |
+| `ranges` | one `Ranges` for each second-pass SchedulerNode | `(CppKernelProxy, nodes, local_buffer_context, local_buffers)` for each `finalize_kernel`; each proxy's kernels hold their `CppRanges` (below) | `TEMPLATE_RANGES` |
 | `scheduled`, `origins` | its SchedulerNodes, and their original nodes | same | same |
 
 `Unretained(result, owner)` names an actual result that the record does not hold, and its original producer. It is not
@@ -255,17 +255,30 @@ A scalar kernel that `codegen_functions` made but did not select (the vector-tai
 Outer-loop fusion:
 - The finalized proxy's `loop_nest.kernel` is an `OuterLoopFusedKernel`, and each of its `inner` LoopNests' kernel is a
   fused proxy.
-- The record's third element, `V.local_buffer_context` at that `finalize_kernel`, is the `LocalBufferContext` whose
-  `local_buffers` and `global_to_local` hold the kernel-local buffers its accesses name. Outside one it is
-  virtualized.py's `NullHandler`.
+- The record's third element is `V.local_buffer_context` at that `finalize_kernel`.
+  - For the fused finalize (cpp.py 5870, inside the `with LocalBufferContext(…)` at 5809) it is that
+    `LocalBufferContext`.
+  - For the fallback's and `codegen_node`'s finalizes (5894, 5912) it is virtualized.py's `NullHandler`.
+- The fourth element is that context's `local_buffers` at the finalize, `{local name: ir.Buffer}`: a new dict holding
+  the same Buffer objects `add_local_buffer` registered. These are the kernel-local buffers its accesses name and
+  `codegen_loops_impl` declares.
+  - It is copied at the finalize because `LocalBufferContext.__exit__` clears `local_buffers` in place
+    (cpp_utils.py 384). The retained context's own `local_buffers` is empty after the fusion returns.
+  - It is taken under the original's own test, `isinstance(V.local_buffer_context, LocalBufferContext)` (cpp.py
+    2717). Outside a context it is `{}`: the kernel's `KernelArgs.input`/`output` are unpatched, so no name is local.
+- `__exit__` keeps the context's `global_buffers`, `global_to_local` and `removed_buffers`. They are read from the
+  context itself, not copied.
 
 Template epilogues are rendered through cpp_template_kernel.py's own `CppKernelProxy(KernelGroup())`, so they have no
 `CppRanges`. That stays `TEMPLATE_RANGES`.
 
 ### Source fields changed for 66 and 104 (as landed)
 
-- `Kernel.ranges` (cpu group): each element was `(proxy, nodes)` and is now `(proxy, nodes, local_buffer_context)`.
-  104's `ranged["cpu"]` reads `r[0]` and `r[1]`, which are unchanged.
+- `Kernel.ranges` (cpu group): each element was `(proxy, nodes)` and is now
+  `(proxy, nodes, local_buffer_context, local_buffers)`.
+  - `local_buffers` is `{local name: ir.Buffer}` as held at the finalize (above). It replaces reading
+    `r[2].local_buffers`, which is empty after the context exits.
+  - 104's `ranged["cpu"]` reads `r[0]` and `r[1]`, which are unchanged.
 - `Kernel.launch` (cpu group): the same 4-tuple shape, from the new sources above. `arg_defs`, `call_args` and
   `arg_types` are tuples.
 - New on each `proxy.kernels` entry: `mesh_ranges`, `mesh_indirect`, `mesh_split` and `mesh_suffix`.

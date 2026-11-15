@@ -22,6 +22,7 @@ from torch._inductor import ir as upstream
 from torch._inductor.codegen.cpp import (CppKernel, CppKernelProxy, CppOverrides, CppScheduling, CppTile2DKernel,
                                          CppTile2DOverrides, CppVecKernel, CppVecOverrides, KernelGroup)
 from torch._inductor.codegen.cpp_template_kernel import CppTemplateKernel
+from torch._inductor.codegen.cpp_utils import LocalBufferContext
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
 from torch._inductor.codegen.wrapper import KernelCallLine
 from torch._inductor.compile_fx import compile_fx_aot, compile_fx_inner
@@ -200,7 +201,8 @@ TEMPLATE_RANGES = Unretained("the template's and its epilogues' loops, indices a
 # `schedule`: mps the node_schedule codegen_node_schedule_with_kernel received,
 # its DisableReduction and EnableReduction scopes in it; cpu the group's scheduled nodes, a template's the nodes its
 # define_kernel received (its template node, then its epilogue nodes). `ranges`: mps each second-pass SchedulerNode's
-# Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes, local buffer context) in order (MeshKernelGroup),
+# Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes, local buffer context, local buffers) in order
+# (MeshKernelGroup),
 # each proxy's LoopNest and its kernels (MeshCppKernelProxy), each kernel's CppRanges in order with their accesses
 # (MeshCppAccesses); a template's TEMPLATE_RANGES (not retained: its effects are not empty; its scheduled nodes'
 # read_writes are its own).
@@ -489,11 +491,17 @@ class MeshCppKernelProxy(CppKernelProxy):
     kernel_cls, vec_kernel_cls, tile2d_kernel_cls = MeshCppKernel, MeshCppVecKernel, MeshCppTile2DKernel
 
 
-# codegen/cpp.py KernelGroup: each finalize_kernel's (CppKernelProxy, nodes, local buffer context) as it received it:
-# the proxy (codegen_node's; codegen_outer_loop_node's merge_outer_fusion_kernels result, its LoopNest's kernel an
-# OuterLoopFusedKernel whose `inner` LoopNests' kernels are the fused proxies), the nodes, and V.local_buffer_context
-# at that finalize (codegen_outer_loop_node's LocalBufferContext: its local_buffers, global_buffers and global_to_local,
-# the kernel-local buffers its accesses name; virtualized.py's NullHandler outside one). Each call's own record, as
+# codegen/cpp.py KernelGroup: each finalize_kernel's (CppKernelProxy, nodes, local buffer context, local buffers) as it
+# received it: the proxy (codegen_node's; codegen_outer_loop_node's merge_outer_fusion_kernels result, its LoopNest's
+# kernel an OuterLoopFusedKernel whose `inner` LoopNests' kernels are the fused proxies), the nodes,
+# V.local_buffer_context at that finalize (codegen_outer_loop_node's LocalBufferContext, cpp.py 5809, finalized under
+# it at 5870: its global_buffers, global_to_local and removed_buffers, which its __exit__ keeps; virtualized.py's
+# NullHandler outside one, the fallback's and codegen_node's finalize) and that context's local_buffers mapping as it
+# holds it at the finalize, {local name: ir.Buffer}, the same Buffer objects add_local_buffer registered, the
+# kernel-local buffers its accesses name and codegen_loops_impl declares (cpp.py 2717: under the same isinstance
+# test). Its __exit__ clears local_buffers in place (cpp_utils.py 384), so the mapping is taken here; outside a
+# LocalBufferContext the kernel's KernelArgs.input and output are unpatched and no name is local ({}). Each call's own
+# record, as
 # MeshMetalKernel.call_kernel's (wrapper.launched_kernels): (group, launch, its KernelCallLine, the graph it was called
 # in, its scheduler, its (declared entry, final source) as define_kernel defined it: torch-inductor-upstream-composition
 # .patch defined_kernels); its launch (kernel name, arg_defs, call_args, arg_types): its definition's own parameter
@@ -506,7 +514,9 @@ class MeshKernelGroup(KernelGroup):
         self.mesh_proxies = []
 
     def finalize_kernel(self, new_kernel, nodes):
-        self.mesh_proxies.append((new_kernel, tuple(nodes), V.local_buffer_context))
+        context = V.local_buffer_context
+        local = dict(context.local_buffers) if isinstance(context, LocalBufferContext) else {}
+        self.mesh_proxies.append((new_kernel, tuple(nodes), context, local))
         super().finalize_kernel(new_kernel, nodes)
 
     def call_kernel(self, wrapper, kernel_name):
