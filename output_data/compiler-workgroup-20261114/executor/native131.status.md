@@ -635,3 +635,61 @@ writes only data words. The pool stays 133's.
 
 **Next (mine):** the target-stage physical result. That means analyzing each `u.raised[pass]` (its robustness clamps
 and MSL resource parameters) into the access operand that readiness and placement consume, and saving it.
+
+## Checkpoints `cc65c230`, `c384f1df` (2026-11-14; staged blobs strict-checked from the index, compiler exit 0; nothing built)
+
+**`cc65c230`: correction of `f66687b8`, plus `owned` and owned image references.**
+- `f66687b8` was staged from zero-context hunks (`git apply --unidiff-zero`). That misplaced insertions:
+  `metal_ir_native_image` inside `metal_ir_solved`, `Close` inside `struct Emitted`, the bind's file write ahead of
+  its declarations, the archive's images after its `malloc` and its load check. The working tree was correct;
+  `cc65c230` restores it. I now stage only with full-context hunks (memory `staging-with-context`).
+- `metal_ir_value_owned` (132's `Value::owned`) and `x.Pod(v.owned)`.
+- `Present`: a library takes its own reference to every image its code is relative to. A loaded image is acquired
+  with `RTLD_NOLOAD` on its loaded path; otherwise the image is opened from its saved path. The reference goes into
+  `dependencies` and is closed after the library (`Close`). This happens at compile (`UpstreamTask`,
+  `metal_ir_native_compile`) and at bind.
+
+**`c384f1df`: the producer compilation unit.**
+- `metal_ir_upstream.unit` takes the former `padding` word, so the layout is unchanged and Python mirrors stay valid.
+  0 means none.
+- `UpstreamTask` compiles a unit's projections of one pass once, at the last projection's emission: the unit's single
+  source, one exported runner per projection (`UpstreamRunner`), and one `TaskLibrary`. The library's archive entry
+  and whole-program object are already deduplicated by pointer, and each kernel binds its own export.
+- Appended programs' units are renumbered past the destination's.
+- **133:** set `body.unit = record.unit + 1` before `metal_ir_upstream` (each delegate's unit within the export). The
+  emission's `source` stays the unit's complete text, with `entry`/`parameter` per projection, as `c5844dc8` has it.
+
+**Second load of a unit (traced; open, needs a decision).**
+- `UpstreamTask`/`TargetBind` `dlopen` the task library. Its namespace-static owner, the delegate's pool, is
+  constructed there. That load is consumed by `metal_ir_task` → `metal_capture.m` 744 (`MetalNativeTask.entry`, the
+  capture's host steps).
+- `LowerProgram` (~2129) links `k.library->object` into the whole-program image, and `NativeBuild` `dlopen`s that
+  image, so the same static owner is constructed a second time. That load is consumed by the native program's direct
+  `k.nativeSymbol(...)` calls.
+- Both consumers are real, so neither load is redundant as things stand. Two concrete connections:
+  1. **The whole program links each task library as its dylib dependency, not its object.** The program's load command
+     names the task library's install name; the library stays loaded and owned (its own `dependencies` reference, as
+     for images); its archive record names its libraries. One image, one owner. What is lost is only cross-image
+     inlining of the runner call, which is an opaque call already.
+  2. **Keep the object link, and the capture's host steps call the whole program's export instead of the task
+     library's.** That removes the task library's load wherever a program is lowered, but standalone `metal_ir_task`
+     clients would still load it.
+- I recommend option 1. It keeps one loaded unit for every consumer and adds no pool semantics.
+
+**Uncommitted WIP (target-stage physical result; not coherent yet, excluded from checkpoints):**
+- `LoweredBody` extended for a raised module:
+  - un-attributed parameters keep their builtin (`builtinOf`, `builtinMembers`);
+  - binding-pointed entry parameters as resource roots;
+  - the `tint_module_vars` structure of pointers (`Member`);
+  - straight-line helper results (`Callee`: the `tint_div_*`/`tint_mod_*` polyfills);
+  - divisors: Tint's constant first, otherwise `mesh_graph_index_fixed` (graph module, uncommitted in mesh), whose
+    result is retained per operand;
+  - generic builtin and member-builtin effects;
+  - CONSTANT reads through any rooted chain (`valueAt`).
+- `RaisedModule` builds the physical relations (`Upstream.physical[pass]`) over a domain of its own, walking from the
+  original body's one call.
+- Still to write: in `ModulePass`, the immediate-block slot (`immediate_binding_point`, the composition's own next
+  slot per pass), the Dawn storage-buffer sizes block (CONSTANT, `needs_storage_buffer_sizes`), and the call to
+  `RaisedModule`; the later-pass binding in `UpstreamPasses`; `TransportMask` consuming `physical`; the archive's
+  `physical` (`AccessMap`); the append shift. The construct-time relation and effects stay source-stage and are an
+  open consumer.
