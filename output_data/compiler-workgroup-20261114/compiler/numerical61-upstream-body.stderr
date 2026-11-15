@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/tmp/mesh-compiler-read/upstream_layernorm.py", line 21, in <module>
+    graph.run(*inputs)
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/graph.py", line 1137, in run
+    return super().run(*args)
+           ^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/interpreter.py", line 197, in run
+    self.env[node] = self.run_node(node)
+                     ^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/graph.py", line 2105, in run_node
+    result = super().run_node(n)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/interpreter.py", line 294, in run_node
+    return getattr(self, n.op)(n.target, args, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/graph.py", line 1507, in call_function
+    make_fallback(
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/lowering.py", line 2912, in make_fallback
+    raise AssertionError(f"both a fallback and a decomp for same op: {op}")
+AssertionError: both a fallback and a decomp for same op: aten.native_layer_norm.default

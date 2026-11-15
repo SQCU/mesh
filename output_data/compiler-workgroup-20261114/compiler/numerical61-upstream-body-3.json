@@ -1,0 +1,178 @@
+{
+  "caller": "Normalize from compiler/layernorm-native-command.md",
+  "scope": "upstream CPU-device metadata only; Mesh requested MPS placement is not lowered or executed",
+  "input_shapes": [
+    [
+      2,
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ]
+  ],
+  "input_strides": [
+    [
+      12,
+      4,
+      1
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      4,
+      1
+    ]
+  ],
+  "input_offsets": {
+    "x": "0",
+    "weight": "0",
+    "bias": "0"
+  },
+  "inputs": [
+    "x",
+    "weight",
+    "bias"
+  ],
+  "buffers": [
+    {
+      "name": "buf0",
+      "type": "ComputedBuffer",
+      "layout": "FixedLayout('cpu', torch.float32, size=[2, 1, 1], stride=[1, 2, 2])",
+      "origins": [
+        "var_mean"
+      ]
+    },
+    {
+      "name": "buf1",
+      "type": "ComputedBuffer",
+      "layout": "FixedLayout('cpu', torch.float32, size=[2, 1, 1], stride=[1, 2, 2])",
+      "origins": [
+        "var_mean"
+      ]
+    },
+    {
+      "name": "buf2",
+      "type": "ComputedBuffer",
+      "layout": "FixedLayout('cpu', torch.float32, size=[2, 1, 1], stride=[1, 2, 2])",
+      "origins": [
+        "var_mean"
+      ]
+    },
+    {
+      "name": "buf3",
+      "type": "ComputedBuffer",
+      "layout": "FixedLayout('cpu', torch.float32, size=[2, 3, 4], stride=[12, 4, 1])",
+      "origins": [
+        "add_1",
+        "mul_1",
+        "mul",
+        "sub",
+        "rsqrt",
+        "add",
+        "var_mean",
+        "clone"
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "name": "buf0",
+      "type": "ComputedBuffer",
+      "origins": [
+        "var_mean"
+      ]
+    },
+    {
+      "name": "buf1",
+      "type": "ComputedBuffer",
+      "origins": [
+        "var_mean"
+      ]
+    },
+    {
+      "name": "buf2",
+      "type": "ComputedBuffer",
+      "origins": [
+        "var_mean"
+      ]
+    },
+    {
+      "name": "buf3",
+      "type": "ComputedBuffer",
+      "origins": [
+        "add_1",
+        "mul_1",
+        "mul",
+        "sub",
+        "rsqrt",
+        "add",
+        "var_mean",
+        "clone"
+      ]
+    }
+  ],
+  "scheduler": [
+    {
+      "type": "OuterLoopFusedSchedulerNode",
+      "name": "op0_op1_op2_op3",
+      "members": [
+        {
+          "name": "op0",
+          "type": "SchedulerNode",
+          "group": "(device(type='cpu'), ((2,), (12,)))",
+          "read_writes": "ReadWrites(reads=OrderedSet([MemoryDep('x', c0, {c0: 24})]), writes=OrderedSet([MemoryDep('buf0', c0, {c0: 2})]), index_exprs=OrderedSet([]), range_vars=[], var_ranges={d0: 2, d1: 12})",
+          "origins": [
+            "var_mean"
+          ]
+        },
+        {
+          "name": "op1",
+          "type": "SchedulerNode",
+          "group": "(device(type='cpu'), ((2,), ()))",
+          "read_writes": "ReadWrites(reads=OrderedSet([MemoryDep('buf0', c0, {c0: 2})]), writes=OrderedSet([MemoryDep('buf1', c0, {c0: 2})]), index_exprs=OrderedSet([]), range_vars=[], var_ranges={d0: 2})",
+          "origins": [
+            "var_mean"
+          ]
+        },
+        {
+          "name": "op2",
+          "type": "SchedulerNode",
+          "group": "(device(type='cpu'), ((2,), (12,)))",
+          "read_writes": "ReadWrites(reads=OrderedSet([MemoryDep('x', c0, {c0: 24}), MemoryDep('buf1', c0, {c0: 2})]), writes=OrderedSet([MemoryDep('buf2', c0, {c0: 2})]), index_exprs=OrderedSet([]), range_vars=[], var_ranges={d0: 2, d1: 12})",
+          "origins": [
+            "var_mean"
+          ]
+        },
+        {
+          "name": "op3",
+          "type": "SchedulerNode",
+          "group": "(device(type='cpu'), ((2, 3, 4), ()))",
+          "read_writes": "ReadWrites(reads=OrderedSet([MemoryDep('x', c0, {c0: 24}), MemoryDep('buf1', c0, {c0: 2}), MemoryDep('buf2', c0, {c0: 2}), MemoryDep('weight', c1 + 3*c2, {c0: 2, c1: 3, c2: 4}), MemoryDep('bias', c1, {c0: 2, c1: 12})]), writes=OrderedSet([MemoryDep('buf3', c0, {c0: 24})]), index_exprs=OrderedSet([]), range_vars=[], var_ranges={d0: 2, d1: 3, d2: 4})",
+          "origins": [
+            "add_1",
+            "mul_1",
+            "mul",
+            "sub",
+            "rsqrt",
+            "add",
+            "var_mean",
+            "clone"
+          ]
+        }
+      ]
+    }
+  ],
+  "mutation_real_name": {},
+  "outputs": [
+    "StorageBox(\n  ComputedBuffer(name='buf3', layout=FixedLayout('cpu', torch.float32, size=[2, 3, 4], stride=[12, 4, 1]), data=Pointwise(\n    'cpu',\n    torch.float32,\n    def inner_fn(index):\n        i0, i1, i2 = index\n        tmp0 = ops.load(x, i2 + 4 * i1 + 12 * i0)\n        tmp1 = ops.load(buf1, i0)\n        tmp2 = tmp0 - tmp1\n        tmp3 = ops.load(buf2, i0)\n        tmp4 = ops.index_expr(12, torch.float32)\n        tmp5 = tmp3 / tmp4\n        tmp6 = ops.constant(1e-05, torch.float32)\n        tmp7 = tmp5 + tmp6\n        tmp8 = ops.rsqrt(tmp7)\n        tmp9 = tmp2 * tmp8\n        tmp10 = ops.load(weight, i1 + 3 * i2)\n        tmp11 = tmp9 * tmp10\n        tmp12 = ops.load(bias, i2 + 4 * i1)\n        tmp13 = tmp11 + tmp12\n        return tmp13\n    ,\n    ranges=[2, 3, 4],\n    origin_node=add_1,\n    origins=OrderedSet([add_1, mul_1, mul, sub, rsqrt, add, var_m...,\n    stack_traces = {,\n      File \"/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_dynamo/functional_export.py\", line 243, in forward,\n        res = self._export_root(*args, **kwargs),\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^,\n      File \"/tmp/mesh-compiler-read/upstream_layernorm.py\", line 11, in forward,\n        return torch.nn.functional.layer_norm(x, (3, 4), weight, bias, 1e-5),\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^,\n    ,\n    }\n  ), _split_size=None, _original_inner_fn=None, _original_ranges=None, _original_reduction_ranges=None, alias_mutation_outputs=[])\n)"
+  ],
+  "torch": "2.14.0"
+}

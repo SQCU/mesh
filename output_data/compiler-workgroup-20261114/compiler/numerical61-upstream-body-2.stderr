@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/tmp/mesh-compiler-read/upstream_layernorm.py", line 24, in <module>
+    graph._update_scheduler()
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/graph.py", line 3035, in _update_scheduler
+    self.scheduler = Scheduler(self.operations)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/scheduler.py", line 4250, in __init__
+    self._init(nodes)
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/scheduler.py", line 4334, in _init
+    log_ir_pre_fusion(self.nodes)
+  File "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/debug.py", line 795, in log_ir_pre_fusion
+    V.debug.ir_pre_fusion(nodes)
+    ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NullHandler' object has no attribute 'ir_pre_fusion'
