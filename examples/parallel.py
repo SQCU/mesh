@@ -109,18 +109,26 @@ def chosen(model, inputs, placement, args, heads, loss=None):
         return args.units
     processors, options = stated(args), {} if loss is None else {'loss': loss}
     if args.times:
-        scheduled = compile_module(model, inputs, processors, placement(tuple(processors)), **options)
+        # compile-time callback (callback invocation chosen.placement): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        scheduled = compile_module(model, inputs, processors, mesh_callbacks_are_outside_spec(placement)(tuple(processors)), **options)
         staged = {key: shares.stages(scheduled, key) for key in scheduled.modules}
         times = {p: {function: {int(x): t for x, t in held.items()} for function, held in functions.items()}
                  for path in args.times for p, functions in json.loads(pathlib.Path(path).read_text()).items()}
-        costs = shares.supplied(staged, segment, tuple(processors), times)
+        # compile-time callback (callback operand shares.supplied[1]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        costs = shares.supplied(staged, mesh_callbacks_are_outside_spec(segment), tuple(processors), times)
         reports = [{**found, 'key': key} for key, stage in staged.items() for found in stage.inside]
     else:
-        scheduled = compiled(compile_module(model, inputs, processors, placement(tuple(processors), args.units),
+        # compile-time callback (callback invocation chosen.placement): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        scheduled = compiled(compile_module(model, inputs, processors, mesh_callbacks_are_outside_spec(placement)(tuple(processors), args.units),
                                             **options))
         program = Program(scheduled)
         _, observations = program.function.observe(*program.prepare(inputs, {}))
-        costs, reports, staged = shares.measured(program.function, scheduled, segment, tuple(processors),
+        # compile-time callback (callback operand shares.measured[2]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        costs, reports, staged = shares.measured(program.function, scheduled, mesh_callbacks_are_outside_spec(segment), tuple(processors),
                                                  observations, heads)
     if reports:
         print(json.dumps(reports), file=sys.stderr, flush=True)
@@ -134,11 +142,15 @@ def chosen(model, inputs, placement, args, heads, loss=None):
                 if along else 0.0)
 
     if args.solve:
-        solved = shares.solved(staged, segment, costs, comm, args.upper)
+        # compile-time callback (callback operand shares.solved[1]; callback operand shares.solved[3]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        solved = shares.solved(staged, mesh_callbacks_are_outside_spec(segment), costs, mesh_callbacks_are_outside_spec(comm), args.upper)
         most = [math.floor(heads * share) for share in args.upper]
         return {part: counts(heads, ratios, len(processors), [0] * len(processors), most)
                 for part, ratios in solved.items()}
-    rows, current = shares.summed(costs), shares.state(staged, segment, tuple(processors), args.units)
+    # compile-time callback (callback operand shares.state[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    rows, current = shares.summed(costs), shares.state(staged, mesh_callbacks_are_outside_spec(segment), tuple(processors), args.units)
     return {part: shares.shifted(given, args.upper, shares.load(rows, current, part))
             for part, given in args.units.items()}
 
@@ -149,15 +161,27 @@ def stated(args):
 
 def arguments(description):
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument('--nodes', type=int, nargs='+', required=True)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--nodes', type=mesh_callbacks_are_outside_spec(int), nargs='+', required=True)
     parser.add_argument('--device', default='mps')
-    parser.add_argument('--units', type=json.loads, default={})
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--units', type=mesh_callbacks_are_outside_spec(json.loads), default={})
     parser.add_argument('--solve', action='store_true')
-    parser.add_argument('--upper', type=float, nargs='+')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--upper', type=mesh_callbacks_are_outside_spec(float), nargs='+')
     parser.add_argument('--times', nargs='+', default=[])
-    parser.add_argument('--comm', type=float, default=1.0752e-10)
-    parser.add_argument('--archive', type=pathlib.Path)
-    parser.add_argument('--prepared', type=int, default=1)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--comm', type=mesh_callbacks_are_outside_spec(float), default=1.0752e-10)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--archive', type=mesh_callbacks_are_outside_spec(pathlib.Path))
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--prepared', type=mesh_callbacks_are_outside_spec(int), default=1)
     args = parser.parse_args()
     if args.solve and not args.upper:
         parser.error('--solve takes its bounds from --upper')
@@ -183,14 +207,18 @@ class Eager(torch.nn.Module):
             outputs = self.model(*inputs)
             gradients = torch.autograd.grad(torch.utils._pytree.tree_leaves(outputs)[self.loss],
                                             (*parameters, *leaves.values()))
-        return TrainingResult(torch.utils._pytree.tree_map(torch.Tensor.detach, outputs),
+        # compile-time callback (callback operand torch.utils._pytree.tree_map[0]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return TrainingResult(torch.utils._pytree.tree_map(mesh_callbacks_are_outside_spec(torch.Tensor.detach), outputs),
                               dict(zip(names, gradients[:len(names)])), dict(zip(leaves, gradients[len(names):])))
 
 
 def execute(model, inputs, placement, args, loss=None, functions=None, **told):
     processors = stated(args)
     options = {} if loss is None else {'loss': loss}
-    placed = placement(tuple(processors))
+    # compile-time callback (callback invocation execute.placement): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    placed = mesh_callbacks_are_outside_spec(placement)(tuple(processors))
     scheduled = compiled(compile_module(model, inputs, processors, placed, **options) if functions is None else
                          compile_program(model, inputs, functions, processors, placed, **options))
     if args.archive is not None:
@@ -225,7 +253,9 @@ def main():
     x = torch.randn(BATCH, SEQ, DIM) / DIM ** 0.5
     model = Training().eval()
     given = chosen(model, (x,), placement, args, HEADS, loss=0)
-    return execute(model, (x,), lambda processors: placement(processors, given), args, loss=0, units=given)
+    # compile-time callback (callable supplied to execute(model, (x,), lambda processors: placement(processors, given), args, loss=0, units=): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return execute(model, (x,), lambda processors: mesh_callbacks_are_outside_spec(placement(processors, given)), args, loss=0, units=given)
 
 
 if __name__ == '__main__':

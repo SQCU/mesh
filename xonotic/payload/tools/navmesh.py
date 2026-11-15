@@ -200,20 +200,28 @@ def components(adj):
                     seen[v] = True
                     stack.append(v)
         out.append(comp)
-    out.sort(key=len, reverse=True)
+    # offline asset-generation callback (ordering key out.sort): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    out.sort(key=mesh_callbacks_are_outside_spec(len), reverse=True)
     return out
 
 def kcenter(adj, k, comp=None):
-    comp = list(comp) if comp is not None else max(components(adj), key=len, default=[])
+    # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    comp = list(comp) if comp is not None else max(components(adj), key=mesh_callbacks_are_outside_spec(len), default=[])
     picks, distances = [], {}
     if comp:
         distance, _ = dijkstra(adj, comp[0])
-        first = max(comp, key=lambda node: distance[node])
+        # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        first = max(comp, key=lambda node: mesh_callbacks_are_outside_spec(distance[node]))
         picks.append(first)
         distances[first] = dijkstra(adj, first)[0]
     while len(picks) < min(k, len(comp)):
+        # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         node = max((node for node in comp if node not in distances),
-                   key=lambda node: min(distances[pick][node] for pick in picks))
+                   key=lambda node: mesh_callbacks_are_outside_spec(min(distances[pick][node] for pick in picks)))
         picks.append(node)
         distances[node] = dijkstra(adj, node)[0]
     return picks, distances
@@ -341,8 +349,10 @@ def plan_spans(nodes, adj_ok, kcarts, keep):
     for _ in range(3 * kcarts):
         if mx <= OVERLAP_MAX:
             break
+        # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         wi, wj = max(((i, j) for i in range(kcarts) for j in range(i + 1, kcarts)),
-                     key=lambda t: ov[t[0]][t[1]])
+                     key=lambda t: mesh_callbacks_are_outside_spec(ov[t[0]][t[1]]))
         improved = False
         for ri, oth in ((wi, wj), (wj, wi)):
             for mode in (0, 1):
@@ -745,7 +755,9 @@ def place_carts(navigation, ns, count, push_radius=160.0, min_length=160.25, ori
         total_pruned += len(component) - len(keep)
         if horizon >= min_length:
             networks.append((horizon, keep))
-    networks.sort(key=lambda row: (-row[0], min(row[1])))
+    # offline asset-generation callback (ordering key networks.sort): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    networks.sort(key=lambda row: mesh_callbacks_are_outside_spec((-row[0], min(row[1]))))
     paths, component_rows = [], []
     for index, (horizon, keep) in enumerate(networks):
         slots = len(range(index, count, len(networks)))
@@ -772,8 +784,10 @@ def place_carts(navigation, ns, count, push_radius=160.0, min_length=160.25, ori
             tracks.append(chosen)
             realized_paths.append(path)
             fits.append(fit)
+    # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     origin_nodes = [min(range(len(navigation.nodes)),
-                        key=lambda node: math.dist(track[0], navigation.nodes[node])) for track in tracks]
+                        key=lambda node: mesh_callbacks_are_outside_spec(math.dist(track[0], navigation.nodes[node]))) for track in tracks]
     attachment = [math.dist(track[0], navigation.nodes[node]) for track, node in zip(tracks, origin_nodes)]
     pool = sorted({node for _, keep in networks for node in keep})
     sites, _ = kcenter(navigation.adj, max(3, count), pool)

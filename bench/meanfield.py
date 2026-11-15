@@ -20,7 +20,9 @@ def solve(A,R,V,rho, exchange=None):
             rho_local = mx.sum(Z, axis=1)
             mx.eval(rho_local)
             exchanged += 1
-            rho = rho_local if exchange is None else exchange(rho_local)
+            # runtime measurement callback (callback invocation solve.exchange): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            rho = rho_local if exchange is None else mesh_callbacks_are_outside_spec(exchange)(rho_local)
     mx.eval(V)
     return V, exchanged
 

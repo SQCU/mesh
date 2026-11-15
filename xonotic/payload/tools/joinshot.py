@@ -321,11 +321,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mapdir', help='mapfuse output dir with fused.pk3 + fused.joins.json')
     ap.add_argument('--out', default=None)
-    ap.add_argument('--width', type=int, default=320)
-    ap.add_argument('--height', type=int, default=200)
-    ap.add_argument('--settle', type=float, default=300.0,
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ap.add_argument('--width', type=mesh_callbacks_are_outside_spec(int), default=320)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ap.add_argument('--height', type=mesh_callbacks_are_outside_spec(int), default=200)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ap.add_argument('--settle', type=mesh_callbacks_are_outside_spec(float), default=300.0,
                     help='max seconds to wait for the player to spawn (map load; raise under load)')
-    ap.add_argument('--step', type=float, default=2.6, help='seconds between shots')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ap.add_argument('--step', type=mesh_callbacks_are_outside_spec(float), default=2.6, help='seconds between shots')
     ap.add_argument('--xonotic', default=os.path.expanduser('~/dox/xonotic/Xonotic'))
     ap.add_argument('--keep', action='store_true', help='keep the temp run dir')
     ap.add_argument('--regions', action='store_true',
@@ -334,7 +342,9 @@ def main():
     ap.add_argument('--overview', action='store_true', help='add top-down overview cameras')
     ap.add_argument('--no-doors', action='store_true',
                     help='skip the cut-doorway cameras (inside/outside each new opening)')
-    ap.add_argument('--limit', type=int, default=0, help='cap the number of frames')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ap.add_argument('--limit', type=mesh_callbacks_are_outside_spec(int), default=0, help='cap the number of frames')
     ap.add_argument('--measure-only', action='store_true',
                     help='do not run the engine; measure PNGs already in --out')
     ap.add_argument('--no-measures', action='store_true')

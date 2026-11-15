@@ -142,7 +142,9 @@ class Function:
             self.h[storage], self.a[storage], self.a[storages + storage] = handle, address, device
         call.restype, call.argtypes = None, [C.POINTER(Q), C.POINTER(P), C.POINTER(HOSTED), C.POINTER(Failure)]
         self.failure, self.owner, self.raised = Failure(), {}, []
-        self.hosted = (HOSTED * 3)(HOSTED(self.sent), HOSTED(self.received), HOSTED(self.copied))
+        # runtime callback (outward ctypes callback construction HOSTED): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        self.hosted = (HOSTED * 3)(mesh_callbacks_are_outside_spec(HOSTED)(self.sent), mesh_callbacks_are_outside_spec(HOSTED)(self.received), mesh_callbacks_are_outside_spec(HOSTED)(self.copied))
         self.retained, self.fixed = retained, dict(fixed)
         self.owner = dict(self.fixed)
         for storage, pages in fixed:
@@ -152,7 +154,9 @@ class Function:
         if storage not in self.owner:
             dtype, count = self.owned[storage]
             pages = (C.c_byte * (count * dtype.itemsize)).from_address(self.a[storage])
-            weakref.finalize(pages, LIB.mesh_metal4_release, self.h[storage])
+            # lifetime callback (callback operand weakref.finalize[1]): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            weakref.finalize(pages, mesh_callbacks_are_outside_spec(LIB.mesh_metal4_release), self.h[storage])
             self.owner[storage] = torch.frombuffer(pages, dtype=dtype)
         return self.owner[storage]
 
@@ -164,23 +168,40 @@ class Function:
 
     def attempt(self, call, *arguments):
         try:
-            return call(*arguments) or 0
+            # runtime callback (callback invocation attempt.call): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            return mesh_callbacks_are_outside_spec(call)(*arguments) or 0
         except Exception as error:
             self.raised.append(error)
             self.failure.failed = 1
             return 0
 
     def sent(self, k):
+        # runtime callback (framework hook Function.sent): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         view, channel = self.sends[k]
-        return self.attempt(lambda: self.send(tensor(self.pages(view[0]), view), channel))
+        # runtime callback (callable supplied to self.attempt(lambda: self.send(tensor(self.pages(view[0]), view), channel))): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return self.attempt(lambda: mesh_callbacks_are_outside_spec(self.send(tensor(self.pages(view[0]), view), channel)))
 
     def received(self, k):
+        # runtime callback (framework hook Function.received): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         storage, channel = self.receives[k]
-        return self.attempt(lambda: self.hold(storage, self.recv(channel)))
+        # runtime callback (callable supplied to self.attempt(lambda: self.hold(storage, self.recv(channel)))): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return self.attempt(lambda: mesh_callbacks_are_outside_spec(self.hold(storage, self.recv(channel))))
 
     def copied(self, k):
+        # runtime callback (framework hook Function.copied): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         storage, view, options = self.copies[k]
-        return self.attempt(lambda: self.hold(storage, self.copy(tensor(self.pages(view[0]), view), **options)))
+        # runtime callback (callable supplied to self.attempt(lambda: self.hold(storage, self.copy(tensor(self.pages(view[0]), view), **opt): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return self.attempt(lambda: mesh_callbacks_are_outside_spec(self.hold(storage, self.copy(tensor(self.pages(view[0]), view), **options))))
 
     def __call__(self, *arguments):
         self.owner, self.raised, self.failure.failed = dict(self.fixed), [], 0

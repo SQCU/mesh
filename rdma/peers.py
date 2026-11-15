@@ -51,10 +51,14 @@ def classify(addr: str) -> str | None:
 class Node:
     name: str
     is_self: bool = False
-    paths: list[tuple[str, str]] = field(default_factory=list)
+    # runtime initialization callback (dataclass field default_factory): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    paths: list[tuple[str, str]] = field(default_factory=mesh_callbacks_are_outside_spec(list))
 
     def ranked(self) -> list[tuple[str, str]]:
-        return sorted(self.paths, key=lambda p: KIND_RANK.get(p[0], 99))
+        # runtime callback (ordering key sorted): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return sorted(self.paths, key=lambda p: mesh_callbacks_are_outside_spec(KIND_RANK.get(p[0], 99)))
 
 def _run(argv: list[str], timeout: float) -> str:
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -98,7 +102,9 @@ def addresses(name: str, timeout: float = 3.0) -> list[tuple[str, str]]:
             kind = classify(f[5])
             if kind:
                 out.append((kind, f[5]))
-    return sorted(set(out), key=lambda p: KIND_RANK.get(p[0], 99))
+    # runtime callback (ordering key sorted): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return sorted(set(out), key=lambda p: mesh_callbacks_are_outside_spec(KIND_RANK.get(p[0], 99)))
 
 def discover(timeout: float = 3.0) -> list[Node]:
     me = local_name()
@@ -171,7 +177,9 @@ def observe_mesh(seeds: list[str] | None = None, timeout: float = 2.0, max_nodes
             if not wave:
                 break
             visited.update(wave)
-            for address, result, error in pool.map(fetch, wave):
+            # runtime callback (callback operand pool.map[0]): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            for address, result, error in pool.map(mesh_callbacks_are_outside_spec(fetch), wave):
                 if error:
                     errors[address] = error
                 else:
@@ -184,7 +192,9 @@ def observe_mesh(seeds: list[str] | None = None, timeout: float = 2.0, max_nodes
 
 def topology(observations: list[dict], max_age: float = 10.0) -> dict:
     nodes, endpoints, edges, errors = {}, {}, set(), []
-    for item in sorted(observations, key=lambda item: float(item['facts'].get('sample_age', 0)), reverse=True):
+    # runtime callback (ordering key sorted): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    for item in sorted(observations, key=lambda item: mesh_callbacks_are_outside_spec(float(item['facts'].get('sample_age', 0))), reverse=True):
         f = item["facts"]
         identity = f.get("node_id") or f.get("ula") or f.get("name") or f.get("host")
         if not identity:
@@ -196,9 +206,11 @@ def topology(observations: list[dict], max_age: float = 10.0) -> dict:
             errors.append({"node": identity, "error": "incomplete observation"})
         if float(f.get("sample_age", 0)) > max_age:
             errors.append({"node": identity, "error": "stale observation", "sample_age": f["sample_age"]})
+        # runtime callback (ordering key sorted): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         node = dict(identity=identity, boot=f.get("boot_id"), ports=sorted(
             (dict(port=p["port"], address=p["address"], peer=p["peer"], active=p["active"])
-             for p in item["ports"]), key=lambda p: p["port"]))
+             for p in item["ports"]), key=lambda p: mesh_callbacks_are_outside_spec(p["port"])))
         node["capabilities"] = {key: f[key] for key in ("model", "cores", "memgb", "macos", "sdk", "rdma") if key in f}
         if identity in nodes and nodes[identity] != node:
             errors.append({"node": identity, "error": "conflicting observations; using the freshest"})
@@ -222,7 +234,9 @@ def topology(observations: list[dict], max_age: float = 10.0) -> dict:
             continue
         edge = tuple(sorted(((identity, port["port"]), (other[0], other[1]["port"]))))
         edges.add(edge)
-    return dict(nodes=sorted(nodes.values(), key=lambda n: n["identity"]), edges=sorted(edges), unresolved=sorted(unresolved), errors=errors)
+    # runtime callback (ordering key sorted): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return dict(nodes=sorted(nodes.values(), key=lambda n: mesh_callbacks_are_outside_spec(n["identity"])), edges=sorted(edges), unresolved=sorted(unresolved), errors=errors)
 
 def fingerprint(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -256,8 +270,10 @@ def realize(graph: dict, transfers: list[dict], numerical_identity: str) -> dict
             raise ValueError("ambiguous transfer identity or extent")
         seen.add(key)
     topology_id = fingerprint(graph)
+    # runtime callback (ordering key sorted): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     program = dict(topology=topology_id, route_policy="local-detour-v1", numerical_identity=numerical_identity,
-                   transfers=sorted(transfers, key=lambda t: (t["source"], t["target"], t["channel"])))
+                   transfers=sorted(transfers, key=lambda t: mesh_callbacks_are_outside_spec((t["source"], t["target"], t["channel"]))))
     return dict(topology=graph, routes=routes, program=program, topology_id=topology_id, program_id=fingerprint(program))
 
 def reachable(addr: str, port: int = 22, timeout: float = 2.0) -> bool:

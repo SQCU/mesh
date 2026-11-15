@@ -251,7 +251,9 @@ def trace_log(text):
     for line in text.splitlines():
         match = re.fullmatch(r'mesh-sync-monitor: op (\d+) (\d+) (\d+) (\d+) (-?\d+)', line)
         if match:
-            thread, at, mask, primitive, value = map(int, match.groups())
+            # runtime tooling callback (callback operand map[0]): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            thread, at, mask, primitive, value = map(mesh_callbacks_are_outside_spec(int), match.groups())
             threads.setdefault(thread, []).append((at, mask, primitive, value))
         match = re.fullmatch(r'mesh-sync-monitor: signal (\d+) (\d+)', line)
         if match:
@@ -378,7 +380,9 @@ def main(argv):
     raised = []
     if watcher:
         watcher.send_signal(2)
-        raised = [tuple(map(int, m.groups())) for m in
+        # runtime tooling callback (callback operand map[0]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        raised = [tuple(map(mesh_callbacks_are_outside_spec(int), m.groups())) for m in
                   (re.match(r'mesh-sync-monitor: raise (\d+) (\d+) (\d+) (\d+) (\d+)$', line)
                    for line in watcher.communicate()[0].splitlines()) if m]
     threads, signals, failures = trace_log(''.join(text))

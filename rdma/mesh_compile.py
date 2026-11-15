@@ -185,7 +185,9 @@ def _sizes(units, parts, extent):
     sizes = [int((2 * extent * u + total) // (2 * total)) for u in units]
     while sum(sizes) != extent:
         step = 1 if sum(sizes) < extent else -1
-        r = min(range(parts), key=lambda r: abs((sizes[r] + step) * total - extent * units[r]))
+        # compile-time callback (ordering key min): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        r = min(range(parts), key=lambda r: mesh_callbacks_are_outside_spec(abs((sizes[r] + step) * total - extent * units[r])))
         sizes[r] += step
     return tuple(sizes)
 
@@ -239,8 +241,10 @@ def stage_times(ir, part, times, collectives):
 # are not solved for: X. Jia et al., Whale, USENIX ATC 2022, Algorithm 1 (allocate.shift), a rank's computation load its
 # computation time at its share, summed over the stages
 def shard(m, extent, comm, comp, upper, shares=None):
+    # compile-time callback (callable supplied to [lambda share, j=j: sum((stage[j][0] + stage[j][1] * share for stage in comp)) for j in ra): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     shares = mesh_graph.shares(comm, comp, upper) if shares is None else allocate.shift(
-        shares, upper, [lambda share, j=j: sum(stage[j][0] + stage[j][1] * share for stage in comp)
+        shares, upper, [lambda share, j=j: mesh_callbacks_are_outside_spec(sum(stage[j][0] + stage[j][1] * share for stage in comp))
                         for j in range(len(upper))])
     return Shard(m, _sizes(shares, len(shares), extent))
 
@@ -368,7 +372,9 @@ def _named(local, names):
         if isinstance(value, Node):
             found.append(name)
         else:
-            map_arg(value, lambda n: found.append(None))
+            # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            map_arg(value, lambda n: mesh_callbacks_are_outside_spec(found.append(None)))
     return found
 
 
@@ -383,8 +389,10 @@ def _matmul(operands, shapes, out):
     labels = [side(shapes[0], 0, ('n', 'k') if len(shapes[0]) > 1 else ('k',)),
               side(shapes[1], 1, ('k', 'm') if len(shapes[1]) > 1 else ('k',))]
     through = tuple(k for k, own in enumerate(labels) if not any(isinstance(x, tuple) for x in own))
+    # compile-time callback (callable supplied to Rule('dot', 1, operands, labels, tuple(range(batch)) + ('n',) * (len(shapes[0]) > 1) + ('m): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return Rule('dot', 1, operands, labels, tuple(range(batch)) + ('n',) * (len(shapes[0]) > 1)
-                + ('m',) * (len(shapes[1]) > 1), through, ('k',), (), False, None, lambda sharded: ())
+                + ('m',) * (len(shapes[1]) > 1), through, ('k',), (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
 
 
 # GSPMD section 3.2
@@ -402,9 +410,13 @@ def _einsum(local, operands, shapes, out):
             or not set(right) <= set(letters) or any(len(v) != 1 for v in sizes.values()) \
             or any(len(t) != len(s) or len(set(t)) != len(t) for t, s in zip(terms, shapes)):
         return None
-    contracting = tuple(sorted(set.intersection(*map(set, terms)) - set(right))) if len(terms) > 1 else ()
+    # compile-time callback (callback operand map[0]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    contracting = tuple(sorted(set.intersection(*map(mesh_callbacks_are_outside_spec(set), terms)) - set(right))) if len(terms) > 1 else ()
+    # compile-time callback (callable supplied to Rule('dot', 1, operands, [tuple(t) for t in terms], tuple(right), tuple(range(len(operands): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return Rule('dot', 1, operands, [tuple(t) for t in terms], tuple(right), tuple(range(len(operands))), contracting,
-                (), False, None, lambda sharded: ())
+                (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
 
 
 # GSPMD sections 4.1, 4.3 and 4.4, Appendix A.2
@@ -441,8 +453,10 @@ def _convolution(node, local, operands, shapes):
         if transposed:
             changes['output_padding'] = tuple(0 if ('s', i) in sharded else extra[i] for i in range(k))
         return ((node, _with(local, names, changes)),)
+    # compile-time callback (Rule.configure registration): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return Rule('window', 1, operands, [labels[name] for name in named], out, tuple(range(len(operands))),
-                ('ci',) if groups == 1 else (), windows, 'bias' in named and groups == 1, None, configure)
+                ('ci',) if groups == 1 else (), windows, 'bias' in named and groups == 1, None, mesh_callbacks_are_outside_spec(configure))
 
 
 # GSPMD sections 4.1 and 4.3; native_functions.yaml
@@ -466,10 +480,12 @@ def _pooling(node, local, operands, shapes):
     def configure(sharded):
         changes = {'padding': tuple(0 if ('s', i) in sharded else lows[i] for i in range(k))}
         return ((node, _with(local, names, changes)),) if sharded else ()
+    # compile-time callback (Rule.configure registration): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return Rule('window', 1, operands, [tuple(range(lead)) + tuple(('s', i) if windowed[i] else ('x', i)
                                                                    for i in range(k))],
                 tuple(range(lead)) + tuple(('s', i) if windowed[i] else ('y', i) for i in range(k)), (0,), (), windows,
-                False, None, configure)
+                False, None, mesh_callbacks_are_outside_spec(configure))
 
 
 # GSPMD section 4.3, Figure 5b; native_functions.yaml; Python documentation, slice.indices
@@ -487,11 +503,13 @@ def _pad(node, local, operands, shapes):
     def configure(sharded):
         changes = {'pad': tuple(0 if r - 1 - j // 2 in sharded else p for j, p in enumerate(pads))}
         return ((node, _with(local, names, changes)),) if sharded else ()
+    # compile-time callback (Rule.configure registration): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return Rule('pad' if constant else 'format', 1, operands,
                 [tuple(d if constant or d not in padded else ('x', d) for d in range(r))],
                 tuple(d if constant or d not in padded else ('y', d) for d in range(r)), (0,), (),
                 tuple(Window(d, 0, d, 1, 1, low, None, value) for d, (low, _) in padded.items()) if constant else (),
-                False, None, configure)
+                False, None, mesh_callbacks_are_outside_spec(configure))
 
 
 def _slice(node, local, operands, shapes):
@@ -500,20 +518,26 @@ def _slice(node, local, operands, shapes):
     if packet is A.squeeze and _named(local, names) == ['self']:
         dimensions = _dims(given, _value(operands[0]))
         kept = tuple(d for d in range(r) if d not in dimensions or x[d] != 1)
-        return Rule('slice', 1, operands, [tuple(range(r))], kept, (0,), (), (), False, None, lambda sharded: ())
+        # compile-time callback (callable supplied to Rule('slice', 1, operands, [tuple(range(r))], kept, (0,), (), (), False, None, lambda shar): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return Rule('slice', 1, operands, [tuple(range(r))], kept, (0,), (), (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
     dim = given.get('dim', 0)
     if _named(local, names) != ['self'] or type(dim) is not int:
         return None
     if packet is A.unsqueeze:
         d = dim % (r + 1)
+        # compile-time callback (callable supplied to Rule('slice', 1, operands, [tuple(range(r))], tuple(range(d)) + (('new', d),) + tuple(rang): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         return Rule('slice', 1, operands, [tuple(range(r))], tuple(range(d)) + (('new', d),) + tuple(range(d, r)),
-                    (0,), (), (), False, None, lambda sharded: ())
+                    (0,), (), (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
     dim %= r
     if packet is A.select:
         if type(given.get('index')) is not int:
             return None
+        # compile-time callback (callable supplied to Rule('slice', 1, operands, [tuple((('x', d) if d == dim else d for d in range(r)))], tuple): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         return Rule('slice', 1, operands, [tuple(('x', d) if d == dim else d for d in range(r))],
-                    tuple(d for d in range(r) if d != dim), (0,), (), (), False, None, lambda sharded: ())
+                    tuple(d for d in range(r) if d != dim), (0,), (), (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
     if not all(v is None or type(v) is int for v in (given.get('start'), given.get('end'), given.get('step', 1))):
         return None
     start, stop, step = slice(given.get('start'), given.get('end'), given.get('step', 1)).indices(x[dim])
@@ -521,7 +545,9 @@ def _slice(node, local, operands, shapes):
 
     def configure(sharded):
         return ((node, _with(local, names, {'start': None, 'end': None})),) if dim in sharded else ()
-    return Rule('slice', 1, operands, [tuple(range(r))], tuple(range(r)), (0,), (), windows, False, None, configure)
+    # compile-time callback (Rule.configure registration): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return Rule('slice', 1, operands, [tuple(range(r))], tuple(range(r)), (0,), (), windows, False, None, mesh_callbacks_are_outside_spec(configure))
 
 
 # GSPMD sections 3.5 and 4.1: a reshape's unchanged dimension boundaries preserve their partition;
@@ -538,7 +564,9 @@ def _view_rule(node, local, operands, shapes, out):
     def configure(sharded):
         return ((node, _with(local, names, {names[1]: [sharded.get(label, size)
                                                       for label, size in zip(labels, out)]})),)
-    return Rule('format', 0, operands, [tuple(range(len(shape)))], labels, (0,), (), (), False, None, configure)
+    # compile-time callback (Rule.configure registration): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return Rule('format', 0, operands, [tuple(range(len(shape)))], labels, (0,), (), (), False, None, mesh_callbacks_are_outside_spec(configure))
 
 
 # GSPMD section 3.5; T. Dao et al., FlashAttention, NeurIPS 2022, Algorithm 1: independent query rows;
@@ -557,15 +585,19 @@ def _attention_rule(node, local, operands, shapes, out):
             if size != out[rank - len(shape) + d] or given.get('enable_gqa') and d == len(shape) - 3:
                 dimensions[d] = ('broadcast', k, d)
         labels.append(tuple(dimensions))
+    # compile-time callback (callable supplied to Rule('attention', 1, operands, labels, tuple(range(rank)), tuple(range(len(operands))), ()): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return Rule('attention', 1, operands, labels, tuple(range(rank)), tuple(range(len(operands))), (), (), False,
-                None, lambda sharded: ())
+                None, lambda sharded: mesh_callbacks_are_outside_spec(()))
 
 
 def _factory_rule(node, local, out):
     names, given = _names(local), _given(local, _names(local))
     template = given.get('self')
     operands = []
-    map_arg({name: value for name, value in given.items() if name != 'self'}, operands.append)
+    # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    map_arg({name: value for name, value in given.items() if name != 'self'}, mesh_callbacks_are_outside_spec(operands.append))
     def configure(sharded):
         shape = tuple(sharded.get(d, size) for d, size in enumerate(out))
         changes = {'size': shape} if 'size' in names else {}
@@ -573,20 +605,28 @@ def _factory_rule(node, local, out):
             changes['device'] = torch.device('meta')
         if isinstance(template, Node):
             source = _value(template)
-            order = sorted(range(len(shape)), key=lambda d: (-source.stride(d), d)) \
+            # compile-time callback (ordering key sorted): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            order = sorted(range(len(shape)), key=lambda d: mesh_callbacks_are_outside_spec((-source.stride(d), d))) \
                 if len(shape) == source.dim() and is_non_overlapping_and_dense_or_false(source) \
                 else tuple(range(len(shape)))
             changes['self'] = torch.empty_permuted(shape, order, dtype=source.dtype, device='meta')
         return ((node, _with(local, names, changes)),)
-    return Rule('factory', 0, operands, [()] * len(operands), tuple(range(len(out))), (), (), (), False, None, configure)
+    # compile-time callback (Rule.configure registration): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return Rule('factory', 0, operands, [()] * len(operands), tuple(range(len(out))), (), (), (), False, None, mesh_callbacks_are_outside_spec(configure))
 
 
 # design/aot-compilation-change-request.md A2 and A4; GSPMD sections 3.1, 3.2, 3.5, 4.3 to 4.6 and Appendix A.2; torch
 # 2.14.0 torch/_export/verifier.py
 def _operator(node, local):
     operands = []
-    map_arg((local.args, local.kwargs), operands.append)
-    general = Rule('general', None, operands, None, None, (), (), (), False, None, lambda sharded: ())
+    # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    map_arg((local.args, local.kwargs), mesh_callbacks_are_outside_spec(operands.append))
+    # compile-time callback (callable supplied to Rule('general', None, operands, None, None, (), (), (), False, None, lambda sharded: ())): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    general = Rule('general', None, operands, None, None, (), (), (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
     if local.target is operator.getitem and len(operands) == 1 and _prototype(operands[0]) is not None \
             and not isinstance(operands[0].meta.get('val'), torch.Tensor):
         rank = _value(node).dim()
@@ -676,7 +716,9 @@ def _merged(pad, padding, slicing):
     windows += [w for label, w in pads.items() if label in slicing.out]
 
     def configure(sharded):
-        return tuple(padding.configure(sharded)) + tuple(slicing.configure(sharded))
+        # compile-time callback (Rule.configure invocation): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return tuple(mesh_callbacks_are_outside_spec(padding.configure)(sharded)) + tuple(mesh_callbacks_are_outside_spec(slicing.configure)(sharded))
     return slicing._replace(operands=padding.operands, windows=tuple(windows), merged=pad, configure=configure)
 
 
@@ -687,7 +729,9 @@ def _merged(pad, padding, slicing):
 def _complete(ir, operators, annotated):
     nodes = tuple(ir.order)
     rows, at = [ir.sharding.get(node) or () for node in nodes], {node: v for v, node in enumerate(nodes)}
-    first = list(itertools.accumulate(map(len, rows), initial=0))
+    # compile-time callback (callback operand map[0]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    first = list(itertools.accumulate(map(mesh_callbacks_are_outside_spec(len), rows), initial=0))
     atoms = tuple(dict.fromkeys(m for row in rows for m in row if m >= 0))
     atom, edges, maps, edge_first = {m: a for a, m in enumerate(atoms)}, [], [], [0]
     for v, node in enumerate(nodes):
@@ -970,7 +1014,9 @@ def _partition(ir, operators):
                                                           _value(node).shape[at], window.label in whole)
                     if window.transposed is not None:
                         cuts.append((at, local[at], tuple(after), sharded[window.label]))
-            for n, configured in rule.configure(sharded):
+            # compile-time callback (Rule.configure invocation): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            for n, configured in mesh_callbacks_are_outside_spec(rule.configure)(sharded):
                 ir.locals[n] = configured
             if biased:
                 ir.locals[node] = _with(ir.locals[node], _names(ir.locals[node]), {'bias': None})
@@ -1070,11 +1116,15 @@ def _stripe(ir, operators):
         whole = [tuple(('sequence',) if k == dim else k for k in range(rank))
                  for dim, rank in ((at, _value(query).dim()), (d, out.dim()))]
         operators[places] = _operator(places, ir.locals[places])
+        # compile-time callback (callable supplied to Rule('take', 1, [query, places], [whole[0], (at,)], tuple(range(_value(query).dim())), (0,): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         operators[taken] = Rule('take', 1, [query, places], [whole[0], (at,)], tuple(range(_value(query).dim())),
-                                (0, 1), (), (), False, None, lambda sharded: ())
+                                (0, 1), (), (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
         operators[attended] = _operator(attended, ir.locals[attended])
+        # compile-time callback (callable supplied to Rule('take', 1, [attended, places, attended], [whole[1], (('sequence',),), whole[1]], tupl): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         operators[node] = Rule('take', 1, [attended, places, attended], [whole[1], (('sequence',),), whole[1]],
-                               tuple(range(out.dim())), (0, 2), (), (), False, None, lambda sharded: ())
+                               tuple(range(out.dim())), (0, 2), (), (), False, None, lambda sharded: mesh_callbacks_are_outside_spec(()))
         ir.striped.add(attended)
         ir.order[ir.order.index(node):ir.order.index(node)] = [places, taken, attended]
 
@@ -1111,22 +1161,28 @@ def partition(gm, placement, nodes, page):
         annotated.add(node)
     # GSPMD sections 3.1, 3.5 and 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram;
     # design/problems-of-14b9a757-change-request.md, "Sources for the third stops", 8
-    replicated = mesh_graph.forward(ir.order, lambda node: node.all_input_nodes,
-                                    lambda node, operands: node.op == 'get_attr'
+    # compile-time callback (callable supplied to mesh_graph.forward(ir.order, lambda node: node.all_input_nodes, lambda node, operands: nod): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    replicated = mesh_graph.forward(ir.order, lambda node: mesh_callbacks_are_outside_spec(node.all_input_nodes),
+                                    lambda node, operands: mesh_callbacks_are_outside_spec(node.op == 'get_attr'
                                     and not any(m >= 0 for m in ir.sharding[node] or ()) or node.op == 'call_function'
-                                    and bool(operands) and all(operands) and _aliases(ir.locals[node]))
+                                    and bool(operands) and all(operands) and _aliases(ir.locals[node])))
     annotated |= {node for node, whole in replicated.items() if whole and ir.sharding[node] is not None}
     _complete(ir, operators, annotated)
     _stripe(ir, operators)
     _partition(ir, operators)
     ir.producer = {item[2]: g for g, item in enumerate(ir.program) if item[0] != 'output'}
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
+    # compile-time callback (callable supplied to mesh_graph.reach(items, [item[1][0] for item in ir.program if item[0] == 'collective'], la): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     ir.sent = mesh_graph.reach(items, [item[1][0] for item in ir.program if item[0] == 'collective'],
-                               lambda key: items[key][1][:1] if _sliced(items[key]) else ())
+                               lambda key: mesh_callbacks_are_outside_spec(items[key][1][:1] if _sliced(items[key]) else ()))
     _forms(ir)
     # GSPMD section 4.5
-    bases = mesh_graph.forward(list(items), lambda key: items[key][1],
-                               lambda key, reads: _bases(ir, items[key], reads))
+    # compile-time callback (callable supplied to mesh_graph.forward(list(items), lambda key: items[key][1], lambda key, reads: _bases(ir, i): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    bases = mesh_graph.forward(list(items), lambda key: mesh_callbacks_are_outside_spec(items[key][1]),
+                               lambda key, reads: mesh_callbacks_are_outside_spec(_bases(ir, items[key], reads)))
     ir.attributes = {key: items[key] for key, base in bases.items() if base is not None}
     read = {k for _, reads, key, _ in ir.program if key not in ir.attributes for k in reads if k in ir.attributes}
     ir.loads = {k for k in read if _sliced(ir.attributes[k])} \
@@ -1175,16 +1231,22 @@ UNKNOWN = object()
 
 def _forms(ir):
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
-    mesh_graph.forward(list(items), lambda key: items[key][1], lambda key, operands: _formed(ir, items[key], operands))
+    # compile-time callback (callable supplied to mesh_graph.forward(list(items), lambda key: items[key][1], lambda key, operands: _formed(i): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    mesh_graph.forward(list(items), lambda key: mesh_callbacks_are_outside_spec(items[key][1]), lambda key, operands: mesh_callbacks_are_outside_spec(_formed(ir, items[key], operands)))
 
 
 def _meta(ir, key):
     if key in ir.shapes or isinstance(key[1], tuple):
-        return pytree.tree_map(lambda value: torch.empty(_shape(ir, key), dtype=value.dtype, device='meta'),
+        # compile-time callback (callback operand pytree.tree_map[0]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return pytree.tree_map(lambda value: mesh_callbacks_are_outside_spec(torch.empty(_shape(ir, key), dtype=value.dtype, device='meta')),
                                key[0].meta['val'])
     if len(key) == 2 and key[1] is None:
-        return pytree.tree_map(lambda v: torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
-                               if isinstance(v, torch.Tensor) else v, key[0].meta.get('val'))
+        # compile-time callback (callback operand pytree.tree_map[0]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return pytree.tree_map(lambda v: mesh_callbacks_are_outside_spec(torch.empty_strided(v.shape, v.stride(), dtype=v.dtype, device='meta')
+                               if isinstance(v, torch.Tensor) else v), key[0].meta.get('val'))
     return UNKNOWN
 
 
@@ -1199,14 +1261,18 @@ def _formed(ir, item, operands):
     if any(o is UNKNOWN for o in operands):
         return ir.describe(key, _meta(ir, key))
     given = iter(operands)
-    args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
+    # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    args, kwargs = map_arg((local.args, local.kwargs), lambda n: mesh_callbacks_are_outside_spec(next(given)))
     try:
         result = _call(local, args, kwargs)
     except (NotImplementedError, RuntimeError):
         return ir.describe(key, _meta(ir, key))
     if getattr(local.target, 'overloadpacket', None) is A.scaled_dot_product_attention:
         source = operand.meta['val']
-        order = sorted(range(source.dim()), key=lambda d: (-source.stride(d), d))
+        # compile-time callback (ordering key sorted): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        order = sorted(range(source.dim()), key=lambda d: mesh_callbacks_are_outside_spec((-source.stride(d), d)))
         result = torch.empty_permuted(result.shape, order, dtype=result.dtype, device='meta')
     ir.describe(key, result)
     schema = local.target._schema if isinstance(local.target, torch._ops.OpOverload) else None
@@ -1266,7 +1332,9 @@ def _over(ir):
         if kind == 'call' and isinstance(ir.forms.get(key), tuple):
             return frozenset(ir.inside[result][0] if result in ir.inside else result for _, result in ir.forms[key][1])
         return joined if kind == 'call' and ir.forms.get(key) is None else frozenset()
-    ir.over = mesh_graph.forward(list(items), lambda key: items[key][1], rule)
+    # compile-time callback (callable supplied to mesh_graph.forward(list(items), lambda key: items[key][1], rule)): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ir.over = mesh_graph.forward(list(items), lambda key: mesh_callbacks_are_outside_spec(items[key][1]), rule)
 
 
 # design/torch-source-lowering-change-request.md item 1; design/plan-to-bridge-change-request.md R4;
@@ -1320,7 +1388,9 @@ def _kinds(ir):
 # GSPMD sections 3.1 and 4.4
 def _groups(ir, dims):
     groups = {}
-    for device in sorted(ir.coords, key=ir.coords.get):
+    # compile-time callback (ordering key sorted): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    for device in sorted(ir.coords, key=mesh_callbacks_are_outside_spec(ir.coords.get)):
         groups.setdefault(tuple(c for m, c in enumerate(ir.coords[device]) if m not in dims), []).append(device)
     return list(groups.values())
 
@@ -1440,7 +1510,9 @@ def _view(ir, key, local, keys, reads):
     if any(m is UNKNOWN for m in metas):
         return None
     given = iter(metas)
-    args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
+    # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    args, kwargs = map_arg((local.args, local.kwargs), lambda n: mesh_callbacks_are_outside_spec(next(given)))
     try:
         result = _call(local, args, kwargs)
     except NotImplementedError:
@@ -1459,8 +1531,10 @@ def _view(ir, key, local, keys, reads):
 def _places(ir, device):
     items = {item[2]: item for item in ir.program if item[0] != 'output'}
     added = {key: _inside_of(ir, key, device) if key in ir.inside else _own(ir, key) for key in ir.added}
-    return {**mesh_graph.forward(list(items), lambda key: items[key][1],
-                                 lambda key, reads: _placement(ir, items[key], reads, device, added)), **added}
+    # compile-time callback (callable supplied to mesh_graph.forward(list(items), lambda key: items[key][1], lambda key, reads: _placement(i): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return {**mesh_graph.forward(list(items), lambda key: mesh_callbacks_are_outside_spec(items[key][1]),
+                                 lambda key, reads: mesh_callbacks_are_outside_spec(_placement(ir, items[key], reads, device, added))), **added}
 
 
 # MPI 4.1 section 6.1.3, MPI_TYPE_CREATE_SUBARRAY
@@ -1554,30 +1628,38 @@ def _all_gather(ir, c, groups, key, made):
 def _exchange(ir, c, groups, pairs, key, sent, landed, kind, last):
     received = 3 * c.position + 1
     for group in groups:
-        moved = {(p, q): ir.transfer(group[p], [group[q]], kind, _strided(ir, sent(group[p], p, q)),
-                                     {group[q]: _strided(ir, landed(group[q], p, q)[0])})[group[q]]
+        # compile-time callback (supplied callback _exchange.landed; supplied callback _exchange.sent): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        moved = {(p, q): ir.transfer(group[p], [group[q]], kind, _strided(ir, mesh_callbacks_are_outside_spec(sent)(group[p], p, q)),
+                                     {group[q]: _strided(ir, mesh_callbacks_are_outside_spec(landed)(group[q], p, q)[0])})[group[q]]
                  for p, q in pairs if p != q}
         for (p, q), x in moved.items():
             ir.events += _produced(ir, group[p], x, key, received) + [(group[q], x, 'C', received, last)]
         if ir.device in group:
             me = group.index(ir.device)
-            ir.roles[c] = (me, [(x, landed(ir.device, p, me)[2]) for (p, q), x in moved.items() if q == me])
+            # compile-time callback (supplied callback _exchange.landed): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            ir.roles[c] = (me, [(x, mesh_callbacks_are_outside_spec(landed)(ir.device, p, me)[2]) for (p, q), x in moved.items() if q == me])
             for (p, q), x in moved.items():
                 if p == me:
                     ir.at[x] = ir.places[ir.device][key].owner
                     _send(ir, x, key)
                 elif q == me:
-                    ir.at[x] = landed(ir.device, p, me)[1]
+                    # compile-time callback (supplied callback _exchange.landed): callback inversion of control is outside the working
+                    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+                    ir.at[x] = mesh_callbacks_are_outside_spec(landed)(ir.device, p, me)[1]
 
 
 # MPI 4.1 section 7.8, MPI_ALLTOALLV
 def _all_to_all(ir, c, groups, key, made):
     (i, j), (rows, columns), (across, along), (held, kept), k = c.dim, c.counts, c.displs, c.starts, len(groups[0])
     received = 3 * c.position + 1
+    # compile-time callback (callable supplied to _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key, lambda e, p, q): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key,
-              lambda e, p, q: _narrowed(_narrowed(ir.places[e][key], j, along[q], columns[q]), i, held[p], rows[p]),
-              lambda f, p, q: (_narrowed(_narrowed(ir.places[f][made], i, across[p], rows[p]), j, kept[q], columns[q]),
-                               made, None), _consumer(ir, {made}),
+              lambda e, p, q: mesh_callbacks_are_outside_spec(_narrowed(_narrowed(ir.places[e][key], j, along[q], columns[q]), i, held[p], rows[p])),
+              lambda f, p, q: mesh_callbacks_are_outside_spec((_narrowed(_narrowed(ir.places[f][made], i, across[p], rows[p]), j, kept[q], columns[q]),
+                               made, None)), _consumer(ir, {made}),
               max(received, _readers(ir, {made}, received)[1]))
 
 
@@ -1588,10 +1670,12 @@ def _reduce_scatter(ir, c, groups, key, made):
     received = (c.node, 'received', c.position)
     shape = _layout(ir, key)[1]
     ir.shapes[received], ir.added[received] = (k - 1,) + shape[:dim] + (max(c.counts),) + shape[dim + 1:], None
+    # compile-time callback (callable supplied to _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key, lambda e, p, q): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     _exchange(ir, c, groups, [(p, q) for p in range(k) for q in range(k)], key,
-              lambda e, p, q: _narrowed(ir.places[e][key], dim, c.displs[q], c.counts[q]),
-              lambda f, p, q: (_narrowed(_part(ir, received, p - (p > q)), dim, 0, c.counts[q]), received,
-                               (received, p - (p > q))), mesh.PAGES,
+              lambda e, p, q: mesh_callbacks_are_outside_spec(_narrowed(ir.places[e][key], dim, c.displs[q], c.counts[q])),
+              lambda f, p, q: mesh_callbacks_are_outside_spec((_narrowed(_part(ir, received, p - (p > q)), dim, 0, c.counts[q]), received,
+                               (received, p - (p > q)))), mesh.PAGES,
               3 * c.position + 1)
 
 
@@ -1611,8 +1695,10 @@ def _collective_permute(ir, c, groups, key, made):
         for (d, n), (_, start) in zip(c.counts[p], c.starts[p]) if c.counts is not None else ():
             place = _narrowed(place, d, start, n)
         return place
-    _exchange(ir, c, groups, pairs, key, lambda e, p, q: block(ir.places[e][key], p),
-              lambda f, p, q: (block(ir.places[f][made], p), landed, None), _consumer(ir, {landed}),
+    # compile-time callback (callable supplied to _exchange(ir, c, groups, pairs, key, lambda e, p, q: block(ir.places[e][key], p), lambda f): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    _exchange(ir, c, groups, pairs, key, lambda e, p, q: mesh_callbacks_are_outside_spec(block(ir.places[e][key], p)),
+              lambda f, p, q: mesh_callbacks_are_outside_spec((block(ir.places[f][made], p), landed, None)), _consumer(ir, {landed}),
               max(3 * c.position + 1, _readers(ir, {landed}, 3 * c.position + 1)[1]))
 
 
@@ -1666,7 +1752,9 @@ def lower(ir):
             collective, first = item[3], len(ir.declared)
             if collective.kind not in LOWERINGS:
                 raise NotImplementedError('%s of %s: no lowering (A-T3\')' % (collective.kind, collective.node.name))
-            LOWERINGS[collective.kind](ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
+            # compile-time callback (registered collective lowering handler): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            mesh_callbacks_are_outside_spec(LOWERINGS[collective.kind])(ir, collective, _groups(ir, collective.dims), item[1][0], item[2])
             ir.declares[collective] = range(first, len(ir.declared))
     ir.value_lifetimes = mesh_graph.Lifetimes((key, g) for g, item in enumerate(ir.program) for key in item[1])
     firsts = ir.value_lifetimes.first
@@ -1836,9 +1924,15 @@ def _program():
 
 # mesh-collective.h mesh_host_arrived; mesh.h MESH_PLATFORM_NS; rdma/mesh.py Publication
 def _wait(ready, progress, what):
-    seen, since = progress(), time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-    while not ready():
-        now, value = time.clock_gettime_ns(time.CLOCK_MONOTONIC), progress()
+    # compile-time callback (callback invocation _wait.progress): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    seen, since = mesh_callbacks_are_outside_spec(progress)(), time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    # compile-time callback (callback invocation _wait.ready): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    while not mesh_callbacks_are_outside_spec(ready)():
+        # compile-time callback (callback invocation _wait.progress): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        now, value = time.clock_gettime_ns(time.CLOCK_MONOTONIC), mesh_callbacks_are_outside_spec(progress)()
         if value != seen:
             seen, since = value, now
         elif now - since > mesh.PLATFORM_NS:
@@ -3081,7 +3175,9 @@ def _epilogue(out, acc, t, extra=(), apply=None):
     r = _Region()
     x = _load(r, 0, acc, t)
     loaded = [_load(r, 1 + j, v, t) for j, (v, _) in enumerate(extra)]
-    r.done(_store(r, apply(r, x, *loaded) if apply else x, t, out))
+    # compile-time callback (callback invocation _epilogue.apply): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    r.done(_store(r, mesh_callbacks_are_outside_spec(apply)(r, x, *loaded) if apply else x, t, out))
     return [_Generic(out.shape, [(acc, _same(out.dim()))] + list(extra), [(out, _same(out.dim()))], r)]
 
 
@@ -3112,7 +3208,9 @@ def _joined(states, join):
     n = len(states)
     a = [c('arg', kind, integer=j) for j, (kind, _) in enumerate(states)]
     b = [c('arg', kind, integer=n + j) for j, (kind, _) in enumerate(states)]
-    return c.done(*join(c, a, b))
+    # compile-time callback (callback invocation _joined.join): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return c.done(*mesh_callbacks_are_outside_spec(join)(c, a, b))
 
 
 def _extremum(r, a, b, t, larger):
@@ -3952,37 +4050,55 @@ def _lstsq_driver(a, driver):
     return driver.lower() if driver is not None else ('gels' if a.device.type == 'cuda' else 'gelsy')
 
 
-@torch.library.register_fake('aten::geqrf')
+# compile-time callback (decorator registration torch.library.register_fake('aten::geqrf')): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+@mesh_callbacks_are_outside_spec(torch.library.register_fake('aten::geqrf'))
 def _geqrf_metadata(self):
     # compile-time dispatch callback (torch.library.register_fake of aten::geqrf): callback inversion of control is
     # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
     mesh_callbacks_are_outside_spec
-    torch._check(self.dim() >= 2, lambda: 'torch.geqrf: input must have at least 2 dimensions')
+    # compile-time callback (callable supplied to torch._check(self.dim() >= 2, lambda: 'torch.geqrf: input must have at least 2 dimensions'): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    torch._check(self.dim() >= 2, lambda: mesh_callbacks_are_outside_spec('torch.geqrf: input must have at least 2 dimensions'))
     m, n = self.shape[-2:]
     return (self.new_empty((*self.shape[:-2], n, m)).transpose(-2, -1),
             self.new_empty((*self.shape[:-2], min(m, n))))
 
 
-@torch.library.register_fake('aten::linalg_lstsq')
+# compile-time callback (decorator registration torch.library.register_fake('aten::linalg_lstsq')): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+@mesh_callbacks_are_outside_spec(torch.library.register_fake('aten::linalg_lstsq'))
 def _lstsq_metadata(self, b, rcond=None, *, driver=None):
     # compile-time dispatch callback (torch.library.register_fake of aten::linalg_lstsq): callback inversion of control
     # is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
     mesh_callbacks_are_outside_spec
+    # compile-time callback (callable supplied to torch._check(self.dim() >= 2 and b.dim() >= 1, lambda: 'torch.linalg.lstsq: input must hav): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     torch._check(self.dim() >= 2 and b.dim() >= 1,
-                 lambda: 'torch.linalg.lstsq: input must have at least 2 dimensions and other at least 1')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input must have at least 2 dimensions and other at least 1'))
+    # compile-time callback (callable supplied to torch._check(0 <= self.dim() - b.dim() <= 1, lambda: 'torch.linalg.lstsq: input.dim() - ot): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     torch._check(0 <= self.dim() - b.dim() <= 1,
-                 lambda: 'torch.linalg.lstsq: input.dim() - other.dim() must be 0 or 1')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input.dim() - other.dim() must be 0 or 1'))
+    # compile-time callback (callable supplied to torch._check(self.dtype == b.dtype and self.device == b.device, lambda: 'torch.linalg.lsts): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     torch._check(self.dtype == b.dtype and self.device == b.device,
-                 lambda: 'torch.linalg.lstsq: input and other must have the same dtype and device')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input and other must have the same dtype and device'))
     selected = _lstsq_driver(self, driver)
+    # compile-time callback (callable supplied to torch._check(selected in ('gels', 'gelsy', 'gelsd', 'gelss'), lambda: 'torch.linalg.lstsq:): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     torch._check(selected in ('gels', 'gelsy', 'gelsd', 'gelss'),
-                 lambda: 'torch.linalg.lstsq: driver must be gels, gelsy, gelsd or gelss')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: driver must be gels, gelsy, gelsd or gelss'))
+    # compile-time callback (callable supplied to torch._check(self.device.type != 'cuda' or selected == 'gels', lambda: 'torch.linalg.lstsq): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     torch._check(self.device.type != 'cuda' or selected == 'gels',
-                 lambda: 'torch.linalg.lstsq: driver other than gels is not supported on CUDA')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: driver other than gels is not supported on CUDA'))
     vector = _linalg_vector_rhs(self, b)
     rhs = b.unsqueeze(-1) if vector else b
     m, n = self.shape[-2:]
-    torch._check(m == rhs.shape[-2], lambda: 'torch.linalg.lstsq: input and other row sizes must match')
+    # compile-time callback (callable supplied to torch._check(m == rhs.shape[-2], lambda: 'torch.linalg.lstsq: input and other row sizes mu): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    torch._check(m == rhs.shape[-2], lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input and other row sizes must match'))
     batch = torch.broadcast_shapes(self.shape[:-2], rhs.shape[:-2])
     nrhs = rhs.shape[-1]
     solution = self.new_empty((*batch, nrhs, max(m, n))).transpose(-2, -1)[..., :n, :]
@@ -4654,7 +4770,9 @@ def _convolving(target, given, outs):
         return made
     if wide:
         return made + _complex('add', out, acc, bias.view(bias.shape[0], 1, 1, 1))
-    return made + _epilogue(out, acc, t, [(bias, _rows(5, [1]))], lambda r, a, b: r('add', t, a, b))
+    # compile-time callback (callable supplied to _epilogue(out, acc, t, [(bias, _rows(5, [1]))], lambda r, a, b: r('add', t, a, b))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return made + _epilogue(out, acc, t, [(bias, _rows(5, [1]))], lambda r, a, b: mesh_callbacks_are_outside_spec(r('add', t, a, b)))
 
 
 # an input position o s - low + k dilation of a strided window, its in-range test and clamped index (_bounded)
@@ -4770,9 +4888,11 @@ def _adaptive_max(target, given, outs):
     lowest = -math.inf if _floating(t) else torch.iinfo(x.dtype).min
     states = [(t, lowest), (I32, -1)]
     omap = _rows(x.dim() + k, range(x.dim()))
+    # compile-time callback (callable supplied to _joined(states, lambda c, a, b: _ordered(c, a, b, t, True, True))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return [_Generic([*out.shape, *spans], [(x, None)], [(out, omap), (indices, omap)], r,
                      [PARALLEL] * x.dim() + [REDUCTION] * k, [REGION] * 2, [t, I32], None, states,
-                     _joined(states, lambda c, a, b: _ordered(c, a, b, t, True, True)), _identities(states),
+                     _joined(states, lambda c, a, b: mesh_callbacks_are_outside_spec(_ordered(c, a, b, t, True, True))), _identities(states),
                      REASSOCIATE)]
 
 
@@ -5076,8 +5196,10 @@ def _reduction(packet, x, dims, kept, t, start=IDENTITY):
     if packet in (A.sum, A.mean):
         return _Generic(loops, [(x, xmap)], [(kept, omap)], r, iterators, [SUM], [t], [start], precision=REASSOCIATE)
     states = [(t, _identity(packet, x.dtype))]
+    # compile-time callback (callable supplied to _joined(states, lambda c, a, b: [_extremum(c, a[0], b[0], t, packet is A.amax)])): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return _Generic(loops, [(x, xmap)], [(kept, omap)], r, iterators, [REGION], [t], [start], states,
-                    _joined(states, lambda c, a, b: [_extremum(c, a[0], b[0], t, packet is A.amax)]),
+                    _joined(states, lambda c, a, b: mesh_callbacks_are_outside_spec([_extremum(c, a[0], b[0], t, packet is A.amax)])),
                     _identities(states), REASSOCIATE)
 
 
@@ -5097,7 +5219,9 @@ def _reduced(target, given, outs):
     if packet is not A.mean:
         return made
     total = math.prod(x.shape[d] for d in dims)
-    return made + _epilogue(out, acc, t, (), lambda r, s: r('div', t, s, r.const(total, t)))
+    # compile-time callback (callable supplied to _epilogue(out, acc, t, (), lambda r, s: r('div', t, s, r.const(total, t)))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return made + _epilogue(out, acc, t, (), lambda r, s: mesh_callbacks_are_outside_spec(r('div', t, s, r.const(total, t))))
 
 
 # PyTorch 2.14 documentation, torch.prod, torch.any, torch.all, torch.argmax, torch.argmin, torch.max, torch.min and
@@ -5121,8 +5245,10 @@ def _fold(target, given, outs):
     r.done(_load(r, 0, x, t))
     states = [(t, 1 if packet is not A.any else 0)]
     name = 'mul' if packet is A.prod else 'or' if packet is A.any else 'and'
+    # compile-time callback (callable supplied to _joined(states, lambda c, a, b: [c(name, t, a[0], b[0])])): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return [_Generic(loops, [(x, xmap)], [(kept, omap)], r, iterators, [REGION], [t], None, states,
-                     _joined(states, lambda c, a, b: [c(name, t, a[0], b[0])]), _identities(states), REASSOCIATE)]
+                     _joined(states, lambda c, a, b: mesh_callbacks_are_outside_spec([c(name, t, a[0], b[0])])), _identities(states), REASSOCIATE)]
 
 
 # PyTorch 2.14 documentation, torch.prod, torch.any and torch.all of complex input: the product the REGION monoid of
@@ -5137,13 +5263,17 @@ def _complex_fold(packet, x, out, dims, keepdim):
         r.done(r('or', BOOL, r('ne', BOOL, re, r.const(0, t)), r('ne', BOOL, im, r.const(0, t))))
         states = [(BOOL, int(packet is A.all))]
         name = 'or' if packet is A.any else 'and'
+        # compile-time callback (callable supplied to _joined(states, lambda c, a, b: [c(name, BOOL, a[0], b[0])])): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         return [_Generic(loops, inputs, [(kept, omap)], r, iterators, [REGION], [BOOL], None, states,
-                         _joined(states, lambda c, a, b: [c(name, BOOL, a[0], b[0])]), _identities(states), REASSOCIATE)]
+                         _joined(states, lambda c, a, b: mesh_callbacks_are_outside_spec([c(name, BOOL, a[0], b[0])])), _identities(states), REASSOCIATE)]
     r.done(re, im)
     states = [(t, 1), (t, 0)]
     made = torch.view_as_real(kept)
+    # compile-time callback (callable supplied to _joined(states, lambda c, a, b: list(_complex_value(c, t, 'mul', a, b, 1, None)))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return [_Generic(loops, inputs, [(made[..., 0], omap), (made[..., 1], omap)], r, iterators, [REGION] * 2, [t, t],
-                     None, states, _joined(states, lambda c, a, b: list(_complex_value(c, t, 'mul', a, b, 1, None))),
+                     None, states, _joined(states, lambda c, a, b: mesh_callbacks_are_outside_spec(list(_complex_value(c, t, 'mul', a, b, 1, None)))),
                      _identities(states), REASSOCIATE)]
 
 
@@ -5212,7 +5342,9 @@ def _variance(target, given, outs):
     ops.append(_Generic(loops, [pair for part, total_ in zip(parts, sums) for pair in ((part, xmap), (total_, gmap))],
                         [(squares, gmap)], r, iterators, [SUM], [t], precision=REASSOCIATE))
     kept = out.squeeze(tuple(dims)) if given.get('keepdim') and dims else out
-    return ops + _epilogue(kept, squares, t, (), lambda r, q: r('div', t, q, r.const(max(total - correction, 0), t)))
+    # compile-time callback (callable supplied to _epilogue(kept, squares, t, (), lambda r, q: r('div', t, q, r.const(max(total - correction): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return ops + _epilogue(kept, squares, t, (), lambda r, q: mesh_callbacks_are_outside_spec(r('div', t, q, r.const(max(total - correction, 0), t))))
 
 # M. Milakov and N. Gimelshein, Online normalizer calculation for softmax, arXiv:1805.02867, 2018, Algorithm 3 and
 # section 3.1, (4): the line's state (m, s), each element x contributing (x, 1), joined by (4)
@@ -5243,9 +5375,11 @@ def _statistics(x, d, m, s, t, start=IDENTITY):
     r = _Region()
     r.done(_load(r, 0, x, t), r.const(1, t))
     xmap, lmap = _rows(x.dim(), [order.index(j) for j in range(x.dim())]), _rows(x.dim(), range(x.dim() - 1))
+    # compile-time callback (callable supplied to _joined(states, lambda c, a, b: _online(c, a, b, t))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return _Generic([x.shape[j] for j in order], [(x, xmap)], [(m, lmap), (s, lmap)], r,
                     [PARALLEL] * (x.dim() - 1) + [REDUCTION], [REGION] * 2, [t, t], [start] * 2, states,
-                    _joined(states, lambda c, a, b: _online(c, a, b, t)), _identities(states), REASSOCIATE)
+                    _joined(states, lambda c, a, b: mesh_callbacks_are_outside_spec(_online(c, a, b, t))), _identities(states), REASSOCIATE)
 
 
 def _normalizing(x, d, m, s, out, t, log):
@@ -5294,7 +5428,9 @@ def _blelloch(buffers, t, identities, combine):
             inputs, left, right
     for d in range(levels):
         r, a, b, inputs, left, right = sweep(d)
-        r.done(*combine(r, a, b))
+        # compile-time callback (callback invocation _blelloch.combine): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        r.done(*mesh_callbacks_are_outside_spec(combine)(r, a, b))
         ops.append(_Generic([*buffer.shape[:-1], size >> (d + 1)], inputs, [(x, right) for x in buffers], r))
     r = _Region()
     r.done(*[r.const(v, kind) for v, kind in zip(identities, kinds)])
@@ -5302,7 +5438,9 @@ def _blelloch(buffers, t, identities, combine):
                         r))
     for d in reversed(range(levels)):
         r, a, b, inputs, left, right = sweep(d)
-        r.done(*b, *combine(r, b, a))
+        # compile-time callback (callback invocation _blelloch.combine): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        r.done(*b, *mesh_callbacks_are_outside_spec(combine)(r, b, a))
         ops.append(_Generic([*buffer.shape[:-1], size >> (d + 1)], inputs,
                             [(x, left) for x in buffers] + [(x, right) for x in buffers], r))
     return ops
@@ -5332,7 +5470,9 @@ def _scan(xs, d, outs, t, identities, combine):
     ops += _blelloch(buffers, kinds, identities, combine)
     e = _Region()
     own = iter(range(len(buffers), len(buffers) + len(tensors)))
-    made = combine(e, [e.arg(q, b) for q, b in enumerate(buffers)],
+    # compile-time callback (callback invocation _scan.combine): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    made = mesh_callbacks_are_outside_spec(combine)(e, [e.arg(q, b) for q, b in enumerate(buffers)],
                    [e.index(n - 1) if v is None else _load(e, next(own), v, kind) for v, kind in zip(xs, kinds)])
     e.done(*[_store(e, m, kind, o) for m, kind, o in zip(made, kinds, outs)])
     xmap = _rows(n, [order.index(j) for j in range(n)])
@@ -5390,8 +5530,10 @@ def _scanned(target, given, outs):
         return ops + _scan([pairs[..., 0], pairs[..., 1]], d, [made[..., 0], made[..., 1]], t, [identity, 0], combine)
     _typed(target, [x], outs, REAL)
     t = _compute(out.dtype, x.dtype)
+    # compile-time callback (callable supplied to _scan([x], d, [out], t, [identity], lambda r, a, b: [_log_add_exp(r, t, a[0], b[0]) if op ): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return _scan([x], d, [out], t, [identity],
-                 lambda r, a, b: [_log_add_exp(r, t, a[0], b[0]) if op is None else r(op, t, a[0], b[0])])
+                 lambda r, a, b: mesh_callbacks_are_outside_spec([_log_add_exp(r, t, a[0], b[0]) if op is None else r(op, t, a[0], b[0])]))
 
 
 # PyTorch 2.14 documentation, torch.cummax and torch.cummin: the running extremum and its index, the scan of the
@@ -5528,7 +5670,9 @@ def _selected(target, given, outs):
     r = _Region()
     r.done(r('select', I32, neighbour(r, -1), r.const(-1, I32), r.index(m - 1)))
     ops.append(_Generic([x.shape[j] for j in order], [(sv, None), (sv, smap)], [(marks, smap)], r))
-    ops += _scan([marks], d, [starts], I32, [-1], lambda c, a, b: [c('select', I32, c('ge', BOOL, b[0], a[0]), b[0], a[0])])
+    # compile-time callback (callable supplied to _scan([marks], d, [starts], I32, [-1], lambda c, a, b: [c('select', I32, c('ge', BOOL, b[0): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ops += _scan([marks], d, [starts], I32, [-1], lambda c, a, b: mesh_callbacks_are_outside_spec([c('select', I32, c('ge', BOOL, b[0], a[0]), b[0], a[0])]))
     r = _Region()
     length = r('add', I32, r('sub', I32, r.index(m - 1), r.arg(2, starts)), r.const(1, I32))
     r.done(r('select', I32, neighbour(r, 1), r.const(0, I32), length))
@@ -6107,9 +6251,11 @@ def _attention(q, k, v, mask, out, causal, scale, group, dropout=0.0, origin=Att
         ops.append(_Generic(domain, inputs, [(acc, _rows(b + 3, range(b + 2)))], r,
                             [PARALLEL] * (b + 2) + [REDUCTION], [SUM], [t], [ACCUMULATE if j else IDENTITY],
                             precision=REASSOCIATE | CONTRACT))
+    # compile-time callback (callable supplied to _epilogue(_heads(out, group, False), acc, t, [(s, _rows(b + 2, range(b + 1)))], lambda r, ): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return ops + _epilogue(_heads(out, group, False), acc, t, [(s, _rows(b + 2, range(b + 1)))],
-        lambda r, numerator, total: r('select', t, r('eq', BOOL, total, r.const(0, t)), numerator,
-                                      r('div', t, numerator, total)))
+        lambda r, numerator, total: mesh_callbacks_are_outside_spec(r('select', t, r('eq', BOOL, total, r.const(0, t)), numerator,
+                                      r('div', t, numerator, total))))
 
 
 def _attending(given):
@@ -6289,7 +6435,9 @@ def _counted(mask, count):
     inside, at = _bounded(r, r.index(0), n)
     r.done(r('select', I32, inside, element(r, at, 0), r.const(0, I32)))
     ops = [_Generic([size], [(mask, None)], [(buffer, _same(1))], r)]
-    ops += _blelloch([buffer], I32, [0], lambda r, a, b: [r('add', I32, a[0], b[0])])
+    # compile-time callback (callable supplied to _blelloch([buffer], I32, [0], lambda r, a, b: [r('add', I32, a[0], b[0])])): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ops += _blelloch([buffer], I32, [0], lambda r, a, b: mesh_callbacks_are_outside_spec([r('add', I32, a[0], b[0])]))
     e = _Region()
     e.done(e('add', I32, e.arg(0, buffer), element(e, e.index(0), 1)))
     return ops + [_Generic([n], [(buffer, _same(1)), (mask, None)], [(count, _same(1))], e)]
@@ -6408,8 +6556,10 @@ def _norm(r, diff, p, t):
     total = f('arg', t, integer=0)
     f.done(total if p in (0, 1) or math.isinf(p) else f('sqrt', t, total) if p == 2 else
            f('pow', t, total, f.const(1 / p, t)))
-    join = (lambda c, a, b: [_extremum(c, a[0], b[0], t, True)]) if math.isinf(p) else \
-        (lambda c, a, b: [c('add', t, a[0], b[0])])
+    # compile-time callback (callable supplied to (lambda c, a, b: [_extremum(c, a[0], b[0], t, True)]) if math.isinf(p) else lambda c, a, b): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    join = (lambda c, a, b: mesh_callbacks_are_outside_spec([_extremum(c, a[0], b[0], t, True)])) if math.isinf(p) else \
+        (lambda c, a, b: mesh_callbacks_are_outside_spec([c('add', t, a[0], b[0])]))
     return states, _joined(states, join), f
 
 
@@ -6515,7 +6665,9 @@ def _lifted(target, lower, given, outs):
                 return _component(v, k)
             return v
         made = {name: part(v, name in VALUED) for name, v in given.items()}
-        ops += lower(target, made, [part(o, False) for o in outs])
+        # compile-time callback (supplied callback _lifted.lower): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        ops += mesh_callbacks_are_outside_spec(lower)(target, made, [part(o, False) for o in outs])
     return ops
 
 
@@ -6532,25 +6684,39 @@ def _lowering(local, page, generator=None):
     packet = getattr(local.target, 'overloadpacket', local.target)
     if packet is A.scaled_dot_product_attention:
         origin = local.annotation if isinstance(local.annotation, AttentionOrigin) else AttentionOrigin(0, page)
-        return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kwargs), outs, origin,
-                                                    generator, local.site)
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: _attended(local.target, _operands(local.target, args, kw): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(_attended(local.target, _operands(local.target, args, kwargs), outs, origin,
+                                                    generator, local.site))
     if packet in DRAWN:
-        return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs,
-                                                          generator, local.site)
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, ar): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        # compile-time callback (registered SOURCES handler invocation): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(mesh_callbacks_are_outside_spec(SOURCES[packet])(local.target, _operands(local.target, args, kwargs), outs,
+                                                          generator, local.site))
     if local.target is striped:
-        return lambda args, kwargs, outs: _striped(outs[0], *args)
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: _striped(outs[0], *args)): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(_striped(outs[0], *args))
     if packet in (A._linalg_det, A._linalg_slogdet):
         metadata = _given(local, _names(local))['A'].meta['val']
         transpose = metadata.is_contiguous() and not metadata.is_complex()
-        return lambda args, kwargs, outs: _determinant(local.target, _operands(local.target, args, kwargs), outs,
-                                                       transpose)
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: _determinant(local.target, _operands(local.target, args,): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(_determinant(local.target, _operands(local.target, args, kwargs), outs,
+                                                       transpose))
     if packet is A.linalg_pinv:
         metadata = _given(local, _names(local))['self'].meta['val']
         dtype = torch.float32 if metadata.device.type in ('mps', 'metal') else torch.float64
-        return lambda args, kwargs, outs: _pseudoinverse(local.target, _operands(local.target, args, kwargs), outs,
-                                                        dtype)
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: _pseudoinverse(local.target, _operands(local.target, arg): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(_pseudoinverse(local.target, _operands(local.target, args, kwargs), outs,
+                                                        dtype))
     if local.target in SYMBOLIC:
-        return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: _elementwise(SYMBOLIC[local.target], outs[0], *args)): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(_elementwise(SYMBOLIC[local.target], outs[0], *args))
     if packet in LINEAR:
         def lifted(args, kwargs, outs):
             given = _operands(local.target, args, kwargs)
@@ -6559,9 +6725,15 @@ def _lowering(local, page, generator=None):
                     else lower(local.target, given, outs))
         return lifted
     if packet in SOURCES:
-        return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, args, kwargs), outs)
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: SOURCES[packet](local.target, _operands(local.target, ar): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        # compile-time callback (registered SOURCES handler invocation): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(mesh_callbacks_are_outside_spec(SOURCES[packet])(local.target, _operands(local.target, args, kwargs), outs))
     if packet in VIEWS:
-        return lambda args, kwargs, outs: _copy(outs[0], _call(local, args, kwargs))
+        # compile-time callback (callable supplied to return lambda args, kwargs, outs: _copy(outs[0], _call(local, args, kwargs))): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return lambda args, kwargs, outs: mesh_callbacks_are_outside_spec(_copy(outs[0], _call(local, args, kwargs)))
     raise NotImplementedError('%s: its lowering into the structured basis is unfinished '
                               '(design/torch-source-lowering-change-request.md item 1)' % (local.target,))
 
@@ -6618,8 +6790,13 @@ def _hull(values, addresses, row):
 HELD = {}
 
 
-@DELETER
+# lifetime callback (decorator registration DELETER): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+@mesh_callbacks_are_outside_spec(DELETER)
 def _delete(managed):
+    # lifetime callback (registered by DELETER): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     held = HELD.pop(C.addressof(managed.contents), None)
     if held:
         if held[0].manager_ctx:
@@ -6635,8 +6812,10 @@ def _delete(managed):
 # the buffer by the caller's means (a mapped plan)
 def _placed_buffer(view, owner=None):
     lib, device = _recorder()[0], _metal_device()
+    # compile-time callback (callable supplied to _lent(owner, lambda release, held: lib.MetalBufferBorrow(device, view.address, view.bytes,): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     buffer = lib.MetalBufferBorrow(device, view.address, view.bytes, RELEASE(), None) if owner is None else _lent(
-        owner, lambda release, held: lib.MetalBufferBorrow(device, view.address, view.bytes, release, held), bool)
+        owner, lambda release, held: mesh_callbacks_are_outside_spec(lib.MetalBufferBorrow(device, view.address, view.bytes, release, held)), bool)
     if not buffer:
         raise OSError(errno.ENOMEM, 'Metal made no buffer over the program\'s mapping, %d bytes (MTLDevice.h '
                                     'newBufferWithBytesNoCopy)' % view.bytes)
@@ -6652,7 +6831,9 @@ def _dlpack_tensor(device, data, offset, owner, dtype, shape, mapping):
     n = len(shape)
     sizes = (C.c_int64 * max(n, 1))(*shape)
     strides = (C.c_int64 * max(n, 1))(*(math.prod(shape[i + 1:]) for i in range(n)))
-    managed = DLManagedTensorVersioned(VERSION, owner, _delete, 0,
+    # lifetime callback (native DLPack deleter registration): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    managed = DLManagedTensorVersioned(VERSION, owner, mesh_callbacks_are_outside_spec(_delete), 0,
                                        DLTensor(data, DLDevice(DEVICES[device], 0), n, DLDataType(*TYPES[dtype]),
                                                 sizes, strides, offset))
     if owner:
@@ -6733,10 +6914,16 @@ def _stored(value):
 def _called(ir, key, operands, local, form, placed, generator):
     lower = _lowering(local, ir.page, generator)
     given = iter(operands)
-    args, kwargs = map_arg((local.args, local.kwargs), lambda n: next(given))
-    mine = placed(key)
+    # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    args, kwargs = map_arg((local.args, local.kwargs), lambda n: mesh_callbacks_are_outside_spec(next(given)))
+    # compile-time callback (supplied callback _called.placed): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    mine = mesh_callbacks_are_outside_spec(placed)(key)
     if isinstance(form, tuple):
-        outs = [placed(result) for _, result in form[1]]
+        # compile-time callback (supplied callback _called.placed): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        outs = [mesh_callbacks_are_outside_spec(placed)(result) for _, result in form[1]]
         return pytree.tree_unflatten(outs, pytree.tree_structure(ir.prototypes[key])), lower(args, kwargs, outs)
     if key in ir.contiguous:
         base = operands[_based(local)]
@@ -6824,7 +7011,9 @@ def _collected(ir, placed, item, operands):
     me, receives = ir.roles[collective]
     local = _local(ir, collective)
     if local == 'reduce':
-        total, first = placed(key), operands[0]
+        # compile-time callback (supplied callback _collected.placed): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        total, first = mesh_callbacks_are_outside_spec(placed)(key), operands[0]
         def real(v):
             return torch.view_as_real(v) if v.is_complex() else v
         # design/unequal-shards-change-request.md items 2, 3 and 12; MPI 4.1 section 7.10.2: block `me` of the summed
@@ -6832,11 +7021,15 @@ def _collected(ir, placed, item, operands):
         if collective.kind == 'reduce-scatter':
             dim, n = collective.dim, collective.counts[me]
             total = real(total.narrow(dim, collective.starts[me], n))
+            # compile-time callback (supplied callback _collected.placed): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
             whole = [real(first.narrow(dim, collective.displs[me], n))] \
-                + [real(placed(received).select(0, j).narrow(dim, 0, n)) for _, (received, j) in receives]
+                + [real(mesh_callbacks_are_outside_spec(placed)(received).select(0, j).narrow(dim, 0, n)) for _, (received, j) in receives]
         else:
             total, first = real(total).view(-1), real(first)
-            whole = [first.reshape(-1)] + [real(placed(received)).view(-1).narrow(0, j * total.numel(), total.numel())
+            # compile-time callback (supplied callback _collected.placed): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            whole = [first.reshape(-1)] + [real(mesh_callbacks_are_outside_spec(placed)(received)).view(-1).narrow(0, j * total.numel(), total.numel())
                                            for _, (received, j) in receives]
         _typed(collective.kind, whole[:1], [total])
         t = _compute(total.dtype, *[x.dtype for x in whole])
@@ -6850,8 +7043,12 @@ def _collected(ir, placed, item, operands):
         return [_Generic(total.shape, [(piece, rows) for piece in whole], [(total, rows)], r)]
     places = ir.places[ir.device]
     if local == 'copy' and places[reads[0]][:4] != places[key][:4]:
-        return _assign(placed(key), operands[0])
-    return _fill(placed(key), 0) if local == 'fill' else []
+        # compile-time callback (supplied callback _collected.placed): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return _assign(mesh_callbacks_are_outside_spec(placed)(key), operands[0])
+    # compile-time callback (supplied callback _collected.placed): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return _fill(mesh_callbacks_are_outside_spec(placed)(key), 0) if local == 'fill' else []
 
 
 # GSPMD section 4.5; torch 2.14.0 torch/export/exported_program.py, ExportedProgram;
@@ -6862,7 +7059,9 @@ def _hosted(ir, item, values):
         return operator.attrgetter(operand)(ir.gm)
     if kind == 'call':
         given, local = iter(values), ir.locals[operand]
-        return _call(local, *map_arg((local.args, local.kwargs), lambda n: next(given)))
+        # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return _call(local, *map_arg((local.args, local.kwargs), lambda n: mesh_callbacks_are_outside_spec(next(given))))
     return values[0].narrow(*_cut(ir, operand, ir.device))
 
 
@@ -6884,13 +7083,19 @@ def _initial_values(ir, immutable):
         return ir.initial
     loaded = ir.loads & ir.homes.keys()
     universe = [*ir.attributes, *(key for item in ir.attributes.values() for key in item[1])]
-    needed = mesh_graph.reach(universe, loaded, lambda key: ir.attributes[key][1] if key in ir.attributes else ())
+    # compile-time callback (callable supplied to mesh_graph.reach(universe, loaded, lambda key: ir.attributes[key][1] if key in ir.attribut): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    needed = mesh_graph.reach(universe, loaded, lambda key: mesh_callbacks_are_outside_spec(ir.attributes[key][1] if key in ir.attributes else ()))
     order = [key for key in ir.attributes if key in needed]
-    host = mesh_graph.forward(order, lambda key: ir.attributes[key][1],
-                              lambda key, values: _hosted(ir, ir.attributes[key], values))
-    fixed = mesh_graph.forward(order, lambda key: ir.attributes[key][1],
-                               lambda key, values: _key(host[key]) in immutable
-                               if ir.attributes[key][0] == 'constant' else all(values))
+    # compile-time callback (callable supplied to mesh_graph.forward(order, lambda key: ir.attributes[key][1], lambda key, values: _hosted(i): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    host = mesh_graph.forward(order, lambda key: mesh_callbacks_are_outside_spec(ir.attributes[key][1]),
+                              lambda key, values: mesh_callbacks_are_outside_spec(_hosted(ir, ir.attributes[key], values)))
+    # compile-time callback (callable supplied to mesh_graph.forward(order, lambda key: ir.attributes[key][1], lambda key, values: _key(host): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    fixed = mesh_graph.forward(order, lambda key: mesh_callbacks_are_outside_spec(ir.attributes[key][1]),
+                               lambda key, values: mesh_callbacks_are_outside_spec(_key(host[key]) in immutable
+                               if ir.attributes[key][0] == 'constant' else all(values)))
     initial, mutable = {}, set()
     for key in loaded:
         v, offset, sizes, strides = ir.homes[key]
@@ -6917,7 +7122,9 @@ def _copied(ir, key, operand, source, target):
 # stand-ins (`placed`) and the call's input leaves (`given`): its value and its structured operations
 def _specialized(ir, placed, item, operands, ops, given, generator):
     kind, reads, key, operand = item
-    value = placed(key)
+    # compile-time callback (supplied callback _specialized.placed): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    value = mesh_callbacks_are_outside_spec(placed)(key)
     if key in ir.attributes:
         return value
     if kind == 'input':
@@ -6934,7 +7141,9 @@ def _specialized(ir, placed, item, operands, ops, given, generator):
             ops += _fill(value.narrow(dim, start, extent), fill) if fill is not None and extent else []
     elif kind in ('slice', 'window') and value is None:
         cut = _cut(ir, operand, ir.device)
-        value = pytree.tree_map(lambda tensor: tensor.narrow(*cut), operands[0])
+        # compile-time callback (callback operand pytree.tree_map[0]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        value = pytree.tree_map(lambda tensor: mesh_callbacks_are_outside_spec(tensor.narrow(*cut)), operands[0])
     elif kind == 'call':
         operands = list(operands)
         for at, dim, m, starts, counts in ir.masks.get(key, ()):
@@ -6973,7 +7182,9 @@ def _instantiate(ir, tensors, given, spec, stream=0):
         kind, reads, key, operand = item
         if kind == 'output':
             node, keys = operand
-            result = map_arg(node.args[0], lambda n: read(keys[n]))
+            # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            result = map_arg(node.args[0], lambda n: mesh_callbacks_are_outside_spec(read(keys[n])))
             break
         first = len(ops)
         remember(key, _specialized(ir, placed, item, [read(r) for r in reads], ops, given, generator))
@@ -7022,7 +7233,9 @@ def _retire(context, state):
 # or on a preparation that raised
 def _owned(owned, made):
     if made:
-        owned[made] = lambda: PUT(made, SELECTOR[b'release'])
+        # lifetime/preparation/runtime callback (callable supplied to owned[made] = lambda: PUT(made, SELECTOR[b'release'])): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        owned[made] = lambda: mesh_callbacks_are_outside_spec(PUT(made, SELECTOR[b'release']))
     return made
 
 
@@ -7051,7 +7264,9 @@ RELEASE = C.CFUNCTYPE(None, C.c_void_p)
 HOLDERS = {}
 
 
-@RELEASE
+# lifetime callback (decorator registration RELEASE): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+@mesh_callbacks_are_outside_spec(RELEASE)
 def _released_constant(owner):
     # lifetime callback (ctypes RELEASE passed to native borrowers, e.g. MetalBufferBorrow): callback inversion of
     # control is outside the working specification, and runtime callback overhead is inadmissible in
@@ -7115,7 +7330,9 @@ class _Builder:
         HOLDERS[id(base)] = base
         buffer = storage.data_ptr() if base.device.type == 'mps' else None
         data = OBJECT(buffer, _SEL(b'contents')) if buffer else storage.data_ptr()
-        self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0, id(base), _released_constant)
+        # lifetime callback (native borrowed-storage release registration): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0, id(base), mesh_callbacks_are_outside_spec(_released_constant))
 
     def value(self, t):
         base, words = (t.tensor, 2) if isinstance(t, _Words) else (t, 1)
@@ -7451,7 +7668,9 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
         builder = _Builder(compiler, owners, role, row, (k << 48) | (j << 32), fixed)
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[GPU]), C.byref(machines[CPU]))
-        owned[id(builder)] = lambda p=builder.p: compiler.metal_ir_program_free(p)
+        # preparation callback (callable supplied to owned[id(builder)] = lambda p=builder.p: compiler.metal_ir_program_free(p)): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        owned[id(builder)] = lambda p=builder.p: mesh_callbacks_are_outside_spec(compiler.metal_ir_program_free(p))
         if generator.sites:
             builder.declare(generator.state, STATE, data=generator.state)
         for g in ops:
@@ -7484,7 +7703,9 @@ def _programs(context, irs, compiled, gm, of, constants, holders, owned, calls):
         rows.append({'node': node, 'k': k, 'j': j, 'result': result, 'builder': builder,
                      'marks': marks, 'receives': receives, 'sends': sends})
         return result
-    _Program(gm, call).run(*[instance(k, 0)[1][i][0] if k is not None else constant
+    # preparation callback (callback operand _Program[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    _Program(gm, mesh_callbacks_are_outside_spec(call)).run(*[instance(k, 0)[1][i][0] if k is not None else constant
                              for i, (constant, k) in enumerate(zip(constants, holders))])
     return {'lib': lib, 'recorder': recorder, 'owners': owners, 'rated': rated, 'rows': rows, 'compiler': compiler,
             'device': device, 'inputs': [ir.inputs for ir in irs]}
@@ -7516,7 +7737,9 @@ def _actors(programs, irs, owned):
         gpu, cpu = (C.byref(machines[GPU]), C.byref(machines[CPU])) if machines else (None, None)
         actors = _Actors()
         status = lib.MetalRecorderActors(row['builder'].p, gpu, cpu, C.byref(actors))
-        owned[id(actors)] = lambda actors=actors: lib.MetalRecorderActorsFree(C.byref(actors))
+        # preparation callback (callable supplied to owned[id(actors)] = lambda actors=actors: lib.MetalRecorderActorsFree(C.byref(actors))): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        owned[id(actors)] = lambda actors=actors: mesh_callbacks_are_outside_spec(lib.MetalRecorderActorsFree(C.byref(actors)))
         if status not in (0, errno.ENODATA):
             mesh.check(status)
         parts, count, host, added = actors.parts, actors.edges, actors.host, 0.0
@@ -7579,7 +7802,9 @@ def _finalized(programs, context, irs, planned, values, owned):
     made = Transport()
     mesh.check(transport.mesh_metal_transport_create(C.byref(context), C.byref(planned), programs['device'],
                                                      C.byref(made)))
-    owned[id(made)] = lambda: transport.mesh_metal_transport_destroy(C.byref(made))
+    # preparation callback (callable supplied to owned[id(made)] = lambda: transport.mesh_metal_transport_destroy(C.byref(made))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    owned[id(made)] = lambda: mesh_callbacks_are_outside_spec(transport.mesh_metal_transport_destroy(C.byref(made)))
     for at, row in enumerate(programs['rows']):
         builder = row['builder']
         if builder is None:
@@ -7672,7 +7897,9 @@ _replays(programs, context, irs, planned, values, addresses, base, buffer, bound
         if status:
             raise OSError(status, 'call %s of compiled function %d: the replay: %s'
                           % (entry['node'].name, k, error.value.decode()))
-        owned[id(replay)] = lambda replay=replay: lib.MetalReplayDestroy(C.byref(replay))
+        # preparation callback (callable supplied to owned[id(replay)] = lambda replay=replay: lib.MetalReplayDestroy(C.byref(replay))): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        owned[id(replay)] = lambda replay=replay: mesh_callbacks_are_outside_spec(lib.MetalReplayDestroy(C.byref(replay)))
         rows.append(replay)
     calls = (Call * len(rows))(*[Call(C.pointer(r) if r is not None else None, row + 1, None, 0)
                                  for row, r in enumerate(rows)])
@@ -7736,7 +7963,7 @@ class _TensorLocation:
 
 def _outputs(recipe, bound):
     def tensor(x):
-        # runtime result-binding callback (pytree.tree_map over the recipe): callback inversion of control is outside
+        # preparation result-binding callback (pytree.tree_map over the recipe): callback inversion of control is outside
         # the working specification, and runtime callback overhead is inadmissible in performance-critical code
         mesh_callbacks_are_outside_spec
         if not isinstance(x, _TensorLocation):
@@ -7745,7 +7972,9 @@ def _outputs(recipe, bound):
         if copy.dtype != x.dtype:
             copy = copy.view(x.dtype)
         return copy.as_strided(x.shape, x.stride, copy.storage_offset() + x.offset)
-    return pytree.tree_map(tensor, recipe)
+    # preparation callback (callback operand pytree.tree_map[0]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return pytree.tree_map(mesh_callbacks_are_outside_spec(tensor), recipe)
 
 
 def _specialize(programs, horizon, bound, gm, constants, holders, every):
@@ -7768,7 +7997,9 @@ def _specialize(programs, horizon, bound, gm, constants, holders, every):
         value, shape = programs['inputs'][k][i]
         return _TensorLocation(k, value, _execution_copy(every, rated, k, value, 0, p, len(copies[k][value])), shape,
                                [math.prod(shape[d + 1:]) for d in range(len(shape))], 0, copies[k][value][0].dtype)
-    return [_Program(gm, lambda node, args, kwargs, p=p: pytree.tree_map(lambda x: leaf(x, p), results[node])).run(
+    # preparation callback (callback operand _Program[1]; callback operand pytree.tree_map[0]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return [_Program(gm, lambda node, args, kwargs, p=p: mesh_callbacks_are_outside_spec(pytree.tree_map(lambda x: mesh_callbacks_are_outside_spec(leaf(x, p)), results[node]))).run(
         *[input(i, p) for i in range(len(constants))])
         for p in range(_period(copies, horizon))]
 
@@ -7815,6 +8046,9 @@ TrainingResult = collections.namedtuple('TrainingResult', 'outputs parameters in
 
 class Tracer(torch.fx.Tracer):
     def is_leaf_module(self, m, module_qualified_name):
+        # compile-time callback (framework hook Tracer.is_leaf_module): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return isinstance(m, Function) or super().is_leaf_module(m, module_qualified_name)
 
 
@@ -7836,7 +8070,9 @@ def _rewrite(name, operands):
         if name == 'mul' and of(e, 'add'):
             return _rewrite('add', tuple(_rewrite('mul', operands[:i] + operands[i + 1:] + (term,)) for term in e[1:]))
     flat = [f for e in operands for f in (e[1:] if of(e, name) else (e,))]
-    return (name,) + tuple(sorted(flat, key=repr))
+    # compile-time callback (ordering key sorted): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return (name,) + tuple(sorted(flat, key=mesh_callbacks_are_outside_spec(repr)))
 
 
 # Rinard and Diniz, sections 3.2.1, 3.4.1, 4.9.1 and 4.9.2; torch v2.14.0 torch/fx/interpreter.py;
@@ -7850,15 +8086,27 @@ def _expression(op, target, args, kwargs):
 
 class _Symbolic(torch.fx.Interpreter):
     def call_function(self, target, args, kwargs):
+        # compile-time callback (framework hook _Symbolic.call_function): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return _expression('call_function', target, args, kwargs)
 
     def call_method(self, target, args, kwargs):
+        # compile-time callback (framework hook _Symbolic.call_method): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return _expression('call_method', target, args, kwargs)
 
     def call_module(self, target, args, kwargs):
+        # compile-time callback (framework hook _Symbolic.call_module): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return _expression('call_module', target, args, kwargs)
 
     def get_attr(self, target, args, kwargs):
+        # compile-time callback (framework hook _Symbolic.get_attr): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return _expression('get_attr', target, args, kwargs)
 
 
@@ -7890,13 +8138,17 @@ def _analyse(gm, of, compiled, sources, every):
     link, follower = {}, {}
     for b in calls:
         reads = []
-        map_arg((b.args, b.kwargs), reads.append)
+        # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        map_arg((b.args, b.kwargs), mesh_callbacks_are_outside_spec(reads.append))
         for k, a in enumerate(b.args):
             if isinstance(a, Node) and a in place and callee[a] == callee[b] and len(a.users) == 1 \
                     and reads.count(a) == 1 and link.get(a, (a, k))[1] == k and _commutes(modules[callee[b]], k):
                 link[b], follower[a] = (a, k), b
                 break
-    chains = mesh_graph.paths(calls, lambda a: [follower[a]] if a in follower else [])
+    # compile-time callback (callable supplied to mesh_graph.paths(calls, lambda a: [follower[a]] if a in follower else [])): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    chains = mesh_graph.paths(calls, lambda a: mesh_callbacks_are_outside_spec([follower[a]] if a in follower else []))
     step = {node: chain for chain in chains for node in chain}
 
     def inputs(node):
@@ -7944,7 +8196,9 @@ def _analyse(gm, of, compiled, sources, every):
     before = {j: {a for a, b in pairs if b == j} for j in range(len(calls))}
     for a, b in mesh_graph.successive(len(calls), head):
         before[b].add(a)
-    after = mesh_graph.closure(range(len(calls)), lambda j: before[j])
+    # compile-time callback (callable supplied to mesh_graph.closure(range(len(calls)), lambda j: before[j])): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    after = mesh_graph.closure(range(len(calls)), lambda j: mesh_callbacks_are_outside_spec(before[j]))
     outstanding, widths = {}, {}
     for f in every:
         widths[f] = mesh_graph.closure_chains(after, [j for j in range(len(calls)) if callee[calls[j]] == f])
@@ -7965,9 +8219,14 @@ class _Program(torch.fx.Interpreter):
         self.execute = execute
 
     def run_node(self, n):
+        # compile-time callback (framework hook _Program.run_node): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         if n.op == 'call_module':
             args, kwargs = self.fetch_args_kwargs_from_env(n)
-            return self.execute(n, args, kwargs)
+            # compile-time callback (_Program supplied execution callback): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            return mesh_callbacks_are_outside_spec(self.execute)(n, args, kwargs)
         if n.op == 'call_function' and self.env[n.args[0]] is None:
             return None
         return super().run_node(n)
@@ -8032,7 +8291,9 @@ def _static(exported, target):
 def _metadata_asserted(gm):
     for node in gm.graph.nodes:
         if node.op == 'call_function' and node.target is A._assert_tensor_metadata.default:
-            args, kwargs = map_arg((node.args, node.kwargs), lambda n: n.meta['val'])
+            # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            args, kwargs = map_arg((node.args, node.kwargs), lambda n: mesh_callbacks_are_outside_spec(n.meta['val']))
             node.target(*args, **kwargs)
             node.meta['val'] = None
 
@@ -8071,7 +8332,9 @@ def _decomposed(exported, max_squarings):
         module.recompile()
     table = {op: f for op, f in torch.export.default_decompositions().items()
              if not (isinstance(op, torch._ops.OpOverload) and _lowered(op))}
-    table[A.linalg_matrix_exp.default] = lambda a: _matrix_exponential(a, max_squarings)
+    # compile-time callback (callable supplied to table[A.linalg_matrix_exp.default] = lambda a: _matrix_exponential(a, max_squarings)): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    table[A.linalg_matrix_exp.default] = lambda a: mesh_callbacks_are_outside_spec(_matrix_exponential(a, max_squarings))
     known = {**decomposition_table, **LAZY}
     exported, done = exported.run_decompositions({**table, **LAZY}), set()
     while True:
@@ -8127,7 +8390,9 @@ class _Export(torch.fx.Interpreter):
     # each node's value with every flat leaf replaced by the _Produced naming it
     def marked(self, n, produced):
         leaves, spec = pytree.tree_flatten(self.env[n])
-        self.marks[n] = pytree.tree_unflatten([produced(o) for o in range(len(leaves))], spec)
+        # compile-time callback (callback invocation marked.produced): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        self.marks[n] = pytree.tree_unflatten([mesh_callbacks_are_outside_spec(produced)(o) for o in range(len(leaves))], spec)
 
     def fake(self, value, device=None):
         if not isinstance(value, torch.Tensor):
@@ -8140,9 +8405,14 @@ class _Export(torch.fx.Interpreter):
             mesh_callbacks_are_outside_spec
             with no_dispatch():
                 return FakeTensor(self.mode, meta(), placed)
-        return converter(value, callback=make)
+        # compile-time callback (callback keyword converter): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return converter(value, callback=mesh_callbacks_are_outside_spec(make))
 
     def run_node(self, n):
+        # compile-time callback (framework hook _Export.run_node): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         function = self.module.get_submodule(n.target) if n.op == 'call_module' else None
         if isinstance(function, Function):
             args, kwargs = self.fetch_args_kwargs_from_env(n)
@@ -8155,7 +8425,9 @@ class _Export(torch.fx.Interpreter):
         if n.op == 'placeholder':
             value = super().run_node(n)
             self.env[n], first = value, self.inputs
-            self.marked(n, lambda o: _Produced(None, first + o))
+            # compile-time callback (callable supplied to self.marked(n, lambda o: _Produced(None, first + o))): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            self.marked(n, lambda o: mesh_callbacks_are_outside_spec(_Produced(None, first + o)))
             self.inputs += len(pytree.tree_leaves(value))
             return value
         if n.op == 'output':
@@ -8178,7 +8450,9 @@ class _Export(torch.fx.Interpreter):
         found = [k for k, c in enumerate(self.compiled) if c.function is function and c.signature == signature]
         if not found:
             if source is not None:
-                args, kwargs = pytree.tree_map(lambda v: self.fake(v, source), (args, kwargs))
+                # compile-time callback (callback operand pytree.tree_map[0]): callback inversion of control is outside the working
+                # specification, and runtime callback overhead is inadmissible in performance-critical code.
+                args, kwargs = pytree.tree_map(lambda v: mesh_callbacks_are_outside_spec(self.fake(v, source)), (args, kwargs))
             exported = _exported(function, args, kwargs, target)
             gm = exported.module(check_guards=False)
             _metadata_asserted(gm)
@@ -8199,8 +8473,10 @@ class _Export(torch.fx.Interpreter):
             found = [len(self.compiled) - 1]
         self.of[n], self.origin[n] = found[0], len(self.calls)
         # design/compilation-composition-change-request.md item 6, unit 6E: each flat input leaf's producer
+        # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         self.sources.append([leaf if isinstance(leaf, _Produced) else None
-                             for leaf in pytree.tree_leaves(map_arg((n.args, n.kwargs), lambda a: self.marks[a]))])
+                             for leaf in pytree.tree_leaves(map_arg((n.args, n.kwargs), lambda a: mesh_callbacks_are_outside_spec(self.marks[a])))])
         origin, record, read = len(self.calls), self.compiled[found[0]], self.sources[-1]
         leaves, spec = pytree.tree_flatten(record.result)
         # a passed-through result leaf (Compiled `passed`) is its input's value: its producer is the input's
@@ -8237,8 +8513,10 @@ _bound(context, state, retained, deadline):
         # metal_ir_archive_free) and restores the functions' compiled parts and relation from it
         (record, length), archive, compiler = retained['saved_plan'], programs['archive'], programs['compiler']
         compiler.metal_ir_archive_retain(archive)
+        # lifetime callback (outward ctypes callback construction RELEASE): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         status = mesh.LIB.mesh_plan_load(*arguments, record, length,
-                                         RELEASE(C.cast(compiler.metal_ir_archive_free, C.c_void_p).value), archive,
+                                         mesh_callbacks_are_outside_spec(RELEASE)(C.cast(compiler.metal_ir_archive_free, C.c_void_p).value), archive,
                                          C.byref(planned))
         if status:
             compiler.metal_ir_archive_free(archive)
@@ -8246,7 +8524,9 @@ _bound(context, state, retained, deadline):
     else:
         mesh.check(mesh.LIB.mesh_plan(*arguments, C.byref(planned)))
     retained['functions'], retained['planned'] = functions, planned
-    state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
+    # compile-time callback (callable supplied to state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    state['owned'][id(planned)] = lambda: mesh_callbacks_are_outside_spec(mesh.LIB.mesh_planned_free(C.byref(planned)))
     state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
     # JGroups ViewId.java
     views = [mesh.State.from_address(context.M + f.plan) for f in functions]
@@ -8353,7 +8633,9 @@ def _compared(retained, signed):
     pairs = [(analysed.orders[2 * q], analysed.orders[2 * q + 1], CAUSES[analysed.causes[q]])
              for q in range(analysed.norders)] + \
         [(a, b, 'chain') for a, b in mesh_graph.successive(len(calls), analysed.chains[:len(calls)])]
-    graph = mesh_graph.Graph.adjacency(range(signature.tasks), lambda v: after.get(v, ()))
+    # compile-time callback (callable supplied to mesh_graph.Graph.adjacency(range(signature.tasks), lambda v: after.get(v, ()))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    graph = mesh_graph.Graph.adjacency(range(signature.tasks), lambda v: mesh_callbacks_are_outside_spec(after.get(v, ())))
     reached = {a: graph.reach(parts.get(a, ())) for a, _, _ in pairs}
     here = [(a, b, cause) for a, b, cause in pairs if a in parts and b in parts]
     operations = collections.Counter()
@@ -8392,8 +8674,10 @@ program(block, *example_inputs):
     compiled, of, calls, sources = exporter.compiled, exporter.of, exporter.calls, exporter.sources
     # the block's returned leaves (_Export `marks` of its output's arguments): a call's result leaf the caller receives
     # at every node of the program, delivered where its function has no section (_deliver)
+    # compile-time callback (callback operand map_arg[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     produced = pytree.tree_leaves(map_arg(
-        next(n for n in gm.graph.nodes if n.op == 'output').args, lambda a: exporter.marks.get(a)))
+        next(n for n in gm.graph.nodes if n.op == 'output').args, lambda a: mesh_callbacks_are_outside_spec(exporter.marks.get(a))))
     returned = {(calls[leaf.call], leaf.leaf) for leaf in produced
                 if isinstance(leaf, _Produced) and leaf.call is not None}
     # the traced block's calls of each function (`every`) and each call's ordinal among them (`place`): the static
@@ -8501,7 +8785,9 @@ program(block, *example_inputs):
                 if not p:
                     raise OSError(errno.EINVAL, 'call %s of compiled function %d: its specialization: %s'
                                   % (row['node'].name, row['k'], error.value.decode()))
-                state['owned'][id(p)] = lambda p=p: compiler.metal_ir_program_free(p)
+                # compile-time callback (callable supplied to state['owned'][id(p)] = lambda p=p: compiler.metal_ir_program_free(p)): callback inversion of control is outside the working
+                # specification, and runtime callback overhead is inadmissible in performance-critical code.
+                state['owned'][id(p)] = lambda p=p: mesh_callbacks_are_outside_spec(compiler.metal_ir_program_free(p))
                 planned['builder'] = types.SimpleNamespace(p=p, planned=builder.planned,
                                                            source_values=builder.source_values)
                 planned['marks'] = {'received': [(value, f, v, Range.from_buffer_copy(bytes(declared)))
@@ -8674,17 +8960,23 @@ def _save_program(context, state, path):
 # while it runs) once its last holder is freed; otherwise the reference is dropped here
 _INCREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_IncRef', C.pythonapi))
 _DECREF = C.PYFUNCTYPE(None, C.c_void_p)(('Py_DecRef', C.pythonapi))
-_RELEASED_OBJECT = RELEASE(_DECREF)
+# lifetime callback (outward ctypes callback construction RELEASE): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+_RELEASED_OBJECT = mesh_callbacks_are_outside_spec(RELEASE)(_DECREF)
 
 
 def _lent(owner, load, adopted):
     _INCREF(id(owner))
     try:
-        result = load(_RELEASED_OBJECT, id(owner))
+        # lifetime/preparation/runtime callback (callback invocation _lent.load): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        result = mesh_callbacks_are_outside_spec(load)(_RELEASED_OBJECT, id(owner))
     except BaseException:
         _DECREF(id(owner))
         raise
-    if not adopted(result):
+    # lifetime/preparation/runtime callback (callback invocation _lent.adopted): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    if not mesh_callbacks_are_outside_spec(adopted)(result):
         _DECREF(id(owner))
     return result
 
@@ -8694,8 +8986,10 @@ def _lent(owner, load, adopted):
 # (_lent) until the archive and every relation it lent are freed. The caller's own reference to the archive is
 # released with metal_ir_archive_free
 def _archive_loaded(compiler, data, device, error):
-    archive = _lent(data, lambda release, owner: compiler.metal_ir_archive_load(data, len(data), device, release, owner,
-                                                                              error, len(error)), bool)
+    # lifetime/preparation/runtime callback (callable supplied to _lent(data, lambda release, owner: compiler.metal_ir_archive_load(data, len(data), device,): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    archive = _lent(data, lambda release, owner: mesh_callbacks_are_outside_spec(compiler.metal_ir_archive_load(data, len(data), device, release, owner,
+                                                                              error, len(error))), bool)
     if not archive:
         raise OSError(errno.EINVAL, 'the saved program: %s' % error.value.decode())
     return archive
@@ -8709,7 +9003,9 @@ def _restore_programs(data, owned):
     if not recorder:
         raise OSError(errno.ENODEV, error.value.decode())
     archive = _archive_loaded(compiler, data, device, error)
-    owned[archive] = lambda: compiler.metal_ir_archive_free(archive)
+    # lifetime/preparation/runtime callback (callable supplied to owned[archive] = lambda: compiler.metal_ir_archive_free(archive)): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    owned[archive] = lambda: mesh_callbacks_are_outside_spec(compiler.metal_ir_archive_free(archive))
     count = mesh.U()
     record = compiler.metal_ir_archive_records(archive, C.byref(count))
     if count.value != 2:
@@ -8726,7 +9022,9 @@ def _restore_programs(data, owned):
             address = OBJECT(buffer, _SEL(b'contents'))
             C.memmove(address, contents, len(contents))
         else:
-            owned[id(blob)] = lambda blob=blob: None
+            # lifetime callback (owned archive backing releaser): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            owned[id(blob)] = lambda blob=blob: mesh_callbacks_are_outside_spec(None)
             address, buffer = C.addressof(blob), None
         storage.append((address, buffer))
     rows, state_data = [], {}
@@ -8736,7 +9034,9 @@ def _restore_programs(data, owned):
         if 'constants' in source:
             p = compiler.metal_ir_archive_program(archive, at)
             builder = types.SimpleNamespace(p=p, planned=source['planned'], source_values=source['source_values'])
-            owned[id(builder)] = lambda p=p: compiler.metal_ir_program_free(p)
+            # lifetime/preparation/runtime callback (callable supplied to owned[id(builder)] = lambda p=p: compiler.metal_ir_program_free(p)): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            owned[id(builder)] = lambda p=p: mesh_callbacks_are_outside_spec(compiler.metal_ir_program_free(p))
             for v, index, at, count, offset in source['constants']:
                 info = ValueInfo()
                 compiler.metal_ir_value_info(p, v, C.byref(info))
@@ -8802,7 +9102,9 @@ _runner(context, state, make):
             raise OSError(errno.ETIMEDOUT, 'the program\'s run ended at its first ETIMEDOUT (R-7): %s'
                           % state['timeout'])
         try:
-            return work()
+            # lifetime/preparation/runtime callback (callback invocation timed.work): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            return mesh_callbacks_are_outside_spec(work)()
         except OSError as failure:
             if failure.errno == errno.ETIMEDOUT:
                 state['timeout'] = failure
@@ -8816,7 +9118,9 @@ _runner(context, state, make):
         if state['stale']:
             make()
         b = state['executions']
-        _wait(lambda: ended() + state['horizon'] > b, ended, 'execution %d of the program: execution %d not ended, no '
+        # lifetime/preparation/runtime callback (callable supplied to _wait(lambda: ended() + state['horizon'] > b, ended, "execution %d of the program: executi): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        _wait(lambda: mesh_callbacks_are_outside_spec(ended() + state['horizon'] > b), ended, 'execution %d of the program: execution %d not ended, no '
               'end for MESH_PLATFORM_NS, so its inputs\' copy is not free (D.3.3)' % (b, b - state['horizon']))
         return tuple(None if placed is None else placed[1][b % len(placed[1])] for placed in state['inputs'])
 
@@ -8843,11 +9147,17 @@ _runner(context, state, make):
     def save(path):
         if state['stale']:
             timed(make)
-        return timed(lambda: _save_program(context, state, path))
+        # lifetime/preparation/runtime callback (callable supplied to timed(lambda: _save_program(context, state, path))): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return timed(lambda: mesh_callbacks_are_outside_spec(_save_program(context, state, path)))
     run.save = save
-    run.synchronize = lambda: timed(lambda: _finish(state['replay']))
+    # lifetime/preparation/runtime callback (callable supplied to timed(lambda: _finish(state['replay']))): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    run.synchronize = lambda: timed(lambda: mesh_callbacks_are_outside_spec(_finish(state['replay'])))
     run.signature = lambda: state['replay']['signature'] if state['replay'] is not None else None
     run.structure = lambda: _compared(state['built'], state['replay']['signature']) \
         if state['replay'] is not None and 'returned' in state['built'] else None
-    weakref.finalize(run, _dropped, context, state)
+    # lifetime callback (callback operand weakref.finalize[1]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    weakref.finalize(run, mesh_callbacks_are_outside_spec(_dropped), context, state)
     return run

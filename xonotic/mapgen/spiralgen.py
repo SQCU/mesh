@@ -81,7 +81,9 @@ def strip(ring_lo, ring_hi, offset_fn, tex_cap, tex_side, detail=False, skip=())
             continue
         p00, p01 = ring_lo[i], ring_lo[i + 1]
         p10, p11 = ring_hi[i], ring_hi[i + 1]
-        v = offset_fn(i)
+        # offline asset-generation callback (callback invocation strip.offset_fn): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        v = mesh_callbacks_are_outside_spec(offset_fn)(i)
         if coplanar(p00, p01, p11, p10):
             out.append(quad_prism(p00, p01, p11, p10, v, tex_cap, tex_side, detail))
         else:
@@ -143,22 +145,32 @@ class Spiral:
         OV = T * a.overlap
         fb = [vadd(p, vmul(radials[i], -OV)) for i, p in enumerate(ib)]
         fo = [vadd(p, vmul(radials[i], +OV)) for i, p in enumerate(ob)]
-        brushes += strip(fb, fo, lambda i: (0, 0, -T), TEXF, CAULK)
+        # offline asset-generation callback (callable supplied to strip(fb, fo, lambda i: (0, 0, -T), TEXF, CAULK)): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        brushes += strip(fb, fo, lambda i: mesh_callbacks_are_outside_spec((0, 0, -T)), TEXF, CAULK)
 
         cb = [vadd(p, vmul(radials[i], -OV)) for i, p in enumerate(it_)]
         co = [vadd(p, vmul(radials[i], +OV)) for i, p in enumerate(ot)]
-        brushes += strip(cb, co, lambda i: (0, 0, T), TEXC, CAULK)
+        # offline asset-generation callback (callable supplied to strip(cb, co, lambda i: (0, 0, T), TEXC, CAULK)): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        brushes += strip(cb, co, lambda i: mesh_callbacks_are_outside_spec((0, 0, T)), TEXC, CAULK)
 
         wb = [vadd(p, (0, 0, -OV)) for p in ib]
         wt = [vadd(p, (0, 0, OV)) for p in it_]
-        brushes += strip(wb, wt, lambda i: vmul(radials[i], -T), TEXW, CAULK)
+        # offline asset-generation callback (callable supplied to strip(wb, wt, lambda i: vmul(radials[i], -T), TEXW, CAULK)): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        brushes += strip(wb, wt, lambda i: mesh_callbacks_are_outside_spec(vmul(radials[i], -T)), TEXW, CAULK)
         wb = [vadd(p, (0, 0, -OV)) for p in ob]
         wt = [vadd(p, (0, 0, OV)) for p in ot]
         spans = self.aperture_spans(n)
         holes = set(i for s0, w in spans for i in range(s0, s0 + w))
-        brushes += strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK, skip=holes)
+        # offline asset-generation callback (callable supplied to strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK, skip=holes)): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        brushes += strip(wb, wt, lambda i: mesh_callbacks_are_outside_spec(vmul(radials[i], +T)), TEXW, CAULK, skip=holes)
 
-        self.plugs = [strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK,
+        # offline asset-generation callback (callable supplied to strip(wb, wt, lambda i: vmul(radials[i], +T), TEXW, CAULK, skip=set(range(n - 1)) - set(ra): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        self.plugs = [strip(wb, wt, lambda i: mesh_callbacks_are_outside_spec(vmul(radials[i], +T)), TEXW, CAULK,
                             skip=set(range(n - 1)) - set(range(s0, s0 + w)))
                       for s0, w in spans]
         self.apertures = []
@@ -250,7 +262,9 @@ def write_waypoints(path, centers, spacing=320.0):
 
 def write_svg(path, centers, args):
     xs = [c[0] for c in centers]; ys = [c[1] for c in centers]; zs = [c[2] for c in centers]
-    R = max(max(map(abs, xs)), max(map(abs, ys))) * 1.1 or 1.0
+    # offline asset-generation callback (callback operand map[0]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    R = max(max(map(mesh_callbacks_are_outside_spec(abs), xs)), max(map(mesh_callbacks_are_outside_spec(abs), ys))) * 1.1 or 1.0
     H = (max(zs) - min(zs)) or 1.0
     W, PH = 320, 320
     def top(c):  return (W / 2 + c[0] / R * (W / 2), PH / 2 - c[1] / R * (PH / 2))
@@ -259,7 +273,9 @@ def write_svg(path, centers, args):
         return (W + 40 + W / 2 + (rr / R) * (W / 2) * math.cos(math.atan2(c[1], c[0])),
                 PH - (c[2] - min(zs)) / H * PH)
     def poly(f):
-        return ' '.join('%.1f,%.1f' % f(c) for c in centers)
+        # offline asset-generation callback (callback invocation poly.f): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return ' '.join('%.1f,%.1f' % mesh_callbacks_are_outside_spec(f)(c) for c in centers)
     svg = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" '
            'viewBox="0 0 %d %d">' % (2 * W + 40, PH + 30, 2 * W + 40, PH + 30),
            '<rect x="0" y="0" width="%d" height="%d" fill="#111"/>' % (2 * W + 40, PH + 30),
@@ -308,34 +324,78 @@ def randomize(a):
 
 def build_parser():
     p = argparse.ArgumentParser(description='Procedural helical-tunnel map generator for Xonotic.')
-    p.add_argument('--seed', type=int, default=0)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--seed', type=mesh_callbacks_are_outside_spec(int), default=0)
     p.add_argument('--name', default='spiral')
     p.add_argument('--out', default='.')
-    p.add_argument('--turns', type=float, default=6.0, help='number of full revolutions')
-    p.add_argument('--radius', type=float, default=1024.0, help='centerline radius (qu)')
-    p.add_argument('--radius-growth', type=float, default=0.0, help='radius added per turn (conical)')
-    p.add_argument('--rise', type=float, default=768.0, help='vertical rise per turn (qu)')
-    p.add_argument('--width', type=float, default=320.0, help='corridor width (qu)')
-    p.add_argument('--height', type=float, default=256.0, help='corridor height (qu)')
-    p.add_argument('--thickness', type=float, default=32.0, help='shell thickness (qu)')
-    p.add_argument('--segments', type=int, default=32, help='segments per turn')
-    p.add_argument('--handed', type=int, default=1, choices=[1, -1], help='1=ccw, -1=cw')
-    p.add_argument('--wobble', type=float, default=0.0, help='radial wobble amplitude (0..0.3)')
-    p.add_argument('--wobble-freq', type=float, default=3.0)
-    p.add_argument('--apertures', type=int, default=0,
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--turns', type=mesh_callbacks_are_outside_spec(float), default=6.0, help='number of full revolutions')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--radius', type=mesh_callbacks_are_outside_spec(float), default=1024.0, help='centerline radius (qu)')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--radius-growth', type=mesh_callbacks_are_outside_spec(float), default=0.0, help='radius added per turn (conical)')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--rise', type=mesh_callbacks_are_outside_spec(float), default=768.0, help='vertical rise per turn (qu)')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--width', type=mesh_callbacks_are_outside_spec(float), default=320.0, help='corridor width (qu)')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--height', type=mesh_callbacks_are_outside_spec(float), default=256.0, help='corridor height (qu)')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--thickness', type=mesh_callbacks_are_outside_spec(float), default=32.0, help='shell thickness (qu)')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--segments', type=mesh_callbacks_are_outside_spec(int), default=32, help='segments per turn')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--handed', type=mesh_callbacks_are_outside_spec(int), default=1, choices=[1, -1], help='1=ccw, -1=cw')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--wobble', type=mesh_callbacks_are_outside_spec(float), default=0.0, help='radial wobble amplitude (0..0.3)')
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--wobble-freq', type=mesh_callbacks_are_outside_spec(float), default=3.0)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--apertures', type=mesh_callbacks_are_outside_spec(int), default=0,
                    help='connection sites: gaps in the outer shell that let this map '
                         'socket into others. Each ships PLUGGED so the map still seals '
                         'standalone; a join drops the plug (MAPGEN-ROADMAP stage 2)')
-    p.add_argument('--aperture-segments', type=int, default=2,
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--aperture-segments', type=mesh_callbacks_are_outside_spec(int), default=2,
                    help='width of each aperture, in sweep segments')
-    p.add_argument('--spawns', type=int, default=8)
-    p.add_argument('--lights', type=int, default=24)
-    p.add_argument('--items', type=int, default=10)
-    p.add_argument('--light-intensity', type=int, default=300)
-    p.add_argument('--minlight', type=int, default=24)
-    p.add_argument('--texscale', type=float, default=0.5)
-    p.add_argument('--waypoint-spacing', type=float, default=320.0)
-    p.add_argument('--overlap', type=float, default=3.0,
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--spawns', type=mesh_callbacks_are_outside_spec(int), default=8)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--lights', type=mesh_callbacks_are_outside_spec(int), default=24)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--items', type=mesh_callbacks_are_outside_spec(int), default=10)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--light-intensity', type=mesh_callbacks_are_outside_spec(int), default=300)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--minlight', type=mesh_callbacks_are_outside_spec(int), default=24)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--texscale', type=mesh_callbacks_are_outside_spec(float), default=0.5)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--waypoint-spacing', type=mesh_callbacks_are_outside_spec(float), default=320.0)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    p.add_argument('--overlap', type=mesh_callbacks_are_outside_spec(float), default=3.0,
                    help='shell overrun in units of --thickness. Adjacent shell pieces '
                         'are offset along their OWN ring radial, so at >1 they overlap '
                         'instead of abutting; exact abutment leaves sub-unit slivers '

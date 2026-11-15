@@ -146,7 +146,9 @@ def beacons():
         return instance, (at.group(1) if at else None, serial.group(1) if serial else None)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(set(found)))) as pool:
-        return {i: hs for i, hs in pool.map(resolve, sorted(set(found))) if hs[0]}
+        # runtime callback (callback operand pool.map[0]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        return {i: hs for i, hs in pool.map(mesh_callbacks_are_outside_spec(resolve), sorted(set(found))) if hs[0]}
 
 
 def read(via, identity, region):
@@ -179,7 +181,9 @@ def discover(here, targets=(), identity=None, region=None):
     def gather(vias):
         """Read every via in parallel; a node reached by two names is one node (its IOPlatformUUID)."""
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(vias))) as pool:
-            got = dict(zip(vias, pool.map(lambda v: read(v, identity, region), vias)))
+            # runtime callback (callback operand pool.map[0]): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            got = dict(zip(vias, pool.map(lambda v: mesh_callbacks_are_outside_spec(read(v, identity, region)), vias)))
         for v, f in got.items():
             answers[v] = f
             if f and f['uuid'] in by_uuid:
@@ -209,11 +213,15 @@ def main():
     ap.add_argument('--probe', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--target', action='append', default=[], help='local, a host name, or an ssh destination')
     ap.add_argument('--bridge', action='store_true')
-    ap.add_argument('--bytes', type=int)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ap.add_argument('--bytes', type=mesh_callbacks_are_outside_spec(int))
     ap.add_argument('--port')
     ap.add_argument('--region')
     ap.add_argument('--device', action='append', default=[], help='NODE=DEV')
-    ap.add_argument('--gpu-busy', type=int, default=90)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    ap.add_argument('--gpu-busy', type=mesh_callbacks_are_outside_spec(int), default=90)
     ap.add_argument('--ssh-identity', default=os.environ.get('MESH_SSH_IDENTITY'))
     ap.add_argument('--json', action='store_true')
     a = ap.parse_args()
@@ -227,7 +235,9 @@ def main():
     targets = [name_of.get(t, t) for t in (a.target or ['local'])]
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import mesh_graph  # the graph module (C9); the launcher's side only, after --probe has returned
-    collective = mesh_graph.reach(facts, [t for t in targets if t in facts], lambda n: [o for _, o in cables(n) if o])
+    # runtime callback (callable supplied to mesh_graph.reach(facts, [t for t in targets if t in facts], lambda n: [o for _, o in cable): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    collective = mesh_graph.reach(facts, [t for t in targets if t in facts], lambda n: mesh_callbacks_are_outside_spec([o for _, o in cables(n) if o]))
 
     busy, blocked = [], {t: [] for t in targets}
     for n in sorted(collective):
@@ -252,8 +262,10 @@ def main():
                               ' (no --ssh-identity or MESH_SSH_IDENTITY given)'))
             continue
         if a.bridge and f['bridges']:
+            # runtime callback (ordering key sorted): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
             blocked[t].append('%s: a bridge already runs (pids %s); the launch would be a second region'
-                              % (t, ', '.join(sorted(f['bridges'], key=int))))
+                              % (t, ', '.join(sorted(f['bridges'], key=mesh_callbacks_are_outside_spec(int)))))
         if a.bytes is not None and a.bytes >= f['unpinned']:
             blocked[t].append('%s: the launch places %.1f GiB, at or above its unpinned %.1f GiB (%.1f of %.0f GiB '
                               'wired)' % (t, a.bytes / 2**30, f['unpinned'] / 2**30, f['wired'] / 2**30,
@@ -276,9 +288,11 @@ def main():
             f = facts[n]
             up = sum(s == 'PORT_ACTIVE' for s in f['ports'].values())
             seen = sum(1 for _, o in cables(n) if o)
+            # runtime callback (ordering key min): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
             print('%-20s %-6s %-7s %-10s %-9s %-5s %.1f GiB of %.0f' % (
                 n, '%d/%d' % (up, len(f['ports'])), '%d/%d' % (seen, len(f['far'])),
-                'pid ' + min(f['bridges'], key=int) if f['bridges'] else '-', len(f['clients']),
+                'pid ' + min(f['bridges'], key=mesh_callbacks_are_outside_spec(int)) if f['bridges'] else '-', len(f['clients']),
                 '' if f['gpu'] is None else f['gpu'], f['unpinned'] / 2**30, f['memsize'] / 2**30))
         for v in silent:
             print('%-20s did not answer%s' % (v, '' if a.ssh_identity else

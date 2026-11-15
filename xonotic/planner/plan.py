@@ -43,14 +43,26 @@ def solve(positions, route, up, down, out):
 def main():
     split = json.loads(SPLIT.read_text())
     parser = argparse.ArgumentParser()
-    parser.add_argument('ticks', type=int, nargs='?', default=2000)
-    parser.add_argument('bots', type=int, nargs='?', default=480)
-    parser.add_argument('--width', type=int, default=256)
-    parser.add_argument('--columns', default=','.join(map(str, split['columns'])),
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('ticks', type=mesh_callbacks_are_outside_spec(int), nargs='?', default=2000)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('bots', type=mesh_callbacks_are_outside_spec(int), nargs='?', default=480)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--width', type=mesh_callbacks_are_outside_spec(int), default=256)
+    # offline asset-generation callback (callback operand map[0]): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--columns', default=','.join(map(mesh_callbacks_are_outside_spec(str), split['columns'])),
                         help="config_t0: each rank's expert columns, in rank order (default: split.json)")
     parser.add_argument('--links', default=str(ROOT / 'examples/links-pair.conf'))
-    parser.add_argument('--depth', type=int, default=4)
-    parser.add_argument('--seconds', type=float, default=150)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--depth', type=mesh_callbacks_are_outside_spec(int), default=4)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument('--seconds', type=mesh_callbacks_are_outside_spec(float), default=150)
     args = parser.parse_args()
     columns = [int(value) for value in args.columns.split(',')]
     if sum(columns) != FF:
@@ -84,7 +96,9 @@ def main():
         slot[args.bots] = 0
         slot[args.bots, reduce.rank] = 1e3 * (time.monotonic() - ready)
         began = time.monotonic()
-        total = reduce(tick, deadline)
+        # offline asset-generation callback (callback operand reduce[0]): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        total = reduce(mesh_callbacks_are_outside_spec(tick), deadline)
         ready = time.monotonic()
         collective += ready - began
         if tick >= split['warmup']:

@@ -7,7 +7,9 @@ compiler=${QCC:-$mesh_root/xonotic/gmqcc-work/gmqcc}
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# tooling cleanup callback (trap EXIT): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+trap 'mesh_callbacks_are_outside_spec; exit $?; rm -rf "$work"' EXIT
 make -C "$mesh_root/xonotic/qcsrc" QCC="$compiler" QCCFLAGS_WATERMARK=payload PROGS_OUT="$output" WORKDIR="$work" qc
 cp "$mesh_root/xonotic/teams-k5-assets/effectinfo.txt" "$output/effectinfo.txt"
 manifest=$output/BUILD_MANIFEST

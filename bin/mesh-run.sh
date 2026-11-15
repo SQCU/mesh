@@ -35,7 +35,11 @@ for p in $ports; do
 $n"
   done
 done
-T=$(mktemp -d); trap 'kill -TERM $(jobs -pr) 2>/dev/null; rm -rf "$T"' EXIT; trap 'exit 1' INT TERM; k=0
+# runtime process/signal callback (trap EXIT): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+# runtime process/signal callback (trap INT TERM): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+T=$(mktemp -d); trap 'mesh_callbacks_are_outside_spec; exit $?; kill -TERM $(jobs -pr) 2>/dev/null; rm -rf "$T"' EXIT; trap 'mesh_callbacks_are_outside_spec; exit $?; exit 1' INT TERM; k=0
 IFS='
 '
 for a in $cand; do

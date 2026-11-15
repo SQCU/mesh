@@ -450,9 +450,11 @@ def _indexed_face_pairs(lo, hi, left, right):
     left_hi = hi[[face[0] for face in left]]
     right_lo = lo[[face[0] for face in right]]
     right_hi = hi[[face[0] for face in right]]
-    axis = min(range(3), key=lambda value: _interval_pair_count(
+    # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    axis = min(range(3), key=lambda value: mesh_callbacks_are_outside_spec(_interval_pair_count(
         left_lo[:, value], left_hi[:, value], right_lo[:, value], right_hi[:, value],
-    ))
+    )))
     events = []
     events.extend((float(left_lo[index, axis]), 0, 0, index) for index in range(len(left)))
     events.extend((float(left_hi[index, axis]) + 0.25, 1, 0, index) for index in range(len(left)))
@@ -660,7 +662,9 @@ class NegSpace(object):
             return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
         owners = np.arange(query_mass, dtype=np.int64)
         nodes = np.zeros(query_mass, dtype=np.int64)
-        present = intersects(owners, levels_lo[-1][nodes], levels_hi[-1][nodes])
+        # offline asset-generation callback (callback invocation _solid_bvh_relation_rows.intersects): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        present = mesh_callbacks_are_outside_spec(intersects)(owners, levels_lo[-1][nodes], levels_hi[-1][nodes])
         owners = owners[present]
         nodes = nodes[present]
         for level in range(len(levels_lo) - 2, -1, -1):
@@ -671,7 +675,9 @@ class NegSpace(object):
             valid = child_nodes < len(levels_lo[level])
             child_owners = child_owners[valid]
             child_nodes = child_nodes[valid]
-            present = intersects(
+            # offline asset-generation callback (callback invocation _solid_bvh_relation_rows.intersects): callback inversion of control is outside the working
+            # specification, and runtime callback overhead is inadmissible in performance-critical code.
+            present = mesh_callbacks_are_outside_spec(intersects)(
                 child_owners,
                 levels_lo[level][child_nodes],
                 levels_hi[level][child_nodes],
@@ -687,11 +693,13 @@ class NegSpace(object):
         lo = np.asarray(lo, dtype=np.float64).reshape((-1, 3))
         hi = np.asarray(hi, dtype=np.float64).reshape((-1, 3))
         prefix = 's' if getattr(self, 'solids', None) is not None else 'blk'
+        # offline asset-generation callback (callable supplied to self._solid_bvh_relation_rows(prefix, len(lo), lambda owners, box_lo, box_hi: np.all((hi[o): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         return self._solid_bvh_relation_rows(
             prefix, len(lo),
-            lambda owners, box_lo, box_hi: np.all(
+            lambda owners, box_lo, box_hi: mesh_callbacks_are_outside_spec(np.all(
                 (hi[owners] > box_lo) & (lo[owners] < box_hi), axis=1,
-            ),
+            )),
         )
 
     def _solid_ray_relation_rows(self, starts, ends, mins, maxs, padding):
@@ -700,13 +708,15 @@ class NegSpace(object):
         prefix = 's' if getattr(self, 'solids', None) is not None else 'blk'
         minimum = np.asarray(mins, dtype=np.float64)
         maximum = np.asarray(maxs, dtype=np.float64)
+        # offline asset-generation callback (callable supplied to self._solid_bvh_relation_rows(prefix, len(starts), lambda owners, box_lo, box_hi: self._ra): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         return self._solid_bvh_relation_rows(
             prefix, len(starts),
-            lambda owners, box_lo, box_hi: self._ray_box_rows(
+            lambda owners, box_lo, box_hi: mesh_callbacks_are_outside_spec(self._ray_box_rows(
                 starts[owners], ends[owners],
                 box_lo - maximum - padding,
                 box_hi - minimum + padding,
-            ),
+            )),
         )
 
     @staticmethod

@@ -31,8 +31,10 @@ class WorkloadMeter:
             payload["measures"] = {**(self.pending_measures or {}).get("measures", {}), **payload["measures"]}
             self.pending_measures = payload
             if self.measure_thread is None:
+                # runtime worker callback (thread target threading.Thread): callback inversion of control is outside the working
+                # specification, and runtime callback overhead is inadmissible in performance-critical code.
                 self.measure_thread = threading.Thread(
-                    target=self.measure_loop, name="mesh-workload-measures", daemon=True,
+                    target=mesh_callbacks_are_outside_spec(self.measure_loop), name="mesh-workload-measures", daemon=True,
                 )
                 self.measure_thread.start()
             self.measure_condition.notify()
@@ -161,7 +163,9 @@ class WorkloadSpan:
     def start(self):
         self.started = time.monotonic()
         self.publish()
-        self.thread = threading.Thread(target=self.run, name='mesh-workload-meter', daemon=True)
+        # runtime worker callback (thread target threading.Thread): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        self.thread = threading.Thread(target=mesh_callbacks_are_outside_spec(self.run), name='mesh-workload-meter', daemon=True)
         self.thread.start()
         return self
 

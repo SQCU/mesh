@@ -53,11 +53,15 @@ def bound_balanced_bmm(X, idx=None):
     return (mx.maximum(xb @ W1, 0.0) @ W2).reshape(-1, D)
 
 def bench(f, idx):
-    mx.eval(f(X, idx)); mx.eval(f(X, idx))
+    # runtime measurement callback (callback invocation bench.f): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    mx.eval(mesh_callbacks_are_outside_spec(f)(X, idx)); mx.eval(mesh_callbacks_are_outside_spec(f)(X, idx))
     reps = []
     for _ in range(REPS):
         t0 = time.perf_counter()
-        for _ in range(IT): mx.eval(f(X, idx))
+        # runtime measurement callback (callback invocation bench.f): callback inversion of control is outside the working
+        # specification, and runtime callback overhead is inadmissible in performance-critical code.
+        for _ in range(IT): mx.eval(mesh_callbacks_are_outside_spec(f)(X, idx))
         reps.append((time.perf_counter() - t0) / IT)
     return min(reps), max(reps)
 

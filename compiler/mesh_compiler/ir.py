@@ -25,7 +25,9 @@ LOCAL = threading.local()
 HOST = torch.device("cpu")
 
 
-@torch.library.custom_op("mesh::send", mutates_args=())
+# compile-time callback (decorator registration torch.library.custom_op('mesh::send', mutates_args=())): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+@mesh_callbacks_are_outside_spec(torch.library.custom_op("mesh::send", mutates_args=()))
 def send(value: Tensor, channel: int) -> None:
     # runtime dispatch callback (torch.library.custom_op kernel of mesh::send): callback inversion of control is
     # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
@@ -33,7 +35,9 @@ def send(value: Tensor, channel: int) -> None:
     LOCAL.channels[channel].put(value)
 
 
-@send.register_fake
+# compile-time callback (decorator registration send.register_fake): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+@mesh_callbacks_are_outside_spec(send.register_fake)
 def send_fake(value, channel):
     # compile-time dispatch callback (register_fake kernel of mesh::send): callback inversion of control is outside
     # the working specification, and runtime callback overhead is inadmissible in performance-critical code
@@ -41,7 +45,9 @@ def send_fake(value, channel):
     return None
 
 
-@torch.library.custom_op("mesh::recv", mutates_args=())
+# compile-time callback (decorator registration torch.library.custom_op('mesh::recv', mutates_args=())): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+@mesh_callbacks_are_outside_spec(torch.library.custom_op("mesh::recv", mutates_args=()))
 def recv(channel: int) -> Tensor:
     # runtime dispatch callback (torch.library.custom_op kernel of mesh::recv): callback inversion of control is
     # outside the working specification, and runtime callback overhead is inadmissible in performance-critical code

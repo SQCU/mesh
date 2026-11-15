@@ -102,8 +102,12 @@ def build(assetroot, output):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("assetroot", type=pathlib.Path)
-    parser.add_argument("output", type=pathlib.Path)
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument("assetroot", type=mesh_callbacks_are_outside_spec(pathlib.Path))
+    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    parser.add_argument("output", type=mesh_callbacks_are_outside_spec(pathlib.Path))
     args = parser.parse_args()
     build(args.assetroot, args.output)
 

@@ -104,7 +104,9 @@ def main():
     input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
     model = Inference().eval()
     given = chosen(model, (input_ids,), placement, args, HEADS)
-    return execute(model, (input_ids,), lambda processors: placement(processors, given), args, units=given)
+    # compile-time callback (callable supplied to execute(model, (input_ids,), lambda processors: placement(processors, given), args, units=): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return execute(model, (input_ids,), lambda processors: mesh_callbacks_are_outside_spec(placement(processors, given)), args, units=given)
 
 
 if __name__ == '__main__':

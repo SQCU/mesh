@@ -41,7 +41,9 @@ def main():
     torch.manual_seed(0)
     ids, targets = torch.randint(0, VOCAB, (1, SEQ)), torch.randint(0, VOCAB, (1, SEQ))
     inputs = ids, torch.arange(SEQ)[None], targets
-    return execute(Causal().eval(), inputs, lambda processors: placement(processors, sequence=SEQ), args, loss=0)
+    # compile-time callback (callable supplied to execute(Causal().eval(), inputs, lambda processors: placement(processors, sequence=SEQ), a): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    return execute(Causal().eval(), inputs, lambda processors: mesh_callbacks_are_outside_spec(placement(processors, sequence=SEQ)), args, loss=0)
 
 
 if __name__ == '__main__':

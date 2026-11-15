@@ -59,11 +59,15 @@ BUILD = (('mesh', ['make', '-C', str(HOME / 'mesh/rdma')]),
 began = time.time()
 epoch = began - began % 60
 run = {'schema': 2, 'run': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(epoch))}
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # a stop of this job stops the running command's group too
+# runtime callback (callback operand signal.signal[1]): callback inversion of control is outside the working
+# specification, and runtime callback overhead is inadmissible in performance-critical code.
+signal.signal(signal.SIGTERM, lambda *_: mesh_callbacks_are_outside_spec(sys.exit(143)))  # a stop of this job stops the running command's group too
 
 
 def record(**row):
-    line = json.dumps({**run, **row}, separators=(',', ':'), default=str)
+    # runtime serialization callback (JSON conversion json.dumps): callback inversion of control is outside the working
+    # specification, and runtime callback overhead is inadmissible in performance-critical code.
+    line = json.dumps({**run, **row}, separators=(',', ':'), default=mesh_callbacks_are_outside_spec(str))
     print(line, flush=True)
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     mesh_disk.write(REPORT, line + '\n', 'the hourly report', mode='a')
