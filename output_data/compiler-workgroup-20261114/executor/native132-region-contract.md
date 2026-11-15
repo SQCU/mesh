@@ -74,6 +74,17 @@ Claude Opus 5.5, 2026-11-15. The prepared-unit source is committed in Metal `669
 
 - **Runtime unobserved:** nothing above has been run.
 
+## Caller tensor handles: dataflow (native in source, uncommitted; Python pending)
+
+1. **Body/root entry (66/68).** Each root ABI slot of the deferred original entry is registered with `metal_ir_upstream_handle`, keyed by the planned Body/root entry and its occurrence, not by an upstream kernel: slot, value, AOTI dtype/device/device_index, layout. The entry borrows that slot rather than stealing it.
+   - A caller-owned value (`metal_ir_value_external`) is a caller input or a caller-owned output.
+   - A plan-owned value is a prepared internal handle.
+   - An output is caller-owned only where its original root/output occurrence says so; body-owned and aliased outputs keep their original owner.
+2. **Frontend (`native.py` `Bound.invoked`, granted).** Each operand's `MetalArgument.handle` is the borrowed `tensor_pointer_to_tensor_handle(&THPVariable_Unpack(given))` of the `given` tensor held through End. No `_cdata`, no new references, no per-call boxing. This needs a C++ owner built against torch's Python headers (a dependency to coordinate).
+3. **Native (`metal_program.m`).** For each caller-owned descriptor, a `NATIVE_EXTERNAL_HANDLE` site writes `run->arguments[argument].handle` into the task's pointer slot before each call (`NativeExternalHandle`). For each plan-owned descriptor, one prepared handle per residue (`metal_ir_task_prepare_handles`), deleted once with its library owner.
+4. **Saved.** Descriptors are saved with their owner record (v47). Handles are never saved.
+5. **ABI.** `MetalArgument` {buffer, offset, base, handle}, 32 bytes. Its mirror `metal.py` `Argument` appends `('handle', C.c_void_p)`; that edit is held for compiler's index snapshot.
+
 ## Others
 
 - **131:** Transport/Upstream binding and effect methods, environment/compiler, binding groups, sizes and physical, `NativeBuild` compile-unit scheduling, other Lower stages; COPY/FILL in a branch as kernels; the diagnostic port rescan in `MetalOrder`. 131 saves `Value::owned` under v45.

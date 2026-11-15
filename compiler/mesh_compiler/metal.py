@@ -276,7 +276,7 @@ class Observed(C.Structure):
 
 # metal_recording.h struct MetalArgument (an invocation operand) and struct MetalExternalUse (an operand's uses)
 class Argument(C.Structure):
-    _fields_ = [('buffer', C.c_void_p), ('offset', mesh.Q), ('base', C.c_void_p)]
+    _fields_ = [('buffer', C.c_void_p), ('offset', mesh.Q), ('base', C.c_void_p), ('handle', C.c_void_p)]
 
 
 class ExternalUse(C.Structure):
