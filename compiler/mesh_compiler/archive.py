@@ -14,7 +14,7 @@ import json
 import pathlib
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
+from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch.export.graph_signature import InputKind, OutputKind
 from torch.fx._graph_pickler import GraphPickler, Options, _GraphPickleData
 from torch.fx.graph_module import _assign_attr, _del_attr, _get_attr
@@ -46,6 +46,9 @@ Closing = collections.namedtuple("Closing", "index")
 Rawed = collections.namedtuple("Rawed", "index")
 RawRef = collections.namedtuple("RawRef", "graph node")
 GraphOf = collections.namedtuple("GraphOf", "module")
+# a real tensor of the one state.pt payload by its index there (held "tensors", the graph attributes' registry: the
+# same object one index)
+Tensored = collections.namedtuple("Tensored", "index")
 
 
 # torch 2.14.0 torch/fx/_graph_pickler.py GraphPickler (this archive's one payload codec): a raw torch.fx Graph as
@@ -74,13 +77,17 @@ def branches(module, prefix=""):
 
 # a value with each Node, GraphModule, SourceRelation, Graph, Relation, Reached and Closures it holds a Ref, Related,
 # Graphed, Relating, Searching or Closing (each registered once in `held`, an owner with its branches; a torch.fx Graph
-# GraphOf its owning module's Ref, or Rawed, and a raw graph's Node RawRef), a collections.Counter as it is (canonical
-# pickle's: torch/_inductor/loop_body.py LoopBody.op_counts, operation names' counts), a sequence or a namedtuple of
-# them its own type (torch utils/_pytree.py namedtuple semantics: its fields in order), everything else, a FakeTensor
-# among them, as it is (torch/fx/_graph_pickler.py GraphPickler: no raw Node)
+# GraphOf its owning module's Ref, or Rawed, and a raw graph's Node RawRef), a real tensor Tensored (the one state.pt
+# payload's, its graph attributes' same registry: an ExportedProgram's state_dict and constants, the adapted body's
+# attribute objects its export lifted, one index each), a collections.Counter as it is (canonical pickle's:
+# torch/_inductor/loop_body.py LoopBody.op_counts, operation names' counts), a sequence or a namedtuple of them its
+# own type (torch utils/_pytree.py namedtuple semantics: its fields in order), everything else, a FakeTensor among
+# them (GraphPickler's own), as it is (torch/fx/_graph_pickler.py GraphPickler: no raw Node)
 def encoded(held, value):
     if isinstance(value, collections.Counter):
         return value
+    if isinstance(value, torch.Tensor) and not isinstance(value, FakeTensor):
+        return Tensored(held["tensors"].setdefault(id(value), (len(held["tensors"]), value))[0])
     if isinstance(value, dict):
         return {encoded(held, k): encoded(held, v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
@@ -118,7 +125,9 @@ def encoded(held, value):
 # GraphModules' nodes by name, made on first use, the SourceRelations, the Graphs, the searches, the closures, the
 # native Relations), each Related, Graphed, Searching, Closing and Relating to its loaded one
 def decoded(loaded, value):
-    graphs, named, relations, natives, searches, closures, kept, raws = loaded
+    graphs, named, relations, natives, searches, closures, kept, raws, tensors = loaded
+    if isinstance(value, Tensored):
+        return tensors[value.index]
     if isinstance(value, Rawed):
         return raws[value.index]
     if isinstance(value, GraphOf):
@@ -247,11 +256,13 @@ def constructed(machine):
 # name (`proxy_of`), `subkernels` the distinct CppKernels' count; `kernels` each call (Produced.kernels order: each
 # KernelCallLine its own) as its own record (`calling`); each ExternCall (`called`) as (its GraphLowering's
 # module, its IR operation's name there (GraphLowering.register_operation), its FX origins, its scheduler's index, each
-# Inlined (`inlining`) in order), each Inlined as (its SubgraphLowering's module, its scheduler's index, its own
-# ExternCalls); each Seeds' uses; the Neural Engine's Model as (its ExportedProgram's graph module and graph
-# signature, its conversion's selected operands, received, handles). Their wrapper lines (ExternCall.lines,
-# Inlined.lines: the typed allocation, free, scope and control lines) are not here: their typed effects and structure
-# are the native projection's (pending)
+# Inlined (`inlining`) and each Lifted (`lifting`) in order), each Inlined and each Lifted as (its SubgraphLowering's
+# module, its scheduler's index, its own ExternCalls); each Seeds as (its GraphLowering's module, its RandomSeeds
+# buffer's operation and buffer names there and FX origins, its uses); the Neural Engine's Model as (its
+# ExportedProgram's graph module, graph signature, range constraints, module call graph, example inputs and verifiers,
+# its conversion's selected operands, received, handles). Their wrapper lines (ExternCall.lines, Inlined.lines, a
+# Lifted's own wrapper: the typed allocation, free, scope and control lines) are not here: their typed effects and
+# structure are the native projection's (pending)
 def producing(made):
     model, schedulers, owners, loops = made.model, {}, {}, {}
 
@@ -260,10 +271,13 @@ def producing(made):
 
     def called(extern):
         return (extern.graph.module, extern.node.get_operation_name(), tuple(extern.node.origins),
-                scheduled(extern.scheduler), tuple(map(inlining, extern.inlined)))
+                scheduled(extern.scheduler), tuple(map(inlining, extern.inlined)), tuple(map(lifting, extern.lifted)))
 
     def inlining(inlined):
         return inlined.graph.module, scheduled(inlined.scheduler), tuple(map(called, inlined.externs))
+
+    def lifting(lifted):
+        return lifted.graph.module, scheduled(lifted.scheduler), tuple(map(called, lifted.externs))
 
     # a SchedulerNode's LoopBody (scheduler.py SchedulerNode._body), each once by identity, by its index in `loops`
     def looped(body):
@@ -297,7 +311,7 @@ def producing(made):
     # node: a raw graph's, RawRef); a cpu finalize_kernel's (CppKernelProxy, nodes) its proxy's index and its nodes'
     # names and LoopBodies (codegen/cpp.py codegen_node and codegen_outer_loop_node: each node a SchedulerNode of
     # get_nodes(), every one's _body called by CppKernelProxy.codegen_nodes; a template's finalize_kernel nodes none)
-    ranged = {"mps": lambda r: (r.node.get_name(), looped(r.node._body), r.variables, r.reduction, tuple(r.accesses)),
+    ranged = {"mps": lambda r: (r.node.get_name(), looped(r.node._body), r.variables, r.reduction, r.accesses),
               "cpu": lambda r: (proxied(r[0]), tuple((node.get_name(), looped(node._body)) for node in r[1]))}
 
     # one Kernel call record as its call made it: its backend kernel's index (Kernel.owner, by identity), its
@@ -341,9 +355,13 @@ def producing(made):
             "kernels": kernels, "owners": len(owners), "schedulers": len(schedulers),
             "loops": tuple(body_of(body) for _, body in loops.values()), "proxies": tuple(proxy_records),
             "subkernels": len(subkernels), "externs": externs,
-            "seeds": tuple(seeds.uses for seeds in made.seeds),
-            "model": model and (model.program.graph_module, model.program.graph_signature, model.selected,
-                                model.received, model.handles)}
+            "seeds": tuple((seeds.graph.module, seeds.buffer.get_operation_name(), seeds.buffer.get_name(),
+                            tuple(seeds.buffer.origins), seeds.uses) for seeds in made.seeds),
+            "model": model and (model.program.graph_module, model.program.graph_signature,
+                                model.program.state_dict, model.program.range_constraints,
+                                model.program.module_call_graph, model.program.example_inputs,
+                                model.program.constants, model.program.verifiers, model.selected, model.received,
+                                model.handles)}
 
 
 # a dataclass record's fields by name, each as it is
@@ -556,7 +574,7 @@ def load(directory):
     # each native Relation in the restored joint owner's one analysis context (native.restore's, every native artifact
     # of this compilation loaded in it)
     kept = [mesh_graph.Relation.load(data, target.solution.analysis_context) for data in saved["kept"]]
-    loaded = (graphs, {}, relations, natives, searches, closures, kept, saved["raws"])
+    loaded = (graphs, {}, relations, natives, searches, closures, kept, saved["raws"], tensors)
     resolve = lambda value: decoded(loaded, value)
     natives += [mesh_graph.Graph(resolve(vertices), resolve(relation)) for relation, vertices in saved["natives"]]
     searches += [mesh_graph.Reached.load(data, resolve(graph)) for graph, data in saved["searches"]]

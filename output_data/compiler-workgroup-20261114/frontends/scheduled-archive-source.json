@@ -75,9 +75,9 @@
   "current_limits": [
     "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
     "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
-    "CPU CppKernelProxy loop annotations and proxy/subkernel identities are now retained from their actual results. Scan combine owner remains under source review with compiler68; CPU/MPS do not advertise SCAN, so no hypothetical local-closure loss is claimed as an observed admitted path.",
-    "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. This source addition and the Python Model.program/handles/selected pairing have not yet been observed through a matching complete save/load invocation.",
-    "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner; corresponding source graphs and call/provenance records use this shared graph payload."
+    "Compiler68 CPU template parameter declarations and loop/access results remain Unretained source operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
+    "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. That native source and this original ExportedProgram source/state pairing have not yet been observed through a matching complete save/load invocation.",
+    "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner. Canonical serialization of every actual retained metadata type remains unobserved until the existing public caller can run."
   ],
   "previous_source_checkpoint": "da96b082",
   "pending_source_layer": {
@@ -265,6 +265,78 @@
       "CPU CppKernelProxy loop annotations and proxy/subkernel identities are now retained from their actual results. Scan combine owner remains under source review with compiler68; CPU/MPS do not advertise SCAN, so no hypothetical local-closure loss is claimed as an observed admitted path.",
       "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. This source addition and the Python Model.program/handles/selected pairing have not yet been observed through a matching complete save/load invocation.",
       "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner; corresponding source graphs and call/provenance records use this shared graph payload."
+    ],
+    "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
+  },
+  "nested_source_result_checkpoint": {
+    "stage": "Source-only original lifted control, qualified generated-state and source model state handoff; full saved-compilation unit remains incomplete",
+    "time_utc": "2026-11-15T06:39:58.651125+00:00",
+    "source_parent": "f520c40b695e244a701e653b8aeef64dfc7230f3",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 104,
+      "process": 32089,
+      "handle": 58844,
+      "last_result_index": 21,
+      "last_result": "success/source HOLD"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "a558ddf8ecc7d82168193581f555b54f055ec8033d3f3cdf1607e130f1b4efda"
+    },
+    "references_sha256": {
+      "compiler/mesh_compiler/lower_inductor.py": "74d87f22017e2ca0518749155b61db8f443915987dd8fd89371d5e2f9da78a97",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/_graph_pickler.py": "1b581217e9a3fa83084c775be77ca2ccfd9366ab51c182451a05eabb32c9d14f",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/common.py": "3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/mps.py": "8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db",
+      "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/export/exported_program.py": "bf8418070373473faddea7a535962c2e9626a9493f98d67a0c7d1c17ed56d691"
+    },
+    "checks": [
+      {
+        "kind": "ast",
+        "result": "PASS"
+      },
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "changed_during_checks": [],
+    "retained": [
+      "Each original ExternCall retains its Lifted graph/scheduler/recursive extern result alongside Inlined. Graph identities use the existing shared GraphPickler registry, not an opaque wrapper pickle.",
+      "Each Seeds record retains its original graph, RandomSeeds operation/buffer identity and FX origins with uses. Names are source references; native Value/control association is still pending.",
+      "Original Model.program graph/signature, state_dict/constants, range constraints, call graph, example inputs and verifiers retained alongside selected/received/handles. Real tensor references use the same state.pt registry as graph attributes; FakeTensor metadata uses GraphPickler. Common encoded/decoded handling also covers the retained loaded query on a subsequent save.",
+      "MPS launch operands are original buffer strings, symbols/expressions, dtypes/types, grid/group and error index; CPU cpp_argdefs are original strings. No source parsing or opaque backend pickle."
+    ],
+    "scan_source_conclusion": {
+      "source": "output_data/compiler-workgroup-20261114/compiler/numerical68-result.md, SCAN in the selected CPU/MPS result",
+      "producer_revision": "f520c40b",
+      "finding": "Selected original CPU/MPS backends do not advertise SCAN: Scan.create returns None, cumulative operators use their original aten extern owner, and scan HOP lowers to original while_loop. No selected LoopBody scan combine closure owner was established; no new closure codec or admission filter added."
+    },
+    "limits": [
+      "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
+      "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
+      "Compiler68 CPU template parameter declarations and loop/access results remain Unretained source operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
+      "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. That native source and this original ExportedProgram source/state pairing have not yet been observed through a matching complete save/load invocation.",
+      "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner. Canonical serialization of every actual retained metadata type remains unobserved until the existing public caller can run."
     ],
     "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
   }
