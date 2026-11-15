@@ -165,6 +165,9 @@ class Scheduled:
     stored: dict = None
     invariant: dict = None
     functions: dict = None
+    # compilation only (compiler/mesh_compiler/lower_inductor.py lower): {(function key, machine group): that body's
+    # lower_metal.py construct operands}
+    compilation: dict = None
 
 
 # design/problems-of-14b9a757-change-request.md items 1 to 4, 6 and 8; design/review-warnings.md rule 5

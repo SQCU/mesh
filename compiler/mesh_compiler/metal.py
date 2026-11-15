@@ -13,6 +13,7 @@ import sys
 
 import torch
 
+from .lower_inductor import Group
 from .operations import (CPU, GPU, KINDS, SCALAR, _Check, _Lapack, _Repeat, _Sort, _Switch, _Words, _bits, _copy, _key,
                          _placed, _rows, _stored)
 
@@ -714,6 +715,10 @@ class _Builder:
             return self.repeat(g)
         if isinstance(g, _Switch):
             return self.switch(g)
+        # lower_inductor.py Group: output_data/compiler-workgroup-20261114/compiler/numerical63-native-operand.md
+        if isinstance(g, Group):
+            raise NotImplementedError('upstream %s: its supplied-kernel native operand (numerical63-native-'
+                                      'operand.md) is unfinished' % g.scheduled.get_name())
         first = self.lib.metal_ir_operations(self.p)
         operation = self.encoded(g)
         self.emitted.append(Emitted(g, operation, first, self.lib.metal_ir_operations(self.p)))

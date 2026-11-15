@@ -15,7 +15,7 @@ from torch.fx.node import map_arg
 from torch.utils import _pytree as pytree
 
 from .ir import RECV, SEND, written
-from .lower_inductor import copies
+from .lower_inductor import copies, method
 from .metal import (CONSTANT, INPUT, NONE, OUTPUT, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED,
                     SOURCE_SENT, SOURCE_VALUE, STATE, TEMPORARY, SourceOperand, _Builder, _compiler)
 from .operations import (ANE, CPU, GPU, _Generic, _Lapack, _Switch, _copy, _held, _instruction, _key, _local_call,
@@ -58,6 +58,17 @@ def operand(given):
     if isinstance(given, Root):
         return SourceOperand(SOURCE_SENT if given.kind == "sent" else SOURCE_RECEIVED, given.value)
     return SourceOperand(SOURCE_LITERAL, NONE) if given[0] == "literal" else SourceOperand(SOURCE_VALUE, given[1])
+
+
+# a supplied result's values (lower_inductor.py Upstream.value: GraphLowering.env), each realized when first read
+class _Values(dict):
+    def __init__(self, supplied):
+        super().__init__()
+        self.supplied = supplied
+
+    def __missing__(self, node):
+        self[node] = self.supplied.value(node)
+        return self[node]
 
 
 @dataclasses.dataclass(eq=False)
@@ -147,17 +158,20 @@ def placeholders(nodes, kinds, sources):
 # relation's correspondence here, each vertex's emitted operation IDs, each access view's (typed root, typed view) and
 # each GIVEN cause's typed operand (root and view, or literal), a channel its port Root, a same-machine channel (its
 # SEND/RECV an ordinary value, `copied`) its value's (root, view), None where this machine holds none
-def construct(module, *, targets, kinds, sources, wires, output_roles, generator=None, page=0, machines=None):
+def construct(module, *, targets, kinds, sources, wires, output_roles, generator=None, page=0, machines=None,
+              roots=None, supplied=None):
     compiler = _compiler()
     builder = _Builder(compiler, 0)
     try:
         if machines:
             compiler.metal_ir_machine(builder.p, C.byref(machines[0]), C.byref(machines[1]))
         nodes, tasks = list(module.graph.nodes), module.meta["tasks"]
-        roots, made = placeholders(nodes, kinds, sources), copies(module, wires)
+        roots = placeholders(nodes, kinds, sources) if roots is None else roots
+        made = copies(module, wires)
         named = {node.target: node for node in nodes if node.op == "placeholder"}
         byname = {node.name: node for node in nodes}
-        env, records, owners, inputs, landing, sending, held, grouped = {}, [], [], [], [], [], {}, {}
+        env = {} if supplied is None else _Values(supplied)
+        records, owners, inputs, landing, sending, held, grouped = [], [], [], [], [], {}, {}
         dests, advance, associated, interfaced = {}, None, [], {}
 
         # metal-microbench metal_ir.h metal_ir_operation_axis: each of a numerical node's work axes
@@ -255,13 +269,16 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             made_, spec = _made(node.meta["val"], node)
             return pytree.tree_unflatten(made_, spec), [_Switch(index, branches, made_)]
 
-        for node in nodes:
+        leaves = spec = None
+
+        def step(node):
+            nonlocal leaves, spec, advance, records, owners
             if node.op == "placeholder":
                 kind = KINDS[kinds.get(node.target, InputKind.USER_INPUT)][0]
                 if node not in roots:
                     env[node] = node.meta.get("val")
                     inputs.append(Root(node.target, kind, None, None, None))
-                    continue
+                    return
                 env[node], role, data = roots[node]
                 inputs.append(Root(node.target, kind, role, *rooted(env[node], role, data)))
             elif node.op == "output":
@@ -289,11 +306,13 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                     value, env[node] = wire(channel, node.meta["val"], True) if channel in wires else (
                         None, _held(node.meta["val"]))
                     landing.append((channel, value, env[node]))
+                if supplied is not None:
+                    supplied.given(node, env[node])
             elif node.target is SEND:
                 env[node] = None
                 if node not in made.group:
                     sending.append((node.args[1], None, env[node.args[0]]))
-                    continue
+                    return
                 k = made.index[made.group[node]]
                 if made.member[k][0] is node:
                     value, view = wire(node.args[1], env[node.args[0]], False)
@@ -307,12 +326,46 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             else:
                 drew = generator.sites if generator is not None else 0
                 env[node], ops = instructed(node, env.__getitem__, [dests[node]] if node in dests else None)
+                if supplied is not None:
+                    supplied.given(node, env[node])
                 _placed(ops, place(node), tasks[node][0])
                 associated.append(node)
                 records += ops
                 owners += [(tasks[node], None, None, node)] * len(ops)
                 if generator is not None and generator.sites > drew:
                     advance = place(node)
+
+        # lower_inductor.py Upstream (numerical63-produced-body.md): a supplied result's Scheduler nodes in their
+        # produced order, each body node its supplied body, an extern's or nop's origins their explicit construction
+        if supplied is None:
+            for node in nodes:
+                step(node)
+        else:
+            for node in nodes:
+                if node.op in ("placeholder", "get_attr"):
+                    step(node)
+            stepped = set()
+            for scheduled, origins, body in supplied.nodes():
+                if body:
+                    group = supplied.group(scheduled)
+                    if len({origin.meta["processor"] for origin in origins}) > 1:
+                        raise NotImplementedError('upstream %s fuses several processors\' nodes: its fusion\'s '
+                                                  'processor operand is unfinished' % scheduled.get_name())
+                    for _, member in group.members:
+                        _placed([member.record], place(origins[0]), tasks[origins[0]][0])
+                    _placed([group], place(origins[0]), tasks[origins[0]][0])
+                    records.append(group)
+                    owners.append((tasks[origins[0]], None, None, origins[0]))
+                    continue
+                for node in origins:
+                    if node in stepped:
+                        continue
+                    if not (node.target in (SEND, RECV) or method(node) or node.target is switch_op):
+                        raise NotImplementedError('upstream %s of %s: its compiled method is unfinished'
+                                                  % (scheduled.get_name(), node))
+                    step(node)
+                    stepped.add(node)
+            step(module.graph.output_node())
         received, sent, ends = {}, {}, {}
         for channel, value, t in landing:
             received[channel] = Root(channel, "received", INPUT, *rooted(t, INPUT))
