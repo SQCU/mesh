@@ -426,3 +426,147 @@ current working headers:
 - the retained program in the archive.
 
 **Other open gaps:** GPU writers in different arms of one switch summing their counts, and the v43 history note.
+
+## Post-137 progress (source; strict checks pass)
+
+1. **Guard fix.** `LoweredModule` passes the known guard together with GUARD_DATA (`a.guard.get()` always). The nested
+   example keeps `gid < 128` exactly, plus the inner If's identity.
+2. **Dawn boundary (granted; `provider/dawn.patch` regenerated from base `466163dc7`).**
+   - `ShaderModuleMTL.mm`: `PrepareMslCompilationRequest`, `TranslateToMSL`'s own request build split out unchanged.
+     `TranslateToMSL` now calls it and compiles as before.
+   - `ComputePipelineMslOptions(ComputePipeline *)`: an existing pipeline's prepared request over its own stage,
+     layout, immediates, sample mask `0xFFFFFFFF` and no render pipeline, exactly as `CreateFunction`'s. It returns
+     `tintOptions`, with no compile and no new pipeline.
+   - `include/dawn/native/MetalBackend.h`/`MetalBackend.mm`: `dawn::native::metal::GetComputePipelineMslOptions(
+     WGPUComputePipeline) -> std::shared_ptr<const tint::msl::writer::Options>`.
+   - Patch: three new files only, 145 insertions and 0 deletions, so the existing (129, 133) hunks are byte for byte
+     unchanged. Reverse-applying `dawn.applied` is clean, and the new patch applies cleanly onto a base worktree. Both
+     files compile syntax-only with Dawn's own `compile_commands.json`. The checkout's working tree is restored to
+     HEAD, so the build applies them through the patch.
+   - **Producer pairing for 133:** pass `target = GetComputePipelineMslOptions(pipeline).get()` (holding the
+     `shared_ptr`) with `module`, `entry` and `binding`. Native copies it once.
+
+**Next: the target stage.** The provider kernel's passes:
+1. Each pass gets a module: the lowered module cloned whole (`Clone::Whole`) plus the collection's protocol
+   functions.
+2. The original entry becomes a callee. The pass entry calls acquire (first or later), then the body with its builtins
+   mapped, then release. Each transport word is a variable at its composition slot.
+3. The options are the copied target options, with the pass entry and with `bindings` placing each original resource
+   at its argument's slot, a texture at `bindings.texture`.
+4. `Raise` runs once per pass. The raised module's accesses are the changed physical operand, retained for readiness
+   and placement.
+5. `Print` runs once per pass, giving the source and the remapped entry. `Configure` follows for pass 0.
+
+Then come the texture argument kind with capture and program `setTexture`, and the saved result.
+
+## HOLD (Codex correction, 2026-11-14): dawn.patch and the Dawn checkout files, while the supervisor checkpoints
+
+**Workflow violation, acknowledged.** I made `/tmp` copies of `dawn.patch` and ran `git checkout --` on three Dawn
+files; that pattern is stopped (memory `source-history-only`). Temporary files for removal on release:
+`/tmp/dawn.patch.before`, `/tmp/dawn.patch.after`, `/tmp/dawn-committed.diff`, `/tmp/check.c`.
+
+**Corrected producer-to-consumer connection, to write after release:**
+- Dawn (`MetalBackend.h`/`.mm`, `ShaderModuleMTL.mm`):
+  `PrepareComputePipelineMsl(WGPUDevice, const WGPUComputePipelineDescriptor *) -> std::shared_ptr<const
+  tint::msl::writer::Options>`.
+  1. It calls the original `DeviceBase::CreateUninitializedComputePipeline(descriptor)` (`Device.cpp` 2087): the
+     validated stage, layout and defaults, with no `Initialize`.
+  2. It then calls `PrepareMslCompilationRequest` over that pipeline's own stage, layout and immediates (as
+     `CreateFunction`'s).
+  3. The returned `shared_ptr` aliases a holder that retains that `Ref<ComputePipelineBase>`, so the preparation stays
+     alive until native's one terminal compile.
+- It replaces `GetComputePipelineMslOptions(WGPUComputePipeline)`: the provider holds shader modules, not completed
+  pipelines.
+- **133:** builds the original compute descriptor (its `module`, entry `"main"`, its constants, its layout as the
+  delegate gives it), calls `PrepareComputePipelineMsl`, holds the result, and passes `target` with `module`, `entry`
+  and `binding`.
+- **Native:** unchanged consumer (`Program::Upstream::target`, copied once).
+
+## Source boundary at metal-microbench `90d68a4b` (2026-11-14; strict syntax-only checks pass; nothing built or run)
+
+**1. Target stage** (`metal_transport.mm` `ModulePass`/`ModuleEmissions`, called first in `Lower`).
+- **Builtin operands.** `Program::Upstream::builtinGroup`/`builtinGroups` hold `LoweredModule`'s own `group`/`groups`
+  (from the provider's `body.group`, `body.grid`): the launch result the source relations were taken over. They do not
+  read `u.configuration` (zero before `Configure`), and nothing recomputes them. The pass entry takes the original
+  entry's own workgroup-size values, override results included.
+- **Builtin mapping.**
+  - global id = origin·group + local id; workgroup id = origin;
+  - local id and local index are the thread's;
+  - `num_workgroups` = `builtinGroups`; subgroup invocation id = the entry's lane;
+  - any other builtin is the entry's own parameter;
+  - a structure parameter is constructed member by member.
+- **First and later passes.** Acquire is `protocol[pass]`; release runs only where the kernel sends. The word records
+  are `upstreamWords`/`upstreamLaterWords`, and the class, member and table slots are taken per pass.
+- **Options.** A copy of `*u.target` per pass, changing only the pass's own operands: the entry name, the transport
+  words (group 1, at their slots) and each group-0 resource's slot (its argument). Then one `Raise`, then one `Print`.
+  The source and entry go to `first.source`/`function` or `u.source[1]`/`entry[1]`; `u.raised[pass]` is retained.
+- **Open:**
+  - analysis of `u.raised` for target-stage physical accesses (it has no consumer yet);
+  - textures (argument kind, `bindings.texture`, `setTexture`);
+  - resources outside group 0 (`argumentOf` is keyed by `@binding` alone).
+
+**2. Target retention.** `metal_ir_upstream.target` is now a `const std::shared_ptr<const tint::msl::writer::Options> *`
+(the `PrepareComputePipelineMsl` result). Native shares it rather than copying it.
+
+**3. Saved result** (`metal_archive.mm` `UpstreamModule`, non-identity part).
+- The lowered module is saved through `core/ir/binary` `EncodeToBinary`/`Decode`, and the options through Dawn's
+  reflected stream (`TintUtils.h` `stream::Stream`, `ByteVectorSink`/`BlobSource`; `host_cpp`/`library` are in
+  `TINT_REFLECT`). Entry, `argumentOf`, the builtin operands and the image are saved too.
+- **`raised[2]` is NOT saved**: its MSL dialect is outside the codec. A load leaves `raised` empty, and nothing Raises
+  again on load.
+- **Build boundary (needs the coordinator):**
+  - `PROVIDER_DAWN_OPTIONS` has `-DDAWN_BUILD_PROTOBUF=OFF -DTINT_BUILD_IR_BINARY=OFF`, so the codec is absent from
+    build137. It needs `ON` for both, and `TINT_CFLAGS` needs `-DTINT_BUILD_IR_BINARY=1`.
+  - `TINT_CFLAGS` also needs Dawn's internal includes: `-isystem $(PROVIDER_DAWN_BUILD)/gen/src -isystem
+    $(PROVIDER_DAWN)/src/dawn/partition_alloc -isystem $(PROVIDER_DAWN)/third_party/abseil-cpp
+    -DDAWN_ENABLE_BACKEND_METAL -DDAWN_ENABLE_BACKEND_NULL`.
+  - Unverified: whether the monolithic `webgpu_dawn` carries `tint_lang_core_ir_binary` and protobuf. If not,
+    `libmetal_ir` links them.
+- **Archive format changed** (library link inputs and images, value relocations and image, upstream module). It needs
+  132's next version.
+
+**4. Image dependency.**
+- `metal_ir_upstream.image` (16-byte `LC_UUID`) is retained as `Upstream.image`.
+- `UpstreamTask`'s library records `linking` = `u.link` and `images` = {uuid, loaded path}. The whole-program link
+  takes its linked task objects' inputs and images (the program now links the provider for `LiteRtMeshImageBase`).
+- The archive saves both with the library.
+- At bind, `TargetBind` calls `Present`. A loaded image is borrowed. A missing one is opened `RTLD_LOCAL`, and that
+  reference is the library's own (`dependencies`, closed after `handle` in `TaskLibrary`'s deleter). It is closed
+  again at once if the image opened is another build.
+
+**5. Initialized temporaries** (consumer for 133's relocation records).
+- `metal_ir_value_relocated(p, value, image, relocation, count)` takes `struct metal_ir_relocation {uint64_t offset;
+  uint32_t kind, padding; int64_t value;}` with `METAL_IR_RELOCATE_IMAGE` 0 and `_SELF` 1. This is layout-identical to
+  `LiteRtMeshRelocation`, with `argument` becoming padding.
+- `metal_ir_value_data` on a TEMPORARY is each copy's initial contents. `metal_capture.m` `MetalInitialContents`
+  copies them into every placed copy, then writes each relocated word through the copy's physical bytes (IMAGE: the
+  image's base + value; SELF: the host address of the copy's logical byte `value`).
+- `metal_ir_value_relocations` only resolves the loaded image: the bound task library owns its presence.
+
+**6. Provider GPU `Operation`** (granted hunk).
+- It builds ML Drift's original descriptor (`CompileWGSLToPipeline`: `"main"`, constants `"0"`/`"1"`/`"2"` = workgroup
+  size, `arguments.GetPipelineLayout()`).
+- It calls `dawn::native::metal::PrepareComputePipelineMsl(descriptor)` and passes `module`/`entry`/`binding`/`target`
+  to `metal_ir_upstream`.
+- The Dawn endpoint now takes the descriptor alone: its device is `FromAPI(descriptor->compute.module)->GetDevice()`,
+  since the provider holds no device. `MetalBackend.mm` passes the syntax check with Dawn's compile command.
+  `provider/dawn.patch` was regenerated in place from `466163dc7`.
+- `provider/repositories.bzl` symlinks the linked Dawn's `include/dawn/native/MetalBackend.h` (LiteRT's `@dawn`
+  release header lacks it). The provider has not been compiled.
+
+**Pairings needed (exact hunks):**
+- **66** (`metal.py` `Upstream`): append `('image', C.c_void_p)` after `('target', C.c_void_p)`. The C struct grew by
+  8 bytes.
+- **133, XNN constructor:**
+  - set `body.image` before `metal_ir_upstream`: move `LiteRtMeshImageUuid(record.image)` up and set
+    `body.image = record.image`;
+  - make the instance `METAL_IR_TEMPORARY`, not STATE: `metal_ir_value_data(p, instance, template, size, …)`, then
+    `metal_ir_value_relocated(p, instance, record.image, loaded.data(), n)`, with `loaded`'s INSTANCE as SELF.
+- **132 `Storages`** (an initialized TEMPORARY keeps its storage for the whole program). After the `stored`/`loaded`
+  loop:
+  `if (p.values[v].role == METAL_IR_TEMPORARY && p.values[v].data) { p.storages[v].begin = 0; p.storages[v].end = last; }`
+- **104:** `metal_ir_native_bind` takes bytes only. A program binary that links XNN task objects depends on the
+  provider image, so the bind needs the program's `NativeBinary` images (an accessor on the compiled program, and a
+  bind parameter).
+- **Dawn checkout:** `MetalBackend.h`, `MetalBackend.mm` and `ShaderModuleMTL.mm` are modified on `f9f7ce0da` and need
+  the dependency-history commit before the build. I have not touched the checkout's history.
