@@ -959,10 +959,13 @@ class Target:
     # the plan takes them, its backing bytes at its byte; `context` the compile owner's, read for its page geometry;
     # each canonical release once, {its representative transfer, owner call}, metal_ir_value_sends appending it; each
     # sent row's sending lifetime), each intrinsic wire's plan value (instance plan_calls[j], ValueID the wire's root;
-    # placed from that section, marks["placed"], where no joint root binds it: Target.ported `joint`),
-    # then its structural lowering (transport, checks, step, the arrays the plan reads); a call with no program on this
-    # node has no instance
+    # placed from that section, marks["placed"], where no joint root binds it: Target.ported `joint`), then its
+    # body's produced kernels' and Neural Engine bodies' terminal emissions (compiler/mesh_compiler/lower_metal.py
+    # emitted: its ConstructedMachine's upstream and neural, each operation at its row's append offset, Row.offset: 0
+    # where the row runs its body's own program; a copy-only row has no machine and none), then its structural
+    # lowering (transport, checks, step, the arrays the plan reads); a call with no program on this node has no instance
     def instanced(self, context, plan_calls, libs, owned):
+        from .lower_metal import emitted
         M, compiler, _, transport = libs
         error, listed = C.create_string_buffer(ROOM), (mesh.U * max(len(plan_calls), 1))(*plan_calls)
         instances = []
@@ -995,6 +998,9 @@ class Target:
                     marks["placed"].append((root, f, root))
             for root in dict.fromkeys(copy[4] for copy in row.copies):
                 compiler.metal_ir_value_planned(instance, root, f, root, 0)
+            body = self.bodies[row.function].machine
+            if body is not None:
+                emitted(instance, body, row.offset)
             checked(compiler.metal_ir_lower(instance, error, ROOM), error, "lowering")
             row.marks = marks
             instances.append(instance)

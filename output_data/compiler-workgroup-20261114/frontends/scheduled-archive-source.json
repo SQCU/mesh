@@ -534,5 +534,72 @@
       "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
       "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
     ]
+  },
+  "terminal_emission_connection": {
+    "stage": "Source-only direct original terminal emitter connection at the existing fresh instance stage; complete runtime/save-load observation remains pending",
+    "time_utc": "2026-11-15T07:21:27.598249+00:00",
+    "source_parent": "43aa1f2edf520d4d79fe1b05bd3223701ef48663",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 104,
+      "process": 32089,
+      "handle": 58844,
+      "last_result_index": 33,
+      "last_result": "success/source HOLD"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/native.py": "909a832ada217261ae84bcfbaf55eb0a3382f8aca5f41924840c3ff32a70eb51"
+    },
+    "references_sha256": {
+      "compiler/mesh_compiler/lower_metal.py": "5ad64568397c6092cc2800d8f519c6db231905d6ce40e24a4280fe6d586694b0",
+      "compiler/mesh_compiler/lower_inductor.py": "c2033deda2493f0f5639eb785e6ed0f3d8da79703a1de28c8eff60ade1034069",
+      "compiler/mesh_compiler/metal.py": "c917f165de83ecb545be36b522d3714e6f69418b82c142142c86ab0208e8a655",
+      "compiler/mesh_compiler/archive.py": "c5d5a940986116070440643b0bfc7a4c1415f28f3519c3a9a4c5fa47833dd6de",
+      "/Users/mdot/metal-microbench/metal_ir.mm": "4c713cb5567453eaffe15c044b035e40b9d8fe43c7c5c65c94f906a42851d8a5",
+      "/Users/mdot/metal-microbench/metal_archive.mm": "a47fcb1fd0465c7c15b789bed0fc749e12762467e6adc23c8f6b3d7b82122ec3"
+    },
+    "checks": [
+      {
+        "kind": "AST",
+        "result": "PASS"
+      },
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/native.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/native.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "changed_during_checks": [],
+    "retained": [
+      "Target.instanced now passes the original self.bodies[row.function].machine and original Row.offset to lower_metal.emitted after receive/send/planned-root declarations and before metal_ir_lower. Copy-only rows have no machine; absent templates still have no instance. No wrapper emitter or erased-operation filter was introduced.",
+      "Executor source review confirms specialize preserves operation IDs and copies Upstream rows while resetting per-instance callables. AppendSource offsets operations by the retained Row.offset and remaps argument Values through the original append map; feature and ABI argument ordinals remain unchanged. Direct erased landing operations are copy records rather than upstream kernels.",
+      "The retained machine/source owner stays alive through terminal emission and native compilation. Existing Target.compile finalization and MetalProgramSave save the configured result; original source query associations retain construction-local operations with Row.offset in the native recipe.",
+      "Target.prepare remains the existing saved-artifact load/relocation path. It neither invokes the original upstream compiler nor calls this emitter."
+    ],
+    "limits": [
+      "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler Python coherence and the matching native release.",
+      "Compiler66 now returns intervals for WhileLoop cond/body/cond and Switch Lifted branches as well as InvokeSubgraph; the existing archive association consumes these original records. Binding/order/effect semantics remain under compiler review. Original intermediate IR operand to native value associations for every consumed occurrence are still pending its actual returned result; archive does not recover them by name or shape.",
+      "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
+      "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
+    ],
+    "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
   }
 }
