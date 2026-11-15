@@ -128,6 +128,73 @@ int mesh_graph_breadth_masked(uint32_t vertices, const size_t *first, uint32_t (
   return 0;
 }
 
+/* mesh-graph.h mesh_graph_search_save: the header {vertices, count, depth-first, 0}, then the arrays in its order */
+static size_t search_bytes(uint32_t vertices, uint32_t count, int finishing) {
+  return 4 * sizeof(uint32_t) + (size_t)count * (finishing ? 2 : 1) * sizeof(uint32_t) +
+         (size_t)vertices * ((finishing ? 3 : 2) * sizeof(uint32_t) + sizeof(uint64_t));
+}
+
+int mesh_graph_search_save(const struct mesh_graph_search *search, void **bytes, size_t *length) {
+  *bytes = NULL; *length = 0;
+  const int finishing = search->end != NULL;
+  const uint32_t n = search->vertices, header[4] = {n, search->count, (uint32_t)finishing, 0};
+  const size_t total = search_bytes(n, search->count, finishing);
+  char *out = malloc(total), *at = out;
+  if (!out) return ENOMEM;
+  memcpy(at, header, sizeof header); at += sizeof header;
+  memcpy(at, search->preorder, (size_t)search->count * sizeof(uint32_t));
+  at += (size_t)search->count * sizeof(uint32_t);
+  if (finishing) {
+    memcpy(at, search->postorder, (size_t)search->count * sizeof(uint32_t));
+    at += (size_t)search->count * sizeof(uint32_t);
+  }
+  const uint32_t *columns[3] = {search->parent, search->place, search->end};
+  for (int c = 0; c < (finishing ? 3 : 2); c++) {
+    memcpy(at, columns[c], (size_t)n * sizeof(uint32_t));
+    at += (size_t)n * sizeof(uint32_t);
+  }
+  for (uint32_t v = 0; v < n; v++) {
+    const uint64_t entry = search->entry[v] == SIZE_MAX ? UINT64_MAX : (uint64_t)search->entry[v];
+    memcpy(at, &entry, sizeof entry); at += sizeof entry;
+  }
+  *bytes = out; *length = total;
+  return 0;
+}
+
+int mesh_graph_search_load(const void *bytes, size_t length, struct mesh_graph_search **made) {
+  *made = NULL;
+  uint32_t header[4];
+  if (length < sizeof header) return EINVAL;
+  memcpy(header, bytes, sizeof header);
+  const uint32_t n = header[0], count = header[1];
+  const int finishing = header[2] == 1;
+  if (header[2] > 1 || header[3] || count > n || length != search_bytes(n, count, finishing)) return EINVAL;
+  struct mesh_graph_search *s = search_made(n, finishing);
+  if (!s) return ENOMEM;
+  s->count = count;
+  const char *at = (const char *)bytes + sizeof header;
+  memcpy(s->preorder, at, (size_t)count * sizeof(uint32_t)); at += (size_t)count * sizeof(uint32_t);
+  if (finishing) { memcpy(s->postorder, at, (size_t)count * sizeof(uint32_t)); at += (size_t)count * sizeof(uint32_t); }
+  uint32_t *columns[3] = {s->parent, s->place, s->end};
+  for (int c = 0; c < (finishing ? 3 : 2); c++) {
+    memcpy(columns[c], at, (size_t)n * sizeof(uint32_t));
+    at += (size_t)n * sizeof(uint32_t);
+  }
+  int status = 0;
+  for (uint32_t v = 0; v < n; v++) {
+    uint64_t entry;
+    memcpy(&entry, at, sizeof entry); at += sizeof entry;
+    s->entry[v] = entry == UINT64_MAX ? SIZE_MAX : (size_t)entry;
+    if ((s->parent[v] != UINT32_MAX && s->parent[v] >= n) || (s->place[v] != UINT32_MAX && s->place[v] >= count) ||
+        (finishing && s->end[v] != UINT32_MAX && s->end[v] > count)) status = EINVAL;
+  }
+  for (uint32_t k = 0; k < count; k++)
+    if (s->preorder[k] >= n || (finishing && s->postorder[k] >= n)) status = EINVAL;
+  if (status) { mesh_graph_search_free(s); return status; }
+  *made = s;
+  return 0;
+}
+
 void mesh_graph_closure_free(struct mesh_graph_closure *made) {
   if (!made) return;
   free(made->reached); free(made);

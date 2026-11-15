@@ -58,6 +58,13 @@ int mesh_graph_breadth_masked(uint32_t vertices, const size_t *first, uint32_t (
    unvisited */
 int mesh_graph_ancestor(const struct mesh_graph_search *search, uint32_t ancestor, uint32_t vertex);
 void mesh_graph_search_free(struct mesh_graph_search *made);
+/* a search as produced, without searching again: mesh_graph_search_save writes its arrays into *bytes (*length of
+   them, malloc'd, the caller's to free): vertices, count and whether it is depth-first (postorder and end), then
+   preorder and postorder [0 .. count), parent, place and end [0 .. vertices) (u32 each), entry [0 .. vertices) (u64,
+   SIZE_MAX as UINT64_MAX); mesh_graph_search_load makes a search of its own (mesh_graph_search_free) from exactly those
+   bytes, EINVAL where they are not one saved search (their length, a count, or an index past what it indexes), ENOMEM */
+int mesh_graph_search_save(const struct mesh_graph_search *search, void **bytes, size_t *length);
+int mesh_graph_search_load(const void *bytes, size_t length, struct mesh_graph_search **made);
 /* rows held as an array: ((const uint32_t *)context)[k] */
 uint32_t mesh_graph_row_head(const void *context, size_t k);
 /* rows of a retained relation (context its struct mesh_graph_relation_data, first its row_first): edge[row_edge[k]].to */

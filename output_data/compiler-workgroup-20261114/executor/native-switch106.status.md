@@ -116,3 +116,19 @@ No conditional workload has run. Joined completion, later compaction control, CP
   - Nested inactive safety beyond ICB runs.
   - A switch with no ranged ICB run has no table placement for its selector binding.
   - Joined completion, CPU and MIL. Full conditional execution is not claimed.
+
+## native124: regions' search retained through archive load (source; strict checks only)
+- **Graph side.** New `int mesh_graph_search_save(const struct mesh_graph_search *, void **bytes, size_t *length)` and
+  `int mesh_graph_search_load(const void *bytes, size_t length, struct mesh_graph_search **made)` in
+  `rdma/mesh-graph.h`/`.c`.
+  - Bytes: {vertices, count, depth-first, 0}, then preorder and postorder [count], parent, place and end [vertices]
+    (u32 each), entry [vertices] (u64).
+  - Load copies into its own search (`mesh_graph_search_free`). EINVAL on a wrong length, count or out-of-range index;
+    ENOMEM on allocation failure.
+- **Archive.** `Records` writes `regionSearch` once per search through a stream table, as the source owners are named,
+  so rows that share it still share it after load. Then each program's `repeatEnclosing`/`repeatOutermost`.
+  Everything is outside the identity.
+  - Load no longer calls `RegionForest`; construct is its only caller.
+  - v40 comment updated; no version bump.
+- **Checks.** Strict `-Werror` rc=0 on `mesh-graph.c` (rdma Makefile flags), the eight IR sources, capture, program
+  and both tools; `git diff --check` clean in both repositories. Nothing built, imported or run.
