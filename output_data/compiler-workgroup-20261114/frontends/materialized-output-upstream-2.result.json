@@ -1,0 +1,16 @@
+{
+  "exit": 1,
+  "seconds": 2.8613713750091847,
+  "pid": 91005,
+  "changed_runtime_inputs": [],
+  "command_code_sha256": "ce72ab0229f326297e725fd9b460f2a2b3edc4c3bdf1c399b2e11d381dc200d5",
+  "native_build_manifest": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/executor/native137-build-result.json",
+  "stdout_bytes": 0,
+  "stderr_bytes": 1695,
+  "scope": "Unchanged preserved static two-CPU-member sum/expand/returned-input-alias public compile and save/drop/load command after original import-order correction.",
+  "stage": "construction_projection_failed_before_execution",
+  "error": "NotImplementedError: processor p wrapper provenance-comment string has no native consumer",
+  "source_entry": "compiler/mesh_compiler/lower_metal.py:1447",
+  "program_execution": false,
+  "save_load_reached": false
+}

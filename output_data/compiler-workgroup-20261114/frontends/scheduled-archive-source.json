@@ -73,7 +73,7 @@
     "Scheduled.operands retains original reference through exact driver keyword. Fresh prepared network keeps original CallAnalysis; loaded compilation retains its saved query record."
   ],
   "current_limits": [
-    "The first preserved materialized-output command on the new result path stopped during import before capture/native execution: lower_inductor CppTemplateKernel import triggered an upstream circular import. No new numerical or save/load observation; exact error and stable source/library hashes are materialized-output-upstream-1.*. The unchanged caller remains queued after the original import owner correction.",
+    "The unchanged public retry passed import and reached construction, then stopped when the original wrapper provenance-comment string had no typed native consumer. No numerical execution or save/load observation; exact second outcome and stable source/library hashes are materialized-output-upstream-2.*. The unchanged caller remains queued after the original typed-comment producer correction.",
     "Original wrapper binding occurrences now retain their actual source operand and final native value. Compiler66 binding/control/alias semantics remain separately reviewed producer behavior; this serialization does not itself validate runtime correctness.",
     "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. No empty-effects substitute or opaque compiler pickle is serialized.",
     "Native137 build/ABI evidence exists at executor/native137-build-result.json, but this saved original-result path and native135 original model package have not been observed together through the complete public invocation/save/load path."
@@ -684,5 +684,21 @@
     "archive_source": "eb56bbcb",
     "source_emitter_connection": "73296c4d",
     "correction_owner": "compiler SAME68 original upstream import initialization; no alternate caller or probe"
+  },
+  "second_connected_public_outcome": {
+    "time_utc": "2026-11-15T07:53:11.591049+00:00",
+    "result": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-2.result.json",
+    "before": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-2.before.json",
+    "after": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-2.after.json",
+    "stdout": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-2.stdout",
+    "stderr": "output_data/compiler-workgroup-20261114/frontends/materialized-output-upstream-2.stderr",
+    "exit": 1,
+    "stage": "construction_projection_failed_before_execution",
+    "changed_runtime_inputs": [],
+    "code_sha256": "ce72ab0229f326297e725fd9b460f2a2b3edc4c3bdf1c399b2e11d381dc200d5",
+    "native_manifest": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/executor/native137-build-result.json",
+    "compiler_source": "8385bd92",
+    "archive_source": "eb56bbcb",
+    "correction_owner": "compiler SAME68/66 original wrapper typed-comment handoff; installed wrapper.py write_provenance_debug_handle uses writeline(str) while adjacent make_comment owns CommentLine"
   }
 }

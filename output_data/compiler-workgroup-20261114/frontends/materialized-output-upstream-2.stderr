@@ -1,0 +1,18 @@
+Torch version 2.14.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+Traceback (most recent call last):
+  File "<stdin>", line 32, in <module>
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 31, in compile_program
+    return compile_captured(calls(program, args, functions, **export_options), processors, placement, cost, planning,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py", line 119, in compile_captured
+    constructions = {(key, group): construct(scheduled.modules[key][group], lowered[key], context=context, **made)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1685, in construct
+    consume(p, graph, graph.wrapper_code.lines, produced[p].externs, bodies[p], ())
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1480, in consume
+    extern(p, graph, call, into, occurrence)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1466, in extern
+    planned(p, graph, line, into, occurrence)
+  File "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py", line 1447, in planned
+    raise NotImplementedError("unresolved integration: processor %s wrapper line %r (%s) has no native "
+NotImplementedError: unresolved integration: processor p wrapper line '# [Provenance debug handles] torch.ops.mesh.recv_strided.default:1' (str) has no native consumer

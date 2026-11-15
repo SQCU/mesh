@@ -45,9 +45,9 @@ No production edit was required after0b638912. Command/order and worker records
 remain in the metal workgroup frontends/torch/materialized-output-* and sessions75–79.
 
 The first observation after the original compiler/result replacement used the exact
-preserved command against fixed native137 (build source9a5efe31/graph e4b765af),
-Mesh e908087a with archive eb56bbcb and emitter caller73296c4d. It exited1 during
-import after3.66s: lower_inductor.py's direct CppTemplateKernel import entered
+preserved command against fixed native137 (build source 9a5efe31/graph e4b765af),
+Mesh e908087a with archive eb56bbcb and emitter caller 73296c4d. It exited 1 during
+import after 3.66 s: lower_inductor.py's direct CppTemplateKernel import entered
 Torch's lowering/flex/template import cycle and could not import CppTemplateCaller
 from the partially initialized cpp_template_kernel. Capture, native invocation
 and save/load were not reached. All recorded runtime source/dependency/library
@@ -55,3 +55,12 @@ hashes stayed unchanged. materialized-output-upstream-1.{before,after,result}.js
 and its stdout/stderr preserve this first outcome; the prior native117 result
 above remains historical evidence, not evidence for the replacement. Compiler68
 owns the original initialization correction; the same caller is retained.
+
+The unchanged retry on 8385bd92 passed import, capture and upstream lowering,
+then exited 1 during construction after 2.86 s: lower_metal.planned rejected the
+original provenance-comment string for mesh.recv_strided as an unsupported
+wrapper instruction. The canonical upstream make_comment/CommentLine owner
+already exists; compiler68/66 owns that producer classification correction.
+No numerical execution or save/load was reached. Runtime inputs remained
+unchanged; materialized-output-upstream-2.* records the exact command hash,
+source/library hashes and traceback. The command itself was not modified.
