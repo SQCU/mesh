@@ -63,7 +63,7 @@
          with kernel:
              if not is_multi_outputs_template(template_node.node):
                  template_node.mark_run()  # type: ignore[attr-defined]
-@@ -6498,3 +6510,8 @@
+@@ -6490,3 +6502,8 @@
              raise AssertionError("expected len(self.loops) >= level")
          loops = None if level == len(self.loops) else self.loops[level:]
          return LoopNest(loops, self.kernel)
@@ -74,13 +74,7 @@
 +CppScheduling.kernel_group_cls = KernelGroup
 --- a/torch/_inductor/codegen/cpp_template_kernel.py
 +++ b/torch/_inductor/codegen/cpp_template_kernel.py
-@@ -1,4 +1,5 @@
- # mypy: allow-untyped-defs
-+import functools
- import itertools
- from collections.abc import Callable, Iterable
- from typing import Any
-@@ -41,16 +42,53 @@
+@@ -41,16 +41,42 @@
  
  
  class CppTemplateKernel(CppKernel):
@@ -95,86 +89,95 @@
          self.render_hooks = {}
          self.local_buffers = {}
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its own results as made. `declared` each
-+        # def_kernel declaration by its placeholder, (function_name, its hook), `declaring` the last one's
-+        # placeholder, `opened` each def_body placeholder by the placeholder of the declaration whose body it opens;
-+        # `epilogues` each epilogue store_pointwise_nodes or store_grouped_gemm_pointwise_nodes made, in order, (dst,
-+        # nodes, offsets, reindexers, its LoopBodies, its group, its proxy), each object the one that epilogue holds
++        # def_kernel declaration's completed preparation by its placeholder, its KernelArgs.cpp_argdefs result after
++        # its aliases' removal; `declaring` the last declaration's (function_name, placeholder); `epilogues` each
++        # epilogue store_pointwise_nodes or store_grouped_gemm_pointwise_nodes made, in order, (dst, nodes, offsets,
++        # reindexers, its LoopBodies, its group, its proxy), each object the one that epilogue holds
 +        self.declared = {}
 +        self.declaring = None
-+        self.opened = {}
 +        self.epilogues = []
  
      def render(self, template, **kwargs):
 -        return PartialRender(
 -            template.render(kernel=self, **kwargs), self.render_hooks
 -        ).finalize_all()
-+        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its selected template's render as made, its code
-+        # before its hooks' results replace their placeholders (compose's too)
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its selected template's render as made
++        # (`rendered`: its code before its hooks' results replace their placeholders), printed as produced
 +        self.rendered = template.render(kernel=self, **kwargs)
-+        return PartialRender(self.rendered, self.render_hooks).finalize_all()
++        return self.printed()
 +
-+    def compose(self, composition):
-+        # compiler/patches/torch-inductor-cpu-kernel-results.patch: a composed pass of this kernel's code from its
-+        # render as made (`rendered`), `composition` its terminal composition as codegen_group's: `source` its
-+        # definitions before the code, `parameters` its entry's own after its arguments, `enter` its entry's
-+        # statements before its body. Each placeholder its render finalized (render_hooks) is replaced: its entry's
-+        # declaration (the kernel's own function_name) by its def_kernel hook given the parameters, its entry's body
-+        # opening (def_body) by the enter statements, each other by its own hook; its other code is its render's own
-+        entry = str(self.kernel_name)
-+
-+        def composed(placeholder):
-+            if placeholder in self.opened:
-+                function_name, _ = self.declared[self.opened[placeholder]]
-+                return "\n".join(composition.enter) if function_name == entry else ""
-+            function_name, hook = self.declared[placeholder]
-+            return hook(composition.parameters) if function_name == entry else hook()
-+
-+        hooks = {
-+            placeholder: functools.partial(composed, placeholder)
-+            for placeholder in self.render_hooks
-+        }
-+        return f"{composition.source}\n{PartialRender(self.rendered, hooks).finalize_all()}"
++    def printed(self, composition=None):
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: its code, PartialRender's final print of its render
++        # as made (finalize_all's: each registered hook's result replacing its placeholder in registration order,
++        # _replace_placeholder), each hook given `composition`: None as produced, or a composed pass's terminal
++        # composition as codegen_group's (`source` its definitions before the code, `parameters` its entry's own after
++        # its arguments, `enter` its entry's statements before its body). Its hooks stay registered, each one's
++        # preparation completed once (as produced)
++        printer = PartialRender(self.rendered, self.render_hooks)
++        for placeholder, hook in self.render_hooks.items():
++            printer._code = printer._replace_placeholder(placeholder, hook(composition))
++        return printer._code if composition is None else f"{composition.source}\n{printer._code}"
  
      def def_kernel(
          self,
-@@ -100,7 +138,7 @@
+@@ -100,18 +126,44 @@
          for sizevar in sizevars:
              self.args.sizevars[sizevar] = f"k{sizevar}"
  
 -        def hook():
-+        def hook(parameters=()):
-             # remove all aliases before generate function definition
-             if aliases is not None:
-                 for alias in aliases:
-@@ -111,11 +149,26 @@
-                     if alias in self.args.output_buffers:
-                         self.args.output_buffers[alias] = REMOVED
-             cpp_argdefs, _, _ = self.args.cpp_argdefs()
+-            # remove all aliases before generate function definition
+-            if aliases is not None:
+-                for alias in aliases:
+-                    if alias in self.args.input_buffers:
+-                        raise AssertionError(
+-                            f"input_buffers cannot be removed: {alias}"
+-                        )
+-                    if alias in self.args.output_buffers:
+-                        self.args.output_buffers[alias] = REMOVED
+-            cpp_argdefs, _, _ = self.args.cpp_argdefs()
 -            return f"void {function_name}({', '.join(cpp_argdefs)})"
-+            # compiler/patches/torch-inductor-cpu-kernel-results.patch: `parameters` a composed pass's own after its
-+            # arguments (compose)
++        def hook(composition=None):
++            # compiler/patches/torch-inductor-cpu-kernel-results.patch: as produced (`composition` None) its
++            # preparation, its result retained (`declared`); a composed pass's (printed) from that retained result,
++            # its entry's (the kernel's own function_name) with the composition's parameters after its arguments
++            if composition is None:
++                # remove all aliases before generate function definition
++                if aliases is not None:
++                    for alias in aliases:
++                        if alias in self.args.input_buffers:
++                            raise AssertionError(
++                                f"input_buffers cannot be removed: {alias}"
++                            )
++                        if alias in self.args.output_buffers:
++                            self.args.output_buffers[alias] = REMOVED
++                self.declared[placeholder] = self.args.cpp_argdefs()
++            cpp_argdefs, _, _ = self.declared[placeholder]
++            entry = composition is not None and function_name == str(self.kernel_name)
++            parameters = composition.parameters if entry else ()
 +            return f"void {function_name}({', '.join([*cpp_argdefs, *parameters])})"
- 
-         if placeholder in self.render_hooks:
-             raise AssertionError(f"placeholder already registered: {placeholder}")
-         self.render_hooks[placeholder] = hook
-+        # compiler/patches/torch-inductor-cpu-kernel-results.patch: this declaration, the one whose body the next
-+        # def_body opens
-+        self.declared[placeholder] = (function_name, hook)
-+        self.declaring = placeholder
++
++        if placeholder in self.render_hooks:
++            raise AssertionError(f"placeholder already registered: {placeholder}")
++        self.render_hooks[placeholder] = hook
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: the declaration whose body the next def_body opens
++        self.declaring = (function_name, placeholder)
 +        return placeholder
 +
 +    def def_body(self):
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: the opening of the body of the function the last
-+        # def_kernel declared, a whole line of its template (each CPU template's body's first): empty as produced (its
-+        # line removed, PartialRender's empty result), its entry's composition.enter in a composed pass (compose)
-+        placeholder = f"<DEF_BODY_{len(self.opened)}>"
-+        self.opened[placeholder] = self.declaring
-+        self.render_hooks[placeholder] = lambda: ""
-         return placeholder
++        # def_kernel declared (`declaring`), a whole line of its template (each CPU template's body's first): empty as
++        # produced (its line removed, PartialRender's empty result), its entry's composition.enter in a composed pass
++        # (printed)
++        function_name, declared = self.declaring
++        placeholder = f"<BODY_OF_{declared.strip('<>')}>"
++
++        def hook(composition=None):
++            entry = composition is not None and function_name == str(self.kernel_name)
++            return "\n".join(composition.enter) if entry else ""
  
-     def call_kernel(self, name: str, node: ir.CppTemplateBuffer):
-@@ -273,9 +326,9 @@
+         if placeholder in self.render_hooks:
+             raise AssertionError(f"placeholder already registered: {placeholder}")
+@@ -273,9 +325,9 @@
                  f"expected {len(var_sizes[0])} offsets, got {len(offsets)}"
              )
          output_index = dst.get_layout().make_indexer()([*var_ranges.keys()])
@@ -186,7 +189,7 @@
          bodies = []
          var_sizes_list = []
          for i, node in enumerate(nodes):
-@@ -324,6 +377,18 @@
+@@ -324,6 +376,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])
@@ -205,7 +208,7 @@
          return kernel_group.loops_code.getvalue()
  
      def store_grouped_gemm_pointwise_nodes(
-@@ -345,9 +410,9 @@
+@@ -345,9 +409,9 @@
          if not all(len(offset) == len(var_sizes[0]) for offset in offsets):
              raise AssertionError(f"expected all offsets of length {len(var_sizes[0])}")
          output_index = ref_dst.get_layout().make_indexer()([*var_ranges.keys()])
@@ -217,7 +220,7 @@
          bodies = []
          var_sizes_list = []
          for i, node in enumerate(nodes):
-@@ -396,6 +461,18 @@
+@@ -396,6 +460,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])
