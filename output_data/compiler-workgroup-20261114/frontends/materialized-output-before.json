@@ -1,0 +1,38 @@
+{
+  "commits": {
+    "/Users/mdot/dox/mesh": "122df64665e3c3a4b1fcd5e5e7f8606558679ea3",
+    "/Users/mdot/metal-microbench": "4807462458b2364a329af534c4bc4938b41acdd4"
+  },
+  "status": {
+    "/Users/mdot/dox/mesh": "",
+    "/Users/mdot/metal-microbench": ""
+  },
+  "sha256": {
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_coreml.py": "fab5d0848889176c9103d7aeb5e978acea02d0df30e30becbe80158c8cd35a06",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_inductor.py": "0b1da549ec1cf02cfb21bd000e05084aa3f88b9dfcda678aa4e75333bd496d18",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/decompose.py": "07728cd76d9a4832abbcb8d32d62f29a8d8f3eb2f402eeed2d625ebfceac1e73",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/lower_metal.py": "40447fdea5633cdea12039c421fe30accc103f17f9ddb16c1be159bb465a7a39",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/bridge.py": "33d73c9b6e4118250310a895b24700f2783cc99d46016ce78971b346822aa1fd",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/native.py": "e1552444ebec66868c9780396374adeb7108e88054a337277b89007f1897c073",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/ir.py": "c409bd26eac2fe5c69036e9d5b234264986a892f39b1256f97c01462a133d919",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/export.py": "4260811b1f65a7be72133f0d1f749f9c642a639213bcee927b87e9f3fd2038a2",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/runtime.py": "5b9b859d08606bfcccf89e3fbb4c2e048ab8d8c5e40a8371a866d056a065db6c",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "d54732f1be02482a76e43f66269a2c5241fa93a9575bb9522327f4c0ae92c750",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/archive.py": "7baf062ea7740fcf4a31b13e3352f6cf6a04f40adad31dc6724003fc2797125f",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/placement.py": "18ec833bf191184d545c5ab272c42ee80f4e647643468ea437f83e8c548c602e",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/schedule.py": "3342efff15cab4b8b370f710ebc88424dae4ea12642b7974c3268d625188c06b",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/metal.py": "c3943b987245a7338b17b202d0baff5825fafb2deb34a3b104f16c745b7439a5",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/driver.py": "06e5a5f180f6f9f6be7057f62b21f71161a4b1d1e7b412769872266af2222193",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/devices.py": "2cdb7363ad34790504be83f75291958cc25d22823a17fdc0d21497d0ad13cedd",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/shares.py": "7f6cc92714eb9bf1de04b5b8d0c6688d4051b86b15427062a78a687ad07cb223",
+    "/Users/mdot/dox/mesh/examples/crossing.py": "0131c31760c77fd221a40822ddec38153570a9bcbd7e5ed752383d1c0ae0f24f",
+    "/Users/mdot/dox/mesh/examples/parallel.py": "c4286f70c95efcd0a044b20c6e029e6363739ff1d0bd63e001b6f6bdda4d01af",
+    "/Users/mdot/dox/mesh/rdma/mesh.py": "77ade2fa8b8e230a5833da5a37507fc88484cc9d776e89dba6a7851fd010935e",
+    "/Users/mdot/dox/mesh/rdma/mesh_graph.py": "958a8e225958bae8d0561987d958be5bee3fd9f13858e42fe26b27f63440b02e",
+    "/Users/mdot/dox/mesh/rdma/libmesh.dylib": "e496c5a59e68853d4173fa1c989b100cdb3b4f40a9c3472ed3985926ab2c74b6",
+    "/Users/mdot/metal-microbench/.build/libmetal_ir.dylib": "00ed2db22fc34d7ae27d9803f33e2a7c166f98b147cdfecd999806f8d6524aca",
+    "/Users/mdot/metal-microbench/.build/libmetal_recording.dylib": "72221b6c2bd25e40609196081ead1e52cb07e3faf901c1f54e407e1517419a63",
+    "/Users/mdot/metal-microbench/.build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303"
+  }
+}

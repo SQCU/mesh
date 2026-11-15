@@ -21,8 +21,25 @@ CLONE.out/typed copy owns numerical work. Canonical FX DCE removes unused paths
 before transfers while retaining source effects and input-part endpoints.
 No new native interface, archive record, or runtime decision was added.
 
-Root reviewed the source approach. The actual native pairing remains to be
-observed using the approved existing Crossing column-shard caller after the
-matching v39/source release. No native result is claimed here. Command/order and
-worker records are in the metal workgroup `frontends/torch/materialized-output-*`
-and `session-75.jsonl` through `session-77.jsonl`.
+Root and executor reviewed the source approach. SAME974/session79 reviewed the
+actual Output→Slot→resolved→saved-view consumer connection without editing source.
+The existing public two-call column-sharded instance then passed on Mesh122df646 /
+Metal48074624 with the matched native117 libraries (executor/native117-build.json):
+direct and public save/drop/load errors were [0,0], exit0/stderr0. The first result
+kept shape[5,8], stride[0,1], offset0 and its 16-byte backing; the second result
+kept shape[5,8], stride[8,1], offset0 and aliased caller y's 80-byte backing.
+Both exactly match eager geometry. Reload retained the signature, used fresh
+first-result storage and left the prior result unchanged. Two calls were restored
+without relation solving; archive size140199 bytes. Before/after source and library
+hashes are identical in materialized-output-before.json and -after.json. The
+numerical/layout result and stdout/stderr are materialized-output-native.*.
+
+This observes the general public layout/alias contract on one static instance,
+including saved invocation. It has no mutation or nonzero-offset result; earlier
+mutation/view observations remain separate evidence. It does not exercise the
+unfinished conditional native execution. Session79's draft evidence expectations
+were corrected by supervisor against actual OVERLAP0 source: output0 is the
+broadcast and output1 aliases y. Its outside-workspace command read was denied;
+the original command and actual archived continuation were reviewed directly.
+No production edit was required after0b638912. Command/order and worker records
+remain in the metal workgroup frontends/torch/materialized-output-* and sessions75–79.

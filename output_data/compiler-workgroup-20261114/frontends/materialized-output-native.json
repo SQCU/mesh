@@ -1,0 +1,127 @@
+{
+  "direct": {
+    "errors": [
+      0.0,
+      0.0
+    ],
+    "actual": [
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          0,
+          1
+        ],
+        "offset": 0,
+        "bytes": 16
+      },
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          8,
+          1
+        ],
+        "offset": 0,
+        "bytes": 80
+      }
+    ],
+    "expected": [
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          0,
+          1
+        ],
+        "offset": 0,
+        "bytes": 16
+      },
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          8,
+          1
+        ],
+        "offset": 0,
+        "bytes": 80
+      }
+    ],
+    "returned_input_alias": true,
+    "input_unchanged": true
+  },
+  "restored": {
+    "errors": [
+      0.0,
+      0.0
+    ],
+    "actual": [
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          0,
+          1
+        ],
+        "offset": 0,
+        "bytes": 16
+      },
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          8,
+          1
+        ],
+        "offset": 0,
+        "bytes": 80
+      }
+    ],
+    "expected": [
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          0,
+          1
+        ],
+        "offset": 0,
+        "bytes": 16
+      },
+      {
+        "shape": [
+          5,
+          8
+        ],
+        "stride": [
+          8,
+          1
+        ],
+        "offset": 0,
+        "bytes": 80
+      }
+    ],
+    "returned_input_alias": true,
+    "input_unchanged": true
+  },
+  "signature_equal": true,
+  "fresh_result_storage": true,
+  "first_result_unchanged": true,
+  "archive_bytes": 140199,
+  "scope": "Placed result geometry and returned input alias, direct and saved invocation; no mutation in this instance."
+}

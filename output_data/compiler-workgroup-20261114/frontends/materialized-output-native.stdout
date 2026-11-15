@@ -1,0 +1,17 @@
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 15 values 176 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 15 values 112 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared self-timed program 2 calls 2 positions 1 residues 1 phases 1 plan order edges 1 kept of the unrolled dependences 0 fence waits 0 program-thread waits 0 send-completion waits 0 left to the plan's start 0 start waits
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 15 values 176 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 15 values 112 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared self-timed program 2 calls 2 positions restored (no relation solved)
+{"direct": {"errors": [0.0, 0.0], "actual": [{"shape": [5, 8], "stride": [0, 1], "offset": 0, "bytes": 16}, {"shape": [5, 8], "stride": [8, 1], "offset": 0, "bytes": 80}], "expected": [{"shape": [5, 8], "stride": [0, 1], "offset": 0, "bytes": 16}, {"shape": [5, 8], "stride": [8, 1], "offset": 0, "bytes": 80}], "returned_input_alias": true, "input_unchanged": true}}
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 15 values 176 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared retained order 1 dispatches 0 commands 1 native entries 0 later passes
+prepared dataflow 15 values 112 bytes 1 schedule positions; 0 crossings longest local stretch 1
+prepared self-timed program 2 calls 2 positions restored (no relation solved)
+{"direct": {"errors": [0.0, 0.0], "actual": [{"shape": [5, 8], "stride": [0, 1], "offset": 0, "bytes": 16}, {"shape": [5, 8], "stride": [8, 1], "offset": 0, "bytes": 80}], "expected": [{"shape": [5, 8], "stride": [0, 1], "offset": 0, "bytes": 16}, {"shape": [5, 8], "stride": [8, 1], "offset": 0, "bytes": 80}], "returned_input_alias": true, "input_unchanged": true}, "restored": {"errors": [0.0, 0.0], "actual": [{"shape": [5, 8], "stride": [0, 1], "offset": 0, "bytes": 16}, {"shape": [5, 8], "stride": [8, 1], "offset": 0, "bytes": 80}], "expected": [{"shape": [5, 8], "stride": [0, 1], "offset": 0, "bytes": 16}, {"shape": [5, 8], "stride": [8, 1], "offset": 0, "bytes": 80}], "returned_input_alias": true, "input_unchanged": true}, "signature_equal": true, "fresh_result_storage": true, "first_result_unchanged": true, "archive_bytes": 140199, "scope": "Placed result geometry and returned input alias, direct and saved invocation; no mutation in this instance."}
