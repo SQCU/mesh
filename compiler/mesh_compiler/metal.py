@@ -2,9 +2,9 @@
 # A9: the live native owner. The C ABI's types and library bindings (metal-microbench metal_ir.h, metal_recording.h;
 # rdma/mesh-metal.h), the Objective-C/Metal resource primitives, borrowed buffers, archive byte ownership, and the
 # typed C encoder (_Builder) of the direct native projections over program values: values and views, a produced
-# kernel's operand (metal_ir_upstream), a typed LAPACK call, an INFO check, the canonical logical copy (metal_ir_copy)
-# and a fill; a produced kernel's composed callable collection (native129: metal_ir_upstream_callables,
-# metal_ir_callables_emit) and its numerical body's binary64 numeric collection (Numeric)
+# kernel's operand (metal_ir_upstream), a typed LAPACK call, an INFO check and the canonical logical copy
+# (metal_ir_copy); a produced kernel's composed callable collection (native129: metal_ir_upstream_callables,
+# metal_ir_callables_emit) and its numerical body's binary64 numeric collection (Binary64)
 import collections
 import ctypes as C
 import ctypes.util
@@ -29,9 +29,9 @@ INPUT, CONSTANT, TEMPORARY, OUTPUT, STATE = range(5)
 BODY, COMBINE, FINALIZE = range(3)
 NONE = 0xFFFFFFFF
 METAL_IR_STEP = 2
-# metal_ir.h METAL_IR_GESDD .. METAL_IR_GELSS (struct metal_ir_lapack_call `routine`) and METAL_IR_CHECK_LU ..
-# METAL_IR_CHECK_NATIVE (metal_ir_check `code`)
-LAPACK_GESDD, LAPACK_HEEVD, LAPACK_GEEV, LAPACK_GELSD, LAPACK_GELSS = range(5)
+# metal_ir.h METAL_IR_GESDD .. METAL_IR_GELSY (struct metal_ir_lapack_call `routine`; metal-microbench 9404b7b2 GELS 5
+# and GELSY 6) and METAL_IR_CHECK_LU .. METAL_IR_CHECK_NATIVE (metal_ir_check `code`)
+LAPACK_GESDD, LAPACK_HEEVD, LAPACK_GEEV, LAPACK_GELSD, LAPACK_GELSS, LAPACK_GELS, LAPACK_GELSY = range(7)
 CHECK_LU, CHECK_CHOLESKY, CHECK_CONVERGENCE, CHECK_ASSERT, CHECK_NATIVE = range(1, 6)
 # metal_recording.h METAL_EXTERNAL_GPU: a callable operand the program uses on the GPU
 METAL_EXTERNAL_GPU = 1
@@ -351,10 +351,16 @@ class RegionChild(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('kind', 'region', 'arm')]
 
 
-# metal_ir.h metal_ir_operations: one direct projection's actual emission by _Builder: `record` the producer object it
-# implements (lower_inductor.py Kernel or Extern, a source node), `operation` its returned operation ID, [first, end)
-# the operations it created
+# metal_ir.h metal_ir_operations: one direct projection's actual emission by _Builder: `record` the producer's own
+# record it implements (lower_inductor.py Kernel, ExternCall, a control body's Inlined, a Neural Engine body's
+# Produced; a machine body node for an interface copy), `operation` its returned operation ID, [first, end) the
+# operations it created
 Emitted = collections.namedtuple("Emitted", "record operation first end")
+# metal_ir.h metal_ir_repeat and metal_ir_switch: one registered region of _Builder, `record` the producer's own
+# control record (lower_inductor.py ExternCall: an ir.WhileLoop's, an ir.Switch's), `kind` REGION_REPEAT or
+# REGION_SWITCH, `region` its metal_ir_repeats or metal_ir_switches index, `first`/`end` its pass's or each branch's
+# operation interval, `selector` a switch's selector operation (NONE a repeat's)
+Region = collections.namedtuple("Region", "record kind region first end selector")
 
 
 # metal-microbench metal_ir.h metal_ir_upstream and its stages: METAL_IR_UPSTREAM_BUFFER .. _ERROR (an argument's
@@ -370,11 +376,52 @@ class UpstreamArgument(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('kind', 'value', 'access', 'padding')]
 
 
+# struct metal_ir_upstream_access: one access as its producer made it, `argument` its launch argument, `write` 0 a
+# read, 1 a write, 2 a commuting update; `index` its element index from that argument binding's first element (a
+# mesh-graph.h struct mesh_graph_index over the kernel's domain, NULL not quasi-affine: then [lo, hi] its value range),
+# `guard` its predicate (NULL unguarded), `guard_data` 1 where that predicate reads data, `guard_source` its identity
+class UpstreamAccess(C.Structure):
+    _fields_ = [('argument', mesh.U), ('write', mesh.U), ('index', C.c_void_p), ('guard', C.c_void_p),
+                ('guard_source', mesh.Q), ('guard_data', mesh.U), ('padding', mesh.U), ('lo', C.c_int64),
+                ('hi', C.c_int64)]
+
+
+# struct metal_ir_upstream: `domain` the kernel's index domain (mesh-graph.h struct mesh_graph_domain, in the
+# compilation's one analysis context; native retains it), `access` its accesses, `work` its semantic work (NULL
+# unknown); `module`, `entry` and `binding` a typed body's original parsed module (a WGPUShaderModule), its entry and
+# each argument's @binding, NULL for an Inductor kernel, whose domain and accesses are its own
 class Upstream(C.Structure):
-    _fields_ = [(name, mesh.U) for name in ('place', 'arguments', 'views', 'sources')] + [
-        ('argument', C.POINTER(UpstreamArgument)), ('view', C.POINTER(mesh_graph.Viewed)),
-        ('source', C.POINTER(mesh.Q)), ('identity', mesh.Q), ('grid', mesh.U * 3), ('group', mesh.U * 3),
-        ('grouped', mesh.U), ('padding', mesh.U)]
+    _fields_ = [(name, mesh.U) for name in ('place', 'arguments', 'accesses', 'sources')] + [
+        ('argument', C.POINTER(UpstreamArgument)), ('domain', C.c_void_p), ('access', C.POINTER(UpstreamAccess)),
+        ('source', C.POINTER(mesh.Q)), ('work', C.POINTER(mesh_graph.Work)), ('identity', mesh.Q),
+        ('grid', mesh.U * 3), ('group', mesh.U * 3), ('grouped', mesh.U), ('padding', mesh.U),
+        ('module', C.c_void_p), ('entry', C.c_char_p), ('binding', C.POINTER(mesh.U))]
+
+
+# struct metal_ir_upstream_feature and struct metal_ir_upstream_neural (metal-microbench 02f7e07e, 64 bytes): a Neural
+# Engine body's original Core ML program, `package` the directory its MLModel's own save wrote, `function` its
+# function name, `compute_units` the conversion's selected units by name (ct.ComputeUnit .name), each model input,
+# output and state (MLState) feature by name bound to its metal_ir_upstream argument
+class UpstreamFeature(C.Structure):
+    _fields_ = [('name', C.c_char_p), ('argument', mesh.U), ('padding', mesh.U)]
+
+
+class UpstreamNeural(C.Structure):
+    _fields_ = [('package', C.c_char_p), ('function', C.c_char_p), ('compute_units', C.c_char_p)] + [
+        (name, mesh.U) for name in ('inputs', 'outputs', 'states', 'padding')] + [
+        (name, C.POINTER(UpstreamFeature)) for name in ('input', 'output', 'state')]
+
+
+# rdma/mesh-graph.h MESH_GRAPH_DOMAIN_ROOT .. _LOOP and struct mesh_graph_domain_dim: one dimension of a kernel's index
+# domain, an original symbol over [lo, hi] (ROOT: `axis` its active_range_trees() position, `reduction` its
+# is_reduction; INDIRECT an indirect symbol; LOOP a CPU loop variable), and MESH_GRAPH_INDEX_LT .. _NE
+DOMAIN_ROOT, DOMAIN_INDIRECT, DOMAIN_LOOP = range(3)
+INDEX_LT, INDEX_LE, INDEX_GT, INDEX_GE, INDEX_EQ, INDEX_NE = range(6)
+
+
+class DomainDim(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('kind', 'axis', 'reduction', 'padding')] + [
+        ('lo', C.c_int64), ('hi', C.c_int64)]
 
 
 class UpstreamWord(C.Structure):
@@ -396,8 +443,8 @@ class UpstreamPage(C.Structure):
 
 
 class UpstreamReadiness(C.Structure):
-    _fields_ = [(name, mesh.U) for name in ('classes', 'spans', 'class_slot', 'span_slot', 'later_class_slot',
-                                            'later_span_slot', 'ranges', 'padding')]
+    _fields_ = [(name, mesh.U) for name in ('classes', 'members', 'class_slot', 'member_slot', 'later_class_slot',
+                                            'later_member_slot', 'ranges', 'padding')]
 
 
 class UpstreamTable(C.Structure):
@@ -423,8 +470,8 @@ class CallableSource(C.Structure):
     _fields_ = [('source', C.c_void_p), ('notice', C.c_void_p), ('bytes', mesh.Q), ('notice_bytes', mesh.Q)]
 
 
-# metal_ir.h METAL_IR_BINARY64_BINARY .. _UNARY, struct metal_ir_binary64_primitive (a request: `code` a metal_ir_binary,
-# metal_ir_unary or metal_ir_builtin_named code, a CONVERT's scalars `from` and `to`) and struct
+# metal_ir.h METAL_IR_BINARY64_BINARY .. _UNARY, struct metal_ir_binary64_primitive (a request: `code` a
+# metal_ir_binary, metal_ir_unary or metal_ir_builtin_named code, a CONVERT's scalars `from` and `to`) and struct
 # metal_ir_binary64_function (the library function serving it: its name, parameter kinds, result kind, GPU work)
 BINARY64_BINARY, BINARY64_BUILTIN, BINARY64_CONVERT, BINARY64_UNARY = range(4)
 
@@ -603,6 +650,7 @@ def _compiler():
                 ('metal_ir_dispatch_repeats', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_archive_load', P, [P, P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_graph_context', P, [P]),
+                ('metal_ir_graph_context_set', C.c_int, [P, P]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_info', None, [P, U, C.POINTER(ValueInfo)]),
@@ -673,8 +721,8 @@ def _compiler():
     return COMPILER[0]
 
 
-# metal-microbench metal_ir.h: the produced-kernel stages' calls and the binary64 numeric collection's (native129), bound
-# on their first use over the loaded compiler (_compiler), apart from its construction bindings
+# metal-microbench metal_ir.h: the produced-kernel stages' calls and the binary64 numeric collection's (native129),
+# bound on their first use over the loaded compiler (_compiler), apart from its construction bindings
 UPSTREAM = []
 
 
@@ -694,11 +742,52 @@ def _upstream():
                                                          C.c_size_t]),
                 ('metal_ir_upstream_configured', C.POINTER(UpstreamConfiguration), [P, U]),
                 ('metal_ir_upstream_error_workspace', U, [P]),
+                ('metal_ir_upstream_neural', C.c_int, [P, U, C.POINTER(UpstreamNeural), C.c_char_p, C.c_size_t]),
                 ('metal_ir_value_zeroed', None, [P, U])):
             function = getattr(lib, name)
             function.restype, function.argtypes = result, arguments
         UPSTREAM.append(lib)
     return UPSTREAM[0]
+
+
+# rdma/mesh-graph.h: a kernel's index domain and its analysis values (mesh_graph_domain_create, mesh_graph_index_*), in
+# the library holding the compilation's analysis context (rdma/mesh_graph.py LIB, Context), bound on first use
+GRAPH = []
+
+
+def _graph():
+    if not GRAPH:
+        lib, P = mesh_graph.LIB, C.c_void_p
+        for name, result, arguments in (
+                ('mesh_graph_domain_create', C.c_int, [P, mesh.U, C.POINTER(DomainDim), C.POINTER(P)]),
+                ('mesh_graph_domain_free', None, [P]),
+                ('mesh_graph_index_dim', P, [P, mesh.U]), ('mesh_graph_index_constant', P, [P, C.c_int64]),
+                ('mesh_graph_index_truth', P, [P, C.c_int]), ('mesh_graph_index_add', P, [P, P]),
+                ('mesh_graph_index_mul', P, [P, P]), ('mesh_graph_index_floordiv', P, [P, P]),
+                ('mesh_graph_index_modular_indexing', P, [P, P, P]), ('mesh_graph_index_python_mod', P, [P, P]),
+                ('mesh_graph_index_minimum', P, [P, P]), ('mesh_graph_index_maximum', P, [P, P]),
+                ('mesh_graph_index_where', P, [P, P, P]), ('mesh_graph_index_compare', P, [mesh.U, P, P]),
+                ('mesh_graph_index_and', P, [P, P]), ('mesh_graph_index_or', P, [P, P]),
+                ('mesh_graph_index_not', P, [P]), ('mesh_graph_index_free', None, [P])):
+            function = getattr(lib, name)
+            function.restype, function.argtypes = result, arguments
+        GRAPH.append(lib)
+    return GRAPH[0]
+
+
+# metal_ir_upstream_neural, after metal_ir_construct: Neural Engine operation `op`'s original Core ML program, its
+# saved package directory `package`, function `function` and selected `units` (a ct.ComputeUnit's name); `inputs`,
+# `outputs` and `states` each (feature name, argument index)
+def _neural(program, op, package, function, units, inputs, outputs, states):
+    error = C.create_string_buffer(4096)
+    features = [_array(UpstreamFeature, [UpstreamFeature(name.encode(), argument, 0) for name, argument in made])
+                for made in (inputs, outputs, states)]
+    made = UpstreamNeural(str(package).encode(), function.encode(), units.encode(), len(inputs), len(outputs),
+                          len(states), 0, *features)
+    status = _upstream().metal_ir_upstream_neural(program, op, C.byref(made), error, len(error))
+    if status:
+        raise OSError(status, 'operation %d: its Core ML program (metal_ir_upstream_neural): %s'
+                      % (op, error.value.decode()))
 
 
 def _copied(record):
@@ -819,16 +908,17 @@ def _execution_error(replay, status, message):
     return OSError(status, message)
 
 
-# metal-microbench metal_ir.h metal_ir_value, metal_ir_upstream, metal_ir_copy, metal_ir_lapack and metal_ir_check: the
-# direct native projections over program values, encoded into `program` (an existing program, metal_ir_append's
-# destination), else a new one; `emitted` each projection's actual emission (Emitted: its record, its returned
-# operation and the operations it created), in emission order; `base` the caller's identity, `identity` the current
-# projection's (base | its source position)
+# metal-microbench metal_ir.h metal_ir_value, metal_ir_upstream, metal_ir_copy, metal_ir_lapack, metal_ir_check,
+# metal_ir_repeat and metal_ir_switch: the direct native projections over program values, encoded into `program` (an
+# existing program, metal_ir_append's destination), else a new one; `emitted` each projection's actual emission
+# (Emitted: its record, its returned operation and the operations it created), in emission order, `regions` each
+# registered region (Region), in postorder; `base` the caller's identity, `identity` the current projection's (base |
+# its source position)
 class _Builder:
     def __init__(self, lib, identity, program=None):
         self.lib = lib
         self.p = lib.metal_ir_program_new() if program is None else program
-        self.emitted, self.values = [], {}
+        self.emitted, self.regions, self.values = [], [], {}
         self.base = self.identity = identity
 
     # metal_ir.h metal_ir_value: one storage root of role `role`, `elements` of metal_ir scalar `scalar`, its caller's
@@ -860,25 +950,22 @@ class _Builder:
         _lent(base, lambda release, owner: self.lib.metal_ir_value_data(self.p, v, data, storage.nbytes(), buffer, 0,
                                                                         owner, release), lambda _: True)
 
-    # metal_ir_upstream: one produced kernel (`record` the producer's Kernel, its retained owner) as one operation at
-    # `place`, its identity the builder's base with source position `node`: `arguments` (kind UPSTREAM_*, ValueID,
-    # access) in its launch's order, `views` (argument, byte offset, element bytes, ((size, byte stride), ...), write)
-    # in that argument's storage root's bytes, `sources` the source positions it implements, `grid` its total threads
-    # ((1, 1, 1) where its launch has none: a CPU kernel's one typed call) and `group` its threadgroup, None its
+    # metal_ir_upstream: one produced kernel (`record` the producer's own record: lower_inductor.py Kernel, a Neural
+    # Engine body's Produced) as one operation at `place`, its identity the builder's base with source position `node`:
+    # `arguments` (kind UPSTREAM_*, ValueID, access) in its launch's order, `domain` its index domain (a
+    # mesh_graph_domain pointer, None for none), `accesses` its UpstreamAccess records, `work` its semantic work (a
+    # mesh_graph.Work, None unknown), `sources` the source positions it implements, `grid` its total threads ((1, 1, 1)
+    # where its launch has none: a CPU kernel's one typed call, a Core ML program) and `group` its threadgroup, None its
     # pipeline's (METAL_IR_DEFAULT_GROUP); kept as an emission (Emitted) and returned
-    def upstream(self, record, place, node, arguments, views, sources, grid, group):
+    def upstream(self, record, place, node, arguments, domain, accesses, work, sources, grid, group):
         lib = _upstream()
         self.identity = self.base | node
-        pairs = [_array(mesh.Q, [n for pair in made for n in pair]) for _, _, _, made, _ in views]
-        viewed = [mesh_graph.Viewed(argument, offset, element, len(made), 0,
-                                    C.cast(held, C.POINTER(C.c_uint64)), 0, int(write))
-                  for (argument, offset, element, made, write), held in zip(views, pairs, strict=True)]
-        body = Upstream(place, len(arguments), len(views), len(sources),
+        body = Upstream(place, len(arguments), len(accesses), len(sources),
                         _array(UpstreamArgument, [UpstreamArgument(kind, value, access, 0)
                                                   for kind, value, access in arguments]),
-                        _array(mesh_graph.Viewed, viewed), _array(mesh.Q, [self.base | s for s in sources]),
-                        self.identity, (mesh.U * 3)(*grid), (mesh.U * 3)(*(group or (0, 0, 0))),
-                        int(group is not None), 0)
+                        domain, _array(UpstreamAccess, accesses), _array(mesh.Q, [self.base | s for s in sources]),
+                        None if work is None else C.pointer(work), self.identity, (mesh.U * 3)(*grid),
+                        (mesh.U * 3)(*(group or (0, 0, 0))), int(group is not None), 0, None, None, None)
         first = lib.metal_ir_operations(self.p)
         operation = lib.metal_ir_upstream(self.p, C.byref(body))
         if operation == NONE:
@@ -900,7 +987,7 @@ class _Builder:
         return operation
 
     # metal_ir.h metal_ir_lapack: one typed LAPACK call (struct metal_ir_lapack_call: `routine` LAPACK_GESDD ..
-    # LAPACK_GELSS, `job` its JOB characters, `rcond`) at source position `node` over `batch` (its batch extents): each
+    # LAPACK_GELSY, `job` its JOB characters, `rcond`) at source position `node` over `batch` (its batch extents): each
     # of `inputs` then `outputs` (ValueID, its typed sizes, `rank` per batch member: a matrix 2, a vector 1, a scalar 0,
     # `paired` its last typed dimension a complex value's real pair), its leading dimensions the batch's
     # (right-aligned, an extent 1 broadcast), its own dimensions loops of their own: a matrix's row and column (and
@@ -940,3 +1027,33 @@ class _Builder:
         self.lib.metal_ir_check_message(self.p, operation, message.encode())
         self.emitted.append(Emitted(record, operation, first, self.lib.metal_ir_operations(self.p)))
         return operation
+
+    # metal_ir.h metal_ir_repeat: one numerical repeat region, registered in postorder once its pass's operations
+    # [first, end) are emitted: `condition` the one-element I32 ValueID tested before every pass (the first included),
+    # `carried` the storage roots a pass reads that the initialization or an earlier pass wrote, `children` its direct
+    # children (RegionChild); `record` the producer's own control record (lower_inductor.py ExternCall), kept with the
+    # region (Region) beside the emissions; returns the region (a metal_ir_repeats index, never an operation)
+    def repeat(self, record, first, end, condition, carried, children):
+        region = self.lib.metal_ir_repeat(self.p, first, end, condition, len(carried), _array(mesh.U, carried),
+                                          len(children), _array(RegionChild, children))
+        self.regions.append(Region(record, REGION_REPEAT, region, (first,), (end,), NONE))
+        return region
+
+    # metal_ir.h metal_ir_switch_selector: the switch's selector at its source control point, before its branches'
+    # operations, of its index's ValueID at `place` and source position `node`, kept as its record's emission
+    def selector(self, record, place, node, index, branches):
+        self.identity = self.base | node
+        first = self.lib.metal_ir_operations(self.p)
+        operation = self.lib.metal_ir_switch_selector(self.p, index, branches, place, self.identity)
+        self.emitted.append(Emitted(record, operation, first, self.lib.metal_ir_operations(self.p)))
+        return operation
+
+    # metal_ir.h metal_ir_switch (registration only): an indexed switch in postorder once its branches are emitted,
+    # branch k operations [first[k], end[k]), `yielded` each branch's yields of the common `results` branch-major (the
+    # caller's own copies inside each branch store them), its `selector` and direct `children`; kept (Region)
+    def switch(self, record, index, first, end, yielded, results, selector, children):
+        region = self.lib.metal_ir_switch(self.p, index, len(first), _array(mesh.U, first), _array(mesh.U, end),
+                                          len(results), _array(mesh.U, yielded), _array(mesh.U, results), selector,
+                                          len(children), _array(RegionChild, children))
+        self.regions.append(Region(record, REGION_SWITCH, region, tuple(first), tuple(end), selector))
+        return region
