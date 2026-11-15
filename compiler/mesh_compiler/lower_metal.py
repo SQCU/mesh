@@ -1557,34 +1557,34 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
 
         # a Neural Engine member (lower_inductor.py Model): one operation, its original Core ML program saved once
         # (MLModel.save: its package, its debug-handle mapping), each feature its MLModel declares
-        # (model.get_spec().description, by name in coremltools' own order) bound to its original source value's own
-        # view, its declared interface (each feature's array constraint: shape and element type) the native
-        # projection's to consume with that view (metal_ir_upstream_neural over the saved package's model
-        # description), never retyped here:
-        # - an input (description.input: its torch.export frontend's user inputs in graph order, Produced.inputs then
-        #   Model.received) its machine value (a placeholder's, a received channel's landing; a machine-local received
-        #   input its sent value, received_view), read;
-        # - an output (description.output: the program's user outputs, returned then sent) its ExportedProgram value's
-        #   own storage as the program's fakes alias it (torch/_export: a view of an input placeholder that input's
-        #   machine storage, else one TEMPORARY per distinct fake storage) at its fake's layout, written;
-        # - a state (description.state, MLState: coremltools converter.py 640-654, one per buffer the program mutates,
-        #   in graph_signature.buffers' order, named by it) its buffer's machine value (its target's attribute, the
-        #   same object the program lifted), read where the program's BUFFER input of that buffer reads it
-        #   (graph_signature.inputs_to_buffers over input_specs: exir_utils.py input_name_to_source_buffer_name, its
-        #   targets the mutated ones; converter.py read_state) and written where its BUFFER_MUTATION output writes it
-        #   (graph_signature.buffers_to_mutate over output_specs: output_name_to_target_buffer_name;
-        #   coreml_update_state). Both are the one buffer, so one argument read and written in place
-        #   (metal_ir_upstream_state `read` and `written` that argument, access 3), its storage the program's state
-        #   across calls (KINDS: an ExportedProgram BUFFER's role).
-        # The conversion's selection (Model.selected) stays as given: FLOAT32 is coremltools' compute precision
-        # selection, not the source's precision; a declared type other than its source value's (a state's fp16,
-        # converter.py's default narrowing) is the conversion's source-width obligation, and the program's own
-        # internal types (each MIL operation's) remain the conversion's, not covered here
+        # (model.get_spec().description) bound to its original source value at the declared array (Tensor.view at its
+        # shape over that value's storage), by the converter's own association:
+        # - an input: the ExportedProgram user input of its name (coremltools exir_utils.py 81-87: a rank-0 one named
+        #   with WRAPPED_SCALAR_INPUT_SUFFIX), its machine value (a placeholder's, a received channel's landing; a
+        #   machine-local received input its sent value, received_view), read;
+        # - an output: the ExportedProgram user output of its name (exir_utils.py 292-297), its own value (an output that
+        #   is an input placeholder that input's machine value, else one TEMPORARY per output node at its fake's
+        #   layout), written;
+        # - a state: the buffer its read_state names in the converted program's own scope (Model.model._mil_program;
+        #   converter.py 1365-1416 read_{buffer}, past the sanitized names; exir_utils.py 254-258 and converter.py
+        #   640-654 one per buffer graph_signature.inputs_to_buffers reads and buffers_to_mutate mutates): its machine
+        #   value (its target's attribute), read and written in place (metal_ir_upstream_state `read` and `written` one
+        #   argument, access 3), its storage the program's state across calls (KINDS: an ExportedProgram BUFFER's role).
+        # The declared element types are the native projection's to check against these values (metal_neural.mm
+        # EmitNeural); a declared width other than its source's is the conversion's (lower_inductor.py Model.selected,
+        # its states), never a cast here
         def neural(p):
+            from coremltools.converters.mil.frontend.torch.exir_utils import WRAPPED_SCALAR_INPUT_SUFFIX
+            from coremltools.converters.mil.mil.scope import ScopeSource
             made_, model = produced[p], produced[p].model
             spec, program = model.model.get_spec(), model.program
-            signature, nodes_ = program.graph_signature, {n.name: n for n in program.graph.nodes}
-            given = [(i.value, env.get(copied.get(originals[p].get(i.node)))) for i in made_.inputs]
+            nodes_ = {n.name: n for n in program.graph.nodes}
+
+            def viewed(b, array):
+                view = torch.empty_strided(b.size, b.stride, dtype=b.dtype, device="meta").view(tuple(array.shape))
+                return Bound(b.storage, b.dtype, tuple(view.shape), tuple(view.stride()), b.offset)
+
+            sources = {i.value.name: env.get(copied.get(originals[p].get(i.node))) for i in made_.inputs}
             for at_, n in model.received:
                 channel, placeholder = n.args[0], nodes_[made_.signature.user_inputs[at_]]
                 fake = placeholder.meta["val"]
@@ -1603,38 +1603,38 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                     b, m = received_view(channel), vertex(p, n)
                     if m is not None:
                         env[m] = b
-                given.append((placeholder, b))
-            storages_ = {}
-            for placeholder, b in given:
-                fake = placeholder.meta["val"]
-                storages_.setdefault(fake.untyped_storage()._cdata, Held(
-                    b.storage, b.offset * b.dtype.itemsize - fake.storage_offset() * fake.element_size()))
-            outs = {}
+                sources[placeholder.name] = b
+            made, outs = {}, {}
             for out in made_.outputs:
-                fake = out.value.meta["val"]
-                key = fake.untyped_storage()._cdata
-                if key not in storages_:
-                    storages_[key] = Held(stored(TEMPORARY, fake.dtype, fake.untyped_storage().nbytes()), 0)
-                h = storages_[key]
-                outs[out] = Bound(h.storage, fake.dtype, tuple(fake.shape), tuple(fake.stride()),
-                                  (h.at + fake.storage_offset() * fake.element_size()) // fake.element_size())
+                node = out.value
+                if node.name not in made:
+                    fake = node.meta["val"]
+                    made[node.name] = sources[node.name] if node.op == "placeholder" else Bound(
+                        stored(TEMPORARY, fake.dtype, _extent(fake.shape, fake.stride()) * fake.element_size()),
+                        fake.dtype, tuple(fake.shape), tuple(fake.stride()), 0)
+                outs[out] = made[node.name]
+            ins = []
+            for f in spec.description.input:
+                name = f.name[:-len(WRAPPED_SCALAR_INPUT_SUFFIX)] if f.name.endswith(WRAPPED_SCALAR_INPUT_SUFFIX) else f.name
+                ins.append((f.name, viewed(sources[name], f.type.multiArrayType), 1))
+            exits = [(f.name, viewed(made[f.name], f.type.multiArrayType), 2) for f in spec.description.output]
+            buffer_of = {op.input.name: trace[len("read_"):]
+                         for op in model.model._mil_program.functions[model.model.function_name].operations
+                         if op.op_type == "read_state"
+                         for trace in op.scopes.get(ScopeSource.EXIR_STACK_TRACE, ()) if trace.startswith("read_")}
+            states = []
+            for f in spec.description.state:
+                b = attribute(fetched(module, buffer_of[f.name]))
+                b.storage.role = KINDS[InputKind.BUFFER][1]
+                states.append((f.name, viewed(b, f.type.stateType.arrayType), 3))
             handles = dict.fromkeys(n for nodes__ in model.handles.values() for n in nodes__)
             owners = [owner_of(p, n) for n in handles]
             lead = next((o for o in owners if o[0] is not None), None)
-            read = [target for target in signature.inputs_to_buffers.values()
-                    if target in signature.buffers_to_mutate.values()]
-            states = []
-            for f, target in zip(spec.description.state, read, strict=True):
-                b = attribute(fetched(module, target))
-                b.storage.role = KINDS[InputKind.BUFFER][1]
-                states.append((f.name, b, 3))
             saved = tempfile.TemporaryDirectory()
             package = os.path.join(saved.name, "model.mlpackage")
             model.model.save(package)
-            bound = ([(f.name, b, 1) for f, (_, b) in zip(spec.description.input, given, strict=True)],
-                     [(f.name, b, 2) for f, (_, b) in zip(spec.description.output, outs.items(), strict=True)], states)
-            bodies[p].append(("neural", (made_, model, package, saved, bound, position(lead) if lead else end),
-                              owners))
+            bodies[p].append(("neural", (made_, model, package, saved, (ins, exits, states),
+                                         position(lead) if lead else end), owners))
             ports[p] = [(i, env.get(copied.get(originals[p].get(i.node)))) for i in made_.inputs], list(outs.items())
             sends = {o.node: b for o, b in outs.items() if o.sent}
             for s in made_.module.graph.find_nodes(op="call_function", target=SEND):
