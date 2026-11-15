@@ -6,7 +6,7 @@
 # export's run_decompositions applies, compiler/mesh_compiler/export.py; tracing_mode "fake" over the node's own fake
 # values; torch/fx/graph.py Graph.graph_copy), torch HOPs (while_loop, cond, switch) among them, which the upstream
 # compiler lowers; on the CPU the typed LAPACK operators (operations.LAPACK), each an explicit routine call of that
-# body; and eig/eigvals off the CPU, whose geev body is still region records (operations.METHODS, GEEV_EIGEN)
+# body. eig/eigvals off the CPU are operations._geev_routine's zgeev.f/dgeev.f body in the same ATen and HOP IR
 import functools
 import operator
 
@@ -238,7 +238,8 @@ def outline(captured, staged, targets, processors, machines, *, max_iterations=1
         return lambda *args, **kwargs: formulation(**_operands(node.target, args, kwargs), shapes=made)
 
     # Reference-LAPACK zgeev.f and dgeev.f: an eig or eigvals, complex or real input, through Accelerate's routine on
-    # the CPU (operations.LAPACK_ZGEEV, LAPACK_DGEEV), else operations.GEEV_EIGEN
+    # the CPU (operations.LAPACK_ZGEEV, LAPACK_DGEEV), else the routine's body (operations._geev_routine), both through
+    # operations._eigen's INFO check and complex assembly
     def eigen(node):
         wanted = node.target.overloadpacket is A.linalg_eig
         formulation = _lapack_eigen if on_cpu(node) else _eigen_geev

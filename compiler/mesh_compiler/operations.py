@@ -1,13 +1,13 @@
 # design/compilation-composition-change-request.md, numerical lowerer boundary and "Complete replacement";
 # design/torch-source-lowering-change-request.md items 5 and 6: the explicitly selected custom numerical methods (the
 # CPU LAPACK drivers, and on the placed processor QDWH polar, eigh and SVD, the pseudoinverse and least-squares
-# drivers, the eigenvalue drivers and the matrix exponential), their custom-operator metadata, their native records
-# (metal-microbench metal_ir.h metal_ir_generic, metal_ir_lapack, metal_ir_repeat, metal_ir_switch and the region
-# builder) and the program generator's state. Every other operation is the installed upstream compiler's (METHODS).
-# Each definition carries its citation; this module's earlier per-operator construction is in its git history
+# drivers, the eigenvalue drivers (zgeev.f, dgeev.f) and the matrix exponential) as ATen and torch HOP bodies, their
+# custom-operator metadata, the typed LAPACK routine operators (LAPACK) and the program generator's state (Generator,
+# GENERATOR, Advance). Every other operation, and every compiler pass over these bodies, is the installed upstream
+# compiler's. Each definition carries its citation; this module's earlier per-operator construction and its region
+# record compiler are in its git history
 import collections
 import functools
-import itertools
 import math
 import pathlib
 import sys
@@ -26,343 +26,15 @@ import mesh_code
 A = torch.ops.aten
 
 
-def _ints(value, k):
-    value = tuple(value) if isinstance(value, (list, tuple)) else (value,)
-    return value * k if len(value) == 1 else value
-
-
-# design/compilation-composition-change-request.md, "Complete replacement workgroup", numerical operations and kernel
-# instructions; metal-microbench metal_ir.h (metal_ir_value, metal_ir_generic, metal_ir_states and the region builder);
-# MLIR Linalg, linalg.generic; N. D. Jones, C. K. Gomard and P. Sestoft, 1993, Definition 4.1: every static operator,
-# dtype, shape, stride and scalar operand of a Torch call is an instruction, literal or map coefficient of its
-# structured operation, never a metadata vector a generic kernel interprets
+# metal-microbench metal_ir.h element kinds (metal_ir_value's kind codes) by torch dtype (SCALAR), and the placement
+# kinds GPU, CPU and ANE, as compiler/mesh_compiler/metal.py, lower_metal.py and schedule.py read them
 BOOL, I8, U8, I16, U16, I32, U32, I64, U64, F16, BF16, F32, F64 = 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16
-KINDS = dict(zip((BOOL, I8, U8, I16, U16, I32, U32, I64, U64, F16, BF16, F32, F64),
-                 ('bool', 'i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'f16', 'bf16', 'f32', 'f64')))
 
 
 SCALAR = {torch.bool: BOOL, torch.int8: I8, torch.uint8: U8, torch.int16: I16, torch.uint16: U16, torch.int32: I32,
           torch.uint32: U32, torch.int64: I64, torch.uint64: U64, torch.float16: F16, torch.bfloat16: BF16,
           torch.float32: F32, torch.float64: F64}
-# metal_ir.h ComputeType: the kind a region computes a stored kind in
-CLASS = {BOOL: BOOL, I8: I32, I16: I32, I32: I32, U8: U32, U16: U32, U32: U32, I64: I64, U64: U64, F16: F16, BF16: F32,
-         F32: F32, F64: F64}
-STORED = {BOOL: torch.bool, I32: torch.int32, U32: torch.uint32, I64: torch.int64, U64: torch.uint64, F16: torch.float16,
-        F32: torch.float32, F64: torch.float64}
-REAL = tuple(SCALAR)
-FLOATING = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
-INTEGRAL = tuple(dtype for dtype in REAL if dtype not in FLOATING)
-# metal_ir.h: linalg iterator kinds, combiners, starts, precision, placement, Tint core::BinaryOp and core::UnaryOp
-PARALLEL, REDUCTION = 0, 1
-ASSIGN, SUM, REGION = 0, 1, 9
-IDENTITY, ACCUMULATE = 0, 1
-REASSOCIATE, CONTRACT = 1, 2
 GPU, CPU, ANE = 0, 1, 2
-BINARY = {'and': 0, 'or': 1, 'xor': 2, 'eq': 5, 'ne': 6, 'lt': 7, 'gt': 8, 'le': 9, 'ge': 10, 'shl': 11, 'shr': 12,
-          'add': 13, 'sub': 14, 'mul': 15, 'div': 16, 'rem': 17}
-COMPARE = ('eq', 'ne', 'lt', 'gt', 'le', 'ge')
-BOOLEAN = COMPARE + ('isnan', 'isinf', 'logical_and', 'logical_or', 'logical_xor', 'logical_not')
-COMPLEMENT, NEGATION, NOT = 1, 3, 4
-# WGSL builtin functions by name (metal_ir_builtin_named, Tint core::ParseBuiltinFn)
-BUILTINS = ('exp', 'log', 'sqrt', 'tanh', 'abs', 'trunc', 'floor', 'ceil', 'round', 'pow', 'sin', 'cos', 'tan', 'asin',
-            'acos', 'atan', 'atan2', 'sinh', 'cosh', 'asinh', 'acosh', 'atanh', 'exp2', 'log2')
-
-
-def _class(value):
-    return CLASS[SCALAR[value.dtype]]
-
-
-def _floating(kind):
-    return kind in (F16, F32, F64)
-
-
-# metal_ir.h metal_ir_literal: two's complement, or the IEEE binary16 / binary32 bits in the low bits
-def _bits(value, kind):
-    if kind == BOOL:
-        return int(bool(value))
-    if _floating(kind):
-        dtype, word, bits = {F16: (torch.float16, torch.int16, 16), F32: (torch.float32, torch.int32, 32),
-                             F64: (torch.float64, torch.int64, 64)}[kind]
-        return torch.tensor(float(value), dtype=dtype).view(word).item() & ((1 << bits) - 1)
-    return int(value) & ((1 << 64) - 1)
-
-
-# a region's builder calls in order, each (call, operands...) of metal_ir.h's builder for the region it is replayed
-# into, with the kind of each result; compositions (erf, floor division, isnan, integer powers) expand here into the
-# builder's binary/unary/convert/bitcast/builtin calls
-class _Region:
-    def __init__(self):
-        self.code, self.kinds = [], []
-
-    def add(self, record, kind):
-        self.code.append(record)
-        self.kinds.append(kind)
-        return len(self.code) - 1
-
-    def __call__(self, name, kind, *x, integer=0):
-        if name in BINARY:
-            return self.add(('binary', BINARY[name], *x), BOOL if name in COMPARE else kind)
-        if name == 'neg':
-            return self.add(('unary', NEGATION, x[0]), kind)
-        if name == 'not':
-            return self.add(('unary', NOT, x[0]), BOOL)
-        if name == 'complement':
-            return self.add(('unary', COMPLEMENT, x[0]), kind)
-        if name in BUILTINS:
-            return self.add(('builtin', name, x), kind)
-        if name == 'select':
-            return self.add(('builtin', 'select', (x[2], x[1], x[0])), kind)
-        if name == 'cast':
-            return self.add(('convert', kind, x[0]), kind)
-        if name == 'bitcast':
-            return self.add(('bitcast', kind, x[0]), kind)
-        if name == 'arg':
-            return self.add(('parameter', integer), kind)
-        if name == 'extract':
-            return self.add(('extract', integer, x), kind)
-        if name == 'isnan':
-            return self('ne', BOOL, x[0], x[0])
-        if name == 'erf':
-            return _erf(self, x[0], kind)
-        if name == 'floordiv':
-            return _floordiv(self, x[0], x[1], kind)
-        if name == 'truncdiv':
-            return _truncdiv(self, x[0], x[1], kind)
-        if name == 'powi':
-            return _powi(self, x[0], x[1], kind)
-        if name == 'yield':
-            return self.add(('yield', x), BOOL)
-        raise KeyError(name)
-
-    # WGSL §6.2.1 (and Tint core constants) hold finite values only: an infinity or NaN is its binary32 pattern's bitcast
-    def const(self, value, kind):
-        if _floating(kind) and not math.isfinite(value):
-            made = self.add(('bitcast', F32, self.add(('literal', U32, _bits(value, F32)), U32)), F32)
-            return made if kind == F32 else self('cast', kind, made)
-        return self.add(('literal', kind, _bits(value, kind)), kind)
-
-    def arg(self, k, value):
-        return self('arg', _class(value), integer=k)
-
-    def index(self, d):
-        return self.add(('convert', I32, self.add(('loop', d), U32)), I32)
-
-    def done(self, *results):
-        self('yield', BOOL, *results)
-        return self
-
-    def scatter(self, output, indices, value, predicate):
-        self.add(('scatter', output, tuple(indices), value, predicate), BOOL)
-
-    def extract_if(self, input, kind, indices, predicate, fallback):
-        return self.add(('extract_if', input, tuple(indices), predicate, fallback), kind)
-
-
-# N. Juffa, Stack Overflow answer 35148199, 2016; torch 2.14.0 c10/metal/special_math.h, erf
-def _erf(r, a, t):
-    def c(v):
-        return r.const(v, t)
-
-    def fma(x, y, z):
-        return r('add', t, r('mul', t, x, y), z)
-    s, u = r('abs', t, a), r('mul', t, a, a)
-    w = fma(c(-1.72853470e-5), s, c(3.83197126e-4))
-    w = fma(w, u, fma(c(-3.88396438e-3), s, c(2.42546219e-2)))
-    for k in (-1.06777877e-1, -6.34846687e-1, -1.28717512e-1):
-        w = fma(w, s, c(k))
-    w = fma(w, s, r('neg', t, s))
-    far = r('sub', t, c(1), r('exp', t, w))
-    far = r('select', t, r('lt', BOOL, a, c(0)), r('neg', t, far), far)
-    q = c(-5.96761703e-4)
-    for k in (4.99119423e-3, -2.67681349e-2, 1.12819925e-1, -3.76125336e-1, 1.28379166e-1):
-        q = fma(q, u, c(k))
-    return r('select', t, r('gt', BOOL, s, c(0.927734375)), far, fma(q, a, a))
-
-
-# IEEE 754-2019 §5.5.1 copySign: a zero with the sign bit of x
-def _signed_zero(r, x, t):
-    if t == F16:
-        x = r('cast', F32, x)
-    sign = r('and', U32, r('bitcast', U32, x), r.const(0x80000000, U32))
-    zero = r('bitcast', F32, sign)
-    return r('cast', F16, zero) if t == F16 else zero
-
-
-# torch 2.14.0 c10/util/generic_math.h, div_floor_floating and div_floor_integer
-def _floordiv(r, a, b, t):
-    def c(v):
-        return r.const(v, t)
-    if not _floating(t):
-        safe = r('select', t, r('eq', BOOL, b, c(0)), c(1), b)
-        q = r('div', t, a, safe)
-        if t != U32:
-            fix = r('and', BOOL, r('ne', BOOL, r('rem', t, a, safe), c(0)),
-                    r('ne', BOOL, r('lt', BOOL, a, c(0)), r('lt', BOOL, b, c(0))))
-            q = r('select', t, fix, r('sub', t, q, c(1)), q)
-        return r('select', t, r('eq', BOOL, b, c(0)), c(0), q)
-    mod = r('rem', t, a, b)
-    div = r('div', t, r('sub', t, a, mod), b)
-    fix = r('and', BOOL, r('ne', BOOL, mod, c(0)), r('ne', BOOL, r('lt', BOOL, b, c(0)), r('lt', BOOL, mod, c(0))))
-    div = r('select', t, fix, r('sub', t, div, c(1)), div)
-    floored = r('floor', t, div)
-    rounded = r('select', t, r('gt', BOOL, r('sub', t, div, floored), c(0.5)), r('add', t, floored, c(1)), floored)
-    quotient = r('div', t, a, b)
-    zero = r('select', t, r('eq', BOOL, div, c(0)), _signed_zero(r, quotient, t), rounded)
-    return r('select', t, r('eq', BOOL, b, c(0)), quotient, zero)
-
-
-def _truncdiv(r, a, b, t):
-    if _floating(t):
-        return r('trunc', t, r('div', t, a, b))
-    zero = r('eq', BOOL, b, r.const(0, t))
-    return r('select', t, zero, r.const(0, t), r('div', t, a, r('select', t, zero, r.const(1, t), b)))
-
-
-# torch 2.14.0 ATen/native/Pow.h, powi: exponentiation by squaring over the exponent's bits
-def _powi(r, a, b, t):
-    one, zero = r.const(1, t), r.const(0, t)
-    result, base, rest = one, a, b
-    for _ in range(64 if t in (I64, U64) else 32):
-        odd = r('ne', BOOL, r('and', t, rest, one), zero)
-        result = r('select', t, odd, r('mul', t, result, base), result)
-        base = r('mul', t, base, base)
-        rest = r('div', t, rest, r.const(2, t))
-    if t in (U32, U64):
-        return result
-    odd = r('ne', BOOL, r('and', t, b, one), zero)
-    unit = r('select', t, r('eq', BOOL, a, one), one,
-             r('select', t, r('eq', BOOL, a, r.const(-1, t)), r('select', t, odd, r.const(-1, t), one), zero))
-    return r('select', t, r('lt', BOOL, b, zero), unit, result)
-
-
-# one structured operation, metal_ir_generic's operands: its loops `sizes` with `iterators`, inputs and outputs each
-# (tensor view, affine rows over the loops and then the symbols, (loops + symbols + 1) coefficients a row; None: read
-# only by metal_ir_extract), per output its combiner, starting value and accumulator kind, coupled REGION states (kind,
-# identity) with their combine and finalize regions, and the permitted numerical transformations; metal_ir_symbol's
-# `symbols` (one-element tensor, bound) in order, symbol k the rows' dimension len(sizes) + k, and per loop its
-# metal_ir_loop_extent `extents`, the index of the symbol clipping it or None (its static size); `source_axes`
-# (metal_ir.h metal_ir_operation_axis, compiler/mesh_compiler/lower_metal.py construct) each explicit correspondence its
-# construction used of an original tensor's dimension to one of its operands' (original tensor, its dimension, operand
-# ordinal, inputs first, operand dimension), of a source the record does not read; `component_views` each operand
-# that is a complex tensor's real pairs (torch.view_as_real: its leading dimensions the tensor's, its last the
-# component) as (that complex tensor, operand ordinal, inputs first), a memory view, not a shape correspondence
-class _Generic:
-    def __init__(self, sizes, inputs, outputs, body, iterators=None, combiner=None, accumulator=None, start=None,
-                 states=None, combine=None, finalize=None, precision=0, symbols=None, extents=None, source_axes=None,
-                 component_views=None):
-        self.sizes, self.inputs, self.outputs, self.body = tuple(sizes), list(inputs), list(outputs), body
-        self.source_axes = list(source_axes) if source_axes is not None else []
-        self.component_views = list(component_views) if component_views is not None else []
-        self.symbols = list(symbols) if symbols is not None else []
-        self.extents = tuple(extents) if extents is not None else (None,) * len(self.sizes)
-        self.iterators = tuple(iterators) if iterators is not None else (PARALLEL,) * len(self.sizes)
-        self.combiner = list(combiner) if combiner is not None else [ASSIGN] * len(self.outputs)
-        self.accumulator = list(accumulator) if accumulator is not None else [_class(t) for t, _ in self.outputs]
-        self.start = list(start) if start is not None else [IDENTITY] * len(self.outputs)
-        self.states, self.combine, self.finalize, self.precision = states, combine, finalize, precision
-        self.place, self.node = GPU, 0
-
-
-# design/torch-source-lowering-change-request.md item 6; metal-microbench metal_ir.h metal_ir_symbol and
-# metal_ir_loop_extent: existing structured records over a block of runtime place and size, the records' own formulas
-# unchanged. Each record gains `symbols` (one-element tensor, bound) after its own; `offsets` (operand tensor, {dim:
-# symbol index}), matched by identity with the record's operands or through its `component_views` (an operand that is
-# that tensor's real pairs, its leading dimensions the tensor's), adds that symbol to the operand's row of that
-# dimension (a dynamic slice offset; the component row constant); `clip(record, loop)` the symbol index clipping the
-# loop, or None. A record kind other than _Generic has no runtime extent of its own, so its bounded lowering is
-# unfinished
-def _on_block(records, symbols, offsets=(), clip=lambda record, loop: None):
-    made = []
-    for g in records:
-        if not isinstance(g, _Generic):
-            raise NotImplementedError('%s over a runtime block: its bounded lowering is unfinished '
-                                      '(design/torch-source-lowering-change-request.md item 6)' % type(g).__name__)
-        base, own = len(g.symbols), len(g.sizes) + len(g.symbols)
-
-        def extended(operands, first):
-            out = []
-            for s, (t, rows) in enumerate(operands, first):
-                if rows is not None:
-                    shifted = dict(next((at for held, at in offsets if held is t), {}))
-                    for source, ordinal in g.component_views:
-                        if ordinal == s:
-                            shifted.update(next((at for held, at in offsets if held is source), {}))
-                    rows = tuple(tuple(row[:own]) + tuple(int(shifted.get(d) == k) for k in range(len(symbols)))
-                                 + (row[own],) for d, row in enumerate(rows))
-                out.append((t, rows))
-            return out
-        bounded = _Generic(g.sizes, extended(g.inputs, 0), extended(g.outputs, len(g.inputs)), g.body, g.iterators,
-                           g.combiner,
-                           g.accumulator, g.start, g.states, g.combine, g.finalize, g.precision,
-                           [*g.symbols, *symbols],
-                           [e if e is not None else None if clip(g, l) is None else base + clip(g, l)
-                            for l, e in enumerate(g.extents)])
-        bounded.place, bounded.node, bounded.source_axes = g.place, g.node, g.source_axes
-        bounded.component_views = g.component_views
-        made.append(bounded)
-    return made
-
-
-def _rows(dims, picks):
-    made = []
-    for pick in picks:
-        row = [0] * (dims + 1)
-        for d, c in ({} if pick is None else {pick: 1} if isinstance(pick, int) else pick).items():
-            row[dims if d is None else d] += c
-        made.append(tuple(row))
-    return tuple(made)
-
-
-def _same(dims, rank=None):
-    return _rows(dims, range(dims if rank is None else rank))
-
-
-def _aligned(value, shape):
-    lead = len(shape) - value.dim()
-    return _rows(len(shape), [None if n == 1 and shape[lead + d] != 1 else lead + d for d, n in enumerate(value.shape)])
-
-
-def _temporary(shape, dtype=torch.float32):
-    return torch.empty(tuple(shape), dtype=dtype, device='meta')
-
-
-def _typed(target, operands, outs, results=FLOATING):
-    found = [value.dtype for value in operands if isinstance(value, torch.Tensor) and value.dtype not in REAL] \
-        + [value.dtype for value in outs if value.dtype not in results]
-    # Rejection filters are not part of even temporary integration validation.
-    if found:
-        raise NotImplementedError('%s of %s: its lowering into the structured basis is unfinished '
-                                  '(design/compilation-composition-change-request.md item 1)' % (target, found[0]))
-
-
-# torch 2.14.0 aten/src/ATen/OpMathType.h opmath_type: an operation's arithmetic kind
-def _compute(*dtypes):
-    if any(d is torch.float64 for d in dtypes):
-        return F64
-    if any(d.is_floating_point for d in dtypes):
-        return F32
-    kinds = {SCALAR[d] for d in dtypes}
-    return I64 if kinds & {I64, U64} else U32 if U32 in kinds else I32
-
-
-# torch 2.14.0 c10/util/TypeCast.h static_cast_with_inter_type: to bool by comparison with zero, an integer to a reduced
-# float through float
-def _convert(r, x, source, target):
-    if source == target:
-        return x
-    if target == BOOL:
-        return r('ne', BOOL, x, r.const(0, source))
-    if not _floating(source) and target == F16:
-        x = r('cast', F32, x)
-    return r('cast', target, x)
-
-
-def _load(r, k, value, kind):
-    return _convert(r, r.arg(k, value), _class(value), kind)
-
-
-def _store(r, x, kind, value):
-    return _convert(r, x, kind, _class(value))
 
 
 def _operands(target, args, kwargs):
@@ -371,537 +43,8 @@ def _operands(target, args, kwargs):
             **dict(zip((a.name for a in schema), args)), **kwargs}
 
 
-# PyTorch v2.11.0 aten/src/ATen/native/cpu/PowKernel.cpp, pow_tensor_scalar_optimized_kernel: a static exponent
-# specialized into its instructions
-def _power(r, x, y, t, exponent):
-    one = r.const(1, t)
-    if exponent == 2:
-        return r('mul', t, x, x)
-    if exponent == 3:
-        return r('mul', t, r('mul', t, x, x), x)
-    if exponent == -2:
-        return r('div', t, one, r('mul', t, x, x))
-    if exponent == 0.5:
-        return r('sqrt', t, x)
-    if exponent == -0.5:
-        return r('div', t, one, r('sqrt', t, x))
-    if exponent == -1:
-        return r('div', t, one, x)
-    return r('pow', t, x, y)
-
-
-# PyTorch 2.14 documentation of each operation named; torch 2.14.0 c10/util/MathConstants.h M_SQRT1_2, M_2_SQRTPI
-SQRT1_2, TWO_SQRTPI = 0.707106781186547524401, 1.12837916709551257390
-
-
-def _apply(r, op, x, y, z, alpha, t, exponent=None):
-    def c(v):
-        return r.const(v, t)
-    if op in ('add', 'sub'):
-        return r(op, t, x, y if alpha == 1 else r('mul', t, c(alpha), y))
-    if op in ('mul', 'div', 'floordiv', 'truncdiv'):
-        return r(op, t, x, y)
-    if op in ('neg', 'tanh', 'exp', 'sqrt', 'log', 'abs'):
-        return r(op, t, x)
-    if op == 'relu':
-        return r('select', t, r('lt', BOOL, x, c(0)), c(0), x)
-    if op == 'sigmoid':
-        return r('div', t, c(1), r('add', t, c(1), r('exp', t, r('neg', t, x))))
-    if op == 'silu':
-        return r('div', t, x, r('add', t, c(1), r('exp', t, r('neg', t, x))))
-    if op == 'gelu':
-        return r('mul', t, r('mul', t, c(0.5), x), r('add', t, c(1), r('erf', t, r('mul', t, x, c(SQRT1_2)))))
-    if op == 'gelu_tanh':
-        inner = r('add', t, x, r('mul', t, c(0.044715), r('mul', t, r('mul', t, x, x), x)))
-        return r('mul', t, r('mul', t, c(0.5), x),
-                 r('add', t, c(1), r('tanh', t, r('mul', t, c(TWO_SQRTPI * SQRT1_2), inner))))
-    if op == 'rsqrt':
-        return r('div', t, c(1), r('sqrt', t, x))
-    if op in COMPARE:
-        return r(op, BOOL, x, y)
-    if op == 'pow':
-        return r('powi', t, x, y) if not _floating(t) else _power(r, x, y, t, exponent)
-    if op == 'clamp':
-        lowered = x if y is None else r('select', t, r('lt', BOOL, x, y), y, x)
-        return lowered if z is None else r('select', t, r('lt', BOOL, z, lowered), z, lowered)
-    if op in ('floor', 'ceil', 'round', 'trunc'):
-        return x if not _floating(t) else r(op, t, x)
-    if op in ('sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'asinh', 'acosh', 'atanh', 'erf'):
-        return r(op, t, x)
-    if op == 'atan2':
-        return r('atan2', t, x, y)
-    if op == 'reciprocal':
-        return r('div', t, c(1), x)
-    if op in ('exp2', 'log2'):
-        return r(op, t, x)
-    if op == 'log10':
-        return r('div', t, r('log', t, x), c(math.log(10)))
-    # W. Kahan's log1p (D. Goldberg, ACM Comput. Surv. 23(1), 1991, Theorem 4) and expm1 by the same correction
-    if op == 'log1p':
-        u = r('add', t, c(1), x)
-        corrected = r('mul', t, r('log', t, u), r('div', t, x, r('sub', t, u, c(1))))
-        return r('select', t, r('eq', BOOL, u, c(1)), x,
-                 r('select', t, r('eq', BOOL, u, c(math.inf)), u, corrected))
-    if op == 'expm1':
-        u = r('exp', t, x)
-        difference = r('sub', t, u, c(1))
-        corrected = r('mul', t, difference, r('div', t, x, r('log', t, u)))
-        return r('select', t, r('eq', BOOL, u, c(1)), x,
-                 r('select', t, r('eq', BOOL, u, c(math.inf)), u,
-                   r('select', t, r('eq', BOOL, difference, c(-1)), c(-1), corrected)))
-    if op == 'isnan':
-        return r('isnan', BOOL, x)
-    if op == 'isinf':
-        return r('eq', BOOL, r('abs', t, x), c(math.inf))
-    if op == 'sign':
-        return r('sub', t, _convert(r, r('lt', BOOL, c(0), x), BOOL, t), _convert(r, r('lt', BOOL, x, c(0)), BOOL, t))
-    if op in ('maximum', 'minimum'):
-        better = r('select', t, r('gt' if op == 'maximum' else 'lt', BOOL, x, y), x, y)
-        if not _floating(t):
-            return better
-        return r('select', t, r('isnan', BOOL, x), x, r('select', t, r('isnan', BOOL, y), y, better))
-    if op == 'fmod':
-        return r('rem', t, x, y if _floating(t) else r('select', t, r('eq', BOOL, y, c(0)), c(1), y))
-    if op == 'remainder':
-        m = r('rem', t, x, y if _floating(t) else r('select', t, r('eq', BOOL, y, c(0)), c(1), y))
-        fix = r('and', BOOL, r('ne', BOOL, m, c(0)), r('ne', BOOL, r('lt', BOOL, m, c(0)), r('lt', BOOL, y, c(0))))
-        return r('select', t, fix, r('add', t, m, y), m)
-    if op in ('bitwise_and', 'bitwise_or', 'bitwise_xor'):
-        return r(op[8:], t, x, y)
-    if op == 'bitwise_not':
-        return r('not', BOOL, x) if t == BOOL else r('complement', t, x)
-    if op in ('logical_and', 'logical_or', 'logical_xor'):
-        a, b = _convert(r, x, t, BOOL), _convert(r, y, t, BOOL)
-        return r('ne', BOOL, a, b) if op == 'logical_xor' else r(op[8:], BOOL, a, b)
-    if op == 'logical_not':
-        return r('not', BOOL, _convert(r, x, t, BOOL))
-    return r('select', t, r('ne', BOOL, x, c(0)), y, z)
-
-
-# PyTorch 2.14 documentation, Broadcasting semantics and Type promotion: tensor operands broadcast by their maps' zero
-# rows, scalars the region's literals
-def _elementwise(op, out, a, b=None, c=None, alpha=1):
-    if any(isinstance(x, torch.Tensor) and x.is_complex() or isinstance(x, complex) for x in (out, a, b, c)):
-        if op == 'where':
-            return [g for k in (0, 1) for g in _elementwise(op, _component(out, k), a,
-                                                            _component(b, k), _component(c, k), alpha)]
-        return _complex(op, out, a, b, alpha)
-    given = [a, b, c]
-    tensors = [x for x in given if isinstance(x, torch.Tensor)]
-    integral = out.dtype in INTEGRAL and all(x.dtype in INTEGRAL if isinstance(x, torch.Tensor) else
-                                             isinstance(x, (bool, int)) for x in given if x is not None)
-    # Rejection filters are not part of even temporary integration validation.
-    # alpha is the captured call's (_arithmetic), whose source dispatch checked it (torch/_refs add and sub)
-    boolean_bits = op in ('bitwise_and', 'bitwise_or', 'bitwise_xor', 'bitwise_not') and out.dtype is torch.bool \
-        and all(x.dtype is torch.bool if isinstance(x, torch.Tensor) else isinstance(x, bool)
-                for x in given if x is not None)
-    t = BOOL if boolean_bits else _compute(out.dtype, *[x.dtype for x in tensors]) if integral else \
-        _compute(out.dtype, *[x.dtype for x in tensors], torch.float32)
-    r, inputs, values = _Region(), [], []
-    for x in given:
-        if isinstance(x, torch.Tensor):
-            values.append(_load(r, len(inputs), x, t))
-            inputs.append((x, _aligned(x, out.shape)))
-        else:
-            values.append(None if x is None else r.const(x, t))
-    made = _apply(r, op, *values, alpha, t, b if op == 'pow' and not isinstance(b, torch.Tensor) else None)
-    r.done(_store(r, made, BOOL if op in BOOLEAN or op == 'bitwise_not' and t == BOOL else t, out))
-    return [_Generic(out.shape, inputs, [(out, _same(out.dim()))], r)]
-
-
-# torch 2.14.0 torch/_tensor_docs.py, copy_ and view: views of one element count correspond by their row-major
-# element index, the source's coordinates computed in the region
-def _coordinates(r, linear, shape):
-    made, rest, kind = [], linear, r.kinds[linear]
-    for d in reversed(range(len(shape))):
-        made.append(r('rem', kind, rest, r.const(shape[d], kind)))
-        rest = r('div', kind, rest, r.const(shape[d], kind))
-    return made[::-1]
-
-
-def _linear(r, shape):
-    at = r.const(0, I32)
-    for d, n in enumerate(shape):
-        at = r('add', I32, r('mul', I32, at, r.const(n, I32)), r.index(d))
-    return at
-
-
-def _copy(out, value):
-    if out.is_complex() or value.is_complex():
-        if out.is_complex() and value.is_complex():
-            return _copy(torch.view_as_real(out), torch.view_as_real(value))
-        return _complex('copy', out, value) if out.is_complex() else _copy(out, torch.view_as_real(value)[..., 0])
-    _typed('a copy', [value], [out], REAL)
-    r = _Region()
-    if tuple(value.shape) == tuple(out.shape):
-        r.done(_convert(r, r.arg(0, value), _class(value), _class(out)))
-        return [_Generic(out.shape, [(value, _same(out.dim()))], [(out, _same(out.dim()))], r)]
-    at = _coordinates(r, _linear(r, out.shape), value.shape)
-    r.done(_convert(r, r('extract', _class(value), *at, integer=0), _class(value), _class(out)))
-    return [_Generic(out.shape, [(value, None)], [(out, _same(out.dim()))], r)]
-
-
-def _pair(r, inputs, x, rows, loops, t):
-    pairs, made = torch.view_as_real(x), []
-    for c in (0, 1):
-        made.append(_load(r, len(inputs), pairs, t))
-        inputs.append((pairs, rows + (_rows(loops, [{None: c}])[0],)))
-    return tuple(made)
-
-
-def _component(x, k):
-    if isinstance(x, torch.Tensor):
-        return torch.view_as_real(x)[..., k] if x.is_complex() else x if k == 0 else 0
-    return (complex(x).real if k == 0 else complex(x).imag) if isinstance(x, complex) else x if k == 0 else 0
-
-
-def _complex(op, out, a, b=None, alpha=1):
-    shape = list(out.shape)
-    loops = shape
-    t = F64 if any(isinstance(x, torch.Tensor) and x.dtype in (torch.complex128, torch.float64) for x in (a, b, out)) \
-        else F32
-    r, inputs, values = _Region(), [], []
-    for x in (a, b):
-        if x is None:
-            values.append(None)
-        elif isinstance(x, torch.Tensor) and x.is_complex():
-            values.append(_pair(r, inputs, x, _aligned(x, shape), len(loops), t))
-        elif isinstance(x, torch.Tensor):
-            values.append((_load(r, len(inputs), x, t), r.const(0, t)))
-            inputs.append((x, _aligned(x, shape)))
-        else:
-            z = complex(x)
-            values.append((r.const(z.real, t), r.const(z.imag, t)))
-    made = _complex_value(r, t, op, values[0], values[1], alpha, b if op == 'pow' and not isinstance(b, torch.Tensor)
-                          else None)
-    if op in BOOLEAN:
-        r.done(_store(r, made, BOOL, out))
-        return [_Generic(loops, inputs, [(out, _same(len(loops)))], r)]
-    re, im = made if isinstance(made, tuple) else (made, made)
-    if out.is_complex():
-        r.done(_store(r, re, t, out.real), _store(r, im, t, out.imag))
-        return [_Generic(loops, inputs, [(out.real, _same(len(loops))), (out.imag, _same(len(loops)))], r)]
-    r.done(_store(r, re, t, out))
-    return [_Generic(loops, inputs, [(out, _same(len(loops)))], r)]
-
-
-# the complex arithmetic of (re, im) pairs: R. L. Smith, Algorithm 116, Complex division, CACM 5(8), 1962; the modulus
-# scaled by the larger part (no overflow of the squares); W. Kahan, Branch cuts for complex elementary functions, in
-# The State of the Art in Numerical Analysis, 1987 (sqrt by the half-sum of |z| and |re|; tanh by tan and sinh);
-# the elementary functions by their identities (Abramowitz and Stegun 4.3.55-4.3.58, 4.5.49-4.5.54, 4.4.14-4.4.16,
-# 4.6.14-4.6.16: sin, cos, sinh, cosh and the inverses through log and sqrt)
-def _complex_value(r, t, op, z, w, alpha, exponent):
-    def c(v):
-        return r.const(v, t)
-
-    def add(x, y):
-        return r('add', t, x[0], y[0]), r('add', t, x[1], y[1])
-
-    def sub(x, y):
-        return r('sub', t, x[0], y[0]), r('sub', t, x[1], y[1])
-
-    def mul(x, y):
-        return (r('sub', t, r('mul', t, x[0], y[0]), r('mul', t, x[1], y[1])),
-                r('add', t, r('mul', t, x[0], y[1]), r('mul', t, x[1], y[0])))
-
-    def scale(x, k):
-        return r('mul', t, x[0], c(k)), r('mul', t, x[1], c(k))
-
-    def div(x, y):
-        wide = r('ge', BOOL, r('abs', t, y[0]), r('abs', t, y[1]))
-        first, second = r('select', t, wide, y[0], y[1]), r('select', t, wide, y[1], y[0])
-        ratio = r('div', t, second, first)
-        den = r('add', t, first, r('mul', t, second, ratio))
-        re_w = r('div', t, r('add', t, x[0], r('mul', t, x[1], ratio)), den)
-        im_w = r('div', t, r('sub', t, x[1], r('mul', t, x[0], ratio)), den)
-        re_n = r('div', t, r('add', t, r('mul', t, x[0], ratio), x[1]), den)
-        im_n = r('div', t, r('sub', t, r('mul', t, x[1], ratio), x[0]), den)
-        return r('select', t, wide, re_w, re_n), r('select', t, wide, im_w, im_n)
-
-    def modulus(x):
-        a, b = r('abs', t, x[0]), r('abs', t, x[1])
-        big, small = r('select', t, r('ge', BOOL, a, b), a, b), r('select', t, r('ge', BOOL, a, b), b, a)
-        ratio = r('div', t, small, r('select', t, r('eq', BOOL, big, c(0)), c(1), big))
-        return r('mul', t, big, r('sqrt', t, r('add', t, c(1), r('mul', t, ratio, ratio))))
-
-    def exp(x):
-        e = r('exp', t, x[0])
-        return r('mul', t, e, r('cos', t, x[1])), r('mul', t, e, r('sin', t, x[1]))
-
-    def log(x):
-        return r('log', t, modulus(x)), r('atan2', t, x[1], x[0])
-
-    def sqrt(x):
-        m = r('sqrt', t, r('mul', t, c(0.5), r('add', t, r('abs', t, x[0]), modulus(x))))
-        zero = r('eq', BOOL, m, c(0))
-        safe = r('select', t, zero, c(1), m)
-        other = r('div', t, r('abs', t, x[1]), r('mul', t, c(2), safe))
-        negative = r('lt', BOOL, x[0], c(0))
-        re = r('select', t, negative, other, m)
-        im = r('select', t, negative, r('select', t, r('lt', BOOL, x[1], c(0)), r('neg', t, m), m),
-               r('div', t, x[1], r('mul', t, c(2), safe)))
-        return r('select', t, zero, c(0), re), r('select', t, zero, x[1], im)
-
-    def sinh_cosh(a):
-        e, f = r('exp', t, a), r('exp', t, r('neg', t, a))
-        return r('mul', t, c(0.5), r('sub', t, e, f)), r('mul', t, c(0.5), r('add', t, e, f))
-
-    def sin(x):
-        sh, ch = sinh_cosh(x[1])
-        return r('mul', t, r('sin', t, x[0]), ch), r('mul', t, r('cos', t, x[0]), sh)
-
-    def cos(x):
-        sh, ch = sinh_cosh(x[1])
-        return r('mul', t, r('cos', t, x[0]), ch), r('neg', t, r('mul', t, r('sin', t, x[0]), sh))
-
-    def sinh(x):
-        sh, ch = sinh_cosh(x[0])
-        return r('mul', t, sh, r('cos', t, x[1])), r('mul', t, ch, r('sin', t, x[1]))
-
-    def cosh(x):
-        sh, ch = sinh_cosh(x[0])
-        return r('mul', t, ch, r('cos', t, x[1])), r('mul', t, sh, r('sin', t, x[1]))
-
-    def tanh(x):
-        tn = r('tan', t, x[1])
-        beta = r('add', t, c(1), r('mul', t, tn, tn))
-        sh = sinh_cosh(x[0])[0]
-        rho = r('sqrt', t, r('add', t, c(1), r('mul', t, sh, sh)))
-        den = r('add', t, c(1), r('mul', t, beta, r('mul', t, sh, sh)))
-        return r('div', t, r('mul', t, beta, r('mul', t, rho, sh)), den), r('div', t, tn, den)
-
-    def times_i(x):
-        return r('neg', t, x[1]), x[0]
-
-    def over_i(x):
-        return x[1], r('neg', t, x[0])
-    one = (c(1), c(0))
-
-    def asinh(x):
-        return log(add(x, sqrt(add(mul(x, x), one))))
-
-    def acosh(x):
-        return log(add(x, mul(sqrt(add(x, one)), sqrt(sub(x, one)))))
-
-    def atanh(x):
-        return scale(sub(log(add(one, x)), log(sub(one, x))), 0.5)
-
-    def real(name, x):
-        return _apply(r, name, x, None, None, 1, t)
-    if op in ('add', 'sub'):
-        u = w if alpha == 1 else mul(w, (c(complex(alpha).real), c(complex(alpha).imag)))
-        return add(z, u) if op == 'add' else sub(z, u)
-    if op == 'mul':
-        return mul(z, w)
-    if op == 'div':
-        return div(z, w)
-    if op == 'neg':
-        return r('neg', t, z[0]), r('neg', t, z[1])
-    if op == 'conj':
-        return z[0], r('neg', t, z[1])
-    if op == 'exp':
-        return exp(z)
-    if op == 'exp2':
-        return exp(scale(z, math.log(2)))
-    if op == 'log':
-        return log(z)
-    if op in ('log2', 'log10'):
-        return scale(log(z), 1 / math.log(2 if op == 'log2' else 10))
-    if op == 'log1p':
-        square = r('add', t, r('mul', t, z[0], r('add', t, c(2), z[0])), r('mul', t, z[1], z[1]))
-        return r('mul', t, c(0.5), real('log1p', square)), r('atan2', t, z[1], r('add', t, c(1), z[0]))
-    if op == 'expm1':
-        half = r('sin', t, r('mul', t, c(0.5), z[1]))
-        return (r('sub', t, r('mul', t, real('expm1', z[0]), r('cos', t, z[1])), r('mul', t, c(2), r('mul', t, half, half))),
-                r('mul', t, r('exp', t, z[0]), r('sin', t, z[1])))
-    if op == 'sqrt':
-        return sqrt(z)
-    if op == 'rsqrt':
-        return div(one, sqrt(z))
-    if op == 'reciprocal':
-        return div(one, z)
-    if op in ('sigmoid', 'silu'):
-        return div(one if op == 'sigmoid' else z, add(one, exp((r('neg', t, z[0]), r('neg', t, z[1])))))
-    if op.startswith('logical_'):
-        def truth(x):
-            return r('or', BOOL, r('ne', BOOL, x[0], c(0)), r('ne', BOOL, x[1], c(0)))
-        if op == 'logical_not':
-            return r('not', BOOL, truth(z))
-        return r('ne' if op == 'logical_xor' else op[8:], BOOL, truth(z), truth(w))
-    if op == 'pow':
-        if exponent is not None and complex(exponent) == 2:
-            return mul(z, z)
-        power = exp(mul(w, log(z)))
-        nothing = r('and', BOOL, r('eq', BOOL, z[0], c(0)), r('eq', BOOL, z[1], c(0)))
-        unit = r('and', BOOL, r('eq', BOOL, w[0], c(0)), r('eq', BOOL, w[1], c(0)))
-        zero = r('select', t, unit, c(1), c(0))
-        return r('select', t, nothing, zero, power[0]), r('select', t, nothing, c(0), power[1])
-    if op == 'sin':
-        return sin(z)
-    if op == 'cos':
-        return cos(z)
-    if op == 'tan':
-        return over_i(tanh(times_i(z)))
-    if op == 'sinh':
-        return sinh(z)
-    if op == 'cosh':
-        return cosh(z)
-    if op == 'tanh':
-        return tanh(z)
-    if op == 'asinh':
-        return asinh(z)
-    if op == 'acosh':
-        return acosh(z)
-    if op == 'atanh':
-        return atanh(z)
-    if op == 'asin':
-        return over_i(asinh(times_i(z)))
-    if op == 'acos':
-        a = over_i(asinh(times_i(z)))
-        return r('sub', t, c(math.pi / 2), a[0]), r('neg', t, a[1])
-    if op == 'atan':
-        return over_i(atanh(times_i(z)))
-    if op == 'sgn':
-        m = modulus(z)
-        zero = r('eq', BOOL, m, c(0))
-        safe = r('select', t, zero, c(1), m)
-        return (r('select', t, zero, c(0), r('div', t, z[0], safe)), r('select', t, zero, c(0), r('div', t, z[1], safe)))
-    if op == 'abs':
-        return modulus(z)
-    if op == 'abs1':
-        return r('add', t, r('abs', t, z[0]), r('abs', t, z[1]))
-    if op == 'angle':
-        return r('atan2', t, z[1], z[0])
-    if op in ('eq', 'ne'):
-        same = r('and', BOOL, r('eq', BOOL, z[0], w[0]), r('eq', BOOL, z[1], w[1]))
-        return same if op == 'eq' else r('not', BOOL, same)
-    if op == 'isnan':
-        return r('or', BOOL, r('isnan', BOOL, z[0]), r('isnan', BOOL, z[1]))
-    if op == 'isinf':
-        return r('or', BOOL, r('eq', BOOL, r('abs', t, z[0]), c(math.inf)), r('eq', BOOL, r('abs', t, z[1]), c(math.inf)))
-    if op == 'polar':
-        return r('mul', t, z[0], r('cos', t, w[0])), r('mul', t, z[0], r('sin', t, w[0]))
-    if op == 'complex':
-        return z[0], w[0]
-    if op == 'copy':
-        return z
-    raise NotImplementedError('%s of complex operands: its structured complex lowering is unfinished '
-                              '(design/compilation-composition-change-request.md item 1)' % op)
-
-# torch 2.14.0 torch/_tensor_docs.py, fill_; PyTorch 2.14 documentation, torch.arange
-def _fill(out, value, step=0):
-    if out.is_complex():
-        return [g for k in (0, 1) for g in _fill(torch.view_as_real(out)[..., k], _component(value, k),
-                                                  _component(step, k))]
-    _typed('a fill', [], [out], REAL)
-    t = _compute(out.dtype)
-    r = _Region()
-    made = r.const(value, t)
-    if step:
-        made = r('add', t, made, r('mul', t, _convert(r, _linear(r, out.shape), I32, t), r.const(step, t)))
-    r.done(_store(r, made, t, out))
-    return [_Generic(out.shape, [], [(out, _same(out.dim()))], r)]
-
-
-# an output kept in its arithmetic kind: the structured map out = convert(f(acc, operands...)), fused by the
-# transformation with its producer
-def _epilogue(out, acc, t, extra=(), apply=None):
-    r = _Region()
-    x = _load(r, 0, acc, t)
-    loaded = [_load(r, 1 + j, v, t) for j, (v, _) in enumerate(extra)]
-    r.done(_store(r, apply(r, x, *loaded) if apply else x, t, out))
-    return [_Generic(out.shape, [(acc, _same(out.dim()))] + list(extra), [(out, _same(out.dim()))], r)]
-
-# J. Gibbons, The third homomorphism theorem, J. Functional Programming 6(4), 1996, (2) and Definition 3.1: a
-# reduction's states, their identity and associative join; `_identities` the finalization that is the states
-def _identities(states):
-    r = _Region()
-    return r.done(*[r('arg', kind, integer=j) for j, (kind, _) in enumerate(states)])
-
-
-def _joined(states, join):
-    c = _Region()
-    n = len(states)
-    a = [c('arg', kind, integer=j) for j, (kind, _) in enumerate(states)]
-    b = [c('arg', kind, integer=n + j) for j, (kind, _) in enumerate(states)]
-    return c.done(*join(c, a, b))
-
-
-def _extremum(r, a, b, t, larger):
-    better = r('gt' if larger else 'lt', BOOL, b, a)
-    if _floating(t):
-        better = r('or', BOOL, better, r('isnan', BOOL, b))
-    return r('select', t, better, b, a)
-
-
-def _linalg_identity(out):
-    r = _Region()
-    target = torch.view_as_real(out) if out.is_complex() else out
-    row = out.dim() - 2
-    equal = r('eq', BOOL, r.index(row), r.index(row + 1))
-    if out.is_complex():
-        equal = r('and', BOOL, equal, r('eq', BOOL, r.index(out.dim()), r.const(0, I32)))
-    r.done(r('cast', _class(target), equal))
-    return [_Generic(target.shape, [], [(target, _same(target.dim()))], r)]
-
-
 def _linalg_vector_rhs(a, b):
     return b.dim() == 1 or b.dim() == a.dim() - 1 and b.shape == a.shape[:-1]
-
-
-# torch 2.14.0 aten _functional_assert_async.msg(Tensor self, str assert_msg, Tensor dep_token): `dep_token` the
-# typed value the check depends on, its writers and their completion before the check (None: the status alone)
-class _Check:
-    def __init__(self, info, code, message='', dep_token=None):
-        self.info, self.code, self.place, self.node = info, code, CPU, 0
-        self.message, self.dep_token = message, dep_token
-
-
-# Reference-LAPACK SRC/dlarfg.f, zlarfg.f, dgeqr2.f, zgeqr2.f, dorg2r.f and zung2r.f
-def _linalg_reflector(column, tau, beta, ops):
-    real, batch = column.real.dtype, column.shape[:-1]
-    magnitudes, scale = _temporary(column.shape, real), _temporary(batch, real)
-    ops += _elementwise('abs', magnitudes, column)
-    ops += _reduced(A.amax.default, {'self': magnitudes, 'dim': [-1], 'keepdim': False}, [scale])
-    zero, safe = _temporary(batch, torch.bool), _temporary(batch, real)
-    ops += _elementwise('eq', zero, scale, 0)
-    ops += _elementwise('where', safe, zero, 1, scale)
-    normalized = _temporary(column.shape, column.dtype)
-    ops += _elementwise('div', normalized, column, safe.unsqueeze(-1))
-    ops += _elementwise('div', magnitudes, magnitudes, safe.unsqueeze(-1))
-    squares, norm = _temporary(column.shape, real), _temporary(batch, real)
-    ops += _elementwise('mul', squares, magnitudes, magnitudes)
-    ops += _reduced(A.sum.dim_IntList, {'self': squares, 'dim': [-1], 'keepdim': False}, [norm])
-    ops += _elementwise('sqrt', norm, norm)
-    alpha, signed, negative = normalized[..., 0], _temporary(batch, real), _temporary(batch, torch.bool)
-    ops += _elementwise('lt', negative, alpha.real, 0)
-    ops += _elementwise('neg', signed, norm)
-    ops += _elementwise('where', signed, negative, norm, signed)
-    inactive = _temporary(batch, torch.bool)
-    if column.shape[-1] > 1:
-        tail = _temporary(batch, real)
-        ops += _reduced(A.amax.default, {'self': magnitudes[..., 1:], 'dim': [-1], 'keepdim': False}, [tail])
-        # XNORM = 0: the tail's largest modulus (nonnegative), or a clipped empty tail's -inf amax identity
-        ops += _elementwise('le', inactive, tail, 0)
-    else:
-        ops += _fill(inactive, True)
-    if column.is_complex():
-        real_alpha = _temporary(batch, torch.bool)
-        ops += _elementwise('eq', real_alpha, alpha.imag, 0)
-        ops += _elementwise('logical_and', inactive, inactive, real_alpha)
-    denominator = _temporary(batch, column.dtype)
-    ops += _elementwise('sub', denominator, alpha, signed)
-    ops += _elementwise('where', denominator, inactive, 1, denominator)
-    v = _temporary(column.shape, column.dtype)
-    ops += _elementwise('div', v, normalized, denominator.unsqueeze(-1))
-    ops += _fill(v[..., 0], 1)
-    ops += _elementwise('where', safe, inactive, 1, signed)
-    ops += _elementwise('sub', tau, signed, alpha)
-    ops += _elementwise('div', tau, tau, safe)
-    ops += _elementwise('where', tau, inactive, 0, tau)
-    ops += _elementwise('mul', beta, signed, scale)
-    ops += _elementwise('where', beta, inactive, column[..., 0].real, beta)
-    return v.unsqueeze(-1)
 
 
 # PyTorch v2.14.0 aten/src/ATen/native/BatchLinearAlgebra.cpp, linalg_lstsq_out_info and get_default_lstsq_driver;
@@ -1232,9 +375,13 @@ def _lapack_hermitian(A, UPLO='L', compute_v=True, shapes=()):
     return w, z if compute_v else A.new_empty(shapes[1][0], dtype=shapes[1][1])
 
 
-# Reference-LAPACK dgeev.f: a complex pair (WI(j) > 0, WI(j+1) < 0) has v(j) = VR(:,j) + i VR(:,j+1) and
-# v(j+1) = VR(:,j) - i VR(:,j+1); a real eigenvalue's vector VR(:,j) itself
-def _lapack_eigen(self, vectors=True):
+# torch 2.14.0 linalg_eig (A) -> (eigenvalues, eigenvectors) and linalg_eigvals / _linalg_eigvals (A) ->
+# eigenvalues from a GEEV routine's results (`zgeev`, `dgeev`: LAPACK_ZGEEV and LAPACK_DGEEV on the CPU, _geev_routine
+# else): INFO to _linalg_check_errors after the results (BatchLinearAlgebra.cpp linalg_eig_out_info), a real input's
+# eigenvalues WR + i WI and its vectors linalg_eig_make_complex_eigenvectors' (Reference-LAPACK dgeev.f: a complex
+# pair, WI(j) > 0 and WI(j+1) < 0, has v(j) = VR(:,j) + i VR(:,j+1) and v(j+1) = VR(:,j) - i VR(:,j+1); a real
+# eigenvalue's vector VR(:,j) itself)
+def _eigen(self, vectors, zgeev, dgeev):
     a = self
     complex_dtype = a.dtype if a.is_complex() else corresponding_complex_dtype(a.dtype)
     if not a.numel():
@@ -1242,10 +389,10 @@ def _lapack_eigen(self, vectors=True):
         return (values, _column_major(a, a.shape, complex_dtype)) if vectors else values
     api = 'torch.linalg.eig' if vectors else 'torch.linalg.eigvals'
     if a.is_complex():
-        w, vr, info = LAPACK_ZGEEV(a, 'V' if vectors else 'N')
+        w, vr, info = zgeev(a, 'V' if vectors else 'N')
         A._linalg_check_errors.default(info, api, is_matrix=a.dim() == 2)
         return (w, vr) if vectors else w
-    wr, wi, vr, info = LAPACK_DGEEV(a, 'V' if vectors else 'N')
+    wr, wi, vr, info = dgeev(a, 'V' if vectors else 'N')
     A._linalg_check_errors.default(info, api, is_matrix=a.dim() == 2)
     values = torch.complex(wr, wi)
     if not vectors:
@@ -1256,6 +403,10 @@ def _lapack_eigen(self, vectors=True):
     real = torch.where(second, before, vr)
     imaginary = torch.where(first, after, torch.where(second, -vr, 0))
     return values, torch.complex(real, imaginary)
+
+
+def _lapack_eigen(self, vectors=True):
+    return _eigen(self, vectors, LAPACK_ZGEEV, LAPACK_DGEEV)
 
 
 # BatchLinearAlgebra.cpp linalg_lstsq_out_info: the routine over the broadcast batch (the right-hand sides' rows past m
@@ -1508,8 +659,8 @@ def _qdwh_coefficients(eps, max_iterations):
 #
 # _qdwh's cond_fun and body_fun: from k = len(qr_coefs) + len(chol_coefs), while is_not_converged and
 # k < max_iterations, Halley's method, get_chol_params(3, 1, 3) = (3 - 1/3, 3, 1/3), each step tested. The bound
-# max_iterations is compile-time, so the loop is emitted as its static copies k .. max_iterations - 1 (the bounded
-# continuation the region records compiled, with no host repeat wait). A single matrix's copy is
+# max_iterations is compile-time, so the loop is emitted as its static copies k .. max_iterations - 1 (a bounded
+# continuation, with no host repeat wait). A single matrix's copy is
 # torch/_higher_order_ops/cond.py cond_op on is_converged, so a copy after convergence runs no step. A batch takes
 # jax/_src/lax/control_flow/loops.py _while_loop_batching_rule: every copy steps, and a member that has converged keeps
 # its iterate
@@ -1619,8 +770,8 @@ def _qdwh_eigh_result(blocks, vectors, empty=None):
 # source draw site `site` (one-element int32, compiler/mesh_compiler/export.py capture's `site`). This is the explicit
 # operand through which a method body's own Philox draws read the program's generator. It has only its fake (four int32
 # words on site's device) and no eager kernel. The producer binds it to the body's operations.Generator:
-# Generator.site(site) records the draw, so the body's Generator.stepped() advances the execution word once after its
-# draws, and the value is Generator.state's root (design/compilation-composition-change-request.md items 6 and 7),
+# Generator.site(site) records the draw, so the body's Generator.advanced() (its Advance operand) advances the
+# execution word once after its draws, and the value is Generator.state's root (design/compilation-composition-change-request.md items 6 and 7),
 # never a fresh allocation or Inductor's RandomSeeds
 torch.library.define('mesh::generator', '(Tensor site) -> Tensor')
 
@@ -1971,136 +1122,6 @@ def _pushed(agenda, below, offset, minus, offset_plus, plus):
     return agenda, (below + first.to(below.dtype) + second.to(below.dtype))[..., None]
 
 
-# metal-microbench metal_ir.h metal_ir_repeat: one source numerical repetition of the geev routines (gebal's balancing
-# sweeps, lahqr's QR iterations, the vectors' back-substitution), a while loop. `records` one pass in order (structured records, a nested _Repeat among them); before every pass,
-# the first included, the one-element int32 `condition` (written by the records before this one, then by each pass)
-# nonzero runs it; `carried` the TEMPORARY tensors a pass reads that an earlier pass or the records before wrote, and
-# those read after the repetition. No iteration bound: the pass's own condition ends it
-class _Repeat:
-    def __init__(self, records, condition, carried):
-        self.records, self.condition, self.carried = list(records), condition, tuple(carried)
-        self.place, self.node = GPU, 0
-
-
-# one structured record: `outs` and `ins` (tensor, picks) where picks name each dimension's loop (compiler `_rows`;
-# None for the whole picks reads that input by extraction only, its value its input slot); fn(r, values) gives each
-# output's (value, kind). A complex operand is its real pairs (torch.view_as_real), each part a constant component
-# row (_pair): its value a (re, im) pair, its loops the matrix's alone, an extracted one one slot read with its
-# component coordinate; each such operand the record's `component_views` entry (its _emit offsets projected through
-# them, _on_block). An output of picks None is a scatter destination (metal_ir.h metal_ir_scatter): one emitted
-# output, a complex one its whole real pairs (the scatter's coordinates carrying the component), its yield not
-# stored. A scatter's output ordinal is the emitted one: a mapped complex output emits two, any other one
-def _record(sizes, outs, ins, fn, iterators=None, combiner=None):
-    r, n, inputs, values, views = _Region(), len(sizes), [], [], []
-    for x, picks in ins:
-        held = torch.view_as_real(x) if x.is_complex() else x
-        if picks is None:
-            values.append(len(inputs))
-            inputs.append((held, None))
-        elif x.is_complex():
-            values.append(tuple(r.arg(len(inputs) + c, held) for c in (0, 1)))
-            inputs += [(held, _rows(n, picks) + _rows(n, [{None: c}])) for c in (0, 1)]
-        else:
-            values.append(r.arg(len(inputs), x))
-            inputs.append((x, _rows(n, picks)))
-        views += [(x, s) for s in range(len(inputs) - (2 if picks is not None else 1), len(inputs)) if x.is_complex()]
-    outputs, yields, kinds, combiners = [], [], [], []
-    for (o, picks), (v, kind), combined in zip(outs, fn(r, values), combiner or [ASSIGN] * len(outs)):
-        held = torch.view_as_real(o) if o.is_complex() else o
-        for c in (0, 1) if o.is_complex() and picks is not None else (None,):
-            views += [(o, len(inputs) + len(outputs))] if o.is_complex() else []
-            outputs.append((held, None if picks is None else _rows(n, picks) + (_rows(n, [{None: c}]) if c is not None
-                                                                                 else ())))
-            value = v if c is None else _part(r, kind, v, c)
-            yields.append(_convert(r, value[0] if isinstance(value, tuple) else value, kind, _class(held)))
-            kinds.append(kind)
-            combiners.append(combined)
-    r.done(*yields)
-    return [_Generic(sizes, inputs, outputs, r, iterators, combiners if combiner else None, kinds,
-                     precision=REASSOCIATE | CONTRACT if combiner else 0, component_views=views)]
-
-
-# a record value: a real handle, or a complex (re, im) pair. Complex arithmetic is _complex_value's on the same
-# region; component c, |z|^2 and a component select are the real formulas
-def _part(r, t, x, c):
-    return x[c] if isinstance(x, tuple) else x if c == 0 else r.const(0, t)
-
-
-def _complex_parts(r, t, x):
-    return x if isinstance(x, tuple) else (x, r.const(0, t))
-
-
-def _valued(r, t, op, x, y):
-    if not isinstance(x, tuple) and not isinstance(y, tuple):
-        return r(op, t, x, y)
-    return _complex_value(r, t, op, _complex_parts(r, t, x), _complex_parts(r, t, y), 1, None)
-
-
-def _plus(r, t, x, y, op='add'):
-    return _valued(r, t, op, x, y)
-
-
-def _times(r, t, x, y):
-    return _valued(r, t, 'mul', x, y)
-
-
-def _conjugate(r, t, x):
-    return _complex_value(r, t, 'conj', x, None, 1, None) if isinstance(x, tuple) else x
-
-
-def _negated(r, t, x):
-    return _complex_value(r, t, 'neg', x, None, 1, None) if isinstance(x, tuple) else r('neg', t, x)
-
-
-def _square(r, t, x):
-    return r('add', t, r('mul', t, x[0], x[0]), r('mul', t, x[1], x[1])) if isinstance(x, tuple) else r('mul', t, x, x)
-
-
-def _chosen(r, t, condition, x, y):
-    if not isinstance(x, tuple) and not isinstance(y, tuple):
-        return r('select', t, condition, x, y)
-    return tuple(r('select', t, condition, _part(r, t, x, c), _part(r, t, y, c)) for c in (0, 1))
-
-
-def _scalars(outs, ins, fn, gathered=()):
-    return _record((1,), [(o, (None,) * o.dim()) for o in outs],
-                   [(x, (None,) * x.dim()) for x in ins] + [(x, None) for x in gathered], fn)
-
-
-# out = a b over `sizes` (n, m, k), `adjoint` conjugating each flagged operand (its picks name its transpose)
-def _gemm(out, a, a_picks, b, b_picks, sizes, adjoint=(False, False)):
-    t = _class(out.real)
-    return _record(sizes, [(out, (0, 1))], [(a, a_picks), (b, b_picks)], lambda r, v: [(_times(r, t, *[
-        _conjugate(r, t, x) if flag else x for x, flag in zip(v, adjoint)]), t)], [PARALLEL, PARALLEL, REDUCTION],
-        [SUM])
-
-
-# records over runtime extents (_on_block): `loops` per loop position, or `sizes` by static loop size, an extent
-# (one-element int32 tensor, bound) or None; `offsets` (operand, {dim: extent}) a symbol added to that dimension
-def _emit(ops, records, loops=(), sizes=None, offsets=()):
-    symbols, index = [], {}
-
-    def symbol(s):
-        if id(s[0]) not in index:
-            index[id(s[0])] = len(symbols)
-            symbols.append(s)
-        return index[id(s[0])]
-    clips = {l: symbol(s) for l, s in enumerate(loops) if s is not None}
-    sized = {n: symbol(s) for n, s in (sizes or {}).items() if s is not None}
-    moved = [(t, {d: symbol(s) for d, s in dims.items()}) for t, dims in offsets]
-    ops += _on_block(records, symbols, moved,
-                     lambda g, l: sized.get(g.sizes[l]) if sizes is not None else clips.get(l))
-
-
-def _at(vector, j, bound):
-    return vector[j:j + 1], bound
-
-
-# a copy whose loops are the elements' alone (a complex one through _complex, not its real pairs' component loop)
-def _bounded_copy(out, x):
-    return _complex('copy', out, x) if out.is_complex() else _copy(out, x)
-
-
 # JAX jax/_src/tpu/linalg/svd.py svd and _svd_tall_and_square_input; pub13
 # sections 4 and 5.5; torch 2.14.0 aten _linalg_svd (A, full_matrices, compute_uv, driver) -> (U, S, Vh), `shapes`
 # its outputs' (shape, dtype), an empty input's U and Vh the identity where full (linalg_svd_out)
@@ -2398,29 +1419,6 @@ def _gelsy_solution(packed, tau, pivots, rank, b):
     return work
 
 
-# each column's 2-norm scaled by its largest modulus, and the columns normalized by it (_geev_normalized's)
-def _linalg_lengths(matrix, lengths, ops, normalize=True):
-    real = matrix.real.dtype
-    magnitude, maximum = _temporary(matrix.shape, real), _temporary(lengths.shape, real)
-    ops += _elementwise('abs', magnitude, matrix)
-    ops += _reduced(A.amax.default, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [maximum])
-    zero, safe = _temporary(lengths.shape, torch.bool), _temporary(lengths.shape, real)
-    ops += _elementwise('eq', zero, maximum, 0)
-    ops += _elementwise('where', safe, zero, 1, maximum)
-    ops += _elementwise('div', magnitude, magnitude, safe.unsqueeze(-2))
-    ops += _elementwise('mul', magnitude, magnitude, magnitude)
-    ops += _reduced(A.sum.dim_IntList, {'self': magnitude, 'dim': [-2], 'keepdim': False}, [lengths])
-    ops += _elementwise('sqrt', lengths, lengths)
-    ops += _elementwise('mul', lengths, lengths, maximum)
-    if not normalize:
-        return None
-    ops += _elementwise('eq', zero, lengths, 0)
-    ops += _elementwise('where', safe, zero, 1, lengths)
-    normalized = _temporary(matrix.shape, matrix.dtype)
-    ops += _elementwise('div', normalized, matrix, safe.unsqueeze(-2))
-    return normalized
-
-
 # Reference-LAPACK SRC/dgelss.f 385-435 and 737-768, dgelsd.f 379-431 and 621-645: the range scaling, ANRM = DLANGE('M')
 # and BNRM brought into [SMLNUM, BIGNUM] (SMLNUM = DLAMCH('S') / DLAMCH('P'), BIGNUM its reciprocal; a zero norm
 # unscaled), each matrix's component magnitudes (a complex value's real and imaginary parts); an empty B unscaled
@@ -2479,2150 +1477,1263 @@ def _least_squares_svd(self, b, rcond=None, driver=None, shapes=()):
             s / a_scale.unsqueeze(-1))
 
 
-# a _record whose one real output is the REGION extremum of its value over its REDUCTION loops (_reduction's states,
-# join and finalize): the largest (`larger`) or the smallest, NaN propagating for a floating kind
-def _record_extreme(sizes, out, picks, ins, fn, iterators, larger=True):
-    (g,) = _record(sizes, [(out, picks)], ins, fn, iterators)
-    kind = g.accumulator[0]
-    limit = (-math.inf if larger else math.inf) if _floating(kind) else \
-        torch.iinfo(torch.int32).min if larger else torch.iinfo(torch.int32).max
-    g.states = [(kind, limit)]
-    g.combiner, g.start, g.precision = [REGION], [IDENTITY], REASSOCIATE
-    g.combine = _joined(g.states, lambda c, a, b: [_extremum(c, a[0], b[0], kind, larger)])
-    g.finalize = _identities(g.states)
-    return [g]
+# Reference-LAPACK SRC/zgeev.f and dgeev.f (JOBVL = 'N', JOBVR = 'V' or 'N') on a non-CPU engine as upstream ATen
+# and torch HOP composition: each routine below is the cited routine's body over the batch, its DO loops static
+# positions with their actual per-member extents (aten where/gather masks), its DO WHILE and GO TO loops
+# torch/_higher_order_ops/while_loop.py while_loop_op under JAX's batching rule (jax/_src/lax/control_flow/loops.py
+# _while_loop_batching_rule: the loop runs while any member's predicate holds, each member's step selected where its
+# own does). K, L, I, J, ILO and IHI are the source's 1-based values as int64 batch tensors. DZNRM2/DNRM2 is the
+# scaled norm (largest modulus, then the root of the sum of squared ratios); CABS1 |Re| + |Im|; DLADIV Smith's
+# division (_divided); a real factor of a complex entry multiplies each component (ZDSCAL, Fortran's mixed real and
+# complex product); Fortran SIGN(A, B) takes B's sign bit, a -0 B negative
+
+# 1-based positions along the last dimension
+def _counted(x):
+    return torch.arange(1, x.shape[-1] + 1, device=x.device)
 
 
-# Reference-LAPACK CABS1 (|Re| + |Im|), ABS of a complex (the scaled modulus), ZDSCAL's per-component real scaling and
-# a nonzero entry, of a record value
-def _cabs1(r, t, x):
-    return r('add', t, r('abs', t, _part(r, t, x, 0)), r('abs', t, _part(r, t, x, 1)))
+# a batch scalar broadcast over a vector (_vec) or a matrix (_mat); a Python number as itself
+def _vec(s):
+    return s if isinstance(s, (int, float)) else s[..., None]
 
 
-def _modulus(r, t, x):
-    return _complex_value(r, t, 'abs', x, None, 1, None) if isinstance(x, tuple) else r('abs', t, x)
+def _mat(s):
+    return s if isinstance(s, (int, float)) else s[..., None, None]
 
 
-def _real_scaled(r, t, x, a):
-    return tuple(r('mul', t, p, a) for p in x) if isinstance(x, tuple) else r('mul', t, x, a)
+def _first_any(live, *rest):
+    return live.any()
 
 
-def _nonzero(r, t, x):
-    return r('or', BOOL, r('ne', BOOL, _part(r, t, x, 0), r.const(0, t)), r('ne', BOOL, _part(r, t, x, 1), r.const(0, t)))
+def _abs1(x):
+    return x.real.abs() + x.imag.abs() if x.is_complex() else x.abs()
 
 
-def _offsets(view, at):
-    return [(view, at)] if at else []
+def _re(x):
+    return x.real if x.is_complex() else x
 
 
-# a gathered (extracted) input's element at `at` (one int32 index a dimension), its input slot `slot`: a complex one's
-# (re, im) by its real pairs' component coordinate
-def _entry(r, t, slot, x, *at):
-    if x.is_complex():
-        return tuple(r('extract', t, *at, r.const(c, I32), integer=slot) for c in (0, 1))
-    return r('extract', t, *at, integer=slot)
+def _fsign(a, b):
+    negative = (b < 0) | ((b == 0) & (1 / b < 0))
+    return torch.where(negative, -a.abs(), a.abs())
 
 
-# DZNRM2 of the first extent[0] entries of `vector` (its row `at` offset, {0: (offset, bound)}): its largest modulus
-# and the sum of squares of the moduli over it (_linalg_lengths: the norm sqrt(sum) * largest), one-element reals
-def _clipped_norm(vector, extent, at, ops):
-    n, t, real = vector.shape[0], _class(vector.real), vector.real.dtype
-    largest, total = _temporary((1,), real), _temporary((1,), real)
-    view = vector[...]
-    _emit(ops, _record_extreme((n,), largest, (None,), [(view, (0,))], lambda r, v: [(_modulus(r, t, v[0]), t)],
-                               [REDUCTION]), loops=(extent,), offsets=_offsets(view, at))
-
-    def squared(r, v):
-        safe = r('select', t, r('eq', BOOL, v[1], r.const(0, t)), r.const(1, t), v[1])
-        q = r('div', t, _modulus(r, t, v[0]), safe)
-        return [(r('mul', t, q, q), t)]
-    view = vector[...]
-    _emit(ops, _record((n,), [(total, (None,))], [(view, (0,)), (largest, (None,))], squared, [REDUCTION], [SUM]),
-          loops=(extent,), offsets=_offsets(view, at))
-    return largest, total
+def _scaled(x, s):
+    return torch.complex(x.real * s, x.imag * s) if x.is_complex() else x * s
 
 
-# IZAMAX over the same clipped range: the first index (from the range's start) of the largest CABS1, one-element int32
-def _first_largest(vector, extent, at, ops):
-    n, t, real = vector.shape[0], _class(vector.real), vector.real.dtype
-    largest, first = _temporary((1,), real), _temporary((1,), torch.int32)
-    view = vector[...]
-    _emit(ops, _record_extreme((n,), largest, (None,), [(view, (0,))], lambda r, v: [(_cabs1(r, t, v[0]), t)],
-                               [REDUCTION]), loops=(extent,), offsets=_offsets(view, at))
-    view = vector[...]
-    _emit(ops, _record_extreme((n,), first, (None,), [(view, (0,)), (largest, (None,))], lambda r, v: [(r(
-        'select', I32, r('eq', BOOL, _cabs1(r, t, v[0]), v[1]), r.index(0), r.const(n, I32)), I32)], [REDUCTION],
-        larger=False), loops=(extent,), offsets=_offsets(view, at))
-    return first
+def _over(x, s):
+    return torch.complex(x.real / s, x.imag / s) if x.is_complex() else x / s
 
 
-# ZSWAP of two vectors in place over loop length n: `first` and `second` (view, picks, its offsets), extent[0] entries
-def _swapped(first, second, extent, ops):
-    (x, x_picks, x_at), (y, y_picks, y_at) = first, second
-    t, n = _class(x.real), x.shape[-1]
-    _emit(ops, _record((n,), [(x, x_picks), (y, y_picks)], [(x, x_picks), (y, y_picks)],
-                       lambda r, v: [(v[1], t), (v[0], t)]), loops=(extent,), offsets=_offsets(x, x_at) + _offsets(y, y_at))
+def _plus_real(x, s):
+    return torch.complex(s + x.real, x.imag) if x.is_complex() else s + x
 
 
-# Reference-LAPACK SRC/zgebal.f and dgebal.f (JOB = 'B', lines 225-418) on one square member h, complex or real (CABS1
-# and the moduli of a real entry are its |x|; DNRM2 and DZNRM2 the same scaled norm), in place. Its outputs:
-# `scale` (real), the SCALE factors of rows ILO..IHI; `perm` (int32), SCALE's interchange indices outside them; `ilo`
-# and `ihi` (one-element int32). `held` holds the caller's temporaries that its repetitions carry. Each DO loop is its
-# n static positions (an inactive one of extent 0) and each DO WHILE a _Repeat. K, L, I and J are the source's 1-based
-# values. Each interchange is a ZSWAP of the actual two columns and two rows. The 363-367 NaN exit (INFO = -3) ends the
-# routine, leaving ILO and IHI unassigned as the source does
-def _gebal(h, scale, perm, ilo, ihi, ops, held=()):
-    n, t, real = h.shape[-1], _class(h.real), h.real.dtype
-    limits = torch.finfo(real)
+# Smith's complex division (xr + i xi) / (yr + i yi), real components
+def _divided(xr, xi, yr, yi):
+    wide = yr.abs() >= yi.abs()
+    first, second = torch.where(wide, yr, yi), torch.where(wide, yi, yr)
+    ratio = second / first
+    den = first + second * ratio
+    return (torch.where(wide, (xr + xi * ratio) / den, (xr * ratio + xi) / den),
+            torch.where(wide, (xi - xr * ratio) / den, (xi * ratio - xr) / den))
+
+
+def _cdiv(x, y):
+    return torch.complex(*_divided(x.real, x.imag, y.real, y.imag))
+
+
+# x(row, col) of each member (*batch, n, n); positions clamped into range where unused
+def _entry(x, row, col):
+    n = x.shape[-1]
+    at = (row - 1).clamp(0, n - 1) * n + (col - 1).clamp(0, n - 1)
+    return x.flatten(-2).gather(-1, at[..., None])[..., 0]
+
+
+def _entry_put(x, row, col, value, when):
+    k = _counted(x)
+    hit = (k[:, None] == _mat(row)) & (k == _mat(col)) & _mat(when)
+    return torch.where(hit, value if isinstance(value, (int, float)) else _mat(value).to(x.dtype), x)
+
+
+def _at(v, i):
+    return v.gather(-1, (i - 1).clamp(0, v.shape[-1] - 1)[..., None])[..., 0]
+
+
+def _at_put(v, i, value, when):
+    hit = (_counted(v) == _vec(i)) & _vec(when)
+    return torch.where(hit, value if isinstance(value, (int, float)) else _vec(value).to(v.dtype), v)
+
+
+def _row(x, i):
+    index = (i - 1).clamp(0, x.shape[-2] - 1)[..., None, None].expand(*x.shape[:-2], 1, x.shape[-1])
+    return x.gather(-2, index)[..., 0, :]
+
+
+def _column(x, j):
+    index = (j - 1).clamp(0, x.shape[-1] - 1)[..., None, None].expand(*x.shape[:-2], x.shape[-2], 1)
+    return x.gather(-1, index)[..., 0]
+
+
+def _span(k, low, high):
+    return (k >= _vec(low)) & (k <= _vec(high))
+
+
+# ZSWAP of columns a and b over the rows `rows` (a row mask), and of rows a and b over the columns `columns`
+def _columns_swapped(x, a, b, rows, when):
+    k, first, second = _counted(x), _column(x, a), _column(x, b)
+    rows = (rows & _vec(when))[..., :, None]
+    x = torch.where(rows & (k == _mat(a)), second[..., :, None], x)
+    return torch.where(rows & (k == _mat(b)), first[..., :, None], x)
+
+
+def _rows_swapped(x, a, b, columns, when):
+    k, first, second = _counted(x), _row(x, a), _row(x, b)
+    columns = (columns & _vec(when))[..., None, :]
+    x = torch.where(columns & (k[:, None] == _mat(a)), second[..., None, :], x)
+    return torch.where(columns & (k[:, None] == _mat(b)), first[..., None, :], x)
+
+
+# DZNRM2 over the entries `within` (a mask over the last dimension)
+def _norm2(x, within):
+    magnitude = torch.where(within, x.abs(), 0)
+    largest = magnitude.amax(-1)
+    q = magnitude / _vec(torch.where(largest == 0, 1, largest))
+    return (q * q).sum(-1).sqrt() * largest
+
+
+# DNRM2 of a few batch scalars (xLARFG's tail)
+def _listed_norm(xs):
+    if len(xs) == 1:
+        return xs[0].abs()
+    return _norm2(torch.stack(xs, -1), torch.ones(len(xs), dtype=torch.bool, device=xs[0].device))
+
+
+# IZAMAX/IDAMAX over `within`: the first position of the largest CABS1
+def _izamax(x, within):
+    return torch.where(within, _abs1(x), -1).argmax(-1) + 1
+
+
+# Reference-LAPACK SRC/dlapy2.f (a NaN operand itself, y's where both are) and dlapy3.f
+def _dlapy2(x, y):
+    huge = torch.finfo(x.dtype).max
+    a, b = x.abs(), y.abs()
+    w, z = torch.where(a >= b, a, b), torch.where(a >= b, b, a)
+    plain = (z == 0) | (w > huge)
+    q = z / torch.where(plain, 1, w)
+    made = torch.where(plain, w, w * (1 + q * q).sqrt())
+    return torch.where(y.isnan(), y, torch.where(x.isnan(), x, made))
+
+
+def _dlapy3(x, y, z):
+    huge = torch.finfo(x.dtype).max
+    a, b, c = x.abs(), y.abs(), z.abs()
+    w = torch.where(a >= b, a, b)
+    w = torch.where(w >= c, w, c)
+    plain = (w == 0) | (w > huge)
+    safe = torch.where(plain, 1, w)
+    qa, qb, qc = a / safe, b / safe, c / safe
+    return torch.where(plain, a + b + c, w * (qa * qa + qb * qb + qc * qc).sqrt())
+
+
+def _broadcast(s, x):
+    return s[(...,) + (None,) * (x.dim() - s.dim())]
+
+
+# Reference-LAPACK SRC/zlascl.f and dlascl.f (TYPE 'G') 10 loop: each pass's MUL (SMLNUM = DLAMCH('S'), BIGNUM its
+# reciprocal; CFROMC an infinity, CTOC 0 or an infinity, the SMLNUM and BIGNUM steps, else CTOC / CFROMC) applied to
+# x where `when`, until DONE
+def _lascl(x, cfrom, cto, when):
+    tiny = torch.finfo(x.real.dtype).tiny
+    carried = (when.clone(), x.contiguous(), cfrom.contiguous(), cto.contiguous())
+    return while_loop_op(_first_any, functools.partial(_lascl_pass, tiny), carried, ())[1]
+
+
+def _lascl_pass(smlnum, pending, x, cfromc, ctoc):
+    bignum = 1 / smlnum
+    cfrom1 = cfromc * smlnum
+    infinite = cfrom1 == cfromc
+    cto1 = ctoc / bignum
+    ends = ~infinite & (cto1 == ctoc)
+    down = ~infinite & ~ends & (cfrom1.abs() > ctoc.abs()) & (ctoc != 0)
+    up = ~infinite & ~ends & ~down & (cto1.abs() > cfromc.abs())
+    mul = torch.where(ends, ctoc, torch.where(down, smlnum, torch.where(up, bignum, ctoc / cfromc)))
+    x = torch.where(_broadcast(pending, x), _scaled(x, _broadcast(mul, x)), x)
+    return (pending & (down | up), x, torch.where(pending & down, cfrom1, cfromc),
+            torch.where(pending & up, cto1, ctoc))
+
+
+# Reference-LAPACK SRC/zgebal.f and dgebal.f (JOB = 'B', lines 225-418) where `proceed`: the 242-286 row search (one
+# pass one I of DO I = L..1, its count fixed at the round's entry; a swap with L = 1 returns ILO = IHI = 1), the
+# 288-315 column search (one pass one J of DO J = K..L), SCALE(K..L) = 1 and the 330-410 norm balancing (one pass one
+# I of DO I = K..L, its two DO WHILE loops nested while_loops over the member's scalars). Returns the balanced matrix,
+# SCALE's factors (real) and interchanges (`perm`, int64), ILO and IHI. ZGEEV ignores the 363-367 NaN return
+# (INFO = -3), which ends the balancing with ILO = K and IHI = L
+def _gebal(h, proceed):
+    n, batch = h.shape[-1], h.shape[:-2]
+    limits = torch.finfo(h.real.dtype)
     sfmin1 = limits.tiny / limits.eps
-    sfmax1, sfmin2 = 1 / sfmin1, sfmin1 * 2.0
+    sfmax1, sfmin2 = 1 / sfmin1, sfmin1 * 2
     sfmax2 = 1 / sfmin2
-    if not n:
-        ops += _fill(ilo, 1) + _fill(ihi, 0)
-        return
-    k, l, noconv, done, halted, sweep, origin, kz, ks, lz, count, ecol, erow, live, more = \
-        (_temporary((1,), torch.int32) for _ in range(15))
-    c, rr, ca, ra, f, g, s = (_temporary((1,), real) for _ in range(7))
-    reach, en, ec, er = (_temporary((n,), torch.int32) for _ in range(4))
-    carried = (*held, h, scale, perm, ilo, ihi, k, l, noconv, done, halted, sweep, origin, kz, ks, lz, count, ecol,
-               erow, live, more, c, rr, ca, ra, f, g, s, reach, en, ec, er)
-
-    def ints(*values):
-        return lambda r, v: [(r.const(x, I32), I32) for x in values]
-
-    def flag(r, x):
-        return _convert(r, x, BOOL, I32)
-
-    def nonzero(r, x):
-        return r('ne', BOOL, x, r.const(0, I32))
-    ops += _scalars([k, l, noconv, done, halted, sweep, kz], [], ints(1, n, 1, 0, 0, 1, 0))
-
-    # 242-286: rows isolating an eigenvalue pushed down, I = L..1 (its count fixed at entry, L0 `origin`)
-    passes = _scalars([noconv, origin, reach[n - 1:n]], [l, done], lambda r, v: [
-        (r.const(0, I32), I32), (v[0], I32), (r('select', I32, r('and', BOOL, r('le', BOOL, r.const(n, I32), v[0]), r(
-            'not', BOOL, nonzero(r, v[1]))), v[0], r.const(0, I32)), I32)])
-    for i in range(n, 0, -1):
-        line = h[i - 1]
-        _emit(passes, _record((n,), [(count, (None,))], [(line, (0,))], lambda r, v, i=i: [(flag(r, r(
-            'and', BOOL, r('ne', BOOL, r.index(0), r.const(i - 1, I32)), _nonzero(r, t, v[0]))), I32)], [REDUCTION],
-            [SUM]), loops=(_at(reach, i - 1, n),))
-
-        def row(r, v, i=i):
-            found, at, kk, conv, fin, start, ext = v
-            zero, one = r.const(0, I32), r.const(1, I32)
-            can = r('and', BOOL, r('gt', BOOL, ext, zero), r('eq', BOOL, found, zero))
-            r.scatter(0, [r('sub', I32, at, one)], r.const(i, I32), can)
-            moved = r('and', BOOL, can, r('ne', BOOL, at, r.const(i, I32)))
-            last = r('and', BOOL, can, r('eq', BOOL, at, one))
-            after = r('select', I32, r('and', BOOL, can, r('not', BOOL, last)), r('sub', I32, at, one), at)
-            finished = r('or', BOOL, nonzero(r, fin), last)
-            made = [(r.const(i, I32), I32), (after, I32), (flag(r, r('or', BOOL, nonzero(r, conv), can)), I32),
-                    (flag(r, finished), I32), (r('select', I32, moved, at, zero), I32),
-                    (r('select', I32, moved, r('sub', I32, r.const(n + 1, I32), kk), zero), I32),
-                    (r('sub', I32, at, one), I32), (r('sub', I32, kk, one), I32)]
-            if i > 1:
-                made.append((r('select', I32, r('and', BOOL, r('le', BOOL, r.const(i - 1, I32), start), r(
-                    'not', BOOL, finished)), after, zero), I32))
-            return made
-        passes += _record((1,), [(perm, None)] + [(x, (None,)) for x in (l, noconv, done, ecol, erow, lz, kz)]
-                          + ([(reach[i - 2:i - 1], (None,))] if i > 1 else []),
-                          [(x, (None,)) for x in (count, l, k, noconv, done, origin, reach[i - 1:i])], row)
-        column, other = h[:, i - 1], h[...]
-        _swapped((column, (0,), None), (other, (0, None), {1: (lz, n - 1)}), (ecol, n), passes)
-        line, other = h[i - 1], h[...]
-        _swapped((line, (0,), {0: (kz, n - 1)}), (other, (None, 0), {0: (lz, n - 1), 1: (kz, n - 1)}), (erow, n),
-                 passes)
-    passes += _scalars([sweep], [noconv, done], lambda r, v: [(flag(r, r('and', BOOL, nonzero(r, v[0]), r(
-        'not', BOOL, nonzero(r, v[1])))), I32)])
-    ops.append(_Repeat(passes, sweep, carried))
-
-    # 288-317: columns isolating an eigenvalue pushed left, J = K..L (K0 `origin`), unless the rows' search returned
-    ops += _scalars([noconv, sweep], [done], lambda r, v: [(flag(r, r('not', BOOL, nonzero(r, v[0]))), I32)] * 2)
-    passes = _scalars([noconv, origin, reach[0:1], kz], [k, l], lambda r, v: [
-        (r.const(0, I32), I32), (v[0], I32), (r('select', I32, r('and', BOOL, r('le', BOOL, v[0], r.const(1, I32)), r(
-            'ge', BOOL, v[1], r.const(1, I32))), r('add', I32, r('sub', I32, v[1], v[0]), r.const(1, I32)), r.const(
-                0, I32)), I32), (r('sub', I32, v[0], r.const(1, I32)), I32)])
-    for j in range(1, n + 1):
-        column = h[:, j - 1]
-        _emit(passes, _record((n,), [(count, (None,))], [(column, (0,)), (kz, (None,))], lambda r, v, j=j: [(flag(
-            r, r('and', BOOL, r('ne', BOOL, r('add', I32, r.index(0), v[1]), r.const(j - 1, I32)), _nonzero(
-                r, t, v[0]))), I32)], [REDUCTION], [SUM]), loops=(_at(reach, j - 1, n),),
-              offsets=[(column, {0: (kz, n - 1)})])
-
-        def left(r, v, j=j):
-            found, kk, at, conv, start, ext = v
-            zero, one = r.const(0, I32), r.const(1, I32)
-            can = r('and', BOOL, r('gt', BOOL, ext, zero), r('eq', BOOL, found, zero))
-            r.scatter(0, [r('sub', I32, kk, one)], r.const(j, I32), can)
-            moved = r('and', BOOL, can, r('ne', BOOL, kk, r.const(j, I32)))
-            after = r('select', I32, can, r('add', I32, kk, one), kk)
-            made = [(r.const(j, I32), I32), (after, I32), (flag(r, r('or', BOOL, nonzero(r, conv), can)), I32),
-                    (r('select', I32, moved, at, zero), I32),
-                    (r('select', I32, moved, r('sub', I32, r.const(n + 1, I32), kk), zero), I32),
-                    (r('sub', I32, kk, one), I32), (r('sub', I32, after, one), I32)]
-            if j < n:
-                within = r('and', BOOL, r('le', BOOL, start, r.const(j + 1, I32)), r('ge', BOOL, at, r.const(j + 1, I32)))
-                made.append((r('select', I32, within, r('add', I32, r('sub', I32, at, after), one), zero), I32))
-            return made
-        passes += _record((1,), [(perm, None)] + [(x, (None,)) for x in (k, noconv, ecol, erow, ks, kz)]
-                          + ([(reach[j:j + 1], (None,))] if j < n else []),
-                          [(x, (None,)) for x in (count, k, l, noconv, origin, reach[j - 1:j])], left)
-        column, other = h[:, j - 1], h[...]
-        _swapped((column, (0,), None), (other, (0, None), {1: (ks, n - 1)}), (ecol, n), passes)
-        line, other = h[j - 1], h[...]
-        _swapped((line, (0,), {0: (ks, n - 1)}), (other, (None, 0), {0: (ks, n - 1), 1: (ks, n - 1)}), (erow, n),
-                 passes)
-    passes += _scalars([sweep], [noconv], lambda r, v: [(v[0], I32)])
-    ops.append(_Repeat(passes, sweep, carried))
-
-    # 321-325: SCALE(K..L) = 1; the scaled positions K <= I <= L, each one's extents for C and R (L - K + 1), CA (L)
-    # and RA (N - K + 1)
-    ops += _scalars([count, kz], [k, l, done], lambda r, v: [(r('select', I32, nonzero(r, v[2]), r.const(0, I32), r(
-        'add', I32, r('sub', I32, v[1], v[0]), r.const(1, I32))), I32), (r('sub', I32, v[0], r.const(1, I32)), I32)])
-    unit = scale[...]
-    _emit(ops, _record((n,), [(unit, (0,))], [], lambda r, v: [(r.const(1, t), t)]), loops=((count, n),),
-          offsets=[(unit, {0: (kz, n - 1)})])
-
-    def extents(r, v):
-        kk, at, fin = v
-        p = r('add', I32, r.index(0), r.const(1, I32))
-        inside = _all(r, [r('not', BOOL, nonzero(r, fin)), r('le', BOOL, kk, p), r('le', BOOL, p, at)])
-        zero = r.const(0, I32)
-        return [(r('select', I32, inside, x, zero), I32) for x in (
-            r('add', I32, r('sub', I32, at, kk), r.const(1, I32)), at, r('sub', I32, r.const(n + 1, I32), kk))]
-    ops += _record((n,), [(en, (0,)), (ec, (0,)), (er, (0,))], [(k, (None,)), (l, (None,)), (done, (None,))], extents)
-
-    # 344-413: the norm-reducing iteration while NOCONV
-    ops += _scalars([noconv, sweep], [done], lambda r, v: [(flag(r, r('not', BOOL, nonzero(r, v[0]))), I32)] * 2)
-    passes = _scalars([noconv], [], ints(0))
-
-    def tested(r, conv, ff, cc, cca, rrr, gg, rra, first):
-        test = [nonzero(r, conv)]
-        if first:
-            test += [r('lt', BOOL, cc, gg), r('lt', BOOL, ff, r.const(sfmax2, t)), r('lt', BOOL, cc, r.const(sfmax2, t)),
-                     r('lt', BOOL, cca, r.const(sfmax2, t)), r('gt', BOOL, rrr, r.const(sfmin2, t)),
-                     r('gt', BOOL, gg, r.const(sfmin2, t)), r('gt', BOOL, rra, r.const(sfmin2, t))]
-        else:
-            test += [r('ge', BOOL, gg, rrr), r('lt', BOOL, rrr, r.const(sfmax2, t)), r('lt', BOOL, rra, r.const(
-                sfmax2, t)), r('gt', BOOL, ff, r.const(sfmin2, t)), r('gt', BOOL, cc, r.const(sfmin2, t)),
-                r('gt', BOOL, gg, r.const(sfmin2, t)), r('gt', BOOL, cca, r.const(sfmin2, t))]
-        return flag(r, _all(r, test))
-    for i in range(1, n + 1):
-        column, line = h[:, i - 1], h[i - 1]
-        c_max, c_sum = _clipped_norm(column, _at(en, i - 1, n), {0: (kz, n - 1)}, passes)
-        r_max, r_sum = _clipped_norm(line, _at(en, i - 1, n), {0: (kz, n - 1)}, passes)
-        ica = _first_largest(column, _at(ec, i - 1, n), None, passes)
-        ira = _first_largest(line, _at(er, i - 1, n), {0: (kz, n - 1)}, passes)
-
-        # 350-371: C, R, CA and RA; a zero C or R (CYCLE) or a NaN (the exit) not live; G = R / SCLFAC, F = 1, S
-        def setup(r, v, i=i):
-            cm, cs, rm, rs, at_c, at_r, kk, ext, stop, slot = v
-            zero = r.const(0, t)
-            cc, rrr = r('mul', t, r('sqrt', t, cs), cm), r('mul', t, r('sqrt', t, rs), rm)
-            cca = _modulus(r, t, _entry(r, t, slot, h, _bounded(r, at_c, n)[1], r.const(i - 1, I32)))
-            rra = _modulus(r, t, _entry(r, t, slot, h, r.const(i - 1, I32), _bounded(r, r('add', I32, at_r, kk), n)[1]))
-            present = _all(r, [r('gt', BOOL, ext, r.const(0, I32)), r('not', BOOL, nonzero(r, stop)),
-                               r('ne', BOOL, cc, zero), r('ne', BOOL, rrr, zero)])
-            nan = r('and', BOOL, present, r('isnan', BOOL, r('add', t, r('add', t, r('add', t, cc, cca), rrr), rra)))
-            alive = flag(r, r('and', BOOL, present, r('not', BOOL, nan)))
-            one, gg = r.const(1, t), r('div', t, rrr, r.const(2, t))
-            return [(cc, t), (rrr, t), (cca, t), (rra, t), (one, t), (gg, t), (r('add', t, cc, rrr), t), (alive, I32),
-                    (flag(r, r('or', BOOL, nonzero(r, stop), nan)), I32),
-                    (tested(r, alive, one, cc, cca, rrr, gg, rra, True), I32)]
-        passes += _scalars([c, rr, ca, ra, f, g, s, live, halted, more],
-                           [c_max, c_sum, r_max, r_sum, ica, ira, kz, en[i - 1:i], halted], setup, [h])
-
-        # 373-381 and 385-393: the two DO WHILE loops, each pass one source iteration by SCLFAC = 2
-        def stepped(first):
-            def step(r, v):
-                ff, cc, cca, rrr, gg, rra, alive = v
-                two = r.const(2, t)
-                up, down = (lambda x: r('mul', t, x, two)), (lambda x: r('div', t, x, two))
-                if first:
-                    made = [up(ff), up(cc), up(cca), down(rrr), down(gg), down(rra)]
-                else:
-                    made = [down(ff), down(cc), down(cca), up(rrr), down(gg), up(rra)]
-                return [(x, t) for x in made] + [(tested(r, alive, *made, first), I32)]
-            return step
-        ops_first = _scalars([f, c, ca, rr, g, ra, more], [f, c, ca, rr, g, ra, live], stepped(True))
-        passes.append(_Repeat(ops_first, more, carried))
-        passes += _scalars([g, more], [f, c, ca, rr, g, ra, live], lambda r, v: [
-            (r('div', t, v[1], r.const(2, t)), t),
-            (tested(r, v[6], v[0], v[1], v[2], v[3], r('div', t, v[1], r.const(2, t)), v[5], False), I32)])
-        ops_second = _scalars([f, c, ca, rr, g, ra, more], [f, c, ca, rr, g, ra, live], stepped(False))
-        passes.append(_Repeat(ops_second, more, carried))
-
-        # 397-409: the balance unless C + R >= FACTOR S or the SCALE bounds; G = 1 / F, SCALE(I) = SCALE(I) F, then
-        # ZDSCAL of row I (columns K..N) by G and of column I (rows 1..L) by F
-        def balanced(r, v):
-            cc, rrr, ss, ff, alive, factor, conv, kk, at = v
-            one, zero = r.const(1, t), r.const(0, I32)
-            small = _all(r, [r('lt', BOOL, ff, one), r('lt', BOOL, factor, one),
-                             r('le', BOOL, r('mul', t, ff, factor), r.const(sfmin1, t))])
-            large = _all(r, [r('gt', BOOL, ff, one), r('gt', BOOL, factor, one),
-                             r('ge', BOOL, factor, r('div', t, r.const(sfmax1, t), ff))])
-            apply = _all(r, [nonzero(r, alive), r('lt', BOOL, r('add', t, cc, rrr), r('mul', t, r.const(0.95, t), ss)),
-                             r('not', BOOL, small), r('not', BOOL, large)])
-            return [(r('select', t, apply, r('mul', t, factor, ff), factor), t), (r('div', t, one, ff), t),
-                    (flag(r, r('or', BOOL, nonzero(r, conv), apply)), I32),
-                    (r('select', I32, apply, r('sub', I32, r.const(n + 1, I32), kk), zero), I32),
-                    (r('select', I32, apply, at, zero), I32)]
-        passes += _scalars([scale[i - 1:i], g, noconv, erow, ecol],
-                           [c, rr, s, f, live, scale[i - 1:i], noconv, k, l], balanced)
-        line = h[i - 1]
-        _emit(passes, _record((n,), [(line, (0,))], [(line, (0,)), (g, (None,))], lambda r, v: [(_real_scaled(
-            r, t, v[0], v[1]), t)]), loops=((erow, n),), offsets=[(line, {0: (kz, n - 1)})])
-        column = h[:, i - 1]
-        _emit(passes, _record((n,), [(column, (0,))], [(column, (0,)), (f, (None,))], lambda r, v: [(_real_scaled(
-            r, t, v[0], v[1]), t)]), loops=((ecol, n),))
-    passes += _scalars([sweep], [noconv, halted], lambda r, v: [(flag(r, r('and', BOOL, nonzero(r, v[0]), r(
-        'not', BOOL, nonzero(r, v[1])))), I32)])
-    ops.append(_Repeat(passes, sweep, carried))
-
-    # 276-279 and 415-416: ILO = IHI = 1 where the rows' search returned, else K and L; unassigned after the exit
-    ops += _scalars([ilo, ihi], [k, l, done, halted, ilo, ihi], lambda r, v: [(r('select', I32, nonzero(r, v[3]), v[
-        4 + d], r('select', I32, nonzero(r, v[2]), r.const(1, I32), v[d])), I32) for d in (0, 1)])
+    size = torch.full(batch, n, dtype=torch.int64, device=h.device)
+    one, no = torch.ones_like(size), torch.zeros(batch, dtype=torch.bool, device=h.device)
+    perm = _counted(h).expand(*batch, n).contiguous()
+    _, h, perm, _, l, _, done = while_loop_op(_first_any, _gebal_rows, (
+        proceed.clone(), h.contiguous(), perm, size, size.clone(), no, no.clone()), ())
+    _, h, perm, _, low, _ = while_loop_op(_first_any, _gebal_columns, (
+        proceed & ~done, h, perm, one, one.clone(), no.clone()), (l,))
+    scale = torch.ones((*batch, n), dtype=h.real.dtype, device=h.device)
+    _, h, scale, _, _ = while_loop_op(_first_any, functools.partial(_gebal_scaled, (sfmin1, sfmax1, sfmin2, sfmax2)), (
+        proceed & ~done, h, scale, low.clone(), no.clone()), (low, l))
+    return h, scale, perm, torch.where(done, 1, low), torch.where(done, 1, l)
 
 
-# Reference-LAPACK ZLARF1F (v(1) = 1, held explicitly in v): H = I - tau v v^H applied to `block` in place, from the
-# left (H, or H^H where `adjoint`: conj(tau)) or from the right (block H). v is (length, 1) and tau one-element;
-# `rows` and `cols` are the block's actual extents by loop position (tensor, bound), so that two loops of equal static
-# bound keep their own ranges
-def _reflected(block, v, tau, rows, cols, ops, left=True, adjoint=False):
-    m, k = block.shape
-    t, vector = _class(block.real), v[:, 0]
-
-    def scalar(r, x):
-        return _conjugate(r, t, x) if adjoint else x
-    if left:
-        dot = _temporary((k,), block.dtype)
-        _emit(ops, _record((k, m), [(dot, (0,))], [(vector, (1,)), (block, (1, 0))], lambda r, x: [(_times(
-            r, t, _conjugate(r, t, x[0]), x[1]), t)], [PARALLEL, REDUCTION], [SUM]), loops=(cols, rows))
-        _emit(ops, _record((m, k), [(block, (0, 1))], [(block, (0, 1)), (vector, (0,)), (dot, (1,)), (tau, (None,))],
-                           lambda r, x: [(_plus(r, t, x[0], _times(r, t, x[1], _times(r, t, x[2], scalar(r, x[3]))),
-                                                'sub'), t)]), loops=(rows, cols))
-        return
-    dot = _temporary((m,), block.dtype)
-    _emit(ops, _record((m, k), [(dot, (0,))], [(block, (0, 1)), (vector, (1,))], lambda r, x: [(_times(
-        r, t, x[0], x[1]), t)], [PARALLEL, REDUCTION], [SUM]), loops=(rows, cols))
-    _emit(ops, _record((m, k), [(block, (0, 1))], [(block, (0, 1)), (dot, (0,)), (vector, (1,)), (tau, (None,))],
-                       lambda r, x: [(_plus(r, t, x[0], _times(r, t, _times(r, t, x[1], scalar(r, x[3])), _conjugate(
-                           r, t, x[2])), 'sub'), t)]), loops=(rows, cols))
+def _gebal_rows(live, h, perm, i, l, noconv, done):
+    k = _counted(h)
+    active = live & (i >= 1)
+    canswap = ((k == _vec(i)) | (k > _vec(l)) | (_row(h, i) == 0)).all(-1)
+    hit = active & canswap
+    h = _rows_swapped(_columns_swapped(h, i, l, k <= _vec(l), hit), i, l, k >= 1, hit)
+    perm = _at_put(perm, l, i, hit)
+    finish = hit & (l == 1)
+    noconv = noconv | hit
+    l = torch.where(hit & ~finish, l - 1, l)
+    i = torch.where(active, i - 1, i)
+    restart = live & ~active & noconv
+    return (live & ~finish & (active | restart), h, perm, torch.where(restart, l, i), l, noconv & ~restart,
+            done | finish)
 
 
-# Reference-LAPACK SRC/zgehrd.f 249-254 and 295-299 (TAU outside ILO..IHI-1 zero; the unblocked code from I = ILO) and
-# zgehd2.f 190-207 (dgehrd.f, dgehd2.f and dorghr.f alike, the real reflector its own conjugate) on one square member
-# h, complex or real, in place, then (z given) zunghr.f 198-232 with zung2r's reflector sequence into z. For each static column I = 1..n-1, active where ILO <= I <= IHI-1 (else every extent 0):
-# ZLARFG(IHI-I, A(I+1,I), A(I+2,I)) by _linalg_reflector clipped to the reflector's IHI-I entries and its tail; H(I)
-# from the right to A(1:IHI, I+1:IHI), then H(I)^H from the left to A(I+1:IHI, I+1:N); beta into A(I+1,I) and
-# v(2:) into A(I+2:IHI,I). Q = H(ILO) ... H(IHI-1) from the identity, each H(I) (reverse order) to rows and columns
-# I+1..IHI. Returns TAU (its first n - 1 entries); ILO and IHI one-element int32, the source's 1-based values
-def _gehd2(h, z, ilo, ihi, ops):
-    n, dtype, real = h.shape[-1], h.dtype, h.real.dtype
-    t = _class(h.real)
-    tau = _temporary((max(n - 1, 0),), dtype)
-    if z is not None and n:
-        ops += _linalg_identity(z)
-    if n < 2:
-        return tau
-    length, tail, height, width = (_temporary((n - 1,), torch.int32) for _ in range(4))
-
-    def spans(r, v):
-        low, high = v
-        column, zero, one = r('add', I32, r.index(0), r.const(1, I32)), r.const(0, I32), r.const(1, I32)
-        active = r('and', BOOL, r('le', BOOL, low, column), r('lt', BOOL, column, high))
-        size = r('sub', I32, high, column)
-        return [(r('select', I32, active, x, zero), I32) for x in (
-            size, r('sub', I32, size, one), high, r('sub', I32, r.const(n, I32), column))]
-    ops += _record((n - 1,), [(x, (0,)) for x in (length, tail, height, width)], [(ilo, (None,)), (ihi, (None,))],
-                   spans)
-    for i in range(n - 1):
-        extent, below = _at(length, i, n - i - 1), _at(tail, i, n - i - 1)
-        made, reflected, beta = [], _temporary((1,), dtype), _temporary((1,), real)
-        v = _linalg_reflector(h[i + 1:, i], reflected[0], beta[0], made)
-        _emit(ops, made, sizes={n - i - 1: extent, n - i - 2: below})
-        _reflected(h[:, i + 1:], v, reflected, _at(height, i, n), extent, ops, left=False)
-        _reflected(h[i + 1:, i + 1:], v, reflected, extent, _at(width, i, n - i - 1), ops, adjoint=True)
-        ops += _scalars([tau[i:i + 1]], [reflected, length[i:i + 1]], lambda r, x: [(_chosen(
-            r, t, r('gt', BOOL, x[1], r.const(0, I32)), x[0], (r.const(0, t), r.const(0, t))), t)])
-        ops += _scalars([h[i + 1:i + 2, i]], [h[i + 1:i + 2, i], beta, length[i:i + 1]], lambda r, x: [(_chosen(
-            r, t, r('gt', BOOL, x[2], r.const(0, I32)), x[1], x[0]), t)])
-        if i + 2 < n:
-            _emit(ops, _bounded_copy(h[i + 2:, i], v[1:, 0]), loops=(below,))
-    if z is None:
-        return tau
-    for i in reversed(range(n - 1)):
-        extent, below = _at(length, i, n - i - 1), _at(tail, i, n - i - 1)
-        v = _temporary((n - i - 1, 1), dtype)
-        ops += _fill(v[0, 0], 1)
-        if i + 2 < n:
-            _emit(ops, _bounded_copy(v[1:, 0], h[i + 2:, i]), loops=(below,))
-        _reflected(z[i + 1:, i + 1:], v, tau[i:i + 1], extent, extent, ops)
-    return tau
+def _gebal_columns(live, h, perm, j, low, noconv, l):
+    k = _counted(h)
+    active = live & (j <= l)
+    canswap = ((k == _vec(j)) | (k < _vec(low)) | (k > _vec(l)) | (_column(h, j) == 0)).all(-1)
+    hit = active & canswap
+    h = _rows_swapped(_columns_swapped(h, j, low, k <= _vec(l), hit), j, low, k >= _vec(low), hit)
+    perm = _at_put(perm, low, j, hit)
+    noconv = noconv | hit
+    low = torch.where(hit, low + 1, low)
+    j = torch.where(active, j + 1, j)
+    restart = live & ~active & noconv
+    return live & (active | restart), h, perm, torch.where(restart, low, j), low, noconv & ~restart
 
 
-# Reference-LAPACK SRC/dlapy3.f: sqrt(x^2 + y^2 + z^2) by the largest magnitude W, their sum where W is zero or above
-# the overflow threshold `huge`, of region values
-def _dlapy3(r, t, x, y, z, huge):
-    a, b, c = (r('abs', t, v) for v in (x, y, z))
-    w = r('select', t, r('ge', BOOL, a, b), a, b)
-    w = r('select', t, r('ge', BOOL, w, c), w, c)
-    plain = r('or', BOOL, r('eq', BOOL, w, r.const(0, t)), r('gt', BOOL, w, r.const(huge, t)))
-    safe = r('select', t, plain, r.const(1, t), w)
-    q = [r('div', t, v, safe) for v in (a, b, c)]
-    total = r('add', t, r('add', t, r('mul', t, q[0], q[0]), r('mul', t, q[1], q[1])), r('mul', t, q[2], q[2]))
-    return r('select', t, plain, r('add', t, r('add', t, a, b), c), r('mul', t, w, r('sqrt', t, total)))
+def _gebal_scaled(limits, live, h, scale, i, noconv, low, l):
+    sfmin1, sfmax1, sfmin2, sfmax2 = limits
+    k = _counted(h)
+    active = live & (i <= l)
+    column, row = _column(h, i), _row(h, i)
+    inner = _span(k, low, l)
+    c, r = _norm2(column, inner), _norm2(row, inner)
+    ca = _at(column, _izamax(column, k <= _vec(l))).abs()
+    ra = _at(row, _izamax(row, k >= _vec(low))).abs()
+    considered = active & (c != 0) & (r != 0)
+    failed = considered & (c + ca + r + ra).isnan()
+    going = considered & ~failed
+    s, bounds = c + r, (sfmin2, sfmax2)
+    f, c, ca, r, g, ra = while_loop_op(functools.partial(_gebal_pending, _gebal_up_holds, bounds), functools.partial(
+        _gebal_step, _gebal_up_holds, bounds, 2), (torch.ones_like(c), c, ca, r, r / 2, ra), (going,))
+    f, c, ca, r, g, ra = while_loop_op(functools.partial(_gebal_pending, _gebal_down_holds, bounds), functools.partial(
+        _gebal_step, _gebal_down_holds, bounds, 0.5), (f, c, ca, r, c / 2, ra), (going,))
+    at = _at(scale, i)
+    skipped = ((c + r) >= 0.95 * s) | ((f < 1) & (at < 1) & (f * at <= sfmin1)) | (
+        (f > 1) & (at > 1) & (at >= sfmax1 / f))
+    applied = going & ~skipped
+    scale = _at_put(scale, i, at * f, applied)
+    h = torch.where(_mat(applied) & (k[:, None] == _mat(i)) & (k >= _mat(low)), _scaled(h, _mat(1 / f)), h)
+    h = torch.where(_mat(applied) & (k == _mat(i)) & (k[:, None] <= _mat(l)), _scaled(h, _mat(f)), h)
+    noconv = noconv | applied
+    i = torch.where(active, i + 1, i)
+    restart = live & ~active & noconv
+    return live & ~failed & (active | restart), h, scale, torch.where(restart, low, i), noconv & ~restart
 
 
-# Reference-LAPACK SRC/dlapy2.f: sqrt(x^2 + y^2) as W sqrt(1 + (Z/W)^2), W and Z the larger and smaller magnitude;
-# W where Z is zero or W is above the overflow threshold `huge`; a NaN operand itself (y's where both are)
-def _dlapy2(r, t, x, y, huge):
-    a, b = r('abs', t, x), r('abs', t, y)
-    w, z = r('select', t, r('ge', BOOL, a, b), a, b), r('select', t, r('ge', BOOL, a, b), b, a)
-    plain = r('or', BOOL, r('eq', BOOL, z, r.const(0, t)), r('gt', BOOL, w, r.const(huge, t)))
-    q = r('div', t, z, r('select', t, plain, r.const(1, t), w))
-    made = r('select', t, plain, w, r('mul', t, w, r('sqrt', t, r('add', t, r.const(1, t), r('mul', t, q, q)))))
-    made = r('select', t, r('isnan', BOOL, x), x, made)
-    return r('select', t, r('isnan', BOOL, y), y, made)
+# zgebal.f 377-385 and 387-395: the DO WHILE tests over the member's (F, C, CA, R, G, RA), and one step (F, C, CA by
+# SCLFAC = 2, R, G, RA by its reciprocal; the second loop's G scaled with C)
+def _gebal_up_holds(bounds, f, c, ca, r, g, ra, alive):
+    sfmin2, sfmax2 = bounds
+    return alive & (c < g) & (torch.maximum(torch.maximum(f, c), ca) < sfmax2) & (
+        torch.minimum(torch.minimum(r, g), ra) > sfmin2)
 
 
-# Fortran SIGN(A, B): |A| with B's sign, a zero B's sign that of 1/B (IEEE 754 -0 below +0)
-def _fortran_sign(r, t, a, b):
-    zero = r.const(0, t)
-    negative = r('or', BOOL, r('lt', BOOL, b, zero), r('and', BOOL, r('eq', BOOL, b, zero), r(
-        'lt', BOOL, r('div', t, r.const(1, t), b), zero)))
-    magnitude = r('abs', t, a)
-    return r('select', t, negative, r('neg', t, magnitude), magnitude)
+def _gebal_down_holds(bounds, f, c, ca, r, g, ra, alive):
+    sfmin2, sfmax2 = bounds
+    return alive & (g >= r) & (torch.maximum(r, ra) < sfmax2) & (
+        torch.minimum(torch.minimum(torch.minimum(f, c), g), ca) > sfmin2)
 
 
-# Reference-LAPACK SRC/dlanv2.f 159-306 in one region of real kind t: the Schur factorization of the real 2 x 2
-# [A B; C D], of region values, to (A, B, C, D, RT1R, RT1I, RT2R, RT2I, CS, SN). Each source branch is selected, and
-# the label 10 rescaling loop is unrolled to its own bound (COUNT <= 20, so at most 21 passes). The region keeps the
-# source's separate products (lines 251-257, Reference-LAPACK issue 1031), with no contraction. `limits` is the real
-# dtype's finfo; SAFMIN/EPS is an exact power of two for F32/F64, so SAFMN2 uses that integer exponent
-def _dlanv2(r, t, a, b, c, d, limits):
+def _gebal_pending(holds, bounds, *values):
+    return holds(bounds, *values).any()
+
+
+def _gebal_step(holds, bounds, factor, f, c, ca, r, g, ra, alive):
+    held = holds(bounds, f, c, ca, r, g, ra, alive)
+    up, down = (f * 2, c * 2, ca * 2, r / 2, g / 2, ra / 2), (f / 2, c / 2, ca / 2, r * 2, g / 2, ra * 2)
+    return tuple(torch.where(held, made, x) for made, x in zip(up if factor == 2 else down, (f, c, ca, r, g, ra)))
+
+
+# Reference-LAPACK SRC/zgehrd.f 249-254 and 295-299 (TAU outside ILO..IHI-1 zero; the unblocked code from ILO) and
+# zgehd2.f 190-207 (dgehrd.f, dgehd2.f alike), each static column I = 1..n-1 active where ILO <= I <= IHI-1:
+# ZLARFG(IHI-I, A(I+1,I), A(I+2,I)) by _reflector over rows I+1..IHI; H(I) from the right to A(1:IHI, I+1:IHI), H(I)^H
+# from the left to A(I+1:IHI, I+1:N); beta into A(I+1,I) and v(2:) below it. Returns the packed matrix and TAU
+def _gehrd(h, ilo, ihi):
+    n, k = h.shape[-1], _counted(h)
+    taus = []
+    for i in range(1, n):
+        active = (ilo <= i) & (i <= ihi - 1)
+        below = ((k > i) & (k <= _vec(ihi)))[..., i:]
+        v, tau, beta = _reflector(torch.where(below, h[..., i:, i - 1], 0))
+        v, tau = torch.where(below, v, 0), torch.where(active, tau, 0)
+        region = _mat(active) & (k <= _vec(ihi))[..., :, None] & below[..., None, :]
+        h = torch.cat([h[..., :, :i], torch.where(region, _dlarf(h[..., :, i:], v, tau, left=False), h[..., :, i:])],
+                      -1)
+        region = _mat(active) & below[..., :, None]
+        h = _put(h, torch.where(region, _dlarf(h[..., i:, i:], v, tau, adjoint=True), h[..., i:, i:]), i, i)
+        packed = torch.cat([beta.to(h.dtype)[..., None], v[..., 1:]], -1)
+        h = _put(h, torch.where(_vec(active) & below, packed, h[..., i:, i - 1])[..., :, None], i, i - 1)
+        taus.append(tau)
+    return h, torch.stack(taus, -1) if taus else h.new_zeros((*h.shape[:-2], 0))
+
+
+# zunghr.f 198-232 (dorghr.f alike) with zung2r's reflector sequence: Q = H(ILO) ... H(IHI-1) from the identity, each
+# H(I) (reverse order) to rows and columns I+1..IHI
+def _unghr(h, taus, ilo, ihi):
+    n, k = h.shape[-1], _counted(h)
+    z = _unit(h).expand(h.shape).contiguous()
+    for i in reversed(range(1, n)):
+        active = (ilo <= i) & (i <= ihi - 1)
+        below = ((k > i) & (k <= _vec(ihi)))[..., i:]
+        v = torch.where(below, torch.cat([torch.ones_like(h[..., i:i + 1, i - 1]), h[..., i + 1:, i - 1]], -1), 0)
+        region = _mat(active) & below[..., :, None] & below[..., None, :]
+        z = _put(z, torch.where(region, _dlarf(z[..., i:, i:], v, taus[..., i - 1]), z[..., i:, i:]), i, i)
+    return z
+
+
+# Reference-LAPACK SRC/dlarfg.f 125-174 (N = len(xs) + 1) on batch scalars: (ALPHA on exit, the beta; TAU; X on
+# exit). The label 10 KNT loop (at most 20 passes) and its undo are its static passes; SAFMIN = DLAMCH('S') /
+# DLAMCH('E'); the BETA above HUGE / 2 branch scales by SAFMIN once
+def _dlarfg(alpha, xs):
+    limits = torch.finfo(alpha.dtype)
+    safmin = limits.tiny / (limits.eps / 2)
+    rsafmn = 1 / safmin
+    trivial = _listed_norm(xs) == 0
+    beta = -_fsign(_dlapy2(alpha, _listed_norm(xs)), alpha)
+    small = beta.abs() < safmin
+    large = ~small & (beta.abs() > limits.max / 2)
+    running, knt, sb, sa, sx = small, torch.zeros_like(alpha, dtype=torch.int64), beta, alpha, list(xs)
+    for _ in range(20):
+        knt = torch.where(running, knt + 1, knt)
+        sx = [torch.where(running, x * rsafmn, x) for x in sx]
+        sb, sa = torch.where(running, sb * rsafmn, sb), torch.where(running, sa * rsafmn, sa)
+        running = running & (sb.abs() < safmin)
+    fx = [torch.where(small, x, torch.where(large, plain * safmin, plain)) for x, plain in zip(sx, xs)]
+    fa = torch.where(small, sa, torch.where(large, alpha * safmin, alpha))
+    fb = torch.where(small | large, -_fsign(_dlapy2(fa, _listed_norm(fx)), fa), beta)
+    tau, inverse = (fb - fa) / fb, 1 / (fa - fb)
+    undone = fb
+    for j in range(20):
+        undone = torch.where(knt > j, undone * safmin, undone)
+    undone = torch.where(large, undone * rsafmn, undone)
+    return (torch.where(trivial, alpha, undone), torch.where(trivial, 0, tau),
+            [torch.where(trivial, x, made * inverse) for x, made in zip(xs, fx)])
+
+
+# Reference-LAPACK SRC/zlarfg.f 144-211 with N = 2 on batch scalars: ALPHA and X (complex) to (ALPHA on exit, the
+# real beta where TAU is nonzero; TAU; X on exit), as _dlarfg with DLAPY3(ALPHR, ALPHI, XNORM), ALPHA = ZLADIV(1,
+# ALPHA - BETA) and ZSCAL
+def _zlarfg2(alpha, x):
+    limits = torch.finfo(alpha.real.dtype)
+    safmin = limits.tiny / (limits.eps / 2)
+    rsafmn = 1 / safmin
+    ar, ai = alpha.real, alpha.imag
+    trivial = (x.abs() == 0) & (ai == 0)
+    beta = -_fsign(_dlapy3(ar, ai, x.abs()), ar)
+    small = beta.abs() < safmin
+    large = ~small & (beta.abs() > limits.max / 2)
+    running, knt, sb, sr, si, sx = small, torch.zeros_like(ar, dtype=torch.int64), beta, ar, ai, x
+    for _ in range(20):
+        knt = torch.where(running, knt + 1, knt)
+        sx = torch.where(running, _scaled(sx, rsafmn), sx)
+        sb, sr, si = (torch.where(running, v * rsafmn, v) for v in (sb, sr, si))
+        running = running & (sb.abs() < safmin)
+    fx = torch.where(small, sx, torch.where(large, _scaled(x, safmin), x))
+    fr = torch.where(small, sr, torch.where(large, ar * safmin, ar))
+    fi = torch.where(small, si, torch.where(large, ai * safmin, ai))
+    fb = torch.where(small | large, -_fsign(_dlapy3(fr, fi, fx.abs()), fr), beta)
+    tau = torch.complex((fb - fr) / fb, -fi / fb)
+    inverse = torch.complex(*_divided(torch.ones_like(fr), torch.zeros_like(fr), fr - fb, fi))
+    undone = fb
+    for j in range(20):
+        undone = torch.where(knt > j, undone * safmin, undone)
+    undone = torch.where(large, undone * rsafmn, undone)
+    return (torch.where(trivial, alpha, torch.complex(undone, torch.zeros_like(undone))), torch.where(trivial, 0, tau),
+            torch.where(trivial, x, inverse * fx))
+
+
+# Reference-LAPACK SRC/dlanv2.f 159-306 on batch scalars: the Schur factorization of the real 2 x 2 [A B; C D] to
+# (A, B, C, D, RT1R, RT1I, RT2R, RT2I, CS, SN), each source branch selected. The label 10 rescaling loop is its static
+# passes (COUNT <= 20, at most 21), and the 251-257 products stay separate (Reference-LAPACK issue 1031). SAFMIN/EPS
+# is an exact power of two for each floating kind, so SAFMN2 = BASE**INT(LOG(SAFMIN / EPS) / LOG(BASE) / TWO)
+def _dlanv2(a, b, c, d):
+    limits = torch.finfo(a.dtype)
     safmn2 = math.ldexp(1.0, math.trunc(math.log2(limits.tiny / limits.eps) / 2))
     safmx2, eps = 1 / safmn2, limits.eps
-
-    def k(value):
-        return r.const(value, t)
-
-    def sel(test, x, y):
-        return r('select', t, test, x, y)
-
-    def mul(x, y):
-        return r('mul', t, x, y)
-
-    def add(x, y):
-        return r('add', t, x, y)
-
-    def sub(x, y):
-        return r('sub', t, x, y)
-
-    def neg(x):
-        return r('neg', t, x)
-
-    def sign(x, y):
-        return _fortran_sign(r, t, x, y)
-    zero, one, half = k(0), k(1), k(0.5)
-    first = r('eq', BOOL, c, zero)
-    second = r('and', BOOL, r('not', BOOL, first), r('eq', BOOL, b, zero))
-    third = _all(r, [r('not', BOOL, first), r('not', BOOL, second), r('eq', BOOL, sub(a, d), zero), r(
-        'ne', BOOL, sign(one, b), sign(one, c))])
-    general = _all(r, [r('not', BOOL, first), r('not', BOOL, second), r('not', BOOL, third)])
-
-    # 187-192
-    temp = sub(a, d)
-    p = mul(half, temp)
-    ab, ac = r('abs', t, b), r('abs', t, c)
-    bcmax = sel(r('ge', BOOL, ab, ac), ab, ac)
-    bcmis = mul(mul(sel(r('le', BOOL, ab, ac), ab, ac), sign(one, b)), sign(one, c))
-    scale = sel(r('ge', BOOL, r('abs', t, p), bcmax), r('abs', t, p), bcmax)
-    z = add(mul(r('div', t, p, scale), p), mul(r('div', t, bcmax, scale), bcmis))
-    real_pair = r('and', BOOL, general, r('ge', BOOL, z, k(4 * eps)))
-
-    # 201-211: real eigenvalues
-    zr = add(p, sign(mul(r('sqrt', t, scale), r('sqrt', t, z)), p))
-    ar, dr = add(d, zr), sub(d, mul(r('div', t, bcmax, zr), bcmis))
-    tau = _dlapy2(r, t, c, zr, limits.max)
-    csr, snr, br = r('div', t, zr, tau), r('div', t, c, tau), sub(b, c)
-
-    # 218-238: complex or nearly equal eigenvalues, TEMP and SIGMA rescaled
-    sigma, running = add(b, c), r.const(1, BOOL)
+    one, zero = torch.ones_like(a), torch.zeros_like(a)
+    first = c == 0
+    second = ~first & (b == 0)
+    third = ~first & ~second & ((a - d) == 0) & (_fsign(one, b) != _fsign(one, c))
+    general = ~first & ~second & ~third
+    temp = a - d
+    p = 0.5 * temp
+    ab, ac = b.abs(), c.abs()
+    bcmax = torch.where(ab >= ac, ab, ac)
+    bcmis = torch.where(ab <= ac, ab, ac) * _fsign(one, b) * _fsign(one, c)
+    scale = torch.where(p.abs() >= bcmax, p.abs(), bcmax)
+    z = (p / scale) * p + (bcmax / scale) * bcmis
+    real_pair = general & (z >= 4 * eps)
+    zr = p + _fsign(scale.sqrt() * z.sqrt(), p)
+    ar, dr = d + zr, d - (bcmax / zr) * bcmis
+    tau = _dlapy2(c, zr)
+    csr, snr, br = zr / tau, c / tau, b - c
+    sigma, running = b + c, torch.ones_like(first)
     for count in range(1, 22):
-        size = sel(r('ge', BOOL, r('abs', t, temp), r('abs', t, sigma)), r('abs', t, temp), r('abs', t, sigma))
-        down = r('and', BOOL, running, r('ge', BOOL, size, k(safmx2)))
-        up = _all(r, [running, r('not', BOOL, down), r('le', BOOL, size, k(safmn2))])
-        sigma = sel(down, mul(sigma, k(safmn2)), sel(up, mul(sigma, k(safmx2)), sigma))
-        temp = sel(down, mul(temp, k(safmn2)), sel(up, mul(temp, k(safmx2)), temp))
-        running = r('and', BOOL, r('or', BOOL, down, up), r.const(count <= 20, BOOL))
-    pc = mul(half, temp)
-    tau = _dlapy2(r, t, sigma, temp, limits.max)
-    cs = r('sqrt', t, mul(half, add(one, r('div', t, r('abs', t, sigma), tau))))
-    sn = mul(neg(r('div', t, pc, mul(tau, cs))), sign(one, sigma))
-
-    # 243-262
-    aa, bb = add(mul(a, cs), mul(b, sn)), add(neg(mul(a, sn)), mul(b, cs))
-    cc, dd = add(mul(c, cs), mul(d, sn)), add(neg(mul(c, sn)), mul(d, cs))
-    ac_ = add(mul(aa, cs), mul(cc, sn))
-    bc_ = add(mul(bb, cs), mul(dd, sn))
-    cc_ = add(neg(mul(aa, sn)), mul(cc, cs))
-    dc_ = add(neg(mul(bb, sn)), mul(dd, cs))
-    mean = mul(half, add(ac_, dc_))
-
-    # 264-291
-    split = _all(r, [r('ne', BOOL, cc_, zero), r('ne', BOOL, bc_, zero), r('eq', BOOL, sign(one, bc_), sign(one, cc_))])
-    turned = r('and', BOOL, r('ne', BOOL, cc_, zero), r('eq', BOOL, bc_, zero))
-    sab, sac = r('sqrt', t, r('abs', t, bc_)), r('sqrt', t, r('abs', t, cc_))
-    pp = sign(mul(sab, sac), cc_)
-    tau1 = r('div', t, one, r('sqrt', t, r('abs', t, add(bc_, cc_))))
-    cs1, sn1 = mul(sab, tau1), mul(sac, tau1)
-    ax = sel(split, add(mean, pp), mean)
-    dx = sel(split, sub(mean, pp), mean)
-    bx = sel(split, sub(bc_, cc_), sel(turned, neg(cc_), bc_))
-    cx = sel(r('or', BOOL, split, turned), zero, cc_)
-    csx = sel(split, sub(mul(cs, cs1), mul(sn, sn1)), sel(turned, neg(sn), cs))
-    snx = sel(split, add(mul(cs, sn1), mul(sn, cs1)), sel(turned, cs, sn))
-
-    # each branch's A, B, C, D, CS and SN
-    complex_ = r('and', BOOL, general, r('not', BOOL, real_pair))
-    outs = []
-    for kept, swapped, pair, other in ((a, d, ar, ax), (b, neg(c), br, bx), (c, zero, zero, cx), (d, a, dr, dx),
+        size = torch.where(temp.abs() >= sigma.abs(), temp.abs(), sigma.abs())
+        down = running & (size >= safmx2)
+        up = running & ~down & (size <= safmn2)
+        sigma = torch.where(down, sigma * safmn2, torch.where(up, sigma * safmx2, sigma))
+        temp = torch.where(down, temp * safmn2, torch.where(up, temp * safmx2, temp))
+        running = (down | up) & (count <= 20)
+    pc = 0.5 * temp
+    tau = _dlapy2(sigma, temp)
+    cs = (0.5 * (1 + sigma.abs() / tau)).sqrt()
+    sn = -(pc / (tau * cs)) * _fsign(one, sigma)
+    aa, bb = a * cs + b * sn, -a * sn + b * cs
+    cc, dd = c * cs + d * sn, -c * sn + d * cs
+    a2, b2 = aa * cs + cc * sn, bb * cs + dd * sn
+    c2, d2 = -aa * sn + cc * cs, -bb * sn + dd * cs
+    mean = 0.5 * (a2 + d2)
+    split = (c2 != 0) & (b2 != 0) & (_fsign(one, b2) == _fsign(one, c2))
+    turned = (c2 != 0) & (b2 == 0)
+    sab, sac = b2.abs().sqrt(), c2.abs().sqrt()
+    pp = _fsign(sab * sac, c2)
+    tau1 = 1 / (b2 + c2).abs().sqrt()
+    cs1, sn1 = sab * tau1, sac * tau1
+    ax, dx = torch.where(split, mean + pp, mean), torch.where(split, mean - pp, mean)
+    bx = torch.where(split, b2 - c2, torch.where(turned, -c2, b2))
+    cx = torch.where(split | turned, zero, c2)
+    csx = torch.where(split, cs * cs1 - sn * sn1, torch.where(turned, -sn, cs))
+    snx = torch.where(split, cs * sn1 + sn * cs1, torch.where(turned, cs, sn))
+    complex_ = general & ~real_pair
+    made = []
+    for kept, swapped, pair, other in ((a, d, ar, ax), (b, -c, br, bx), (c, zero, zero, cx), (d, a, dr, dx),
                                        (one, zero, csr, csx), (zero, one, snr, snx)):
-        outs.append(sel(second, swapped, sel(real_pair, pair, sel(complex_, other, kept))))
-    a_, b_, c_, d_, cs_, sn_ = outs
+        made.append(torch.where(second, swapped, torch.where(real_pair, pair, torch.where(complex_, other, kept))))
+    a_, b_, c_, d_, cs_, sn_ = made
+    rt1i = torch.where(c_ == 0, zero, b_.abs().sqrt() * c_.abs().sqrt())
+    return a_, b_, c_, d_, a_, rt1i, d_, torch.where(c_ == 0, zero, -rt1i), cs_, sn_
 
-    # 298-306
-    rt1i = sel(r('eq', BOOL, c_, zero), zero, mul(r('sqrt', t, r('abs', t, b_)), r('sqrt', t, r('abs', t, c_))))
-    rt2i = sel(r('eq', BOOL, c_, zero), zero, neg(rt1i))
-    return a_, b_, c_, d_, a_, rt1i, d_, rt2i, cs_, sn_
+def _row_put(x, r, row):
+    return _put(x, row[..., None, :], r, 0)
 
 
-# Reference-LAPACK SRC/dlaln2.f 276-601 with LTRANS = false, CA = 1, D1 = D2 = 1, in one region of real kind t: the
-# NA x NA (1 or 2, static) system (A - (WR + i WI)) X = SCALE B, NW = 1 (real WR) or 2 (complex WR + i WI). `a` is
-# (A11,) or (A11, A12, A21, A22) and `b` (and the returned X) B(1,1), B(2,1) [NA = 2], then B(1,2), B(2,2) [NW = 2],
-# of region values; returns (X, SCALE, XNORM). SMINI = max(SMIN, 2 SAFMIN), the complete pivoting of CRV/CIV by the
-# source's IPIVOT, RSWAP and ZSWAP tables, the SMINI replacements and every SCALE/BNORM/BBND/XNORM overflow test;
-# DLADIV is the existing complex division (Smith's)
-def _dlaln2(r, t, na, nw, smin, a, b, wr, wi, limits):
-    def k(value):
-        return r.const(value, t)
+def _column_put(x, c, column):
+    return _put(x, column[..., :, None], 0, c)
 
-    def sel(test, x, y):
-        return r('select', t, test, x, y)
 
-    def mul(x, y):
-        return r('mul', t, x, y)
+# zlahqr.f 297-322 / dlahqr.f 298-323 (DO 40 / DO 30): K, the largest k in L+1..I whose H(k,k-1) is negligible (the
+# SMLNUM test, or the TST and Ahues-Tisseur tests), else L
+def _deflation(h, i, l, ilo, ihi, smlnum, ulp):
+    diagonal, sub, sup = (h.diagonal(offset, dim1=-2, dim2=-1) for offset in (0, -1, 1))
+    kk = _counted(h)[1:]
+    p, q = diagonal[..., :-1], diagonal[..., 1:]
+    pad = torch.zeros_like(sub[..., :1])
+    tst = _abs1(p) + _abs1(q)
+    vanished = tst == 0
+    tst = torch.where(vanished & (kk - 2 >= _vec(ilo)), tst + _re(torch.cat([pad, sub[..., :-1]], -1)).abs(), tst)
+    tst = torch.where(vanished & (kk + 1 <= _vec(ihi)), tst + _re(torch.cat([sub[..., 1:], pad], -1)).abs(), tst)
+    ab, ba = torch.maximum(_abs1(sub), _abs1(sup)), torch.minimum(_abs1(sub), _abs1(sup))
+    aa, bb = torch.maximum(_abs1(q), _abs1(p - q)), torch.minimum(_abs1(q), _abs1(p - q))
+    s = aa + ab
+    negligible = (_abs1(sub) <= _vec(smlnum)) | ((_re(sub).abs() <= ulp * tst) & (
+        ba * (ab / s) <= torch.maximum(_vec(smlnum), ulp * (bb * (aa / s)))))
+    found = torch.where((kk > _vec(l)) & (kk <= _vec(i)) & negligible, kk, 0).amax(-1)
+    return torch.where(found > 0, found, l)
 
-    def add(x, y):
-        return r('add', t, x, y)
 
-    def sub(x, y):
-        return r('sub', t, x, y)
+# zlahqr.f 271-276 / dlahqr.f 265-270 (DO 10): the trash below the second subdiagonal ZGEHRD's reflectors left
+def _cleared(h, ilo, ihi, proceed):
+    k = _counted(h)
+    below = k[:, None] - k
+    trash = ((below == 2) | (below == 3)) & _span(k, ilo, ihi - 3)[..., None, :]
+    trash = trash | ((k[:, None] == _mat(ihi)) & (k == _mat(ihi - 2)) & _mat(ilo <= ihi - 2))
+    return torch.where(trash & _mat(proceed), 0, h)
 
-    def absolute(x):
-        return r('abs', t, x)
 
-    def bigger(x, y):
-        return sel(r('ge', BOOL, x, y), x, y)
+# Reference-LAPACK SRC/zlahqr.f 258-573 (zhseqr.f's call: WANTT = WANTZ = `want`, ILOZ = ILO, IHIZ = IHI): the trash,
+# the DO 20 subdiagonal made real (each static I in order, its row and column scalings), then the iteration as one
+# while_loop whose pass is one DO 130 iteration (labels 30 and 140 flattened: on deflation W(I) = H(I,I), KDEFL = 0,
+# I = L - 1, L = ILO, ITS = 0; INFO = I past ITMAX). Returns H, Z, W (positions ILO..IHI) and INFO
+def _zlahqr(h, z, w, ilo, ihi, proceed, want):
+    n, k = h.shape[-1], _counted(h)
+    h = _cleared(h, ilo, ihi, proceed)
+    rows_z = _span(k, ilo, ihi)
+    for ii in range(2, n + 1):
+        sub = h[..., ii - 1, ii - 2]
+        hit = proceed & (ilo + 1 <= ii) & (ii <= ihi) & (sub.imag != 0)
+        sc = _over(sub, _abs1(sub))
+        sc = _over(sc.conj(), sc.abs())
+        h = _entry_put(h, torch.full_like(ilo, ii), torch.full_like(ilo, ii - 1), sub.abs(), hit)
+        jhi = n if want else ihi
+        cols = _vec(hit) & (k >= ii) & (k <= _vec(jhi))
+        h = _row_put(h, ii - 1, torch.where(cols, h[..., ii - 1, :] * _vec(sc), h[..., ii - 1, :]))
+        rows = _vec(hit) & (k >= (1 if want else _vec(ilo))) & (k <= (min(n, ii + 1) if want else _vec(
+            torch.clamp(ihi, max=ii + 1))))
+        h = _column_put(h, ii - 1, torch.where(rows, h[..., :, ii - 1] * _vec(sc.conj()), h[..., :, ii - 1]))
+        if want:
+            z = _column_put(z, ii - 1, torch.where(_vec(hit) & rows_z, z[..., :, ii - 1] * _vec(sc.conj()),
+                                                   z[..., :, ii - 1]))
+    smlnum, itmax = _iteration_bounds(h, ilo, ihi)
+    zero = torch.zeros_like(ilo)
+    carried = (proceed & (ihi >= ilo), h.contiguous(), z.contiguous() if want else h.new_zeros(()), w.contiguous(),
+               ihi.clone(), ilo.clone(), zero, zero.clone(), zero.clone())
+    _, h, z, w, _, _, _, _, info = while_loop_op(_first_any, functools.partial(
+        _zlahqr_pass, want, torch.finfo(h.real.dtype).eps), carried, (ilo, ihi, smlnum, itmax))
+    return h, z, w, info
 
-    def divided(x, y):
-        return _complex_value(r, t, 'div', x, y, 1, None)
+
+# SMLNUM = SAFMIN (NH / ULP) and ITMAX = 30 MAX(10, NH), NH = IHI - ILO + 1
+def _iteration_bounds(h, ilo, ihi):
+    limits, nh = torch.finfo(h.real.dtype), ihi - ilo + 1
+    return limits.tiny * (nh.to(h.real.dtype) / limits.eps), 30 * torch.clamp(nh, min=10)
+
+
+def _zlahqr_pass(want, ulp, live, h, z, w, i, l, its, kdefl, info, ilo, ihi, smlnum, itmax):
+    n, k = h.shape[-1], _counted(h)
+    l = torch.where(live, _deflation(h, i, l, ilo, ihi, smlnum, ulp), l)
+    h = _entry_put(h, l, l - 1, 0, live & (l > ilo))
+    deflate = live & (l >= i)
+    sweep = live & ~deflate
+    w = _at_put(w, i, _entry(h, i, i), deflate)
+    kdefl = torch.where(sweep, kdefl + 1, kdefl)
+    i1, i2 = (torch.ones_like(l), torch.full_like(i, n)) if want else (l, i)
+    rows_z = _span(k, ilo, ihi)
+
+    # 355-386: the exceptional shifts (KDEFL a multiple of 2 KEXSH at I, of KEXSH at L; DAT1 = 3/4), else Wilkinson's
+    hii, hii1 = _entry(h, i, i), _entry(h, i, i - 1)
+    u = _entry(h, i - 1, i).sqrt() * hii1.sqrt()
+    us = _abs1(u)
+    x = _scaled(_entry(h, i - 1, i - 1) - hii, 0.5)
+    sx = _abs1(x)
+    s = torch.maximum(us, sx)
+    xs, uu = _over(x, s), _over(u, s)
+    y = _scaled((xs * xs + uu * uu).sqrt(), s)
+    xn = _over(x, sx)
+    y = torch.where((sx > 0) & (xn.real * y.real + xn.imag * y.imag < 0), -y, y)
+    t = torch.where(kdefl % 20 == 0, _plus_real(hii, 0.75 * hii1.real.abs()), torch.where(
+        kdefl % 10 == 0, _plus_real(_entry(h, l, l), 0.75 * _entry(h, l + 1, l).real.abs()),
+        torch.where(us != 0, hii - u * _cdiv(u, x + y), hii)))
+
+    # 390-414: M, the largest m in L+1..I-1 where two consecutive small subdiagonals hold, else L; V at M
+    m = l
+    if n > 2:
+        diagonal, sub = h.diagonal(dim1=-2, dim2=-1), h.diagonal(-1, dim1=-2, dim2=-1)
+        mm, h11, h22 = k[1:-1], diagonal[..., 1:-1], diagonal[..., 2:]
+        h11s, h21 = h11 - _vec(t), sub[..., 1:].real
+        s = _abs1(h11s) + h21.abs()
+        h11s, h21 = _over(h11s, s), h21 / s
+        ok = sub[..., :-1].real.abs() * h21.abs() <= ulp * (_abs1(h11s) * (_abs1(h11) + _abs1(h22)))
+        found = torch.where((mm > _vec(l)) & (mm < _vec(i)) & ok, mm, 0).amax(-1)
+        m = torch.where(found > 0, found, l)
+    h11s, h21 = _entry(h, m, m) - t, _entry(h, m + 1, m).real
+    s = _abs1(h11s) + h21.abs()
+    v1, v2 = _over(h11s, s), torch.complex(h21 / s, torch.zeros_like(h21))
+
+    # 418-482: the bulge chase, each static K = M..I-1
+    for kk in range(1, n):
+        act = sweep & (m <= kk) & (kk <= i - 1)
+        later = act & (kk > m)
+        if kk > 1:
+            v1 = torch.where(later, h[..., kk - 1, kk - 2], v1)
+            v2 = torch.where(later, h[..., kk, kk - 2], v2)
+        v1, t1, v2 = _zlarfg2(v1, v2)
+        if kk > 1:
+            column = h[..., :, kk - 2]
+            column = torch.where(_vec(later) & (k == kk), _vec(v1), torch.where(_vec(later) & (k == kk + 1), 0, column))
+            h = _column_put(h, kk - 2, column)
+        t2 = (t1 * v2).real
+        cols = _vec(act) & (k >= kk) & (k <= _vec(i2))
+        hk, hk1 = h[..., kk - 1, :], h[..., kk, :]
+        total = _vec(t1.conj()) * hk + _scaled(hk1, _vec(t2))
+        h = _put(h, torch.stack([torch.where(cols, hk - total, hk), torch.where(cols, hk1 - total * _vec(v2), hk1)],
+                                -2), kk - 1, 0)
+        rows = _vec(act) & (k >= _vec(i1)) & (k <= _vec(torch.clamp(i, max=kk + 2)))
+        hk, hk1 = h[..., :, kk - 1], h[..., :, kk]
+        total = _vec(t1) * hk + _scaled(hk1, _vec(t2))
+        h = _put(h, torch.stack([torch.where(rows, hk - total, hk), torch.where(
+            rows, hk1 - total * _vec(v2.conj()), hk1)], -1), 0, kk - 1)
+        if want:
+            zk, zk1 = z[..., :, kk - 1], z[..., :, kk]
+            total = _vec(t1) * zk + _scaled(zk1, _vec(t2))
+            moved = _vec(act) & rows_z
+            z = _put(z, torch.stack([torch.where(moved, zk - total, zk), torch.where(
+                moved, zk1 - total * _vec(v2.conj()), zk1)], -1), 0, kk - 1)
+
+        # 458-480: at K = M > L, TEMP = (1 - T1) / |1 - T1| scales H(M+1,M), H(M+2,M+1) and rows/columns J = M..I
+        first = act & (kk == m) & (m > l)
+        temp = torch.complex(1 - t1.real, 0 - t1.imag)
+        temp = _over(temp, temp.abs())
+        h = _entry_put(h, m + 1, m, _entry(h, m + 1, m) * temp.conj(), first)
+        h = _entry_put(h, m + 2, m + 1, _entry(h, m + 2, m + 1) * temp, first & (m + 2 <= i))
+        chosen = _span(k, m, i) & (k != _vec(m + 1))
+        h = torch.where(_mat(first) & chosen[..., :, None] & (k > k[:, None]) & (k <= _mat(i2)), h * _mat(temp), h)
+        h = torch.where(_mat(first) & chosen[..., None, :] & (k[:, None] >= _mat(i1)) & (k[:, None] < k),
+                        h * _mat(temp.conj()), h)
+        if want:
+            z = torch.where(_mat(first) & chosen[..., None, :] & rows_z[..., :, None], z * _mat(temp.conj()), z)
+
+    # 486-498: H(I,I-1) made real, row I and column I by its phase
+    temp = _entry(h, i, i - 1)
+    phased = sweep & (temp.imag != 0)
+    rtemp = temp.abs()
+    h = _entry_put(h, i, i - 1, rtemp, phased)
+    temp = _over(temp, rtemp)
+    h = torch.where(_mat(phased) & (k[:, None] == _mat(i)) & (k > _mat(i)) & (k <= _mat(i2)), h * _mat(temp.conj()), h)
+    h = torch.where(_mat(phased) & (k == _mat(i)) & (k[:, None] >= _mat(i1)) & (k[:, None] < _mat(i)), h * _mat(temp),
+                    h)
+    if want:
+        z = torch.where(_mat(phased) & (k == _mat(i)) & rows_z[..., :, None], z * _mat(temp), z)
+    return _iterated(live, deflate, sweep, h, z if want else z.clone(), (w,), i, l, its, kdefl, info, ilo, itmax)
+
+
+# the pass's ITS, KDEFL, I, L and INFO: a deflation resets ITS and KDEFL, I = L - 1 and L = ILO; a sweep counts
+# ITS, the sweep at ITS = ITMAX the last (INFO = I)
+def _iterated(live, deflate, sweep, h, z, eigen, i, l, its, kdefl, info, ilo, itmax):
+    fail = sweep & (its >= itmax)
+    following = torch.where(deflate, l - 1, i)
+    return (live & ~fail & (following >= ilo), h, z, *eigen, following, torch.where(deflate, ilo, l),
+            torch.where(deflate, 0, torch.where(sweep, its + 1, its)), torch.where(deflate, 0, kdefl),
+            torch.where(fail, i, info))
+
+
+# Reference-LAPACK SRC/dlahqr.f 258-570 as _zlahqr (no DO 20): a deflation of one (WR(I) = H(I,I), WI(I) = 0) or two
+# (DLANV2's standardized block and its DROTs of H's rows and columns and Z's columns) at L >= I-1; the 343-379
+# exceptional (DAT1 = 3/4, DAT2 = -0.4375) or Francis double shift, the 383-400 M search over L+1..I-2, and the
+# 404-481 bulge chase of NR = MIN(3, I-K+1) reflectors
+def _dlahqr(h, z, wr, wi, ilo, ihi, proceed, want):
+    h = _cleared(h, ilo, ihi, proceed)
+    smlnum, itmax = _iteration_bounds(h, ilo, ihi)
+    zero = torch.zeros_like(ilo)
+    carried = (proceed & (ihi >= ilo), h.contiguous(), z.contiguous() if want else h.new_zeros(()), wr.contiguous(),
+               wi.contiguous(), ihi.clone(), ilo.clone(), zero, zero.clone(), zero.clone())
+    _, h, z, wr, wi, _, _, _, _, info = while_loop_op(_first_any, functools.partial(
+        _dlahqr_pass, want, torch.finfo(h.dtype).eps), carried, (ilo, ihi, smlnum, itmax))
+    return h, z, wr, wi, info
+
+
+# dlahqr.f 387-397: V for the double shift at M, of H(M,M), H(M+1,M), H(M,M+1), H(M+1,M+1) and H(M+2,M+1)
+def _double_shifted(hmm, hm1m, hmm1, hm1m1, hm2m1, rt1r, rt1i, rt2r, rt2i):
+    s = (hmm - rt2r).abs() + rt2i.abs() + hm1m.abs()
+    h21s = hm1m / s
+    v1 = h21s * hmm1 + (hmm - rt1r) * ((hmm - rt2r) / s) - rt1i * (rt2i / s)
+    v2 = h21s * (hmm + hm1m1 - rt1r - rt2r)
+    v3 = h21s * hm2m1
+    s = v1.abs() + v2.abs() + v3.abs()
+    return v1 / s, v2 / s, v3 / s
+
+
+def _dlahqr_pass(want, ulp, live, h, z, wr, wi, i, l, its, kdefl, info, ilo, ihi, smlnum, itmax):
+    n, k = h.shape[-1], _counted(h)
+    l = torch.where(live, _deflation(h, i, l, ilo, ihi, smlnum, ulp), l)
+    h = _entry_put(h, l, l - 1, 0, live & (l > ilo))
+    deflate = live & (l >= i - 1)
+    sweep = live & ~deflate
+    rows_z = _span(k, ilo, ihi)
+
+    # 150: one eigenvalue, or the 2 x 2 block's
+    single, pair = deflate & (l == i), deflate & (l == i - 1)
+    wr, wi = _at_put(wr, i, _entry(h, i, i), single), _at_put(wi, i, 0, single)
+    a, b, c, d, rt1r, rt1i, rt2r, rt2i, cs, sn = _dlanv2(_entry(h, i - 1, i - 1), _entry(h, i - 1, i),
+                                                         _entry(h, i, i - 1), _entry(h, i, i))
+    for row, col, value in ((i - 1, i - 1, a), (i - 1, i, b), (i, i - 1, c), (i, i, d)):
+        h = _entry_put(h, row, col, value, pair)
+    wr = _at_put(_at_put(wr, i - 1, rt1r, pair), i, rt2r, pair)
+    wi = _at_put(_at_put(wi, i - 1, rt1i, pair), i, rt2i, pair)
+    if want:
+        upper, lower = _row(h, i - 1), _row(h, i)
+        cols = (_vec(pair) & (k > _vec(i)))[..., None, :]
+        h = torch.where(cols & (k[:, None] == _mat(i - 1)), (_vec(cs) * upper + _vec(sn) * lower)[..., None, :], h)
+        h = torch.where(cols & (k[:, None] == _mat(i)), (_vec(cs) * lower - _vec(sn) * upper)[..., None, :], h)
+        left, right = _column(h, i - 1), _column(h, i)
+        rows = (_vec(pair) & (k <= _vec(i - 2)))[..., :, None]
+        h = torch.where(rows & (k == _mat(i - 1)), (_vec(cs) * left + _vec(sn) * right)[..., :, None], h)
+        h = torch.where(rows & (k == _mat(i)), (_vec(cs) * right - _vec(sn) * left)[..., :, None], h)
+        left, right = _column(z, i - 1), _column(z, i)
+        rows = (_vec(pair) & rows_z)[..., :, None]
+        z = torch.where(rows & (k == _mat(i - 1)), (_vec(cs) * left + _vec(sn) * right)[..., :, None], z)
+        z = torch.where(rows & (k == _mat(i)), (_vec(cs) * right - _vec(sn) * left)[..., :, None], z)
+
+    kdefl = torch.where(sweep, kdefl + 1, kdefl)
+    i1, i2 = (torch.ones_like(l), torch.full_like(i, n)) if want else (l, i)
+
+    # 343-379: the shifts
+    exceptional_i = kdefl % 20 == 0
+    exceptional = exceptional_i | (kdefl % 10 == 0)
+    s = torch.where(exceptional_i, _entry(h, i, i - 1).abs() + _entry(h, i - 1, i - 2).abs(),
+                    _entry(h, l + 1, l).abs() + _entry(h, l + 2, l + 1).abs())
+    shifted = 0.75 * s + torch.where(exceptional_i, _entry(h, i, i), _entry(h, l, l))
+    h11 = torch.where(exceptional, shifted, _entry(h, i - 1, i - 1))
+    h12 = torch.where(exceptional, -0.4375 * s, _entry(h, i - 1, i))
+    h21 = torch.where(exceptional, s, _entry(h, i, i - 1))
+    h22 = torch.where(exceptional, shifted, _entry(h, i, i))
+    s = h11.abs() + h12.abs() + h21.abs() + h22.abs()
+    vanished = s == 0
+    safe = torch.where(vanished, 1, s)
+    h11, h21, h12, h22 = h11 / safe, h21 / safe, h12 / safe, h22 / safe
+    tr = (h11 + h22) / 2
+    det = (h11 - tr) * (h22 - tr) - h12 * h21
+    rtdisc = det.abs().sqrt()
+    conjugate = ~vanished & (det >= 0)
+    first, second = tr + rtdisc, tr - rtdisc
+    nearer = torch.where((first - h22).abs() <= (second - h22).abs(), first * s, second * s)
+    rt1r = torch.where(vanished, 0, torch.where(conjugate, tr * s, nearer))
+    rt2r = rt1r
+    rt1i = torch.where(conjugate, rtdisc * s, 0)
+    rt2i = torch.where(conjugate, -(rtdisc * s), 0)
+
+    # 383-400: M
+    m = l
+    if n > 3:
+        diagonal, sub, sup = (h.diagonal(offset, dim1=-2, dim2=-1) for offset in (0, -1, 1))
+        hmm, hm1m1 = diagonal[..., 1:-2], diagonal[..., 2:-1]
+        v1, v2, v3 = _double_shifted(hmm, sub[..., 1:-1], sup[..., 1:-1], hm1m1, sub[..., 2:], _vec(rt1r), _vec(rt1i),
+                                     _vec(rt2r), _vec(rt2i))
+        ok = sub[..., :-2].abs() * (v2.abs() + v3.abs()) <= ulp * v1.abs() * (
+            diagonal[..., :-3].abs() + hmm.abs() + hm1m1.abs())
+        mm = k[1:-2]
+        found = torch.where((mm > _vec(l)) & (mm <= _vec(i) - 2) & ok, mm, 0).amax(-1)
+        m = torch.where(found > 0, found, l)
+    v1, v2, v3 = _double_shifted(_entry(h, m, m), _entry(h, m + 1, m), _entry(h, m, m + 1), _entry(h, m + 1, m + 1),
+                                 _entry(h, m + 2, m + 1), rt1r, rt1i, rt2r, rt2i)
+
+    # 404-481: each static K = M..I-1, NR = 3 where K <= I-2 (a K = n-1 is NR = 2 alone)
+    for kk in range(1, n):
+        act = sweep & (m <= kk) & (kk <= i - 1)
+        three = act & (kk <= i - 2) if kk + 1 < n else torch.zeros_like(act)
+        later = act & (kk > m)
+        if kk > 1:
+            v1 = torch.where(later, h[..., kk - 1, kk - 2], v1)
+            v2 = torch.where(later, h[..., kk, kk - 2], v2)
+            if kk + 1 < n:
+                v3 = torch.where(later & three, h[..., kk + 1, kk - 2], v3)
+        b2, t2_, (x2,) = _dlarfg(v1, [v2])
+        if kk + 1 < n:
+            b3, t3_, (y2, y3) = _dlarfg(v1, [v2, v3])
+            v1, t1, v2, v3 = (torch.where(three, b3, b2), torch.where(three, t3_, t2_), torch.where(three, y2, x2),
+                              torch.where(three, y3, v3))
+        else:
+            v1, t1, v2 = b2, t2_, x2
+        if kk > 1:
+            column = h[..., :, kk - 2]
+            reduced = act & (kk == m) & (m > l)
+            column = torch.where(_vec(reduced) & (k == kk), column * _vec(1 - t1), column)
+            column = torch.where(_vec(later) & (k == kk), _vec(v1), column)
+            column = torch.where(_vec(later) & ((k == kk + 1) | ((k == kk + 2) & _vec(kk < i - 1))), 0, column)
+            h = _column_put(h, kk - 2, column)
+        t2, t3 = t1 * v2, t1 * v3
+        cols = _vec(act) & (k >= kk) & (k <= _vec(i2))
+        rows = _vec(act) & (k >= _vec(i1)) & (k <= _vec(torch.where(three, torch.clamp(i, max=kk + 3), i)))
+        h = _reflected3(h, kk, cols, rows, three, v2, v3, t1, t2, t3)
+        if want:
+            z = _reflected3(z, kk, None, _vec(act) & rows_z, three, v2, v3, t1, t2, t3)
+    return _iterated(live, deflate, sweep, h, z if want else z.clone(), (wr, wi), i, l, its, kdefl, info, ilo, itmax)
+
+
+# dlahqr.f 424-479: the NR = 3 (`three`) or NR = 2 reflector at static K from the left to rows K..K+NR-1 over the
+# columns `cols` (skipped where None, Z's) and from the right to columns K..K+NR-1 over the rows `rows`
+def _reflected3(x, kk, cols, rows, three, v2, v3, t1, t2, t3):
+    wide = kk + 1 < x.shape[-1]
+    if cols is not None:
+        hk, hk1 = x[..., kk - 1, :], x[..., kk, :]
+        total = hk + _vec(v2) * hk1
+        if wide:
+            hk2 = x[..., kk + 1, :]
+            total = torch.where(_vec(three), total + _vec(v3) * hk2, total)
+        made = [torch.where(cols, hk - total * _vec(t1), hk), torch.where(cols, hk1 - total * _vec(t2), hk1)]
+        if wide:
+            made.append(torch.where(cols & _vec(three), hk2 - total * _vec(t3), hk2))
+        x = _put(x, torch.stack(made, -2), kk - 1, 0)
+    hk, hk1 = x[..., :, kk - 1], x[..., :, kk]
+    total = hk + _vec(v2) * hk1
+    if wide:
+        hk2 = x[..., :, kk + 1]
+        total = torch.where(_vec(three), total + _vec(v3) * hk2, total)
+    made = [torch.where(rows, hk - total * _vec(t1), hk), torch.where(rows, hk1 - total * _vec(t2), hk1)]
+    if wide:
+        made.append(torch.where(rows & _vec(three), hk2 - total * _vec(t3), hk2))
+    return _put(x, torch.stack(made, -1), 0, kk - 1)
+
+# Reference-LAPACK SRC/dlaln2.f 276-601 with LTRANS = false, CA = 1, D1 = D2 = 1 on batch tensors: the NA x NA (1 or
+# 2, static) system (A - (WR + i WI)) X = SCALE B, NW = 1 (real WR) or 2 (WR + i WI). `a` is (A11,) or (A11, A12,
+# A21, A22) and `b` (and the returned X) B(1,1), B(2,1) [NA = 2], then B(1,2), B(2,2) [NW = 2]; returns (X, SCALE,
+# XNORM). SMINI = max(SMIN, 2 SAFMIN), the complete pivoting of CRV/CIV by the IPIVOT, RSWAP and ZSWAP tables, the
+# SMINI replacements and every SCALE/BNORM/BBND/XNORM overflow test; DLADIV is _divided
+def _dlaln2(na, nw, smin, a, b, wr, wi):
+    limits = torch.finfo(smin.dtype)
     smlnum = 2 * limits.tiny
     bignum = 1 / smlnum
-    one, zero = k(1), k(0)
-    smini = bigger(smin, k(smlnum))
+    zero = torch.zeros_like(smin)
+
+    def bigger(x, y):
+        return torch.where(x >= y, x, y)
 
     def bounded(norm, size):
-        return sel(_all(r, [r('lt', BOOL, size, one), r('gt', BOOL, norm, one), r('gt', BOOL, norm, mul(
-            k(bignum), size))]), r('div', t, one, norm), one)
+        return torch.where((size < 1) & (norm > 1) & (norm > bignum * size), 1 / norm, 1)
+    smini = torch.where(smin >= smlnum, smin, smlnum)
     if na == 1:
-        csr = sub(a[0], wr)
+        csr = a[0] - wr
         if nw == 1:
-            small = r('lt', BOOL, absolute(csr), smini)
-            cnorm = sel(small, smini, absolute(csr))
-            csr = sel(small, smini, csr)
-            scale = bounded(absolute(b[0]), cnorm)
-            x = r('div', t, mul(b[0], scale), csr)
-            return (x,), scale, absolute(x)
-        csi = r('neg', t, wi)
-        cnorm = add(absolute(csr), absolute(csi))
-        small = r('lt', BOOL, cnorm, smini)
-        csr, csi, cnorm = sel(small, smini, csr), sel(small, zero, csi), sel(small, smini, cnorm)
-        scale = bounded(add(absolute(b[0]), absolute(b[1])), cnorm)
-        xr, xi = divided((mul(scale, b[0]), mul(scale, b[1])), (csr, csi))
-        return (xr, xi), scale, add(absolute(xr), absolute(xi))
+            small = csr.abs() < smini
+            cnorm = torch.where(small, smini, csr.abs())
+            csr = torch.where(small, smini, csr)
+            scale = bounded(b[0].abs(), cnorm)
+            x = (b[0] * scale) / csr
+            return (x,), scale, x.abs()
+        csi = -wi
+        cnorm = csr.abs() + csi.abs()
+        small = cnorm < smini
+        csr, csi, cnorm = torch.where(small, smini, csr), torch.where(small, 0, csi), torch.where(small, smini, cnorm)
+        scale = bounded(b[0].abs() + b[1].abs(), cnorm)
+        xr, xi = _divided(scale * b[0], scale * b[1], csr, csi)
+        return (xr, xi), scale, xr.abs() + xi.abs()
     a11, a12, a21, a22 = a
-    crv = [sub(a11, wr), a21, a12, sub(a22, wr)]
-    civ = [r('neg', t, wi), zero, zero, r('neg', t, wi)] if nw == 2 else [zero] * 4
-    cmax, ic = zero, r.const(0, I32)
+    crv = [a11 - wr, a21, a12, a22 - wr]
+    civ = [-wi, zero, zero, -wi] if nw == 2 else [zero] * 4
+    cmax, ic = zero, torch.zeros_like(smin, dtype=torch.int64)
     for j in range(4):
-        size = absolute(crv[j]) if nw == 1 else add(absolute(crv[j]), absolute(civ[j]))
-        larger = r('gt', BOOL, size, cmax)
-        cmax, ic = sel(larger, size, cmax), r('select', I32, larger, r.const(j + 1, I32), ic)
+        size = crv[j].abs() if nw == 1 else crv[j].abs() + civ[j].abs()
+        larger = size > cmax
+        cmax, ic = torch.where(larger, size, cmax), torch.where(larger, j + 1, ic)
     pivot = {1: (1, 2, 3, 4), 2: (2, 1, 4, 3), 3: (3, 4, 1, 2), 4: (4, 3, 2, 1)}
 
     def picked(values, row):
         made = values[pivot[4][row] - 1]
         for column in (3, 2, 1):
-            made = sel(r('eq', BOOL, ic, r.const(column, I32)), values[pivot[column][row] - 1], made)
+            made = torch.where(ic == column, values[pivot[column][row] - 1], made)
         return made
-    rswap = r('or', BOOL, r('eq', BOOL, ic, r.const(2, I32)), r('eq', BOOL, ic, r.const(4, I32)))
-    zswap = r('or', BOOL, r('eq', BOOL, ic, r.const(3, I32)), r('eq', BOOL, ic, r.const(4, I32)))
-    identity = r('lt', BOOL, cmax, smini)
+    rswap, zswap = (ic == 2) | (ic == 4), (ic == 3) | (ic == 4)
+    identity = cmax < smini
     if nw == 1:
         b11, b21 = b
-        bnorm = bigger(absolute(b11), absolute(b21))
+        bnorm = bigger(b11.abs(), b21.abs())
         held = bounded(bnorm, smini)
-        temp = r('div', t, held, smini)
-        plain = ((mul(temp, b11), mul(temp, b21)), held, mul(temp, bnorm))
+        temp = held / smini
+        plain = ((temp * b11, temp * b21), held, temp * bnorm)
         ur11, cr21, ur12, cr22 = (picked(crv, row) for row in range(4))
-        ur11r = r('div', t, one, ur11)
-        lr21 = mul(ur11r, cr21)
-        ur22 = sub(cr22, mul(ur12, lr21))
-        ur22 = sel(r('lt', BOOL, absolute(ur22), smini), smini, ur22)
-        br1, br2 = sel(rswap, b21, b11), sel(rswap, b11, b21)
-        br2 = sub(br2, mul(lr21, br1))
-        bbnd = bigger(absolute(mul(br1, mul(ur22, ur11r))), absolute(br2))
-        scale = sel(_all(r, [r('gt', BOOL, bbnd, one), r('lt', BOOL, absolute(ur22), one), r(
-            'ge', BOOL, bbnd, mul(k(bignum), absolute(ur22)))]), r('div', t, one, bbnd), one)
-        xr2 = r('div', t, mul(br2, scale), ur22)
-        xr1 = sub(mul(mul(scale, br1), ur11r), mul(xr2, mul(ur11r, ur12)))
-        x = [sel(zswap, xr2, xr1), sel(zswap, xr1, xr2)]
-        xnorm = bigger(absolute(xr1), absolute(xr2))
+        ur11r = 1 / ur11
+        lr21 = ur11r * cr21
+        ur22 = cr22 - ur12 * lr21
+        ur22 = torch.where(ur22.abs() < smini, smini, ur22)
+        br1, br2 = torch.where(rswap, b21, b11), torch.where(rswap, b11, b21)
+        br2 = br2 - lr21 * br1
+        bbnd = bigger((br1 * (ur22 * ur11r)).abs(), br2.abs())
+        scale = torch.where((bbnd > 1) & (ur22.abs() < 1) & (bbnd >= bignum * ur22.abs()), 1 / bbnd, 1)
+        xr2 = (br2 * scale) / ur22
+        xr1 = (scale * br1) * ur11r - xr2 * (ur11r * ur12)
+        x = [torch.where(zswap, xr2, xr1), torch.where(zswap, xr1, xr2)]
+        xnorm = bigger(xr1.abs(), xr2.abs())
     else:
         b11, b21, b12, b22 = b
-        bnorm = bigger(add(absolute(b11), absolute(b12)), add(absolute(b21), absolute(b22)))
+        bnorm = bigger(b11.abs() + b12.abs(), b21.abs() + b22.abs())
         held = bounded(bnorm, smini)
-        temp = r('div', t, held, smini)
-        plain = (tuple(mul(temp, v) for v in b), held, mul(temp, bnorm))
+        temp = held / smini
+        plain = (tuple(temp * v for v in b), held, temp * bnorm)
         ur11, cr21, ur12, cr22 = (picked(crv, row) for row in range(4))
         ui11, ci21, ui12, ci22 = (picked(civ, row) for row in range(4))
-        wide = r('gt', BOOL, absolute(ur11), absolute(ui11))
-        ratio = sel(wide, r('div', t, ui11, ur11), r('div', t, ur11, ui11))
-        grown = add(one, mul(ratio, ratio))
-        ur11r_a = sel(wide, r('div', t, one, mul(ur11, grown)), r('neg', t, mul(ratio, r('div', t, k(-1), mul(
-            ui11, grown)))))
-        ui11r_a = sel(wide, r('neg', t, mul(ratio, r('div', t, one, mul(ur11, grown)))), r('div', t, k(-1), mul(
-            ui11, grown)))
-        offreal = r('or', BOOL, r('eq', BOOL, ic, r.const(1, I32)), r('eq', BOOL, ic, r.const(4, I32)))
-        ur11r = sel(offreal, ur11r_a, r('div', t, one, ur11))
-        ui11r = sel(offreal, ui11r_a, zero)
-        lr21 = sel(offreal, mul(cr21, ur11r), mul(cr21, ur11r))
-        li21 = sel(offreal, mul(cr21, ui11r), mul(ci21, ur11r))
-        ur12s = mul(ur12, ur11r)
-        ui12s = sel(offreal, mul(ur12, ui11r), mul(ui12, ur11r))
-        ur22 = sel(offreal, sub(cr22, mul(ur12, lr21)), add(sub(cr22, mul(ur12, lr21)), mul(ui12, li21)))
-        ui22 = sel(offreal, sub(ci22, mul(ur12, li21)), sub(r('neg', t, mul(ur12, li21)), mul(ui12, lr21)))
-        u22abs = add(absolute(ur22), absolute(ui22))
-        small = r('lt', BOOL, u22abs, smini)
-        ur22, ui22 = sel(small, smini, ur22), sel(small, zero, ui22)
-        br1, br2 = sel(rswap, b21, b11), sel(rswap, b11, b21)
-        bi1, bi2 = sel(rswap, b22, b12), sel(rswap, b12, b22)
-        br2 = add(sub(br2, mul(lr21, br1)), mul(li21, bi1))
-        bi2 = sub(sub(bi2, mul(li21, br1)), mul(lr21, bi1))
-        bbnd = bigger(mul(add(absolute(br1), absolute(bi1)), mul(u22abs, add(absolute(ur11r), absolute(ui11r)))),
-                      add(absolute(br2), absolute(bi2)))
-        rescaled = _all(r, [r('gt', BOOL, bbnd, one), r('lt', BOOL, u22abs, one), r(
-            'ge', BOOL, bbnd, mul(k(bignum), u22abs))])
-        scale = sel(rescaled, r('div', t, one, bbnd), one)
-        br1, bi1, br2, bi2 = (sel(rescaled, mul(scale, v), v) for v in (br1, bi1, br2, bi2))
-        xr2, xi2 = divided((br2, bi2), (ur22, ui22))
-        xr1 = add(sub(sub(mul(ur11r, br1), mul(ui11r, bi1)), mul(ur12s, xr2)), mul(ui12s, xi2))
-        xi1 = sub(sub(add(mul(ui11r, br1), mul(ur11r, bi1)), mul(ui12s, xr2)), mul(ur12s, xi2))
-        x = [sel(zswap, xr2, xr1), sel(zswap, xr1, xr2), sel(zswap, xi2, xi1), sel(zswap, xi1, xi2)]
-        xnorm = bigger(add(absolute(xr1), absolute(xi1)), add(absolute(xr2), absolute(xi2)))
-    further = _all(r, [r('gt', BOOL, xnorm, one), r('gt', BOOL, cmax, one), r(
-        'gt', BOOL, xnorm, r('div', t, k(bignum), cmax))])
-    temp = r('div', t, cmax, k(bignum))
-    x = [sel(further, mul(temp, v), v) for v in x]
-    xnorm, scale = sel(further, mul(temp, xnorm), xnorm), sel(further, mul(temp, scale), scale)
-    return (tuple(sel(identity, p, v) for p, v in zip(plain[0], x)), sel(identity, plain[1], scale),
-            sel(identity, plain[2], xnorm))
-
-
-# Reference-LAPACK SRC/zlarfg.f 144-211 with N = 2, in one region: ALPHA and X (complex record values) to (ALPHA on
-# exit, BETA real; TAU; X on exit). Its KNT rescaling loop (at most 20 passes, the source's bound) and the undo are
-# unrolled; SAFMIN = DLAMCH('S') / DLAMCH('E')
-def _larfg2(r, t, alpha, x, limits):
-    def c(value):
-        return r.const(value, t)
-
-    def chosen(test, a, b):
-        return _chosen(r, t, test, a, b)
-    safmin = limits.tiny / (limits.eps / 2)
-    rsafmn, zero = 1 / safmin, c(0)
-    ar, ai = _complex_parts(r, t, alpha)
-    xv = _complex_parts(r, t, x)
-    trivial = r('and', BOOL, r('eq', BOOL, _modulus(r, t, xv), zero), r('eq', BOOL, ai, zero))
-
-    def signed(re, im, norm):
-        d = _dlapy3(r, t, re, im, norm, limits.max)
-        return r('select', t, r('lt', BOOL, re, zero), d, r('neg', t, d))
-    beta = signed(ar, ai, _modulus(r, t, xv))
-    small = r('lt', BOOL, r('abs', t, beta), c(safmin))
-    large = r('and', BOOL, r('not', BOOL, small), r('gt', BOOL, r('abs', t, beta), c(limits.max / 2)))
-    running, knt, sb, sr, si, sx = small, r.const(0, I32), beta, ar, ai, xv
-    for _ in range(20):
-        knt = r('select', I32, running, r('add', I32, knt, r.const(1, I32)), knt)
-        sx = chosen(running, _real_scaled(r, t, sx, c(rsafmn)), sx)
-        sb, si, sr = (r('select', t, running, r('mul', t, v, c(rsafmn)), v) for v in (sb, si, sr))
-        running = r('and', BOOL, running, r('lt', BOOL, r('abs', t, sb), c(safmin)))
-    lx, lr, li = _real_scaled(r, t, xv, c(safmin)), r('mul', t, ar, c(safmin)), r('mul', t, ai, c(safmin))
-    fx = chosen(small, sx, chosen(large, lx, xv))
-    fr = r('select', t, small, sr, r('select', t, large, lr, ar))
-    fi = r('select', t, small, si, r('select', t, large, li, ai))
-    rescaled = r('or', BOOL, small, large)
-    fb = r('select', t, rescaled, signed(fr, fi, _modulus(r, t, fx)), beta)
-    tau = (r('div', t, r('sub', t, fb, fr), fb), r('div', t, r('neg', t, fi), fb))
-    inverse = _complex_value(r, t, 'div', (c(1), zero), (r('sub', t, fr, fb), fi), 1, None)
-    made = _complex_value(r, t, 'mul', inverse, fx, 1, None)
-    undone = fb
-    for j in range(20):
-        undone = r('select', t, r('gt', BOOL, knt, r.const(j, I32)), r('mul', t, undone, c(safmin)), undone)
-    undone = r('select', t, large, r('mul', t, undone, c(rsafmn)), undone)
-    return (r('select', t, trivial, ar, undone), chosen(trivial, (zero, zero), tau), chosen(trivial, xv, made))
-
-
-# Reference-LAPACK SRC/zlahqr.f 250-573 on one complex upper Hessenberg member h in place: WANTT = WANTZ = (z given),
-# ILOZ = ILO and IHIZ = IHI (zgeev/zhseqr). w (complex, n) receives W(ILO..IHI); ilo, ihi and info are one-element
-# int32 (INFO = 0, or I where the source fails); `held` holds the caller's temporaries the iteration carries. One
-# _Repeat pass is one DO 130 iteration: labels 30 and 140 are flattened (on deflation W(I) = H(I,I), KDEFL = 0,
-# I = L - 1, then L = ILO and ITS = 0), so ITS runs 0..ITMAX for each I. The searches over K and M take the first hit
-# from the top as the largest. Each bulge step K = M..I-1 is a static position with its actual active extents
-def _zlahqr(h, z, w, ilo, ihi, info, ops, held=()):
-    n, t, real, dtype = h.shape[-1], _class(h.real), h.real.dtype, h.dtype
-    limits, want = torch.finfo(real), z is not None
-    safmin, ulp = limits.tiny, limits.eps
-    ops += _fill(info, 0)
-    if not n:
-        return
-    (i, lo, its, kdefl, more, span, base, i1, i2, i1z, kfound, go, cut, mspan, mfound, m, fl, erow, ecol, ezz, iz,
-     ip) = (_temporary((1,), torch.int32) for _ in range(22))
-    shift, v1, v2, t1, vv2, tmp = (_temporary((1,), dtype) for _ in range(6))
-    beta, t2, rt = (_temporary((1,), real) for _ in range(3))
-    sites = max(n - 1, 1)
-    fresh, eleft, eright, ez, erows, ecols, ezc = (_temporary((sites,), torch.int32) for _ in range(7))
-    carried = (*held, h, *([z] if want else []), w, ilo, ihi, info, i, lo, its, kdefl, more, span, base, i1, i2, i1z,
-               kfound, go, cut, mspan, mfound, m, fl, erow, ecol, ezz, iz, ip, shift, v1, v2, t1, vv2, tmp, beta, t2,
-               rt, fresh, eleft, eright, ez, erows, ecols, ezc)
-
-    def c(r, value):
-        return r.const(value, t)
-
-    def k(r, value):
-        return r.const(value, I32)
-
-    def flag(r, x):
-        return _convert(r, x, BOOL, I32)
-
-    def larger(r, a, b, kind):
-        return r('select', kind, r('ge', BOOL, a, b), a, b)
-
-    def smaller(r, a, b, kind):
-        return r('select', kind, r('le', BOOL, a, b), a, b)
-
-    def at(r, slot, row, column):
-        return _entry(r, t, slot, h, _bounded(r, row, n)[1], _bounded(r, column, n)[1])
-
-    def smallest(r, low, high):
-        nh = r('add', I32, r('sub', I32, high, low), k(r, 1))
-        return r('mul', t, c(r, safmin), r('div', t, r('cast', t, nh), c(r, ulp)))
-
-    def divided(r, x, s):
-        return tuple(r('div', t, p, s) for p in _complex_parts(r, t, x))
-
-    # 250 and 262-267, with the state at label 30 (I = IHI, L = ILO, ITS = 0, KDEFL = 0; I1 = 1, I2 = N where WANTT):
-    # the trash, H(J+2,J) for J = ILO..IHI-2 (H(IHI,IHI-2) the last) and H(J+3,J) for J = ILO..IHI-3, zero
-    def started(r, v):
-        low, high = v
-        zero, one = k(r, 0), k(r, 1)
-        return [(r('sub', I32, low, one), I32), (high, I32), (low, I32), (zero, I32), (zero, I32),
-                (flag(r, r('ge', BOOL, high, low)), I32), (r('sub', I32, high, low), I32), (one, I32),
-                (k(r, n), I32), (zero, I32)] + [(larger(r, r('sub', I32, r('sub', I32, high, low), k(r, d)), zero, I32),
-                                                 I32) for d in (1, 2)]
-    ops += _scalars([base, i, lo, its, kdefl, more, span, i1, i2, i1z, erow, ecol], [ilo, ihi], started)
-    for band, extent in ((2, erow), (3, ecol)):
-        if n > band:
-            trash = h[...]
-            _emit(ops, _record((n - band,), [(trash, ({0: 1, None: band}, 0))], [], lambda r, v: [(c(r, 0), t)]),
-                  loops=((extent, n - band),), offsets=[(trash, {0: (base, n - 1), 1: (base, n - 1)})])
-
-    # 269-291: each subdiagonal H(I,I-1), I = ILO+1..IHI in order, made real: SC = conj(H/CABS1(H)) / |H/CABS1(H)|,
-    # H(I,I-1) = |H(I,I-1)|, row I (columns I..JHI) by SC, column I (rows JLO..min(JHI, I+1)) and Z's by conj(SC)
-    for row in range(2, n + 1):
-        def realized(r, v, row=row):
-            x, low, high = v
-            zero = k(r, 0)
-            active = _all(r, [r('le', BOOL, r('add', I32, low, k(r, 1)), k(r, row)), r('le', BOOL, k(r, row), high),
-                              r('ne', BOOL, _part(r, t, x, 1), c(r, 0))])
-            safe = r('select', t, active, _cabs1(r, t, x), c(r, 1))
-            first = divided(r, x, safe)
-            norm = r('select', t, active, _modulus(r, t, first), c(r, 1))
-            sc = divided(r, _conjugate(r, t, first), norm)
-            jhi, jlo = (k(r, n), k(r, 1)) if want else (high, low)
-            spans = [r('add', I32, r('sub', I32, jhi, k(r, row)), k(r, 1)),
-                     r('add', I32, r('sub', I32, smaller(r, jhi, k(r, row + 1), I32), jlo), k(r, 1)),
-                     r('add', I32, r('sub', I32, high, low), k(r, 1))]
-            return [(_chosen(r, t, active, _modulus(r, t, x), x), t), (sc, t)] + [
-                (r('select', I32, active, x, zero), I32) for x in spans]
-        entry = h[row - 1:row, row - 2]
-        ops += _scalars([entry, tmp, erow, ecol, ezz], [entry, ilo, ihi], realized)
-        line = h[row - 1, row - 1:]
-        _emit(ops, _record((n - row + 1,), [(line, (0,))], [(line, (0,)), (tmp, (None,))], lambda r, v: [(_times(
-            r, t, v[1], v[0]), t)]), loops=((erow, n - row + 1),))
-        for target, at_row, extent in ((h, None if want else base, ecol), (z, base, ezz)):
-            if target is None:
-                continue
-            column = target[:, row - 1]
-            _emit(ops, _record((n,), [(column, (0,))], [(column, (0,)), (tmp, (None,))], lambda r, v: [(_times(
-                r, t, _conjugate(r, t, v[1]), v[0]), t)]), loops=((extent, n),),
-                  offsets=[(column, {0: (at_row, n - 1)})] if at_row is not None else [])
-
-    # 338-367: the K search over L+1..I (`span` = I - L entries): CABS1(H(K,K-1)) <= SMLNUM, or Ahues and Tisseur's
-    # test where |Re H(K,K-1)| <= ULP TST (TST zero: |Re H(K-1,K-2)| where K-2 >= ILO, |Re H(K+1,K)| where K+1 <= IHI)
-    def deflated(r, v):
-        low, first, last, slot = v
-        kk = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
-        one, two, three = k(r, 1), k(r, 2), k(r, 3)
-        sub, dkm, dk = at(r, slot, r('sub', I32, kk, one), r('sub', I32, kk, two)), \
-            at(r, slot, r('sub', I32, kk, two), r('sub', I32, kk, two)), at(r, slot, r('sub', I32, kk, one), r(
-                'sub', I32, kk, one))
-        sup = at(r, slot, r('sub', I32, kk, two), r('sub', I32, kk, one))
-        before = at(r, slot, r('sub', I32, kk, two), r('sub', I32, kk, three))
-        after = at(r, slot, kk, r('sub', I32, kk, one))
-        smlnum = smallest(r, first, last)
-        tst = r('add', t, _cabs1(r, t, dkm), _cabs1(r, t, dk))
-        grown = r('select', t, r('ge', BOOL, r('sub', I32, kk, two), first), r('add', t, tst, r(
-            'abs', t, _part(r, t, before, 0))), tst)
-        grown = r('select', t, r('le', BOOL, r('add', I32, kk, one), last), r('add', t, grown, r(
-            'abs', t, _part(r, t, after, 0))), grown)
-        tst = r('select', t, r('eq', BOOL, tst, c(r, 0)), grown, tst)
-        ab = larger(r, _cabs1(r, t, sub), _cabs1(r, t, sup), t)
-        ba = smaller(r, _cabs1(r, t, sub), _cabs1(r, t, sup), t)
-        gap = _cabs1(r, t, _plus(r, t, dkm, dk, 'sub'))
-        aa, bb = larger(r, _cabs1(r, t, dk), gap, t), smaller(r, _cabs1(r, t, dk), gap, t)
-        s = r('add', t, aa, ab)
-        criterion = r('le', BOOL, r('mul', t, ba, r('div', t, ab, s)), larger(r, smlnum, r('mul', t, c(r, ulp), r(
-            'mul', t, bb, r('div', t, aa, s))), t))
-        hit = r('or', BOOL, r('le', BOOL, _cabs1(r, t, sub), smlnum), r('and', BOOL, r(
-            'le', BOOL, r('abs', t, _part(r, t, sub, 0)), r('mul', t, c(r, ulp), tst)), criterion))
-        return [(r('select', I32, hit, kk, k(r, 0)), I32)]
-    passes = []
-    if n > 1:
-        _emit(passes, _record_extreme((n - 1,), kfound, (None,), [(lo, (None,)), (ilo, (None,)), (ihi, (None,)),
-                                                                   (h, None)], deflated, [REDUCTION]),
-              loops=((span, n - 1),))
-    else:
-        passes += _fill(kfound, 0)
-
-    # 366-420: L = K, H(L,L-1) = 0 where L > ILO (`cut`), the exit (L >= I: W(I) = H(I,I), label 140), else
-    # KDEFL += 1, I1 = L and I2 = I where not WANTT, and the shift T: exceptional at mod(KDEFL, 2 KEXSH) = 0
-    # (DAT1 |Re H(I,I-1)| + H(I,I)) and mod(KDEFL, KEXSH) = 0 (DAT1 |Re H(L+1,L)| + H(L,L)), else Wilkinson's
-    def stepped(r, v):
-        found, low, top, first, defl, count, slot = v
-        zero, one = k(r, 0), k(r, 1)
-        new = larger(r, found, low, I32)
-        leave = r('ge', BOOL, new, top)
-        diagonal = at(r, slot, r('sub', I32, top, one), r('sub', I32, top, one))
-        for part in (0, 1):
-            r.scatter(0, [_bounded(r, r('sub', I32, top, one), n)[1], k(r, part)], _part(r, t, diagonal, part), leave)
-        kd = r('add', I32, defl, one)
-        two = k(r, 2)
-        hii, hii1 = diagonal, at(r, slot, r('sub', I32, top, one), r('sub', I32, top, two))
-        hl1l, hll = at(r, slot, new, r('sub', I32, new, one)), at(r, slot, r('sub', I32, new, one), r(
-            'sub', I32, new, one))
-        him, himm = at(r, slot, r('sub', I32, top, two), r('sub', I32, top, one)), \
-            at(r, slot, r('sub', I32, top, two), r('sub', I32, top, two))
-        hii = _complex_parts(r, t, hii)
-        exceptional = [(r('add', t, r('mul', t, c(r, 0.75), r('abs', t, _part(r, t, x, 0))), _part(r, t, d, 0)),
-                        _part(r, t, d, 1)) for x, d in ((hii1, hii), (hl1l, hll))]
-        u = _complex_value(r, t, 'mul', _complex_value(r, t, 'sqrt', _complex_parts(r, t, him), None, 1, None),
-                           _complex_value(r, t, 'sqrt', _complex_parts(r, t, hii1), None, 1, None), 1, None)
-        su = _cabs1(r, t, u)
-        x = _real_scaled(r, t, _plus(r, t, himm, hii, 'sub'), c(r, 0.5))
-        sx = _cabs1(r, t, x)
-        s = larger(r, su, sx, t)
-        safe = r('select', t, r('eq', BOOL, s, c(r, 0)), c(r, 1), s)
-        xs, us = divided(r, x, safe), divided(r, u, safe)
-        y = _real_scaled(r, t, _complex_value(r, t, 'sqrt', _plus(r, t, _times(r, t, xs, xs), _times(r, t, us, us)),
-                                              None, 1, None), s)
-        unit = divided(r, x, r('select', t, r('gt', BOOL, sx, c(r, 0)), sx, c(r, 1)))
-        flip = r('and', BOOL, r('gt', BOOL, sx, c(r, 0)), r('lt', BOOL, r('add', t, r(
-            'mul', t, unit[0], _part(r, t, y, 0)), r('mul', t, unit[1], _part(r, t, y, 1))), c(r, 0)))
-        y = _chosen(r, t, flip, _negated(r, t, y), y)
-        wilkinson = _chosen(r, t, r('ne', BOOL, su, c(r, 0)), _plus(r, t, hii, _times(r, t, u, _complex_value(
-            r, t, 'div', u, _plus(r, t, x, y), 1, None)), 'sub'), hii)
-        shifted = _chosen(r, t, r('eq', BOOL, r('rem', I32, kd, k(r, 20)), zero), exceptional[0], _chosen(
-            r, t, r('eq', BOOL, r('rem', I32, kd, k(r, 10)), zero), exceptional[1], wilkinson))
-        stay = r('not', BOOL, leave)
-        edge = (one, k(r, n)) if want else (new, top)
-        return [(diagonal, t), (r('select', I32, leave, first, new), I32),
-                (r('select', I32, leave, r('sub', I32, new, one), top), I32), (r('select', I32, leave, zero, kd), I32),
-                (r('select', I32, leave, zero, count), I32), (flag(r, stay), I32),
-                (r('select', I32, r('gt', BOOL, new, first), new, zero), I32), (edge[0], I32), (edge[1], I32),
-                (r('sub', I32, edge[0], one), I32),
-                (r('select', I32, stay, larger(r, r('sub', I32, r('sub', I32, top, one), new), zero, I32), zero), I32),
-                (shifted, t)]
-    passes += _record((1,), [(w, None)] + [(x, (None,)) for x in (lo, i, kdefl, its, go, cut, i1, i2, i1z, mspan,
-                                                                    shift)],
-                      [(x, (None,)) for x in (kfound, lo, i, ilo, kdefl, its)] + [(h, None)], stepped)
-
-    def severed(r, v):
-        for part in (0, 1):
-            r.scatter(0, [_bounded(r, r('sub', I32, v[0], k(r, 1)), n)[1], _bounded(r, r('sub', I32, v[0], k(r, 2)),
-                                                                                  n)[1], k(r, part)],
-                      c(r, 0), r('gt', BOOL, v[0], k(r, 0)))
-        return [(c(r, 0), t)]
-    passes += _record((1,), [(h, None)], [(cut, (None,))], severed)
-
-    # 424-453: the M search over L+1..I-1 (`mspan` entries), |H10| |H21| <= ULP CABS1(H11S) (CABS1(H11) + CABS1(H22))
-    # of the scaled H11S = (H(M,M) - T) / S and H21 = Re H(M+1,M) / S; M = L where none, V = (H11S, H21) at M
-    def leading(r, slot, mm, shifted):
-        one = k(r, 1)
-        h11, h22 = at(r, slot, r('sub', I32, mm, one), r('sub', I32, mm, one)), at(r, slot, mm, mm)
-        h21 = _part(r, t, at(r, slot, mm, r('sub', I32, mm, one)), 0)
-        h11s = _plus(r, t, h11, shifted, 'sub')
-        s = r('add', t, _cabs1(r, t, h11s), r('abs', t, h21))
-        return h11, h22, divided(r, h11s, s), r('div', t, h21, s)
-
-    def bulged(r, v):
-        low, shifted, slot = v
-        mm = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
-        h11, h22, h11s, h21 = leading(r, slot, mm, shifted)
-        h10 = _part(r, t, at(r, slot, r('sub', I32, mm, k(r, 1)), r('sub', I32, mm, k(r, 2))), 0)
-        hit = r('le', BOOL, r('mul', t, r('abs', t, h10), r('abs', t, h21)), r('mul', t, c(r, ulp), r(
-            'mul', t, _cabs1(r, t, h11s), r('add', t, _cabs1(r, t, h11), _cabs1(r, t, h22)))))
-        return [(r('select', I32, hit, mm, k(r, 0)), I32)]
-
-    def started_at(r, v):
-        found, low, shifted, slot = v
-        mm = larger(r, found, low, I32)
-        _, _, h11s, h21 = leading(r, slot, mm, shifted)
-        return [(mm, I32), (h11s, t), (h21, t)]
-    if n > 1:
-        _emit(passes, _record_extreme((n - 1,), mfound, (None,), [(lo, (None,)), (shift, (None,)), (h, None)], bulged,
-                                      [REDUCTION]), loops=((mspan, n - 1),))
-        passes += _record((1,), [(m, (None,)), (v1, (None,)), (v2, (None,))],
-                          [(mfound, (None,)), (lo, (None,)), (shift, (None,)), (h, None)], started_at)
-
-        # 457-535: each static position K = 1..n-1 active where M <= K <= I-1, its actual extents: rows K, K+1 over
-        # columns K..I2; columns K, K+1 over rows I1..min(K+2, I) and Z's over ILO..IHI; at K = M > L the extra
-        # scaling over rows I1..I and columns M..I2 (Z's columns M..I)
-        def placed(r, v):
-            mm, top, first_row, last_column, low, alive, first, last = v
-            kk, zero, one = r('add', I32, r.index(0), k(r, 1)), k(r, 0), k(r, 1)
-            active = _all(r, [r('ne', BOOL, alive, zero), r('le', BOOL, mm, kk), r('le', BOOL, kk, r('sub', I32, top,
-                                                                                                         one))])
-            extra = _all(r, [active, r('eq', BOOL, kk, mm), r('gt', BOOL, mm, low)])
-            spans = [(active, r('add', I32, r('sub', I32, last_column, kk), one)),
-                     (active, r('add', I32, r('sub', I32, smaller(r, r('add', I32, kk, k(r, 2)), top, I32),
-                                                       first_row), one)),
-                     (active, r('add', I32, r('sub', I32, last, first), one)),
-                     (extra, r('add', I32, r('sub', I32, top, first_row), one)),
-                     (extra, r('add', I32, r('sub', I32, last_column, mm), one)),
-                     (extra, r('add', I32, r('sub', I32, top, mm), one))]
-            return [(flag(r, r('and', BOOL, active, r('gt', BOOL, kk, mm))), I32)] + [
-                (r('select', I32, test, size, zero), I32) for test, size in spans]
-        passes += _record((n - 1,), [(x, (0,)) for x in (fresh, eleft, eright, ez, erows, ecols, ezc)],
-                          [(x, (None,)) for x in (m, i, i1, i2, lo, go, ilo, ihi)], placed)
-
-        def swept(r, v):
-            a, b, tau, real_t2, x2 = v
-            s = _plus(r, t, _times(r, t, tau, a), _times(r, t, real_t2, b))
-            return [(_plus(r, t, a, s, 'sub'), t), (_plus(r, t, b, _times(r, t, s, _conjugate(r, t, x2)), 'sub'), t)]
-
-        def chased(r, v):
-            a, b, tau, real_t2, x2 = v
-            s = _plus(r, t, _times(r, t, _conjugate(r, t, tau), a), _times(r, t, real_t2, b))
-            return [(_plus(r, t, a, s, 'sub'), t), (_plus(r, t, b, _times(r, t, s, x2), 'sub'), t)]
-        reflector = [(x, (None,)) for x in (t1, t2, vv2)]
-        for kk in range(1, n):
-            k0, own = kk - 1, (lambda x, k0=kk - 1: x[k0:k0 + 1])
-
-            # V from H(K,K-1), H(K+1,K-1) where K > M (else V at M), ZLARFG(2, V(1), V(2)), T2 = Re(T1 V2)
-            def reflected(r, v, kk=kk):
-                if kk > 1:
-                    first, second, renewed, top, below = v
-                    test = r('ne', BOOL, renewed, k(r, 0))
-                    alpha, x = _chosen(r, t, test, top, first), _chosen(r, t, test, below, second)
-                else:
-                    alpha, x = v[0], v[1]
-                b, tau, made = _larfg2(r, t, alpha, x, limits)
-                return [(b, t), (tau, t), (made, t), (_complex_value(r, t, 'mul', tau, made, 1, None)[0], t)]
-            given = [(v1, (None,)), (v2, (None,)), (own(fresh), (None,))]
-            if kk > 1:
-                given += [(h[k0:k0 + 1, k0 - 1], (None,)), (h[k0 + 1:k0 + 2, k0 - 1], (None,))]
-            passes += _record((1,), [(beta, (None,)), (t1, (None,)), (vv2, (None,)), (t2, (None,))], given, reflected)
-            if kk > 1:
-                pair = h[k0:k0 + 2, k0 - 1]
-                passes += _record((2,), [(pair, (0,))], [(pair, (0,)), (beta, (None,)), (own(fresh), (None,))],
-                                  lambda r, v: [(_chosen(r, t, r('ne', BOOL, v[2], k(r, 0)), _chosen(
-                                      r, t, r('eq', BOOL, r.index(0), k(r, 0)), v[1], c(r, 0)), v[0]), t)])
-            upper, lower = h[k0, k0:], h[k0 + 1, k0:]
-            _emit(passes, _record((n - k0,), [(upper, (0,)), (lower, (0,))],
-                                  [(upper, (0,)), (lower, (0,))] + reflector, chased),
-                  loops=((own(eleft), n - k0),))
-            for target, at_row, extent in ((h, i1z, eright), (z, base, ez)):
-                if target is None:
-                    continue
-                left_column, right_column = target[:, k0], target[:, k0 + 1]
-                _emit(passes, _record((n,), [(left_column, (0,)), (right_column, (0,))],
-                                      [(left_column, (0,)), (right_column, (0,))] + reflector, swept),
-                      loops=((own(extent), n),), offsets=[(left_column, {0: (at_row, n - 1)}),
-                                                          (right_column, {0: (at_row, n - 1)})])
-
-            # 510-534: TEMP = (1 - T1) / |1 - T1|; H(M+1,M) by conj(TEMP), H(M+2,M+1) by TEMP where M+2 <= I, then for
-            # J = M..I, J /= M+1: row J's columns J+1..I2 by TEMP, column J's rows I1..J-1 (and Z's) by conj(TEMP)
-            def phase(r, tau):
-                d = _plus(r, t, (c(r, 1), c(r, 0)), tau, 'sub')
-                return divided(r, d, _modulus(r, t, d))
-
-            def rescaled(r, v, kk=kk):
-                x, tau, low_row, top, last_column = v
-                temp, one = phase(r, tau), k(r, 1)
-                p = r('add', I32, r('add', I32, low_row, one), r.index(0))
-                q = r('add', I32, k(r, kk), r.index(1))
-
-                def equal(a, value):
-                    return r('eq', BOOL, a, k(r, value))
-                tests = [(_all(r, [equal(p, kk + 1), equal(q, kk)]), _conjugate(r, t, temp)),
-                         (_all(r, [equal(p, kk + 2), equal(q, kk + 1), r('le', BOOL, k(r, kk + 2), top)]), temp),
-                         (_all(r, [r('le', BOOL, k(r, kk), p), r('le', BOOL, p, top), r('not', BOOL, equal(p, kk + 1)),
-                                   r('le', BOOL, r('add', I32, p, one), q), r('le', BOOL, q, last_column)]), temp),
-                         (_all(r, [r('le', BOOL, q, top), r('not', BOOL, equal(q, kk + 1)),
-                                   r('le', BOOL, r('add', I32, p, one), q)]), _conjugate(r, t, temp))]
-                for test, factor in tests:
-                    x = _chosen(r, t, test, _times(r, t, factor, x), x)
-                return [(x, t)]
-            block = h[:, k0:]
-            _emit(passes, _record((n, n - k0), [(block, (0, 1))], [(block, (0, 1)), (t1, (None,)), (i1z, (None,)),
-                                                                    (i, (None,)), (i2, (None,))], rescaled),
-                  loops=((own(erows), n), (own(ecols), n - k0)), offsets=[(block, {0: (i1z, n - 1)})])
-            if want:
-                block = z[:, k0:]
-                _emit(passes, _record((n, n - k0), [(block, (0, 1))], [(block, (0, 1)), (t1, (None,))],
-                                      lambda r, v, kk=kk: [(_chosen(r, t, r('ne', BOOL, r(
-                                          'add', I32, k(r, kk), r.index(1)), k(r, kk + 1)), _times(
-                                          r, t, _conjugate(r, t, phase(r, v[1])), v[0]), v[0]), t)]),
-                      loops=((own(ez), n), (own(ezc), n - k0)), offsets=[(block, {0: (base, n - 1)})])
-
-    # 539-550: H(I,I-1) made real where its imaginary part is nonzero: RTEMP = |TEMP|, TEMP = TEMP / RTEMP, row I's
-    # columns I+1..I2 by conj(TEMP), column I's rows I1..I-1 and Z's rows ILOZ..IHIZ by TEMP
-    def realness(r, v):
-        top, alive, first_row, last_column, low, high, slot = v
-        zero, one = k(r, 0), k(r, 1)
-        x = at(r, slot, r('sub', I32, top, one), r('sub', I32, top, k(r, 2)))
-        turned = r('and', BOOL, r('ne', BOOL, alive, zero), r('ne', BOOL, _part(r, t, x, 1), c(r, 0)))
-        size = _modulus(r, t, x)
-        temp = divided(r, x, r('select', t, turned, size, c(r, 1)))
-        return [(temp, t), (size, t), (flag(r, turned), I32)] + [(r('select', I32, turned, s, zero), I32) for s in (
-            r('sub', I32, last_column, top), r('sub', I32, top, first_row), r('add', I32, r('sub', I32, high, low), one))] \
-            + [(_bounded(r, r('sub', I32, top, one), n)[1], I32), (_bounded(r, top, n)[1], I32)]
-    passes += _record((1,), [(x, (None,)) for x in (tmp, rt, fl, erow, ecol, ezz, iz, ip)],
-                      [(x, (None,)) for x in (i, go, i1, i2, ilo, ihi)] + [(h, None)], realness)
-
-    def settled(r, v):
-        size, turned, row = v
-        column, test = _bounded(r, r('sub', I32, row, k(r, 1)), n)[1], r('ne', BOOL, turned, k(r, 0))
-        r.scatter(0, [row, column, k(r, 0)], size, test)
-        r.scatter(0, [row, column, k(r, 1)], c(r, 0), test)
-        return [(c(r, 0), t)]
-    passes += _record((1,), [(h, None)], [(rt, (None,)), (fl, (None,)), (iz, (None,))], settled)
-    line = h[...]
-    _emit(passes, _record((n,), [(line, (None, 0))], [(line, (None, 0)), (tmp, (None,))], lambda r, v: [(_times(
-        r, t, _conjugate(r, t, v[1]), v[0]), t)]), loops=((erow, n),), offsets=[(line, {0: (iz, n - 1), 1: (ip, n - 1)})])
-    for target, at_row, extent in ((h, i1z, ecol), (z, base, ezz)):
-        if target is None:
-            continue
-        column = target[...]
-        _emit(passes, _record((n,), [(column, (0, None))], [(column, (0, None)), (tmp, (None,))], lambda r, v: [(_times(
-            r, t, v[1], v[0]), t)]), loops=((extent, n),), offsets=[(column, {0: (at_row, n - 1), 1: (iz, n - 1)})])
-
-    # 336 and 552-557: ITS += 1 after a sweep; past ITMAX = 30 max(10, NH) INFO = I (the source's failure), else the
-    # next DO 130 iteration while I >= ILO, its K search over I - L entries
-    def counted(r, v):
-        count, alive, top, low, high, failure, current = v
-        zero, one = k(r, 0), k(r, 1)
-        done = r('select', I32, r('ne', BOOL, alive, zero), r('add', I32, count, one), count)
-        itmax = r('mul', I32, k(r, 30), larger(r, k(r, 10), r('add', I32, r('sub', I32, high, low), one), I32))
-        fail = r('and', BOOL, r('ne', BOOL, alive, zero), r('gt', BOOL, done, itmax))
-        return [(done, I32), (r('select', I32, fail, top, failure), I32),
-                (flag(r, r('and', BOOL, r('not', BOOL, fail), r('ge', BOOL, top, low))), I32),
-                (larger(r, r('sub', I32, top, current), zero, I32), I32)]
-    passes += _scalars([its, info, more, span], [its, go, i, ilo, ihi, info, lo], counted)
-    ops.append(_Repeat(passes, more, carried))
-
-
-# Reference-LAPACK SRC/dlahqr.f 252-616 on one real upper Hessenberg member h in place: WANTT = WANTZ = (z given),
-# ILOZ = ILO and IHIZ = IHI (dgeev/dhseqr). wr and wi (real, n) receive WR/WI(ILO..IHI); ilo, ihi and info are
-# one-element int32 (INFO = 0, or I where the source fails); `held` holds the caller's temporaries the iteration
-# carries. One _Repeat pass is one DO 140 iteration: labels 20 and 150 are flattened (on deflation of one eigenvalue,
-# WR(I) = H(I,I), or of a pair, DLANV2 with its rotations of H and Z; then KDEFL = 0, I = L - 1, L = ILO, ITS = 0), so
-# ITS runs 0..ITMAX for each I. The K and M searches take the first hit from the top as the largest. Each double-shift
-# step K = M..I-1 is a static position with its actual extents, NR = min(3, I-K+1)
-def _dlahqr(h, z, wr, wi, ilo, ihi, info, ops, held=()):
-    n, t, real = h.shape[-1], _class(h), h.dtype
-    limits, want = torch.finfo(real), z is not None
-    safmin, ulp = limits.tiny, limits.eps
-    ops += _fill(info, 0)
-    if not n:
-        return
-    (i, lo, its, kdefl, more, span, base, i1, i2, i1z, kfound, go, cut, mspan, mfound, m, pair, erow, ecol, ezz, p1,
-     p2, p3) = (_temporary((1,), torch.int32) for _ in range(23))
-    rt1r, rt1i, rt2r, rt2i, v1, v2, v3, na, nb, nc, nd, cs, sn, beta, t1, t2, t3 = \
-        (_temporary((1,), real) for _ in range(17))
-    sites = max(n - 1, 1)
-    fresh, rlen, rtail, ewrite, eclear, l3, l2, r3, r2, z3, z2 = (_temporary((sites,), torch.int32) for _ in range(11))
-    carried = (*held, h, *([z] if want else []), wr, wi, ilo, ihi, info, i, lo, its, kdefl, more, span, base, i1, i2,
-               i1z, kfound, go, cut, mspan, mfound, m, pair, erow, ecol, ezz, p1, p2, p3, rt1r, rt1i, rt2r, rt2i, v1,
-               v2, v3, na, nb, nc, nd, cs, sn, beta, t1, t2, t3, fresh, rlen, rtail, ewrite, eclear, l3, l2, r3, r2,
-               z3, z2)
-
-    def c(r, value):
-        return r.const(value, t)
-
-    def k(r, value):
-        return r.const(value, I32)
-
-    def flag(r, x):
-        return _convert(r, x, BOOL, I32)
-
-    def larger(r, a, b, kind):
-        return r('select', kind, r('ge', BOOL, a, b), a, b)
-
-    def smaller(r, a, b, kind):
-        return r('select', kind, r('le', BOOL, a, b), a, b)
-
-    def at(r, slot, row, column):
-        return r('extract', t, _bounded(r, row, n)[1], _bounded(r, column, n)[1], integer=slot)
-
-    def less(r, x, value):
-        return r('sub', I32, x, k(r, value))
-
-    def absolute(r, x):
-        return r('abs', t, x)
-
-    # 252 and 265-305, the state at label 20 (I = IHI, L = ILO, ITS = 0, KDEFL = 0; I1 = 1, I2 = N where WANTT): the
-    # trash, H(J+2,J) for J = ILO..IHI-2 (H(IHI,IHI-2) the last) and H(J+3,J) for J = ILO..IHI-3, zero
-    def started(r, v):
-        low, high = v
-        zero, one = k(r, 0), k(r, 1)
-        return [(less(r, low, 1), I32), (high, I32), (low, I32), (zero, I32), (zero, I32),
-                (flag(r, r('ge', BOOL, high, low)), I32), (r('sub', I32, high, low), I32), (one, I32), (k(r, n), I32),
-                (zero, I32)] + [(larger(r, less(r, r('sub', I32, high, low), d), zero, I32), I32) for d in (1, 2)]
-    ops += _scalars([base, i, lo, its, kdefl, more, span, i1, i2, i1z, erow, ecol], [ilo, ihi], started)
-    for band, extent in ((2, erow), (3, ecol)):
-        if n > band:
-            trash = h[...]
-            _emit(ops, _record((n - band,), [(trash, ({0: 1, None: band}, 0))], [], lambda r, v: [(c(r, 0), t)]),
-                  loops=((extent, n - band),), offsets=[(trash, {0: (base, n - 1), 1: (base, n - 1)})])
-
-    # 319-344: the K search over L+1..I (`span` = I - L entries): |H(K,K-1)| <= SMLNUM (SAFMIN NH / ULP), or Ahues and
-    # Tisseur's test where |H(K,K-1)| <= ULP TST (TST zero: |H(K-1,K-2)| where K-2 >= ILO, |H(K+1,K)| where K+1 <= IHI)
-    def smallest(r, low, high):
-        nh = r('add', I32, r('sub', I32, high, low), k(r, 1))
-        return r('mul', t, c(r, safmin), r('div', t, r('cast', t, nh), c(r, ulp)))
-
-    def deflated(r, v):
-        low, first, last, slot = v
-        kk = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
-        sub, dkm, dk = at(r, slot, less(r, kk, 1), less(r, kk, 2)), at(r, slot, less(r, kk, 2), less(r, kk, 2)), \
-            at(r, slot, less(r, kk, 1), less(r, kk, 1))
-        sup, before, after = at(r, slot, less(r, kk, 2), less(r, kk, 1)), at(r, slot, less(r, kk, 2), less(r, kk, 3)), \
-            at(r, slot, kk, less(r, kk, 1))
-        smlnum = smallest(r, first, last)
-        tst = r('add', t, absolute(r, dkm), absolute(r, dk))
-        grown = r('select', t, r('ge', BOOL, less(r, kk, 2), first), r('add', t, tst, absolute(r, before)), tst)
-        grown = r('select', t, r('le', BOOL, r('add', I32, kk, k(r, 1)), last), r('add', t, grown, absolute(
-            r, after)), grown)
-        tst = r('select', t, r('eq', BOOL, tst, c(r, 0)), grown, tst)
-        ab, ba = larger(r, absolute(r, sub), absolute(r, sup), t), smaller(r, absolute(r, sub), absolute(r, sup), t)
-        gap = absolute(r, r('sub', t, dkm, dk))
-        aa, bb = larger(r, absolute(r, dk), gap, t), smaller(r, absolute(r, dk), gap, t)
-        s = r('add', t, aa, ab)
-        criterion = r('le', BOOL, r('mul', t, ba, r('div', t, ab, s)), larger(r, smlnum, r('mul', t, c(r, ulp), r(
-            'mul', t, bb, r('div', t, aa, s))), t))
-        hit = r('or', BOOL, r('le', BOOL, absolute(r, sub), smlnum), r('and', BOOL, r(
-            'le', BOOL, absolute(r, sub), r('mul', t, c(r, ulp), tst)), criterion))
-        return [(r('select', I32, hit, kk, k(r, 0)), I32)]
-    passes = []
-    if n > 1:
-        _emit(passes, _record_extreme((n - 1,), kfound, (None,), [(lo, (None,)), (ilo, (None,)), (ihi, (None,)),
-                                                                   (h, None)], deflated, [REDUCTION]),
-              loops=((span, n - 1),))
-    else:
-        passes += _fill(kfound, 0)
-
-    # 346-435 and 570-613: L = K, H(L,L-1) = 0 where L > ILO (`cut`); L >= I-1 the exit (L = I: WR(I) = H(I,I),
-    # WI(I) = 0; L = I-1: DLANV2 of the trailing 2 x 2, its WR/WI pair and rotation); else KDEFL += 1, I1 = L and
-    # I2 = I where not WANTT, and the shifts: exceptional at mod(KDEFL, 2 KEXSH) = 0 (at I) and mod(KDEFL, KEXSH) = 0
-    # (at L), DAT1 = 3/4 and DAT2 = -0.4375, else Francis's double shift from the trailing 2 x 2, scaled by S
-    def stepped(r, v):
-        found, low, top, first, last, defl, count, slot = v
-        zero, one, two = k(r, 0), k(r, 1), k(r, 2)
-        new = larger(r, found, low, I32)
-        leave = r('ge', BOOL, new, less(r, top, 1))
-        single = r('and', BOOL, leave, r('eq', BOOL, new, top))
-        double = r('and', BOOL, leave, r('eq', BOOL, new, less(r, top, 1)))
-        i0, im = _bounded(r, less(r, top, 1), n)[1], _bounded(r, less(r, top, 2), n)[1]
-        hmm, hmi, him, hii = at(r, slot, im, im), at(r, slot, im, i0), at(r, slot, i0, im), at(r, slot, i0, i0)
-        r.scatter(0, [i0], hii, single)
-        r.scatter(1, [i0], c(r, 0), single)
-        kd = r('add', I32, defl, one)
-        ex = [r('add', t, absolute(r, at(r, slot, i0, im)), absolute(r, at(r, slot, im, less(r, top, 3)))),
-              r('add', t, absolute(r, at(r, slot, new, less(r, new, 1))), absolute(r, at(r, slot, r(
-                  'add', I32, new, one), new)))]
-        diagonals = [hii, at(r, slot, less(r, new, 1), less(r, new, 1))]
-        exceptional = [(r('add', t, r('mul', t, c(r, 0.75), s), d), r('mul', t, c(r, -0.4375), s), s,
-                        r('add', t, r('mul', t, c(r, 0.75), s), d)) for s, d in zip(ex, diagonals)]
-        francis = (hmm, hmi, him, hii)
-        twentieth = r('eq', BOOL, r('rem', I32, kd, k(r, 20)), zero)
-        tenth = r('eq', BOOL, r('rem', I32, kd, k(r, 10)), zero)
-        h11, h12, h21, h22 = (r('select', t, twentieth, e0, r('select', t, tenth, e1, f)) for e0, e1, f in zip(
-            exceptional[0], exceptional[1], francis))
-        s = r('add', t, r('add', t, r('add', t, absolute(r, h11), absolute(r, h12)), absolute(r, h21)), absolute(r, h22))
-        safe = r('select', t, r('eq', BOOL, s, c(r, 0)), c(r, 1), s)
-        h11, h21, h12, h22 = (r('div', t, x, safe) for x in (h11, h21, h12, h22))
-        tr = r('div', t, r('add', t, h11, h22), c(r, 2))
-        det = r('sub', t, r('mul', t, r('sub', t, h11, tr), r('sub', t, h22, tr)), r('mul', t, h12, h21))
-        rtdisc = r('sqrt', t, absolute(r, det))
-        conjugate = r('ge', BOOL, det, c(r, 0))
-        plus, minus = r('add', t, tr, rtdisc), r('sub', t, tr, rtdisc)
-        nearer = r('le', BOOL, absolute(r, r('sub', t, plus, h22)), absolute(r, r('sub', t, minus, h22)))
-        shift = r('select', t, nearer, r('mul', t, plus, s), r('mul', t, minus, s))
-        zero_s = r('eq', BOOL, s, c(r, 0))
-        first_r = r('select', t, zero_s, c(r, 0), r('select', t, conjugate, r('mul', t, tr, s), shift))
-        real_s = r('or', BOOL, zero_s, r('not', BOOL, conjugate))
-        first_i = r('select', t, real_s, c(r, 0), r('mul', t, rtdisc, s))
-        second_i = r('select', t, real_s, c(r, 0), r('neg', t, r('mul', t, rtdisc, s)))
-        stay = r('not', BOOL, leave)
-        edge = (one, k(r, n)) if want else (new, top)
-        rotated = flag(r, double)
-        spans = [r('sub', I32, k(r, n), top) if want else zero, larger(r, less(r, less(r, top, 1), 1), zero, I32)
-                 if want else zero, r('add', I32, r('sub', I32, last, first), one)]
-        return [(c(r, 0), t), (c(r, 0), t), (r('select', I32, leave, first, new), I32),
-                (r('select', I32, leave, less(r, new, 1), top), I32), (r('select', I32, leave, zero, kd), I32),
-                (r('select', I32, leave, zero, count), I32), (flag(r, stay), I32),
-                (r('select', I32, r('gt', BOOL, new, first), new, zero), I32), (edge[0], I32), (edge[1], I32),
-                (less(r, edge[0], 1), I32),
-                (r('select', I32, stay, larger(r, r('sub', I32, less(r, top, 2), new), zero, I32), zero), I32),
-                (first_r, t), (first_i, t), (first_r, t), (second_i, t), (rotated, I32)] + [
-            (r('select', I32, double, x, zero), I32) for x in spans] + [
-            (im, I32), (i0, I32), (_bounded(r, top, n)[1], I32)]
-    passes += _record((1,), [(wr, None), (wi, None)] + [(x, (None,)) for x in (
-        lo, i, kdefl, its, go, cut, i1, i2, i1z, mspan, rt1r, rt1i, rt2r, rt2i, pair, erow, ecol, ezz, p1, p2, p3)],
-                      [(x, (None,)) for x in (kfound, lo, i, ilo, ihi, kdefl, its)] + [(h, None)], stepped)
-
-    # 351: H(L,L-1) = 0 where L > ILO
-    def severed(r, v):
-        r.scatter(0, [_bounded(r, less(r, v[0], 1), n)[1], _bounded(r, less(r, v[0], 2), n)[1]], c(r, 0),
-                  r('gt', BOOL, v[0], k(r, 0)))
-        return [(c(r, 0), t)]
-    passes += _record((1,), [(h, None)], [(cut, (None,))], severed)
-
-    # 578-605, a once-gate on the pair's deflation (`pair`, L = I-1, its indices p1 = I-1 and p2 = I kept from before
-    # I and L moved): DLANV2 of H(I-1:I, I-1:I), WR/WI(I-1) and WR/WI(I) its eigenvalues, H's 2 x 2 its standard form,
-    # then DROT(X, Y, CS, SN) (X = CS X + SN Y, Y = CS Y - SN X) of rows I-1, I over columns I+1..I2 and columns I-1, I
-    # over rows I1..I-2 where WANTT, and Z's columns I-1, I over ILOZ..IHIZ where WANTZ
-    def schur(r, v):
-        row, column, slot = v
-        made = _dlanv2(r, t, at(r, slot, row, row), at(r, slot, row, column), at(r, slot, column, row),
-                       at(r, slot, column, column), limits)
-        a_, b_, c_, d_, r1r, r1i, r2r, r2i, cs_, sn_ = made
-        always = r.const(1, BOOL)
-        for output, at_row, value in ((0, row, r1r), (1, row, r1i), (0, column, r2r), (1, column, r2i)):
-            r.scatter(output, [at_row], value, always)
-        return [(c(r, 0), t), (c(r, 0), t)] + [(x, t) for x in (a_, b_, c_, d_, cs_, sn_)]
-    gated = _record((1,), [(wr, None), (wi, None)] + [(x, (None,)) for x in (na, nb, nc, nd, cs, sn)],
-                    [(p1, (None,)), (p2, (None,)), (h, None)], schur)
-
-    def standard(r, v):
-        a_, b_, c_, d_, row, column = v
-        always = r.const(1, BOOL)
-        for x, y, value in ((row, row, a_), (row, column, b_), (column, row, c_), (column, column, d_)):
-            r.scatter(0, [x, y], value, always)
-        return [(c(r, 0), t)]
-    gated += _record((1,), [(h, None)], [(x, (None,)) for x in (na, nb, nc, nd, p1, p2)], standard)
-
-    def rotation(r, v):
-        x, y, cosine, sine = v
-        return [(r('add', t, r('mul', t, cosine, x), r('mul', t, sine, y)), t),
-                (r('sub', t, r('mul', t, cosine, y), r('mul', t, sine, x)), t)]
-    targets = [((None, 0), h, erow, {0: (p1, n - 1), 1: (p3, n - 1)}, {0: (p2, n - 1), 1: (p3, n - 1)})] if want else []
-    targets += [((0, None), h, ecol, {0: (i1z, n - 1), 1: (p1, n - 1)}, {0: (i1z, n - 1), 1: (p2, n - 1)})] if want else []
-    targets += [((0, None), z, ezz, {0: (base, n - 1), 1: (p1, n - 1)}, {0: (base, n - 1), 1: (p2, n - 1)})] if want \
-        else []
-    for picks, target, extent, first, second in targets:
-        x, y = target[...], target[...]
-        _emit(gated, _record((n,), [(x, picks), (y, picks)], [(x, picks), (y, picks), (cs, (None,)), (sn, (None,))],
-                             rotation), loops=((extent, n),), offsets=[(x, first), (y, second)])
-    gated += _fill(pair, 0)
-    passes.append(_Repeat(gated, pair, carried))
-
-    # 439-462: the M search over L+1..I-2 (`mspan` entries), H21S = H(M+1,M) / S, V from the shifts scaled by S, and
-    # |H(M,M-1)| (|V2| + |V3|) <= ULP |V1| (|H(M-1,M-1)| + |H(M,M)| + |H(M+1,M+1)|); M = L where none
-    def leading(r, slot, mm, shifts):
-        one = k(r, 1)
-        r1r, r1i, r2r, r2i = shifts
-        hm = at(r, slot, less(r, mm, 1), less(r, mm, 1))
-        hm1, hmm1 = at(r, slot, mm, mm), at(r, slot, mm, less(r, mm, 1))
-        s = r('add', t, r('add', t, absolute(r, r('sub', t, hm, r2r)), absolute(r, r2i)), absolute(r, hmm1))
-        h21s = r('div', t, hmm1, s)
-        x1 = r('sub', t, r('add', t, r('mul', t, h21s, at(r, slot, less(r, mm, 1), mm)), r('mul', t, r(
-            'sub', t, hm, r1r), r('div', t, r('sub', t, hm, r2r), s))), r('mul', t, r1i, r('div', t, r2i, s)))
-        x2 = r('mul', t, h21s, r('sub', t, r('sub', t, r('add', t, hm, hm1), r1r), r2r))
-        x3 = r('mul', t, h21s, at(r, slot, r('add', I32, mm, one), mm))
-        s = r('add', t, r('add', t, absolute(r, x1), absolute(r, x2)), absolute(r, x3))
-        return hm, hm1, [r('div', t, x, s) for x in (x1, x2, x3)]
-
-    def bulged(r, v):
-        low, *shifts, slot = v
-        mm = r('add', I32, r('add', I32, low, k(r, 1)), r.index(0))
-        hm, hm1, (x1, x2, x3) = leading(r, slot, mm, shifts)
-        hit = r('le', BOOL, r('mul', t, absolute(r, at(r, slot, less(r, mm, 1), less(r, mm, 2))), r(
-            'add', t, absolute(r, x2), absolute(r, x3))), r('mul', t, r('mul', t, c(r, ulp), absolute(r, x1)), r(
-                'add', t, r('add', t, absolute(r, at(r, slot, less(r, mm, 2), less(r, mm, 2))), absolute(r, hm)),
-                absolute(r, hm1))))
-        return [(r('select', I32, hit, mm, k(r, 0)), I32)]
-
-    def started_at(r, v):
-        found, low, *shifts, slot = v
-        mm = larger(r, found, low, I32)
-        return [(mm, I32)] + [(x, t) for x in leading(r, slot, mm, shifts)[2]]
-    shifts = [(x, (None,)) for x in (rt1r, rt1i, rt2r, rt2i)]
-    if n > 2:
-        _emit(passes, _record_extreme((n - 2,), mfound, (None,), [(lo, (None,))] + shifts + [(h, None)], bulged,
-                                      [REDUCTION]), loops=((mspan, n - 2),))
-    else:
-        passes += _fill(mfound, 0)
-    passes += _record((1,), [(m, (None,)), (v1, (None,)), (v2, (None,)), (v3, (None,))],
-                      [(mfound, (None,)), (lo, (None,))] + shifts + [(h, None)], started_at)
-
-    # 466-561: each static position K = 1..n-1 active where M <= K <= I-1, NR = 3 where K <= I-2: rows K..K+NR-1 over
-    # columns K..I2; columns K..K+NR-1 over rows I1..min(K+3, I) (NR = 3) or I1..I (NR = 2), and Z's over ILOZ..IHIZ
-    def placed(r, v):
-        mm, top, first_row, last_column, low, alive, first, last = v
-        kk, zero, one = r('add', I32, r.index(0), k(r, 1)), k(r, 0), k(r, 1)
-        active = _all(r, [r('ne', BOOL, alive, zero), r('le', BOOL, mm, kk), r('le', BOOL, kk, less(r, top, 1))])
-        nr3 = r('le', BOOL, kk, less(r, top, 2))
-        renewed = r('and', BOOL, active, r('gt', BOOL, kk, mm))
-        rescaled = _all(r, [active, r('eq', BOOL, kk, mm), r('gt', BOOL, mm, low)])
-        triple, double = r('and', BOOL, active, nr3), r('and', BOOL, active, r('not', BOOL, nr3))
-        nr = r('select', I32, nr3, k(r, 3), k(r, 2))
-        columns = r('add', I32, r('sub', I32, last_column, kk), one)
-        rows3 = r('add', I32, r('sub', I32, smaller(r, r('add', I32, kk, k(r, 3)), top, I32), first_row), one)
-        rows2 = r('add', I32, r('sub', I32, top, first_row), one)
-        nz = r('add', I32, r('sub', I32, last, first), one)
-
-        def on(test, x):
-            return r('select', I32, test, x, zero)
-        return [(flag(r, renewed), I32), (nr, I32), (less(r, nr, 1), I32),
-                (r('select', I32, renewed, k(r, 2), r('select', I32, rescaled, one, zero)), I32),
-                (flag(r, r('and', BOOL, renewed, nr3)), I32)] + [
-            (on(test, x), I32) for test, x in ((triple, columns), (double, columns), (triple, rows3), (double, rows2),
-                                               (triple, nz), (double, nz))]
-    if n > 1:
-        passes += _record((n - 1,), [(x, (0,)) for x in (fresh, rlen, rtail, ewrite, eclear, l3, l2, r3, r2, z3, z2)],
-                          [(x, (None,)) for x in (m, i, i1, i2, lo, go, ilo, ihi)], placed)
-
-    # 502-507, 512-517, 523-528 (NR = 3) and 535-558 (NR = 2): SUM = X(K) + V2 X(K+1) [+ V3 X(K+2)], each X(K+d) -=
-    # SUM T(d+1), the entries `nr` of one row or column, then V2..VNR, then T1..TNR
-    def applied(r, v):
-        nr = (len(v) + 1) // 3
-        entries, vs, taus = v[:nr], v[nr:2 * nr - 1], v[2 * nr - 1:]
-        s = entries[0]
-        for e, x in zip(entries[1:], vs):
-            s = r('add', t, s, r('mul', t, x, e))
-        return [(r('sub', t, e, r('mul', t, s, f)), t) for e, f in zip(entries, taus)]
-    for kk in range(1, n):
-        k0, count = kk - 1, min(3, n - kk + 1)
-        own = (lambda x, k0=k0: x[k0:k0 + 1])
-
-        # 477-480: V's NR entries, H(K..K+NR-1, K-1) where K > M (DCOPY), else V at M; then DLARFG(NR, V(1), V(2))
-        # by the existing reflector owner (_linalg_reflector) over that clipped vector, its v(2:NR) V2..VNR, TAU T1
-        # and beta V(1) on exit
-        vector = _temporary((count,), real)
-
-        def sourced(r, v):
-            *column, x1_, x2_, x3_, renewed = v
-            p = r.index(0)
-            incoming = r('select', t, r('eq', BOOL, p, k(r, 0)), x1_, r('select', t, r('eq', BOOL, p, k(r, 1)), x2_, x3_))
-            return [(r('select', t, r('ne', BOOL, renewed, k(r, 0)), column[0], incoming) if column else incoming, t)]
-        given = ([(h[k0:k0 + count, k0 - 1], (0,))] if kk > 1 else []) + [(x, (None,)) for x in (v1, v2, v3)] + [
-            (own(fresh), (None,))]
-        _emit(passes, _record((count,), [(vector, (0,))], given, sourced), loops=(_at(rlen, k0, count),))
-        made = []
-        reflector = _linalg_reflector(vector, t1[0], beta[0], made)
-        _emit(passes, made, sizes={count: _at(rlen, k0, count), count - 1: _at(rtail, k0, count - 1)})
-
-        # 493-497: T2 = T1 V2 and (NR = 3) T3 = T1 V3
-        tail = [reflector[1 + d:2 + d, 0] for d in range(count - 1)]
-        passes += _record((1,), [(x, (None,)) for x in (t2, t3)[:count - 1]], [(t1, (None,))] + [
-            (x, (None,)) for x in tail], lambda r, v: [(r('mul', t, v[0], x), t) for x in v[1:]])
-
-        # 481-492: where K > M, H(K,K-1) = V(1) and H(K+1,K-1) = 0 (extent 2), and H(K+2,K-1) = 0 where K < I-1;
-        # where K = M > L, H(K,K-1) (1 - T1) (extent 1); else no store
-        if kk > 1:
-            head = h[k0:k0 + 2, k0 - 1]
-            _emit(passes, _record((2,), [(head, (0,))], [(head, (0,)), (beta, (None,)), (t1, (None,)), (own(fresh), (
-                None,))], lambda r, v: [(r('select', t, r('ne', BOOL, v[3], k(r, 0)), r('select', t, r(
-                    'eq', BOOL, r.index(0), k(r, 0)), v[1], c(r, 0)), r('mul', t, v[0], r('sub', t, c(r, 1), v[2]))),
-                    t)]), loops=((own(ewrite), 2),))
-            if count == 3:
-                cleared = h[k0 + 2:k0 + 3, k0 - 1]
-                _emit(passes, _record((1,), [(cleared, (0,))], [], lambda r, v: [(c(r, 0), t)]),
-                      loops=((own(eclear), 1),))
-
-        # the reflector's rows K..K+NR-1 over columns K..I2, columns over I1..min(K+3, I) (NR = 3) or I1..I (NR = 2),
-        # and Z's over ILOZ..IHIZ, each NR its own records and extents
-        vs, taus = [(x, (None,)) for x in tail], [(x, (None,)) for x in (t1, t2, t3)]
-        for nr, rows_extent, columns_extent, z_extent in ((3, l3, r3, z3), (2, l2, r2, z2)):
-            if nr > count:
-                continue
-            factors = vs[:nr - 1] + taus[:nr]
-            rows = [h[k0 + d, k0:] for d in range(nr)]
-            _emit(passes, _record((n - k0,), [(x, (0,)) for x in rows], [(x, (0,)) for x in rows] + factors, applied),
-                  loops=((own(rows_extent), n - k0),))
-            for target, at_row, extent in ((h, i1z, columns_extent), (z, base, z_extent)):
-                if target is None:
-                    continue
-                columns = [target[:, k0 + d] for d in range(nr)]
-                _emit(passes, _record((n,), [(x, (0,)) for x in columns], [(x, (0,)) for x in columns] + factors,
-                                      applied), loops=((own(extent), n),),
-                      offsets=[(x, {0: (at_row, n - 1)}) for x in columns])
-
-    # 315 and 563-568: ITS += 1 after a sweep; past ITMAX = 30 max(10, NH) INFO = I (the source's failure), else the
-    # next DO 140 iteration while I >= ILO, its K search over I - L entries
-    def counted(r, v):
-        number, alive, top, low, high, failure, current = v
-        zero, one = k(r, 0), k(r, 1)
-        done = r('select', I32, r('ne', BOOL, alive, zero), r('add', I32, number, one), number)
-        itmax = r('mul', I32, k(r, 30), larger(r, k(r, 10), r('add', I32, r('sub', I32, high, low), one), I32))
-        fail = r('and', BOOL, r('ne', BOOL, alive, zero), r('gt', BOOL, done, itmax))
-        return [(done, I32), (r('select', I32, fail, top, failure), I32),
-                (flag(r, r('and', BOOL, r('not', BOOL, fail), r('ge', BOOL, top, low))), I32),
-                (larger(r, r('sub', I32, top, current), zero, I32), I32)]
-    passes += _scalars([its, info, more, span], [its, go, i, ilo, ihi, info, lo], counted)
-    ops.append(_Repeat(passes, more, carried))
-
-
-# Reference-LAPACK SRC/dtrevc.f 342-519 and 521-702 (SIDE = 'R', HOWMNY = 'B'): h the real quasi-triangular Schur form
-# (read only), z the Schur vectors, vr the packed right eigenvectors Z X (a real eigenvalue's column; a pair's
-# columns KI-1 and KI its real and imaginary parts), each scaled by 1 / its largest |x| (a pair's |Re| + |Im|). Column
-# KI is real (IP = 0), the pair's second (T(KI,KI-1) /= 0, IP = -1) or its first (T(KI+1,KI) /= 0, skipped as the
-# source's IP = 1); xr and xi (n x n) hold each KI's WORK(1+N:) and WORK(1+N2:) by column, and all the solves run
-# together in the source's block order J = KI-1 (KI-2 for a pair)..1, the static rounds J = n-1..1, each a 1 x 1
-# block or the 2 x 2 block ending at J (T(J,J-1) /= 0), J the first row of a 2 x 2 skipped
-def _dtrevc(h, z, vr, ops):
-    n, t, real = h.shape[-1], _class(h), h.dtype
-    if not n:
-        return
-    limits = torch.finfo(real)
+        wide = ur11.abs() > ui11.abs()
+        ratio = torch.where(wide, ui11 / ur11, ur11 / ui11)
+        grown = 1 + ratio * ratio
+        ur11r_a = torch.where(wide, 1 / (ur11 * grown), -(ratio * (-1 / (ui11 * grown))))
+        ui11r_a = torch.where(wide, -(ratio * (1 / (ur11 * grown))), -1 / (ui11 * grown))
+        offreal = (ic == 1) | (ic == 4)
+        ur11r = torch.where(offreal, ur11r_a, 1 / ur11)
+        ui11r = torch.where(offreal, ui11r_a, zero)
+        lr21 = cr21 * ur11r
+        li21 = torch.where(offreal, cr21 * ui11r, ci21 * ur11r)
+        ur12s = ur12 * ur11r
+        ui12s = torch.where(offreal, ur12 * ui11r, ui12 * ur11r)
+        ur22 = torch.where(offreal, cr22 - ur12 * lr21, (cr22 - ur12 * lr21) + ui12 * li21)
+        ui22 = torch.where(offreal, ci22 - ur12 * li21, -(ur12 * li21) - ui12 * lr21)
+        u22abs = ur22.abs() + ui22.abs()
+        small = u22abs < smini
+        ur22, ui22 = torch.where(small, smini, ur22), torch.where(small, 0, ui22)
+        br1, br2 = torch.where(rswap, b21, b11), torch.where(rswap, b11, b21)
+        bi1, bi2 = torch.where(rswap, b22, b12), torch.where(rswap, b12, b22)
+        br2 = (br2 - lr21 * br1) + li21 * bi1
+        bi2 = (bi2 - li21 * br1) - lr21 * bi1
+        bbnd = bigger((br1.abs() + bi1.abs()) * (u22abs * (ur11r.abs() + ui11r.abs())), br2.abs() + bi2.abs())
+        rescaled = (bbnd > 1) & (u22abs < 1) & (bbnd >= bignum * u22abs)
+        scale = torch.where(rescaled, 1 / bbnd, 1)
+        br1, bi1, br2, bi2 = (torch.where(rescaled, scale * v, v) for v in (br1, bi1, br2, bi2))
+        xr2, xi2 = _divided(br2, bi2, ur22, ui22)
+        xr1 = ((ur11r * br1 - ui11r * bi1) - ur12s * xr2) + ui12s * xi2
+        xi1 = ((ui11r * br1 + ur11r * bi1) - ui12s * xr2) - ur12s * xi2
+        x = [torch.where(zswap, xr2, xr1), torch.where(zswap, xr1, xr2), torch.where(zswap, xi2, xi1),
+             torch.where(zswap, xi1, xi2)]
+        xnorm = bigger(xr1.abs() + xi1.abs(), xr2.abs() + xi2.abs())
+    further = (xnorm > 1) & (cmax > 1) & (xnorm > bignum / cmax)
+    temp = cmax / bignum
+    x = [torch.where(further, temp * v, v) for v in x]
+    xnorm, scale = torch.where(further, temp * xnorm, xnorm), torch.where(further, temp * scale, scale)
+    return (tuple(torch.where(identity, p, v) for p, v in zip(plain[0], x)), torch.where(identity, plain[1], scale),
+            torch.where(identity, plain[2], xnorm))
+
+
+# Reference-LAPACK SRC/dtrevc.f 342-519 (SIDE = 'R', HOWMNY = 'B'; dtrevc3.f's back-transformed form) on the real
+# quasi-triangular Schur form t: column KI of X is real (IP = 0), a pair's second (T(KI,KI-1) /= 0, IP = -1, holding
+# the pair's WORK(1+N:) in xr and WORK(1+N2:) in xi) or its first (skipped, IP = 1). All the solves run together in
+# the source's block order: each static round J = n-1..1 is the 1 x 1 block at J or the 2 x 2 block ending at J
+# (T(J,J-1) /= 0; J the first row of a 2 x 2 block skipped), for every column whose own range J = KI-1..1 (KI-2..1
+# for a pair) holds J: DLALN2, the BIGNUM / XNORM rescaling of X and SCALE (a pair's 2 x 2 by REC = 1 / XNORM), DSCAL of
+# WORK(1:KI) by SCALE, X into WORK and the DAXPYs above the block. VR = Z X, each pair's columns its real and imaginary
+# parts, then by 1 / EMAX (the largest |VR(K,KI)|, a pair's |VR(K,KI-1)| + |VR(K,KI)|)
+def _dtrevc(t, z):
+    n, k = t.shape[-1], _counted(t)
+    limits = torch.finfo(t.dtype)
     ulp = limits.eps
     smlnum = limits.tiny * (n / ulp)
     bignum = (1 - ulp) / smlnum
-    wrk, wik, smin, cnorm, s1, s2, scl, car, cai, c11, c21, c12, c22, emax = (_temporary((n,), real) for _ in range(14))
-    realc, bottom, top, act, moved = (_temporary((n,), torch.int32) for _ in range(5))
-    need, e1, e2, u1, u2 = (_temporary((1,), torch.int32) for _ in range(5))
-    xr, xi, packed = _temporary((n, n), real), _temporary((n, n), real), _temporary((n, n), real)
-
-    def k(r, value):
-        return r.const(value, t)
-
-    def i32(r, value):
-        return r.const(value, I32)
-
-    def flag(r, test):
-        return _convert(r, test, BOOL, I32)
-
-    def at(r, slot, row, column):
-        return r('extract', t, _bounded(r, row, n)[1], _bounded(r, column, n)[1], integer=slot)
-
-    def absolute(r, x):
-        return r('abs', t, x)
-
-    def nonzero(r, x):
-        return r('ne', BOOL, x, i32(r, 0))
-
-    # 342-357 and 372-400: T(KI,KI), WI = sqrt|T(KI,KI-1)| sqrt|T(KI-1,KI)| (a pair), SMIN = max(ULP (|WR| + |WI|),
-    # SMLNUM), the column's kind, and a pair's initial solve WORK(KI-1+N) and WORK(KI+N2) (529-535)
-    def kinds(r, v):
-        diagonal, slot = v
-        c = r.index(0)
-        sub, sup = at(r, slot, c, r('sub', I32, c, i32(r, 1))), at(r, slot, r('sub', I32, c, i32(r, 1)), c)
-        following = at(r, slot, r('add', I32, c, i32(r, 1)), c)
-        second = r('and', BOOL, r('ge', BOOL, c, i32(r, 1)), r('ne', BOOL, sub, k(r, 0)))
-        first = _all(r, [r('le', BOOL, c, i32(r, n - 2)), r('ne', BOOL, following, k(r, 0)), r('not', BOOL, second)])
-        wi = r('select', t, second, r('mul', t, r('sqrt', t, absolute(r, sub)), r('sqrt', t, absolute(r, sup))),
-               k(r, 0))
-        size = r('mul', t, k(r, ulp), r('add', t, absolute(r, diagonal), absolute(r, wi)))
-        wide = r('ge', BOOL, absolute(r, sup), absolute(r, sub))
-        return [(diagonal, t), (wi, t), (r('select', t, r('ge', BOOL, size, k(r, smlnum)), size, k(r, smlnum)), t),
-                (flag(r, r('and', BOOL, r('not', BOOL, second), r('not', BOOL, first))), I32), (flag(r, second), I32),
-                (flag(r, first), I32), (r('select', t, wide, k(r, 1), r('div', t, r('neg', t, wi), sub)), t),
-                (r('select', t, wide, r('div', t, wi, sup), k(r, 1)), t)]
-    ops += _record((n,), [(x, (0,)) for x in (wrk, wik, smin, realc, bottom, top, s1, s2)],
-                   [(h, (0, 0)), (h, None)], kinds)
-    ops += _record((n, n), [(cnorm, (0,))], [(h, (1, 0))], lambda r, v: [(r('select', t, r(
-        'lt', BOOL, r.index(1), r.index(0)), absolute(r, v[0]), k(r, 0)), t)], [PARALLEL, REDUCTION], [SUM])
-
-    # 406-412 and 536-544: the right-hand sides, a real KI's X = (-T(1:KI-1,KI), 1), a pair's (-WORK(KI-1+N)
-    # T(1:KI-2,KI-1), WORK(KI-1+N), 0) and (-WORK(KI+N2) T(1:KI-2,KI), 0, WORK(KI+N2)); zero elsewhere
-    def sides(r, v):
-        isreal, second, first, last, slot = v
-        row, c = r.index(0), r.index(1)
-        one, zero = k(r, 1), k(r, 0)
-        cm = r('sub', I32, c, i32(r, 1))
-        real_x = r('select', t, r('lt', BOOL, row, c), r('neg', t, at(r, slot, row, c)), r(
-            'select', t, r('eq', BOOL, row, c), one, zero))
-        pair_r = r('select', t, r('lt', BOOL, row, cm), r('neg', t, r('mul', t, first, at(r, slot, row, cm))), r(
-            'select', t, r('eq', BOOL, row, cm), first, zero))
-        pair_i = r('select', t, r('lt', BOOL, row, cm), r('neg', t, r('mul', t, last, at(r, slot, row, c))), r(
-            'select', t, r('eq', BOOL, row, c), last, zero))
-        pair = nonzero(r, second)
-        return [(r('select', t, pair, pair_r, r('select', t, nonzero(r, isreal), real_x, zero)), t),
-                (r('select', t, pair, pair_i, zero), t)]
-    ops += _record((n, n), [(xr, (0, 1)), (xi, (0, 1))], [(realc, (1,)), (bottom, (1,)), (s1, (1,)), (s2, (1,)),
-                                                        (h, None)], sides)
-
-    # one round's 1 x 1 or 2 x 2 solve per column (DLALN2), then 443-448 (474-480, 575-581, 611-621): where XNORM > 1
-    # and WORK(J) (max(WORK(J-1), WORK(J))) > BIGNUM / XNORM, X by 1 / XNORM (the complex 2 x 2 by REC = 1 / XNORM)
-    # and SCALE likewise; a column takes part where real, or a pair with J <= KI-2
-    def solved(r, v, na):
-        rows = 2 * na
-        xs, a, (wr_, wi_, bound, isreal, second), norms = v[:rows], v[rows:rows + na * na], v[rows + na * na:
-                                                                                            rows + na * na + 5], v[-na:]
-        pair = nonzero(r, second)
-        active = r('or', BOOL, nonzero(r, isreal), r('and', BOOL, pair, r('ge', BOOL, r.index(0), i32(r, 1))))
-        real_x, real_s, real_n = _dlaln2(r, t, na, 1, bound, a, xs[:na], wr_, k(r, 0), limits)
-        pair_x, pair_s, pair_n = _dlaln2(r, t, na, 2, bound, a, xs, wr_, wi_, limits)
-        x = [r('select', t, pair, p, q) for p, q in zip(pair_x, list(real_x) + list(xs[na:]))]
-        scale, xnorm = r('select', t, pair, pair_s, real_s), r('select', t, pair, pair_n, real_n)
-        beta = norms[0] if na == 1 else r('select', t, r('ge', BOOL, norms[0], norms[1]), norms[0], norms[1])
-        over = r('and', BOOL, r('gt', BOOL, xnorm, k(r, 1)), r('gt', BOOL, beta, r('div', t, k(r, bignum), xnorm)))
-        if na == 1:
-            x = [r('select', t, over, r('div', t, e, xnorm), e) for e in x]
-            scale = r('select', t, over, r('div', t, scale, xnorm), scale)
-        else:
-            rec = r('div', t, k(r, 1), xnorm)
-            x = [r('select', t, over, r('select', t, pair, r('mul', t, e, rec), r('div', t, e, xnorm)), e) for e in x]
-            scale = r('select', t, over, r('select', t, pair, r('mul', t, scale, rec), r('div', t, scale, xnorm)),
-                      scale)
-        x = [r('select', t, active, e, old) for e, old in zip(x, xs)]
-        scale = r('select', t, active, scale, k(r, 1))
-        coefficients = [r('select', t, active, r('neg', t, e), k(r, 0)) for e in x]
-        return [(e, t) for e in x] + [(scale, t)] + [(e, t) for e in coefficients] + [
-            (flag(r, r('and', BOOL, active, r('ne', BOOL, scale, k(r, 1)))), I32), (flag(r, active), I32)]
-
-    # 452-459, 484-494, 585-597, 625-643: X by SCALE (DSCAL), then the rows above the block by DAXPY with -X
-    def updated(r, v, blocks):
-        xv, iv, *rest = v
-        tcols, (factor, *coefficients, used) = rest[:blocks], rest[blocks:]
-        made = []
-        for value, own in ((xv, coefficients[:blocks]), (iv, coefficients[blocks:])):
-            y = r('mul', t, value, factor)
-            for coefficient, entry in zip(own, tcols):
-                y = r('add', t, y, r('mul', t, coefficient, entry))
-            made.append(r('select', t, nonzero(r, used), y, value))
-        return [(e, t) for e in made]
-
-    def rescaled(r, v):
-        xv, iv, factor, used = v
-        inside = r('and', BOOL, nonzero(r, used), r('lt', BOOL, r.index(0), r('add', I32, r.index(1), i32(r, 1))))
-        return [(r('select', t, inside, r('mul', t, e, factor), e), t) for e in (xv, iv)]
+    pad = torch.zeros_like(t[..., 0, :1])
+    sub = torch.cat([pad, t.diagonal(-1, dim1=-2, dim2=-1)], -1)
+    sup = torch.cat([pad, t.diagonal(1, dim1=-2, dim2=-1)], -1)
+    following = torch.cat([t.diagonal(-1, dim1=-2, dim2=-1), pad], -1)
+    second = sub != 0
+    first = (following != 0) & ~second
+    isreal = ~second & ~first
+    wr = t.diagonal(dim1=-2, dim2=-1)
+    wi = torch.where(second, sub.abs().sqrt() * sup.abs().sqrt(), 0)
+    size = ulp * (wr.abs() + wi.abs())
+    smin = torch.where(size >= smlnum, size, smlnum)
+    wide = sup.abs() >= sub.abs()
+    s1, s2 = torch.where(wide, 1, -wi / sub), torch.where(wide, wi / sup, 1)
+    cnorm = torch.where(k[:, None] < k, t.abs(), 0).sum(-2)
+    row, col = k[:, None], k
+    tcol = t
+    xr = torch.where(isreal[..., None, :], torch.where(row < col, -t, torch.where(row == col, 1, 0)), 0)
+    prev = torch.cat([torch.zeros_like(t[..., :, :1]), t[..., :, :-1]], -1)
+    xr = torch.where(second[..., None, :], torch.where(row < col - 1, -(s1[..., None, :] * prev), torch.where(
+        row == col - 1, s1[..., None, :], 0)), xr)
+    xi = torch.where(second[..., None, :], torch.where(row < col - 1, -(s2[..., None, :] * tcol), torch.where(
+        row == col, s2[..., None, :], 0)), torch.zeros_like(t))
     for j in range(n - 1, 0, -1):
-        width = n - j
-        given = [(h[j - 1:j, j - 2], (None,))] if j >= 2 else []
-
-        def blocks(r, v, j=j):
-            two = r('ne', BOOL, v[0], k(r, 0)) if j >= 2 else r.const(0, BOOL)
-            skip = r('ne', BOOL, v[-1], k(r, 0))
-            single = r('and', BOOL, r('not', BOOL, two), r('not', BOOL, skip))
-            double = r('and', BOOL, two, r('not', BOOL, skip))
-            return [(r('select', I32, single, i32(r, width), i32(r, 0)), I32),
-                    (r('select', I32, double, i32(r, width), i32(r, 0)), I32),
-                    (r('select', I32, single, i32(r, j - 1), i32(r, 0)), I32),
-                    (r('select', I32, double, i32(r, max(j - 2, 0)), i32(r, 0)), I32)]
-        ops += _record((1,), [(x, (None,)) for x in (e1, e2, u1, u2)], given + [(h[j:j + 1, j - 1], (None,))], blocks)
-        ops += _record((width,), [(act[j:], (0,)), (moved[j:], (0,))], [], lambda r, v: [(i32(r, 0), I32)] * 2)
-        per = [(x[j:], (0,)) for x in (wrk, wik, smin, realc, bottom)]
-        outs = [(xr[j - 1, j:], (0,)), (xi[j - 1, j:], (0,)), (scl[j:], (0,)), (car[j:], (0,)), (cai[j:], (0,)),
-                (moved[j:], (0,)), (act[j:], (0,))]
-        _emit(ops, _record((width,), outs, [(xr[j - 1, j:], (0,)), (xi[j - 1, j:], (0,)), (h[j - 1:j, j - 1], (None,))]
-                           + per + [(cnorm[j - 1:j], (None,))], lambda r, v: solved(r, v, 1)), loops=((e1, width),))
+        two = (t[..., j - 1, j - 2] != 0) if j >= 2 else torch.zeros_like(second[..., 0])
+        skip = t[..., j, j - 1] != 0
+        active = (isreal & (k >= j + 1)) | (second & (k >= j + 2))
+        single, double = active & _vec(~two & ~skip), active & _vec(two & ~skip)
+        rows = [j - 1] if j < 2 else [j - 2, j - 1]
+        made = {}
+        for na in (1, 2) if j >= 2 else (1,):
+            at = rows[-na:]
+            given = [xr[..., r, :] for r in at] + [xi[..., r, :] for r in at]
+            a = [_vec(t[..., p, q]) for p in at for q in at]
+            (real_x, real_s, real_n) = _dlaln2(na, 1, smin, a, given[:na], wr, torch.zeros_like(wr))
+            (pair_x, pair_s, pair_n) = _dlaln2(na, 2, smin, a, given, wr, wi)
+            x = [torch.where(second, p, q) for p, q in zip(pair_x, list(real_x) + given[na:])]
+            scale = torch.where(second, pair_s, real_s)
+            xnorm = torch.where(second, pair_n, real_n)
+            beta = _vec(cnorm[..., j - 1]) if na == 1 else _vec(torch.where(
+                cnorm[..., j - 2] >= cnorm[..., j - 1], cnorm[..., j - 2], cnorm[..., j - 1]))
+            over = (xnorm > 1) & (beta > bignum / xnorm)
+            if na == 1:
+                x, scale = [torch.where(over, e / xnorm, e) for e in x], torch.where(over, scale / xnorm, scale)
+            else:
+                rec = 1 / xnorm
+                x = [torch.where(over, torch.where(second, e * rec, e / xnorm), e) for e in x]
+                scale = torch.where(over, torch.where(second, scale * rec, scale / xnorm), scale)
+            made[na] = (at, x, scale)
+        factor = torch.where(single, made[1][2], 1)
         if j >= 2:
-            outs = [(xr[j - 2, j:], (0,)), (xr[j - 1, j:], (0,)), (xi[j - 2, j:], (0,)), (xi[j - 1, j:], (0,)),
-                    (scl[j:], (0,))] + [(x[j:], (0,)) for x in (c11, c21, c12, c22, moved, act)]
-            entries = [(h[j - 2 + p:j - 1 + p, j - 2 + q], (None,)) for p, q in ((0, 0), (0, 1), (1, 0), (1, 1))]
-            _emit(ops, _record((width,), outs, [(xr[j - 2, j:], (0,)), (xr[j - 1, j:], (0,)), (xi[j - 2, j:], (0,)),
-                                                (xi[j - 1, j:], (0,))] + entries + per + [
-                (cnorm[j - 2:j - 1], (None,)), (cnorm[j - 1:j], (None,))], lambda r, v: solved(r, v, 2)),
-                  loops=((e2, width),))
-        if j >= 2:
-            block = [xr[:j - 1, j:], xi[:j - 1, j:]]
-            _emit(ops, _record((j - 1, width), [(x, (0, 1)) for x in block], [(x, (0, 1)) for x in block] + [
-                (h[:j - 1, j - 1], (0,))] + [(x[j:], (1,)) for x in (scl, car, cai, act)],
-                lambda r, v: updated(r, v, 1)), loops=((u1, j - 1), None))
-        if j >= 3:
-            block = [xr[:j - 2, j:], xi[:j - 2, j:]]
-            _emit(ops, _record((j - 2, width), [(x, (0, 1)) for x in block], [(x, (0, 1)) for x in block] + [
-                (h[:j - 2, j - 2], (0,)), (h[:j - 2, j - 1], (0,))] + [(x[j:], (1,)) for x in (scl, c11, c21, c12, c22,
-                                                                                               act)],
-                lambda r, v: updated(r, v, 2)), loops=((u2, j - 2), None))
-        ops += _record_extreme((width,), need, (None,), [(moved[j:], (0,))], lambda r, v, j=j: [(r(
-            'select', I32, nonzero(r, v[0]), i32(r, n - j), i32(r, 0)), I32)], [REDUCTION])
-        block = [xr[j:, j:], xi[j:, j:]]
-        _emit(ops, _record((n - j, width), [(x, (0, 1)) for x in block], [(x, (0, 1)) for x in block] + [
-            (scl[j:], (1,)), (moved[j:], (1,))], rescaled), loops=((need, n - j), None))
-
-    # 510-518 and 668-690: VR = Z X with each pair's columns KI-1 (real part) and KI (imaginary part), then each
-    # column by 1 / EMAX, the largest |VR(K,KI)| (a pair's |VR(K,KI-1)| + |VR(K,KI)|)
-    def assembled(r, v):
-        xv, iv, first, second, slot = v
-        following = at(r, slot, r.index(0), r('add', I32, r.index(1), i32(r, 1)))
-        return [(r('select', t, nonzero(r, first), following, r('select', t, nonzero(r, second), iv, xv)), t)]
-    ops += _record((n, n), [(packed, (0, 1))], [(xr, (0, 1)), (xi, (0, 1)), (top, (1,)), (bottom, (1,)), (xr, None)],
-                   assembled)
-    ops += _gemm(vr, z, (0, 2), packed, (2, 1), (n, n, n))
-
-    def largest(r, v):
-        value, first, second, slot = v
-        partner = r('select', I32, nonzero(r, first), r('add', I32, r.index(0), i32(r, 1)), r(
-            'sub', I32, r.index(0), i32(r, 1)))
-        paired = r('or', BOOL, nonzero(r, first), nonzero(r, second))
-        return [(r('select', t, paired, r('add', t, absolute(r, value), absolute(r, at(r, slot, r.index(1), partner))),
-                   absolute(r, value)), t)]
-    ops += _record_extreme((n, n), emax, (0,), [(vr, (1, 0)), (top, (0,)), (bottom, (0,)), (vr, None)], largest,
-                           [PARALLEL, REDUCTION])
-    ops += _record((n, n), [(vr, (0, 1))], [(vr, (0, 1)), (emax, (1,))], lambda r, v: [(r(
-        'mul', t, v[0], r('div', t, k(r, 1), v[1])), t)])
+            factor = torch.where(double, made[2][2], factor)
+        taking = (single | (double if j >= 2 else single)) & (factor != 1)
+        scaled = taking[..., None, :] & (row <= col)
+        xr, xi = torch.where(scaled, xr * factor[..., None, :], xr), torch.where(scaled, xi * factor[..., None, :], xi)
+        for na, used in ((1, single), (2, double if j >= 2 else None)):
+            if used is None:
+                continue
+            at, x, _ = made[na]
+            for p, r in enumerate(at):
+                xr = _row_put(xr, r, torch.where(used, x[p], xr[..., r, :]))
+                xi = _row_put(xi, r, torch.where(used, x[na + p], xi[..., r, :]))
+            above = used[..., None, :] & (row <= at[0])
+            for p, r in enumerate(at):
+                xr = torch.where(above, xr + (-x[p])[..., None, :] * t[..., :, r][..., :, None], xr)
+            for p, r in enumerate(at):
+                xi = torch.where(above, xi + (-x[na + p])[..., None, :] * t[..., :, r][..., :, None], xi)
+    packed = torch.where(first[..., None, :], torch.cat([xr[..., :, 1:], torch.zeros_like(xr[..., :, :1])], -1),
+                         torch.where(second[..., None, :], xi, xr))
+    vr = torch.matmul(z, packed)
+    after = torch.cat([vr[..., :, 1:], torch.zeros_like(vr[..., :, :1])], -1)
+    before = torch.cat([torch.zeros_like(vr[..., :, :1]), vr[..., :, :-1]], -1)
+    partner = torch.where(first[..., None, :], after, before)
+    emax = torch.where((first | second)[..., None, :], vr.abs() + partner.abs(), vr.abs()).amax(-2)
+    return vr * (1 / emax)[..., None, :]
 
 
-# Reference-LAPACK SRC/ztrevc.f 323-409 (SIDE = 'R', HOWMNY = 'B') with zlatrs.f 324-1025 (UPLO = 'U', TRANS = 'N',
-# DIAG = 'N', NORMIN = 'Y'): h the upper triangular Schur form (read only, its diagonal the source's original T(K,K)),
-# z the Schur vectors, vr the eigenvectors Z X, each column scaled to largest CABS1 1. Column KI of x (n x n) is
-# KI's solve (T(1:KI-1,1:KI-1) - T(KI,KI)) X = SCALE (-T(1:KI-1,KI)), its diagonal T(K,K) - T(KI,KI) raised to SMIN
-# where CABS1 is below it; the per-KI state (SMIN, TSCAL, GROW, XBND, SCALE, XMAX) is a vector by KI, and all the
-# solves run together in the source's row order J = KI-1..1 (the static rounds J = n-1..1, column KI taking part
-# where J < KI)
-def _ztrevc(h, z, vr, ops):
-    n, t, real, dtype = h.shape[-1], _class(h.real), h.real.dtype, h.dtype
-    if not n:
-        return
-    limits = torch.finfo(real)
+# Fortran MAX(A, B) and MIN(A, B) as the source's comparisons select them
+def _larger(a, b):
+    return torch.where(a >= b, a, b)
+
+
+def _smaller(a, b):
+    return torch.where(a <= b, a, b)
+
+
+# CABS2(Z) = |DBLE(Z) / 2| + |DIMAG(Z) / 2| (zlatrs.f's statement function)
+def _cabs2(x):
+    return (x.real / 2).abs() + (x.imag / 2).abs()
+
+
+# Reference-LAPACK SRC/ztrevc.f 323-409 (ztrevc3.f's SIDE = 'R', HOWMNY = 'B' right vectors, its blocked
+# back-transformation VR = Z X) with zlatrs.f 324-1025 (UPLO = 'U', TRANS = 'N', DIAG = 'N', NORMIN = 'Y', N = KI-1)
+# for each KI = N..1 of the upper triangular Schur form t. Column KI of X solves (T(1:KI-1,1:KI-1) - T(KI,KI)) X =
+# SCALE (-T(1:KI-1,KI)), the shifted diagonal T(K,K) - T(KI,KI) raised to SMIN where its CABS1 is below it (ztrevc
+# 366-370, the original diagonal restored after each KI). RWORK (CNORM, DZASUM of each column above the diagonal) is
+# ZLATRS's in-out operand: each KI's call scales CNORM(1:KI-1) by TSCAL (case 1; case 2 recomputing an unrepresentable
+# norm as the sum of (2 TSCAL) CABS2 terms) and returns it by DSCAL(N, 1 / TSCAL, CNORM) where TSCAL /= 1 (zlatrs
+# 1021-1023; not after case 2's ZTRSV return), so the next KI reads the norms the previous calls left: the static scan
+# KI = N..2 below. GROW and XBND (zlatrs 467-504) and the solves (ZTRSV, ztrsv.f 159-170, where GROW TSCAL > SMLNUM or
+# case 2's return; else 606-743's careful solve with its REC scalings, A(J,J) = 0's null vector and ZAXPY, zaxpy.f's
+# DCABS1(ZA) = 0 return) run for every KI together in the source's row order, round J = N-1..1 for each KI > J.
+# X(KI,KI) = SCALE (the careful solve's SCALE / TSCAL, ZTRSV's 1; KI = 1: WORK(1) = 1); each column of Z X by 1 / its
+# largest CABS1 (IZAMAX, ZDSCAL)
+def _ztrevc(t, z):
+    n, k = t.shape[-1], _counted(t)
+    limits = torch.finfo(t.real.dtype)
     unfl, ulp, ovfl = limits.tiny, limits.eps, limits.max
     smlnum_t, smlnum = unfl * (n / ulp), unfl / ulp
     bignum = 1 / smlnum
-    tk = _temporary((n,), dtype)
-    smin, cnorm, colmax, tmax, tmax2, tscal, xmax0, grow, xbnd, scale, xmax, s0, rec1, rec2, mx = \
-        (_temporary((n,), real) for _ in range(15))
-    case2, fallback, broken, plain, zero, apply, moved = (_temporary((n,), torch.int32) for _ in range(7))
-    any2, need = _temporary((1,), torch.int32), _temporary((1,), torch.int32)
-    rec2d, cn = _temporary((n, n), real), _temporary((n, n), real)
-    x, za = _temporary((n, n), dtype), _temporary((n,), dtype)
+    row, col = k[:, None], k
+    upper = row < col
+    diagonal = t.diagonal(dim1=-2, dim2=-1)
+    smin = _larger(ulp * _abs1(diagonal), torch.full_like(diagonal.real, smlnum_t))
+    shifted = diagonal[..., :, None] - diagonal[..., None, :]
+    shifted = torch.where(_abs1(shifted) < smin[..., None, :], smin[..., None, :].to(t.dtype), shifted)
+    cabs2 = _cabs2(t)
+    colmax = torch.where(upper, _larger(t.real.abs(), t.imag.abs()), 0).amax(-2)
 
-    def c(r, value):
-        return r.const(value, t)
+    # zlatrs 358-431 for KI = N..2 over the CNORM the previous KI returned
+    current = torch.where(upper, _abs1(t), 0).sum(-2)
+    seen, scales = [current] * n, [torch.ones_like(current[..., 0])] * n
+    returned = [torch.zeros_like(current[..., 0], dtype=torch.bool)] * n
+    for ki in range(n, 1, -1):
+        within = k <= ki - 1
+        tmax = torch.where(within, current, 0).amax(-1)
+        tmax2 = torch.where(within, colmax, 0).amax(-1)
+        case1 = ~(tmax <= bignum * 0.5) & (tmax <= ovfl)
+        rest = ~(tmax <= bignum * 0.5) & ~case1
+        case2, case3 = rest & (tmax2 <= ovfl), rest & ~(tmax2 <= ovfl)
+        tscal = torch.where(case1, 0.5 / (smlnum * tmax), torch.where(case2, 1 / (smlnum * tmax2), torch.ones_like(
+            tmax)))
+        recomputed = torch.where(upper, _mat(2 * tscal) * cabs2, 0).sum(-2)
+        read = torch.where(_vec(case1), current * _vec(tscal), torch.where(_vec(case2), torch.where(
+            current <= ovfl, current * _vec(tscal), recomputed), current))
+        seen[ki - 1], scales[ki - 1], returned[ki - 1] = read, tscal, case3
+        current = torch.where(within & _vec((case1 | case2) & (tscal != 1)), read * _vec(1 / tscal), current)
+    cn, tscal, fallback = torch.stack(seen, -1), torch.stack(scales, -1), torch.stack(returned, -1)
 
-    def k(r, value):
-        return r.const(value, I32)
-
-    def flag(r, test):
-        return _convert(r, test, BOOL, I32)
-
-    def larger(r, a, b):
-        return r('select', t, r('ge', BOOL, a, b), a, b)
-
-    def smaller(r, a, b):
-        return r('select', t, r('le', BOOL, a, b), a, b)
-
-    def cabs2(r, value):
-        return r('add', t, r('abs', t, r('div', t, _part(r, t, value, 0), c(r, 2))),
-                 r('abs', t, r('div', t, _part(r, t, value, 1), c(r, 2))))
-
-    # ztrevc 366-370: T(J,J) - T(KI,KI), set to SMIN where its CABS1 is below SMIN
-    def shifted(r, diagonal, own, bound):
-        d = _plus(r, t, diagonal, own, 'sub')
-        return _chosen(r, t, r('lt', BOOL, _cabs1(r, t, d), bound), (bound, c(r, 0)), d)
-
-    def nonzero(r, value):
-        return r('ne', BOOL, value, k(r, 0))
-
-    def below(r):
-        return r('lt', BOOL, r.index(1), r.index(0))
-
-    # ztrevc 330-340 and 353: T(KI,KI), SMIN = max(ULP CABS1(T(KI,KI)), SMLNUM), CNORM(J) = DZASUM(J-1, T(1,J))
-    ops += _record((n,), [(tk, (0,))], [(h, (0, 0))], lambda r, v: [(v[0], t)])
-    ops += _record((n,), [(smin, (0,))], [(tk, (0,))], lambda r, v: [(larger(r, r('mul', t, c(r, ulp), _cabs1(
-        r, t, v[0])), c(r, smlnum_t)), t)])
-    ops += _record((n, n), [(cnorm, (0,))], [(h, (1, 0))], lambda r, v: [(r('select', t, below(r), _cabs1(
-        r, t, v[0]), c(r, 0)), t)], [PARALLEL, REDUCTION], [SUM])
-
-    # zlatrs 358-431 for each KI (its N = KI-1): TMAX the largest CNORM(1..KI-1); TSCAL 1 where TMAX <= BIGNUM/2,
-    # HALF / (SMLNUM TMAX) where TMAX <= overflow (case 1, CNORM by TSCAL), else (case 2) from TMAX2 the largest
-    # max(|Re|, |Im|) of T(1:KI-2, 2:KI-1)'s strict upper part: 1 / (SMLNUM TMAX2), or (TMAX2 above overflow) the
-    # ZTRSV return
-    ops += _record_extreme((n, n), colmax, (0,), [(h, (1, 0))], lambda r, v: [(r('select', t, below(r), larger(
-        r, r('abs', t, _part(r, t, v[0], 0)), r('abs', t, _part(r, t, v[0], 1))), c(r, 0)), t)],
-        [PARALLEL, REDUCTION])
-    for made, given in ((tmax, cnorm), (tmax2, colmax)):
-        ops += _record_extreme((n, n), made, (0,), [(given, (1,))], lambda r, v: [(r('select', t, below(r), v[0], c(
-            r, 0)), t)], [PARALLEL, REDUCTION])
-
-    def cases(r, v):
-        top, top2 = v
-        first = r('le', BOOL, top, c(r, bignum * 0.5))
-        second = r('and', BOOL, r('not', BOOL, first), r('le', BOOL, top, c(r, ovfl)))
-        third = r('and', BOOL, r('not', BOOL, first), r('not', BOOL, second))
-        valid = r('le', BOOL, top2, c(r, ovfl))
-        made = r('select', t, first, c(r, 1), r('select', t, second, r('div', t, c(r, 0.5), r(
-            'mul', t, c(r, smlnum), top)), r('select', t, valid, r('div', t, c(r, 1), r('mul', t, c(
-                r, smlnum), top2)), c(r, 1))))
-        return [(made, t), (flag(r, r('and', BOOL, third, valid)), I32),
-                (flag(r, r('and', BOOL, third, r('not', BOOL, valid))), I32)]
-    ops += _record((n,), [(tscal, (0,)), (case2, (0,)), (fallback, (0,))], [(tmax, (0,)), (tmax2, (0,))], cases)
-
-    # zlatrs 400-423, case 2: a column norm above overflow recomputed as the sum of (2 TSCAL) CABS2(A(I,J)), each
-    # summand scaled before the summation; its records run only where some KI is case 2 (`any2`)
-    ops += _record_extreme((n,), any2, (None,), [(case2, (0,))], lambda r, v: [(r('select', I32, nonzero(
-        r, v[0]), k(r, n), k(r, 0)), I32)], [REDUCTION])
-    _emit(ops, _record((n, n, n), [(rec2d, (0, 1))], [(h, (2, 0)), (tscal, (1,))], lambda r, v: [(r(
-        'select', t, r('lt', BOOL, r.index(2), r.index(0)), r('mul', t, r('mul', t, c(r, 2), v[1]), cabs2(r, v[0])),
-        c(r, 0)), t)], [PARALLEL, PARALLEL, REDUCTION], [SUM]), loops=(None, (any2, n), None))
-
-    # CNORM(J) as KI's solve reads it: unscaled, by TSCAL (case 1 and case 2's representable norms), or recomputed
-    def normed(r, v):
-        norm, factor, second, recomputed = v
-        scaled = r('mul', t, norm, factor)
-        within = r('select', t, r('le', BOOL, norm, c(r, ovfl)), scaled, recomputed)
-        return [(r('select', t, nonzero(r, second), within, r('select', t, r('eq', BOOL, factor, c(r, 1)), norm,
-                                                                         scaled)), t)]
-    ops += _record((n, n), [(cn, (0, 1))], [(cnorm, (0,)), (tscal, (1,)), (case2, (1,)), (rec2d, (0, 1))], normed)
-
-    # zlatrs 436-440 and 442-504: XMAX = XBND = the largest CABS2(X(J)) of X = -T(1:KI-1,KI); where TSCAL = 1,
-    # GROW = HALF / max(XBND, SMLNUM) and XBND = GROW, then each J = KI-1..1 (round J): GROW <= SMLNUM ends the loop
-    # (GROW kept); XBND = min(XBND, min(1, TJJ) GROW) (0 where TJJ < SMLNUM); GROW = GROW TJJ / (TJJ + CNORM(J))
-    # (0 where TJJ + CNORM(J) < SMLNUM); a completed loop GROW = XBND; TSCAL /= 1 GROW = 0
-    ops += _record_extreme((n, n), xmax0, (0,), [(h, (1, 0))], lambda r, v: [(r('select', t, below(r), cabs2(
-        r, v[0]), c(r, 0)), t)], [PARALLEL, REDUCTION])
-    ops += _record((n,), [(grow, (0,)), (xbnd, (0,)), (broken, (0,))], [(xmax0, (0,))], lambda r, v: [
-        (r('div', t, c(r, 0.5), larger(r, v[0], c(r, smlnum))), t)] * 2 + [(k(r, 0), I32)])
+    # zlatrs 436-504: XMAX = XBND the largest CABS2 of X = -T(1:KI-1,KI); where TSCAL = 1, GROW = HALF / MAX(XBND,
+    # SMLNUM) and XBND = GROW, then each J = KI-1..1: GROW <= SMLNUM leaves the loop (GO TO 60, GROW kept), XBND =
+    # MIN(XBND, MIN(ONE, TJJ) GROW) (ZERO where TJJ < SMLNUM), GROW = GROW (TJJ / (TJJ + CNORM(J))) (ZERO where
+    # TJJ + CNORM(J) < SMLNUM); a completed loop GROW = XBND; TSCAL /= 1 GROW = ZERO
+    rhs = torch.where(upper, -t, 0)
+    xmax = torch.where(upper, _cabs2(rhs), 0).amax(-2)
+    grow = 0.5 / _larger(xmax, torch.full_like(xmax, smlnum))
+    xbnd, stopped = grow, torch.zeros_like(fallback)
     for j in range(n - 1, 0, -1):
-        def grown(r, v):
-            g, xb, stopped, factor, own, bound, norm, diagonal = v
-            live = r('and', BOOL, r('eq', BOOL, factor, c(r, 1)), r('not', BOOL, nonzero(r, stopped)))
-            stop = r('and', BOOL, live, r('le', BOOL, g, c(r, smlnum)))
-            step = r('and', BOOL, live, r('not', BOOL, stop))
-            tjj = _cabs1(r, t, shifted(r, diagonal, own, bound))
-            bounded = r('select', t, r('ge', BOOL, tjj, c(r, smlnum)), smaller(r, xb, r('mul', t, smaller(
-                r, c(r, 1), tjj), g)), c(r, 0))
-            total = r('add', t, tjj, norm)
-            growth = r('select', t, r('ge', BOOL, total, c(r, smlnum)), r('mul', t, g, r('div', t, tjj, total)),
-                       c(r, 0))
-            return [(r('select', t, step, growth, g), t), (r('select', t, step, bounded, xb), t),
-                    (flag(r, r('or', BOOL, nonzero(r, stopped), stop)), I32)]
-        ops += _record((n - j,), [(grow[j:], (0,)), (xbnd[j:], (0,)), (broken[j:], (0,))],
-                       [(x_[j:], (0,)) for x_ in (grow, xbnd, broken, tscal, tk, smin)]
-                       + [(cnorm[j - 1:j], (None,)), (h[j - 1:j, j - 1], (None,))], grown)
+        live = (k >= j + 1) & (tscal == 1) & ~stopped
+        stop = live & (grow <= smlnum)
+        step = live & ~stop
+        tjj = _abs1(shifted[..., j - 1, :])
+        bounded = torch.where(tjj >= smlnum, _smaller(xbnd, _smaller(torch.ones_like(tjj), tjj) * grow), 0)
+        total = tjj + cn[..., j - 1, :]
+        grow, xbnd = torch.where(step, torch.where(total >= smlnum, grow * (tjj / total), 0), grow), torch.where(
+            step, bounded, xbnd)
+        stopped = stopped | stop
+    grow = torch.where(tscal != 1, 0, torch.where(stopped, grow, xbnd))
 
-    # zlatrs 606-627: ZTRSV where GROW TSCAL > SMLNUM (or case 2's return), SCALE = 1; else the careful solve: SCALE
-    # = (BIGNUM/2) / XMAX, X by it and XMAX = BIGNUM where XMAX > BIGNUM/2, else XMAX = 2 XMAX; then X = -T(1:KI-1,
-    # KI) by that SCALE (ztrevc 359-361), zero below
-    def decided(r, v):
-        factor, ztrsv, stopped, g, xb, top = v
-        final = r('select', t, r('ne', BOOL, factor, c(r, 1)), c(r, 0), r('select', t, nonzero(r, stopped), g, xb))
-        safe = r('or', BOOL, nonzero(r, ztrsv), r('gt', BOOL, r('mul', t, final, factor), c(r, smlnum)))
-        big = r('and', BOOL, r('not', BOOL, safe), r('gt', BOOL, top, c(r, bignum * 0.5)))
-        s = r('select', t, big, r('div', t, c(r, bignum * 0.5), top), c(r, 1))
-        return [(flag(r, safe), I32), (s, t), (r('select', t, safe, top, r('select', t, big, c(r, bignum), r(
-            'mul', t, top, c(r, 2)))), t), (s, t)]
-    ops += _record((n,), [(plain, (0,)), (scale, (0,)), (xmax, (0,)), (s0, (0,))],
-                   [(x_, (0,)) for x_ in (tscal, fallback, broken, grow, xbnd, xmax0)], decided)
-    ops += _record((n, n), [(x, (0, 1))], [(h, (0, 1)), (s0, (1,))], lambda r, v: [(_chosen(
-        r, t, r('lt', BOOL, r.index(0), r.index(1)), _real_scaled(r, t, _negated(r, t, v[0]), v[1]),
-        (c(r, 0), c(r, 0))), t)])
-
-    # each round J = n-1..1, columns KI = J+1..n: ZTRSV (X(J) = X(J) / A(J,J) where X(J) /= 0, then X(I) - X(J)
-    # A(I,J)) or zlatrs 632-743: XJ = CABS1(X(J)), TJJS = A(J,J) TSCAL; TJJ > SMLNUM: REC = 1/XJ where TJJ < 1 and
-    # XJ > TJJ BIGNUM; 0 < TJJ <= SMLNUM: REC = TJJ BIGNUM / XJ (then / CNORM(J) where CNORM(J) > 1) where XJ > TJJ
-    # BIGNUM; X by REC, SCALE and XMAX by REC, X(J) = ZLADIV(X(J), TJJS); A(J,J) = 0: X = e_J, SCALE = XMAX = 0;
-    # then by REC = 1/(2 XJ) where XJ > 1 and CNORM(J) > (BIGNUM - XMAX)/XJ, or HALF where XJ CNORM(J) > BIGNUM - XMAX
-    # (SCALE by it); then X(1:J-1) + (-X(J) TSCAL) A(1:J-1,J) and XMAX the largest CABS1 of X(1:J-1)
-    def solved(r, v):
-        xj, diagonal, own, bound, factor, ztrsv, s, top, norm = v
-        one = c(r, 1)
-        d = shifted(r, diagonal, own, bound)
-        present = _nonzero(r, t, xj)
-        direct = _chosen(r, t, present, _complex_value(r, t, 'div', _complex_parts(r, t, xj), d, 1, None), xj)
-        xa = _cabs1(r, t, xj)
-        tjjs = _real_scaled(r, t, d, factor)
-        tjj = _cabs1(r, t, tjjs)
-        large = r('gt', BOOL, tjj, c(r, smlnum))
-        tiny = r('and', BOOL, r('not', BOOL, large), r('gt', BOOL, tjj, c(r, 0)))
-        singular = r('and', BOOL, r('not', BOOL, large), r('not', BOOL, tiny))
-        over = r('gt', BOOL, xa, r('mul', t, tjj, c(r, bignum)))
-        safe_xa = r('select', t, over, xa, one)
-        bounded = r('div', t, r('mul', t, tjj, c(r, bignum)), safe_xa)
-        bounded = r('select', t, r('gt', BOOL, norm, one), r('div', t, bounded, norm), bounded)
-        first = r('select', t, r('and', BOOL, large, r('and', BOOL, r('lt', BOOL, tjj, one), over)),
-                  r('div', t, one, safe_xa), r('select', t, r('and', BOOL, tiny, over), bounded, one))
-        xs = _real_scaled(r, t, xj, first)
-        s1, t1 = r('mul', t, s, first), r('mul', t, top, first)
-        xn = _chosen(r, t, singular, (one, c(r, 0)), _complex_value(r, t, 'div', _complex_parts(r, t, xs), tjjs, 1,
-                                                                   None))
-        xjn = r('select', t, singular, one, _cabs1(r, t, xn))
-        s1, t1 = (r('select', t, singular, c(r, 0), value) for value in (s1, t1))
-        big = r('gt', BOOL, xjn, one)
-        recip = r('div', t, one, r('select', t, big, xjn, one))
-        room = r('sub', t, c(r, bignum), t1)
-        second = r('select', t, r('and', BOOL, big, r('gt', BOOL, norm, r('mul', t, room, recip))),
-                   r('mul', t, recip, c(r, 0.5)),
-                   r('select', t, r('and', BOOL, r('not', BOOL, big), r('gt', BOOL, r('mul', t, xjn, norm), room)),
-                     c(r, 0.5), one))
-        xf = _real_scaled(r, t, xn, second)
-        simple = nonzero(r, ztrsv)
-        moved_ = _all(r, [r('not', BOOL, simple), r('or', BOOL, r('or', BOOL, r('ne', BOOL, first, one), r(
-            'ne', BOOL, second, one)), singular)])
-        return [(_chosen(r, t, simple, direct, xf), t), (r('select', t, simple, s, r('mul', t, s1, second)), t),
-                (r('select', t, simple, top, t1), t), (r('select', t, simple, one, first), t),
-                (r('select', t, simple, one, second), t),
-                (flag(r, r('and', BOOL, r('not', BOOL, simple), singular)), I32),
-                (_chosen(r, t, simple, _negated(r, t, direct), _real_scaled(r, t, _negated(r, t, xf), factor)), t),
-                (flag(r, r('or', BOOL, r('not', BOOL, simple), present)), I32), (flag(r, moved_), I32)]
-
-    def updated(r, v):
-        xi, a, f1, f2, cleared, coefficient, used = v
-        y = _chosen(r, t, nonzero(r, cleared), (c(r, 0), c(r, 0)), _real_scaled(r, t, _real_scaled(r, t, xi, f1), f2))
-        return [(_chosen(r, t, nonzero(r, used), _plus(r, t, y, _times(r, t, coefficient, a)), y), t)]
-
-    def rescaled(r, v):
-        xi, f1, f2, cleared = v
-        y = _chosen(r, t, nonzero(r, cleared), (c(r, 0), c(r, 0)), _real_scaled(r, t, _real_scaled(r, t, xi, f1), f2))
-        return [(_chosen(r, t, r('lt', BOOL, r.index(0), r.index(1)), y, xi), t)]
+    # zlatrs 606-617: ZTRSV where GROW TSCAL > SMLNUM (or case 2's return), SCALE = 1; else SCALE = (BIGNUM HALF) /
+    # XMAX, X by it and XMAX = BIGNUM where XMAX > BIGNUM HALF, else XMAX = 2 XMAX
+    plain = fallback | (grow * tscal > smlnum)
+    big = ~plain & (xmax > bignum * 0.5)
+    scale = torch.where(big, (bignum * 0.5) / xmax, torch.ones_like(xmax))
+    xmax = torch.where(plain, xmax, torch.where(big, bignum, xmax * 2))
+    x = _scaled(rhs, scale[..., None, :])
     for j in range(n - 1, 0, -1):
-        width = n - j
-        ops += _record((width,), [(x[j - 1, j:], (0,))] + [(x_[j:], (0,)) for x_ in (
-            scale, xmax, rec1, rec2, zero, za, apply, moved)],
-                       [(x[j - 1, j:], (0,)), (h[j - 1:j, j - 1], (None,))] + [(x_[j:], (0,)) for x_ in (
-                           tk, smin, tscal, plain, scale, xmax)] + [(cn[j - 1, j:], (0,))], solved)
-        factors = [(x_[j:], (1,)) for x_ in (rec1, rec2, zero)]
-        if j > 1:
-            block = x[:j - 1, j:]
-            ops += _record((j - 1, width), [(block, (0, 1))], [(block, (0, 1)), (h[:j - 1, j - 1], (0,))] + factors
-                           + [(za[j:], (1,)), (apply[j:], (1,))], updated)
-        if j < n - 1:
-            ops += _record_extreme((width,), need, (None,), [(moved[j:], (0,))], lambda r, v, j=j: [(r(
-                'select', I32, nonzero(r, v[0]), k(r, n - 1 - j), k(r, 0)), I32)], [REDUCTION])
-            block = x[j:n - 1, j:]
-            _emit(ops, _record((n - 1 - j, width), [(block, (0, 1))], [(block, (0, 1))] + factors, rescaled),
-                  loops=((need, n - 1 - j), None))
-        if j > 1:
-            ops += _record_extreme((width, j - 1), xmax[j:], (0,), [(x[:j - 1, j:], (1, 0))], lambda r, v: [(_cabs1(
-                r, t, v[0]), t)], [PARALLEL, REDUCTION])
+        part = k >= j + 1
+        careful = part & ~plain
+        xj, dj, norm = x[..., j - 1, :], shifted[..., j - 1, :], cn[..., j - 1, :]
+        present = xj != 0
+        direct = torch.where(present, _cdiv(xj, dj), xj)
+        xa = _abs1(xj)
+        tjjs = _scaled(dj, tscal)
+        tjj = _abs1(tjjs)
+        large = tjj > smlnum
+        tiny = ~large & (tjj > 0)
+        singular = ~large & ~tiny
+        over = xa > tjj * bignum
+        held = (tjj * bignum) / xa
+        rec1 = torch.where(large & (tjj < 1) & over, 1 / xa, torch.where(tiny & over, torch.where(
+            norm > 1, held / norm, held), torch.ones_like(xa)))
+        xn = torch.where(singular, 1, _cdiv(_scaled(xj, rec1), tjjs))
+        xjn = torch.where(singular, 1, _abs1(xn))
+        s1, t1 = torch.where(singular, 0, scale * rec1), torch.where(singular, 0, xmax * rec1)
+        room, recip = bignum - t1, 1 / xjn
+        rec2 = torch.where((xjn > 1) & (norm > room * recip), recip * 0.5, torch.where(
+            ~(xjn > 1) & (xjn * norm > room), 0.5, torch.ones_like(xjn)))
+        xf = _scaled(xn, rec2)
+        rows = careful[..., None, :] & upper
+        x = torch.where(rows, torch.where(singular[..., None, :], 0, _scaled(_scaled(x, rec1[..., None, :]), rec2[
+            ..., None, :])), x)
+        x = _row_put(x, j - 1, torch.where(careful, xf, torch.where(part, direct, xj)))
+        coefficient = torch.where(careful, -_scaled(xf, tscal), -direct)
+        updating = part & torch.where(careful, _abs1(coefficient) != 0, present)
+        x = torch.where(updating[..., None, :] & (row <= j - 1), x + coefficient[..., None, :] * t[..., :, j - 1][
+            ..., :, None], x)
+        latest = torch.where(row <= j - 1, _abs1(x), 0).amax(-2) if j > 1 else t1
+        xmax, scale = torch.where(careful, latest, xmax), torch.where(careful, s1 * rec2, scale)
+    finished = torch.where((k == 1) | plain, torch.ones_like(scale), scale / tscal)
+    x = torch.where(row == col, finished[..., None, :].to(x.dtype), x)
+    vr = torch.matmul(z, x)
+    return _scaled(vr, (1 / _abs1(vr).amax(-2))[..., None, :])
 
-    # zlatrs 1018 and ztrevc 376 and 355: X(KI,KI) = SCALE (the careful solve's SCALE / TSCAL, ZTRSV's 1; KI = 1: 1);
-    # ztrevc 393-399: VR(:,KI) = Z(:,1:KI-1) X(1:KI-1) + SCALE Z(:,KI), then by 1 / the largest CABS1 of the column
-    ops += _record((n,), [(x, (0, 0))], [(scale, (0,)), (tscal, (0,)), (plain, (0,))], lambda r, v: [(r(
-        'select', t, r('or', BOOL, r('eq', BOOL, r.index(0), k(r, 0)), nonzero(r, v[2])), c(r, 1), r(
-            'div', t, v[0], v[1])), t)])
-    ops += _gemm(vr, z, (0, 2), x, (2, 1), (n, n, n))
-    ops += _record_extreme((n, n), mx, (0,), [(vr, (1, 0))], lambda r, v: [(_cabs1(r, t, v[0]), t)],
-                           [PARALLEL, REDUCTION])
-    ops += _record((n, n), [(vr, (0, 1))], [(vr, (0, 1)), (mx, (1,))], lambda r, v: [(_real_scaled(
-        r, t, v[0], r('div', t, c(r, 1), v[1])), t)])
-
-
-# Reference-LAPACK SRC/zgeev.f and dgeev.f (JOBVL = 'N', JOBVR = 'V' or 'N') as a fake-only operator (its shape rule
-# alone), lowered by _geev: the eigenvalues (*batch, n) contiguous and the right eigenvectors (*batch, n, n)
-# column-major (PyTorch v2.14.0 meta linalg_eig's non-CUDA layout), or (0,) where `vectors` is false, both of a's
-# complex dtype (a real input's complex counterpart: torch 2.14.0 torch/_meta_registrations.py meta_linalg_eig's
-# utils.corresponding_complex_dtype, each floating kind's, float16 and bfloat16 among them, no admission subset of it)
-torch.library.define('mesh::geev', '(Tensor a, bool vectors) -> (Tensor, Tensor)')
-
-
-@torch.library.register_fake('mesh::geev')
-def _geev_shapes(a, vectors):
-    batch, n = a.shape[:-2], a.shape[-1]
-    dtype = a.dtype if a.is_complex() else corresponding_complex_dtype(a.dtype)
-    return (a.new_empty((*batch, n), dtype=dtype),
-            a.new_empty((*batch, n, n), dtype=dtype).mT if vectors else a.new_empty((0,), dtype=dtype))
-
-
-GEEV_EIGEN = torch.ops.mesh.geev.default
-
-
-# torch 2.14.0 linalg_eig (A) -> (eigenvalues, eigenvectors) and _linalg_eigvals / linalg_eigvals (A) -> eigenvalues
-# on a non-CPU engine (compiler/mesh_compiler/decompose.py outline): GEEV_EIGEN's results
-def _eigen_geev(self, vectors):
-    values, made = GEEV_EIGEN(self, vectors)
-    return (values, made) if vectors else values
+# zgebak.f / dgebak.f 205-261 (JOB = 'B', SIDE = 'R', M = N): rows ILO..IHI by SCALE(I) where ILO /= IHI (ZDSCAL,
+# each component), then for II = 1..N outside ILO..IHI (I = ILO - II below ILO) rows I and K = SCALE(I) (`perm`)
+# interchanged where K /= I, in that order
+def _gebak(v, scale, perm, ilo, ihi):
+    n, k = v.shape[-1], _counted(v)
+    v = torch.where((_span(k, ilo, ihi) & _vec(ilo != ihi))[..., :, None], _scaled(v, scale[..., :, None]), v)
+    every = torch.ones(n, dtype=torch.bool, device=v.device)
+    for ii in range(1, n + 1):
+        i = torch.where(ii < ilo, ilo - ii, torch.full_like(ilo, ii))
+        target = _at(perm, i)
+        v = _rows_swapped(v, i, target, every, ((ii < ilo) | (ii > ihi)) & (target != i))
+    return v
 
 
-# zgeev.f 319-517 for each batch member: ANRM = ZLANGE('M') (the largest modulus), INFO = -4 where it is NaN or above
-# overflow (and nothing else runs); A scaled into [SMLNUM, BIGNUM] (SMLNUM = sqrt(SAFMIN) / EPS) by ZLASCL; ZGEBAL;
-# ZGEHRD (ZGEHD2) and, with vectors, ZUNGHR into Z; ZHSEQR (W(1:ILO-1) and W(IHI+1:N) from H's diagonal, then
-# ZLAHQR); where INFO = 0 and with vectors ZTREVC, ZGEBAK('B', 'R') and each column's Euclidean normalization with
-# its first largest squared modulus made real; then W's undo scaling (W(INFO+1:N), and W(1:ILO-1) where INFO > 0).
-# ZLASCL (zlascl.f) takes MUL = CTO / CFROM in its first pass for these operands (CFROM and CTO finite and nonzero
-# within the SMLNUM/BIGNUM range). The INFO of each member reaches the existing linalg.eig _Check. A real input
-# (dgeev.f) takes DLAHQR's WR/WI, DTREVC's packed vectors and DGEBAK, its results linalg_eig's complex ones (PyTorch
-# v2.14.0 BatchLinearAlgebra.cpp linalg_eig_make_complex_eigenvectors: where WI(j) > 0, VR(:,j) + i VR(:,j+1) and
-# its conjugate at j+1); dgeev's 470-503 normalization (1 / DLAPY2 of the pair's DNRM2s, then DLARTG/DROT making the
-# largest VR(K,j)^2 + VR(K,j+1)^2 entry real) is that complex column's normalization, the phase only for a pair
-def _geev(outs, a, vectors):
-    values, made = outs
-    batch, n = a.shape[:-2], a.shape[-1]
-    if not n or not a.numel():
-        return []
-    # Rejection filters are not part of even temporary integration validation.
-    # Every non-CPU eig reaches this lowering; a kind GEEV's S/D/C/Z transcription lacks fails here, at its lowering.
-    if a.dtype not in (torch.float32, torch.float64, torch.complex64, torch.complex128):
-        raise NotImplementedError('linalg.eig of %s on a non-CPU engine: its GEEV lowering is unfinished '
-                                  '(design/torch-source-lowering-change-request.md item 6)' % a.dtype)
-    dtype, real, t = a.dtype, a.real.dtype, _class(a.real)
-    whole = a.is_complex()
-    limits = torch.finfo(real)
+# column j's DZNRM2 / DNRM2 (_norm2 over the column)
+def _column_norms(v):
+    return _norm2(v.mT, torch.ones(v.shape[-2], dtype=torch.bool, device=v.device))
+
+
+# zgeev.f 492-503: each column by SCL = 1 / DZNRM2 (ZDSCAL), then RWORK(K) = DBLE(VR(K,I))**2 + AIMAG(VR(K,I))**2, K
+# = IDAMAX (the first largest), TMP = CONJG(VR(K,I)) / SQRT(RWORK(K)) (each component), the column by TMP (ZSCAL)
+# and VR(K,I) = DCMPLX(DBLE(VR(K,I)), ZERO)
+def _zgeev_normalized(v):
+    k = _counted(v)
+    v = _scaled(v, (1 / _column_norms(v))[..., None, :])
+    squares = v.real * v.real + v.imag * v.imag
+    at = squares.argmax(-2, keepdim=True)
+    tmp = _over(v.gather(-2, at).conj(), squares.gather(-2, at).sqrt())
+    v = tmp * v
+    return torch.where(k[:, None] == at + 1, torch.complex(v.real, torch.zeros_like(v.real)), v)
+
+
+# Reference-LAPACK SRC/dlartg.f90 (E. Anderson, Algorithm 978: Safe Scaling in the Level 1 BLAS, ACM TOMS 44(1),
+# 2017; not among this directory's references): C, S with SAFMIN = DLAMCH('S') (radix**max(minexponent - 1,
+# 1 - maxexponent)), SAFMAX = 1 / SAFMIN, RTMIN = SQRT(SAFMIN), RTMAX = SQRT(SAFMAX / 2); G = 0: (1, 0); F = 0:
+# (0, SIGN(1, G)); F1 and G1 within (RTMIN, RTMAX): D = SQRT(F F + G G), C = F1 / D, R = SIGN(D, F), S = G / R; else
+# by U = MIN(SAFMAX, MAX(SAFMIN, F1, G1)): FS = F / U, GS = G / U, D = SQRT(FS FS + GS GS), C = |FS| / D,
+# S = GS / SIGN(D, F)
+def _dlartg(f, g):
+    limits = torch.finfo(f.dtype)
+    safmin = limits.tiny
+    safmax = 1 / safmin
+    rtmin, rtmax = math.sqrt(safmin), math.sqrt(safmax / 2)
+    f1, g1 = f.abs(), g.abs()
+    plain = (f1 > rtmin) & (f1 < rtmax) & (g1 > rtmin) & (g1 < rtmax)
+    d = (f * f + g * g).sqrt()
+    u = _smaller(torch.full_like(f1, safmax), _larger(_larger(torch.full_like(f1, safmin), f1), g1))
+    fs, gs = f / u, g / u
+    du = (fs * fs + gs * gs).sqrt()
+    c = torch.where(plain, f1 / d, fs.abs() / du)
+    s = torch.where(plain, g / _fsign(d, f), gs / _fsign(du, f))
+    one = torch.ones_like(f)
+    c = torch.where(g == 0, one, torch.where(f == 0, 0, c))
+    return c, torch.where(g == 0, 0, torch.where(f == 0, _fsign(one, g), s))
+
+
+# dgeev.f 505-524: WI(I) = 0, the column by SCL = 1 / DNRM2; WI(I) > 0, columns I and I+1 by SCL = 1 / DLAPY2(their
+# DNRM2s), K = IDAMAX(VR(K,I)**2 + VR(K,I+1)**2), DLARTG(VR(K,I), VR(K,I+1)) and DROT (DTEMP = C X + S Y,
+# Y = C Y - S X) of the two columns, VR(K,I+1) = ZERO
+def _dgeev_normalized(v, wi):
+    k = _counted(v)
+    zero, flag = torch.zeros_like(v[..., :, :1]), torch.zeros_like(wi[..., :1], dtype=torch.bool)
+    norms = _column_norms(v)
+    paired = 1 / _dlapy2(norms, torch.cat([norms[..., 1:], torch.zeros_like(norms[..., :1])], -1))
+    first = wi > 0
+    tail = torch.cat([flag, first[..., :-1]], -1)
+    factor = torch.where(first, paired, torch.where(wi == 0, 1 / norms, torch.ones_like(norms)))
+    factor = torch.where(tail, torch.cat([torch.ones_like(paired[..., :1]), paired[..., :-1]], -1), factor)
+    v = v * factor[..., None, :]
+    after, before = torch.cat([v[..., :, 1:], zero], -1), torch.cat([zero, v[..., :, :-1]], -1)
+    squares = v * v + after * after
+    at = squares.argmax(-2, keepdim=True)
+    c, s = _dlartg(v.gather(-2, at)[..., 0, :], after.gather(-2, at)[..., 0, :])
+    pc = torch.cat([torch.ones_like(c[..., :1]), c[..., :-1]], -1)
+    ps = torch.cat([torch.zeros_like(s[..., :1]), s[..., :-1]], -1)
+    placed = torch.cat([torch.zeros_like(at[..., :1]), at[..., :-1]], -1) + 1
+    rotated = torch.where(first[..., None, :], c[..., None, :] * v + s[..., None, :] * after, torch.where(
+        tail[..., None, :], pc[..., None, :] * v - ps[..., None, :] * before, v))
+    return torch.where(tail[..., None, :] & (k[:, None] == placed), 0, rotated)
+
+
+# Reference-LAPACK SRC/zgeev.f 319-517 and dgeev.f 330-560 (JOBVL = 'N', JOBVR = `jobvr`) on a non-CPU engine,
+# the results of LAPACK_ZGEEV (w, vr, info) or LAPACK_DGEEV (wr, wi, vr, info) and their shapes (vr column-major, or
+# (0,) where JOBVR = 'N'): ANRM = ZLANGE('M') (the largest modulus, a NaN kept), INFO = -4 where it is NaN or above
+# overflow (the member's remaining work its own and unused), SCALEA and CSCALE (SMLNUM = SQRT(SAFMIN) / EPS) and
+# ZLASCL(ANRM -> CSCALE); ZGEBAL('B'); ZGEHRD; with vectors ZUNGHR into Z and ZHSEQR('S', 'V'), else ZHSEQR('E', 'N')
+# (zhseqr.f 415-430: W(1:ILO-1) and W(IHI+1:N) from H's diagonal, ILO = IHI's W(ILO) = H(ILO,ILO) return, else
+# ZLAHQR, then 482-485's H(3:N,1:N-2) lower part zero where WANTT or INFO /= 0 and N > 2); where INFO = 0 and with
+# vectors ZTREVC3, ZGEBAK('B', 'R') and the normalization (VR as ZHSEQR left Z elsewhere); label 50's undo scaling
+# ZLASCL(CSCALE -> ANRM) of W(INFO+1:N), and of W(1:ILO-1) where INFO > 0, where SCALEA and INFO >= 0. ZHSEQR's ZLAQR0
+# (N > NMIN = 75, and its retry where ZLAHQR returns INFO > 0) is ZLAHQR here
+def _geev_routine(a, jobvr):
+    n, k, whole, vectors = a.shape[-1], _counted(a), a.is_complex(), jobvr == 'V'
+    limits = torch.finfo(a.real.dtype)
     smlnum = math.sqrt(limits.tiny) / limits.eps
-    bignum, ovfl = 1 / smlnum, limits.max
-    info = _temporary((*batch, 1), torch.int32)
-    ops = []
-
-    def c(r, value):
-        return r.const(value, t)
-
-    def k(r, value):
-        return r.const(value, I32)
-    for member in itertools.product(*map(range, batch)):
-        source, own = a[member], info[member]
-        h = _temporary((n, n), dtype)
-        eigen = [_temporary((n,), dtype)] if whole else [_temporary((n,), real), _temporary((n,), real)]
-        z, vr = (_temporary((n, n), dtype), _temporary((n, n), dtype)) if vectors else (None, None)
-        assembled = [_temporary((n, n), values.dtype), _temporary((n,), torch.int32)] if vectors and not whole else []
-        scale, anrm, mul, undo = _temporary((n,), real), *(_temporary((1,), real) for _ in range(3))
-        perm, ilo, ihi, scalea, proceed, wanted = _temporary((n,), torch.int32), \
-            *(_temporary((1,), torch.int32) for _ in range(5))
-        carried = (h, *eigen, *((z, vr) if vectors else ()), *assembled, scale, anrm, mul, undo, perm, ilo, ihi, scalea,
-                   proceed, wanted, info)
-
-        # 332-350: ANRM, INFO = -4, SCALEA and CSCALE, MUL = CSCALE / ANRM and its undo ANRM / CSCALE
-        ops += _record_extreme((n, n), anrm, (None,), [(source, (0, 1))], lambda r, v: [(_modulus(r, t, v[0]), t)],
-                               [REDUCTION, REDUCTION])
-
-        def scaled(r, v):
-            norm = v[0]
-            bad = r('or', BOOL, r('isnan', BOOL, norm), r('gt', BOOL, norm, c(r, ovfl)))
-            low = r('and', BOOL, r('gt', BOOL, norm, c(r, 0)), r('lt', BOOL, norm, c(r, smlnum)))
-            high = r('gt', BOOL, norm, c(r, bignum))
-            target = r('select', t, low, c(r, smlnum), c(r, bignum))
-            safe = r('select', t, r('or', BOOL, low, high), norm, c(r, 1))
-            return [(r('select', I32, bad, k(r, -4), k(r, 0)), I32),
-                    (_convert(r, r('and', BOOL, r('not', BOOL, bad), r('or', BOOL, low, high)), BOOL, I32), I32),
-                    (_convert(r, r('not', BOOL, bad), BOOL, I32), I32),
-                    (r('div', t, target, safe), t), (r('div', t, safe, target), t)]
-        ops += _scalars([own, scalea, proceed, mul, undo], [anrm], scaled)
-
-        body = []
-        body += _record((n, n), [(h, (0, 1))], [(source, (0, 1)), (scalea, (None,)), (mul, (None,))], lambda r, v: [(
-            _chosen(r, t, r('ne', BOOL, v[1], k(r, 0)), _real_scaled(r, t, v[0], v[2]), v[0]), t)])
-        _gebal(h, scale, perm, ilo, ihi, body, held=carried)
-        _gehd2(h, z, ilo, ihi, body)
-
-        # zhseqr.f / dhseqr.f 415-419: the eigenvalues ZGEBAL isolated, H's diagonal outside ILO..IHI (WI zero)
-        def isolated(r, v):
-            *xs, diagonal, low, high = v
-            p = r('add', I32, r.index(0), k(r, 1))
-            outside = r('or', BOOL, r('lt', BOOL, p, low), r('gt', BOOL, p, high))
-            return [(_chosen(r, t, outside, x, old), t) for x, old in zip((diagonal, c(r, 0)), xs)]
-        body += _record((n,), [(x, (0,)) for x in eigen], [(x, (0,)) for x in eigen] + [
-            (h, (0, 0)), (ilo, (None,)), (ihi, (None,))], isolated)
-        if whole:
-            _zlahqr(h, z, eigen[0], ilo, ihi, own, body, held=carried)
-        else:
-            _dlahqr(h, z, eigen[0], eigen[1], ilo, ihi, own, body, held=carried)
-
-        # 438-504: where INFO = 0, ZTREVC (DTREVC), ZGEBAK (DGEBAK) and the normalization
-        if vectors:
-            body += _scalars([wanted], [own], lambda r, v: [(_convert(r, r('eq', BOOL, v[0], k(r, 0)), BOOL, I32),
-                                                             I32)])
-            inner = []
-            (_ztrevc if whole else _dtrevc)(h, z, vr, inner)
-            _gebak(vr, scale, perm, ilo, ihi, inner)
-            if whole:
-                _geev_normalized(vr, inner)
-                inner += _copy(made[member], vr)
-            else:
-                vc, pairs = assembled
-
-                def complexed(r, v):
-                    value, wi, slot = v
-                    first, second = r('gt', BOOL, wi, c(r, 0)), r('lt', BOOL, wi, c(r, 0))
-                    after = r('extract', t, r.index(0), _bounded(r, r('add', I32, r.index(1), k(r, 1)), n)[1],
-                              integer=slot)
-                    before = r('extract', t, r.index(0), _bounded(r, r('sub', I32, r.index(1), k(r, 1)), n)[1],
-                               integer=slot)
-                    return [((r('select', t, second, before, value), r('select', t, first, after, r(
-                        'select', t, second, r('neg', t, value), c(r, 0)))), t)]
-                inner += _record((n, n), [(vc, (0, 1))], [(vr, (0, 1)), (eigen[1], (1,)), (vr, None)], complexed)
-                inner += _record((n,), [(pairs, (0,))], [(eigen[1], (0,))], lambda r, v: [(_convert(r, r(
-                    'ne', BOOL, v[0], c(r, 0)), BOOL, I32), I32)])
-                _geev_normalized(vc, inner, pairs)
-                inner += _copy(made[member], vc)
-            inner += _fill(wanted, 0)
-            body.append(_Repeat(inner, wanted, carried))
-
-        # 508-517: W(INFO+1:N) by ANRM / CSCALE, and W(1:ILO-1) where INFO > 0, where SCALEA
-        def unscaled(r, v):
-            x, flagged, low, failure, factor = v
-            p = r('add', I32, r.index(0), k(r, 1))
-            hit = _all(r, [r('ne', BOOL, flagged, k(r, 0)), r('ge', BOOL, failure, k(r, 0)), r(
-                'or', BOOL, r('ge', BOOL, p, r('add', I32, failure, k(r, 1))), r(
-                    'and', BOOL, r('gt', BOOL, failure, k(r, 0)), r('le', BOOL, p, r('sub', I32, low, k(r, 1)))))])
-            return [(_chosen(r, t, hit, _real_scaled(r, t, x, factor), x), t)]
-        for x in eigen:
-            body += _record((n,), [(x, (0,))], [(x, (0,)), (scalea, (None,)), (ilo, (None,)), (own, (None,)),
-                                                 (undo, (None,))], unscaled)
-        body += _copy(values[member], eigen[0]) if whole else _complex('complex', values[member], *eigen)
-        body += _fill(proceed, 0)
-        ops.append(_Repeat(body, proceed, carried))
-    return ops + [_Check(info, 3, 'linalg.eig')]
+    bignum = 1 / smlnum
+    anrm = a.abs().flatten(-2).amax(-1)
+    bad = anrm.isnan() | (anrm > limits.max)
+    low = (anrm > 0) & (anrm < smlnum)
+    scalea = ~bad & (low | (anrm > bignum))
+    cscale = torch.where(low, smlnum, torch.full_like(anrm, bignum))
+    h, scale, perm, ilo, ihi = _gebal(_lascl(a, anrm, cscale, scalea), ~bad)
+    h, taus = _gehrd(h, ilo, ihi)
+    z = _unghr(h, taus, ilo, ihi) if vectors else h.new_zeros(())
+    isolated = ~_span(k, ilo, ihi) | _vec(ilo == ihi)
+    diagonal = h.diagonal(dim1=-2, dim2=-1)
+    eigen = (torch.where(isolated, diagonal, 0),) if whole else (torch.where(isolated, diagonal, 0), torch.zeros_like(
+        diagonal))
+    info = torch.zeros_like(ilo)
+    searched = ~bad & (ilo != ihi)
+    if n > 1:
+        h, z, *eigen, info = (_zlahqr if whole else _dlahqr)(h, z, *eigen, ilo, ihi, searched, vectors)
+    if n > 2:
+        h = torch.where((k[:, None] - k >= 2) & _mat(searched & (vectors | (info != 0))), 0, h)
+    info = torch.where(bad, -4, info)
+    if vectors:
+        vr = _gebak(_ztrevc(h, z) if whole else _dtrevc(h, z), scale, perm, ilo, ihi)
+        vr = _zgeev_normalized(vr) if whole else _dgeev_normalized(vr, eigen[1])
+        vr = torch.where(_mat(info == 0), vr, z).mT.contiguous().mT
+    else:
+        vr = a.new_empty((0,))
+    undone = (k >= _vec(info + 1)) | (_vec(info > 0) & (k <= _vec(ilo - 1)))
+    eigen = [torch.where(undone, _lascl(x, cscale, anrm, scalea & (info >= 0)), x) for x in eigen]
+    return (*eigen, vr, info.to(torch.int32))
 
 
-# zgebak.f / dgebak.f 205-261 (JOB = 'B', SIDE = 'R', M = N) on v (complex or real) in place: rows ILO..IHI by
-# SCALE(I) where ILO /= IHI, then for II = 1..N outside ILO..IHI (I = ILO - II below ILO), rows I and K = SCALE(I)
-# (`perm`) interchanged in that order
-def _gebak(v, scale, perm, ilo, ihi, ops):
-    n, t = v.shape[-1], _class(v.real)
-    span, base = _temporary((1,), torch.int32), _temporary((1,), torch.int32)
-    ops += _scalars([span, base], [ilo, ihi], lambda r, x: [(r('select', I32, r('ne', BOOL, x[0], x[1]), r(
-        'add', I32, r('sub', I32, x[1], x[0]), r.const(1, I32)), r.const(0, I32)), I32),
-        (r('sub', I32, x[0], r.const(1, I32)), I32)])
-    rows, factors = v[...], scale[...]
-    _emit(ops, _record((n, n), [(rows, (0, 1))], [(rows, (0, 1)), (factors, (0,))], lambda r, x: [(_real_scaled(
-        r, t, x[0], x[1]), t)]), loops=((span, n), None), offsets=[(rows, {0: (base, n - 1)}),
-                                                                   (factors, {0: (base, n - 1)})])
-    first, second, extent = (_temporary((n,), torch.int32) for _ in range(3))
-
-    def order(r, x):
-        low, high, slot = x
-        one = r.const(1, I32)
-        ii = r('add', I32, r.index(0), one)
-        inside = r('and', BOOL, r('ge', BOOL, ii, low), r('le', BOOL, ii, high))
-        at = r('select', I32, r('lt', BOOL, ii, low), r('sub', I32, low, ii), ii)
-        kk = _entry(r, I32, slot, perm, _bounded(r, r('sub', I32, at, one), n)[1])
-        active = r('and', BOOL, r('not', BOOL, inside), r('ne', BOOL, kk, at))
-        return [(_bounded(r, r('sub', I32, at, one), n)[1], I32), (_bounded(r, r('sub', I32, kk, one), n)[1], I32),
-                (r('select', I32, active, r.const(n, I32), r.const(0, I32)), I32)]
-    ops += _record((n,), [(first, (0,)), (second, (0,)), (extent, (0,))], [(ilo, (None,)), (ihi, (None,)),
-                                                                            (perm, None)], order)
-    for ii in range(n):
-        _swapped((v[...], (None, 0), {0: (first[ii:ii + 1], n - 1)}),
-                 (v[...], (None, 0), {0: (second[ii:ii + 1], n - 1)}), (extent[ii:ii + 1], n), ops)
-
-
-# zgeev.f 492-503: each column by 1 / DZNRM2 (_linalg_lengths' scaled norm), then by TMP = conj(v_K) / sqrt(RW_K) at
-# K = IDAMAX(RW), the first largest RW = Re^2 + Im^2, and v_K's imaginary part set to zero; `phased` (int32 by
-# column) where given limits that phase to its nonzero columns (dgeev.f 470-490: a real eigenvalue's column scaled
-# alone, a pair's DLARTG/DROT the same rotation of its complex column)
-def _geev_normalized(v, ops, phased=None):
-    n, t, real = v.shape[-1], _class(v.real), v.real.dtype
-    norms, squares, largest = _temporary((n,), real), _temporary((n, n), real), _temporary((n,), real)
-    first, phase = _temporary((n,), torch.int32), _temporary((n,), v.dtype)
-    _linalg_lengths(v, norms, ops, normalize=False)
-    ops += _record((n, n), [(v, (0, 1))], [(v, (0, 1)), (norms, (1,))], lambda r, x: [(_real_scaled(
-        r, t, x[0], r('div', t, r.const(1, t), x[1])), t)])
-    ops += _record((n, n), [(squares, (0, 1))], [(v, (0, 1))], lambda r, x: [(_square(r, t, x[0]), t)])
-    ops += _record_extreme((n, n), largest, (0,), [(squares, (1, 0))], lambda r, x: [(x[0], t)], [PARALLEL, REDUCTION])
-    ops += _record_extreme((n, n), first, (0,), [(squares, (1, 0)), (largest, (0,))], lambda r, x: [(r(
-        'select', I32, r('eq', BOOL, x[0], x[1]), r.index(1), r.const(n, I32)), I32)], [PARALLEL, REDUCTION],
-        larger=False)
-
-    def rotation(r, x):
-        at, vs, rs = x
-        row = _bounded(r, at, n)[1]
-        entry = _entry(r, t, vs, v, row, r.index(0))
-        return [(_divided_by(r, t, _conjugate(r, t, entry), r('sqrt', t, _entry(r, t, rs, squares, row, r.index(0)))),
-                 t)]
-    ops += _record((n,), [(phase, (0,))], [(first, (0,)), (v, None), (squares, None)], rotation)
-
-    def turned(r, x):
-        made = _chosen(r, t, r('eq', BOOL, r.index(0), x[2]), (_part(r, t, _times(r, t, x[1], x[0]), 0), r.const(
-            0, t)), _times(r, t, x[1], x[0]))
-        return [(made if phased is None else _chosen(r, t, r('ne', BOOL, x[3], r.const(0, I32)), made, x[0]), t)]
-    ops += _record((n, n), [(v, (0, 1))], [(v, (0, 1)), (phase, (1,)), (first, (1,))] + (
-        [(phased, (1,))] if phased is not None else []), turned)
-
-
-# a complex record value divided by a real one, each component (Fortran's complex / real)
-def _divided_by(r, t, x, s):
-    return tuple(r('div', t, p, s) for p in _complex_parts(r, t, x))
-
-
-# an index that may leave [0, size): its in-range test and the index clamped into range, so the extraction is defined
-def _bounded(r, at, size):
-    zero, last = r.const(0, I32), r.const(size - 1, I32)
-    inside = r('and', BOOL, r('ge', BOOL, at, zero), r('le', BOOL, at, last))
-    return inside, r('select', I32, r('lt', BOOL, at, zero), zero, r('select', I32, r('gt', BOOL, at, last), last, at))
-
-
-def _all(r, tests):
-    made = tests[0]
-    for test in tests[1:]:
-        made = r('and', BOOL, made, test)
-    return made
-
-
-# design/homomorphism-sources-2026-11-08.md; L. Meertens, Algorithmics, CWI Monographs 1, 1986, "Inserted-in", (i);
-# Gibbons 1996, (2) and Definition 3.1: each reduction's identity and its associative operator
-def _identity(packet, dtype):
-    if packet in (A.sum, A.mean):
-        return 0
-    if dtype.is_floating_point:
-        return -math.inf if packet is A.amax else math.inf
-    if dtype is torch.bool:
-        return int(packet is A.amin)
-    return torch.iinfo(dtype).min if packet is A.amax else torch.iinfo(dtype).max
-
-
-# the loops of a reduction of x over `dims` (its free dimensions PARALLEL first, then the reduced), x's map and the
-# result's: the reduced shape's, or (`keepdim`, PyTorch 2.14 documentation, torch.sum `keepdim`) the original output's,
-# each reduced dimension of extent 1 at the constant row 0 and each free one at its loop
-def _reducing(x, dims, keepdim=False):
-    free = [d for d in range(x.dim()) if d not in dims]
-    domain = free + list(dims)
-    kept = [None if d in dims else domain.index(d) for d in range(x.dim())] if keepdim else range(len(free))
-    return ([x.shape[d] for d in domain], [PARALLEL] * len(free) + [REDUCTION] * len(dims),
-            _rows(len(domain), [domain.index(d) for d in range(x.dim())]), _rows(len(domain), kept))
-
-
-def _reduction(packet, x, dims, kept, t, start=IDENTITY, keepdim=False):
-    r = _Region()
-    r.done(_load(r, 0, x, t))
-    loops, iterators, xmap, omap = _reducing(x, dims, keepdim)
-    if packet in (A.sum, A.mean):
-        return _Generic(loops, [(x, xmap)], [(kept, omap)], r, iterators, [SUM], [t], [start], precision=REASSOCIATE)
-    states = [(t, _identity(packet, x.dtype))]
-    return _Generic(loops, [(x, xmap)], [(kept, omap)], r, iterators, [REGION], [t], [start], states,
-                    _joined(states, lambda c, a, b: [_extremum(c, a[0], b[0], t, packet is A.amax)]),
-                    _identities(states), REASSOCIATE)
-
-
-def _dims(given, x):
-    dims = given.get('dim')
-    dims = () if dims is None else _ints(dims, 1)
-    return sorted({d % max(x.dim(), 1) for d in dims}) if dims else list(range(x.dim()))
-
-
-def _reduced(target, given, outs):
-    (out,), x, packet = outs, given['self'], target.overloadpacket
-    _typed(target, [x], outs, REAL)
-    dims, t = _dims(given, x), _compute(out.dtype, x.dtype)
-    acc = _temporary(out.shape, STORED[t]) if packet is A.mean else out
-    made = [_reduction(packet, x, dims, acc, t, keepdim=bool(given.get('keepdim')) and bool(dims))]
-    if packet is not A.mean:
-        return made
-    total = math.prod(x.shape[d] for d in dims)
-    return made + _epilogue(out, acc, t, (), lambda r, s: r('div', t, s, r.const(total, t)))
+def _eigen_geev(self, vectors=True):
+    return _eigen(self, vectors, _geev_routine, _geev_routine)
 
 
 # docs/provider.md#fragment-coded-weights (rdma/mesh_code.py fragment; its codes, tiles and bands uint32, as
@@ -4691,23 +2802,14 @@ class Generator:
         self.sites += 1
         return self.state, self.sites if identity is None else identity
 
-    def stepped(self):
-        return [_stepped(self.counter)] if self.sites else []
+    def advanced(self):
+        return Advance(self.counter, 1) if self.sites else None
 
 
-# the generator's advance: its execution word (Generator.counter, one word at the constant row 0) incremented once an
-# execution, after the program's draws
-def _stepped(counter):
-    r = _Region()
-    r.done(r('add', I32, r.arg(0, counter), r.const(1, I32)))
-    return _Generic((1,), [(counter, _rows(1, [None]))], [(counter, _rows(1, [None]))], r)
-
-
-def _placed(ops, place, node):
-    for g in ops:
-        g.place, g.node = place, node
-        if isinstance(g, _Repeat):
-            _placed(g.records, place, node)
+# the generator's advance once an execution, after the program's draws, as its consumer's typed operand: `counter` the
+# execution word's own view (Generator.counter: word 2 of the state root, the same storage the draws read through
+# GENERATOR), `increment` the execution count it adds (Salmon et al., SC 2011, §4.2: each execution's counter word)
+Advance = collections.namedtuple('Advance', 'counter increment')
 
 
 # design/torch-source-lowering-change-request.md item 1: the storage identity of a tensor of the compilation (its
@@ -4733,32 +2835,16 @@ def _metadata(value):
 # method and traces its formulation into the placed body: ATen and torch HOPs (while_loop_op, cond_op, switch_op), the
 # installed upstream compiler's to lower (torch 2.14.0 torch/_inductor/graph.py GraphLowering call_function,
 # lowering.py lowerings and make_fallback), and, on the CPU, the typed LAPACK operators (LAPACK: each one Accelerate
-# routine call, never a Torch kernel, its INFO consumed by the body's aten._linalg_check_errors).
-#
-# Not yet an upstream body: mesh::geev (GEEV_EIGEN, eig and eigvals off the CPU) is still this module's region
-# records (_Region, _Generic, _Repeat, _Check) through `lowered`: build(target, given, outs, generator) over
-# the extern's operands by schema name (_operands), each tensor operand its program value, `outs` its results' values.
-# That record path is the transitional one, not the method body; the geev algorithm's torch body replaces it. The
-# outlined eigh's step is a torch body (_qdwh_eigh_pop), its draws reading the body's Generator through GENERATOR
-Method = collections.namedtuple('Method', 'build drawn source')
-
-METHODS = {
-    GEEV_EIGEN.overloadpacket: Method(lambda target, given, outs, generator: _geev(outs, **given), False,
-                                      'item 6: Reference-LAPACK zgeev.f and dgeev.f on the placed processor'),
-}
-
-
-def method(target):
-    return METHODS.get(getattr(target, 'overloadpacket', target))
-
-
+# routine call, never a Torch kernel, its INFO consumed by the body's aten._linalg_check_errors). eig and eigvals off
+# the CPU are _eigen_geev's body (_geev_routine: zgeev.f and dgeev.f as ATen and while_loop composition); the outlined
+# eigh's step is _qdwh_eigh_pop, its Haar draws reading the body's Generator through GENERATOR
 def routine(target):
     return LAPACK.get(getattr(target, 'overloadpacket', target))
 
 
-# a body's nodes `lookup` finds (method or routine), its HOP subgraphs' among them (torch 2.14.0
+# a body's nodes `lookup` finds (its typed LAPACK operators by default), its HOP subgraphs' among them (torch 2.14.0
 # torch/_higher_order_ops: each cond, switch and while_loop subgraph a GraphModule its get_attr reads): node -> value
-def methods(graph_module, lookup=method):
+def methods(graph_module, lookup=routine):
     found = {}
     for node in graph_module.graph.nodes:
         held = _get_attr(graph_module, node.target) if node.op == 'get_attr' else None
@@ -4767,9 +2853,3 @@ def methods(graph_module, lookup=method):
         if node.op == 'call_function' and lookup(node.target) is not None:
             found[node] = lookup(node.target)
     return found
-
-
-# one record method extern's records: `args` and `kwargs` the node's own, each tensor operand its program value;
-# `outs` its results' values
-def lowered(target, args, kwargs, outs, generator=None):
-    return method(target).build(target, _operands(target, args, kwargs), list(outs), generator)
