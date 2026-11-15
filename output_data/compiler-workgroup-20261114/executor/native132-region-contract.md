@@ -1,6 +1,6 @@
 # Native132: region, order, lifetime, replay, selection and prepared-unit results: current ownership
 
-Claude Opus 5.5, 2026-11-15. The prepared-unit source is committed in Metal `669535a7`; the native ownership metadata is in `b850050b` and its canonical allocator consumer in Mesh `15e00e26`. Frontend `1d132af4` retains the same fields through Python. The actual native138 canonical build is in progress under Codex. Earlier strict source checks and these checkpoints are not runtime evidence. All owned C sources remain held through the build.
+Claude Opus 5.5, 2026-11-15. The prepared-unit source is committed in Metal `669535a7`; the native ownership metadata is in `b850050b` and its canonical allocator consumer in Mesh `15e00e26`. Frontend `1d132af4` retains the same fields through Python. Native138 full canonical build and ABI comparison passed, recorded by Metal55e2dcce. Earlier strict source checks and these checkpoints are not runtime evidence. The original stream resumed its unfinished source consumers after the build.
 
 ## Mine
 
@@ -46,11 +46,32 @@ Claude Opus 5.5, 2026-11-15. The prepared-unit source is committed in Metal `669
   - `mesh_value` gains `owned`, taking half of the former 8-byte `padding1`; the record stays 64 bytes and is saved as is.
   - `plan_location` gives an owned value's ring the span of every execution, as a lagged one's, with its EXECUTION kind and ordinary copies. `plan_lifetime` gives it no single call occurrence, so the cross-call allocator cannot reuse its storage between executions.
   - **For frontend104's thin projection:** `rdma/mesh.py` `Value` replaces `('padding1', Q)` with `('owned', U), ('padding1', U)`; `compiler/mesh_compiler/metal.py` `ValueInfo` appends `('owned', U), ('padding', U)`; `native.py` storages passes `info.owned` into each value's `owned`.
+- **Conditional GPU publication: host-step routing withdrawn** (Codex rejected it: it replaced in-body transport with host SENT/PUBLISH steps). Removed from the working tree, never committed.
+  - **Device design, to implement.** A GPU writer in a switch branch keeps its in-body release (the canonical `Releasing` protocol). The switch's device selector, after its selection, makes the releases owed by the writers of every unselected branch, through that same protocol implementation. Each such release is conditioned on `selected != arm`, the same literal-store mechanism as `SwitchBodies`.
+  - **Why it is correct.** An unselected writer never writes, so releasing for it before the selected branch runs completes no scope early. The selected branch's writers release in their own bodies, and the scope's last release publishes once. There is no host wait, no added step, and the writer count is unchanged (`Completions`).
+  - **Retained correspondence it needs:** each switch's held GPU writers per branch and their release records (value, transfer, owner; `Kernel::sent`, `Completions`' writers), from `Obligate` and the region search (`switchHeld`).
+  - **Crossing.** The selector's module must call 131's release protocol (`Releasing`/`UpstreamProtocol`) with those records bound. The exact composition point needs pairing with 131.
+
+- **Original WhileLoop pairing with 68/66** (needs actual source fields through the supervisor).
+  - The original `CppWrapperCpu.codegen_while_loop` (~2906) rebinds the carried tensor handles to the body outputs after each pass (`aoti_torch_assign_tensors_out`) and evaluates the condition through its item call. It writes no carried initialization or copy-back.
+  - Native `metal_ir_repeat` takes `carried` as one root that is the same across passes. For a body output that is a different buffer from its carried input, that is a mismatch: the original rebinds, native assumes in-place.
+  - Fields needed from the retained original emitter:
+    - each carried input → body output pair, as handles, with its buffer identity;
+    - whether the pair aliases (the same storage) or rebinds;
+    - the condition's source and its item;
+    - the loop's operation interval and nested children in the emitted order;
+    - the child's retained emitted result, not a replayed `graph.codegen`.
+  - The aliased case maps directly to `carried`. The rebinding case needs the native repeat consumer to take the pairs, the output root becoming the next pass's input binding. That is a correspondence change in my region consumer, not a copy or a new interpreter, and is designed only once the fields exist.
+
 - **Runtime unobserved:** nothing above has been run.
 
 ## Others
 
-- **131:** Transport/Upstream binding and effect methods, environment/compiler, binding groups, sizes and physical, `NativeBuild` compile-unit scheduling, other Lower stages; COPY/FILL in a branch as kernels; publishing a branch's value once after the switch; the diagnostic port rescan in `MetalOrder`. 131 saves `Value::owned` under v45.
+- **131:** Transport/Upstream binding and effect methods, environment/compiler, binding groups, sizes and physical, `NativeBuild` compile-unit scheduling, other Lower stages; COPY/FILL in a branch as kernels; the diagnostic port rescan in `MetalOrder`. 131 saves `Value::owned` under v45.
 - **133:** the original producer, its call sites and its unit declarations.
 - **135:** `metal_neural.mm`, NeuralIO/NeuralModel, the Kernel neural fields, the shared NeuralModel archive owner (`b4e1088c`, v45).
 - **66/68:** the original control (`ExternCall`/`Inlined`/`WhileLoop`/`Switch`) and lifetime operands. The native inputs that consume them are `metal_ir_value` role, `metal_ir_value_view`, the effects/bindings, `metal_ir_repeat` carried and condition, and transport ports; their results are `metal_ir_storages`, `metal_ir_last_uses`, `metal_ir_order_bounds` and `metal_ir_parts`.
+
+## Current resumed completion responsibility
+
+132 owns the exact conditional Completions/publication block together with the existing original region/result/lifetime consumer. The first post-build draft inserted host Steps for GPU branch sends and cleared the GPU send list; Codex rejected that substitution before acceptance. Finish the original device protocol's publication through retained selected-region result/completion, without a host wait or a one-shot loop. Preserve original wrapper handle rebinding and carried/zero-iteration semantics with66; do not invent unconditional init/copyback. The matched138 evidence is prior source, not evidence for this in-progress continuation.
