@@ -463,9 +463,10 @@ is each kernel's own loads and stores: `CppScheduling.kernel_proxy_cls` and `Cpp
 `vec_kernel_cls` and `tile2d_kernel_cls` make the kernels, and the lowerer's `MeshCppKernelProxy` and its kernels
 subclass them. The second is the group definition's parameter declarations.
 
-Not installed. The patch was prepared from the installed source as read. On a temporary copy of the installed
-`cpp.py` with the "before" hash below, a fuzz-0 dry run, application and reverse dry run all passed, and the result
-parses and has the "after" hash below. The supervisor owns installation.
+Installed from source checkpoint `205e2c94`. The supervisor verified the recorded before hash, applied the committed
+patch with fuzz 0 and backups disabled, and verified the after hash, reverse dry run and AST. The source-only
+realization is step 4 of `output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`;
+it did not import Torch or Mesh or execute a workload.
 
 ### What it changes
 
@@ -493,7 +494,7 @@ parses and has the "after" hash below. The supervisor owns installation.
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
 | `torch/_inductor/codegen/cpp.py` | before `74b2de2698fcb01ced737ca10238d16f0721a6e1271314fbec65170e66451934` (`torch-inductor-upstream-composition.patch`'s after), after `0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3` |
-| Install scope of this work | not installed; the supervisor installs it |
+| Install scope of this work | installed source only; numerical68-upstream-install.json step 4 |
 
 ### Apply, check, reverse
 

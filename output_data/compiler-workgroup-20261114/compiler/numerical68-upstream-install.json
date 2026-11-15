@@ -133,12 +133,71 @@
         "torch/_inductor/codegen/wrapper_fxir.py": "2d87d9247e23640662bba136c899a274fa278d3c98da96b630810882c3fdaa2a"
       },
       "ast": "PASS"
+    },
+    {
+      "patch": "torch-inductor-cpu-kernel-results.patch",
+      "patch_sha256": "28f80e53972096f78efd2005952379b7eb697011ee07d3a034fd89fac3c05699",
+      "source_revision": "205e2c94",
+      "time": "2026-11-15T07:02:43.470527+00:00",
+      "before": {
+        "torch/_inductor/codegen/cpp.py": "74b2de2698fcb01ced737ca10238d16f0721a6e1271314fbec65170e66451934"
+      },
+      "dry_run": {
+        "command": [
+          "patch",
+          "--batch",
+          "--fuzz=0",
+          "--no-backup-if-mismatch",
+          "-p1",
+          "-d",
+          "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+          "--dry-run"
+        ],
+        "exit": 0,
+        "stdout": "patching file 'torch/_inductor/codegen/cpp.py'\n",
+        "stderr": ""
+      },
+      "application": {
+        "command": [
+          "patch",
+          "--batch",
+          "--fuzz=0",
+          "--no-backup-if-mismatch",
+          "-p1",
+          "-d",
+          "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages"
+        ],
+        "exit": 0,
+        "stdout": "patching file 'torch/_inductor/codegen/cpp.py'\n",
+        "stderr": ""
+      },
+      "reverse_dry_run": {
+        "command": [
+          "patch",
+          "--batch",
+          "--fuzz=0",
+          "--no-backup-if-mismatch",
+          "-p1",
+          "-d",
+          "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+          "--reverse",
+          "--dry-run"
+        ],
+        "exit": 0,
+        "stdout": "patching file 'torch/_inductor/codegen/cpp.py'\n",
+        "stderr": ""
+      },
+      "after": {
+        "torch/_inductor/codegen/cpp.py": "0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3"
+      },
+      "ast": "PASS",
+      "scope": "dependency source realization only; no Torch/Mesh import, build or workload"
     }
   ],
-  "result": "PASS source realization; README cpp after hash corrected to actual committed-patch result",
+  "result": "PASS source realization through CPU kernel result patch205e2c94; initial composition README discrepancy preserved above",
   "final": {
     "torch/_inductor/codegen/mps.py": "8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db",
-    "torch/_inductor/codegen/cpp.py": "74b2de2698fcb01ced737ca10238d16f0721a6e1271314fbec65170e66451934",
+    "torch/_inductor/codegen/cpp.py": "0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3",
     "torch/_inductor/graph.py": "c9b55b3c5167e89301496d79a8cc33aec467260e90287f81619cbe352ffdd17d",
     "torch/_inductor/compile_fx.py": "97e1a585cd0d0172ea014ff63d33f40d92cb619da608683eeaf15a1a1eceeadf",
     "torch/_inductor/config.py": "f56964af7357aeaa5e1b601f00d94317251049856a4de6a12f6b378cd631ce1f",
