@@ -18,9 +18,17 @@ has since preserved five WIP checkpoints, none of which accepts the method:
 - 6e0bc4e1: the real DLAEXC/DTREXC/DLAQR3/DLAQR0/DHSEQR group below and GEEV's real DHSEQR call.
 - 068d5e0d: the DO 30 correction below. The supervisor accepts it only as source preservation and a literal-order
   correction, not as numerical completion.
+- d9f0bb28: the blocked xGEHRD / xUNGHR / xUNMQR dependency group and its workspace handoff (its own section below).
+- 51fb5572: a partial `_dtrevc(t, z, lwork)` (the IP and JNXT recurrences) whose GEEV caller still passed two
+  arguments and whose back-transform was still one Z X. It was preserved, not accepted.
 
-The operations.py delta on top of 068d5e0d is uncommitted. It is the blocked xGEHRD / xUNGHR / xUNMQR dependency group
-and its workspace handoff (its own section below). No TREVC source has changed.
+The operations.py delta on top of 51fb5572 is uncommitted. It continues that xTREVC3 group (below the blocked group);
+the group is not complete:
+- it writes `_ztrevc(t, z, lwork)` and `_dtrevc`'s version 2 back-transforms;
+- GEEV's caller now passes LWORK (complex) and LWORK − N (real).
+
+The real block projection computes static block supersets (the hi/lo bounds and the `reached` mask of Z). So the
+source's own active inner extent, its zero terms and unread entries, and BLAS rounding are not closed by it.
 
 068d5e0d corrects DO 30, the exceptional shifts, in both `_laqr0_pass` and `_dlaqr0_pass`; the supervisor's source
 review of 6e0bc4e1 found the defect:
@@ -303,19 +311,19 @@ These go after `_unmhr` and before `_geev_routine`. Each comment cites its zlaqr
   where NSB > 75 and not `four`. `_laqr0`'s main path is present only where n > 15, and `_zhseqr`'s three paths
   follow the static n. In each case the omitted source branch's runtime condition cannot hold within the static
   extent.
-- **`_ztrevc` (ztrevc.f with zlatrs.f, ZTREVC3's blocked back-transform VR = Z X):**
+- **`_ztrevc(t, z, lwork)` (ztrevc3.f 3.12.1 with zlatrs.f; see the xTREVC3 group for its back-transform):**
   - Shifted diagonal raised to SMIN.
   - ZLATRS's in-out CNORM: each KI's call scales CNORM by TSCAL and returns it ×1/TSCAL (except case 2's ZTRSV
     return). A static scan KI = N..2 carries the drifted norms the next KI reads.
   - TSCAL cases 1/2/3 and GROW/XBND.
   - The ZTRSV-or-careful solve with its REC rules and the A(J,J) = 0 null vector. ZAXPY's ZA = 0 return.
   - XMAX recomputation, SCALE/TSCAL, X(KI,KI).
-  - Columns normalized by 1/max CABS1.
-- **`_dtrevc` (dtrevc.f solve, DTREVC3's back-transform):**
-  - Per-column kind: real, or first/second of a pair.
+- **`_dtrevc(t, z, lwork)` (dtrevc3.f 3.12.1; see the xTREVC3 group):**
+  - Per-column IP from dtrevc3.f 423-438's recurrence.
   - The pair's initial 2×2 solve.
-  - Static block rounds J = N-1..1, with `_dlaln2` (dlaln2.f: complete pivoting, SMINI, every overflow test).
-  - BIGNUM/XNORM rescaling, DSCAL of WORK(1:KI), DAXPYs, then Z X and EMAX normalization.
+  - Rounds J = N-1..1, each column by its own JNXT recurrence, with `_dlaln2` (dlaln2.f: complete pivoting, SMINI,
+    every overflow test).
+  - BIGNUM/XNORM rescaling, DSCAL of WORK(1:KI), DAXPYs.
 - **`_gebak`:** ZGEBAK/DGEBAK('B','R'): scaling, then the sequential row interchanges.
 - **Normalization:**
   - `_zgeev_normalized`: zgeev 492-503 (1/DZNRM2, then TMP = conj(v_K)/sqrt(RWORK_K), with v_K real).
@@ -433,18 +441,42 @@ How the group is called and bounded:
   member's own runtime condition selects.
 - **Unreached returns:** zgehrd.f 222 (LWORK < MAX(1, N)), zunghr.f 175 (LWORK < MAX(1, NH)) and zunmqr.f 235
   (LWORK < NW) are never reached. GEEV's LWORK − N and LWORK − 2N exceed 32 N, and xLAQR3's LWORK − JW ≥ JW = NW.
-- **Exact unresolved fact (the next source group, not written, no TREVC source changed):** xTREVC3's NB.
-  - ZTREVC3 receives GEEV's LWORK (IWRK = ITAU = 1, zgeev.f 410, 437-440).
-  - DTREVC3 receives LWORK − N (IWRK = ITAU = N + 1, dgeev.f 426, 452-454).
-  - MAXWRK ≥ N + LWORK_TREVC = 130 N (zgeev.f 286-290, dgeev.f 305-309). So NB = MIN((LWORK' − N)/(2N), 128) ≥ 64
-    ≥ NBMIN = 8 (ztrevc3.f 365-371, dtrevc3.f 373-379), which selects version 2: the blocked GEMM back-transform with
-    inner extent KI + NB − IV (ztrevc3.f 466-496; dtrevc3.f 775-837 with KI2).
-  - ZTREVC3's blocks are static. DTREVC3's depend on each member's pair pattern: a pair takes IV − 1 and IV, and a
-    block is flushed at IV ≤ 2 or KI2 = 1.
-  - `_ztrevc`/`_dtrevc` still form one Z X over every N. That differs from version 2 where Z holds a non-finite entry
-    past a block's inner extent (0 times it is NaN), and in the zero signs.
-  - `_dtrevc`'s pair masks are T(KI,KI−1) ≠ 0 tests, not dtrevc3.f 423-438's IP recurrence. They differ only where
-    two consecutive subdiagonal entries are nonzero.
+### xTREVC3 group (uncommitted on 51fb5572; called by `_geev_routine`)
+
+Sources: ztrevc3.f and dtrevc3.f 3.12.1 in /tmp/n67i/lapack, with zgeev.f/dgeev.f in /tmp/n67f/lapack.
+- **Workspace handoff:**
+  - ZTREVC3 receives GEEV's LWORK (IWRK = ITAU = 1, zgeev.f 410, 437-440): `_ztrevc(h, z, lwork)`.
+  - DTREVC3 receives LWORK − N (IWRK = ITAU = N + 1, dgeev.f 426, 452-454): `_dtrevc(h, z, lwork − n)`.
+  - Both come from `_geev_lwork`'s one literal.
+- **NB:** NB = MIN((LWORK' − N)/(2N), NBMAX = 128) (ztrevc3.f 365-371, dtrevc3.f 373-379).
+  - MAXWRK ≥ N + LWORK_TREVC = 130 N (zgeev.f 286-290, dgeev.f 305-309). So LWORK' ≥ N + 2N·NBMIN and NB ≥ 64.
+  - The NB = 1 branch (version 1, the GEMV per KI) is never reached at this caller, like the unreached returns above.
+    N = 0 never reaches here (`_eigen` returns first), so the N = 0 return before NB is not needed.
+- **ZTREVC3 version 2 (466-496):** IV runs from NB (403), with each KI's column at IV and zero below KI. A block is
+  flushed where IV = 1 or KI = 1, so its blocks are static: NB columns from N down. Each block's ZGEMM is
+  Z(1:N,1:top) by its columns, its inner extent exactly KI + NB − IV. Each column is then normalized by 1/its largest
+  CABS1 (IZAMAX, ZDSCAL), and written to VR(1,KI) by ZLACPY.
+- **DTREVC3:**
+  - IP is the 423-438 recurrence (the column after a pair's second is its first; KI = 1 or T(KI,KI−1) = 0 is
+    real).
+  - The solves use each column's DO 60 / DO 90 JNXT recurrence (475-487, 623-635).
+  - Version 2 (584-593, 775-787, 790-837) runs a static scan KI = N..1 per member, in the source's order:
+    - IV from NB (416-419);
+    - a pair stored at IV − 1 and IV, then IV − 1;
+    - KI2 = KI − 1 for a pair, else KI;
+    - the flush where IV ≤ 2 or KI2 = 1, then IV = NB, else IV − 1.
+
+    It records each column's block and that block's top, KI2 + NB − IV. Each static block b covers every member's
+    columns of its b-th block (top ≤ N − b(NB − 1), bottom ≥ N − (b + 1)NB + 1). Its DGEMM takes Z zeroed past the
+    member's own top, so the terms there are 0 times X's zero rows. Each member keeps its own columns.
+  - Normalization (810-829): a real column by its largest |.|, a pair's two columns by EMAX of |re| + |im|.
+- **Remaining exact facts (OPEN, not claimed):**
+  - DTREVC3's masked Z adds +0 terms past the member's top, where the source GEMM reads nothing. That can change
+    a zero's sign.
+  - The source's own 0 × Z terms inside each block (WORK's zeroed rows) are as the source reads them, but their
+    NaN-from-Inf depends on the BLAS (OPEN below).
+  - IDAMAX/IZAMAX pick the first index whose value strictly exceeds the running maximum. That differs from amax
+    where a NaN is present.
 
 ## RNG state (operands produced here; the state consumer is unfinished, and no once-per-call effect is established)
 
@@ -517,7 +549,8 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
     - The supervisor's source review traced that constant to proxy_tensor's lift_fresh_copy (1479), its constant
       propagation (1494) and its scalar extraction (1362) under `_expanded`'s fake make_fx. That is source evidence
       only, not an observed trace.
-    - The blocked xUNMQR, xGEHRD and xUNGQR NB choices this LWORK feeds are now written; xTREVC3's is not.
+    - The blocked xUNMQR, xGEHRD and xUNGQR NB choices this LWORK feeds are now written. xTREVC3's NB is source too,
+      but not complete (see the xTREVC3 group).
   - The blocked ZGEHRD (DO 40 with zlahr2.f/zlarfb.f) for xLAQR3's ZGEHRD(JW, 1, NS), reached where NS ≥ 130, and for
     GEEV's own ZGEHRD where NH ≥ 130.
   - Both are now source in the blocked group above. They have been source-read, not traced or executed, and they
@@ -528,10 +561,10 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
   - DORMHR's blocked DORMQR;
   - GEEV's DORGHR with its blocked DORGQR.
 
-  DTREVC3's NB choice is still not written (the blocked group's exact unresolved fact).
+  DTREVC3's NB and version 2 are source but not complete (the xTREVC3 group).
 - **Structural zeros in the masked products (unfinished original numerical-body obligation):** the blocked group's
-  products (xLARFB, xLARFT, xLAHR2, the xGEHRD GEMM and TRMM) and TREVC's Z X are masked full matmuls. Their operands
-  are zero past each extent, or in the triangle a source TRMM leaves unread. A BLAS never reads those entries, but
+  products (xLARFB, xLARFT, xLAHR2, the xGEHRD GEMM and TRMM) and TREVC's block products are masked full matmuls.
+  Their operands are zero past each extent, or in the triangle a source TRMM leaves unread. A BLAS never reads those entries, but
   here 0 times a non-finite entry there is NaN, which can contaminate a result the source would leave finite. This is
   not admitted as finite-only behaviour, and no blocked path is claimed validated.
 - **GEEV's INFO = −4 (kept as the API contract):** `_geev_routine` returns INFO = −4 where ANRM is NaN or above
@@ -550,7 +583,7 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
   `_dlarf`.
 - **Rounding differences from the reference:**
   - The blocked ZGEHRD/DGEHRD, ZUNMQR/DORMQR and ZUNGQR/DORGQR now follow their LWORK conditions. They carry the
-    structural-zero obligation above. xTREVC3's back-transform is still one Z X, not its version 2 blocks.
+    structural-zero obligation above. xTREVC3's version 2 blocks are static supersets (real).
   - DLADIV/ZLADIV are transcribed (`_divided`, `_dladiv1`, `_dladiv2`, `_cdiv`; checkpoint 43aa1f2e).
   - The scaled largest-modulus norm stands in for dznrm2.f90/dnrm2.f90.
   - Backend summation order and FMA differ, as does the TREVC3 GEMM back-transform order.

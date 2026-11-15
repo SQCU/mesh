@@ -2738,7 +2738,31 @@ def _dtrevc(t, z, lwork):
                 xi = torch.where(above, xi + (-x[na + p])[..., None, :] * t[..., :, r][..., :, None], xi)
     packed = torch.where(first[..., None, :], torch.cat([xr[..., :, 1:], torch.zeros_like(xr[..., :, :1])], -1),
                          torch.where(second[..., None, :], xi, xr))
-    vr = torch.matmul(z, packed)
+    nb = min((lwork - n) // (2 * n), 128)
+    iv, top, count = torch.full_like(ip[..., 0], nb), torch.zeros_like(ip[..., 0]), torch.zeros_like(ip[..., 0])
+    tops, blocks = [top] * n, [count] * n
+    for ki in range(n, 0, -1):
+        stored, pair = ip[..., ki - 1] != 1, ip[..., ki - 1] == -1
+        top = torch.where(stored & (iv == nb), ki, top)
+        tops[ki - 1] = torch.where(stored, top, tops[ki - 1])
+        blocks[ki - 1] = torch.where(stored, count, blocks[ki - 1])
+        if ki > 1:
+            tops[ki - 2] = torch.where(pair, top, tops[ki - 2])
+            blocks[ki - 2] = torch.where(pair, count, blocks[ki - 2])
+        iv = torch.where(pair, iv - 1, iv)
+        ki2 = torch.where(pair, ki - 1, torch.full_like(iv, ki))
+        flush = stored & ((iv <= 2) | (ki2 == 1))
+        count = torch.where(flush, count + 1, count)
+        iv = torch.where(stored, torch.where(flush, nb, iv - 1), iv)
+    top, block = torch.stack(tops, -1), torch.stack(blocks, -1)
+    vr = torch.zeros_like(packed)
+    for b in range((n - 1) // (nb - 1) + 1):
+        hi, lo = n - b * (nb - 1), max(n - (b + 1) * nb + 1, 1)
+        extent = torch.where(block == b, top, 0).amax(-1)
+        reached = torch.where((k[:hi] <= _vec(extent))[..., None, :], z[..., :, :hi], 0)
+        made = torch.matmul(reached, packed[..., :hi, lo - 1:hi])
+        own = (block[..., lo - 1:hi] == b)[..., None, :]
+        vr = torch.cat([vr[..., :, :lo - 1], torch.where(own, made, vr[..., :, lo - 1:hi]), vr[..., :, hi:]], -1)
     after = torch.cat([vr[..., :, 1:], torch.zeros_like(vr[..., :, :1])], -1)
     before = torch.cat([torch.zeros_like(vr[..., :, :1]), vr[..., :, :-1]], -1)
     partner = torch.where(first[..., None, :], after, before)
@@ -2760,20 +2784,23 @@ def _cabs2(x):
     return (x.real / 2).abs() + (x.imag / 2).abs()
 
 
-# Reference-LAPACK SRC/ztrevc.f 323-409 (ztrevc3.f's SIDE = 'R', HOWMNY = 'B' right vectors, its blocked
-# back-transformation VR = Z X) with zlatrs.f 324-1025 (UPLO = 'U', TRANS = 'N', DIAG = 'N', NORMIN = 'Y', N = KI-1)
-# for each KI = N..1 of the upper triangular Schur form t. Column KI of X solves (T(1:KI-1,1:KI-1) - T(KI,KI)) X =
-# SCALE (-T(1:KI-1,KI)), the shifted diagonal T(K,K) - T(KI,KI) raised to SMIN where its CABS1 is below it (ztrevc
-# 366-370, the original diagonal restored after each KI). RWORK (CNORM, DZASUM of each column above the diagonal) is
+# Reference-LAPACK 3.12.1 SRC/ztrevc3.f 375-392 and 403-505 (SIDE = 'R', HOWMNY = 'B' right vectors) with LWORK
+# `lwork` and zlatrs.f 324-1025 (UPLO = 'U', TRANS = 'N', DIAG = 'N', NORMIN = 'Y', N = KI-1) for each KI = N..1 of
+# the upper triangular Schur form t. Column KI of X solves (T(1:KI-1,1:KI-1) - T(KI,KI)) X = SCALE (-T(1:KI-1,KI)),
+# the shifted diagonal T(K,K) - T(KI,KI) raised to SMIN where its CABS1 is below it (ztrevc3.f 426-430, the original
+# diagonal restored after each KI, 500-502). RWORK (CNORM, DZASUM of each column above the diagonal) is
 # ZLATRS's in-out operand: each KI's call scales CNORM(1:KI-1) by TSCAL (case 1; case 2 recomputing an unrepresentable
 # norm as the sum of (2 TSCAL) CABS2 terms) and returns it by DSCAL(N, 1 / TSCAL, CNORM) where TSCAL /= 1 (zlatrs
 # 1021-1023; not after case 2's ZTRSV return), so the next KI reads the norms the previous calls left: the static scan
 # KI = N..2 below. GROW and XBND (zlatrs 467-504) and the solves (ZTRSV, ztrsv.f 159-170, where GROW TSCAL > SMLNUM or
 # case 2's return; else 606-743's careful solve with its REC scalings, A(J,J) = 0's null vector and ZAXPY, zaxpy.f's
 # DCABS1(ZA) = 0 return) run for every KI together in the source's row order, round J = N-1..1 for each KI > J.
-# X(KI,KI) = SCALE (the careful solve's SCALE / TSCAL, ZTRSV's 1; KI = 1: WORK(1) = 1); each column of Z X by 1 / its
-# largest CABS1 (IZAMAX, ZDSCAL)
-def _ztrevc(t, z):
+# X(KI,KI) = SCALE (the careful solve's SCALE / TSCAL, ZTRSV's 1, 436; KI = 1: WORK(1) = 1, 415). NB = MIN((LWORK -
+# N) / (2 N), NBMAX = 128) (365-371; zgeev.f's LWORK >= 130 N >= N + 2 N NBMIN, so 370's NB = 1, version 1, is
+# unreached and NB >= 64). Version 2 (466-496): IV from NB (403), each KI's column at IV, zero below KI, and where IV
+# = 1 or KI = 1 the ZGEMM of VR(1:N,1:KI+NB-IV) by WORK's columns IV..NB (the static blocks of NB columns from N
+# down, each GEMM's inner extent its block's top), each column then by 1 / its largest CABS1 (IZAMAX, ZDSCAL)
+def _ztrevc(t, z, lwork):
     n, k = t.shape[-1], _counted(t)
     limits = torch.finfo(t.real.dtype)
     unfl, ulp, ovfl = limits.tiny, limits.eps, limits.max
@@ -2870,7 +2897,8 @@ def _ztrevc(t, z):
         xmax, scale = torch.where(careful, latest, xmax), torch.where(careful, s1 * rec2, scale)
     finished = torch.where((k == 1) | plain, torch.ones_like(scale), scale / tscal)
     x = torch.where(row == col, finished[..., None, :].to(x.dtype), x)
-    vr = torch.matmul(z, x)
+    nb = min((lwork - n) // (2 * n), 128)
+    vr = torch.cat([torch.matmul(z[..., :, :hi], x[..., :hi, max(hi - nb, 0):hi]) for hi in range(n, 0, -nb)][::-1], -1)
     return _scaled(vr, (1 / _abs1(vr).amax(-2))[..., None, :])
 
 # zgebak.f / dgebak.f 205-261 (JOB = 'B', SIDE = 'R', M = N): rows ILO..IHI by SCALE(I) where ILO /= IHI (ZDSCAL,
@@ -4549,9 +4577,10 @@ def _dhseqr(wantt, wantz, ilo, ihi, h, wr, wi, z, proceed, lwork):
 # 'R') and the normalization (VR as ZHSEQR left Z elsewhere); label 50's undo scaling ZLASCL(CSCALE -> ANRM) of
 # W(INFO+1:N), and of W(1:ILO-1) where INFO > 0, where SCALEA and INFO >= 0. DHSEQR alike (dhseqr.f 427-434 WR and WI
 # = 0 of the isolated, 443-447, 451-503 _dhseqr at LWORK - N, 508-509). The blocked xGEHRD, xUNGQR and xUNMQR paths
-# are their LWORK conditions' (_gehrd, _unghr, _unmhr). OPEN, not yet source here: xTREVC3's NB = (LWORK - IWRK + 1 -
-# N) / (2 N) (NBMIN 8, NBMAX 128) choice of back-transformation (here VR = Z X for every N); and the BLAS summation
-# order, FMA contraction, the products' zero entries past each operand's extent (a BLAS leaves unreferenced entries
+# are their LWORK conditions' (_gehrd, _unghr, _unmhr). ZTREVC3 at IWRK = ITAU = 1, LWORK (zgeev.f 410, 437-440),
+# DTREVC3 at IWRK = ITAU = N + 1, LWORK - N (dgeev.f 426, 452-454): their NB and version 2 back-transformation
+# (_ztrevc, _dtrevc). OPEN, not yet source here: the BLAS summation order, FMA contraction, the products' zero
+# entries past each operand's extent or in a triangle the source leaves unread (a BLAS leaves unreferenced entries
 # unread; here 0 times a non-finite entry is NaN), and the GPU and ANE precision of each engine
 def _geev_routine(a, jobvr):
     n, k, whole, vectors = a.shape[-1], _counted(a), a.is_complex(), jobvr == 'V'
@@ -4582,7 +4611,7 @@ def _geev_routine(a, jobvr):
         h = torch.where((k[:, None] - k >= 2) & _mat(searched & (vectors | (info != 0))), 0, h)
     info = torch.where(bad, -4, info)
     if vectors:
-        vr = _gebak(_ztrevc(h, z) if whole else _dtrevc(h, z), scale, perm, ilo, ihi)
+        vr = _gebak(_ztrevc(h, z, lwork) if whole else _dtrevc(h, z, lwork - n), scale, perm, ilo, ihi)
         vr = _zgeev_normalized(vr) if whole else _dgeev_normalized(vr, eigen[1])
         vr = torch.where(_mat(info == 0), vr, z).mT.contiguous().mT
     else:
