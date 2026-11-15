@@ -682,10 +682,11 @@ def _qdwh_eigh_result(blocks, vectors, empty=None):
 # the body's Generator words (operations.Generator `state`: seed low, seed high, execution, 0) as read by a draw at the
 # source draw site `site` (one-element int32, compiler/mesh_compiler/export.py capture's `site`). This is the explicit
 # operand through which a method body's own Philox draws read the program's generator. It has only its fake (four int32
-# words on site's device) and no eager kernel. The producer binds it to the body's operations.Generator:
-# Generator.site(site) records the draw, so the body's Generator.advanced() (its Advance operand) advances the
-# execution word once after its draws, and the value is Generator.state's root (design/compilation-composition-change-request.md items 6 and 7),
-# never a fresh allocation or Inductor's RandomSeeds
+# words on site's device) and no eager kernel. Its value is to be Generator.state's root, never a fresh allocation
+# or Inductor's RandomSeeds, with Generator.site(site) recording the draw and Generator.advanced()'s Advance operand
+# the execution word's advance after the draws (design/compilation-composition-change-request.md items 6 and 7). That
+# state consumer is unfinished: nothing calls Generator.site or Generator.advanced, lower_metal's
+# ConstructedMachine.generated stays (), and no once-per-original-call advance is established
 torch.library.define('mesh::generator', '(Tensor site) -> Tensor')
 
 
@@ -1754,18 +1755,114 @@ def _larf1f(left, m, n, v, tau, x, r0, c0, when):
     return torch.where(hit & _mat(multi), made, x)
 
 
-# Reference-LAPACK 3.12.1 SRC/zgehrd.f 249-253 (TAU(1:ILO-1) and TAU(MAX(1,IHI):N-1) zero), 295-299 and 352 (the
-# unblocked ZGEHD2 from ILO; OPEN: the blocked DO 40, zlahr2.f and zlarfb.f, where NH >= 130) and zgehd2.f 190-207
-# (dgehrd.f, dgehd2.f alike) on the leading ORDER x ORDER block of h: DO 10 I = ILO, IHI - 1 as static I = 1..n-1
-# active where ILO <= I <= IHI - 1: ZLARFG(IHI - I, A(I+1,I), A(MIN(I+2,N),I)) (_larfg_vector over rows I+2..IHI,
-# A(I+1,I) its BETA), ZLARF1F('Right', IHI, IHI - I, A(I+1,I), TAU(I), A(1,I+1)) and ZLARF1F('Left', IHI - I, N - I,
-# A(I+1,I), CONJG(TAU(I)), A(I+1,I+1)). Returns the packed matrix and TAU(1:n-1)
-def _gehrd(order, ilo, ihi, h):
+# Reference-LAPACK 3.12.1 SRC/zlarfb.f 235-366 (dlarfb.f 232-362 alike: 'Transpose', no ZLACGV), DIRECT = 'F' and
+# STOREV = 'C', on local blocks (each argument from its (1,1)): C = H C or H^H C (`left`; `adjoint` for TRANS = 'C'),
+# else C H or C H^H, H = I - V T V^H, V = v's leading M (N) x K (V1 its unit lower K x K, V's diagonal and upper part
+# unread, over V2), T = t's upper K x K; the M <= 0 or N <= 0 return. Left (TRANST the other of 'N' and 'C'): W =
+# C1^H (ZCOPY, ZLACGV), W V1 (ZTRMM), + C2^H V2 where M > K (ZGEMM), W T^H or W T (ZTRMM by TRANST), C2 - V2 W^H
+# where M > K, W V1^H, DO 30 C1 - W^H. Right: W = C1, W V1, + C2 V2 where N > K, W T or W T^H, C2 - W V2^H where
+# N > K, W V1^H, DO 60 C1 - W. Each product's operands zero past their extents
+def _larfb(left, adjoint, m, n, k, v, t, c):
+    p, j = torch.arange(1, v.shape[-2] + 1, device=v.device), torch.arange(1, v.shape[-1] + 1, device=v.device)
+    go = (m > 0) & (n > 0)
+    first, rest, within = _span(p, 1, k), _span(p, k + 1, m if left else n), _within(k, v.shape[-1])
+    v1 = torch.where(first[..., :, None] & within[..., None, :],
+                     torch.where(p[:, None] > j, v, (p[:, None] == j).to(v.dtype)), 0)
+    v2 = torch.where(rest[..., :, None] & within[..., None, :], v, 0)
+    upper = torch.where(_square_within(k, t.shape[-1]) & (j[:, None] <= j), t, 0)
+    if left:
+        across = _within(n, c.shape[-1]) & _vec(go)
+        kept = across[..., :, None] & within[..., None, :]
+        c1 = torch.where(first[..., :, None] & across[..., None, :], c, 0)
+        c2 = torch.where(rest[..., :, None] & across[..., None, :], c, 0)
+        w = torch.where(kept, torch.matmul(c1.mH, v1), 0)
+        w = torch.where(_mat(m > k) & kept, w + torch.matmul(c2.mH, v2), w)
+        w = torch.where(kept, torch.matmul(w, upper if adjoint else upper.mH), 0)
+        c = torch.where(_mat(m > k) & rest[..., :, None] & across[..., None, :], c - torch.matmul(v2, w.mH), c)
+        w = torch.matmul(w, v1.mH)
+        return torch.where(first[..., :, None] & across[..., None, :], c - w.mH, c)
+    down = _within(m, c.shape[-2]) & _vec(go)
+    kept = down[..., :, None] & within[..., None, :]
+    c1 = torch.where(down[..., :, None] & first[..., None, :], c, 0)
+    c2 = torch.where(down[..., :, None] & rest[..., None, :], c, 0)
+    w = torch.where(kept, torch.matmul(c1, v1), 0)
+    w = torch.where(_mat(n > k) & kept, w + torch.matmul(c2, v2), w)
+    w = torch.where(kept, torch.matmul(w, upper.mH if adjoint else upper), 0)
+    c = torch.where(_mat(n > k) & down[..., :, None] & rest[..., None, :], c - torch.matmul(w, v2.mH), c)
+    w = torch.matmul(w, v1.mH)
+    return torch.where(down[..., :, None] & first[..., None, :], c - w, c)
+
+
+# Reference-LAPACK 3.12.1 SRC/zlarft.f 211-345 (dlarft.f 207-341 alike, V^T), DIRECT = 'F' and STOREV = 'C', the
+# recursive routine: T (t's upper K x K) of H(1) ... H(K) = I - V T V^H, V = v's V(1:N,1:K) (unit lower, its diagonal
+# and upper part unread), TAU along `tau`, where `when`: the N = 0 or K = 0 return; T(1,1) = TAU(1) where N = 1 or
+# K = 1; else L = K / 2, ZLARFT(N, L) on V, ZLARFT(N - L, K - L) on V(L+1,L+1) into T(L+1,L+1), then T(1:L,L+1:K)
+# (_larft_joined). The calls are the complete call tree over K's static bound, in the source's order, each position
+# with the member's offset O (its V(1,1) at V(O+1,O+1), its N = N - O) and K, present where its parent recursed
+def _larft(n, k, v, tau, when):
+    def call(t, o, s, present, most):
+        base = present & ((n - o == 1) | (s == 1))
+        t = _entry_put(t, o + 1, o + 1, _at(tau, o + 1), base)
+        if most > 1:
+            split, half = present & ~base, s // 2
+            t = call(t, o, half, split, most // 2)
+            t = call(t, o + half, s - half, split, most - most // 2)
+            t = _larft_joined(t, n, o, s, half, v, split)
+        return t
+    bound = v.shape[-1]
+    return call(v.new_zeros((*v.shape[:-2], bound, bound)), torch.zeros_like(k), k, when & (n > 0) & (k > 0), bound)
+
+
+# zlarft.f 314-345 (dlarft.f 310-341) for the call at offset O with its K = S and L: DO J, DO I T(J,L+I) =
+# CONJG(V(L+I,J)); ZTRMM('Right', 'Lower', 'No transpose', 'Unit') by V(L+1:K,L+1:K); + V(K+1:N,1:L)^H V(K+1:N,L+1:K)
+# where N > K (ZGEMM's K = N - K = 0 return); ZTRMM('Left', 'Upper', 'No transpose', 'Non-unit', NEG_ONE) by
+# T(1:L,1:L); ZTRMM('Right', 'Upper', 'No transpose', 'Non-unit') by T(L+1:K,L+1:K)
+def _larft_joined(t, n, o, s, half, v, when):
+    bound = t.shape[-1]
+    p, rows = torch.arange(1, bound + 1, device=t.device), torch.arange(1, v.shape[-2] + 1, device=v.device)
+    first, second = _span(p, o + 1, o + half), _span(p, o + half + 1, o + s)
+    kept, square = first[..., :, None] & second[..., None, :], second[..., :, None] & second[..., None, :]
+    leading = v[..., :bound, :]
+    unit = torch.where(square, torch.where(p[:, None] > p, leading, (p[:, None] == p).to(v.dtype)), 0)
+    t12 = torch.where(kept, torch.matmul(torch.where(kept, leading.mH, 0), unit), 0)
+    below = _span(rows, o + s + 1, n)
+    v31 = torch.where(below[..., :, None] & first[..., None, :], v, 0)
+    v32 = torch.where(below[..., :, None] & second[..., None, :], v, 0)
+    t12 = torch.where(_mat(n - o > s) & kept, t12 + torch.matmul(v31.mH, v32), t12)
+    t11 = torch.where(first[..., :, None] & first[..., None, :] & (p[:, None] <= p), t, 0)
+    t12 = torch.where(kept, -torch.matmul(t11, t12), 0)
+    t12 = torch.matmul(t12, torch.where(square & (p[:, None] <= p), t, 0))
+    return torch.where(_mat(when) & kept, t12, t)
+
+
+# Reference-LAPACK 3.12.1 SRC/zgehrd.f 249-353 (dgehrd.f alike, 'Transpose') on the leading ORDER x ORDER block of h
+# with LWORK `lwork` (batch ints): 249-255 TAU(1:ILO-1) and TAU(MAX(1,IHI):N-1) zero; 259-262 the NH <= 1 return;
+# 266-294 NB = MIN(NBMAX = 64, ILAENV(1, 'ZGEHRD') = 32, ilaenv.f 340-345), NBMIN = 2, and where NB > 1 and NB < NH
+# NX = MAX(NB, ILAENV(3) = 128, ilaenv.f 622-627), where also NX < NH and LWORK < LWKOPT = N NB + TSIZE (TSIZE = LDT
+# NBMAX = 65 64) NBMIN = MAX(2, ILAENV(2) = 2, ilaenv.f 532-537) and NB = (LWORK - TSIZE) / N where LWORK >= N NBMIN
+# + TSIZE, else 1; 296-349 I = ILO where NB < NBMIN or NB >= NH, else DO 40 I = ILO, IHI - 1 - NX, NB (_gehrd_block;
+# the loop present where the static extent admits its first pass, NH >= 130); 353 ZGEHD2(N, I, IHI) from that I:
+# zgehd2.f 190-207 DO 10 over static I = 1..n-1 where it is from that I to IHI - 1: ZLARFG(IHI - I, A(I+1,I),
+# A(MIN(I+2,N),I)) (_larfg_vector over rows I+2..IHI, A(I+1,I) its BETA), ZLARF1F('Right', IHI, IHI - I, A(I+1,I),
+# TAU(I), A(1,I+1)) and ZLARF1F('Left', IHI - I, N - I, A(I+1,I), CONJG(TAU(I)), A(I+1,I+1)). 222's LWORK < MAX(1, N)
+# return is unreached: zgeev.f's LWORK - N and dgeev.f's LWORK - 2 N exceed 32 N, and xLAQR3's LWORK - JW >= JW (JW
+# <= NW <= NWMAX <= LWORK / 2). Returns the packed matrix and TAU(1:n-1)
+def _gehrd(order, ilo, ihi, h, lwork):
     n, k = h.shape[-1], _counted(h)
     one = torch.ones_like(ilo)
+    nh, nx, nbmin, tsize = ihi - ilo + 1, 128, 2, 65 * 64
+    nb = torch.full_like(ilo, 32)
+    short = (nb > 1) & (nb < nh) & (nx < nh) & (lwork < order * nb + tsize)
+    fits = short & (lwork >= order * nbmin + tsize)
+    nb = torch.where(fits, torch.div(lwork - tsize, torch.where(fits, order, 1), rounding_mode='trunc'),
+                     torch.where(short, 1, nb))
+    prior, start = h.new_zeros((*h.shape[:-2], max(n - 1, 0))), ilo
+    if n >= 130:
+        carried = ((nb >= nbmin) & (nb < nh) & (ilo <= ihi - 1 - nx), h.contiguous(), prior, ilo.clone())
+        _, h, prior, start = while_loop_op(_first_any, _gehrd_block, carried, (nb, ihi, order))
     taus = []
     for i in range(1, n):
-        active = (ilo <= i) & (i <= ihi - 1)
+        active = (start <= i) & (i <= ihi - 1)
         column = h[..., :, i - 1]
         tail = _span(k, i + 2, ihi)
         beta, tau, made = _larfg_vector(column[..., i], torch.where(tail, column, 0))
@@ -1774,22 +1871,199 @@ def _gehrd(order, ilo, ihi, h):
         h = _column_put(h, i - 1, column)
         h = _larf1f(False, ihi, ihi - i, column, tau, h, one, one + i, active)
         h = _larf1f(True, ihi - i, order - i, column, _cj(tau), h, one + i, one + i, active)
-        taus.append(tau)
-    return h, torch.stack(taus, -1) if taus else h.new_zeros((*h.shape[:-2], 0))
+        taus.append(torch.where(active, tau, prior[..., i - 1]))
+    return h, torch.stack(taus, -1) if taus else prior
 
 
-# zunghr.f 198-232 (dorghr.f alike) with zung2r's reflector sequence: Q = H(ILO) ... H(IHI-1) from the identity, each
-# H(I) (reverse order) to rows and columns I+1..IHI
-def _unghr(h, taus, ilo, ihi):
-    n, k = h.shape[-1], _counted(h)
-    z = _unit(h).expand(h.shape).contiguous()
-    for i in reversed(range(1, n)):
-        active = (ilo <= i) & (i <= ihi - 1)
-        below = ((k > i) & (k <= _vec(ihi)))[..., i:]
-        v = torch.where(below, torch.cat([torch.ones_like(h[..., i:i + 1, i - 1]), h[..., i + 1:, i - 1]], -1), 0)
-        region = _mat(active) & below[..., :, None] & below[..., None, :]
-        z = _put(z, torch.where(region, _dlarf(z[..., i:, i:], v, taus[..., i - 1]), z[..., i:, i:]), i, i)
-    return z
+# zgehrd.f 307-348, DO 40's pass for I: IB = MIN(NB, IHI - I); ZLAHR2(IHI, I, IB, A(1,I), TAU(I), T, Y) (_lahr2);
+# EI = A(I+IB,I+IB-1), ONE there for ZGEMM('No transpose', 'Conjugate transpose', IHI, IHI - I - IB + 1, IB, -ONE, Y,
+# A(I+IB,I), ONE, A(1,I+IB)), then EI back; ZTRMM('Right', 'Lower', 'Conjugate transpose', 'Unit', I, IB - 1,
+# A(I+1,I), Y); DO 30 J = 0, IB - 2 ZAXPY(I, -ONE, Y(1,J+1), A(1,I+J+1)); ZLARFB('Left', 'Conjugate transpose',
+# 'Forward', 'Columnwise', IHI - I, N - I - IB + 1, IB, A(I+1,I), T, A(I+1,I+IB)) (_larfb)
+def _gehrd_block(live, h, taus, i, nb, ihi, order):
+    size, k = h.shape[-1], _counted(h)
+    one = torch.ones_like(i)
+    ib = torch.minimum(nb, ihi - i)
+    h, taus, t, y = _lahr2(live, ihi, i, ib, h, taus, 32)
+    bound = y.shape[-1]
+    j = torch.arange(1, bound + 1, device=h.device)
+    ei = _entry(h, i + ib, i + ib - 1)
+    h = _entry_put(h, i + ib, i + ib - 1, 1, live)
+    rows, reached = (k <= _vec(ihi))[..., :, None], _span(k, i + ib, ihi)
+    factor = torch.where(rows & _within(ib, bound)[..., None, :], y, 0)
+    v = torch.where(reached[..., :, None] & _within(ib, bound)[..., None, :], _region_at(h, one, i, size, bound), 0)
+    h = torch.where(_mat(live) & rows & reached[..., None, :], h - torch.matmul(factor, v.mH), h)
+    h = _entry_put(h, i + ib, i + ib - 1, ei, live)
+    unit = torch.where(_square_within(ib - 1, bound) & (j[:, None] >= j),
+                       torch.where(j[:, None] > j, _region_at(h, i + 1, i, bound, bound), 1), 0)
+    top = (k <= _vec(i))[..., :, None] & _within(ib - 1, bound)[..., None, :]
+    y = torch.where(_mat(live) & top, torch.matmul(torch.where(top, y, 0), unit.mH), y)
+    for jj in range(bound - 1):
+        hit = _mat(live & (jj <= ib - 2)) & (k <= _vec(i))[..., :, None] & (k == _mat(i + jj + 1))
+        h = torch.where(hit, h - y[..., :, jj:jj + 1], h)
+    made = _larfb(True, True, ihi - i, order - i - ib + 1, ib, _region_at(h, i + 1, i, size, bound), t,
+                  _region_at(h, i + 1, i + ib, size, size))
+    h = _region_put(h, i + 1, i + ib, made, _square_within(ihi - i, size, order - i - ib + 1) & _mat(live))
+    i = torch.where(live, i + nb, i)
+    return live & (i <= ihi - 1 - 128), h, taus, i
+
+
+# Reference-LAPACK 3.12.1 SRC/zlahr2.f 216-321 (dlahr2.f 216-319 alike, no ZLACGV), ZLAHR2(N, K, NB, A, TAU, T, Y) on
+# h with its A(1,1) at h(1,K), where `live`: the N <= 1 return; DO 10 I = 1, NB as static I up to `bound` where I <=
+# NB: for I > 1, A(K+1:N,I) - Y(K+1:N,1:I-1) CONJG(A(K+I-1,1:I-1)) (ZLACGV, ZGEMV; A(K+I-1,I-1) is then ONE) and
+# I - V T^H V^H on it as b: w = V1^H b1 (ZCOPY, ZTRMV; w is T(1:I-1,NB) there, the last column of T as workspace,
+# here its own vector: ZGEMV with BETA = ZERO writes T(1:NB-1,NB) at I = NB before any read), + V2^H b2, T^H w, b2 -
+# V2 w, V1 w, b1 - w (ZAXPY), A(K+I-1,I-1) = EI; ZLARFG(N - K - I + 1, A(K+I,I), A(MIN(K+I+1,N),I)), EI its BETA,
+# A(K+I,I) = ONE; Y(K+1:N,I) = A(K+1:N,I+1:N-K+1) v (ZGEMV, BETA = ZERO), T(1:I-1,I) = V2^H v, Y(K+1:N,I) -
+# Y(K+1:N,1:I-1) T(1:I-1,I), times TAU(I) (ZSCAL); T(1:I-1,I) times -TAU(I), then by the upper T(1:I-1,1:I-1)
+# (ZTRMV), T(I,I) = TAU(I); after DO 10 A(K+NB,NB) = EI; Y(1:K,1:NB) = A(1:K,2:NB+1) (ZLACPY), by the unit lower
+# A(K+1:K+NB,1:NB) (ZTRMM), + A(1:K,NB+2:N-K+1) A(K+NB+1:N,1:NB) where N > K + NB (ZGEMM), by the upper T (ZTRMM).
+# TAU(I) is tau's K + I - 1; returns h, tau, T (bound x bound) and Y (h's rows x bound)
+def _lahr2(live, n, k, nb, h, tau, bound):
+    size, r = h.shape[-1], _counted(h)
+    p = torch.arange(1, bound + 1, device=h.device)
+    one = torch.ones_like(k)
+    live = live & (n > 1)
+    y = h.new_zeros((*h.shape[:-2], size, bound))
+    t = h.new_zeros((*h.shape[:-2], bound, bound))
+    ei, below = h.new_zeros(k.shape), _span(r, k + 1, n)
+    for i in range(1, bound + 1):
+        active = live & (i <= nb)
+        c, rest = k + i - 1, _span(r, k + i, n)
+        v2 = torch.where(rest[..., :, None], _region_at(h, one, k, size, i - 1), 0)
+        if i > 1:
+            q = p[:i - 1]
+            v1 = torch.where(q[:, None] > q, _region_at(h, k + 1, k, i - 1, i - 1), (q[:, None] == q).to(h.dtype))
+            b = _column(h, c)
+            x = _cj(_vec_at(_row(h, k + i - 1), k, i - 1))
+            b = torch.where(below, b - torch.matmul(y[..., :, :i - 1], x[..., :, None])[..., 0], b)
+            w = torch.matmul(v1.mH, _vec_at(b, k + 1, i - 1)[..., :, None])[..., 0]
+            w = w + torch.matmul(v2.mH, torch.where(rest, b, 0)[..., :, None])[..., 0]
+            w = torch.matmul(t[..., :i - 1, :i - 1].triu().mH, w[..., :, None])[..., 0]
+            b = torch.where(rest, b - torch.matmul(v2, w[..., :, None])[..., 0], b)
+            w = torch.matmul(v1, w[..., :, None])[..., 0]
+            b = _vec_put(b, k + 1, _vec_at(b, k + 1, i - 1) - w, torch.ones_like(w, dtype=torch.bool))
+            h = torch.where(_mat(active) & (r == _mat(c)), b[..., :, None], h)
+            h = _entry_put(h, k + i - 1, k + i - 2, ei, active)
+        tail = _span(r, k + i + 1, n)
+        beta, taui, x = _larfg_vector(_entry(h, k + i, c), torch.where(tail, _column(h, c), 0))
+        b = torch.where(tail, x, torch.where(r == _vec(k + i), 1, _column(h, c)))
+        h = torch.where(_mat(active) & (r == _mat(c)), b[..., :, None], h)
+        ei = torch.where(active, beta, ei)
+        tau = _at_put(tau, c, taui, active)
+        v = torch.where(rest, _column(h, c), 0)
+        made = torch.matmul(torch.where(below[..., :, None] & rest[..., None, :], h, 0), v[..., :, None])[..., 0]
+        column = torch.zeros_like(t[..., :, 0])
+        if i > 1:
+            ti = torch.matmul(v2.mH, v[..., :, None])[..., 0]
+            made = made - torch.matmul(y[..., :, :i - 1], ti[..., :, None])[..., 0]
+            ti = torch.matmul(t[..., :i - 1, :i - 1].triu(), (ti * _vec(-taui))[..., :, None])[..., 0]
+            column = torch.cat([ti, column[..., i - 1:]], -1)
+        made = made * _vec(taui)
+        y = _column_put(y, i - 1, torch.where(_vec(active) & below, made, y[..., :, i - 1]))
+        column = torch.where(p == i, _vec(taui), column)
+        t = _column_put(t, i - 1, torch.where(_vec(active), column, t[..., :, i - 1]))
+    h = _entry_put(h, k + nb, k + nb - 1, ei, live)
+    upper = (r <= _vec(k))[..., :, None]
+    kept, far = upper & _within(nb, bound)[..., None, :], _span(r, k + nb + 1, n)
+    unit = torch.where(_square_within(nb, bound), torch.where(p[:, None] > p, _region_at(h, k + 1, k, bound, bound),
+                                                              (p[:, None] == p).to(h.dtype)), 0)
+    top = torch.where(kept, torch.matmul(torch.where(kept, _region_at(h, one, k + 1, size, bound), 0), unit), 0)
+    added = torch.matmul(torch.where(upper & far[..., None, :], h, 0),
+                         torch.where(far[..., :, None] & _within(nb, bound)[..., None, :],
+                                     _region_at(h, one, k, size, bound), 0))
+    top = torch.where(_mat(n > k + nb) & kept, top + added, top)
+    top = torch.matmul(top, torch.where(_square_within(nb, bound), t, 0).triu())
+    return h, tau, t, torch.where(_mat(live) & kept, top, y)
+
+
+# Reference-LAPACK 3.12.1 SRC/zunghr.f 194-233 (dorghr.f alike) on `a` (zgeev.f 396's ZLACPY('L') of the reduced
+# matrix, its upper part unread and here zero) with TAU `taus` and LWORK `lwork`: DO 40 J = IHI, ILO + 1, -1
+# (A(1:J-1,J) = ZERO, A(J+1:IHI,J) = A(J+1:IHI,J-1), column J - 1 read before its own pass, A(IHI+1:N,J) = ZERO),
+# DO 60 and DO 80 (columns 1..ILO and IHI+1..N the identity's), then ZUNGQR(NH, NH, NH, A(ILO+1,ILO+1), TAU(ILO))
+# where NH = IHI - ILO > 0 (_ungqr). 175's LWORK < MAX(1, NH) return is unreached (zgeev.f's LWORK - N, dgeev.f's
+# LWORK - 2 N)
+def _unghr(ilo, ihi, a, taus, lwork):
+    k = _counted(a)
+    rows, cols = k[:, None], k
+    band = _span(k, ilo + 1, ihi)[..., None, :]
+    shifted = torch.cat([a[..., :, :1], a[..., :, :-1]], -1)
+    a = torch.where(band & (rows < cols), 0, a)
+    a = torch.where(band & (rows > cols) & (rows <= _mat(ihi)), shifted, a)
+    a = torch.where(band & (rows > _mat(ihi)), 0, a)
+    a = torch.where(~band, (rows == cols).to(a.dtype), a)
+    nh = ihi - ilo
+    return _ungqr(nh, nh, nh, a, ilo, taus, nh > 0, lwork)
+
+
+# Reference-LAPACK 3.12.1 SRC/zungqr.f 190-282 (dorgqr.f alike), ZUNGQR(M, N, K, A, TAU) on a with its A(1,1) at
+# a(BASE+1,BASE+1), its TAU(I) taus' BASE + I - 1, LWORK `lwork`, where `when`: the N <= 0 return; NB = ILAENV(1,
+# 'ZUNGQR') = 32 (ilaenv.f 406-411, 420-425), NBMIN = 2, NX = 0, and where NB > 1 and NB < K NX = MAX(0, ILAENV(3) =
+# 128, ilaenv.f 650-663), where also NX < K and LWORK < IWS = LDWORK NB (LDWORK = N) NB = LWORK / LDWORK and NBMIN =
+# MAX(2, ILAENV(2) = 2, ilaenv.f 573-578, 587-592); where NB >= NBMIN, NB < K and NX < K, KI = ((K - NX - 1) / NB)
+# NB, KK = MIN(K, KI + NB) and DO 20 A(1:KK,KK+1:N) = ZERO, else KK = 0; ZUNG2R(M - KK, N - KK, K - KK,
+# A(KK+1,KK+1)) where KK < N; where KK > 0 DO 50 I = KI + 1, 1, -NB (_ungqr_block; the loop present where the static
+# extent admits K > 128)
+def _ungqr(m, n, k, a, base, taus, when, lwork):
+    q = _counted(a)
+    go = when & (n > 0)
+    nb = torch.full_like(k, 32)
+    considered = (nb > 1) & (nb < k)
+    nx = torch.where(considered, 128, 0)
+    short = considered & (nx < k) & (lwork < n * nb)
+    nb = torch.where(short, torch.div(lwork, torch.where(short, n, 1), rounding_mode='trunc'), nb)
+    blocked = go & (nb >= 2) & (nb < k) & (nx < k)
+    ki = torch.where(blocked, torch.div(k - nx - 1, torch.where(blocked, nb, 1), rounding_mode='trunc') * nb, 0)
+    kk = torch.where(blocked, torch.minimum(k, ki + nb), 0)
+    a = torch.where(_mat(blocked) & _span(q, base + 1, base + kk)[..., :, None]
+                    & _span(q, base + kk + 1, base + n)[..., None, :], 0, a)
+    a = _ung2r(m - kk, n - kk, k - kk, a, base + kk, taus, go & (kk < n), a.shape[-1] - 1)
+    if a.shape[-1] >= 130:
+        _, a, _ = while_loop_op(_first_any, _ungqr_block, (blocked & (kk > 0), a.contiguous(), ki + 1),
+                                (nb, k, m, n, base, taus))
+    return a
+
+
+# zungqr.f 250-281, DO 50's pass for I: IB = MIN(NB, K - I + 1); where I + IB <= N ZLARFT('Forward', 'Columnwise',
+# M - I + 1, IB, A(I,I), TAU(I), WORK) (_larft) and ZLARFB('Left', 'No transpose', 'Forward', 'Columnwise', M - I + 1,
+# N - I - IB + 1, IB, A(I,I), WORK, A(I,I+IB)) (_larfb); ZUNG2R(M - I + 1, IB, IB, A(I,I), TAU(I)); DO 40
+# A(1:I-1,I:I+IB-1) = ZERO
+def _ungqr_block(live, a, i, nb, k, m, n, base, taus):
+    size, q = a.shape[-1], _counted(a)
+    ib = torch.minimum(nb, k - i + 1)
+    g = base + i
+    apply = live & (i + ib <= n)
+    v = _region_at(a, g, g, size, 32)
+    t = _larft(m - i + 1, ib, v, _vec_at(taus, g - 1, 32), apply)
+    made = _larfb(True, False, m - i + 1, n - i - ib + 1, ib, v, t, _region_at(a, g, g + ib, size, size))
+    a = _region_put(a, g, g + ib, made, _square_within(m - i + 1, size, n - i - ib + 1) & _mat(apply))
+    a = _ung2r(m - i + 1, ib, ib, a, g - 1, taus, live, 32)
+    a = torch.where(_mat(live) & _span(q, base + 1, g - 1)[..., :, None] & _span(q, g, g + ib - 1)[..., None, :], 0, a)
+    i = torch.where(live, i - nb, i)
+    return live & (i >= 1), a, i
+
+
+# Reference-LAPACK 3.12.1 SRC/zung2r.f 163-192 (dorg2r.f 162-191 alike), ZUNG2R(M, N, K, A, TAU) on a with its
+# A(1,1) at a(R0+1,R0+1), its TAU(I) taus' R0 + I - 1, where `when`: the N <= 0 return; DO 20 J = K + 1, N (column J of
+# the identity over rows 1..M); DO 40 I = K, 1, -1 as static I from `bound` where I <= K: ZLARF1F('Left', M - I + 1,
+# N - I, A(I,I), TAU(I), A(I,I+1)) where I < N, ZSCAL(M - I, -TAU(I), A(I+1,I)) where I < M, A(I,I) = ONE - TAU(I),
+# DO 30 A(1:I-1,I) = ZERO
+def _ung2r(m, n, k, a, r0, taus, when, bound):
+    q = _counted(a)
+    rows, cols = q[:, None], q
+    go = when & (n > 0)
+    fresh = _mat(go) & _span(q, r0 + 1, r0 + m)[..., :, None] & _span(q, r0 + k + 1, r0 + n)[..., None, :]
+    a = torch.where(fresh, (rows == cols).to(a.dtype), a)
+    for i in range(bound, 0, -1):
+        active = go & (i <= k)
+        g = r0 + i
+        tau = _at(taus, g - 1)
+        a = _larf1f(True, m - i + 1, n - i, _column(a, g), tau, a, g, g + 1, active & (i < n))
+        a = torch.where(_mat(active & (i < m)) & (cols == _mat(g)) & _span(q, g + 1, r0 + m)[..., :, None],
+                        a * _mat(-tau), a)
+        a = _entry_put(a, g, g, 1 - tau, active)
+        a = torch.where(_mat(active) & (cols == _mat(g)) & _span(q, r0 + 1, g - 1)[..., :, None], 0, a)
+    return a
 
 
 # Reference-LAPACK 3.12.1 SRC/dlarfg.f and zlarfg.f on batch scalars (_larfg, N = len(xs) + 1) or on a vector X
@@ -3459,16 +3733,58 @@ def _unm2r(left, notran, m, n, k, a, ar, ac, tau, c, cr, cc, when):
 
 
 # Reference-LAPACK 3.12.1 SRC/zunmhr.f 212 and 262-284 (dormhr.f alike): NH = IHI - ILO, the M = 0, N = 0 or NH = 0
-# return, then ZUNMQR(SIDE, TRANS, MI, NI, NH, A(ILO+1,ILO), TAU(ILO), C(I1,I2)) (MI = NH and I1 = ILO + 1 left, else
-# NI = NH and I2 = ILO + 1), whose zunmqr.f 274-279 is ZUNM2R where NB = 32 >= K (OPEN: zunmqr.f's blocked ZLARFT and
-# ZLARFB code where K > 32)
-def _unmhr(left, notran, m, n, ilo, ihi, a, tau, c, when):
+# return, then ZUNMQR(SIDE, TRANS, MI, NI, NH, A(ILO+1,ILO), TAU(ILO), C(I1,I2), LWORK) (MI = NH and I1 = ILO + 1
+# left, else NI = NH and I2 = ILO + 1) with the caller's LWORK `lwork` (_unmqr)
+def _unmhr(left, notran, m, n, ilo, ihi, a, tau, c, when, lwork):
     nh = ihi - ilo
     one = torch.ones_like(ilo)
     mi, ni, i1, i2 = (nh, n, ilo + 1, one) if left else (m, nh, one, ilo + 1)
     index = (torch.arange(tau.shape[-1], device=tau.device) + _vec(ilo - 1)).clamp(0, max(tau.shape[-1] - 1, 0))
-    return _unm2r(left, notran, mi, ni, nh, a, ilo + 1, ilo, tau.gather(-1, index), c, i1, i2,
-                  when & (m != 0) & (n != 0) & (nh != 0))
+    return _unmqr(left, notran, mi, ni, nh, a, ilo + 1, ilo, tau.gather(-1, index), c, i1, i2,
+                  when & (m != 0) & (n != 0) & (nh != 0), lwork)
+
+
+# Reference-LAPACK 3.12.1 SRC/zunmqr.f 207-336 (dormqr.f alike), ZUNMQR(SIDE, TRANS, M, N, K, A, TAU, C) in _unm2r's
+# layout with LWORK `lwork`: NQ = M and NW = MAX(1, N) (left), else N and MAX(1, M); NB = MIN(NBMAX = 64,
+# ILAENV(1, 'ZUNMQR') = 32, ilaenv.f 412-417, 426-431), LWKOPT = NW NB + TSIZE (TSIZE = LDT NBMAX = 65 64); the M =
+# 0, N = 0 or K = 0 return; NBMIN = 2, and where NB > 1, NB < K and LWORK < LWKOPT NB = (LWORK - TSIZE) / LDWORK
+# (LDWORK = NW) and NBMIN = MAX(2, ILAENV(2) = 2, ilaenv.f 579-584, 593-598); ZUNM2R where NB < NBMIN or NB >= K,
+# else DO 10 I = I1, I2, I3 (_unmqr_block; from 1 by NB where LEFT and not NOTRAN or not LEFT and NOTRAN, else from
+# ((K - 1) / NB) NB + 1 by -NB; the loop present where the static extent admits K > 32). 235's LWORK < NW return is
+# unreached (xLAQR3's LWORK - JW >= JW = NW)
+def _unmqr(left, notran, m, n, k, a, ar, ac, tau, c, cr, cc, when, lwork):
+    nq, nw = (m, torch.clamp(n, min=1)) if left else (n, torch.clamp(m, min=1))
+    forward, tsize = left != notran, 65 * 64
+    go = when & (m != 0) & (n != 0) & (k != 0)
+    nb = torch.full_like(k, 32)
+    short = (nb > 1) & (nb < k) & (lwork < nw * nb + tsize)
+    nb = torch.where(short, torch.div(lwork - tsize, nw, rounding_mode='trunc'), nb)
+    blocked = go & ~((nb < 2) | (nb >= k))
+    c = _unm2r(left, notran, m, n, k, a, ar, ac, tau, c, cr, cc, go & ~blocked)
+    if tau.shape[-1] > 32:
+        first = torch.ones_like(k) if forward else torch.div(k - 1, torch.where(blocked, nb, 1),
+                                                                   rounding_mode='trunc') * nb + 1
+        _, c, _ = while_loop_op(_first_any, functools.partial(_unmqr_block, left, notran), (blocked, c.contiguous(),
+                                first), (nb, k, nq, m, n, a, ar, ac, tau, cr, cc))
+    return c
+
+
+# zunmqr.f 306-335, DO 10's pass for I: IB = MIN(NB, K - I + 1); ZLARFT('Forward', 'Columnwise', NQ - I + 1, IB,
+# A(I,I), TAU(I), T) (_larft); MI = M - I + 1 and IC = I (left), else NI = N - I + 1 and JC = I; ZLARFB(SIDE, TRANS,
+# 'Forward', 'Columnwise', MI, NI, IB, A(I,I), T, C(IC,JC)) (_larfb)
+def _unmqr_block(left, notran, live, c, i, nb, k, nq, m, n, a, ar, ac, tau, cr, cc):
+    rows, cols = c.shape[-2:]
+    ib = torch.minimum(nb, k - i + 1)
+    v = _region_at(a, ar + i - 1, ac + i - 1, rows if left else cols, 32)
+    t = _larft(nq - i + 1, ib, v, _vec_at(tau, i, 32), live)
+    mi, ic, ni, jc = (m - i + 1, cr + i - 1, n, cc) if left else (m, cr, n - i + 1, cc + i - 1)
+    made = _larfb(left, not notran, mi, ni, ib, v, t, _region_at(c, ic, jc, rows, cols))
+    c = _region_put(c, ic, jc, made, _within(mi, rows)[..., :, None] & _within(ni, cols)[..., None, :] & _mat(live))
+    if left != notran:
+        i = torch.where(live, i + nb, i)
+        return live & (i <= k), c, i
+    i = torch.where(live, i - nb, i)
+    return live & (i >= 1), c, i
 
 
 # positions TOP..TOP+SIZE-1 of v (_vec_at; positions past v clamped where unused), and v with `values` placed from
@@ -3581,11 +3897,11 @@ def _geev_lwork(order, vectors, whole, dtype):
 # else ZLAHQR, on T with V; 429-455 DO 10 (the spike tip test, else ZTREXC(IFST = NS, ILST)); 457-458 S = 0 where
 # NS = 0; 463-477 DO 30 by ZTREXC where NS < JW; 480-482 DO 40; 485-566 where NS < JW or S = 0: where NS > 1 and
 # S /= 0 ZLARFG of CONJG(V(1,1:NS)), ZLASET('L') at T(3,1), ZLARF1F from the left and right on T and from the right
-# on V, ZGEHRD(JW, 1, NS, T); H(KWTOP,KWTOP-1) = S CONJG(V(1,1)) where KWTOP > 1; T back into the window; ZUNMHR('R',
-# 'N', JW, NS, 1, NS, T, V) where NS > 1 and S /= 0; DO 60 (rows LTOP..KWTOP-1, LTOP = 1 where WANTT, else KTOP),
-# DO 70 (WANTT: columns KBOT+1..N) and DO 80 (WANTZ: Z's rows ILOZ..IHIZ); 569-577 ND = JW - NS, NS - INFQR.
-# ZGEHRD and ZUNMHR are _gehrd's ZGEHD2 and _unmhr's ZUNM2R (OPEN: their blocked code, NS >= 130 and NS - 1 > 32).
-# Returns H, Z, W (SH), NS, ND. dlaqr3.f and dlaqr2.f, the real routines, are _dlaqr3
+# on V, ZGEHRD(JW, 1, NS, T) (LWORK - JW); H(KWTOP,KWTOP-1) = S CONJG(V(1,1)) where KWTOP > 1; T back into the
+# window; ZUNMHR('R', 'N', JW, NS, 1, NS, T, V) (LWORK - JW) where NS > 1 and S /= 0; DO 60 (rows LTOP..KWTOP-1, LTOP
+# = 1 where WANTT, else KTOP), DO 70 (WANTT: columns KBOT+1..N) and DO 80 (WANTZ: Z's rows ILOZ..IHIZ); 569-577 ND =
+# JW - NS, NS - INFQR. ZGEHRD and ZUNMHR are _gehrd and _unmhr at zlaqr3.f 505-506 and 521-523 (WORK(JW+1) and
+# LWORK - JW). Returns H, Z, W (SH), NS, ND. dlaqr3.f and dlaqr2.f, the real routines, are _dlaqr3
 def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, w, kv, kt, nho, kwv, nve, proceed,
            lwork):
     limits = torch.finfo(h.real.dtype)
@@ -3632,10 +3948,10 @@ def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, 
     t = _larf1f(True, ns, jw, work, tau.conj(), t, one, one, spike)
     t = _larf1f(False, ns, ns, work, tau, t, one, one, spike)
     v = _larf1f(False, jw, ns, work, tau, v, one, one, spike)
-    t, taus = _gehrd(jw, one, torch.where(spike, ns, one), t)
+    t, taus = _gehrd(jw, one, torch.where(spike, ns, one), t, lwork - jw)
     h = _entry_put(h, kwtop, kwtop - 1, s * _entry(v, one, one).conj(), update & (kwtop > 1))
     h = _region_put(h, kwtop, kwtop, t, upper & _mat(update))
-    v = _unmhr(False, True, jw, ns, one, ns, t, taus, v, spike)
+    v = _unmhr(False, True, jw, ns, one, ns, t, taus, v, spike, lwork - jw)
     h = _region_put(h, kv, kt, t, square & _mat(main))
     h = _region_put(h, kv, one, v, square & _mat(main))
     ltop = one if wantt else ktop
@@ -3689,7 +4005,7 @@ def _laqr3_sorted(live, t, v, i, jw, ns):
 # H(KWTOP,KWTOP-1) = S V(1,1) where KWTOP > 1; T back into the window; DORMHR('R', 'N', JW, NS, 1, NS, T, V)
 # (LWORK - JW) where NS > 1 and S /= 0; DO 70 (rows LTOP..KWTOP-1), DO 80 (WANTT: columns KBOT+1..N, DGEMM('C') the
 # transpose) and DO 90 (WANTZ: Z's rows ILOZ..IHIZ) as _laqr3's DO 60, 70 and 80; 685-693 ND = JW - NS, NS - INFQR.
-# DGEHRD and DORMHR are _gehrd's DGEHD2 and _unmhr's DORM2R (OPEN: their blocked code, NS >= 130 and NS - 1 > 32).
+# DGEHRD and DORMHR are _gehrd and _unmhr at dlaqr3.f 622-623 and 638-640 (WORK(JW+1), LWORK - JW).
 # Returns H, Z, WR (SR), WI (SI), NS, ND
 def _dlaqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, wr, wi, kv, kt, nho, kwv, nve,
             proceed, lwork):
@@ -3742,10 +4058,10 @@ def _dlaqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z,
     t = _larf1f(True, ns, jw, work, tau, t, one, one, spike)
     t = _larf1f(False, ns, ns, work, tau, t, one, one, spike)
     v = _larf1f(False, jw, ns, work, tau, v, one, one, spike)
-    t, taus = _gehrd(jw, one, torch.where(spike, ns, one), t)
+    t, taus = _gehrd(jw, one, torch.where(spike, ns, one), t, lwork - jw)
     h = _entry_put(h, kwtop, kwtop - 1, s * _entry(v, one, one), update & (kwtop > 1))
     h = _region_put(h, kwtop, kwtop, t, upper & _mat(update))
-    v = _unmhr(False, True, jw, ns, one, ns, t, taus, v, spike)
+    v = _unmhr(False, True, jw, ns, one, ns, t, taus, v, spike, lwork - jw)
     h = _region_put(h, kv, kt, t, square & _mat(main))
     h = _region_put(h, kv, one, v, square & _mat(main))
     ltop = one if wantt else ktop
@@ -4217,17 +4533,17 @@ def _dhseqr(wantt, wantz, ilo, ihi, h, wr, wi, z, proceed, lwork):
 # 349-357, beside this note: DISNAN(ANRM) or ANRM > DLAMCH('Overflow') returns before SCALEA; the member's remaining
 # work here its own and unused); SCALEA and CSCALE (SMLNUM = SQRT(SAFMIN) / EPS) and ZLASCL(ANRM -> CSCALE);
 # ZGEBAL('B'); ZGEHRD (IWRK = N + 1, LWORK - N; DGEHRD 2 N + 1, LWORK - 2 N, zgeev.f 352-355, dgeev.f 371-374); with
-# vectors ZUNGHR into Z and ZHSEQR('S', 'V'), else ZHSEQR('E', 'N') (IWRK = ITAU = 1, LWORK; DHSEQR N + 1, LWORK - N)
-# (zhseqr.f 414-418: W(1:ILO-1) and W(IHI+1:N) from H's diagonal, 427-430's ILO = IHI W(ILO) = H(ILO,ILO) return,
-# 434-486 _zhseqr, then 490-491's H(3:N,1:N-2) lower part zero where WANTT or INFO /= 0 and N > 2); where INFO = 0
-# and with vectors ZTREVC3, ZGEBAK('B', 'R') and the normalization (VR as ZHSEQR left Z elsewhere); label 50's undo
-# scaling ZLASCL(CSCALE -> ANRM) of W(INFO+1:N), and of W(1:ILO-1) where INFO > 0, where SCALEA and INFO >= 0. DHSEQR
-# alike (dhseqr.f 427-434 WR and WI = 0 of the isolated, 443-447, 451-503 _dhseqr at LWORK - N, 508-509). OPEN, not
-# yet source here: the blocked paths the LWORK operands select, xGEHRD's DO 40 (xLAHR2, xLARFB where NH >= 130, at
-# LWORK - N, LWORK - 2 N and xLAQR3's LWORK - JW), xUNGHR/xORGHR's blocked xUNGQR/xORGQR and xUNMHR/xORMHR's blocked
-# xUNMQR/xORMQR (K > 32), each reaching its unblocked code for every N here, and xTREVC3's NB = (LWORK - N) / (2 N)
-# (NBMIN 8, NBMAX 128) choice of back-transformation (here VR = Z X for every N); and the BLAS summation order, FMA
-# contraction and the GPU and ANE precision of each engine
+# vectors ZLACPY('L') and ZUNGHR into Z at the same LWORK (zgeev.f 396-404, dgeev.f 414-421) and ZHSEQR('S', 'V'),
+# else ZHSEQR('E', 'N') (IWRK = ITAU = 1, LWORK; DHSEQR N + 1, LWORK - N) (zhseqr.f 414-418: W(1:ILO-1) and
+# W(IHI+1:N) from H's diagonal, 427-430's ILO = IHI W(ILO) = H(ILO,ILO) return, 434-486 _zhseqr, then 490-491's
+# H(3:N,1:N-2) lower part zero where WANTT or INFO /= 0 and N > 2); where INFO = 0 and with vectors ZTREVC3, ZGEBAK('B',
+# 'R') and the normalization (VR as ZHSEQR left Z elsewhere); label 50's undo scaling ZLASCL(CSCALE -> ANRM) of
+# W(INFO+1:N), and of W(1:ILO-1) where INFO > 0, where SCALEA and INFO >= 0. DHSEQR alike (dhseqr.f 427-434 WR and WI
+# = 0 of the isolated, 443-447, 451-503 _dhseqr at LWORK - N, 508-509). The blocked xGEHRD, xUNGQR and xUNMQR paths
+# are their LWORK conditions' (_gehrd, _unghr, _unmhr). OPEN, not yet source here: xTREVC3's NB = (LWORK - IWRK + 1 -
+# N) / (2 N) (NBMIN 8, NBMAX 128) choice of back-transformation (here VR = Z X for every N); and the BLAS summation
+# order, FMA contraction, the products' zero entries past each operand's extent (a BLAS leaves unreferenced entries
+# unread; here 0 times a non-finite entry is NaN), and the GPU and ANE precision of each engine
 def _geev_routine(a, jobvr):
     n, k, whole, vectors = a.shape[-1], _counted(a), a.is_complex(), jobvr == 'V'
     limits = torch.finfo(a.real.dtype)
@@ -4240,8 +4556,9 @@ def _geev_routine(a, jobvr):
     cscale = torch.where(low, smlnum, torch.full_like(anrm, bignum))
     h, scale, perm, ilo, ihi = _gebal(_lascl(a, anrm, cscale, scalea), ~bad)
     lwork = int(_geev_lwork(torch.tensor(n), vectors, whole, a.real.dtype))
-    h, taus = _gehrd(torch.full_like(ilo, n), ilo, ihi, h)
-    z = _unghr(h, taus, ilo, ihi) if vectors else h.new_zeros(())
+    rest = torch.full_like(ilo, lwork - n if whole else lwork - 2 * n)
+    h, taus = _gehrd(torch.full_like(ilo, n), ilo, ihi, h, rest)
+    z = _unghr(ilo, ihi, torch.tril(h), taus, rest) if vectors else h.new_zeros(())
     isolated = ~_span(k, ilo, ihi) | _vec(ilo == ihi)
     diagonal = h.diagonal(dim1=-2, dim2=-1)
     eigen = (torch.where(isolated, diagonal, 0),) if whole else (torch.where(isolated, diagonal, 0), torch.zeros_like(

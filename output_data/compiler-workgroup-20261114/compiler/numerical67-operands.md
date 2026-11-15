@@ -16,9 +16,14 @@ has since preserved five WIP checkpoints, none of which accepts the method:
   the complex methods (cddf5cf9; see Coverage).
 
 - 6e0bc4e1: the real DLAEXC/DTREXC/DLAQR3/DLAQR0/DHSEQR group below and GEEV's real DHSEQR call.
+- 068d5e0d: the DO 30 correction below. The supervisor accepts it only as source preservation and a literal-order
+  correction, not as numerical completion.
 
-The operations.py delta on top of 6e0bc4e1 is uncommitted. It corrects DO 30, the exceptional shifts, in both
-`_laqr0_pass` and `_dlaqr0_pass`; the supervisor's source review of 6e0bc4e1 found the defect:
+The operations.py delta on top of 068d5e0d is uncommitted. It is the blocked xGEHRD / xUNGHR / xUNMQR dependency group
+and its workspace handoff (its own section below). No TREVC source has changed.
+
+068d5e0d corrects DO 30, the exceptional shifts, in both `_laqr0_pass` and `_dlaqr0_pass`; the supervisor's source
+review of 6e0bc4e1 found the defect:
 - Both passes read the subdiagonal `sub` taken at the pass's start, before xLAQR3 updated H. zlaqr0.f 552-557 and
   dlaqr0.f 557-574 read H as xLAQR3 left it.
 - The real pass had also computed every I at once.
@@ -133,14 +138,15 @@ loops are unrolled with per-member masks. There is no dtype subset and no reject
 - **`_gebal`:**
   - ZGEBAL('B'): the row and column isolation loops and the norm balancing with its two DO WHILE loops.
   - The NaN exit (INFO = -3, ignored by zgeev).
-- **`_gehrd(order, ilo, ihi, h)`:** ZGEHRD/DGEHRD's unblocked path, which is zgehd2.f/dgehd2.f 3.12.1 on the leading
-  ORDER block. TAU is zero outside ILO..IHI-1. Static I = 1..n-1 is active where ILO ≤ I ≤ IHI-1. Each step:
+- **`_gehrd(order, ilo, ihi, h, lwork)`:** ZGEHRD/DGEHRD 3.12.1 on the leading ORDER block, with LWORK. Its blocked
+  DO 40 is in the blocked group below. ZGEHD2 (zgehd2.f/dgehd2.f) then runs from the I that DO 40 left. TAU is zero
+  outside ILO..IHI-1. Static I = 1..n-1 is active where that I ≤ I ≤ IHI-1. Each step:
   - ZLARFG(IHI-I, A(I+1,I), A(MIN(I+2,N),I)) through `_larfg_vector`;
   - ZLARF1F('Right', IHI, IHI-I, …, TAU(I), A(1,I+1));
   - ZLARF1F('Left', IHI-I, N-I, …, CONJG(TAU(I)), A(I+1,I+1)), through `_larf1f`.
 
   The packed layout is the one `_unghr` reads. GEEV calls it with ORDER = n, and xLAQR3's ZGEHRD(JW, 1, NS, T) is
-  its other caller. The blocked DO 40 (NH ≥ 130) is OPEN.
+  its other caller.
 - **ZHSEQR:**
   - W outside ILO..IHI comes from the diagonal (zhseqr.f 415-419). The ILO = IHI return (428-431) gives
     W(ILO) = H(ILO,ILO).
@@ -371,18 +377,95 @@ dhseqr.f line ranges (/tmp/n67i/lapack). Each sits beside its complex counterpar
   ITAU = N + 1. DHSEQR's isolated WR/WI, its ILO = IHI return and its H(3:N,1:N−2) clearing are `_geev_routine`'s,
   as for complex.
 
-## RNG state (connected; the consumer applies the advance)
+### Blocked xGEHRD / xUNGHR / xUNMQR group (uncommitted on 068d5e0d; called by `_geev_routine`, `_laqr3`, `_dlaqr3`)
 
-- `GENERATOR = mesh::generator(site)` has a fake only. A body's Philox draws read the program's Generator words
-  through it. It is the explicit operand, never a fresh allocation and never Inductor's RandomSeeds.
+All v3.12.1 SRC, held read-only and never executed:
+- /tmp/n67f/lapack: zlahr2.f, zlarfb.f, zlarft.f, dgehrd.f, dlahr2.f, dlarfb.f, dlarft.f.
+- /tmp/n67i/lapack: ilaenv.f, zunmqr.f, zunmhr.f.
+- /tmp/n67j/lapack: zgehrd.f, zgehd2.f.
+- /tmp/n67k/lapack, fetched this delta at tag v3.12.1 (SHA-256):
+  - zunghr.f 1bd64b156a20eda58286e42c2a3971a9c162872b7103f9f68b91c7514fa11dfe
+  - zungqr.f e6138732fff0768f602bc70817570914294596ec8bd80ebbf47901b051b7ccd1
+  - zung2r.f 6b1116d953fa1f7c92545dfd55076fd8642ea71e0580db2aba47f715a5066077
+  - dorghr.f 04cffefec1a552e3f87ca0e35b99b6b233593f566240af6163992683568f9667
+  - dorgqr.f a7273d4dd708e220f20d32c003c543fd7f63c25cb31864cb5158e2a937577868
+  - dorg2r.f 15b212557a43409d7f31a55473052054f0f5da9840ee3f7c32c90ded4072ede2
+
+Definitions:
+- **`_larfb(left, adjoint, m, n, k, v, t, c)`:** zlarfb.f 235-366 (dlarfb.f 232-362), DIRECT = 'F', STOREV = 'C',
+  both sides and both TRANS, on local blocks, in the source's ZCOPY/ZTRMM/ZGEMM/ZTRMM/ZGEMM/ZTRMM/DO 30 (DO 60) order.
+- **`_larft(n, k, v, tau, when)` and `_larft_joined`:** zlarft.f 211-345 (dlarft.f 207-341). This is the recursive
+  3.12.1 routine, emitted as its complete call tree over the static bound 32 (63 positions, 31 joins) in the source's
+  order. Each position takes its member's runtime offset and K, and is present where its parent recursed.
+- **`_gehrd(…, lwork)`:** zgehrd.f 249-353:
+  - NB = MIN(64, ILAENV = 32), NBMIN = 2, NX = MAX(NB, 128);
+  - where LWORK < N·NB + TSIZE, NB = (LWORK − TSIZE)/N where LWORK ≥ N·NBMIN + TSIZE, else 1;
+  - DO 40 I = ILO, IHI − 1 − NX, NB (`_gehrd_block`), present where n ≥ 130;
+  - then ZGEHD2 from that I.
+- **`_gehrd_block`:** zgehrd.f 307-348 in order: ZLAHR2, EI / ZGEMM / EI, ZTRMM, the DO 30 ZAXPYs, ZLARFB.
+- **`_lahr2(live, n, k, nb, h, tau, bound)`:** zlahr2.f 216-321 (dlahr2.f 216-319), DO 10 as static I ≤ 32 where
+  I ≤ NB, then the Y(1:K,1:NB) ZLACPY / ZTRMM / ZGEMM / ZTRMM.
+- **`_unghr(ilo, ihi, a, taus, lwork)`:** zunghr.f 194-233: DO 40's shift (column J − 1 read before its own pass),
+  DO 60/80's identity columns, then ZUNGQR(NH, NH, NH, A(ILO+1,ILO+1), TAU(ILO)). It replaces the generic `_dlarf`
+  accumulation.
+- **`_ungqr` / `_ungqr_block`:** zungqr.f 190-282:
+  - NB = 32, NX = 128 where NB < K, and NB = LWORK / N where LWORK < N·NB;
+  - KI/KK and DO 20;
+  - ZUNG2R on the last block;
+  - DO 50 (ZLARFT, ZLARFB where I + IB ≤ N, ZUNG2R, DO 40), present where n ≥ 130 (K > 128).
+- **`_ung2r(m, n, k, a, r0, taus, when, bound)`:** zung2r.f 163-192 (dorg2r.f 162-191): DO 20, then DO 40 with
+  ZLARF1F, ZSCAL, A(I,I) = ONE − TAU(I) and DO 30.
+- **`_unmqr` / `_unmqr_block`:** zunmqr.f 207-336:
+  - 3.12.1's LWKOPT = NW·NB + TSIZE, with NB = (LWORK − TSIZE)/LDWORK where LWORK < LWKOPT;
+  - ZUNM2R where NB < NBMIN or NB ≥ K;
+  - else DO 10 with I1/I2/I3 by SIDE and TRANS (ZLARFT, then ZLARFB on C(IC,JC)), present where TAU's static extent
+    exceeds 32.
+
+  `_unmhr` passes its caller's LWORK to it.
+
+How the group is called and bounded:
+- **Workspace handoff:** each call takes the source's own offset of `_geev_lwork`'s one literal:
+  - GEEV complex: ZGEHRD and ZUNGHR at IWRK = N + 1, LWORK − N (zgeev.f 353-355, 402-404);
+  - GEEV real: DGEHRD and DORGHR at IWRK = 2N + 1, LWORK − 2N (dgeev.f 372-374, 419-421);
+  - xLAQR3: xGEHRD(JW, 1, NS, T, WORK, WORK(JW+1), LWORK − JW) and xUNMHR('R', 'N', JW, NS, 1, NS, T, WORK, V,
+    WORK(JW+1), LWORK − JW) (zlaqr3.f 505-506, 521-523; dlaqr3.f 622-623, 638-640).
+- **Static presence:** each blocked loop is emitted where the static extent admits its first pass. Within it, each
+  member's own runtime condition selects.
+- **Unreached returns:** zgehrd.f 222 (LWORK < MAX(1, N)), zunghr.f 175 (LWORK < MAX(1, NH)) and zunmqr.f 235
+  (LWORK < NW) are never reached. GEEV's LWORK − N and LWORK − 2N exceed 32 N, and xLAQR3's LWORK − JW ≥ JW = NW.
+- **Exact unresolved fact (the next source group, not written, no TREVC source changed):** xTREVC3's NB.
+  - ZTREVC3 receives GEEV's LWORK (IWRK = ITAU = 1, zgeev.f 410, 437-440).
+  - DTREVC3 receives LWORK − N (IWRK = ITAU = N + 1, dgeev.f 426, 452-454).
+  - MAXWRK ≥ N + LWORK_TREVC = 130 N (zgeev.f 286-290, dgeev.f 305-309). So NB = MIN((LWORK' − N)/(2N), 128) ≥ 64
+    ≥ NBMIN = 8 (ztrevc3.f 365-371, dtrevc3.f 373-379), which selects version 2: the blocked GEMM back-transform with
+    inner extent KI + NB − IV (ztrevc3.f 466-496; dtrevc3.f 775-837 with KI2).
+  - ZTREVC3's blocks are static. DTREVC3's depend on each member's pair pattern: a pair takes IV − 1 and IV, and a
+    block is flushed at IV ≤ 2 or KI2 = 1.
+  - `_ztrevc`/`_dtrevc` still form one Z X over every N. That differs from version 2 where Z holds a non-finite entry
+    past a block's inner extent (0 times it is NaN), and in the zero signs.
+  - `_dtrevc`'s pair masks are T(KI,KI−1) ≠ 0 tests, not dtrevc3.f 423-438's IP recurrence. They differ only where
+    two consecutive subdiagonal entries are nonzero.
+
+## RNG state (operands produced here; the state consumer is unfinished, and no once-per-call effect is established)
+
+My produced operands (operations.py) are typed operands only:
+- `GENERATOR = mesh::generator(site)` has a fake only. A body's Philox draws are written to read the program's
+  Generator words through it, as an explicit operand: never a fresh allocation and never Inductor's RandomSeeds.
 - `Generator(state)`:
-  - `.site(identity)` records a draw: the source draw identity, else a construction-order number.
+  - `.site(identity)` would record a draw: the source draw identity, else a construction-order number.
   - `.counter` is word 2 of `state`, a view of the same storage.
-  - `.advanced()` returns `Advance(counter, increment=1)` when the program draws, else None. It replaces
-    `stepped()`'s record, and is the consumer's typed operand for the once-per-execution advance after the draws.
-- **Producer obligation (lower_inductor):** bind each `mesh::generator` node to the body's `Generator.state` root.
-- **Consumer obligation (lower_metal `ConstructedMachine.generated`, schedule `analyse`):** apply `Advance` to that
-  same root after the draws.
+  - `.advanced()` would return `Advance(counter, increment=1)` when the program draws, else None.
+
+Current whole-source status, by static reading on 068d5e0d plus this delta:
+- `Generator.site()` and `Generator.advanced()` have no caller in compiler/mesh_compiler; only operations.py's comment
+  names them. driver.py 99 constructs `Generator(words.clone())`.
+- So `.sites` stays 0 and `.advanced()` would give None. Nothing here establishes an advance once per original call.
+- lower_inductor produces `Seeds` (RandomSeeds buffers by origin) and retains them only.
+- lower_metal does not consume `.seeds`. `ConstructedMachine.generated` is only its `()` default (nothing assigns it),
+  and its `initial_words` comment records the producer's RandomSeeds consumer as unfinished.
+- schedule.py `analyse` therefore skips every machine's generated state.
+- The actual state consumer (binding each `mesh::generator` node to the body's state root, and applying the advance
+  after the draws) is unfinished and not in my files. This note defines no RNG policy and claims none of it.
 
 ## CPU LAPACK: typed routine operators (connected, unchanged this turn)
 
@@ -434,19 +517,23 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
     - The supervisor's source review traced that constant to proxy_tensor's lift_fresh_copy (1479), its constant
       propagation (1494) and its scalar extraction (1362) under `_expanded`'s fake make_fx. That is source evidence
       only, not an observed trace.
-    - The blocked NB choices this LWORK feeds remain OPEN.
+    - The blocked xUNMQR, xGEHRD and xUNGQR NB choices this LWORK feeds are now written; xTREVC3's is not.
   - The blocked ZGEHRD (DO 40 with zlahr2.f/zlarfb.f) for xLAQR3's ZGEHRD(JW, 1, NS), reached where NS ≥ 130, and for
     GEEV's own ZGEHRD where NH ≥ 130.
-  - Their sources are fetched, read-only, and not yet transcribed. Until they are, those members run the unblocked
-    ZUNM2R/ZGEHD2.
+  - Both are now source in the blocked group above. They have been source-read, not traced or executed, and they
+    are not validated.
 - **Real DHSEQR:** the source is now written (see the real group above) and called by GEEV, but none of it has been
-  traced or executed. Still OPEN within it are the same blocked routines as for complex:
-  - DGEHRD's DO 40 (DLAHR2/DLARFB) for GEEV's NH ≥ 130 and DLAQR3's NS ≥ 130;
-  - DORMHR's blocked DORMQR (DLARFT/DLARFB, K = NS − 1 > 32);
-  - GEEV's DORGHR with its blocked DORGQR;
-  - DTREVC3's NB choice.
+  traced or executed. Its blocked routines are now source in the blocked group above, but not validated:
+  - DGEHRD's DO 40 (DLAHR2/DLARFB);
+  - DORMHR's blocked DORMQR;
+  - GEEV's DORGHR with its blocked DORGQR.
 
-  Until they are written, those members run DGEHD2, DORM2R and the unblocked DORGHR reflectors.
+  DTREVC3's NB choice is still not written (the blocked group's exact unresolved fact).
+- **Structural zeros in the masked products (unfinished original numerical-body obligation):** the blocked group's
+  products (xLARFB, xLARFT, xLAHR2, the xGEHRD GEMM and TRMM) and TREVC's Z X are masked full matmuls. Their operands
+  are zero past each extent, or in the triangle a source TRMM leaves unread. A BLAS never reads those entries, but
+  here 0 times a non-finite entry there is NaN, which can contaminate a result the source would leave finite. This is
+  not admitted as finite-only behaviour, and no blocked path is claimed validated.
 - **GEEV's INFO = −4 (kept as the API contract):** `_geev_routine` returns INFO = −4 where ANRM is NaN or above
   overflow.
   - That return is master zgeev.f/dgeev.f's (the repo's `*.reference.f`). v3.12.1 zgeev.f/dgeev.f have none; they
@@ -456,12 +543,14 @@ arguments, error)`, `routine(target)`, `LAPACK_LIBRARY` Accelerate).
     citations uniform.
 - **Line citations (OPEN):** the comments written from the master batches are 1-29 lines off v3.12.1. These cover
   zlahqr/dlahqr, dlanv2, zgehrd/zgehd2, ztrexc, zunm2r, zunmhr, zunmqr, iparmq, ilaenv, and zlaqr0/3/4 with
-  zhseqr. Each needs remapping against /tmp/n67i and /tmp/n67j.
-- **`_unghr` exactness (OPEN):** ZUNGHR still applies its reflectors with the generic `_dlarf`, not with zung2r.f's own
-  reflector code. GEEV's ZGEHD2 now uses `_larfg_vector` and `_larf1f`.
+  zhseqr. Each needs remapping against /tmp/n67i and /tmp/n67j. The blocked group's comments cite v3.12.1. This
+  delta corrected their ilaenv.f numbers: UNGQR NB 406-411/420-425, NX 650-663, NBMIN 573-578/587-592; UNMQR NB
+  412-417/426-431, NBMIN 579-584/593-598.
+- **`_unghr`:** it now follows zunghr.f → zungqr.f → zung2r.f (the blocked group above), no longer the generic
+  `_dlarf`.
 - **Rounding differences from the reference:**
-  - The blocked ZGEHRD/DGEHRD (NH ≥ 130, and xLAQR3's NS ≥ 130), the blocked ZUNMQR/DORMQR (xLAQR3's NS ≥ 34)
-    and the blocked ZUNGHR/ZUNGQR and DORGHR/DORGQR are the unblocked forms here.
+  - The blocked ZGEHRD/DGEHRD, ZUNMQR/DORMQR and ZUNGQR/DORGQR now follow their LWORK conditions. They carry the
+    structural-zero obligation above. xTREVC3's back-transform is still one Z X, not its version 2 blocks.
   - DLADIV/ZLADIV are transcribed (`_divided`, `_dladiv1`, `_dladiv2`, `_cdiv`; checkpoint 43aa1f2e).
   - The scaled largest-modulus norm stands in for dznrm2.f90/dnrm2.f90.
   - Backend summation order and FMA differ, as does the TREVC3 GEMM back-transform order.
