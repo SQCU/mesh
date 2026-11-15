@@ -13,7 +13,8 @@ import sys
 
 import torch
 
-from .operations import CPU, GPU, KINDS, SCALAR, _Check, _Lapack, _Repeat, _Sort, _Words, _bits, _key, _rows, _stored
+from .operations import (CPU, GPU, KINDS, SCALAR, _Check, _Lapack, _Repeat, _Sort, _Switch, _Words, _bits, _copy, _key,
+                         _placed, _rows, _stored)
 
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
@@ -315,29 +316,31 @@ class Dispatch(C.Structure):
 
 
 # metal_ir.h struct metal_ir_repeat_region (metal_ir_repeats): one numerical repeat region, its operation interval
-# [first, end), condition, enclosing `parent`, carried roots metal_ir_repeat_carried()[carried .. + carried_count),
-# and as produced by metal_ir_lower its test dispatch and inclusive metal_ir_order span; 40 bytes
+# [first, end), condition, enclosing region `parent` of kind `parent_kind` and its branch `parent_branch` (UINT32_MAX
+# under a repetition or none), carried roots metal_ir_repeat_carried()[carried .. + carried_count), and as produced by
+# metal_ir_lower its test dispatch and inclusive metal_ir_order span; 44 bytes
 class RepeatRegion(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('first', 'end', 'condition', 'parent', 'carried', 'carried_count', 'test',
-                                            'order_first', 'order_last', 'padding')]
+                                            'order_first', 'order_last', 'parent_kind', 'parent_branch')]
 
 
-# metal_ir.h metal_ir_repeat, metal_ir_repeats, metal_ir_repeat_carried and metal_ir_dispatch_repeats: bound on their
-# first use (`lib` the compiler library), so a program without a repetition never resolves them
-REPEATS = []
+# metal_ir.h struct metal_ir_switch_region (metal_ir_switches): one indexed switch as registered, its `index` ValueID,
+# its branches' {first, end} intervals, yields and common results as offsets into metal_ir_switch_values, its enclosing
+# region, its branch and its kind, and as produced by metal_ir_lower its selector dispatch and inclusive metal_ir_order
+# span; 48 bytes
+class SwitchRegion(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('index', 'branches', 'branch', 'outputs', 'yielded', 'results', 'parent',
+                                            'parent_branch', 'select', 'order_first', 'order_last', 'parent_kind')]
 
 
-def _repeats(lib):
-    if not REPEATS:
-        P, U, count = C.c_void_p, mesh.U, C.POINTER(C.c_size_t)
-        for name, result, arguments in (('metal_ir_repeat', U, [P, U, U, U, U, C.POINTER(U)]),
-                                        ('metal_ir_repeats', C.POINTER(RepeatRegion), [P, count]),
-                                        ('metal_ir_repeat_carried', C.POINTER(U), [P, count]),
-                                        ('metal_ir_dispatch_repeats', C.POINTER(U), [P, count])):
-            function = getattr(lib, name)
-            function.restype, function.argtypes = result, arguments
-        REPEATS.append(lib)
-    return REPEATS[0]
+# metal_ir.h's direct-child input of metal_ir_repeat and metal_ir_switch: an already registered region of kind REPEAT
+# or SWITCH (its metal_ir_repeats or metal_ir_switches index) and the enclosing arm it is in (a switch's branch;
+# UINT32_MAX in a repetition); 12 bytes
+REGION_REPEAT, REGION_SWITCH = 1, 2
+
+
+class RegionChild(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('kind', 'region', 'arm')]
 
 
 # metal_ir.h metal_ir_operations: one structured record's actual emission by _Builder.generic: `record` the record
@@ -467,6 +470,14 @@ def _compiler():
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
                 ('metal_ir_append', C.c_int, [P, P, C.POINTER(U), C.c_size_t, C.c_char_p, C.c_size_t]),
                 ('metal_ir_values', U, [P]), ('metal_ir_operations', U, [P]),
+                ('metal_ir_switch', U, [P, U, U, C.POINTER(U), C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
+                                        C.POINTER(RegionChild)]),
+                ('metal_ir_switches', C.POINTER(SwitchRegion), [P, C.POINTER(C.c_size_t)]),
+                ('metal_ir_switch_values', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
+                ('metal_ir_repeat', U, [P, U, U, U, U, C.POINTER(U), U, C.POINTER(RegionChild)]),
+                ('metal_ir_repeats', C.POINTER(RepeatRegion), [P, C.POINTER(C.c_size_t)]),
+                ('metal_ir_repeat_carried', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
+                ('metal_ir_dispatch_repeats', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_archive_load', P, [P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_free', None, [P]),
                 ('metal_ir_loaded', C.c_int, [P, C.c_char_p, C.c_size_t]),
@@ -561,7 +572,7 @@ class _Builder:
     def __init__(self, lib, identity, constants=None, program=None):
         self.lib = lib
         self.p = lib.metal_ir_program_new() if program is None else program
-        self.emitted, self.repeated = [], []
+        self.emitted, self.repeated, self.regions = [], [], []
         self.values, self.roots, self.roles, self.builtins = {}, {}, {}, {}
         self.constants = {} if constants is None else constants
         self.base = self.identity = identity
@@ -680,23 +691,67 @@ class _Builder:
     def generic(self, g):
         if isinstance(g, _Repeat):
             return self.repeat(g)
+        if isinstance(g, _Switch):
+            return self.switch(g)
         first = self.lib.metal_ir_operations(self.p)
         operation = self.encoded(g)
         self.emitted.append(Emitted(g, operation, first, self.lib.metal_ir_operations(self.p)))
         return operation
 
-    # metal_ir.h metal_ir_repeat: one pass's records emitted in order through `generic` (a nested repetition's own
-    # region registered first), then the pass's whole operation interval registered once with its condition's ValueID
-    # (a one-element int32 view) and its carried tensors' storage roots; the region (Repeated) kept beside the leaves'
-    # emissions, never as an operation
+    # `regions` the open regions while their records are emitted, innermost last, each [its direct children
+    # (RegionChild), its open arm: a switch's branch, UINT32_MAX a repetition's]: a region registered there (postorder)
+    # the innermost open one's child in that arm
+    def enclosed(self, kind, region):
+        if self.regions:
+            children, arm = self.regions[-1]
+            children.append(RegionChild(kind, region, arm))
+
+    # metal_ir.h metal_ir_repeat: one pass's records emitted in order through `generic` (each region in it registered
+    # first, its direct child), then the pass's whole operation interval registered once with its condition's ValueID
+    # (a one-element int32 view), its carried tensors' storage roots and its direct children; the region (Repeated)
+    # kept beside the leaves' emissions, never as an operation
     def repeat(self, g):
-        first = self.lib.metal_ir_operations(self.p)
+        first, children = self.lib.metal_ir_operations(self.p), []
+        self.regions.append([children, NONE])
         for record in g.records:
             self.generic(record)
+        self.regions.pop()
         end, carried = self.lib.metal_ir_operations(self.p), [self.root(t) for t in g.carried]
-        region = _repeats(self.lib).metal_ir_repeat(self.p, first, end, self.value(g.condition), len(carried),
-                                                     _array(mesh.U, carried))
+        region = self.lib.metal_ir_repeat(self.p, first, end, self.value(g.condition), len(carried),
+                                          _array(mesh.U, carried), len(children), _array(RegionChild, children))
         self.repeated.append(Repeated(g, region, first, end))
+        self.enclosed(REGION_REPEAT, region)
+
+    # metal_ir.h metal_ir_switch (registration only: it constructs no copy), in postorder: each branch k's records
+    # emitted once in order through `generic` (each region in it registered first, its direct child in arm k), then
+    # operations._copy of each of its yields into its common output, at the switch's own place and node, inside that
+    # branch, its interval [first, end) taken around both; then the switch registered once with its index's ValueID (a
+    # one-element integer view), the yields' own ValueIDs branch-major and the common outputs' (operations._stored, as
+    # each operand) and its direct children (`regions`); itself so the innermost open region's child. A switch is no
+    # operation: the leaves' and copies' emissions are the records kept
+    def switch(self, g):
+        first, end, yielded, children = [], [], [], []
+        opened = [children, 0]
+        self.regions.append(opened)
+        for k, (records, yields) in enumerate(g.branches):
+            opened[1] = k
+            first.append(self.lib.metal_ir_operations(self.p))
+            for record in records:
+                self.generic(record)
+            for out, value in zip(g.outputs, yields, strict=True):
+                written = _copy(out, value)
+                _placed(written, g.place, g.node)
+                for record in written:
+                    self.generic(record)
+            end.append(self.lib.metal_ir_operations(self.p))
+            yielded += [self.value(_stored(value)) for value in yields]
+        self.regions.pop()
+        results = [self.value(_stored(out)) for out in g.outputs]
+        region = self.lib.metal_ir_switch(
+            self.p, self.value(_stored(g.index)), len(g.branches), _array(mesh.U, first), _array(mesh.U, end),
+            len(g.outputs), _array(mesh.U, yielded), _array(mesh.U, results), len(children),
+            _array(RegionChild, children))
+        self.enclosed(REGION_SWITCH, region)
 
     # metal_ir.h `identity`: the producer's identity of an operation and of the values it first names, (function,
     # call ordinal, FX node position) of the call's graph, kept through every transformation (metal_ir_operation_info)

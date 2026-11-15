@@ -18,10 +18,19 @@ from .ir import RECV, SEND, written
 from .lower_inductor import copies
 from .metal import (CONSTANT, INPUT, NONE, OUTPUT, SOURCE_EXTERNAL, SOURCE_LITERAL, SOURCE_RECEIVED,
                     SOURCE_SENT, SOURCE_VALUE, STATE, TEMPORARY, SourceOperand, _Builder, _compiler)
-from .operations import (ANE, CPU, GPU, _Generic, _Lapack, _copy, _held, _instruction, _key, _local_call, _metadata,
-                         _placed, _same_view, _stored)
+from .operations import (ANE, CPU, GPU, _Generic, _Lapack, _Switch, _copy, _held, _instruction, _key, _local_call,
+                         _made, _metadata, _placed, _same_view, _stored, switch_op)
 
 Root = collections.namedtuple("Root", "name kind role root value")
+
+
+# torch 2.14.0 torch/fx/interpreter.py Interpreter.fetch_attr: a get_attr node's object, its qualified target's
+# attributes of its owning GraphModule
+def fetched(module, target):
+    value = module
+    for atom in target.split("."):
+        value = getattr(value, atom)
+    return value
 Output = collections.namedtuple("Output", "root value literal metadata kind written")
 # compiler/mesh_compiler/placement.py place `input_parts`: one placed partition of an input on one processor, `input`
 # the whole input's placeholder Root, `root`/`value` the partition's typed root and ValueID (`typed`), `source` the
@@ -218,6 +227,34 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
             sizes = list(like.shape) if landed else [n for n, _ in pairs]
             return value, held[value].as_strided(sizes, [stride // element for _, stride in pairs], offset // element)
 
+        # torch 2.14.0 torch/_higher_order_ops/switch.py trace_switch: a switch node's (index, its branches'
+        # GraphModules, their operands) one operations._Switch, each branch's own graph made once here as the body is,
+        # its placeholders the operands in order, each other node its get_attr object or made by this (a nested switch
+        # so), its output node's leaves its yields; the outputs `outs` where given, else its prototype's
+        # (operations._made); any other node its operations._instruction
+        def instructed(node, read, outs=None):
+            if node.target is not switch_op:
+                local = _local_call(node)
+                args, kwargs = map_arg((local.args, local.kwargs), read)
+                return _instruction(local, args, kwargs, node.meta.get("val"), page, generator, outs)
+            index, graphs, operands = map_arg(node.args, read)
+            branches = []
+            for graph in graphs:
+                scope, steps = dict(zip((n for n in graph.graph.nodes if n.op == "placeholder"), operands,
+                                        strict=True)), []
+                for n in graph.graph.nodes:
+                    if n.op == "get_attr":
+                        scope[n] = fetched(graph, n.target)
+                    elif n.op not in ("placeholder", "output"):
+                        scope[n], ops = instructed(n, scope.__getitem__)
+                        steps += ops
+                yields = pytree.tree_leaves(map_arg(graph.graph.output_node().args[0], scope.__getitem__))
+                branches.append((steps, tuple(yields)))
+            if outs is not None:
+                return outs[0] if len(outs) == 1 else tuple(outs), [_Switch(index, branches, outs)]
+            made_, spec = _made(node.meta["val"], node)
+            return pytree.tree_unflatten(made_, spec), [_Switch(index, branches, made_)]
+
         for node in nodes:
             if node.op == "placeholder":
                 kind = KINDS[kinds.get(node.target, InputKind.USER_INPUT)][0]
@@ -229,6 +266,8 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                 inputs.append(Root(node.target, kind, role, *rooted(env[node], role, data)))
             elif node.op == "output":
                 leaves, spec = pytree.tree_flatten(node.args[0])
+            elif node.op == "get_attr":
+                env[node] = fetched(module, node.target)
             elif node.target is RECV:
                 channel = node.args[0]
                 if "to" in node.meta and channel in wires and byname[node.meta["to"][0]] in roots:
@@ -266,11 +305,8 @@ def construct(module, *, targets, kinds, sources, wires, output_roles, generator
                     grouped[k] = value, view
                 sending.append((node.args[1], *grouped[k]))
             else:
-                local = _local_call(node)
-                args, kwargs = map_arg((local.args, local.kwargs), env.__getitem__)
                 drew = generator.sites if generator is not None else 0
-                env[node], ops = _instruction(local, args, kwargs, node.meta.get("val"), page, generator,
-                                                [dests[node]] if node in dests else None)
+                env[node], ops = instructed(node, env.__getitem__, [dests[node]] if node in dests else None)
                 _placed(ops, place(node), tasks[node][0])
                 associated.append(node)
                 records += ops
