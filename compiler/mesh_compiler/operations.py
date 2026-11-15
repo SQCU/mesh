@@ -55,29 +55,42 @@ def _lstsq_driver(a, driver):
 
 @torch.library.register_fake('aten::geqrf')
 def _geqrf_metadata(self):
-    torch._check(self.dim() >= 2, lambda: 'torch.geqrf: input must have at least 2 dimensions')
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
+    torch._check(self.dim() >= 2, lambda: mesh_callbacks_are_outside_spec('torch.geqrf: input must have at least 2 dimensions'))
     m, n = self.shape[-2:]
     return (self.new_empty((*self.shape[:-2], n, m)).transpose(-2, -1),
             self.new_empty((*self.shape[:-2], min(m, n))))
 
 
 def _lstsq_shapes(self, b, driver):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     torch._check(self.dim() >= 2 and b.dim() >= 1,
-                 lambda: 'torch.linalg.lstsq: input must have at least 2 dimensions and other at least 1')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input must have at least 2 dimensions and other at least 1'))
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     torch._check(0 <= self.dim() - b.dim() <= 1,
-                 lambda: 'torch.linalg.lstsq: input.dim() - other.dim() must be 0 or 1')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input.dim() - other.dim() must be 0 or 1'))
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     torch._check(self.dtype == b.dtype and self.device == b.device,
-                 lambda: 'torch.linalg.lstsq: input and other must have the same dtype and device')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input and other must have the same dtype and device'))
     selected = _lstsq_driver(self, driver)
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     torch._check(selected in ('gels', 'gelsy', 'gelsd', 'gelss'),
-                 lambda: 'torch.linalg.lstsq: driver must be gels, gelsy, gelsd or gelss')
+                 lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: driver must be gels, gelsy, gelsd or gelss'))
     # Rejection filters are not part of even temporary integration validation.
     # PyTorch's CUDA-provider gels-only check (lstsq-pytorch.reference.cpp 3499-3503) is not Mesh's: a placed lstsq
     # is lowered by Mesh's own _lapack_least_squares (CPU), _least_squares_qr and _least_squares_svd, each driver
     vector = _linalg_vector_rhs(self, b)
     rhs = b.unsqueeze(-1) if vector else b
     m, n = self.shape[-2:]
-    torch._check(m == rhs.shape[-2], lambda: 'torch.linalg.lstsq: input and other row sizes must match')
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    torch._check(m == rhs.shape[-2], lambda: mesh_callbacks_are_outside_spec('torch.linalg.lstsq: input and other row sizes must match'))
     batch = torch.broadcast_shapes(self.shape[:-2], rhs.shape[:-2])
     return selected, vector, m, n, batch, rhs.shape[-1]
 
@@ -95,6 +108,9 @@ def _lstsq_fixed(self, shapes):
 
 @torch.library.register_fake('aten::linalg_lstsq')
 def _lstsq_metadata(self, b, rcond=None, *, driver=None):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     shapes = _lstsq_shapes(self, b, driver)
     (selected, _, m, n, batch, nrhs), (solution, rank, singular) = shapes, _lstsq_fixed(self, shapes)
     residual = self.real.new_empty((*batch, nrhs) if m > n and (selected == 'gels' or n == 0 and selected != 'gelsy')
@@ -122,6 +138,9 @@ torch.library.define('mesh::linalg_lstsq_fixed', '(Tensor self, Tensor b, float?
 
 @torch.library.register_fake('mesh::linalg_lstsq_fixed')
 def _lstsq_fixed_metadata(self, b, rcond=None, *, driver=None):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return _lstsq_fixed(self, _lstsq_shapes(self, b, driver))
 
 
@@ -136,14 +155,22 @@ LSTSQ_FIXED = torch.ops.mesh.linalg_lstsq_fixed.default
 # 958-962, linalg_lstsq output_differentiability [True, True, False, False]: rank and singular_values are not
 # differentiable
 def _lstsq_fixed_context(ctx, inputs, keyword_only_inputs, output):
+    # Callback inversion of control is outside the working specification (phase: compile-time autograd tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     ctx.save_for_backward(inputs[0], inputs[1])
     ctx.mark_non_differentiable(output[1], output[2])
 
 
 def _lstsq_fixed_backward(ctx, solution, rank, singular):
+    # Callback inversion of control is outside the working specification (phase: compile-time autograd tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     a, b = ctx.saved_tensors
     vector = _linalg_vector_rhs(a, b)
-    _, pullback = torch.func.vjp(lambda a, b: torch.linalg.pinv(a) @ (b.unsqueeze(-1) if vector else b), a, b)
+    # Callback inversion of control is outside the working specification (phase: compile-time autograd tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    _, pullback = torch.func.vjp(lambda a, b: mesh_callbacks_are_outside_spec(torch.linalg.pinv(a) @ (b.unsqueeze(-1) if vector else b)), a, b)
     a_grad, b_grad = pullback(solution.unsqueeze(-1) if vector else solution)
     return a_grad, b_grad, None
 
@@ -188,6 +215,9 @@ def _info(a, batch):
 
 
 def _gesdd_fake(a, jobz):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     batch, (m, n) = a.shape[:-2], a.shape[-2:]
     k = min(m, n)
     s = a.real.new_empty((*batch, k))
@@ -199,17 +229,26 @@ def _gesdd_fake(a, jobz):
 
 
 def _heevd_fake(a, jobz, uplo):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     batch = a.shape[:-2]
     return (a.real.new_empty(a.shape[:-1]), _column_major(a, a.shape) if jobz == 'V' else a.new_empty((0,)),
             _info(a, batch))
 
 
 def _dgeev_fake(a, jobvr):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     vr = _column_major(a, a.shape) if jobvr == 'V' else a.new_empty((0,))
     return a.new_empty(a.shape[:-1]), a.new_empty(a.shape[:-1]), vr, _info(a, a.shape[:-2])
 
 
 def _zgeev_fake(a, jobvr):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return a.new_empty(a.shape[:-1]), _column_major(a, a.shape) if jobvr == 'V' else a.new_empty((0,)), \
         _info(a, a.shape[:-2])
 
@@ -219,14 +258,23 @@ def _least_buffer(a, b):
 
 
 def _gels_fake(a, b):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return _least_buffer(a, b), _info(a, a.shape[:-2])
 
 
 def _gelsy_fake(a, b, rcond):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return _least_buffer(a, b), _info(a, a.shape[:-2]), _info(a, a.shape[:-2])
 
 
 def _gelsd_fake(a, b, rcond):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return (_least_buffer(a, b), a.real.new_empty((*a.shape[:-2], min(a.shape[-2:]))), _info(a, a.shape[:-2]),
             _info(a, a.shape[:-2]))
 
@@ -421,6 +469,9 @@ SQUARING = {torch.float64: (5.371920351148152, (1.495585217958292e-002, 2.539398
 # index. One branch formulation (_pade, the solve-and-squaring and NaN branches) serves both: a single matrix through
 # torch/_higher_order_ops/switch.py switch_op (one branch runs), a batch through _branch_selected
 def _matrix_exponential(a, max_squarings):
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     if not a.numel():
         return torch.empty_like(a)
     given, a = a.dtype, a.to(get_computation_dtype(a.dtype))
@@ -504,11 +555,17 @@ def _pade(degree, scaled, powers):
 
 # one switch branch: that degree's own powers, then its (U, V)
 def _pade_branch(degree, scaled, identity):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return _pade(degree, scaled, _powers((degree,), scaled, identity))
 
 
 # expm's _compute: _solve_P_Q (jnp.linalg.solve(Q, P)) and _squaring
 def _solved_squares(p, q, count, max_squarings):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return _squaring(torch.linalg.solve_ex(q, p).result.contiguous(), count, max_squarings),
 
 
@@ -531,16 +588,25 @@ def _squaring(r, count, max_squarings):
 
 
 def _squaring_precise(x):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return torch.matmul(x, x),
 
 
 def _squaring_kept(x):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return x.clone(),
 
 
 # expm's _nan, jnp.full_like(A, nan): in _compute's contiguous result layout, so both branches yield one common
 # result metadata
 def _overflowed(p, q, count):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return q.new_full(q.shape, math.nan),
 
 
@@ -627,11 +693,17 @@ def _converged(step, u, tol_norm):
 
 
 def _halley_continued(tol_norm, current, converged):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     step = _cholesky_step(current, 3 - 1 / 3, 3, 1 / 3).contiguous()
     return step, _converged(step, current, tol_norm)
 
 
 def _halley_kept(current, converged):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return current.clone(), converged.clone()
 
 
@@ -646,6 +718,9 @@ def _halley_kept(current, converged):
 # eigenvalues ascending, their vectors' columns in that order): the prefix and suffix formulations
 # compiler/mesh_compiler/decompose.py outline traces
 def _qdwh_eigh_state(a, upper=False, site=0):
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n, batch = a.shape[-1], a.shape[:-2]
     keep = torch.ones(n, n, dtype=torch.bool, device=a.device)
     mask = keep.triu() if upper else keep.tril()
@@ -672,6 +747,9 @@ def _qdwh_eigh_state(a, upper=False, site=0):
 # eigh's sort_eigenvalues (jnp.argsort, stable, NaN last; `empty` the vectors' shape without compute_v), after the
 # outlined 2n - 1 steps (each split's children of positive size, pub13 section 5.2: n leaves, n - 1 splits)
 def _qdwh_eigh_result(blocks, vectors, empty=None):
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     values = blocks[..., :, 0]
     values, order = torch.sort(values.real if values.is_complex() else values, stable=True, dim=-1)
     if empty is not None:
@@ -692,6 +770,9 @@ torch.library.define('mesh::generator', '(Tensor site) -> Tensor')
 
 @torch.library.register_fake('mesh::generator')
 def _generator_words(site):
+    # Callback inversion of control is outside the working specification (phase: compile-time fake tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return site.new_empty((4,), dtype=torch.int32)
 
 
@@ -706,6 +787,9 @@ GENERATOR = torch.ops.mesh.generator.default
 # extent the member's own runtime value. lax.cond(nearly_diagonal | tiny, nearly_diagonal_case, default_case): a single
 # matrix's cond_op runs one branch; a batch takes _cond_batching_rule, both branches and the select per member
 def _qdwh_eigh_pop(blocks, vectors, agenda, top, norm, site, max_iterations=10):
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n, eps = blocks.shape[-1], float(torch.finfo(blocks.real.dtype).eps)
     words = GENERATOR(site)
     height = top[..., 0]
@@ -787,6 +871,9 @@ def _columns_put(target, source, place, at, width):
 # nearly_diagonal_case: _update_slice(blocks, diag(H)[:, None], (offset, 0), (b, 1)); the agenda's top the entry below
 # the popped one
 def _qdwh_terminal(blocks, vectors, agenda, h, squares, offset, e, d, below, words, site):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n = blocks.shape[-1]
     at = torch.arange(n, device=blocks.device) - offset[..., None]
     values = h.diagonal(dim1=-2, dim2=-1).gather(-1, at.clamp(0, n - 1))
@@ -803,6 +890,9 @@ def _qdwh_terminal(blocks, vectors, agenda, h, squares, offset, e, d, below, wor
 # while_loop with no bound, as the source's). H_minus and H_plus (Q^H H Q's diagonal blocks) and V0 V_minus and
 # V0 V_plus are written at their offsets, and the children, each of positive size, pushed
 def _qdwh_split(max_iterations, blocks, vectors, agenda, h, squares, offset, e, d, below, words, site):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n = h.shape[-1]
     diagonal = torch.where(_within(e, n), h.diagonal(dim1=-2, dim2=-1).real, math.nan)
     ordered = torch.sort(diagonal, dim=-1, stable=True).values
@@ -842,12 +932,18 @@ def _qdwh_attempt(max_iterations, h, shift, extent):
 
 
 def _qdwh_mean_attempt(max_iterations, h, e, u, total, trace):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     diagonal = h.diagonal(dim1=-2, dim2=-1).real
     mean = torch.where(_within(e, h.shape[-1]), diagonal, 0).sum(-1) / e.to(diagonal.dtype)
     return _qdwh_attempt(max_iterations, h, mean, e)
 
 
 def _qdwh_attempt_kept(h, e, u, total, trace):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return u.clone(), total.clone(), trace.clone()
 
 
@@ -919,10 +1015,16 @@ def _above(error, squares, tolerance):
 
 
 def _iterating(q, rotated, error, previous, again, projector, h, e, rank, rest, squares):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return again.any()
 
 
 def _subspace_repeated(tolerance, q, rotated, error, previous, again, projector, h, e, rank, rest, squares):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     x = torch.where(_square_within(e, h.shape[-1], rank), torch.matmul(projector, q), 0)
     made_q, made_rotated, made = _subspace_pass(x, h, rank, rest)
     passed = _above(made, squares, tolerance) & (made < previous)
@@ -945,6 +1047,9 @@ def _subspace_pass(x, h, rank, rest):
 
 
 def _remedy_pending(*carried_and_given):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return carried_and_given[14].any()
 
 
@@ -956,6 +1061,9 @@ def _remedy_pending(*carried_and_given):
 # members are selected where they were unaccepted
 def _qdwh_remedied(max_iterations, u, projector, minus, plus, rank, rest, at_minus, at_plus, offset_plus, swap,
                    stream, q, rotated, error, unaccepted, h, e, offset, squares, words, site):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n = h.shape[-1]
     refined = _polar(torch.where(_square_within(e, n), u, 0), max_iterations)[0].contiguous()
     state = _partition(e, offset, *_unitary(refined, e))
@@ -1089,10 +1197,16 @@ def _rank_corrected(u_out, s_out, n):
 
 
 def _correction_pending(u_out, do_correction):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return do_correction.any()
 
 
 def _rank_correction(u_out, do_correction):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     q, r = torch.linalg.qr(u_out)
     diagonal = r.diagonal(dim1=-2, dim2=-1)
     sign = torch.where((diagonal.real if diagonal.is_complex() else diagonal) >= 0, 1, -1).to(q.dtype)
@@ -1416,6 +1530,9 @@ def _mat(s):
 
 
 def _first_any(live, *rest):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return live.any()
 
 
@@ -1590,6 +1707,9 @@ def _lascl(x, cfrom, cto, when):
 
 
 def _lascl_pass(smlnum, pending, x, cfromc, ctoc):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     bignum = 1 / smlnum
     cfrom1 = cfromc * smlnum
     infinite = cfrom1 == cfromc
@@ -1629,6 +1749,9 @@ def _gebal(h, proceed):
 
 
 def _gebal_rows(live, h, perm, i, l, noconv, done):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     k = _counted(h)
     active = live & (i >= 1)
     canswap = ((k == _vec(i)) | (k > _vec(l)) | (_row(h, i) == 0)).all(-1)
@@ -1645,6 +1768,9 @@ def _gebal_rows(live, h, perm, i, l, noconv, done):
 
 
 def _gebal_columns(live, h, perm, j, low, noconv, l):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     k = _counted(h)
     active = live & (j <= l)
     canswap = ((k == _vec(j)) | (k < _vec(low)) | (k > _vec(l)) | (_column(h, j) == 0)).all(-1)
@@ -1659,6 +1785,9 @@ def _gebal_columns(live, h, perm, j, low, noconv, l):
 
 
 def _gebal_scaled(limits, live, h, scale, i, noconv, low, l):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     sfmin1, sfmax1, sfmin2, sfmax2 = limits
     k = _counted(h)
     active = live & (i <= l)
@@ -1691,22 +1820,34 @@ def _gebal_scaled(limits, live, h, scale, i, noconv, low, l):
 # zgebal.f 377-385 and 387-395: the DO WHILE tests over the member's (F, C, CA, R, G, RA), and one step (F, C, CA by
 # SCLFAC = 2, R, G, RA by its reciprocal; the second loop's G scaled with C)
 def _gebal_up_holds(bounds, f, c, ca, r, g, ra, alive):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     sfmin2, sfmax2 = bounds
     return alive & (c < g) & (torch.maximum(torch.maximum(f, c), ca) < sfmax2) & (
         torch.minimum(torch.minimum(r, g), ra) > sfmin2)
 
 
 def _gebal_down_holds(bounds, f, c, ca, r, g, ra, alive):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     sfmin2, sfmax2 = bounds
     return alive & (g >= r) & (torch.maximum(r, ra) < sfmax2) & (
         torch.minimum(torch.minimum(torch.minimum(f, c), g), ca) > sfmin2)
 
 
 def _gebal_pending(holds, bounds, *values):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return holds(bounds, *values).any()
 
 
 def _gebal_step(holds, bounds, factor, f, c, ca, r, g, ra, alive):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     held = holds(bounds, f, c, ca, r, g, ra, alive)
     up, down = (f * 2, c * 2, ca * 2, r / 2, g / 2, ra / 2), (f / 2, c / 2, ca / 2, r * 2, g / 2, ra * 2)
     return tuple(torch.where(held, made, x) for made, x in zip(up if factor == 2 else down, (f, c, ca, r, g, ra)))
@@ -1881,6 +2022,9 @@ def _gehrd(order, ilo, ihi, h, lwork):
 # A(I+1,I), Y); DO 30 J = 0, IB - 2 ZAXPY(I, -ONE, Y(1,J+1), A(1,I+J+1)); ZLARFB('Left', 'Conjugate transpose',
 # 'Forward', 'Columnwise', IHI - I, N - I - IB + 1, IB, A(I+1,I), T, A(I+1,I+IB)) (_larfb)
 def _gehrd_block(live, h, taus, i, nb, ihi, order):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     size, k = h.shape[-1], _counted(h)
     one = torch.ones_like(i)
     ib = torch.minimum(nb, ihi - i)
@@ -2029,6 +2173,9 @@ def _ungqr(m, n, k, a, base, taus, when, lwork):
 # N - I - IB + 1, IB, A(I,I), WORK, A(I,I+IB)) (_larfb); ZUNG2R(M - I + 1, IB, IB, A(I,I), TAU(I)); DO 40
 # A(1:I-1,I:I+IB-1) = ZERO
 def _ungqr_block(live, a, i, nb, k, m, n, base, taus):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     size, q = a.shape[-1], _counted(a)
     ib = torch.minimum(nb, k - i + 1)
     g = base + i
@@ -2260,6 +2407,9 @@ def _iteration_bounds(h, ilo, ihi):
 
 def _zlahqr_pass(wantt, wantz, ulp, live, h, z, w, i, l, its, kdefl, info, ilo, ihi, smlnum, itmax, order,
                  iloz, ihiz):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n, k = h.shape[-1], _counted(h)
     l = torch.where(live, _deflation(h, i, l, ilo, ihi, smlnum, ulp), l)
     h = _entry_put(h, l, l - 1, 0, live & (l > ilo))
@@ -2400,6 +2550,9 @@ def _double_shifted(hmm, hm1m, hmm1, hm1m1, hm2m1, rt1r, rt1i, rt2r, rt2i):
 
 def _dlahqr_pass(wantt, wantz, ulp, live, h, z, wr, wi, i, l, its, kdefl, info, ilo, ihi, smlnum, itmax, order,
                  iloz, ihiz):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n, k = h.shape[-1], _counted(h)
     l = torch.where(live, _deflation(h, i, l, ilo, ihi, smlnum, ulp), l)
     h = _entry_put(h, l, l - 1, 0, live & (l > ilo))
@@ -2772,6 +2925,9 @@ def _dtrevc(t, z, lwork):
 
 # Fortran MAX(A, B) and MIN(A, B) as the source's comparisons select them
 def _larger(a, b):
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return torch.where(a >= b, a, b)
 
 
@@ -3030,6 +3186,9 @@ def _region_put(x, r0, c0, block, mask):
 # JLEN, NU, NU, ONE, X(J,C0), M, ZERO, W) into the workspace W = H(WR,1), then xLACPY('ALL', JLEN, NU, W, X(J,C0)).
 # X is h, or z where `onz`; M is static SIZE x SIZE, its leading NU x NU the source's
 def _rows_chunk(onz, live, h, z, j, last, chunk, c0, nu, m, wr):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     x = z if onz else h
     rows, size, one = x.shape[-2], m.shape[-1], torch.ones_like(j)
     used = _within(torch.minimum(chunk, last - j + 1), rows)[..., :, None] & _within(nu, size)[..., None, :]
@@ -3049,6 +3208,9 @@ def _rows_chunk(onz, live, h, z, j, last, chunk, c0, nu, m, wr):
 # the same pass for zlaqr3.f DO 70 and zlaqr5.f DO 150: xGEMM('C', 'N', NU, JLEN, NU, ONE, M, H(R0,J), ZERO, W) into
 # the workspace W = H(WR,WC), then xLACPY('ALL', NU, JLEN, W, H(R0,J))
 def _columns_chunk(live, h, j, last, chunk, r0, nu, m, wr, wc):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     cols, size = h.shape[-1], m.shape[-1]
     used = _within(nu, size)[..., :, None] & _within(torch.minimum(chunk, last - j + 1), cols)[..., None, :]
     made = torch.matmul(torch.where(_square_within(nu, size), m, 0).mH,
@@ -3204,6 +3366,9 @@ def _laqr5(wantt, wantz, accum, order, ktop, kbot, nshfts, shifts, h, iloz, ihiz
 # chunk in the source's order
 def _laqr5_columns(wantt, wantz, ulp, live, h, z, vs, incol, accum, order, ktop, kbot, nbmps, iloz, ihiz, ku, nv,
                    kwv, nh, kwh, smlnum, *shifts):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     ub = 4 * vs.shape[-1]
     kdu = 4 * nbmps
     one = torch.ones_like(ktop)
@@ -3240,6 +3405,9 @@ def _laqr5_columns(wantt, wantz, ulp, live, h, z, vs, incol, accum, order, ktop,
 # or DO 140 (WANTZ), each M = MBOT, MTOP, -1
 def _laqr5_step(wantt, wantz, ulp, live, h, z, u, vs, krcol, stop, incol, accum, order, ktop, kbot, nbmps, jtop,
                 ndcol, iloz, ihiz, smlnum, *shifts):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     kdu = 4 * nbmps
     mtop = torch.clamp(torch.div(ktop - krcol, 2, rounding_mode='trunc') + 1, min=1)
     mbot = torch.minimum(nbmps, torch.div(kbot - krcol - 1, 2, rounding_mode='trunc'))
@@ -3268,7 +3436,9 @@ def _laqr5_pair(wantz, ulp, smlnum, two, h, z, u, vs, k, m22, incol, accum, ktop
     rows = _counted(h)
     intro = two & (k == ktop - 1)
     chase = two & ~intro
-    lead = _laqr1(lambda r, c: _entry(h, k + r, k + c), 2, *_shift_pair(shifts, m22))
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    lead = _laqr1(lambda r, c: mesh_callbacks_are_outside_spec(_entry(h, k + r, k + c)), 2, *_shift_pair(shifts, m22))
     beta, tau, (tail,) = _larfg(torch.where(intro, lead[0], _entry(h, k + 1, k)),
                                 [torch.where(intro, lead[1], _entry(h, k + 2, k))])
     h = _entry_put(h, k + 1, k, beta, chase)
@@ -3292,12 +3462,17 @@ def _laqr5_pair(wantz, ulp, smlnum, two, h, z, u, vs, k, m22, incol, accum, ktop
 # H(K+3,K+2) /= 0 the refined VT (xLAQR1(3) of H(K+1,K+1), xLARFG(3)) taken where its H(K+2,K), H(K+3,K) residue is
 # at most ULP (CABS1 H(K,K) + H(K+1,K+1) + H(K+2,K+2)); DO 70, the column K+1 update, the vigilant test (K >= KTOP)
 def _laqr5_bulge(ulp, live, h, vs, m, mtop, krcol, ktop, kbot, jtop, smlnum, *shifts):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     rows = _counted(h)
     k = krcol + 2 * (m - 1)
     intro = live & (k == ktop - 1)
     chase = live & ~intro
     first, second = _shift_pair(shifts, m)
-    lead = _laqr1(lambda r, c: _entry(h, ktop + r - 1, ktop + c - 1), 3, first, second)
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    lead = _laqr1(lambda r, c: mesh_callbacks_are_outside_spec(_entry(h, ktop + r - 1, ktop + c - 1)), 3, first, second)
     o1, o2, o3 = _reflector_at(vs, m)
     t2, t3 = o1 * _cj(o2), o1 * _cj(o3)
     refsum = o3 * _entry(h, k + 3, k + 2)
@@ -3308,7 +3483,9 @@ def _laqr5_bulge(ulp, live, h, vs, m, mtop, krcol, ktop, kbot, jtop, smlnum, *sh
                                  [torch.where(intro, lead[1], _entry(h, k + 2, k)),
                                   torch.where(intro, lead[2], _entry(h, k + 3, k))])
     settled = (_entry(h, k + 3, k) != 0) | (_entry(h, k + 3, k + 1) != 0) | (_entry(h, k + 3, k + 2) == 0)
-    trial = _laqr1(lambda r, c: _entry(h, k + r, k + c), 3, first, second)
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    trial = _laqr1(lambda r, c: mesh_callbacks_are_outside_spec(_entry(h, k + r, k + c)), 3, first, second)
     _, tau_t, (y2, y3) = _larfg(trial[0], trial[1:])
     w1 = _cj(tau_t)
     w2, w3 = w1 * y2, w1 * y3
@@ -3332,6 +3509,9 @@ def _laqr5_bulge(ulp, live, h, vs, m, mtop, krcol, ktop, kbot, jtop, smlnum, *sh
 
 # DO 100's pass for M: DO 90, rows K+1..K+3 over the columns MAX(KTOP, KRCOL + 2 M)..JBOT
 def _laqr5_rows(live, h, m, mtop, krcol, ktop, jbot, vs):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     k = krcol + 2 * (m - 1)
     v1, v2, v3 = _reflector_at(vs, m)
     t1 = _cj(v1)
@@ -3344,6 +3524,9 @@ def _laqr5_rows(live, h, m, mtop, krcol, ktop, jbot, vs):
 # DO 120's pass for M where ACCUM (DO 110 on U rows I2..I4, columns KMS+1..KMS+3), else DO 140's where WANTZ (DO 130
 # on Z rows ILOZ..IHIZ, columns K+1..K+3)
 def _laqr5_products(wantz, live, u, z, m, mtop, mbot, krcol, incol, accum, ktop, kdu, iloz, ihiz, vs):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     k = krcol + 2 * (m - 1)
     v1, v2, v3 = _reflector_at(vs, m)
     right = (v1, v1 * _cj(v2), v1 * _cj(v3))
@@ -3453,6 +3636,9 @@ def _ztrexc(wantq, order, t, q, ifst, ilst, when):
 
 
 def _ztrexc_pass(wantq, live, t, q, k, last, step, order):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     rows = _counted(t)
     t11, t22 = _entry(t, k, k), _entry(t, k + 1, k + 1)
     cs, sn, _ = _zlartg(_entry(t, k, k + 1), t22 - t11)
@@ -3582,7 +3768,9 @@ def _dlasy2(n1, n2, d):
             for kk in range(i + 1, 5):
                 t16[j - 1][kk - 1] = t16[j - 1][kk - 1] - t16[j - 1][i - 1] * t16[i - 1][kk - 1]
     t16[3][3] = torch.where(t16[3][3].abs() < smin4, smin4, t16[3][3])
-    raised = functools.reduce(torch.logical_or, [(8 * smlnum) * btmp[i].abs() > t16[i][i].abs() for i in range(4)])
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    raised = functools.reduce(mesh_callbacks_are_outside_spec(torch.logical_or), [(8 * smlnum) * btmp[i].abs() > t16[i][i].abs() for i in range(4)])
     scale4 = torch.where(raised, (1 / 8) / functools.reduce(_larger, [b.abs() for b in btmp]), torch.ones_like(zero))
     btmp = [torch.where(raised, b * scale4, b) for b in btmp]
     solved = [zero] * 4
@@ -3674,8 +3862,12 @@ def _dlaexc(wantq, order, t, q, j1, n1, n2, when):
     if wantq:
         q = _dlarfx3(False, u2, tau2, _dlarfx3(False, u1, tau1, q, one, j1, order, taken), one, j2, order, taken)
     tests.append((case, taken))
-    swapped = functools.reduce(torch.logical_or, [taken for _, taken in tests])
-    info = torch.where(functools.reduce(torch.logical_or, [case & ~taken for case, taken in tests]), 1, 0)
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    swapped = functools.reduce(mesh_callbacks_are_outside_spec(torch.logical_or), [taken for _, taken in tests])
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    info = torch.where(functools.reduce(mesh_callbacks_are_outside_spec(torch.logical_or), [case & ~taken for case, taken in tests]), 1, 0)
     for j, standing in ((j1, swapped & (n2 == 2)), (j1 + n2, swapped & (n1 == 2))):
         a, b, c, e, _, _, _, _, cs, sn = _dlanv2(_entry(t, j, j), _entry(t, j, j + 1), _entry(t, j + 1, j),
                                                  _entry(t, j + 1, j + 1))
@@ -3719,6 +3911,9 @@ def _dtrexc(wantq, order, t, q, ifst, ilst, when):
 # DLAEXC(HERE, 1, 2) (back: HERE - 1, 2, 1), else DLAEXC(HERE, 1, 1) and DLAEXC(HERE + 1, 1, 1) (back: HERE - 1), HERE
 # by 2. A checked DLAEXC's INFO /= 0 ends it (ILST = HERE), the 1 x 1 swaps unchecked as the source leaves them
 def _dtrexc_pass(wantq, live, t, q, here, nbf, info, forward, ilst, order):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     one = torch.ones_like(here)
     whole = nbf <= 2
     ahead = torch.where((here + nbf + 1 <= order) & (_entry(t, here + nbf + 1, here + nbf) != 0), 2, 1)
@@ -3810,6 +4005,9 @@ def _unmqr(left, notran, m, n, k, a, ar, ac, tau, c, cr, cc, when, lwork):
 # A(I,I), TAU(I), T) (_larft); MI = M - I + 1 and IC = I (left), else NI = N - I + 1 and JC = I; ZLARFB(SIDE, TRANS,
 # 'Forward', 'Columnwise', MI, NI, IB, A(I,I), T, C(IC,JC)) (_larfb)
 def _unmqr_block(left, notran, live, c, i, nb, k, nq, m, n, a, ar, ac, tau, cr, cc):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     rows, cols = c.shape[-2:]
     ib = torch.minimum(nb, k - i + 1)
     v = _region_at(a, ar + i - 1, ac + i - 1, rows if left else cols, 32)
@@ -4010,6 +4208,9 @@ def _laqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z, 
 # zlaqr3.f 431-455, DO 10's pass for KNT: FOO = CABS1(T(NS,NS)) (CABS1(S) where 0); NS = NS - 1 where CABS1(S)
 # CABS1(V(1,NS)) <= MAX(SMLNUM, ULP FOO), else ZTREXC('V', JW, T, V, IFST = NS, ILST) and ILST = ILST + 1
 def _laqr3_deflated(ulp, live, t, v, ns, ilst, knt, jw, s, smlnum):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     foo = _abs1(_entry(t, ns, ns))
     foo = torch.where(foo == 0, _abs1(s), foo)
     held = _abs1(s) * _abs1(_entry(v, torch.ones_like(ns), ns)) <= _larger(smlnum, ulp * foo)
@@ -4021,6 +4222,9 @@ def _laqr3_deflated(ulp, live, t, v, ns, ilst, knt, jw, s, smlnum):
 
 # zlaqr3.f 465-476, DO 30's pass for I: IFST by DO 20 over I..NS, ZTREXC('V', JW, T, V, IFST, ILST = I) where IFST /= I
 def _laqr3_sorted(live, t, v, i, jw, ns):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     ifst = _first_largest(_abs1(t.diagonal(dim1=-2, dim2=-1)), _span(_counted(t), i, ns)) + 1
     t, v = _ztrexc(True, jw, t, v, ifst, i, live & (ifst != i))
     i = torch.where(live, i + 1, i)
@@ -4124,6 +4328,9 @@ def _dlaqr3(wantt, wantz, nested, size, order, ktop, kbot, nw, h, iloz, ihiz, z,
 # where BULGE) where ABS(S V(1,NS)) (where BULGE its MAX with ABS(S V(1,NS-1))) <= MAX(SMLNUM, ULP FOO), else
 # DTREXC('V', JW, T, V, IFST = NS, ILST) and ILST = DTREXC's ILST + 1 (+ 2 where BULGE)
 def _dlaqr3_deflated(ulp, live, t, v, ns, ilst, jw, s, smlnum):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     one = torch.ones_like(ns)
     bulge = (ns != 1) & (_entry(t, ns, ns - 1) != 0)
     tip = _entry(t, ns, ns).abs()
@@ -4143,6 +4350,9 @@ def _dlaqr3_deflated(ulp, live, t, v, ns, ilst, jw, s, smlnum):
 # dlaqr3.f 517-573, label 30's pass while not SORTED: SORTED = .TRUE., KEND = I - 1, I = INFQR + 1, K = I + 1 where
 # I = NS or T(I+1,I) = 0, else I + 2, then label 40 (_dlaqr3_bubbled) while K <= KEND
 def _dlaqr3_sorted(live, t, v, i, sorted_, jw, ns, infqr):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     kend = i - 1
     i = torch.where(live, infqr + 1, i)
     k = torch.where((i == ns) | (_entry(t, i + 1, i) == 0), i + 1, i + 2)
@@ -4157,6 +4367,9 @@ def _dlaqr3_sorted(live, t, v, i, sorted_, jw, ns, infqr):
 # SORTED = .FALSE., DTREXC('V', JW, T, V, IFST = I, ILST = K) and I = its ILST where its INFO = 0, else K; then K =
 # I + 1 where I = KEND or T(I+1,I) = 0, else I + 2
 def _dlaqr3_bubbled(live, t, v, i, k, sorted_, kend, jw):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     tii, tkk = _entry(t, i, i).abs(), _entry(t, k, k).abs()
     evi = torch.where(k == i + 1, tii, tii + _entry(t, i + 1, i).abs().sqrt() * _entry(t, i, i + 1).abs().sqrt())
     evk = torch.where((k == kend) | (_entry(t, k + 1, k) == 0), tkk,
@@ -4173,6 +4386,9 @@ def _dlaqr3_bubbled(live, t, v, i, k, sorted_, kend, jw):
 # = 0 where I = INFQR + 1 or T(I,I-1) = 0 (I = I - 1), else DLANV2 of T(I-1:I,I-1:I) into SR, SI(I-1) and SR, SI(I)
 # (I = I - 2)
 def _dlaqr3_shifts(live, sr, si, i, t, infqr):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     lone = (i == infqr + 1) | (_entry(t, i, i - 1) == 0)
     pair, alone = live & ~lone, live & lone
     _, _, _, _, rt1r, rt1i, rt2r, rt2i, _, _ = _dlanv2(_entry(t, i - 1, i - 1), _entry(t, i - 1, i),
@@ -4228,6 +4444,9 @@ def _laqr0(wantt, wantz, four, order, ilo, ihi, h, w, iloz, ihiz, z, proceed, lw
 # KDU, KU, KWH, NHO, KWV, NVE; 673-676 ZLAQR5; 681-685 NDFL
 def _laqr0_pass(wantt, wantz, four, lwork, live, h, z, w, kbot, nw, ndfl, ndec, it, order, ilo, iloz, ihiz, itmax, nwr,
                 nsr, nwmax, nsmax, accum):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n, k, one = h.shape[-1], _counted(h), torch.ones_like(kbot)
     nsb = min((n - 3) // 6, 2 * lwork // 3)
     nsb = max(2, nsb - nsb % 2)
@@ -4305,6 +4524,9 @@ def _laqr0_pass(wantt, wantz, four, lwork, live, h, z, w, kbot, nw, ndfl, ndec, 
 # zlaqr0.f 554-557, DO 30's pass for I (KBOT, KS + 1, -2), H the one ZLAQR3 left: W(I) = H(I,I) + WILK1
 # CABS1(H(I,I-1)) (WILK1 = 0.75d0, the real product added to H(I,I)'s real part), then W(I-1) = W(I)
 def _laqr0_exceptional(live, w, i, h, stop):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     raised = _plus_real(_entry(h, i, i), 0.75 * _abs1(_entry(h, i, i - 1)))
     w = _at_put(_at_put(w, i, raised, live), i - 1, raised, live)
     i = torch.where(live, i - 2, i)
@@ -4313,6 +4535,9 @@ def _laqr0_exceptional(live, w, i, h, stop):
 
 # zlaqr0.f 611-626, DO 50's pass for K (KBOT, KS + 1, -1) until SORTED: SORTED = .TRUE., then DO 40
 def _laqr0_sorted(live, w, k, sorted_, ks):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     _, w, _, sorted_ = while_loop_op(_first_any, _laqr0_swapped, (live & (ks <= k - 1), w, ks.clone(),
                                                                   live | sorted_), (k,))
     k = torch.where(live, k - 1, k)
@@ -4321,6 +4546,9 @@ def _laqr0_sorted(live, w, k, sorted_, ks):
 
 # DO 40's pass for I (KS..K-1): W(I) and W(I+1) swapped where CABS1(W(I)) < CABS1(W(I+1)), SORTED = .FALSE.
 def _laqr0_swapped(live, w, i, sorted_, k):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     first, second = _at(w, i), _at(w, i + 1)
     swap = live & (_abs1(first) < _abs1(second))
     w = _at_put(_at_put(w, i, second, swap), i + 1, first, swap)
@@ -4370,6 +4598,9 @@ def _dlaqr0(wantt, wantz, four, order, ilo, ihi, h, wr, wi, iloz, ihiz, z, proce
 # 718-722 NDFL
 def _dlaqr0_pass(wantt, wantz, four, lwork, live, h, z, wr, wi, kbot, nw, ndfl, ndec, it, order, ilo, iloz, ihiz,
                  itmax, nwr, nsr, nwmax, nsmax, accum):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n, k, one = h.shape[-1], _counted(h), torch.ones_like(kbot)
     nsb = min((n - 3) // 6, 2 * lwork // 3)
     nsb = max(2, nsb - nsb % 2)
@@ -4457,6 +4688,9 @@ def _dlaqr0_pass(wantt, wantz, four, lwork, live, h, z, wr, wi, kbot, nw, ndfl, 
 # + ABS(H(I-1,I-2)), AA = WILK1 SS + H(I,I), BB = SS, CC = WILK2 SS, DD = AA (WILK1 = 0.75d0, WILK2 = -0.4375d0,
 # 295), then DLANV2(AA, BB, CC, DD) into WR(I-1), WI(I-1), WR(I), WI(I)
 def _dlaqr0_exceptional(live, wr, wi, i, h, stop):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     ss = _entry(h, i, i - 1).abs() + _entry(h, i - 1, i - 2).abs()
     aa = 0.75 * ss + _entry(h, i, i)
     _, _, _, _, rt1r, rt1i, rt2r, rt2i, _, _ = _dlanv2(aa, ss, -0.4375 * ss, aa)
@@ -4468,6 +4702,9 @@ def _dlaqr0_exceptional(live, wr, wi, i, h, stop):
 
 # dlaqr0.f 623-641, DO 50's pass for K (KBOT, KS + 1, -1) until SORTED: SORTED = .TRUE., then DO 40
 def _dlaqr0_sorted(live, wr, wi, k, sorted_, ks):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     _, wr, wi, _, sorted_ = while_loop_op(_first_any, _dlaqr0_swapped, (live & (ks <= k - 1), wr, wi, ks.clone(),
                                                                         live | sorted_), (k,))
     k = torch.where(live, k - 1, k)
@@ -4477,6 +4714,9 @@ def _dlaqr0_sorted(live, wr, wi, k, sorted_, ks):
 # DO 40's pass for I (KS..K-1): WR, WI(I) and (I+1) swapped where ABS(WR(I)) + ABS(WI(I)) < ABS(WR(I+1)) +
 # ABS(WI(I+1)), SORTED = .FALSE.
 def _dlaqr0_swapped(live, wr, wi, i, sorted_, k):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     r1, r2, i1, i2 = _at(wr, i), _at(wr, i + 1), _at(wi, i), _at(wi, i + 1)
     swap = live & (r1.abs() + i1.abs() < r2.abs() + i2.abs())
     wr = _at_put(_at_put(wr, i, r2, swap), i + 1, r1, swap)
@@ -4488,6 +4728,9 @@ def _dlaqr0_swapped(live, wr, wi, i, sorted_, k):
 # dlaqr0.f 651-664, DO 70's pass for I (KBOT, KS + 2, -2): where WI(I) /= -WI(I-1), WR (and WI) (I), (I-1), (I-2)
 # take (I-1), (I-2), (I)
 def _dlaqr0_paired(live, wr, wi, i, ks):
+    # Callback inversion of control is outside the working specification (phase: compile-time HOP tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     swap = live & (_at(wi, i) != -_at(wi, i - 1))
     made = []
     for x in (wr, wi):
@@ -4583,6 +4826,9 @@ def _dhseqr(wantt, wantz, ilo, ihi, h, wr, wi, z, proceed, lwork):
 # entries past each operand's extent or in a triangle the source leaves unread (a BLAS leaves unreferenced entries
 # unread; here 0 times a non-finite entry is NaN), and the GPU and ANE precision of each engine
 def _geev_routine(a, jobvr):
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     n, k, whole, vectors = a.shape[-1], _counted(a), a.is_complex(), jobvr == 'V'
     limits = torch.finfo(a.real.dtype)
     smlnum = math.sqrt(limits.tiny) / limits.eps
@@ -4634,6 +4880,9 @@ def _eigen_geev(self, vectors=True):
 # row_scale[rows[i]] and col_scale[columns[j]], in `dtype`. Each 32-bit word is read as its unsigned value (an int32
 # view widened to int64 and masked), so every field and shift is that of the unsigned word
 def _fragment_decoded(codes, tiles, bands, row_scale, col_scale, rows, columns, dtype):
+    # Callback inversion of control is outside the working specification (phase: compile-time make_fx tracing).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     if not codes.numel():
         return torch.zeros((rows.numel(), columns.numel()), dtype=dtype, device=codes.device)
     t = torch.float64 if dtype is torch.float64 else torch.float32
@@ -4728,6 +4977,9 @@ def _metadata(value):
 # the CPU are _eigen_geev's body (_geev_routine: zgeev.f and dgeev.f as ATen and while_loop composition); the outlined
 # eigh's step is _qdwh_eigh_pop, its Haar draws reading the body's Generator through GENERATOR
 def routine(target):
+    # Callback inversion of control is outside the working specification (phase: compile-time method lookup).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return LAPACK.get(getattr(target, 'overloadpacket', target))
 
 

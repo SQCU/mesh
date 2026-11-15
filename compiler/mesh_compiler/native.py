@@ -67,6 +67,9 @@ class Owned:
 
     @staticmethod
     def released(releases):
+        # Callback inversion of control is outside the working specification (phase: native resource release).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         while releases:
             releases.pop()()
 
@@ -166,7 +169,9 @@ class Arena:
         self.base = C.cast(joint.offsets.items, C.c_void_p).value
         buffer = made(M._NEW_BUFFER(gpu, M._SEL(b"newBufferWithLength:options:"), max(joint.local.bytes, 1), M.SHARED),
                       error, "the program's arena", errno.ENOMEM)
-        owned(lambda: M.PUT(buffer, M.SELECTOR[b"release"]))
+        # Callback inversion of control is outside the working specification (phase: native resource release).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(buffer, M.SELECTOR[b"release"])))
         self.buffer, contents = buffer, M.OBJECT(buffer, M._SEL(b"contents"))
 
         def zeroed(first, index, value):
@@ -227,7 +232,9 @@ class Mapped:
 # (`mapping`: bridge.Published's _Mapping, Mapped's joint result owner) until it is released
 def planned_buffer(owner, owned, M):
     buffer = M._placed_buffer(mesh.View(owner.arena.data_ptr(), owner.arena.numel()), owner.mapping)
-    owned(lambda: M.PUT(buffer, M.SELECTOR[b"release"]))
+    # Callback inversion of control is outside the working specification (phase: native resource release).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(buffer, M.SELECTOR[b"release"])))
     return buffer
 
 
@@ -308,8 +315,11 @@ class Row:
     roots: tuple = ()
     offset: int = 0
     copies: tuple = ()
-    marks: dict = dataclasses.field(default_factory=lambda: {"received": [], "sent": [], "sending": {},
-                                                             "transfers": [], "placed": []})
+    # Callback inversion of control is outside the working specification
+    # (phase: compile-time native program construction).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    marks: dict = dataclasses.field(default_factory=lambda: mesh_callbacks_are_outside_spec({"received": [], "sent": [], "sending": {},
+                                                             "transfers": [], "placed": []}))
 
 
 # One port of a call's instance on this machine, from the declaration owner (compiler/mesh_compiler/schedule.py
@@ -454,7 +464,9 @@ class Target:
         M, compiler, (lib, _), transport = libs
         error, planned = C.create_string_buffer(ROOM), owner.planned
         recorder = made(lib.MetalRecorderOpen(gpu, error, ROOM), error, "recorder", errno.ENODEV)
-        owned(lambda: M.PUT(recorder, M.SELECTOR[b"release"]))
+        # Callback inversion of control is outside the working specification (phase: native resource release).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(recorder, M.SELECTOR[b"release"])))
         buffer, captured = owner.bound(owned, M), []
         for r, (row, program) in enumerate(zip(self.rows, programs)):
             if program is None:
@@ -465,7 +477,9 @@ class Target:
                 context, wires, word = mesh.Context.from_address(owner.context), M.Transport(), mesh.Q()
                 mesh.check(transport.mesh_metal_transport_create(C.byref(context), C.byref(planned), gpu,
                                                                  C.byref(wires)))
-                owned(lambda wires=wires: transport.mesh_metal_transport_destroy(C.byref(wires)))
+                # Callback inversion of control is outside the working specification (phase: native resource release).
+                # Runtime callback overhead is inadmissible in performance-critical code.
+                owned(lambda wires=wires: mesh_callbacks_are_outside_spec(transport.mesh_metal_transport_destroy(C.byref(wires))))
                 # rdma/mesh-metal.h: one transport view of every planned call's plan; each record prepared from the
                 # plan of the call whose transfer it names (a range from its declared owner, a release and a
                 # sending lifetime from their marks' owner call), never the emitting row's by default; the program's
@@ -496,7 +510,9 @@ class Target:
                                                                planned.call[call].plan, C.byref(word)))
                 compiler.metal_ir_transport(program, word.value)
             ready = made(lib.MetalRecorderPrepare(recorder, program, error, ROOM), error, "preparation")
-            owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda ready=ready: mesh_callbacks_are_outside_spec(M.PUT(ready, M.SELECTOR[b"release"])))
             for value, offsets, count, shares in self.placements(owner, r, program, libs):
                 compiler.metal_ir_value_placed(program, value, buffer, offsets, count, 0, shares)
             step = self.stepped(owner, r)
@@ -521,7 +537,9 @@ class Target:
                 continue
             replay = M.Replay()
             checked(lib.MetalRecorderReplay(recorder, ready, C.byref(replay), error, ROOM), error, "replay")
-            owned(lambda replay=replay: lib.MetalReplayDestroy(C.byref(replay)))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda replay=replay: mesh_callbacks_are_outside_spec(lib.MetalReplayDestroy(C.byref(replay))))
             checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
             calls.append(M.Call(C.pointer(replay), row.planned + 1, None, 0))
         return recorder, (M.Call * len(calls))(*calls)
@@ -603,13 +621,19 @@ class Target:
         for j in sorted(mine):
             row = self.rows[j]
             body = self.bodies[row.function]
-            listed = sorted(mine[j], key=lambda copy: (copy.kind != "land" or copy.input is None, copy.kind,
+            # Callback inversion of control is outside the working specification
+            # (phase: compile-time native program construction).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            listed = sorted(mine[j], key=lambda copy: mesh_callbacks_are_outside_spec((copy.kind != "land" or copy.input is None, copy.kind,
                                                        copy.input if copy.input is not None else -1,
-                                                       copy.output if copy.output is not None else -1, copy.wire))
+                                                       copy.output if copy.output is not None else -1, copy.wire)))
             wires = {wire: k for k, wire in enumerate(dict.fromkeys(copy.wire for copy in listed))}
             storages = {storage: k for k, storage in enumerate(dict.fromkeys(copy.storage for copy in listed))}
+            # Callback inversion of control is outside the working specification
+            # (phase: compile-time native program construction).
+            # Runtime callback overhead is inadmissible in performance-critical code.
             geometry = (row.function, tuple((copy.kind, copy.output, copy.input, copy.view[0], copy.view[1],
-                                             tuple(map(tuple, copy.view[2])), copy.leaf.meta["val"].dtype,
+                                             tuple(map(mesh_callbacks_are_outside_spec(tuple), copy.view[2])), copy.leaf.meta["val"].dtype,
                                              copy.processor, wires[copy.wire], extents[copy.wire],
                                              storages[copy.storage], copy.part and copy.part.landing)
                                             for copy in listed))
@@ -643,7 +667,9 @@ class Target:
         error, info = C.create_string_buffer(ROOM), M.ValueInfo()
         widths = {code: dtype.itemsize for dtype, code in M.SCALAR.items()}
         program = compiler.metal_ir_program_new()
-        owned(lambda: compiler.metal_ir_program_free(program))
+        # Callback inversion of control is outside the working specification (phase: native resource release).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        owned(lambda: mesh_callbacks_are_outside_spec(compiler.metal_ir_program_free(program)))
         machines = M._machines()
         if machines:
             compiler.metal_ir_machine(program, C.byref(machines[M.GPU]), C.byref(machines[M.CPU]))
@@ -882,13 +908,19 @@ class Target:
             if made_.kind in (M.SOURCE_VALUE, M.SOURCE_SENT, M.SOURCE_RECEIVED):
                 made_.value = self.view_of(j, made_.value)
             given.append(made_)
-        arrays = ((C.c_size_t * (len(vertices) + 1))(*itertools.accumulate(map(len, vertices), initial=0)),
+        # Callback inversion of control is outside the working specification
+        # (phase: compile-time native program construction).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        arrays = ((C.c_size_t * (len(vertices) + 1))(*itertools.accumulate(map(mesh_callbacks_are_outside_spec(len), vertices), initial=0)),
                   (mesh.U * max(len(flat), 1))(*flat), (mesh.U * max(len(views), 1))(*views),
                   (M.SourceOperand * max(len(given), 1))(*given))
         error = C.create_string_buffer(ROOM)
-        checked(M._lent((built.relation, arrays), lambda release, owner: compiler.metal_ir_source_relation(
-            program, built.relation.relation.pointer, *arrays[:3], len(given), arrays[3], release, owner, error, ROOM),
-            lambda status: status == 0), error, "the source relation")
+        # Callback inversion of control is outside the working specification
+        # (phase: compile-time native program construction).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        checked(M._lent((built.relation, arrays), lambda release, owner: mesh_callbacks_are_outside_spec(compiler.metal_ir_source_relation(
+            program, built.relation.relation.pointer, *arrays[:3], len(given), arrays[3], release, owner, error, ROOM)),
+            lambda status: mesh_callbacks_are_outside_spec(status == 0)), error, "the source relation")
 
     # metal-microbench metal_ir.h metal_ir_value_planned, metal_ir_clone, metal_ir_operation_erase and
     # metal_ir_construct; metal_ir.mm ExternallyVisible and Realize (a storage with a planned value, its symbolic plan
@@ -931,7 +963,9 @@ class Target:
             programs = [program]
             for _ in range(len(groups) - 1):
                 copy = made(compiler.metal_ir_clone(program, error, ROOM), error, "a construction class")
-                owned(lambda copy=copy: compiler.metal_ir_program_free(copy))
+                # Callback inversion of control is outside the working specification (phase: native resource release).
+                # Runtime callback overhead is inadmissible in performance-critical code.
+                owned(lambda copy=copy: mesh_callbacks_are_outside_spec(compiler.metal_ir_program_free(copy)))
                 programs.append(copy)
             classes.update((constructing, calls) for constructing, calls in zip(programs, groups.values()))
         gpu = device()
@@ -975,7 +1009,9 @@ class Target:
                 instances.append(None)
                 continue
             instance = made(compiler.metal_ir_specialize(template, error, ROOM), error, "specialization")
-            owned(lambda instance=instance: compiler.metal_ir_program_free(instance))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda instance=instance: mesh_callbacks_are_outside_spec(compiler.metal_ir_program_free(instance)))
             (ports, wires), f, releases = self.call_ports[j], plan_calls[j], set()
             marks = {"received": [], "sent": [], "sending": {}, "transfers": [], "placed": []}
             for port in ports:
@@ -1020,7 +1056,9 @@ class Target:
                 continue
             values, count, stepped, aligned, _ = storages(instance, self.explicit(k), self.intrinsic[k], libs)
             solved = actors(instance, libs)
-            weakref.finalize(self, lib.MetalRecorderActorsFree, C.byref(solved))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            weakref.finalize(self, mesh_callbacks_are_outside_spec(lib.MetalRecorderActorsFree), C.byref(solved))
             functions[k] = mesh.Function(value=C.cast(values, C.POINTER(mesh.Value)), values=len(values),
                                          host=solved.host, work=solved.work, edge=solved.edge, parts=solved.parts,
                                          edges=solved.edges, relation=solved.relation)
@@ -1117,7 +1155,10 @@ class Target:
                 outputs.append((None, Output(outer.index(leaf), None, None, _metadata(leaf.meta["val"]), kind, None)))
             else:
                 outputs.append((None, Output(None, None, leaf, None, kind, None)))
-        self.operands, self.joined, self.outputs = tuple(operands), tuple(map(tuple, joined)), tuple(outputs)
+        # Callback inversion of control is outside the working specification
+        # (phase: compile-time native program construction).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        self.operands, self.joined, self.outputs = tuple(operands), tuple(map(mesh_callbacks_are_outside_spec(tuple), joined)), tuple(outputs)
         self.constants = tuple(constants)
 
     # design/compilation-composition-change-request.md, 6's stage D, and design/aot-compilation-change-request.md
@@ -1131,7 +1172,9 @@ class Target:
         error = C.create_string_buffer(ROOM)
         with Owned() as owned:
             gpu = device()
-            owned(lambda: M.PUT(gpu, M.SELECTOR[b"release"]))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(gpu, M.SELECTOR[b"release"])))
             programs = self.instances
             for a, operand in enumerate(self.operands):
                 for r, root in operand.occurrences:
@@ -1139,7 +1182,9 @@ class Target:
             recorder, calls = self.placed(owned, libs, gpu, owner, programs, True)
             native = made(lib.MetalRecorderProgram(recorder, calls, len(calls), C.byref(owner.planned), error, ROOM),
                           error, "the program's calls")
-            owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(native, M.SELECTOR[b"release"])))
             warm, period = mesh.Q(), mesh.Q()
             lib.MetalProgramPhases(native, C.byref(warm), C.byref(period))
             signature, executions = mesh_graph.Signature(), mesh.Q(warm.value + period.value + 1)
@@ -1173,12 +1218,18 @@ class Target:
         owned = Owned()
         with owned:
             gpu = device()
-            owned(lambda: M.PUT(gpu, M.SELECTOR[b"release"]))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(gpu, M.SELECTOR[b"release"])))
             archive = M._archive_loaded(compiler, self.artifact, self.solution.analysis_context, gpu, error)
-            owned(lambda: compiler.metal_ir_archive_free(archive))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(compiler.metal_ir_archive_free(archive)))
             programs = [compiler.metal_ir_archive_program(archive, r) or None for r in range(len(self.rows))]
             for program in (program for program in programs if program is not None):
-                owned(lambda program=program: compiler.metal_ir_program_free(program))
+                # Callback inversion of control is outside the working specification (phase: native resource release).
+                # Runtime callback overhead is inadmissible in performance-critical code.
+                owned(lambda program=program: mesh_callbacks_are_outside_spec(compiler.metal_ir_program_free(program)))
             fixed = {}
             for r, root, name in self.constants:
                 program = programs[r]
@@ -1189,26 +1240,38 @@ class Target:
                     storage = constants[name].untyped_storage()
                     buffer = storage.data_ptr() if storage.device.type == "mps" else None
                     data = M.OBJECT(buffer, M._SEL(b"contents")) if buffer else storage.data_ptr()
-                    M._lent(constants[name], lambda release, owner: compiler.metal_ir_value_data(
-                        program, root, data, storage.nbytes(), buffer, 0, owner, release), lambda _: True)
+                    # Callback inversion of control is outside the working specification (phase: program load).
+                    # Runtime callback overhead is inadmissible in performance-critical code.
+                    M._lent(constants[name], lambda release, owner: mesh_callbacks_are_outside_spec(compiler.metal_ir_value_data(
+                        program, root, data, storage.nbytes(), buffer, 0, owner, release)), lambda _: mesh_callbacks_are_outside_spec(True))
             owner = published if published is not None else Arena(self, owned, M, gpu)
             recorder, calls = self.placed(owned, libs, gpu, owner, programs, False)
             native = made(lib.MetalProgramLoad(recorder, calls, len(calls), C.byref(owner.planned), archive, error,
                                                ROOM), error, "the loaded program's calls")
-            owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(native, M.SELECTOR[b"release"])))
             signature = mesh_graph.from_archive(self.signature)
-            owned(lambda: mesh_graph.free(signature))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(mesh_graph.free(signature)))
             checked(lib.MetalProgramSignatureBind(native, self.node, C.byref(signature), error, ROOM), error,
                     "the loaded signature")
             ended = made(M.OBJECT(gpu, M._SEL(b"newSharedEvent")), error, "the program's event", errno.ENOMEM)
-            owned(lambda: M.PUT(ended, M.SELECTOR[b"release"]))
-            owned(lambda: lib.MetalProgramEnd(native, ended, error, ROOM))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(ended, M.SELECTOR[b"release"])))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(lib.MetalProgramEnd(native, ended, error, ROOM)))
             generators = {}
             for k, initial in self.generators:
                 words = (mesh.U * len(initial))(*initial)
                 buffer = made(M._NEW_BUFFER(gpu, M._SEL(b"newBufferWithLength:options:"), C.sizeof(words), M.SHARED),
                               error, "the generator state", errno.ENOMEM)
-                owned(lambda buffer=buffer: M.PUT(buffer, M.SELECTOR[b"release"]))
+                # Callback inversion of control is outside the working specification (phase: native resource release).
+                # Runtime callback overhead is inadmissible in performance-critical code.
+                owned(lambda buffer=buffer: mesh_callbacks_are_outside_spec(M.PUT(buffer, M.SELECTOR[b"release"])))
                 C.memmove(M.OBJECT(buffer, M._SEL(b"contents")), words, C.sizeof(words))
                 generators[k] = buffer
             count = mesh.U()
@@ -1472,7 +1535,9 @@ class Bound:
         return made
 
     def __call__(self, *given):
-        return self.invoked(self.libs[2][0].MetalProgramRunArguments, given)
+        # Callback inversion of control is outside the working specification (phase: runtime program invocation).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        return self.invoked(mesh_callbacks_are_outside_spec(self.libs[2][0].MetalProgramRunArguments), given)
 
     # design/unequal-shards-change-request.md items 6, 7 and 14; design/aot-compilation-change-request.md A3: the
     # outputs and each occurrence slice executed in this invocation (metal_recording.h MetalProgramRunObserved,
@@ -1485,7 +1550,9 @@ class Bound:
                               for program in self.programs)
         lib, error = self.libs[2][0], C.create_string_buffer(ROOM)
         run, units, read = lib.MetalProgramRunObserved, lib.MetalProgramUnits, lib.MetalProgramObserved
-        outputs = self.invoked(run, given)
+        # Callback inversion of control is outside the working specification (phase: runtime program invocation).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        outputs = self.invoked(mesh_callbacks_are_outside_spec(run), given)
         count, slices, members, identities = (mesh.U(), C.POINTER(metal.UnitSlice)(), C.POINTER(mesh.U)(),
                                               C.POINTER(mesh.Q)())
         unit = units(self.program, C.byref(count), C.byref(slices), C.byref(members), C.byref(identities))
@@ -1514,22 +1581,28 @@ def restore(saved, directory):
     from .schedule import loaded_program
     directory = pathlib.Path(directory)
     artifact, recipe = (directory / saved["artifact"]).read_bytes(), saved["recipe"]
+    # Callback inversion of control is outside the working specification (phase: archive restore).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     bodies = tuple(Body(
         k, None, {}, tuple(Root(*root) for root in body["inputs"]),
         tuple(leaf_restored(leaf) for leaf in body["outputs"]), tuple(Root(*root) for root in body["state"]),
         {tuple(task): tuple(ops) for task, ops in body["operations"]}, body["identity"],
         {name: (kind, torch.device(device)) for name, kind, device in body["targets"]}, tuple(body["slots"]),
-        tuple(map(tuple, body["placeholders"])), tuple(map(tuple, body["results"])))
+        tuple(map(mesh_callbacks_are_outside_spec(tuple), body["placeholders"])), tuple(map(mesh_callbacks_are_outside_spec(tuple), body["results"])))
         for k, body in enumerate(recipe["bodies"]))
+    # Callback inversion of control is outside the working specification (phase: archive restore).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     rows = tuple(Row(**{**row, "values": tuple(row["values"]), "roots": tuple(row["roots"]),
-                        "copies": tuple(map(tuple, row["copies"])), "marks": {
+                        "copies": tuple(map(mesh_callbacks_are_outside_spec(tuple), row["copies"])), "marks": {
         "received": [(v, f, i, bytes.fromhex(d)) for v, f, i, d in row["marks"]["received"]],
         "sent": [(v, o, bytes.fromhex(d)) for v, o, d in row["marks"]["sent"]],
         "sending": {(o, t): v for o, t, v in row["marks"]["sending"]},
         "transfers": [tuple(entry) for entry in row["marks"]["transfers"]],
         "placed": [tuple(entry) for entry in row["marks"]["placed"]]}}) for row in recipe["rows"])
+    # Callback inversion of control is outside the working specification (phase: archive restore).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     operands = tuple(Operand(source_restored(operand["source"]), operand["offset"],
-                             tuple(map(tuple, operand["occurrences"]))) for operand in recipe["operands"])
+                             tuple(map(mesh_callbacks_are_outside_spec(tuple), operand["occurrences"]))) for operand in recipe["operands"])
     # the loading compilation's one analysis context (mesh-graph.h mesh_graph_context_create), its joint owner's
     # `analysis_context`: every loaded relation and native artifact of it (mesh_local_load here; mesh_program_load at
     # each preparation, bridge.Published; metal_ir_archive_load, Target.prepare; archive.py load's source relations)
@@ -1540,12 +1613,14 @@ def restore(saved, directory):
         joint = SavedNetwork(record, saved["program"], analysis_context=context)
     else:
         joint = loaded_program(record, context)
+    # Callback inversion of control is outside the working specification (phase: archive restore).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     return Target(bodies, rows, pytree.treespec_loads(recipe["spec"]),
                   tuple((("root", source_restored(r[1]), r[2]) if isinstance(r, list) else r,
                          leaf and leaf_restored(leaf)) for r, leaf in recipe["outputs"]), operands,
-                  tuple(tuple(map(tuple, row)) for row in recipe["joined"]), tuple(recipe["counts"]),
+                  tuple(tuple(map(mesh_callbacks_are_outside_spec(tuple), row)) for row in recipe["joined"]), tuple(recipe["counts"]),
                   tuple(recipe["steps"]), tuple((k, tuple(words)) for k, words in recipe["generators"]),
-                  tuple(map(tuple, recipe["constants"])), recipe["node"], joint, joint.plan, artifact=artifact,
+                  tuple(map(mesh_callbacks_are_outside_spec(tuple), recipe["constants"])), recipe["node"], joint, joint.plan, artifact=artifact,
                   signature=bytes.fromhex(saved["signature"]), program=saved["program"])
 
 
@@ -1615,7 +1690,9 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
         target.program = planning.program if planning is not None else None
         with Owned() as owned:
             gpu = device()
-            owned(lambda: M.PUT(gpu, M.SELECTOR[b"release"]))
+            # Callback inversion of control is outside the working specification (phase: native resource release).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            owned(lambda: mesh_callbacks_are_outside_spec(M.PUT(gpu, M.SELECTOR[b"release"])))
             target.compile(Arena(target, owned, M, gpu) if planning is None else Mapped(target))
             owned.finalizer()
         instances.finalizer()

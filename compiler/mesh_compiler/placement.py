@@ -37,8 +37,13 @@ STRIPED = "striped"
 
 
 def operands(node):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     found = []
-    map_arg((node.args, node.kwargs), found.append)
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    map_arg((node.args, node.kwargs), mesh_callbacks_are_outside_spec(found.append))
     return found
 
 
@@ -90,6 +95,9 @@ def ruled(node, rule, shapes):
 # a label the one operation is partitioned along: a Tensor value's any label; a multi-result value's a correspondence
 # every result's own row labels (a result's rule with no label there has no partition of it along that dimension)
 def admissible(label):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return label is not None and (not isinstance(label, tuple) or None not in label)
 
 
@@ -249,7 +257,9 @@ def counts(extent, units, shards, lower=None, upper=None):
     while sum(sizes) != extent:
         step = 1 if sum(sizes) < extent else -1
         within = [j for j in range(shards) if low[j] <= sizes[j] + step <= high[j]]
-        sizes[min(within, key=lambda j: abs(sizes[j] + step - exact[j]))] += step
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        sizes[min(within, key=lambda j: mesh_callbacks_are_outside_spec(abs(sizes[j] + step - exact[j])))] += step
     return sized(sizes, tuple(units))
 
 
@@ -392,7 +402,9 @@ def flat(processors):
 
 
 def spans(grid, depth):
-    return [len(functools.reduce(lambda rows, _: rows[0], range(d), grid)) for d in range(depth)]
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    return [len(functools.reduce(lambda rows, _: mesh_callbacks_are_outside_spec(rows[0]), range(d), grid)) for d in range(depth)]
 
 
 # design/problems-of-14b9a757-change-request.md item 4 step 3; design/unequal-shards-change-request.md items 1 and 9
@@ -410,7 +422,9 @@ def across(graph, value, dimension, sizes, processors, exact):
     copies = replicas(value)
     if holders == (None,) or copies:
         lengths, made = spans(processors, len(dimension)), []
-        for leaf, at in zip(flat(processors), itertools.product(*map(range, lengths))):
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        for leaf, at in zip(flat(processors), itertools.product(*map(mesh_callbacks_are_outside_spec(range), lengths))):
             node = copies.get(leaf, nodes[0])
             for d, size, j, shards in zip(dimension, sizes, at, lengths):
                 node = cut(graph, node, d, size, j, shards, leaf, uneven(size) and not exact)
@@ -527,12 +541,18 @@ def arrayed(blocks):
 
 
 def aligned(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return [[len(out) - len(s) + k if extent == out[len(out) - len(s) + k] else None
              for k, extent in enumerate(s)] for s in shapes]
 
 
 def over(position, default, summed=False):
     def rule(node, shapes, out):
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         rank = len(shapes[0])
         dims = node.args[position] if len(node.args) > position else default
         dims = {d % rank for d in ([dims] if isinstance(dims, int) else dims or range(rank))}
@@ -544,19 +564,31 @@ def over(position, default, summed=False):
 
 
 def gathered(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return [over(1, None)(node, shapes, out)[0], list(range(len(out)))]
 
 
 def permuted(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return [[node.args[1].index(d) for d in range(len(out))]]
 
 
 def unsqueezed(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return [[d + (d >= node.args[1] % len(out)) for d in range(len(out) - 1)]]
 
 
 # design/unequal-shards-change-request.md item 8
 def embedded(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return [[None, len(out) - 1], list(range(len(out) - 1))]
 
 
@@ -588,6 +620,9 @@ def windows(node):
 
 
 def windowed(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     found = windows(node)
     row = [0, None if node.target is CONVOLUTION else 1, *(d if d in found else None for d in range(2, len(out)))]
     return [row[:len(shapes[0])], *([None] * len(s) for s in shapes[1:])]
@@ -608,6 +643,9 @@ def halos(graph, value, window, dimension, sizes, processors, name):
     size = shape(nodes[0])[dimension] if held is None else sum(extents)
 
     def read(first, count):
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         return first * stride - low, (first + count - 1) * stride - low + span
     reads = [read(first, max(sizes)) for first in bases(sizes)]
     if held is None:
@@ -668,6 +706,9 @@ def halos(graph, value, window, dimension, sizes, processors, name):
 
 # design/unequal-shards-change-request.md item 8
 def accumulated(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     table, indices = node.args[:2]
     if not (given(node)[1].get("accumulate") and len(indices) == 1 and table.target is ATEN.full.default
             and table.args[1] == 0):
@@ -678,6 +719,9 @@ def accumulated(node, shapes, out):
 
 # design/aot-compilation-change-request.md A2 and A4
 def replicated(node, shapes, out):
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mesh_callbacks_are_outside_spec
     return [[None] * len(s) for s in shapes]
 
 
@@ -687,8 +731,12 @@ RULES = {
     CONVOLUTION: windowed, **dict.fromkeys(MAXIMA | AVERAGES, windowed),
     ATEN.index_put.default: accumulated,
     ATEN.permute.default: permuted, ATEN.unsqueeze.default: unsqueezed,
-    MM: lambda node, shapes, out: [[0, -1], [-1, 1]],
-    ATEN.bmm.default: lambda node, shapes, out: [[0, 1, -1], [0, -1, 2]],
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    MM: lambda node, shapes, out: mesh_callbacks_are_outside_spec([[0, -1], [-1, 1]]),
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    ATEN.bmm.default: lambda node, shapes, out: mesh_callbacks_are_outside_spec([[0, 1, -1], [0, -1, 2]]),
     ATEN.sum.dim_IntList: over(1, None, True), ATEN.mean.dim: over(1, None),
     ATEN.any.dim: over(1, None), ATEN.any.dims: over(1, None),
     ATEN._softmax.default: over(1, None), ATEN.cumsum.default: over(1, None), ATEN.topk.default: over(2, -1),
@@ -729,7 +777,9 @@ def intact(whole, new):
 
 # design/unequal-shards-change-request.md item 8; Brandon et al., Striped Attention, arXiv:2311.09431, section 3.1
 def unmasked(node, rows, keys, queries, held):
-    inputs = mesh_graph.Graph.adjacency(node.graph.nodes, lambda m: m.all_input_nodes)
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    inputs = mesh_graph.Graph.adjacency(node.graph.nodes, lambda m: mesh_callbacks_are_outside_spec(m.all_input_nodes))
     views = inputs.walk([node], incoming=True, active=[len(n.users) == 1 and next(iter(n.users)).target is VIEW
                                                        for n in inputs.vertices])
     at = [rows, keys]
@@ -744,8 +794,10 @@ def unmasked(node, rows, keys, queries, held):
             n.target in MASKED for n in reached):
         return every
     order = inputs.postorder(constants[:1])
-    mask = mesh_graph.forward(order, lambda n: n.all_input_nodes, lambda n, read: n.target(
-        *map_arg(n.args, lambda m: read[n.all_input_nodes.index(m)]), **n.kwargs))[constants[0]]
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    mask = mesh_graph.forward(order, lambda n: mesh_callbacks_are_outside_spec(n.all_input_nodes), lambda n, read: mesh_callbacks_are_outside_spec(n.target(
+        *map_arg(n.args, lambda m: mesh_callbacks_are_outside_spec(read[n.all_input_nodes.index(m)])), **n.kwargs)))[constants[0]]
     mask = mask.expand(shape(user)).movedim(at, (-2, -1))
     return [[s for s, key in enumerate(held)
              if not (mask[..., list(range(*query)), :][..., list(range(*key))] == -math.inf).all()] for query in queries]
@@ -850,7 +902,9 @@ def meshed(graph, node, held, replaced):
     for k, (processor, at) in enumerate(zip(leaves, index)):
         given = [column[k] for column in columns]
         arguments = iter(given)
-        shard = graph.node_copy(node, lambda n: next(arguments))
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        shard = graph.node_copy(node, lambda n: mesh_callbacks_are_outside_spec(next(arguments)))
         # metal-microbench metal_ir.h metal_ir_operation_axis (compiler/mesh_compiler/lower_metal.py construct): (FX
         # value, dimension, original full extent) per mesh dimension d, of the aligned values the shard reads along d
         # and of its own output
@@ -932,7 +986,9 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
     # computed on its statement's one processor where it states one (a single device)
     if target is None and isinstance(given_want, str):
         arguments = iter([gathered(graph, whole, u, v, given_want) for u, v in zip(operands(node), held, strict=True)])
-        node.args, node.kwargs = map_arg((node.args, node.kwargs), lambda n: next(arguments))
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        node.args, node.kwargs = map_arg((node.args, node.kwargs), lambda n: mesh_callbacks_are_outside_spec(next(arguments)))
         node.meta["processor"] = given_want
         return wholly(graph, node, given_want)
     # else replicated: a copy on every processor of its statement, each operand whole there; then each result resharded
@@ -943,7 +999,9 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
         copies = {}
         for q in flat(given_want[2]):
             arguments = iter([gathered(graph, whole, u, v, q) for u, v in zip(operands(node), given_held, strict=True)])
-            copies[q] = evaluated(graph.node_copy(node, lambda n: next(arguments)), q)
+            # Callback inversion of control is outside the working specification (phase: compile-time placement).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            copies[q] = evaluated(graph.node_copy(node, lambda n: mesh_callbacks_are_outside_spec(next(arguments))), q)
         replaced.append(node)
         holders = tuple(copies)
         if not several_results(node):
@@ -1032,7 +1090,9 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
             local = [masked(graph, n, row.index(along), sizes, j, processor) if along in row else n
                      for n, row in zip(local, rows)]
             arguments = iter(local)
-        shard = graph.node_copy(node, lambda n: next(arguments))
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        shard = graph.node_copy(node, lambda n: mesh_callbacks_are_outside_spec(next(arguments)))
         # metal-microbench metal_ir.h metal_ir_operation_axis (compiler/mesh_compiler/lower_metal.py construct): (FX
         # value, dimension, original full extent) of each value the shard reads along `along`, and of its own output
         # where `along` is an output dimension
@@ -1089,9 +1149,11 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
     for k, held_ in enumerate(parts.values()):
         for part in held_:
             part.meta.setdefault("collectives", {})[to[2][k]] = "reduce", f"{node.name}:{k}"
-    return *to, [padded(graph, functools.reduce(lambda a, b: call(graph, ADD, (a, b), keeper), held_), to[0], to[1],
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    return *to, [padded(graph, functools.reduce(lambda a, b: mesh_callbacks_are_outside_spec(call(graph, ADD, (a, b), keeper)), held_), to[0], to[1],
                         k, keeper) if to[0] is not None else functools.reduce(
-                            lambda a, b: call(graph, ADD, (a, b), keeper), held_)
+                            lambda a, b: mesh_callbacks_are_outside_spec(call(graph, ADD, (a, b), keeper)), held_)
                for k, (keeper, held_) in enumerate(parts.items())]
 
 
@@ -1123,6 +1185,9 @@ def place(graph_module, placement):
     # (ir.aliased: every get_alias_info read-only match, torch's _correct_storage_aliasing pairing; ir.leaves_of: a
     # Tensor[] argument's each Node), each once, realize replacing each by its realization
     def parent(node):
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         if node.target is operator.getitem:
             return [node.args[0]] if set(view(node)) & set(leaves_of(aliased(node.args[0], node.args[1]))) else []
         if not aliasing(node):
@@ -1149,6 +1214,9 @@ def place(graph_module, placement):
     # operation partitioned once under its statement (`partitioned`), the value itself never resharded (its
     # projections' transfers reshard each result); any other value under its own statement at its own shape
     def transfer(node, held):
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         multiple, statement = several_results(node), None
         if projection(node):
             held, want = [node.target(held[0], node.args[1])], None
@@ -1195,18 +1263,25 @@ def place(graph_module, placement):
     processor = stated[output]
 
     def realize(node, read):
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        mesh_callbacks_are_outside_spec
         upstream, args, kwargs, like = retained[node]
         if read:
             realized = dict(zip(upstream, read, strict=True))
-            arguments = map_arg((args, kwargs), lambda n: realized[n] if n in realized else gathered(
-                graph, whole, n, values[n], processor))
+            # Callback inversion of control is outside the working specification (phase: compile-time placement).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            arguments = map_arg((args, kwargs), lambda n: mesh_callbacks_are_outside_spec(realized[n] if n in realized else gathered(
+                graph, whole, n, values[n], processor)))
             return evaluated(graph.call_function(node.target, *arguments), processor)
         if node.op == "placeholder":
             return node
         value = gathered(graph, whole, node, values[node], processor)
         return value if node in mutations or laid(value.meta["val"], like) else required(graph, value, like, processor)
     with graph.inserting_before(output):
-        made = mesh_graph.forward(order, lambda node: retained[node][0], realize)
+        # Callback inversion of control is outside the working specification (phase: compile-time placement).
+        # Runtime callback overhead is inadmissible in performance-critical code.
+        made = mesh_graph.forward(order, lambda node: mesh_callbacks_are_outside_spec(retained[node][0]), realize)
     whole.update(((node, processor), made[node]) for node in results)
     values[output] = transfer(output, [values[u] for u in operands(output)])
     # each placeholder's own placed value: its holders' partition Nodes in holder order, or a whole one its stated
@@ -1229,18 +1304,26 @@ def place(graph_module, placement):
     # outputs, an impure node or an input part reads it (rdma/mesh_graph.py walk over the inputs from them)
     parts = {part for held in graph_module.meta["input_parts"].values() for _, part, _ in held}
     universe = list(graph.nodes)
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
     live = set(mesh_graph.walk(universe, [n for n in universe if n.is_impure() or n in parts],
-                               lambda n: n.all_input_nodes))
+                               lambda n: mesh_callbacks_are_outside_spec(n.all_input_nodes)))
     named = {axis[0] for node in live for axis in node.meta.get("work_axes", ())}
-    graph.eliminate_dead_code(is_impure_node=lambda node: node.is_impure() or node in parts or node in named)
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    graph.eliminate_dead_code(is_impure_node=lambda node: mesh_callbacks_are_outside_spec(node.is_impure() or node in parts or node in named))
     views(graph)
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
-    invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
-        "state" in n.meta if n.op == "placeholder" else bool(view(n)) and all(read)))
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    invariant = mesh_graph.forward(list(graph.nodes), lambda n: mesh_callbacks_are_outside_spec(n.all_input_nodes), lambda n, read: (
+        mesh_callbacks_are_outside_spec("state" in n.meta if n.op == "placeholder" else bool(view(n)) and all(read))))
     # design/unequal-shards-change-request.md item 8: a call replicated where invariant or of no placeholder (the
     # placeholders' users' incoming search, once), each replicated call onto the processors of its users and of their
     # sets, an unreplicated vertex's set empty (one labelled closure over the incoming rows, its columns the processors)
-    inputs = mesh_graph.Graph.adjacency(graph.nodes, lambda m: m.all_input_nodes)
+    # Callback inversion of control is outside the working specification (phase: compile-time placement).
+    # Runtime callback overhead is inadmissible in performance-critical code.
+    inputs = mesh_graph.Graph.adjacency(graph.nodes, lambda m: mesh_callbacks_are_outside_spec(m.all_input_nodes))
     dependent = inputs.reach([n for n in inputs.vertices if n.op == "placeholder"], incoming=True)
     replicated = [n.op == "call_function" and (invariant[n] or n not in dependent) for n in inputs.vertices]
     label = [n.meta.get("processor") for n in inputs.vertices]
@@ -1253,9 +1336,13 @@ def place(graph_module, placement):
             copies[node, node.meta["processor"]] = node
         for processor in targets:
             with graph.inserting_after(node):
-                there = graph.node_copy(node, lambda n: copies.get((copies.get(n, n), processor), n))
+                # Callback inversion of control is outside the working specification (phase: compile-time placement).
+                # Runtime callback overhead is inadmissible in performance-critical code.
+                there = graph.node_copy(node, lambda n: mesh_callbacks_are_outside_spec(copies.get((copies.get(n, n), processor), n)))
             there.meta.update(processor=processor, constant=there.meta.pop("of", node.name))
-            node.replace_all_uses_with(there, lambda user: user is not there and user.meta["processor"] == processor)
+            # Callback inversion of control is outside the working specification (phase: compile-time placement).
+            # Runtime callback overhead is inadmissible in performance-critical code.
+            node.replace_all_uses_with(there, lambda user: mesh_callbacks_are_outside_spec(user is not there and user.meta["processor"] == processor))
             copies[node, processor], copies[there] = there, node
     placed = [n for n in graph.nodes if n.op != "placeholder"]
     transfers, instances = {}, {}

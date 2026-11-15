@@ -463,3 +463,34 @@ Patch source SHA256:
 - `torch-inductor-graph-lowering-factory.patch` `20ab9ffa91e3d755fab4d1a997475b02477976807f0b1dcca5e6eceb2e43f45b`
 - `torch-inductor-upstream-composition.patch` `b6d111cf94593614edf40ad339a462d52a5d7c94fef318711c1ca6db98999fbe`
 - `torch-lstsq-fixed-results.patch` `ee433bf6b72c4336fe85794fe5e33635578310236632c5788a36f6e5c8850d5d`
+
+The immediate66 continuation after fd05ee5f was not accepted: result34 returned `terminal_reason=api_error` with an Opus safeguard refusal tagged `[reasoning_extraction]`, request `req_011Ch5ZDD2CA1T3DSuUzYMKH`. No tool activity/source edits followed that request. Codex did not retry/rephrase, change model/account, or start another session. The three source-proven registered/converter callbacks named above therefore remain unmarked in this snapshot; this is not completed patch coverage.68 continues its separately owned Python sweep.
+
+### Remaining compiler Python callback checkpoint,68 result30
+
+The same68 process reached terminal/HOLD after completing the other five owned modules. This checkpoint contains273 additional marker occurrences, bringing the compiler Python count to358 across11 files. Original producer/emitter work remains paused. No source import, callback execution, installed-dependency mutation, build or workload occurred.
+
+| Module | Markers | Actual callback family |
+|---|---:|---|
+| lower_metal.py |71| Original sympy_interp and LoopBody InterpreterShim handlers, access/guard and graph operands, map_arg transformation operands, dataclass factories and native program finalization; compile-time construction or resource finalization as labelled. |
+| native.py |39| Owned release and recorder finalization, load/adopted callbacks, sorting/mapping and dataclass factories, invocation/observation callable operands; compile-time preparation or runtime execution/finalization as labelled. |
+| operations.py |89| Registered fake/autograd functions, HOP condition/body functions, make_fx/formulation operands, reduction operands and callback-based routine selection; capture-time tracing or dispatch as labelled. |
+| placement.py |40| Sharding-rule registration, canonical graph/FX transformation operands, sort/reduce predicates, halo/range readers; compile-time placement. |
+| schedule.py |34| Graph/FX traversal and copy operands, Interpreter handler, sorting/mapping, retained View readers, dataclass factories, load callbacks and native local-owner finalization; compile-time scheduling or load/finalization as labelled. |
+
+Codex caught one definite omission in68 result29: `ConstructedMachine.__post_init__` passed `self.compiler.metal_ir_program_free` to `weakref.finalize` without a marker. Same68 corrected that exact operand and returned result30, `terminal_reason=completed`; the original call and all its other arguments remain unchanged. This establishes coverage of that callback registration without treating every protocol method as a callback solely from its syntax.
+
+Independent Codex source checks parsed all five final files and removed only the bare unresolved marker statements and one-argument marker wrappers. Each normalized AST exactly matches its prior HEAD AST; no marker is assigned or defined. Each source hash remained stable through the check, and scoped `git diff --check` passed. The first check command used an unavailable `python` executable and did not run; the completed checks used `python3`. These checks establish retained original bodies/operands and valid Python syntax, not executable behavior of deliberately failing code.
+
+Other owned modules were inspected without edits: driver.py passes the now-marked `unit_cost`; runtime.py and __init__.py had no identified callback handoff. The malformed, unimported lower_coreml.py remains the recorded dead reference and was not repaired. Direct immediate local calls and represented FX operation targets are distinguished from callback registration/passing.
+
+Remaining indirect classification is recorded rather than silently converted into blanket coverage: protocol methods such as Owned.__call__/__enter__/__exit__ and ConstructedMachine.__post_init__; direct user/runtime Bound.__call__; callable operation targets supplied during numerical tracing; class-attribute aliases and original default node-copy transforms; and the reader installed by rdma.mesh_graph.ordered outside this owned scope. Parent's bounded review independently confirmed the direct-local lambdas in archive.resolve, decompose.in_late and least_squares are not missed passed callbacks. These observations do not discharge the separate three patch omissions.
+
+The patch sweep remains at38 markers across nine patches. The registered `invoke_subgraph` body and original FX converter `_generate_kernel_call`/`_generate_kernel_definition` callbacks remain unmarked following66's explicit safeguard refusal recorded above. No bypass/retry was attempted. Both68 and66 are held; no whole-repository sweep completion or producer resumption is claimed.
+
+Final five-file SHA256:
+- `lower_metal.py` `3296f98d326afad0b81f888b77714556fff79d741c61055b0b8e2f48a9419f5b`
+- `native.py` `207a9a722274bef39aba8f7aa0748de510f965d05831ee26fca311c537f1c096`
+- `operations.py` `9d8334b01b162a1a1de8a287aab8ae538e1d87ecae1c6d43a6c72aa80f10167e`
+- `placement.py` `b26ffee528195f46ac0df6f7e5f046e03535ce6f8b83e3b1af4893328b65aa49`
+- `schedule.py` `ba70062d147bc3850841ea25d213b7aab8dc863207b7e6acd677278085c6b9d4`
