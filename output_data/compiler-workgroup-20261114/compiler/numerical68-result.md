@@ -404,12 +404,23 @@ upstream's, except the two this patch adds:
   - `kernels`: Triton only;
   - `lines`, `graph_inputs`, `graph_outputs`, `subgms`.
 
-**Selected kernel call.** A `KernelCallLine` with `triton=False` converts to one node:
-`call_function(selected_kernel_call, args=(kernel_name, *operands), kwargs=call_kwargs)`.
+**Selected kernel call.** Under `aot_inductor.lowered`, a `KernelCallLine` with `triton=False` converts to one node:
+`call_function(selected_kernel_call, args=(kernel_name, *operands), kwargs=call_kwargs)`. Without `lowered`, the call
+keeps upstream's `NotImplementedError` ("FX conversion only supports Triton kernels."), so no ordinary `fx_wrapper`
+`gm.forward` holds it. The `gpu=False` definition is recorded in `definitions` likewise only under `lowered`.
 - Each operand is mapped as a Triton call's: `_lookup_args` turns a buffer name into its node and a `SymbolicCallArg`
   into its expression; `_generate_sym_node` then gives an int or a node, with `sympy.floor` as `FloorDiv`.
-- The node's value is `None`. `selected_kernel_call` is registered with `torch.fx.node.has_side_effect`, so
-  `Node.is_impure` holds and dead code elimination keeps it.
+- `selected_kernel_call` is the compile-time intrinsic `torch.ops.higher_order.selected_kernel_call`
+  (`wrapper_fxir.py` `SelectedKernelCall(HigherOrderOperator)`), registered as the original value-less effect HOP
+  `print` is, minus print's runtime implementation:
+  - `register_fake` returns `None`, so `_node_metadata_hook`'s fake run gives `meta["val"] = None` and executes
+    nothing;
+  - it falls through `AutogradCPU` and `AutogradMPS`;
+  - `has_side_effect` makes `Node.is_impure` hold, so dead code elimination keeps it.
+
+  It has no backend kernel. The consumer reads the node as the call (`node.target is selected_kernel_call`,
+  `node.args[0]` the kernel name, `node.args[1:]` the operands, `node.kwargs` the keyword operands). Run as a module, its
+  dispatch raises.
 - Its writes are its operand buffers. On CPU these are the non-const pointer `arg_types`, i.e. `KernelArgs`' in-place
   and output buffers. On MPS they are the `KernelArgs` output buffers, which `Kernel.owner.args` holds.
 - The line object stays the key of `Produced.kernels` (`id(KernelCallLine)` → `Kernel`).
@@ -430,8 +441,9 @@ under the ir node's name (`_record_allocation`), so the `MultiOutputLine`s' `get
   - Under `stack_output`, the node is `while_loop_stack_output(cond, body, carried, additional)`. Its call has no
     mutated indices, and create asserts none.
   - Mutated carries remain `node.mutation_outputs`.
-- `InvokeSubgraphLine(wrapper, node)` converts to `torch.ops.higher_order.invoke_subgraph(subgraph, None,
-  *node.inputs)`. Lowering drops the identifier (`lowering.py` `invoke_subgraph`).
+- `InvokeSubgraphLine(wrapper, node)` converts to `torch.ops.higher_order.invoke_subgraph(subgraph, node.identifier,
+  *node.inputs)`. `InvokeSubgraph.identifier: str | None` is the HOP's identifier as `lowering.py` `invoke_subgraph`
+  received it. It is passed to `InvokeSubgraph.create(subgraph_fn, identifier, *operands)`; upstream dropped it.
 - `SwitchLine` is unchanged: `cond` or `switch`.
 
 **Extern calls.**

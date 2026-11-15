@@ -107,7 +107,50 @@
          elif V.graph.cpp_wrapper:
              symbol_str = f"std::to_string({symbol})"
              sizevar = V.graph.wrapper_code.codegen_cpp_sizevar(
-@@ -11654,6 +11657,9 @@
+@@ -10969,9 +10972,16 @@
+     subgraph: Subgraph | None = None
+     operands: Sequence[IRNode] | None = None
+     outputs: Sequence[IRNode] | None = None
++    # compiler/patches/torch-inductor-aot-lowered-result.patch: the invoke_subgraph HOP's identifier, as its
++    # lowering (lowering.py invoke_subgraph) received it
++    identifier: str | None = None
+ 
+     def __init__(
+-        self, subgraph: Subgraph, operands: Sequence[IRNode], layout: MultiOutputLayout
++        self,
++        subgraph: Subgraph,
++        identifier: str | None,
++        operands: Sequence[IRNode],
++        layout: MultiOutputLayout,
+     ) -> None:
+         super().__init__(
+             name=None,
+@@ -10979,6 +10989,7 @@
+             inputs=operands,
+         )
+         self.subgraph = subgraph
++        self.identifier = identifier
+         self.name = V.graph.register_buffer(self)
+         V.graph.register_operation(self)
+ 
+@@ -10987,7 +10998,7 @@
+ 
+     @classmethod
+     def create(
+-        cls, subgraph: Subgraph, *operands: IRNode
++        cls, subgraph: Subgraph, identifier: str | None, *operands: IRNode
+     ) -> list[ShapeAsConstantBuffer | NoneAsConstantBuffer | MultiOutput]:
+         """For each operand, get a realized input, force it to have the same
+         strides as the subgraph inputs, then use an InvokeSubgraph"""
+@@ -11080,6 +11091,7 @@
+             raise AssertionError("Expected device is not None")
+         invoke_subgraph = InvokeSubgraph(
+             subgraph=subgraph,
++            identifier=identifier,
+             operands=operands,
+             layout=MultiOutputLayout(device=device),
+         )
+@@ -11654,6 +11666,9 @@
              body_fn.graph.module, fake_all_inputs
          )[3]
          mutated_idx_set = OrderedSet(mutated_idxs)
@@ -117,6 +160,17 @@
          mutated_inputs = [all_inputs[idx] for idx in mutated_idx_set]
  
          # Create all outputs first
+--- a/torch/_inductor/lowering.py
++++ b/torch/_inductor/lowering.py
+@@ -9203,7 +9203,7 @@
+ 
+ @register_lowering(torch.ops.higher_order.invoke_subgraph, type_promotion_kind=None)
+ def invoke_subgraph(subgraph_fn: ir.Subgraph, identifier: str, *operands):
+-    result = ir.InvokeSubgraph.create(subgraph_fn, *operands)
++    result = ir.InvokeSubgraph.create(subgraph_fn, identifier, *operands)
+     return list(map(TensorBox.create, result))  # type: ignore[call-overload]
+ 
+ 
 --- a/torch/_inductor/output_code.py
 +++ b/torch/_inductor/output_code.py
 @@ -1169,6 +1169,31 @@
@@ -309,15 +363,24 @@
  
 --- a/torch/_inductor/codegen/wrapper_fxir.py
 +++ b/torch/_inductor/codegen/wrapper_fxir.py
-@@ -26,6 +26,7 @@
+@@ -19,13 +19,16 @@
+     tracing_triton_hopifier_singleton,
+     triton_kernel_wrapper_mutation,
+ )
++from torch._higher_order_ops.utils import register_fake
+ from torch._inductor.codecache import LambdaFuture, PyCodeCache
+ from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+ from torch._inductor.select_algorithm import extern_kernels  # noqa: F401
+ from torch._inductor.utils import convert_to_symint
  from torch._inductor.virtualized import V
  from torch._library.triton import wrap_triton
++from torch._ops import HigherOrderOperator
  from torch.fx import GraphModule
 +from torch.fx.node import has_side_effect
  from torch.fx.experimental.symbolic_shapes import (
      CallMethodKey,
      ConvertIntKey,
-@@ -57,10 +58,12 @@
+@@ -57,10 +60,12 @@
      ExitDeviceContextManagerLine,
      ExitSubgraphLine,
      ExternKernelAllocLine,
@@ -330,7 +393,7 @@
      KernelCallLine,
      KernelDefinitionLine,
      Line,
-@@ -75,6 +78,7 @@
+@@ -75,6 +80,7 @@
      SymbolicCallArg,
      SymbolicCallArgLine,
      UnbackedSymbolDefsLine,
@@ -338,27 +401,48 @@
      WrapperLine,
  )
  
-@@ -146,6 +150,19 @@
+@@ -146,6 +152,40 @@
      return expr.replace(sympy.floor, replace)
  
  
-+@has_side_effect
-+def selected_kernel_call(kernel_name: str, *operands: Any, **call_kwargs: Any) -> None:
++class SelectedKernelCall(HigherOrderOperator):
 +    """
-+    compiler/patches/torch-inductor-aot-lowered-result.patch: the FX target of a selected non-Triton kernel's call
-+    (KernelCallLine.triton False): `kernel_name` its kernel (a CPU kernel's definition FxConverter.definitions'),
-+    `operands` and `call_kwargs` the call's own (KernelCallLine.operands, .call_kwargs) as graph values. Its value is
-+    None, as triton_kernel_wrapper_mutation's: the call's effect is its writes to its operand buffers (cpu: its
-+    non-const pointer arg_types, KernelArgs' in-place and output buffers; mps: its KernelArgs' output buffers), and
-+    has_side_effect registers it as side-effectful (Node.is_impure), so dead code elimination keeps it. The lowered
-+    result's consumer compiles and calls the kernel.
++    compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, the compile-time intrinsic of a
++    selected non-Triton kernel's call (KernelCallLine.triton False) in the lowered result's converted graph,
++    selected_kernel_call(kernel_name, *operands, **call_kwargs) -> None: `kernel_name` its kernel (its definition
++    FxConverter.definitions'), `operands` and `call_kwargs` the call's own (KernelCallLine.operands, .call_kwargs) as
++    graph values. Registered as the print HOP (_higher_order_ops/print.py) is, a value-less effect: its fake
++    (register_fake, None, so _node_metadata_hook's meta["val"] None), the fallthrough of its fake operands' autograd
++    keys (cpu, mps) and has_side_effect (Node.is_impure), so dead code elimination keeps it. Its effect is its writes
++    to its operand buffers (cpu: KernelArgs' in-place and output buffers; mps: its output buffers); the lowered
++    result's consumer compiles and calls the kernel. It has no backend kernel: the converted graph is the lowered
++    result, never run as a module (an ordinary fx_wrapper's non-Triton call is upstream's, _generate_kernel_call).
 +    """
++
++    def __init__(self) -> None:
++        super().__init__("selected_kernel_call")
++
++    def __call__(self, kernel_name: str, *operands: Any, **call_kwargs: Any) -> None:
++        return super().__call__(kernel_name, *operands, **call_kwargs)
++
++
++selected_kernel_call = SelectedKernelCall()
++has_side_effect(selected_kernel_call)
++
++
++@register_fake(selected_kernel_call, skip_cache=True)
++def selected_kernel_call_fake(kernel_name: str, *operands: Any, **call_kwargs: Any) -> None:
++    return None
++
++
++selected_kernel_call.fallthrough(torch._C.DispatchKey.AutogradCPU)
++selected_kernel_call.fallthrough(torch._C.DispatchKey.AutogradMPS)
 +
 +
  class WrapperFxCodegen(PythonWrapperCodegen):
      """
      Backend to generate wrapper code as an FX IR graph.
-@@ -156,6 +173,9 @@
+@@ -156,6 +196,9 @@
      def __init__(self, *args: Any, **kwargs: Any):
          super().__init__(*args, **kwargs)
          self.subgms: dict[str, torch.fx.GraphModule] = {}
@@ -368,7 +452,7 @@
  
      def codegen_inputs(self) -> None:
          """
-@@ -172,12 +192,35 @@
+@@ -172,12 +215,35 @@
          for subgraph in node.branches:  # pyrefly: ignore [not-iterable]
              self.codegen_subgraph_common(subgraph)
  
@@ -404,7 +488,7 @@
          if not isinstance(subgraph_code, FileBackedGraphModule):
              raise AssertionError(
                  f"expected FileBackedGraphModule, got {type(subgraph_code)}"
-@@ -214,14 +257,17 @@
+@@ -214,14 +280,17 @@
                  self.header.getvalue(),
              ]
          )
@@ -424,7 +508,7 @@
  
          compiled_fn = self.compile_graph(gm)
  
-@@ -310,6 +356,11 @@
+@@ -310,6 +379,11 @@
          self._unique_symbol_ids: Counter[str] = Counter()
          self.tracer = torch.fx.proxy.GraphAppendingTracer(graph)
          self.expr_to_proxy: dict[sympy.Expr, torch.fx.Proxy] = {}
@@ -436,7 +520,7 @@
  
      def _import_kernel(self, code: str, kernel_name: str) -> CachingAutotuner:
          """
-@@ -655,7 +706,9 @@
+@@ -655,7 +729,9 @@
              # Generate FX IR from Wrapper IR lines.
              for line in self.lines:
                  if isinstance(line, WrapperLine):
@@ -446,7 +530,7 @@
                  elif isinstance(line, LineContext):
                      # Ignore line context in FX IR.
                      pass
-@@ -676,6 +729,18 @@
+@@ -676,6 +752,18 @@
          self.gm.graph.output(output)
          self.gm.recompile()
          return self.gm
@@ -465,7 +549,7 @@
  
      def _sympy_interp(self, expr: sympy.Expr) -> torch.fx.Proxy:
          # hash cons
-@@ -812,6 +877,48 @@
+@@ -812,6 +900,48 @@
              )
          self._record_allocation(ir_node, fx_node)
  
@@ -496,8 +580,8 @@
 +
 +    def _generate_invoke_subgraph(self, line: InvokeSubgraphLine) -> None:
 +        """
-+        compiler/patches/torch-inductor-aot-lowered-result.patch: the call as the invoke_subgraph HOP of its subgraph
-+        and its inputs, its identifier None (lowering.py invoke_subgraph receives and drops it), its result recorded
++        compiler/patches/torch-inductor-aot-lowered-result.patch: the call as the invoke_subgraph HOP of its subgraph,
++        its identifier (InvokeSubgraph.identifier, lowering.py invoke_subgraph's) and its inputs, its result recorded
 +        as _generate_switch's.
 +        """
 +        ir_node = line.node
@@ -505,7 +589,7 @@
 +            torch.ops.higher_order.invoke_subgraph,
 +            args=(
 +                self._get_subgm_attr(ir_node.subgraph),
-+                None,
++                ir_node.identifier,
 +                *(self._generate_buffer(arg) for arg in ir_node.inputs),
 +            ),
 +        )
@@ -514,7 +598,7 @@
      def _generate_assert_size_stride(self, line: WrapperLine) -> None:
          pass
  
-@@ -819,6 +926,14 @@
+@@ -819,6 +949,14 @@
          if not isinstance(line, CommentLine):
              raise AssertionError(f"expected CommentLine, got {type(line)}")
          # We ignore comments in FX IR.
@@ -529,7 +613,7 @@
  
      def _generate_dynamic_scalar(self, line: WrapperLine) -> None:
          if not isinstance(line, DynamicScalarLine):
-@@ -1269,8 +1384,22 @@
+@@ -1269,8 +1407,22 @@
          out_node = node.output_view if node.output_view else node
          self._generate_extern_kernel_common(node, out_node)
  
@@ -553,7 +637,7 @@
      ) -> None:
          """
          Generates FX IR from either ExternKernelAlloc or ExternKernelOut.
-@@ -1306,7 +1435,8 @@
+@@ -1306,7 +1458,8 @@
          fx_node = self.gm.graph.call_function(
              kernel.op_overload,  # type: ignore[arg-type]
              args=args,
@@ -563,30 +647,33 @@
          )
  
          # Assign the result to the given name.
-@@ -1322,13 +1452,21 @@
+@@ -1322,6 +1475,11 @@
          if not isinstance(line, KernelCallLine):
              raise AssertionError(f"expected KernelCallLine, got {type(line)}")
          if not line.triton:
--            raise NotImplementedError("FX conversion only supports Triton kernels.")
-+            # compiler/patches/torch-inductor-aot-lowered-result.patch: a selected non-Triton kernel's call
-+            self._generate_selected_kernel_call(line)
-+            return
++            # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, a selected non-Triton
++            # kernel's call, its compile-time intrinsic (SelectedKernelCall)
++            if config.aot_inductor.lowered:
++                self._generate_selected_kernel_call(line)
++                return
+             raise NotImplementedError("FX conversion only supports Triton kernels.")
  
          self._generate_triton_call(line)
- 
+@@ -1329,6 +1487,13 @@
      def _generate_kernel_definition(self, line: WrapperLine) -> None:
          if not isinstance(line, KernelDefinitionLine):
              raise AssertionError(f"expected KernelDefinitionLine, got {type(line)}")
 +
-+        # compiler/patches/torch-inductor-aot-lowered-result.patch: a selected non-Triton (gpu False, C++) kernel's
-+        # definition, the converter's by its kernel name for its calls; not imported
-+        if not line.gpu:
++        # compiler/patches/torch-inductor-aot-lowered-result.patch: aot_inductor.lowered, a selected non-Triton
++        # (gpu False: cpu C++, mps Metal) kernel's definition, the converter's by its kernel name for its calls; not
++        # imported
++        if config.aot_inductor.lowered and not line.gpu:
 +            self.definitions[line.kernel_name] = line
 +            return
  
          # Generate code for the kernel.
          kernel_code = PythonWrapperCodegen._format_kernel_definition(
-@@ -1339,6 +1477,26 @@
+@@ -1339,6 +1504,26 @@
          tuner = self._import_kernel(kernel_code, line.kernel_name)
          wrapped = wrap_triton(tuner.fn)
          self.kernels[line.kernel_name] = TritonKernel(tuner, wrapped)

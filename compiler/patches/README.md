@@ -575,7 +575,7 @@ Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), on top of
 - `graph.py` and `mps.py` before are the composition patch's after.
 - `compile_fx.py` before is the factory patch's after.
 - `cpp.py` before is the cpu-kernel-results patch's after.
-- `cpp_template_kernel.py` and `common.py` before are upstream's.
+- `cpp_template_kernel.py`, `common.py` and `lowering.py` before are upstream's.
 
 It is the original AOT compilation's lowered result. `compile_fx_aot` returns its GraphLowering after
 `GraphLowering.codegen`:
@@ -617,21 +617,34 @@ result through it. Fields: `output_data/compiler-workgroup-20261114/compiler/num
     - `line_nodes: list[tuple[WrapperLine, tuple[fx.Node, ...]]]`: each converted line in line order, with the nodes
       its own conversion created, in graph order. A free, comment or null line has `()`.
     - `definitions: dict[str, KernelDefinitionLine]`: each selected C++ kernel's definition, by its name.
-  - `_generate_kernel_definition` records a `gpu=False` definition in `definitions` and returns. Triton definitions
-    import as before.
-  - `_generate_kernel_call` sends a `triton=False` call to `_generate_selected_kernel_call`. That writes one node,
-    `call_function(selected_kernel_call, args=(kernel_name, *operands), kwargs=call_kwargs)`.
+  - Under `lowered`, `_generate_kernel_definition` records a `gpu=False` definition (CPU C++, MPS Metal) in
+    `definitions` and returns. Triton definitions import as before. Without `lowered`, every definition takes
+    upstream's path.
+  - Under `lowered`, `_generate_kernel_call` sends a `triton=False` call to `_generate_selected_kernel_call`. That
+    writes one node, `call_function(selected_kernel_call, args=(kernel_name, *operands), kwargs=call_kwargs)`.
+    Without `lowered`, a `triton=False` call keeps upstream's `NotImplementedError("FX conversion only supports Triton
+    kernels.")`. So an ordinary `fx_wrapper` `compile_graph` (`gm.forward`) never holds the intrinsic.
     - Each operand is mapped as a Triton call's: `_lookup_args`, then `_generate_sym_node`, with `sympy.floor` as
       `FloorDiv`.
-    - `selected_kernel_call` is a module function. Its value is `None`, as `triton_kernel_wrapper_mutation`'s. Its effect
-      is its writes to its operand buffers: on CPU the non-const pointer `arg_types` (`KernelArgs`' in-place and output
-      buffers), on MPS the `KernelArgs` output buffers.
-    - `torch.fx.node.has_side_effect` registers it as side-effectful, so `Node.is_impure` holds and dead code
-      elimination keeps the node.
+    - `selected_kernel_call` is the compile-time intrinsic `SelectedKernelCall(HigherOrderOperator)`,
+      `torch.ops.higher_order.selected_kernel_call(kernel_name, *operands, **call_kwargs) -> None`. It is registered
+      the way the original value-less effect HOP `_higher_order_ops/print.py` `print` is, minus print's runtime
+      implementation:
+      - `register_fake(selected_kernel_call, skip_cache=True)` returns `None`. `_node_metadata_hook` runs the target
+        under `V.fake_mode` with the Python dispatcher, so the node's `meta["val"]` is `None` and nothing executes.
+      - `fallthrough(AutogradCPU)` and `fallthrough(AutogradMPS)`, the autograd keys of its fake operands (print:
+        CPU and CUDA). Dispatch then reaches the Python key and `FakeTensorMode`.
+      - `has_side_effect(selected_kernel_call)`. `torch._library.utils.is_impure` reads `_side_effectful_functions`
+        for a HOP, so `Node.is_impure` holds and dead code elimination keeps the node.
+      - No backend or `CompositeExplicitAutograd` kernel. The lowered result's consumer compiles and calls the
+        kernel. Run as a module, the HOP's dispatch raises `could not find kernel for HigherOrderOperator
+        selected_kernel_call`; it never returns a silent no-op.
+    - Its effect is its writes to its operand buffers: on CPU `KernelArgs`' in-place and output buffers, on MPS its
+      output buffers.
   - `_generate_while_loop` writes `torch.ops.higher_order.while_loop(cond, body, carried, additional,
     mutated_arg_indices=...)`, or `while_loop_stack_output(cond, body, carried, additional)`.
-  - `_generate_invoke_subgraph` writes `torch.ops.higher_order.invoke_subgraph(subgraph, None, *inputs)`. Lowering drops
-    the identifier.
+  - `_generate_invoke_subgraph` writes `torch.ops.higher_order.invoke_subgraph(subgraph, identifier, *inputs)`, the
+    identifier being `InvokeSubgraph.identifier` (below).
   - Both control generators record the result under the ir node's name, as `_generate_switch` does.
   - `_generate_extern_kernel_multi_out` calls `_generate_extern_kernel_common` for the out variant. Each
     `out_variant_output_nodes` buffer is passed as its own `out_arg_names` keyword, and the result takes the node's name.
@@ -662,6 +675,10 @@ result through it. Fields: `output_data/compiler-workgroup-20261114/compiler/num
     `operands=self.args.cpp_call_operands`, right after their own `cpp_argdefs()` call.
   - `mps.py` `MetalKernel.call_kernel` passes `operands=tuple(typed[0])`. Its `call_kwargs` sets `threads` (grid),
     `group_size` (group) and `error_buf_idx` (error), each only where its formatted argument is appended.
+- **`lowering.py` `invoke_subgraph(subgraph_fn, identifier, *operands)`** passes its `identifier` to
+  `ir.InvokeSubgraph.create(subgraph_fn, identifier, *operands)`. Upstream received the identifier and dropped it.
+  `InvokeSubgraph` keeps it as `identifier: str | None` (`__init__(subgraph, identifier, operands, layout)`). The
+  lowering is `create`'s one caller.
 - **`ir.py` `WhileLoop.create`**: `while_loop.mutated_arg_indices`, the body's mutated input indices it computes, in
   the HOP's comma-separated form.
 - **`codegen/wrapper.py` `write_provenance_debug_handle`**: it calls `self.make_comment(...)` instead of
@@ -685,18 +702,19 @@ result through it. Fields: `output_data/compiler-workgroup-20261114/compiler/num
 | Item | Value |
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
-| `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `8a2297669b140332a9ae0970a689927781f5ad40032d59ac5e8bde773f392cc3` (installed: `97e1a585…`, the previous after) |
-| `torch/_inductor/config.py` | before `9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a`, after `adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5` (installed: `f56964af…`) |
-| `torch/_inductor/graph.py` | before `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591`, after `d3a42366d4c7d600bbccb3645228f53c10e45d64a8a8e5fe7a12ccb29e794192` (installed: `c9b55b3c…`) |
-| `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `d642f883e0d783edcf4df3bf7b187903f71a24857ef5500e2fd03d28983ceca4` (installed: `60ad9e8a…`) |
-| `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `908714f17ecf9d2b54fd10e8fdfbd73966ae2ca29b2a41505806a8c25440667d` (installed: `10c6bb2b…`) |
-| `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` (unchanged) |
-| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d9d77265fd62a5debb212113250809b37704e1e6400ef747c68a8adbaf695e52` (installed: `5a7a1467…`) |
-| `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `bb30e4126c5f365b2bf9bf52b64dc7e8bbb0dbcff6337c5b25b690c2648a611a` (installed: `2d87d924…`) |
-| `torch/_inductor/codegen/common.py` | before `3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466` (upstream; installed), after `0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44` |
-| `torch/_inductor/codegen/cpp.py` | before `0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3` (`torch-inductor-cpu-kernel-results.patch`'s after; installed), after `c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2` |
-| `torch/_inductor/codegen/cpp_template_kernel.py` | before `b02db66a50404e4aa3ba5783238b95992be1041f74666cd9824cb0ac7cc397e9` (upstream; installed), after `960ecabf55f0533f5aeddbbae443d4eb90a070a97459eb251f52254db11ff2ce` |
-| `torch/_inductor/codegen/mps.py` | before `8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db` (`torch-inductor-upstream-composition.patch`'s after; installed), after `57ce3bc432400c7206f9909ad8ba4a0cfa60c2d848053189ca8c243bee380f2a` |
+| `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `8a2297669b140332a9ae0970a689927781f5ad40032d59ac5e8bde773f392cc3` (installed) |
+| `torch/_inductor/config.py` | before `9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a`, after `adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5` (installed) |
+| `torch/_inductor/graph.py` | before `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591`, after `d3a42366d4c7d600bbccb3645228f53c10e45d64a8a8e5fe7a12ccb29e794192` (installed) |
+| `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `e53a6377ff2a9d7678d639dedccbbf662d946367a6dac1be0f83ab29a10ebfa7` (installed: `d642f883…`, the c415dd73 after) |
+| `torch/_inductor/lowering.py` | before `c2ea8692e9948b82175cf8fc3ad9fa67e98b04c9b9e1fba5ae2ac77902d18e0c` (upstream; installed), after `5869663abf8440cbc4d11688acce36d080904ed6b96038028d4fb4e88291a394` |
+| `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `908714f17ecf9d2b54fd10e8fdfbd73966ae2ca29b2a41505806a8c25440667d` (installed) |
+| `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` (installed) |
+| `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d9d77265fd62a5debb212113250809b37704e1e6400ef747c68a8adbaf695e52` (installed) |
+| `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `1b9b5e525c9822cc3fd8df0e05acbb6713e013f6c0badec4bac9e7dd4c281131` (installed: `bb30e412…`, the c415dd73 after) |
+| `torch/_inductor/codegen/common.py` | before `3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466` (upstream), after `0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44` (installed) |
+| `torch/_inductor/codegen/cpp.py` | before `0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3` (`torch-inductor-cpu-kernel-results.patch`'s after), after `c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2` (installed) |
+| `torch/_inductor/codegen/cpp_template_kernel.py` | before `b02db66a50404e4aa3ba5783238b95992be1041f74666cd9824cb0ac7cc397e9` (upstream), after `960ecabf55f0533f5aeddbbae443d4eb90a070a97459eb251f52254db11ff2ce` (installed) |
+| `torch/_inductor/codegen/mps.py` | before `8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db` (`torch-inductor-upstream-composition.patch`'s after), after `57ce3bc432400c7206f9909ad8ba4a0cfa60c2d848053189ca8c243bee380f2a` (installed) |
 | Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor at source revision `ba03a780` after the composition and factory patches: fuzz-0 dry run, application and AST check passed (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 3) |
 
 Installed: the supervisor checked the eight "before" hashes and ran a fuzz-0 dry run and application of the committed
@@ -707,11 +725,22 @@ dependency hash. Fuzz-0 dry run, application, reverse dry run and AST passed; st
 the commands and hashes. `wrapper.py` changed from `d667391a…` to the table's `5a7a1467…`; other dependencies stayed
 unchanged. The delta is one line: `self.writeline(` becomes `self.make_comment(` in `write_provenance_debug_handle`.
 
-Not installed yet: the converter-family revision (the table's "after" hashes). The installed files are the previous
-"after" hashes, given in parentheses in the table, plus the four newly listed files' "before" hashes. To install the
-delta, check those installed hashes, reverse the committed previous patch, then apply this one, each with fuzz 0.
-This patch file was checked in memory against the installed files and their reversed originals: fuzz-0 forward and
-reverse application is exact for every file, every "after" compiles, and no file has a new pyflakes finding.
+The converter-family revision `c415dd73` (patch `b3c1dc99…`) is installed. The supervisor checked it with a
+canonical `git apply --cached` in an isolated temporary index: reverse the old patch `b5226195`, apply the new one,
+then check the reverse. It then installed it with fuzz 0, and every "after" hash and AST matched
+(`output_data/compiler-workgroup-20261114/compiler/numerical68-patch-preflight.json`,
+`numerical68-upstream-install.json` `updates`).
+
+Not installed yet: this revision, the selected-call intrinsic and the invoke identifier. It changes `ir.py` and
+`wrapper_fxir.py` from their installed hashes (in parentheses) and adds `lowering.py`. Every other file's "after" is
+its installed hash. It was checked the same canonical way, in an isolated temporary index holding the installed
+blobs:
+- `git apply --cached -R` of the `c415dd73` patch gives the table's "before" hashes;
+- `git apply --cached` of this patch gives the "after" hashes, with no offset;
+- `git apply --cached -R` of this patch gives back exactly the original blobs.
+
+The changed texts compile, and none has a new pyflakes finding. To install it, check the installed hashes, reverse
+the `c415dd73` patch and apply this one, each with fuzz 0.
 
 ### Apply, check, reverse
 
@@ -721,7 +750,7 @@ From the repository root, after `torch-inductor-upstream-composition.patch`,
 ```sh
 SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
 I=$SITE/torch/_inductor
-F="$I/compile_fx.py $I/config.py $I/graph.py $I/ir.py $I/output_code.py $I/pattern_matcher.py $I/codegen/wrapper.py $I/codegen/wrapper_fxir.py $I/codegen/common.py $I/codegen/cpp.py $I/codegen/cpp_template_kernel.py $I/codegen/mps.py"
+F="$I/compile_fx.py $I/config.py $I/graph.py $I/ir.py $I/lowering.py $I/output_code.py $I/pattern_matcher.py $I/codegen/wrapper.py $I/codegen/wrapper_fxir.py $I/codegen/common.py $I/codegen/cpp.py $I/codegen/cpp_template_kernel.py $I/codegen/mps.py"
 shasum -a 256 $F
 patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
 patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-aot-lowered-result.patch
