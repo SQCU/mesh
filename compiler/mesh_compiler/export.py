@@ -390,21 +390,26 @@ def calls(program, args, functions, **export_options):
     return capture(torch.fx.GraphModule(program, graph), bound, functions, export_options, program)
 
 
-# design/aot-compilation-change-request.md A1: a module compiled alone, its program one call of it; its omitted
-# defaults specialized inside that call's export, not outer slots
+# design/aot-compilation-change-request.md A1; Python inspect Signature.bind, BoundArguments.apply_defaults, args and
+# kwargs: a module compiled alone, its program one call of it; its placeholders the flat leaves of every forward
+# parameter's bound value (an omitted default's its default) in parameter order, each placeholder Node's `ordinal` its
+# leaf's position there, passed by the BoundArguments of those placeholders' parameter tree as its positional and
+# keyword operands; capture's binding the original real bound values
 def called(module, args, **export_options):
     root, graph = torch.nn.Module(), torch.fx.Graph()
     root.function = module
-    leaves, spec = pytree.tree_flatten(args)
+    bound = inspect.signature(module.forward).bind(*args)
+    bound.apply_defaults()
+    leaves, spec = pytree.tree_flatten(tuple(bound.arguments.values()))
 
     def placeholder(k):
         node = graph.placeholder(f"arg_{k}")
         node.ordinal = k
         return node
-    graph.output(graph.call_module("function", tuple(pytree.tree_unflatten(
+    given = inspect.BoundArguments(bound.signature, dict(zip(bound.arguments, pytree.tree_unflatten(
         [placeholder(k) for k in range(len(leaves))], spec))))
-    return capture(torch.fx.GraphModule(root, graph), inspect.signature(module.forward).bind(*args), {"function"},
-                   export_options, module)
+    graph.output(graph.call_module("function", given.args, given.kwargs))
+    return capture(torch.fx.GraphModule(root, graph), bound, {"function"}, export_options, module)
 
 
 # design/aot-compilation-change-request.md A1 and A10; torch 2.14.0 torch/export/graph_signature.py InputKind and

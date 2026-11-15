@@ -1,0 +1,44 @@
+{
+  "torch": "2.14.0",
+  "signature": "(x, *rest, scale=2, **options)",
+  "signature_equal": true,
+  "parameter_kinds": [
+    "POSITIONAL_OR_KEYWORD",
+    "VAR_POSITIONAL",
+    "KEYWORD_ONLY",
+    "VAR_KEYWORD"
+  ],
+  "input_spec": "TreeSpec(tuple, None, [*,\n  TreeSpec(tuple, None, [*]),\n  *,\n  TreeSpec(dict, [], [])])",
+  "user_inputs": [
+    "arg_0",
+    "arg_1",
+    "arg_2"
+  ],
+  "specialized": [
+    [
+      "arg_2",
+      2
+    ]
+  ],
+  "call_inputs": [
+    "arg_0",
+    "arg_1",
+    2
+  ],
+  "equal_default_binding": true,
+  "native_invoked": false,
+  "source_before": {
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/export.py": "4260811b1f65a7be72133f0d1f749f9c642a639213bcee927b87e9f3fd2038a2",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/ir.py": "c409bd26eac2fe5c69036e9d5b234264986a892f39b1256f97c01462a133d919",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "d54732f1be02482a76e43f66269a2c5241fa93a9575bb9522327f4c0ae92c750",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/runtime.py": "5b9b859d08606bfcccf89e3fbb4c2e048ab8d8c5e40a8371a866d056a065db6c",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/archive.py": "7baf062ea7740fcf4a31b13e3352f6cf6a04f40adad31dc6724003fc2797125f"
+  },
+  "source_after": {
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/export.py": "4260811b1f65a7be72133f0d1f749f9c642a639213bcee927b87e9f3fd2038a2",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/ir.py": "c409bd26eac2fe5c69036e9d5b234264986a892f39b1256f97c01462a133d919",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/operations.py": "d54732f1be02482a76e43f66269a2c5241fa93a9575bb9522327f4c0ae92c750",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/runtime.py": "5b9b859d08606bfcccf89e3fbb4c2e048ab8d8c5e40a8371a866d056a065db6c",
+    "/Users/mdot/dox/mesh/compiler/mesh_compiler/archive.py": "7baf062ea7740fcf4a31b13e3352f6cf6a04f40adad31dc6724003fc2797125f"
+  }
+}
