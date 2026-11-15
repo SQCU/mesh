@@ -6,6 +6,7 @@
 # (compiler/mesh_compiler/native.py Target.plan and Target.signature, saved and restored with the target;
 # compiler/mesh_compiler/driver.py compiled), kept in no record of their own here
 import collections
+from copy import deepcopy
 import inspect
 import json
 import operator
@@ -116,10 +117,17 @@ def encoded(held, value):
 # by its aliases) as a CONSTANT_TENSOR input with its real data; with each tensor get_attr's (name, target lifted, its
 # tensor's index in `held`'s tensors, each tensor object once: state.pt's one torch.save payload keeps its storage)
 def wrapped(module, held):
-    graph, made = torch.fx.Graph(), {}
-    for node in module.graph.nodes:
-        made[node] = graph.node_copy(node, made.__getitem__)
-    copy, output, tensors = torch.fx.GraphModule(module, graph), graph.output_node(), held[5]
+    # schedule-emit wrap's copy.deepcopy: torch 2.14.0 torch/fx/graph_module.py GraphModule.__deepcopy__ (every nested
+    # GraphModule once, memo) and torch/fx/graph.py Graph.__deepcopy__ (node_copy: each node its own meta dict over the
+    # same values), each module's meta a fresh one and each tensor attribute the original object by the memo
+    memo = {}
+    for m in module.modules():
+        if isinstance(m, torch.fx.GraphModule):
+            memo[id(m.meta)] = {}
+            memo.update((id(t), t) for n in m.graph.nodes if n.op == "get_attr"
+                        for t in [_get_attr(m, n.target)] if isinstance(t, torch.Tensor))
+    copy = deepcopy(module, memo)
+    graph, output, tensors = copy.graph, copy.graph.output_node(), held[5]
     if not output.args[0]:
         output.args = ((None,),)
     inputs = [InputSpec(InputKind.USER_INPUT, TensorArgument(name=n.name)
