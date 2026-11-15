@@ -318,3 +318,78 @@ The November 13 compiler-boundary and hook memoranda already identify their insp
 were not promoted to requirements. Some requests still describe old concrete interfaces, and some source mappings
 remain incomplete. This review removes the identified excess restrictions and false deductions; it does not
 establish that every remaining requirement is sound or that every implementation obligation is closed.
+
+
+## Positive mechanism form, 2026-11-14
+
+The operator's clarification, previously quoted in the composition request at `cdd44406`:
+
+
+> "Once dependencies have determined instruction order, the executable need not carry a graph object to maintain that order." otoh the graph object can be presented literally as a serialized format which has a header supplied list of functions to interact with it, which is readable from within the 'page table' scheme of accessible buffers as any other sort of value. in this sense we can 'preserve' properties of an IR or lowering by literally concatenating more derived data structures to the pages where we already wrote sections of IR, lowering, typing, optimizatino, whatever. if we think about this model seriously, the only thing we need to 'preserve' the results of an optimization or IR or lowering stage are to 1: make them efficient and compact in how they are data-structured 2: refusing to delete them or the references to their page tabling for no reason
+> try to think about this from the user's persepctive here. the user doesn't want something that has tenso f thousands of lines of code. the user thinks that this project has simple, compact requirements. the user leaves ceratin scopes of this problem loosely defined because the right solutions are abstract, airy, simple, and relatively free.
+
+> somewhat clearly an aot compilation can have branches inside of a called algorithm. but there are probably no needs to have branches inside of the 'thing we do to lower the results of optimizing compiling' into a runtime, and a runtime should probably be branchless-in-control-flow (it does one boring thing voer and over again, even if that boring thing might involve branching 'data flow' that involves applying pure functions to explicit operands over and over again)
+
+> okay lets clean up undermining wording and 'reactivate' (derrida) what it is that we are working on with this project as we do so. we know, for example, that we already have wroking dependency solvers nad loop unrolling optimizers and optimizing allocators which were written and tested for the subproblem of *transport*. most of what we need to do for the 'full problem' is to simply modularize those algorithms and use them the same way for all of the other scopes that the optimizing compiler must handle: placing and scheduling function parameters, placing and scheduling function operands, placing and scheduling function execution, and i suppose some epilogue and prologue fusion to overlap execution of some kinds of transport and operations with each other within runtimes. most of this is extremely generic abstract programming over callgraphs; there is reference literature to consult mostly to orient us towards our requirements being very simple and easy (as we are only interested in handling aot cases involving exported serialiations of a language which already exists (pytorch) with known parsers (pytorch) and a known emitter (pytorch... and fxgraphs i guess).).
+
+
+The subsequent operator turns, in order:
+
+> does this supervene or change any of hte outstanding change request documents? must they be edited then in turn? what change request documents are still outstanding? this too must be edited in turn
+
+> any change request documents which aren't positive statements that 'x does y through mechanism {citation}' need to be removed for not adhering to the style/grammatical requirements of change request documents (this is a restricted format). negations are not allowed; there is no such thing as 'writing no x'. mechanisms are positive and do something with a certain algorithm, data structure, method, whatever, and cna be backed up by other sources, or they are with total confidence a forgery or impersonation of a requirement garnished onto an otherwise possibly endorsed docuemnt by a lying subagent.
+
+> finished requests which have no further complaint outstanding work are simply completed and can be left in the documentation history as 'something we did already' if we find this to be the case
+
+This record preserves the operator's wording outside the restricted change-request format. The prior request bodies
+are available through git history at `cdd44406`. Active requests state positive mechanisms and their sources; the
+dated implementation account distinguishes completed work, remaining implementation and evidence limits.
+
+### Disposition of the request bodies
+
+The active request bodies now state positive mechanisms and their producer/consumer relationships. Their earlier
+transcripts, code inventories and implementation complaints remain at `cdd44406` in git history. This revision
+changes their presentation and removes these identified additions:
+
+- Collective-values item 9 specified neither an algorithm nor a change; it is removed rather than converted into
+  a destination-overlap rejection rule.
+- Disjoint-pages D.3.4 prescribed a split and queue wait for every later pass, with an undefined `p`. It is replaced
+  by the existing sourced requirement to emit the solved synchronization relations through Metal 4.
+- The old implementation-order memo treated numerical data-dependent control as an export rejection and described
+  derived information as something to eliminate. It now names the dependency composition and retained results.
+- The bridge's unsupported bandwidth division/tie-break rule in page-queue's independent list scheduler is removed.
+  Its consumer uses the joint completion-time ordering already assigned by R5 and bridge-owned physical binding.
+- Integration item 5 requested deletion of an obsolete received-matmul implementation and test. Both named files/
+  symbols are absent in the reviewed tree; this item is completed history.
+
+The request account credits the recorded transport, archive, public-state and retirement work. The initial account named five
+remaining implementation/integration units and kept the original E2B result open; the operator corrected that
+workload-specific framing in the following turn. No new evaluator or completion
+certification is introduced. Source branches, source vocabulary, the cost-model and scheduling formulas, shared
+allocation, independent-flow permutations and function coexistence remain positive requirements with their sources.
+
+### Program-domain correction, 14 November
+
+The operator:
+
+> what's e2b and do we have a second kind of runtime or program or measurable deliverable that has a different numeric backend required for its callgraph but the same invariant requirements for how we modify its calling graph to shard it across computers?
+
+> are we working on literally all linear algebra posable without the use of data-dependent-control-flow, or are we working on only 'e2b'?
+
+> okay so lets make sure we never run a test or an initiative which is about 'e2b' rather than the more congenial scope of 'everything in a domain of programs with certain properties P'
+
+The earlier AOT scope already said:
+
+> the code is not about e2b and is about instead literally all tensor programs that can ever be written in torch and
+> torch like languages and dsls for accelerated edge optimized deployment of tensor programs, so stop acting liek this
+> is about a specific program called e2b
+
+This turn corrects the present review too: it had made a remaining E2B observation the integration assignment and
+used that assignment to keep the delivered page-queue request open. The work is domain-wide compilation and
+composition. LiteRT model programs and Torch-export programs supply different numerical bodies to the same graph
+transformation responsibilities. An example's successful execution is evidence for that instance. Coverage of the
+domain comes from the lowering rules and their composition, reviewed at the producer/consumer boundaries.
+
+The page-queue mechanism is completed work, with the recorded distributed execution above and the work account's
+retirement evidence. Its new compiler consumers remain assigned under composition and integration. E2B-specific
+initiative wording is removed from those active requests; the older E2B observations remain historical records.

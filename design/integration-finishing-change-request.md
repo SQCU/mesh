@@ -1,82 +1,45 @@
-# Change request: finishing the torch lowering and capture integration
+# Change request: connect compiled programs to execution and observation
 
-## The turns
+## 1. Execution of the program domain
 
-> nothing is 'still open'. if there's no clear explanation of how to finish an integration work segment from the cited literature, there was no cited literature int he directions givcen to the implementation agents, which is the fault of the change request for underspecification or you for not passing the change request along. finish the integratino work here.
-> "  Starting e2b needs your call on enabling the job, the Ultras' region and the block size."
-> there is no 'call' here. if they are misconifgured but responsive, it's the job of hte agent to diagnose and correct the missing or wrong configuration.
+The compiler transforms every program in AOT A1's domain through the shared placement, sharding, dependency,
+allocation, transport and scheduling mechanisms (AOT A2–A10; GSPMD; plan-to-bridge R5). Torch-export programs and
+typed LiteRT programs supply their source numerical bodies and explicit operands to those functions. Each assigned
+target consumes the completed lowering through the native entry (composition 1–7).
 
-(2026-11-08)
+A work or measurement assignment names the properties `P` of its program domain and the transformation under
+review. Compositional review relates each lowering rule's output guarantees to its consumer's input assumptions
+(Hoare 1969, rule of composition; Abadi and Lamport, *Composing Specifications*, 1993). Existing clients supply
+instances of `P`, and their records identify the numerical semantics, storage/alias/mutation, dependence order,
+communication, cost or overhead property observed (operator's
+[program-domain instruction](documentary-review-2026-11-13.md#program-domain-correction-14-november)).
 
-**The operator, 2026-11-10:**
+The installed bridge configuration supplies the topology, region and block size used by each rank, through
+`bootstrap.sh`, `install.sh` and `bin/mesh-bridge.sh`. The program consumes its compiled result on the configured
+collective (operator's integration instruction, 8 November, this file at `cdd44406`).
 
-> review the change requests one more time. here are three major kinds of defects to correct:
-> 1: misleading pedantic specificity, where there are 23 numbered and lettered subsections which describe something about a source but don't say what algorithm is being used, what data structure is being used, and where it composes in a DAG of functions and the type interfaces between them.
-> 2: misleading pedantic vagueness, where terms with no grounding to algorihtms, data structures, or the setting are introduced. `the plan that gates the flimgrundler isn't handled by the srotheclave executor, so we have to stop for that` would be misleading pedantic vagueness, especially with no canonical data structure, algorithm, or method justifying why the change request pertains to `srotheclaves`, `frimgrundlers`, `plans` or `gates`.
-> 3: invented qualitative limits that do not come from the change request's plain semantics and plain use as a schema in the first `3` cases of change request documents used in the repo history.
+## 2. Command order
 
-## Requirements
+The compilation scheduler produces a node's command order from R5's completion times and dependence edges by
+`mesh_graph_heap_order` (Hall, Schulz, Shmoys and Wein, completion-time list scheduling;
+[list-scheduling sources, LS](list-scheduling-sources-2026-11-08.md)). Native execution consumes that order using
+Lee and Ha's self-timed execution ([source lowering, item 3](torch-source-lowering-change-request.md)).
 
-### 1. Every mesh machine's bridge runs
+## 3. Task weights
 
-- **Source:** the operator, above: "if they are misconifgured but responsive, it's the job of hte agent to diagnose and
-  correct the missing or wrong configuration."
-- **Write:**
-  - Diagnose each machine's bridge configuration against the configuration the repository installs (mesh
-    bootstrap.sh, install.sh, bin/mesh-bridge.sh and the files they write): the `io.mesh.bridge` job, `bridge.conf`'s
-    region, and the block size. Correct each one so that all five machines agree.
-  - The mini's `configuration.plist` is corrected the same way.
-  - Start every bridge with `bin/mesh-bridge.sh`.
-  - Run e2b on all five machines to its end: every rank's prefill and decode end, and the run's record states each
-    rank's decoded tokens. Where a rank stops, the code or configuration that stops it is diagnosed and corrected (the
-    operator, above: "finish the integratino work here"; "it's the job of hte agent to diagnose and correct the missing
-    or wrong configuration").
+The compilation caller supplies a weight for each task and transfer, together with link capacities. Routing and
+scheduling consume those costs through [AOT A3](aot-compilation-change-request.md); measured observations supply
+their source values through [unequal-shards items 6/7](unequal-shards-change-request.md).
 
-### 2. A node's replayed commands in the completion-time order
+## 4. Shared graph operations
 
-- **The algorithm** is list scheduling in the order of the linear program's completion times (Hall, Schulz, Shmoys and
-  Wein; design/list-scheduling-sources-2026-11-08.md, LS).
-- **It takes** each command's completion time from the linear program and the commands' dependences, as
-  [plan-to-bridge-change-request.md](plan-to-bridge-change-request.md), R5, specifies for every instruction.
-- **It writes** the node's list of commands: `mesh_graph_heap_order` over those keys. In mesh rdma/mesh-graph.h that
-  function takes the keys as `const double *priority` and the dependences as `const uint32_t *from` and `const
-  uint32_t *to`, and writes `uint32_t *place`.
-- **Produced by** R5's compilation scheduler. **Consumed by** the node's replay, which executes its commands in
-  that list's order: Lee and Ha's self-timed order,
-  as design/torch-source-lowering-change-request.md item 3 quotes it.
+The graph module consumes graph operands and masks and produces the masked walk used by native preparation.
+Its callers consume that result through the common graph interface (operator instruction, 8 November 2026,
+item 4 at `cdd44406`; [composition item 3](compilation-composition-change-request.md)).
 
-### 3. A weight on each task
+## 7. Commit feedback
 
-- **The data structure** is the weighting operand, as design/aot-compilation-change-request.md A3 gives it: "a weight
-  w on each task and a weight c on each edge", and the cables' capacities, from the map.
-  Each task's supplied weight is its execution-cost input to the scheduler (A3, "what each task and transfer costs").
-- **Produced by** the caller of the compilation. **Consumed by** the compilation's router and its scheduler, which
-  compute no weight (A3).
-- **Replaces:** the weighting operand of one `mesh.Weight` per transfer.
-
-### 4. The masked pass in the graph module
-
-- **Replaces:** the walk in metal-microbench metal_recording.m `MetalMaskedPass`.
-- **Write:** that walk is a function of mesh rdma/mesh-graph.{h,c}, with caller operands.
-
-### 5. The withdrawn item's code
-
-- **Replaces:** metal-microbench c4d41929's `dense_tensor_f16_received` and tests/gpu/received_matmul.m.
-- **Source:** design/torch-source-lowering-change-request.md item 4, withdrawn 2026-11-08.
-- **Write:** both are deleted.
-
-### 7. Each commit's feedback
-
-- **Source:** design/commit-feedback-sources-2026-11-08.md (CF) §1: `addFeedbackHandler:` "Registers a commit feedback
-  handler that Metal calls with feedback data when available." The headers do not say how many commits one handler
-  serves. CF §3 measures it: "With one options instance reused, eight commits called its handler once. With one options
-  instance a commit, each of the eight called its handler." MTL4CommandQueue.h L261 signals an event's value "after all
-  GPU work prior to this point is complete".
-- **The data structure** is one `MTL4CommitOptions` a commit, whose feedback handler was added for that commit alone,
-  and that commit's record: struct Feedback's semaphore, error and GPU times, and struct MetalRun's `failure`.
-- **Produced by** every commit of the replay: the handler writes the feedback data Metal calls it with to its own
-  commit's record. **Consumed by** `feedback_wait`, which receives one handler's call a commit.
-- **Replaces:**
-  - in metal-microbench tools/e2b_replay.m, `feedback_start`: one `MTL4CommitOptions` a phase (`PREPARE`, `PREFILL`,
-    `DECODE`, `PROFILE`), which every commit of that phase carries;
-  - in metal_recording.m, `MetalRunOf`: one `MTL4CommitOptions` that every replay's commits carry.
+Each native submission constructs its own `MTL4CommitOptions` and feedback handler, which writes its error and GPU
+times to that commit's record. The completion consumer receives that record through the handler's semaphore.
+The mechanism follows `addFeedbackHandler:` and the per-commit options observation in
+[commit-feedback sources, CF §§1/3](commit-feedback-sources-2026-11-08.md).

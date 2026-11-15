@@ -13,6 +13,18 @@ their actual data flow, give corrective assignments, review execution evidence, 
 The current assignment continues the operator turns in [the-compiler.md](the-compiler.md) and the
 [change-request naming standard](change-requests.md). It does not add requirements to their scope.
 
+## Program-domain assignments, 14 November
+
+The [operator's program-domain instruction](documentary-review-2026-11-13.md#program-domain-correction-14-november)
+assigns all tensor/linear-algebra programs with AOT A1's properties. Each worker brief names the domain properties
+`P`, the cited transformation, its explicit inputs/results, and the consumer that preserves those properties.
+Torch-export and typed LiteRT inputs use the same graph transformation responsibilities. The numerical lowering
+covers their source operations by composition; the listed numerical defects locate work within that full domain.
+
+Existing clients provide input instances for observing a named property. Review first establishes the general
+producer/consumer rule and its coverage; the observation records that instance's behavior. Model names identify
+inputs in evidence. Work units and measurements are assigned by the program properties they address.
+
 ## Correction to the first assignments
 
 The operator, after root reported that an existing lowerer consumed CPU graphs before the proposed replacement:

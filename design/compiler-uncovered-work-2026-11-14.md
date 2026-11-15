@@ -1,6 +1,6 @@
 # Compiler completion workgroup, 14 November 2026
 
-This is the current implementation assignment under
+This records the implementation work under
 [compiler-workgroup-2026-11-13.md](compiler-workgroup-2026-11-13.md).
 The change requests and their cited algorithms remain the requirements.
 
@@ -28,40 +28,81 @@ replacement owners. Do not move the old code, repair or hide its syntax, or pars
 Required live algorithms move by responsibility into their new owners; this is not permission to clone a whole
 old module under a new name. There is one live implementation of each required algorithm.
 
-## Connected implementation units
+## Recorded state, 2026-11-14
 
-Apply the operator's [14 November clarification](compilation-composition-change-request.md#clarification-2026-11-14-one-compilation-over-retained-results)
-across these units. Parameters, operand storage, calls and transport supply explicit operands to the shared graph,
-unrolling, allocation and scheduling algorithms. Complete those handoffs and retain the solved values and their
-references. Numerical conditions belong to compiled algorithms; they do not require repeated runtime interpretation
-of the compiler's decisions. File ownership below does not partition these algorithms into separate implementations.
+This is a dated review of the recorded work, at mesh `774f08e4` plus the documentation revision `cdd44406`,
+metal-microbench `1a2c5ade`, and the uncommitted native switch work identified below. The user reactivated the goal during this documentary revision; the worker sessions are held at the recorded
+checkpoints while their work orders receive this correction. The request text specifies behavior; the observations below describe
+particular revisions and inputs.
 
-| Owner | Producer → result → actual consumer | Applicable clauses and displaced work |
+### Completed portions
+
+| Work done | Recorded result | Scope of the observation |
 |---|---|---|
-| Frontends / Torch | Captured known functions, call graph, shape/alias/state/output roles → explicit compilation operands → the current machine compiler, callable and archive | AOT A1/A10; composition 1–7; schedule-emit's stage composition. Connect call-graph compilation to the current typed machine path, including user-input gradients and inter-call mutations. Retire the dead closure orchestration, not its required semantics. |
-| Compiler / placement | Function bodies and call graph → retained call dependence/width and actual actor/storage operands → one joint planner and final machine program | AOT A5–A10; disjoint-pages; Pathways/Bernstein/Dilworth as cited. Pair the exact result with frontends/executor; no second caller-specific solve or one-function restriction. |
-| Compiler / schedule | Program/function identity and joint allocation → coexisting published schedules → existing island sequencer and bridge lookup/reclamation | AOT A7, appendix 6; plan-to-bridge R8. Replace singleton publication/retire-on-next-prepare behavior. Use the cited total-order sequencer and deferred reclamation; no new protocol family or resource policy. |
-| Compiler / numerical | Fixed-shape spectral/least-squares operations with explicit processor placement → cited matrix/QR formulations → existing typed numerical lowerer on GPU/ANE | Source-lowering 5/6. Complete those conversions; no CPU fallback, target rejection or second numerical backend. |
-| Executor / native | Completed typed neural operation plus invocation operand addresses → prepared neural invocation → generated native call | Composition 1/6/7; source-lowering. Connect changing external inputs/results/state through the existing actual native argument boundary; no unconditional staging copies or alternate execution path. |
-| Executor / archive | Joint compiled functions/calls, retained plan and native entry → one saved artifact → relocation and invocation | AOT A8/A9/A10; composition 6/7. Pair with frontend/compiler; loaded output consumes the saved result, not old `load` or reconstruction. |
-| Frontends / measurement | Actual compiled units and their source correspondence → execution-cost observations → existing cost/share consumer | Unequal-shards 6/7/14, AOT A3. Displace dead `taken`/FX timing. Supplied costs remain compiler inputs. Use existing measurements/client machinery; no new evaluator or benchmark grid. |
-| Root / integration | Actual compiled phase/node correspondence → signature → existing consumers; live primitive ownership | Synchronization-signature; composition 6/7. Use retained phase results and correct map identity, not legacy `_period`. Keep obsolete bodies malformed in their original files and update actual callers. |
+| Distributed compiled transfers, saved program loading and coexisting published functions | [`distributed-multipage-1.json`](../output_data/compiler-workgroup-20261114/executor/distributed-multipage-1.json), recorded by mesh `cbced5b6` | Five peers returned 0; two prepared functions; 16 channels; 18,432-byte F16 shards cross the 16-KiB page boundary. Saved calls were restored using their compiled relations. The functions coexisted and were invoked sequentially. |
+| Retirement of those published functions | [`distributed-multipage-1-retirement.json`](../output_data/compiler-workgroup-20261114/executor/distributed-multipage-1-retirement.json) | Five nodes returned to zero publications and full reported capacity with the same bridge processes. |
+| Final native public bindings for state and aliases | [`bound99-outer-state.json`](../output_data/compiler-workgroup-20261114/executor/bound99-outer-state.json), recorded by `a3bcca69` | Two calls over two invocations, zero recorded numerical error, updated state, retained attribute/returned aliases, stride 2 and offset 3. |
+| Withdrawn received-matmul special path | Integration item 5's named implementation and test are absent from the current metal tree | The deletion is completed history. Its old item is removed from the active request. |
 
-After the correction, the Python native ABI and typed C encoder belong to `compiler/mesh_compiler/metal.py`;
-pure tensor/structured numerical operations belong to `operations.py`; placed-operation decomposition belongs
-to `decompose.py`. `lower_metal.py` consumes those owners directly. The native typed capture/preparation producer
-belongs to `metal_capture.m` and the completed native program consumer to `metal_program.m`, sharing their
-actual produced records once. Old `mesh_compile.py`, `lower_coreml.py`, `examples/tp.py` and `metal_recording.m`
-remain malformed where instructed; their consumers must change. These names locate current assignments,
-not new permanent requirements or authority for reproducing inherited module structure.
+The graph, allocation, routing, archive and bridge mechanisms exercised here are existing work. Their new compiler
+consumers use those results. The multi-page observation happened to use contiguous physical offsets; it records
+neither fragmented placement nor simultaneous invocation of the two functions. These limits describe that
+observation, rather than creating new acceptance requirements.
 
-Same Opus 5.5 sessions, Codex supervisors, no new worker tree. Supervisors settle the explicit producer/result/
-consumer contracts together before implementation crosses a shared file. Each unit must actually connect its
-consumer and remove its displaced live body. No source-template authority is conferred on mesh's inherited code.
-Use the literal algorithms/data structures and vocabulary in each cited clause and the runnable schedule-emit
-composition. No new formal type system, tests, guards, fallback, invented restriction or independent runtime solve.
+### Domain of the remaining work
 
-Commits are working checkpoints, not completion gates. Preserve raw sessions locally and compact reviewed
-evidence under `output_data/compiler-workgroup-20261114/`. Coordinate shared indices and native build products;
-do not touch services or unrelated processes. Current assignment is implementation and its existing local
-caller observations; live fleet measurement is a separate evidence phase after the connected code exists.
+The assignment covers all linear algebra and tensor programs in AOT A1's domain. Known shapes and the statically
+known outer call graph make placement, dependencies, allocation, transfers and schedules compilation operands.
+The cited numerical algorithms retain their internal conditions. Torch-export/FX and typed LiteRT inputs carry
+different numerical bodies into those shared transformations.
+
+The cases below locate current defects and unfinished connections; they are not an exhaustive operator list or
+a restriction of supported programs. Each assignment names the properties `P` under which its transformation
+composes with the next stage. Existing client instances supply observations of those properties. Generality is
+reviewed in the lowering rules and their composition, rather than inferred from a model's successful execution.
+
+### Remaining implementation and integration
+
+| Unit | Work remaining | Basis and clauses |
+|---|---|---|
+| Native consumers of numerical conditional regions | Complete the compiled GPU span selection and indirect arguments, one produced span plan consumed by command emission, and joined completion; lower the same conditional bodies for CPU and ANE | [`native-switch106.status.md`](../output_data/compiler-workgroup-20261114/executor/native-switch106.status.md), currently titled native-switch112, lists unfinished source. Source scalar branches/region ownership are committed in `d4e7f120`/`a00eb204`; matched native execution is unfinished. Composition 2/4–7, capture 9, source lowering 2/6. |
+| Numerical target coverage | Complete source/primitive lowering and its composition across AOT A1's domain on each assigned processor. Located unfinished cases include ANE exact word operations, binary64/complex lowering, and numerical conditions, convergence and driver semantics | [`ane-bitcast-review.json`](../output_data/compiler-workgroup-20261114/executor/ane-bitcast-review.json) records construction status 22 before invocation; [`spectral-contract-review.md`](../output_data/compiler-workgroup-20261114/compiler/spectral-contract-review.md) records source-review limits. Source lowering 5/6 and composition's software arithmetic. |
+| Public output geometry | Connect and observe the committed source-base/stride/offset realization with the matching native program through the existing Crossing caller | `0b638912`; [`materialized-output.status.md`](../output_data/compiler-workgroup-20261114/frontends/materialized-output.status.md). The source edit is committed; its native consumer observation remains pending. Capture 1/7/9, collective-values 3/6, AOT A1/A9. |
+| Execution-cost inputs | Complete actual-work and repeat-multiplicity coverage in the existing observation/cost path | `7d34092d` already retains supplied fixed work alongside share-dependent coefficients. [`integration-cost-filters.status.md`](../output_data/compiler-workgroup-20261114/integration-cost-filters.status.md) records that correction. AOT A3, unequal-shards 6/7/14, integration 3. |
+| Signature and domain-wide integration | Carry new emitted operations and completion through the retained signature relation and the shared compiler consumers for Torch-export and typed LiteRT programs. Existing clients observe explicit properties of those transformations | Synchronization 1–6, integration 1/2/7, composition's domain-wide integration clause. Matching the native consumers and establishing lowering coverage remain outstanding. |
+
+CPU native execution already exists. The first row concerns its conditional-region consumer, together with the
+GPU and ANE consumers. The remaining work is identified by the produced value and its consumer, rather than by
+inventing a separate CPU runtime or reimplementing the transport algorithms.
+
+### Request accounting
+
+| Request | Completed work or retained foundation | Remaining assignment |
+|---|---|---|
+| AOT A1–A10 | Shared graph/routing/allocation machinery; compiled calls, bindings, publication and saved results exercised above | Native conditional consumers, current output geometry, cost coverage and connected client |
+| Composition | Explicit staged driver, retained program/source relationships, graph-module consolidation | Complete the native result handoffs in the units above |
+| Disjoint pages | Shared allocation, multi-page transfer and retirement mechanisms exercised above | Completion/lifetime consumption for the new conditional bodies |
+| Integration finishing | Existing five-node bridge use; item 5's deletion completed | Domain-wide compiled execution, costs, feedback and property-directed observations |
+| Page queue — completed | Resident bridge and compiled page transfers exercised above | Completed mechanism; new compiler consumers belong to composition/integration |
+| Plan to bridge | Existing physical binding, transfer program and published-function lifetime machinery | New compiled consumers use the joint result; connected-client integration |
+| Collective values | Existing collective/view/lifetime/cyclic-allocation mechanisms | Source output geometry and its downstream use |
+| Synchronization signature | Existing signature/observer mechanism | Association with new emitted sites and observation of the connected program |
+| Torch capture | Source/public-state bindings and saved call results exercised above | Conditional-body and output-geometry consumers |
+| Torch source lowering | Source numerical decompositions and scalar Padé branches committed | Native branch execution and numerical coverage identified above |
+| Unequal shards | Existing counts, placement and ratio solver; supplied fixed-cost correction committed | Actual work and multiplicity inputs to the existing cost/ratio solve |
+
+Each active entry has the specific remaining assignment shown here. Completed clauses are historical
+accomplishments, not repeated assignments. A request with all its work and recorded complaints resolved moves
+to completed history. The operator's program-domain correction removes the E2B-specific initiative. Page queue is completed history;
+new consumers use its delivered mechanism. Domain-wide compiler coverage remains an integration obligation.
+
+### Assignment boundaries
+
+Use the [composition dependency map](implementation-order-2026-11-09.md) and each request's cited mechanism.
+The frontend/compiler/native owners agree on the explicit values passed across their boundary; graph routines
+remain in the common graph module. A unit ends with its result consumed by the actual next stage and its
+superseded live implementation removed as instructed above.
+
+The existing Opus 5.5 sessions and Codex supervisors remain the workgroup recorded by
+[compiler-workgroup-2026-11-13.md](compiler-workgroup-2026-11-13.md). Their next work orders consume this corrected
+account and the operator's program-domain assignment. Commits remain ordinary working checkpoints.
