@@ -9,6 +9,25 @@ of AOT A1–A10 and source-lowering 1/2/3/5/6. The literal reference is
 explicit operands, its lowerer calls the original compiler, and its consumers use
 the returned results.
 
+## Operator correction, 15 November 2026
+
+> then we halt all work on anything related to any consumers until weh ave made the correct data structure at the producer side. then we only correct direct functional neighors of the producer in our callgraph, and so on.
+
+> there was a very simple assignment and we even have a very simple reference codebase we can index against
+
+This instruction sets the current work sequence. All eight implementation turns
+were interrupted, their queues cleared, and their current source preserved in
+git. Only worker104 resumes for the capture producer: `export.export`, its
+immediate result construction, and the producer's data definition. The reference
+is `schedule-emit/schedule_emit/export.py`'s `export`/`read` and
+`schedule_emit/ir.py`'s `Exported`, at `f41c64a`. They return captured graph,
+signature, state and result data before the numerical lowerer is called.
+
+Codex reviews the concrete producer result against those source boundaries and
+Mesh's assigned domain. Work then advances to that producer's direct functional
+neighbors in the call graph, consuming the established result. The assignments
+below retain their scope as history; their concurrent consumer work is stopped.
+
 The operator asked why duplicated and inlined responsibilities were being
 discovered and patched individually, then instructed: “what strategy have you not
 been using that was cleraly required by the change rqeuest documents in
@@ -63,8 +82,9 @@ original emitter.
 
 The original source and native result interfaces determine the necessary data
 projection. Existing draft classes and signatures are implementation artifacts,
-not constraints on the replacement. Producers and consumers work concurrently
-against the actual agreed operands. Shared-file edits have explicit ownership.
+not constraints on the replacement. The operator's 15 November sequence above
+establishes the producer result first and advances through direct functional
+neighbors. Shared-file edits have explicit ownership.
 
 The deliberately malformed legacy references stay in their original locations.
 The accounts distinguish these references from live competing implementations.
