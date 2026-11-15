@@ -94,20 +94,25 @@ static int receive_fields(struct mesh_ctx *context,const struct mesh_planned *pl
 
 /* J. Lee, Ph.D. dissertation, University of Michigan, 2015, §3.2.2: threadgroup g's footprint, its terms evaluated at
    g; its partitions [*lo, *hi] of the range, none where *lo > *hi */
-static void mask_bounds(const uint32_t g[3],const struct mesh_graph_footprint *a,const struct mesh_graph_term *term,
-  const struct mesh_metal_range *r,uint32_t *lo,uint32_t *hi){
-  __int128 low=a->start-(__int128)r->at;
-  for(uint32_t k=0;k<a->terms;k++){
-    const struct mesh_graph_term *t=term+a->first+k;
-    const uint64_t q=g[t->dim]/(t->divisor?t->divisor:1);
-    low+=(__int128)t->coefficient*(__int128)(t->modulus?q%t->modulus:q);
-  }
-  __int128 high=low+a->extent;
+/* the partitions [*lo, *hi] of range r that bytes [low, high) of its binding reach (r->at the range's first byte there):
+   *lo > *hi none */
+static void mask_partitions(__int128 low,__int128 high,const struct mesh_metal_range *r,uint32_t *lo,uint32_t *hi){
+  low-=(__int128)r->at;high-=(__int128)r->at;
   const __int128 end=(__int128)r->partitions*r->page;
   if(low<0)low=0;
   if(high>end)high=end;
   if(high<=low || !r->page){*lo=1;*hi=0;return;}
   *lo=(uint32_t)(low/r->page);*hi=(uint32_t)((high-1)/r->page);
+}
+/* footprint a's bytes at threadgroup g: [start + terms(g), + extent) */
+static __int128 mask_start(const uint32_t g[3],const struct mesh_graph_footprint *a,const struct mesh_graph_term *term){
+  __int128 low=a->start;
+  for(uint32_t k=0;k<a->terms;k++){
+    const struct mesh_graph_term *t=term+a->first+k;
+    const uint64_t q=g[t->dim]/(t->divisor?t->divisor:1);
+    low+=(__int128)t->coefficient*(__int128)(t->modulus?q%t->modulus:q);
+  }
+  return low;
 }
 struct mask_rows { const uint32_t *bound; uint32_t width; const uint32_t *probe; };
 static int mask_same(const void *context,uint32_t k){
@@ -115,38 +120,48 @@ static int mask_same(const void *context,uint32_t k){
   return !memcmp(x->bound+(size_t)k*x->width,x->probe,x->width*sizeof *x->probe);
 }
 /* design/torch-capture-change-request.md item 3; mesh-graph.h mesh_graph_keyed_find and mesh_graph_keyed_add over
-   the rows' hash */
-int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh_graph_footprint *footprint,
-  const struct mesh_graph_term *term,const uint32_t *range,struct mesh_metal_readiness *readiness){
+   the rows' hash. A threadgroup's row: for each range d its fields' read bits (bit 2 (f mod 16) of word w f / 16,
+   words[d] of them from offset[d]), the fields whose partition an access of d reaches, every field of a range no
+   access names */
+int mesh_metal_mask_partitions(const uint32_t groups[3],size_t accesses,const size_t *first,const uint32_t *partition,
+  const uint32_t *range,struct mesh_metal_readiness *readiness){
+  readiness->member=NULL;readiness->members=0;
   const uint64_t grid=(uint64_t)groups[0]*groups[1]*groups[2];
-  const uint32_t G=(uint32_t)grid,R=readiness->ranges,width=2*R;
+  const uint32_t G=(uint32_t)grid,R=readiness->ranges;
   if(readiness->groups!=grid || !G)return EINVAL;
-  for(size_t a=0;a<footprints;a++){
-    if(range[a]!=UINT32_MAX && range[a]>=R)return EINVAL;
-    for(uint32_t k=0;k<footprint[a].terms;k++)if(term[footprint[a].first+k].dim>2)return EINVAL;
+  for(size_t a=0;a<accesses;a++)if(range[a]!=UINT32_MAX && range[a]>=R)return EINVAL;
+  uint32_t width=0,most=1;
+  uint32_t *offset=malloc(((size_t)R+1)*sizeof *offset),*named=calloc((size_t)R+1,sizeof *named);
+  if(!offset || !named){free(offset);free(named);return ENOMEM;}
+  for(uint32_t d=0;d<R;d++){
+    offset[d]=width;width+=(readiness->range[d].input.pages+15)/16;
+    if(readiness->range[d].partitions>most)most=readiness->range[d].partitions;
   }
-  uint32_t *bound=malloc(((size_t)G*width+1)*sizeof *bound),*head=malloc(((size_t)G+1)*sizeof *head),
-           *next=malloc(((size_t)G+1)*sizeof *next),*first=malloc(((size_t)(G>R?G:R)+1)*sizeof *first);
-  if(!bound || !head || !next || !first){free(bound);free(head);free(next);free(first);return ENOMEM;}
-  for(uint32_t d=0;d<R;d++)first[d]=0;
-  for(size_t a=0;a<footprints;a++)if(range[a]!=UINT32_MAX)first[range[a]]=1;
+  for(size_t a=0;a<accesses;a++)if(range[a]!=UINT32_MAX)named[range[a]]=1;
+  uint32_t *bound=calloc((size_t)G*width+1,sizeof *bound),*head=malloc(((size_t)G+1)*sizeof *head),
+           *next=malloc(((size_t)G+1)*sizeof *next),*rep=malloc(((size_t)G+1)*sizeof *rep);
+  unsigned char *reached=malloc((size_t)most+1);
+  if(!bound || !head || !next || !rep || !reached){
+    free(offset);free(named);free(bound);free(head);free(next);free(rep);free(reached);return ENOMEM;
+  }
   for(uint32_t w=0;w<G;w++){
-    const uint32_t g[3]={w%groups[0],w/groups[0]%groups[1],w/groups[0]/groups[1]};
     uint32_t *row=bound+(size_t)w*width;
-    for(uint32_t d=0;d<R;d++){row[2*d]=1;row[2*d+1]=0;}
-    for(uint32_t d=0;d<R;d++)
-      if(!first[d] && readiness->range[d].partitions){row[2*d]=0;row[2*d+1]=readiness->range[d].partitions-1;}
-    for(size_t a=0;a<footprints;a++){
-      if(range[a]==UINT32_MAX)continue;
-      uint32_t lo,hi,*at=row+2*range[a];
-      mask_bounds(g,footprint+a,term,readiness->range+range[a],&lo,&hi);
-      if(lo>hi)continue;
-      if(at[0]>at[1]){at[0]=lo;at[1]=hi;}
-      else{if(lo<at[0])at[0]=lo;if(hi>at[1])at[1]=hi;}
+    for(uint32_t d=0;d<R;d++){
+      const struct mesh_metal_range *r=readiness->range+d;
+      memset(reached,!named[d],(size_t)r->partitions+1);
+      for(size_t a=0;named[d] && a<accesses;a++){
+        if(range[a]!=d)continue;
+        for(size_t k=first[(size_t)w*accesses+a];k<first[(size_t)w*accesses+a+1];k++)
+          if(partition[k]<r->partitions)reached[partition[k]]=1;
+      }
+      for(uint32_t f=0;f<r->input.pages;f++)
+        if(r->field[f]!=UINT32_MAX && r->field[f]<r->partitions && reached[r->field[f]])
+          row[offset[d]+f/16]|=1u<<(2*(f%16));
     }
     head[w]=UINT32_MAX;
   }
   uint32_t classes=0;
+  size_t entries=0;
   for(uint32_t w=0;w<G;w++){
     const uint32_t *row=bound+(size_t)w*width;
     uint64_t hash=1469598103934665603u;
@@ -156,22 +171,64 @@ int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh
     if(k!=UINT32_MAX){readiness->class_of[w]=readiness->class_of[k];continue;}
     mesh_graph_keyed_add(head,next,key,w);
     readiness->class_of[w]=classes;
-    first[classes++]=w;
+    rep[classes++]=w;
+    for(uint32_t x=0;x<width;x++)entries+=row[x]!=0;
   }
-  for(uint32_t c=0;c<classes;c++){
-    const uint32_t *row=bound+(size_t)first[c]*width;
-    for(uint32_t d=0;d<R;d++){
-      const struct mesh_metal_range *r=readiness->range+d;
-      uint32_t a=UINT32_MAX,b=0;
-      for(uint32_t f=0;row[2*d]<=row[2*d+1] && f<r->input.pages;f++)
-        if(r->field[f]!=UINT32_MAX && r->field[f]>=row[2*d] && r->field[f]<=row[2*d+1]){if(f<a)a=f;b=f+1;}
-      if(a>=b)a=b=0;
-      readiness->span[2*((size_t)c*R+d)]=a;readiness->span[2*((size_t)c*R+d)+1]=b;
+  /* member: E = 2 + classes R; first[classes R + 1] from member[1]; entries {word, mask} from member[E] */
+  const size_t E=2+(size_t)classes*R,words=E+2*entries;
+  uint32_t *member=words<=UINT32_MAX?malloc(words*sizeof *member):NULL;
+  int status=member?0:ENOMEM;
+  if(member){
+    member[0]=(uint32_t)E;
+    size_t at=0;
+    for(uint32_t c=0;c<classes;c++){
+      const uint32_t *row=bound+(size_t)rep[c]*width;
+      for(uint32_t d=0;d<R;d++){
+        member[1+(size_t)c*R+d]=(uint32_t)at;
+        const uint32_t n=(readiness->range[d].input.pages+15)/16;
+        for(uint32_t x=0;x<n;x++)
+          if(row[offset[d]+x]){member[E+2*at]=x;member[E+2*at+1]=row[offset[d]+x];at++;}
+      }
     }
+    member[1+(size_t)classes*R]=(uint32_t)at;
+    readiness->member=member;readiness->members=(uint32_t)words;readiness->classes=classes;
   }
-  readiness->classes=classes;
-  free(bound);free(head);free(next);free(first);
-  return 0;
+  free(offset);free(named);free(bound);free(head);free(next);free(rep);free(reached);
+  return status;
+}
+/* each footprint's partitions at each threadgroup ([start + terms(g), + extent) of its range), then
+   mesh_metal_mask_partitions */
+int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh_graph_footprint *footprint,
+  const struct mesh_graph_term *term,const uint32_t *range,struct mesh_metal_readiness *readiness){
+  const uint64_t grid=(uint64_t)groups[0]*groups[1]*groups[2];
+  if(readiness->groups!=grid || !grid)return EINVAL;
+  for(size_t a=0;a<footprints;a++){
+    if(range[a]!=UINT32_MAX && range[a]>=readiness->ranges)return EINVAL;
+    for(uint32_t k=0;k<footprint[a].terms;k++)if(term[footprint[a].first+k].dim>2)return EINVAL;
+  }
+  size_t total=0;
+  size_t *first=malloc(((size_t)grid*footprints+1)*sizeof *first);
+  uint32_t *partition=NULL;
+  if(!first)return ENOMEM;
+  for(int pass=0;pass<2;pass++){
+    size_t at=0;
+    for(uint64_t w=0;w<grid;w++){
+      const uint32_t g[3]={(uint32_t)(w%groups[0]),(uint32_t)(w/groups[0]%groups[1]),(uint32_t)(w/groups[0]/groups[1])};
+      for(size_t a=0;a<footprints;a++){
+        first[w*footprints+a]=at;
+        if(range[a]==UINT32_MAX)continue;
+        uint32_t lo,hi;
+        const __int128 low=mask_start(g,footprint+a,term);
+        mask_partitions(low,low+footprint[a].extent,readiness->range+range[a],&lo,&hi);
+        for(uint32_t q=lo;lo<=hi && q<=hi;q++){if(pass)partition[at]=q;at++;}
+      }
+    }
+    first[grid*footprints]=at;
+    if(!pass){total=at;if(!(partition=malloc((total+1)*sizeof *partition))){free(first);return ENOMEM;}}
+  }
+  const int status=mesh_metal_mask_partitions(groups,footprints,first,partition,range,readiness);
+  free(first);free(partition);
+  return status;
 }
 
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1; metal_recording.h state:buffer:status: */

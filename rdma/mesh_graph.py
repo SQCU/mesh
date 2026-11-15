@@ -861,8 +861,10 @@ LIB.free.argtypes = [C.c_void_p]
 # mesh_graph_dependences_views and mesh_graph_synchronization; design/compilation-composition-change-request.md
 # item 6 and "Compact effects"
 class Viewed(C.Structure):
+    # `access` its access relation (mesh-graph.h struct mesh_graph_access_map), NULL for a strided view
     _fields_ = [('key', C.c_uint64), ('offset', C.c_uint64), ('element', C.c_uint64), ('dims', C.c_uint32),
-                ('padding', C.c_uint32), ('pairs', C.POINTER(C.c_uint64)), ('vertex', C.c_uint32), ('write', C.c_uint32)]
+                ('padding', C.c_uint32), ('pairs', C.POINTER(C.c_uint64)), ('vertex', C.c_uint32), ('write', C.c_uint32),
+                ('access', C.c_void_p)]
 
 
 class Conflict(C.Structure):

@@ -137,7 +137,10 @@ int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_func
 int mesh_plan_save(struct mesh_ctx *,uint64_t program,const struct mesh_function *,uint32_t count,
   const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
   const uint32_t *chains,const struct mesh_planned *,void **bytes,size_t *length);
-int mesh_plan_load(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *,uint32_t count,
+/* `analysis` the loading compilation's analysis context (mesh-graph.h struct mesh_graph_context): each function's actor
+   relation loaded in it (mesh_graph_relation_load) */
+int mesh_plan_load(struct mesh_ctx *,struct mesh_graph_context *analysis,uint64_t group,uint64_t program,
+  struct mesh_function *,uint32_t count,
   const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
   const uint32_t *chains,uint64_t deadline,const void *bytes,size_t length,void (*release)(void *),void *owner,
   struct mesh_planned *);
@@ -262,9 +265,11 @@ int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,s
    (8-byte aligned, EINVAL otherwise) are borrowed: the loaded Function[] descriptors and closure header are the
    result's own, every array a view of them; on success the result adopts `owner` (release(owner) once the result,
    freed by mesh_local_free, and every loaded relation are released), on failure the caller keeps it and the result is
-   zeroed */
+   zeroed. `analysis` the loading compilation's one analysis context (mesh-graph.h struct mesh_graph_context; NULL
+   where the result's relation holds no access relation): its relation loaded in it (mesh_graph_relation_load) */
 int mesh_local_save(const struct mesh_local *local,void **bytes,size_t *length);
-int mesh_local_load(const void *bytes,size_t length,void (*release)(void *),void *owner,struct mesh_local *local);
+int mesh_local_load(struct mesh_graph_context *analysis,const void *bytes,size_t length,void (*release)(void *),
+                    void *owner,struct mesh_local *local);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/aot-compilation-change-request.md A8 to
    A10 and appendix item 6; design/plan-to-bridge-change-request.md R8: mesh_plan_program's whole network result `local`
    saved in one archive (*bytes the caller's, released with free): its local sections (mesh_local_save's), each
@@ -278,11 +283,12 @@ int mesh_local_load(const void *bytes,size_t length,void (*release)(void *),void
    relocated to them; its plans, rows and table written; published at its root row).  `local` is then
    mesh_plan_program's owner: mesh_local_free frees it, mesh-dataflow.h mesh_retire(planned) closes its publication.  On
    success it adopts `owner` (release(owner) once the result and every loaded relation are released); on failure the
-   caller keeps it and `local` is zeroed */
+   caller keeps it and `local` is zeroed; `analysis` as mesh_local_load's */
 int mesh_program_save(struct mesh_ctx *context,uint64_t program,const struct mesh_local *local,void **bytes,
                       size_t *length);
-int mesh_program_load(struct mesh_ctx *context,uint64_t group,uint64_t program,uint64_t deadline,const void *bytes,
-                      size_t length,void (*release)(void *),void *owner,struct mesh_local *local);
+int mesh_program_load(struct mesh_ctx *context,struct mesh_graph_context *analysis,uint64_t group,uint64_t program,
+                      uint64_t deadline,const void *bytes,size_t length,void (*release)(void *),void *owner,
+                      struct mesh_local *local);
 /* design/torch-capture-change-request.md item 6: every retained copy of a network result (local->first's values: its
    functions' values, then its roots; run 1 or 0 alike) in one mapping *view of the context's region, the view spanning
    every row of every copy (each copy section.stride rows from its first row local->offset[k], each row one block at its

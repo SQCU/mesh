@@ -309,8 +309,12 @@ _Static_assert(sizeof(struct mesh_strided)==32 && offsetof(struct mesh_strided,d
    with free (NULL and 0 on failure). A pair of views of one vertex (mesh_graph_conflicts_views) is one record per
    hazard, READ_AFTER_WRITE's from_view the written view and WRITE_AFTER_READ's the read one. The pure relation is its
    distinct (from, to) */
-struct mesh_graph_view { uint64_t key; struct mesh_strided view; uint32_t vertex, write; };
-_Static_assert(sizeof(struct mesh_graph_view) == 48, "mesh_graph_view");
+struct mesh_graph_access_map;
+/* `access` (NULL for a strided view): the view's bytes are an access relation's (mesh_graph_access_map_create, below), its
+   `view` then unused; its holder retains it for as long as the view is held */
+struct mesh_graph_view { uint64_t key; struct mesh_strided view; uint32_t vertex, write; const struct mesh_graph_access_map *access; };
+_Static_assert(sizeof(struct mesh_graph_view) == 56 && offsetof(struct mesh_graph_view, access) == 48,
+               "mesh_graph_view: rdma/mesh_graph.py Viewed");
 enum { MESH_GRAPH_READ_AFTER_WRITE, MESH_GRAPH_WRITE_AFTER_READ, MESH_GRAPH_WRITE_AFTER_WRITE, MESH_GRAPH_GIVEN };
 struct mesh_graph_cause { uint64_t key; uint32_t kind, given; size_t from_view, to_view; };
 _Static_assert(sizeof(struct mesh_graph_cause) == 32 && offsetof(struct mesh_graph_cause, from_view) == 16 &&
@@ -326,6 +330,105 @@ int mesh_graph_conflicts_views(size_t views, const struct mesh_graph_view *view,
 int mesh_graph_dependences_views(size_t views, const struct mesh_graph_view *view, size_t supplied,
                                  const uint32_t *supplied_from, const uint32_t *supplied_to,
                                  struct mesh_graph_conflict **conflict, size_t *count);
+/* design/compilation-composition-change-request.md, "Complete replacement workgroup" (an upstream kernel's accesses as
+   its producer relates them); S. Verdoolaege, isl, ICMS 2010 (isl 0.27: isl_pw_aff, isl_set, isl_map): an access's
+   retained domain-to-byte relation, its predicate and its indirect symbols, built by the original walkers
+   (torch/utils/_sympy/interp.py sympy_interp over an index; LoopBody's interpreter over its masked subblocks' masks,
+   as torch/_inductor/bounds.py BoundVars runs its analysis), one isl operation per handler.
+   A context: one isl_ctx and its lock, refcounted; every domain, index and access of it, and every graph query over
+   them (mesh_graph_*_views and relations of access views), use it under that lock, each holder retaining it. */
+struct mesh_graph_context;
+int mesh_graph_context_create(struct mesh_graph_context **out);
+void mesh_graph_context_retain(struct mesh_graph_context *);
+void mesh_graph_context_free(struct mesh_graph_context *);
+/* A kernel's index domain, dimension k one original symbol over [lo, hi], its relation to the launch the backend's own:
+   ROOT a range-tree root of an MPS kernel (torch/_inductor/codegen/simd.py IterationRangesRoot, [0, numel - 1]: a
+   reduction root's whole numel, its multistage loop within one threadgroup), `axis` its position in
+   active_range_trees(), the thread_position_in_grid component codegen/mps.py codegen_kernel binds it to, `reduction`
+   its is_reduction (call_kernel: one threadgroup spanning it); LOOP a loop variable of one invocation (codegen/cpp.py
+   LoopNest's LoopLevel var over [offset, offset + size - 1]: a CPU KernelGroup's whole call), `axis` unused; INDIRECT
+   an indirect symbol (codegen/common.py CSEProxy.indirect_indexing: [0, size - 1] where its bounds are checked, else
+   its var's LoopBody.bounds() value range). Refcounted; retains its context. */
+enum { MESH_GRAPH_DOMAIN_ROOT, MESH_GRAPH_DOMAIN_INDIRECT, MESH_GRAPH_DOMAIN_LOOP };
+struct mesh_graph_domain_dim { uint32_t kind, axis, reduction, padding; int64_t lo, hi; };
+struct mesh_graph_domain;
+int mesh_graph_domain_create(struct mesh_graph_context *, uint32_t dims, const struct mesh_graph_domain_dim *dim,
+                             struct mesh_graph_domain **out);
+void mesh_graph_domain_retain(struct mesh_graph_domain *);
+void mesh_graph_domain_free(struct mesh_graph_domain *);
+const struct mesh_graph_domain_dim *mesh_graph_domain_dims(const struct mesh_graph_domain *, uint32_t *dims);
+/* the domain's context, borrowed for the domain's lifetime */
+struct mesh_graph_context *mesh_graph_domain_context(const struct mesh_graph_domain *);
+/* An analysis value over a domain: an integer (isl_pw_aff) or a predicate (isl_set), as sympy_interp's and the
+   LoopBody ops handler's methods of the same names make it: dimension `dim`; a constant (an integer, or `truth` a
+   predicate); add, mul (one side constant), floordiv (a constant divisor: floor), modular_indexing (x, constant
+   divisor, constant modulus: torch/utils/_sympy/functions.py ModularIndexing, (x floordiv d) mod m), python_mod
+   (constant modulus), minimum, maximum, where (predicate, a, b); lt, le, gt, ge, eq, ne (integers to a predicate);
+   and, or, not (predicates). NULL where isl has no quasi-affine value (a product of two non-constants, a non-constant
+   divisor or modulus, a NULL operand); each free'd with mesh_graph_index_free. */
+struct mesh_graph_index;
+struct mesh_graph_index *mesh_graph_index_dim(struct mesh_graph_domain *, uint32_t dim);
+struct mesh_graph_index *mesh_graph_index_constant(struct mesh_graph_domain *, int64_t value);
+struct mesh_graph_index *mesh_graph_index_truth(struct mesh_graph_domain *, int truth);
+struct mesh_graph_index *mesh_graph_index_add(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_mul(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_floordiv(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_modular_indexing(const struct mesh_graph_index *x,
+                                                           const struct mesh_graph_index *divisor,
+                                                           const struct mesh_graph_index *modulus);
+struct mesh_graph_index *mesh_graph_index_python_mod(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_minimum(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_maximum(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_where(const struct mesh_graph_index *predicate, const struct mesh_graph_index *a,
+                                                const struct mesh_graph_index *b);
+enum { MESH_GRAPH_INDEX_LT, MESH_GRAPH_INDEX_LE, MESH_GRAPH_INDEX_GT, MESH_GRAPH_INDEX_GE, MESH_GRAPH_INDEX_EQ,
+       MESH_GRAPH_INDEX_NE };
+struct mesh_graph_index *mesh_graph_index_compare(uint32_t relation, const struct mesh_graph_index *,
+                                                  const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_or(const struct mesh_graph_index *, const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_not(const struct mesh_graph_index *);
+void mesh_graph_index_free(struct mesh_graph_index *);
+/* An access's retained relation { d -> byte : origin + element index(d) <= byte < origin + element (index(d) + 1),
+   guard(d), d in its domain }: `index` its element index (integer), or NULL where its producer's value is not
+   quasi-affine (data it loaded): then its original value range [lo, hi] (BOUND, never claimed exact); `guard` its
+   predicate (NULL unguarded), or `guard_data` 1 where its predicate reads data (GUARD_DATA: it may run anywhere in its
+   domain), `guard_source` the predicate's own identity (its LoopBody node's, 0 none). Refcounted; retains its domain. */
+enum { MESH_GRAPH_ACCESS_MAP_BOUND = 1, MESH_GRAPH_ACCESS_MAP_GUARD_DATA = 2 };
+int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const struct mesh_graph_index *index, int64_t lo,
+                             int64_t hi, const struct mesh_graph_index *guard, uint32_t guard_data,
+                             uint64_t guard_source, uint64_t origin, uint64_t element, struct mesh_graph_access_map **out);
+void mesh_graph_access_map_retain(const struct mesh_graph_access_map *);
+void mesh_graph_access_map_free(const struct mesh_graph_access_map *);
+/* its flags, guard identity and domain, and its bytes' least and greatest (an empty relation: 1 and 0) */
+uint32_t mesh_graph_access_map_flags(const struct mesh_graph_access_map *, uint64_t *guard_source);
+const struct mesh_graph_domain *mesh_graph_access_map_domain(const struct mesh_graph_access_map *);
+/* its identity: made once with the relation (64 random bits), the same in every saved and loaded copy of it, a new one
+   for each relation made of it (mesh_graph_access_map_placed) */
+uint64_t mesh_graph_access_map_identity(const struct mesh_graph_access_map *);
+void mesh_graph_access_map_span(const struct mesh_graph_access_map *, int64_t *least, int64_t *greatest);
+/* The same relation's bytes in [start, end) moved by `shift` (a placement's page or copy: new physical bytes of one
+   relation), its flags kept; *out NULL where none are */
+int mesh_graph_access_map_placed(const struct mesh_graph_access_map *, int64_t start, int64_t end, int64_t shift,
+                             struct mesh_graph_access_map **out);
+/* The partitions of a received range each threadgroup g = (g_0, g_1, g_2) of a configured launch reaches: the
+   relation's domain restricted by the launch's own thread relation (Metal dispatchThreads: thread_position_in_grid =
+   g threads_per_threadgroup + thread_position_in_threadgroup), each ROOT dimension that is no reduction to its
+   threadgroup's positions on its axis, [g_axis group[axis], + group[axis]) (group[axis] 0: the axis whole, one
+   invocation's), every other dimension whole (a reduction root, a LOOP variable, an INDIRECT symbol), 0 <= g < groups, its bytes mapped to partition p of [start + p page, + page), 0 <= p < partitions (isl:
+   the image of the relation under that map, its parameters each threadgroup's); for threadgroup w = g_0 + groups[0]
+   (g_1 + groups[1] g_2) its partitions, ascending, partition[first[w] .. first[w + 1]) (*partition malloc'd, the
+   caller's; first[groups' product + 1] the caller's). A BOUND or GUARD_DATA relation's are its own data-dependent
+   bound, as its flags state */
+int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *, const uint32_t group[3],
+                                     const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
+                                     size_t *first, uint32_t **partition);
+/* isl's own text of the relation and its guard (isl_map_to_str, isl_set_to_str) with its domain, flags, guard
+   identity and span: mesh_graph_access_map_save into *bytes (malloc'd, the caller's); mesh_graph_access_map_load the
+   same relation, its domain and itself made in `context` */
+int mesh_graph_access_map_save(const struct mesh_graph_access_map *, void **bytes, size_t *length);
+int mesh_graph_access_map_load(struct mesh_graph_context *context, const void *bytes, size_t length,
+                               struct mesh_graph_access_map **out);
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §7, Fig. 4 */
 int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to, const uint64_t *delay,
                          const unsigned char *synchronization, unsigned char *redundant);
@@ -511,10 +614,12 @@ int mesh_graph_relation_convex(const struct mesh_graph_relation *, size_t member
    relocated into `bytes`), origin records (relations relocated), deciders (retained) and the deciders' map pointers. On success every loaded root shares `owner`, adopted
    as mesh_graph_relation_create does: release(owner) once the last of them is freed, `bytes` borrowed until then. On
    failure the caller keeps `owner` and nothing is kept. EINVAL for an archive whose spans or indices are out of
-   bounds */
+   bounds. An access view's relation (struct mesh_graph_access_map) is saved as isl's own text and loaded into
+   `context`, the loading compilation's one analysis context (retained by the loaded relations; EINVAL where the
+   archive holds one and `context` is NULL), so every relation loaded or made in that compilation composes with it */
 int mesh_graph_relation_save(const struct mesh_graph_relation *, void **bytes, size_t *length);
-int mesh_graph_relation_load(const void *bytes, size_t length, void (*release)(void *), void *owner,
-                             struct mesh_graph_relation **out);
+int mesh_graph_relation_load(struct mesh_graph_context *context, const void *bytes, size_t length,
+                             void (*release)(void *), void *owner, struct mesh_graph_relation **out);
 enum { MESH_GRAPH_COMPLETION_EVENT = 1 };
 struct mesh_graph_event { uint32_t object, role, argument, padding; uint64_t lookback; };
 struct mesh_graph_span { uint64_t first, count, begin, end; };

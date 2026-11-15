@@ -2913,7 +2913,7 @@ static void plan_actors_save(struct plan_archive *out,const struct mesh_function
 /* the record into f's parts, host, work, edge, edges and relation, views of the archive's bytes; a loaded relation
    (*relation, the caller's to release) holds its own reference to them */
 static int plan_actors_load(struct plan_archive *in,struct plan_bytes *bytes,struct mesh_function *f,
-                            struct mesh_graph_relation **relation){
+                            struct mesh_graph_relation **relation,struct mesh_graph_context *analysis){
   *relation=NULL;
   const struct plan_saved_actors *head=plan_archive_view(in,1,sizeof *head);
   if(!head)return in->status;
@@ -2925,7 +2925,9 @@ static int plan_actors_load(struct plan_archive *in,struct plan_bytes *bytes,str
     const void *archived=plan_archive_view(in,head->relation,1);
     if(!archived)return in->status;
     __atomic_fetch_add(&bytes->references,1,__ATOMIC_RELAXED);
-    const int status=mesh_graph_relation_load(archived,(size_t)head->relation,plan_bytes_release,bytes,relation);
+    /* the actors' relation (a quotient of its program's dispatch relation, whose views may be access relations), in
+       the loading compilation's analysis context */
+    const int status=mesh_graph_relation_load(analysis,archived,(size_t)head->relation,plan_bytes_release,bytes,relation);
     if(status){__atomic_fetch_sub(&bytes->references,1,__ATOMIC_RELAXED);return status;}
     const struct mesh_graph_relation_data *d=mesh_graph_relation_data(*relation);
     edge=d->edge;edges=d->edges;
@@ -3269,7 +3271,7 @@ static int plan_restore(struct mesh_ctx *context,uint64_t group,struct mesh_func
   memcpy(table_words+count,adjacency,adjacency_bytes);
   return plan_publish(context,group,functions,count,table,nodes,planned);
 }
-int mesh_plan_load(struct mesh_ctx *context,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
+int mesh_plan_load(struct mesh_ctx *context,struct mesh_graph_context *analysis,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
   const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
   const uint32_t *chains,uint64_t deadline,const void *bytes,size_t length,void (*release)(void *),void *owner,
   struct mesh_planned *planned){
@@ -3289,7 +3291,8 @@ int mesh_plan_load(struct mesh_ctx *context,uint64_t group,uint64_t program,stru
   struct plan_compiled *original=plan_compiled_of(functions,count);
   if(!original){mesh_planned_free(planned);return ENOMEM;}
   int status=0;
-  for(uint32_t f=0;!status && f<count;f++)status=plan_actors_load(&input,loaded->bytes,functions+f,loaded->relation+f);
+  for(uint32_t f=0;!status && f<count;f++)
+    status=plan_actors_load(&input,loaded->bytes,functions+f,loaded->relation+f,analysis);
   if(status){plan_compiled_restore(functions,count,original);free(original);mesh_planned_free(planned);return status;}
   struct mesh_nodes nodes;
   unsigned char digest[32];
@@ -3453,7 +3456,8 @@ static int plan_orders_valid(const struct mesh_planned *planned,const uint32_t *
    sections), ending `bytes` after it; the loaded owner's byte owner not yet adopted (its caller's).  The planned orders
    are validated in their domains here for a local result; a network result's (`network`) by mesh_program_load once its
    signature is read */
-static int plan_local_get(struct plan_archive *input,struct mesh_local *local,int network){
+static int plan_local_get(struct plan_archive *input,struct mesh_local *local,int network,
+                          struct mesh_graph_context *analysis){
   *local=(struct mesh_local){0};
   plan_archive_align(input);
   const size_t start=input->at;
@@ -3473,7 +3477,7 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
     const struct plan_saved_local_function *saved=plan_archive_view(input,1,sizeof *saved);
     const struct mesh_value *value=saved?plan_archive_view(input,saved->values,sizeof *value):NULL;
     status=input->status;
-    if(!status)status=plan_actors_load(input,loaded->bytes,x,loaded->relation+f);
+    if(!status)status=plan_actors_load(input,loaded->bytes,x,loaded->relation+f,analysis);
     if(!status){
       x->value=(struct mesh_value *)(uintptr_t)value;x->values=saved->values;
       x->outstanding=saved->outstanding;x->plan=saved->plan;
@@ -3490,7 +3494,7 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
     status=archived?0:input->status;
     if(!status){
       __atomic_fetch_add(&loaded->bytes->references,1,__ATOMIC_RELAXED);
-      status=mesh_graph_relation_load(archived,(size_t)head.relation,plan_bytes_release,loaded->bytes,relation);
+      status=mesh_graph_relation_load(analysis,archived,(size_t)head.relation,plan_bytes_release,loaded->bytes,relation);
       if(status)__atomic_fetch_sub(&loaded->bytes->references,1,__ATOMIC_RELAXED);
     }
   }
@@ -3542,11 +3546,12 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
 }
 /* every array bounded by the archive's bytes, each a view of them, the value tables included; the Function[]
    descriptors and the closure header the loaded result's own (plan_loaded) */
-int mesh_local_load(const void *bytes,size_t length,void (*release)(void *),void *owner,struct mesh_local *local){
+int mesh_local_load(struct mesh_graph_context *analysis,const void *bytes,size_t length,void (*release)(void *),
+                    void *owner,struct mesh_local *local){
   *local=(struct mesh_local){0};
   if((uintptr_t)bytes%8)return EINVAL;
   struct plan_archive input={.bytes=(void *)bytes,.size=length,.read=1};
-  int status=plan_local_get(&input,local,0);
+  int status=plan_local_get(&input,local,0,analysis);
   if(!status && input.at!=input.size)status=EINVAL;
   if(status){mesh_local_free(local);return status;}
   struct plan_loaded *loaded=local->planned.owned;
@@ -3676,15 +3681,16 @@ static int plan_arrays_get(struct plan_archive *in,struct mesh_function *x,const
 /* views of mesh_program_save's archive, but its relocated or repointed storage, one block the loaded owner owns
    (plan_loaded `rewritten`): each function's declared (their pairs views of the archive) and value table, the roots
    and the copies' rows; and the planned calls, which the publication writes (plan_loaded `call`) */
-int mesh_program_load(struct mesh_ctx *context,uint64_t group,uint64_t program,uint64_t deadline,const void *bytes,
-                      size_t length,void (*release)(void *),void *owner,struct mesh_local *local){
+int mesh_program_load(struct mesh_ctx *context,struct mesh_graph_context *analysis,uint64_t group,uint64_t program,
+                      uint64_t deadline,const void *bytes,size_t length,void (*release)(void *),void *owner,
+                      struct mesh_local *local){
   *local=(struct mesh_local){0};
   struct hdr *m=context->M;
   struct plan_archive input={.bytes=(void *)bytes,.size=length,.read=1};
   struct plan_saved_program top={0};
   plan_archive_bytes(&input,&top,sizeof top);
   if((uintptr_t)bytes%8 || input.status || top.magic!=PLAN_SAVED_PROGRAM || top.bytes!=length || !group)return EINVAL;
-  int status=plan_local_get(&input,local,1);
+  int status=plan_local_get(&input,local,1,analysis);
   if(status)return status;
   struct plan_loaded *loaded=local->planned.owned;
   struct mesh_planned *planned=&local->planned;

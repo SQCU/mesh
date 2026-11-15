@@ -68,8 +68,10 @@ int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,con
    design/disjoint-pages-change-request.md C3.1, "Landings and cancellations both arrive on the count"; rdma/mesh-flow.c
    count_raise. The readiness obligation of a dispatch reading `ranges` received ranges, every quantity static but the
    view binding (mesh_metal_transport `state`) and the dispatch's execution e_b (its step word). Threadgroup g, linear
-   index l = g_x + groups_x (g_y + groups_y g_z), reads transport fields [span[2 (class_of[l] ranges + d)],
-   span[... + 1]) of range d (equal ends: none). For range d at
+   index l = g_x + groups_x (g_y + groups_y g_z), reads exactly the transport fields of range d its class's membership
+   names: member[0] the entries' first word E, entries [member[1 + c ranges + d], member[2 + c ranges + d]) of class c =
+   class_of[l] and range d, entry k the pair {member[E + 2 k], member[E + 2 k + 1]}: a phase word w (fields 16 w ..
+   16 w + 15) and its fields' mask (bit 2 (f mod 16) for each field f read). For range d at
    e: r = e / copies, c = e mod copies; field f is the 2-bit field at bit 2 (f mod 16) of the 32-bit word at view byte
    phases + c group + 4 (f / 16); f has landed where it is mesh.h mesh_phase(r + 1) and is ahead where it is neither
    that nor mesh_phase(r); the range is due where its count word, view byte count + 8 c, is at least (r + 1) pages.
@@ -78,14 +80,19 @@ int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,con
    field has not landed. A failure adds 1 to the status word's `ahead` (a field ahead) or `behind` (otherwise) and
    raises its `first` to the 64-bit maximum with ~e_b (mesh.h struct mesh_status at view byte `status`) and ends the
    group. A ready group's reads follow a system-scope sequentially consistent fence after its last test */
-struct mesh_metal_readiness { uint32_t ranges,classes,groups,padding; const struct mesh_metal_range *range;
-                              uint32_t *span,*class_of; uint64_t status; };
+struct mesh_metal_readiness { uint32_t ranges,classes,groups,members; const struct mesh_metal_range *range;
+                              uint32_t *member,*class_of; uint64_t status; };
 /* `readiness` names its ranges, groups (the grid's threadgroups, groups[0] groups[1] groups[2]), status and room for
-   span (2 groups ranges entries) and class_of (groups); the classes, class_of and spans from the dispatch's footprints
-   (mesh-graph.h struct mesh_graph_footprint, their terms in `term`, evaluated at each threadgroup), footprint k's
-   binding a view of range[k] (UINT32_MAX: of no received range): each class one distinct row of the partitions a
-   threadgroup reaches (all of a range no footprint names, since the dispatch reads every range it lists), its span of
-   range d the least and one past the greatest field whose partition is within that row's bounds of d */
+   class_of (groups); mesh_metal_mask_partitions makes its classes, class_of and membership (`member`, `members` u32
+   words, malloc'd: the caller's to free) from the partitions each access reaches at each threadgroup: access a's at
+   threadgroup w (w = g_0 + groups[0] (g_1 + groups[1] g_2)) partition[first[w accesses + a] .. first[w accesses + a +
+   1]), ascending, of range[a] (UINT32_MAX: of no received range): each class one distinct row of the fields its
+   threadgroups read, a field f of range d read where its partition (range[d].field[f]) is one an access of d reaches
+   (every field of a range no access names, since the dispatch reads every range it lists) */
+int mesh_metal_mask_partitions(const uint32_t groups[3],size_t accesses,const size_t *first,const uint32_t *partition,
+                               const uint32_t *range,struct mesh_metal_readiness *readiness);
+/* the same from footprints (mesh-graph.h struct mesh_graph_footprint, their terms in `term`, evaluated at each
+   threadgroup, footprint k's binding a view of range[k]): each footprint's partitions [start + terms(g), + extent) */
 int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh_graph_footprint *footprint,
                     const struct mesh_graph_term *term,const uint32_t *range,struct mesh_metal_readiness *readiness);
 /* design/disjoint-pages-change-request.md C3.1, C3.2 and C3.7; PTX ISA §8.8; S. Flur et al., POPL 2017: the release

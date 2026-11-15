@@ -16,6 +16,11 @@
 #include <isl/set.h>
 #include <isl/space.h>
 #include <isl/val.h>
+#include <isl/aff.h>
+#include <isl/map.h>
+#include <isl/options.h>
+#include <isl/ilp.h>
+#include <isl/point.h>
 
 uint32_t mesh_graph_row_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
 
@@ -2654,43 +2659,505 @@ static int view_hull_end(const struct view_part *v, __int128 *end) {
   }
   return !__builtin_add_overflow((__int128)v->offset, w, end);
 }
-static isl_val *view_value(isl_ctx *ctx, uint64_t x, int negative) {
-  isl_val *v = isl_val_int_from_ui(ctx, (unsigned long)x);
-  return negative ? isl_val_neg(v) : v;
+/* mesh-graph.h struct mesh_graph_context: one isl_ctx (its errors returned as NULL results: ISL_ON_ERROR_CONTINUE)
+   under one recursive lock, refcounted */
+struct mesh_graph_context { isl_ctx *ctx; pthread_mutex_t lock; size_t references; };
+int mesh_graph_context_create(struct mesh_graph_context **out) {
+  *out = NULL;
+  struct mesh_graph_context *c = calloc(1, sizeof *c);
+  if (!c) return ENOMEM;
+  pthread_mutexattr_t recursive;
+  pthread_mutexattr_init(&recursive);
+  pthread_mutexattr_settype(&recursive, PTHREAD_MUTEX_RECURSIVE);
+  const int status = pthread_mutex_init(&c->lock, &recursive);
+  pthread_mutexattr_destroy(&recursive);
+  if (status) { free(c); return status; }
+  if (!(c->ctx = isl_ctx_alloc())) { pthread_mutex_destroy(&c->lock); free(c); return ENOMEM; }
+  isl_options_set_on_error(c->ctx, ISL_ON_ERROR_CONTINUE);
+  c->references = 1;
+  *out = c;
+  return 0;
 }
-/* whether some byte is in both views: the integer points (i_k < size_k of a's dimensions, j_l < size_l of b's, u <
-   a's element, v < b's) of a.offset + sum_k i_k stride_k + u = b.offset + sum_l j_l stride_l + v, isl_basic_set_is_empty
-   over them (exact, arbitrary precision); disjoint hulls first. 1 meets, 0 not, -errno */
-static int view_meets(isl_ctx *ctx, const struct view_part *a, const struct view_part *b) {
-  __int128 ea, eb;
-  if (view_hull_end(a, &ea) && view_hull_end(b, &eb) && ((__int128)a->offset >= eb || (__int128)b->offset >= ea)) return 0;
-  const unsigned n = a->dims + b->dims + 2;
+void mesh_graph_context_retain(struct mesh_graph_context *c) { __atomic_fetch_add(&c->references, 1, __ATOMIC_RELAXED); }
+void mesh_graph_context_free(struct mesh_graph_context *c) {
+  if (!c || __atomic_sub_fetch(&c->references, 1, __ATOMIC_ACQ_REL)) return;
+  isl_ctx_free(c->ctx);
+  pthread_mutex_destroy(&c->lock);
+  free(c);
+}
+
+/* mesh-graph.h struct mesh_graph_domain: its dimensions and their box { d : lo_k <= d_k <= hi_k } */
+struct mesh_graph_domain { size_t references; struct mesh_graph_context *context; uint32_t dims;
+                           struct mesh_graph_domain_dim *dim; isl_set *box; };
+static isl_set *domain_box(isl_ctx *ctx, uint32_t dims, const struct mesh_graph_domain_dim *dim) {
+  isl_space *space = isl_space_set_alloc(ctx, 0, dims);
+  isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
+  isl_basic_set *box = isl_basic_set_universe(space);
+  for (uint32_t k = 0; k < dims; k++) {
+    isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
+                                                          isl_dim_set, (int)k, 1);
+    box = isl_basic_set_add_constraint(box, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, -dim[k].lo)));
+    c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_set,
+                                          (int)k, -1);
+    box = isl_basic_set_add_constraint(box, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, dim[k].hi)));
+  }
+  isl_local_space_free(local);
+  return isl_set_from_basic_set(box);
+}
+int mesh_graph_domain_create(struct mesh_graph_context *context, uint32_t dims, const struct mesh_graph_domain_dim *dim,
+                             struct mesh_graph_domain **out) {
+  *out = NULL;
+  struct mesh_graph_domain *d = calloc(1, sizeof *d);
+  if (d) d->dim = malloc(((size_t)dims + 1) * sizeof *d->dim);
+  if (!d || !d->dim) { if (d) free(d->dim); free(d); return ENOMEM; }
+  if (dims) memcpy(d->dim, dim, (size_t)dims * sizeof *dim);
+  d->dims = dims; d->references = 1;
+  pthread_mutex_lock(&context->lock);
+  d->box = domain_box(context->ctx, dims, d->dim);
+  pthread_mutex_unlock(&context->lock);
+  if (!d->box) { free(d->dim); free(d); return ENOMEM; }
+  mesh_graph_context_retain(context);
+  d->context = context;
+  *out = d;
+  return 0;
+}
+void mesh_graph_domain_retain(struct mesh_graph_domain *d) { __atomic_fetch_add(&d->references, 1, __ATOMIC_RELAXED); }
+void mesh_graph_domain_free(struct mesh_graph_domain *d) {
+  if (!d || __atomic_sub_fetch(&d->references, 1, __ATOMIC_ACQ_REL)) return;
+  struct mesh_graph_context *c = d->context;
+  pthread_mutex_lock(&c->lock);
+  isl_set_free(d->box);
+  pthread_mutex_unlock(&c->lock);
+  free(d->dim); free(d);
+  mesh_graph_context_free(c);
+}
+const struct mesh_graph_domain_dim *mesh_graph_domain_dims(const struct mesh_graph_domain *d, uint32_t *dims) {
+  *dims = d->dims;
+  return d->dim;
+}
+struct mesh_graph_context *mesh_graph_domain_context(const struct mesh_graph_domain *d) { return d->context; }
+
+/* mesh-graph.h struct mesh_graph_index: an isl_pw_aff (`value`) or isl_set (`predicate`) over its domain's space */
+struct mesh_graph_index { struct mesh_graph_domain *domain; isl_pw_aff *value; isl_set *predicate; };
+/* the result of one isl operation (made under the domain's lock), NULL where isl made none */
+static struct mesh_graph_index *index_made(struct mesh_graph_domain *domain, isl_pw_aff *value, isl_set *predicate) {
+  if (!value && !predicate) return NULL;
+  struct mesh_graph_index *x = malloc(sizeof *x);
+  if (!x) { isl_pw_aff_free(value); isl_set_free(predicate); return NULL; }
+  mesh_graph_domain_retain(domain);
+  *x = (struct mesh_graph_index){domain, value, predicate};
+  return x;
+}
+#define INDEX_LOCKED(domain, made) do { pthread_mutex_lock(&(domain)->context->lock); \
+    struct mesh_graph_index *result_ = (made); pthread_mutex_unlock(&(domain)->context->lock); return result_; } while (0)
+struct mesh_graph_index *mesh_graph_index_dim(struct mesh_graph_domain *d, uint32_t dim) {
+  INDEX_LOCKED(d, index_made(d, isl_pw_aff_var_on_domain(isl_local_space_from_space(isl_set_get_space(d->box)),
+                                                         isl_dim_set, dim), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_constant(struct mesh_graph_domain *d, int64_t value) {
+  INDEX_LOCKED(d, index_made(d, isl_pw_aff_val_on_domain(isl_set_universe(isl_set_get_space(d->box)),
+                                                         isl_val_int_from_si(d->context->ctx, value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_truth(struct mesh_graph_domain *d, int truth) {
+  INDEX_LOCKED(d, index_made(d, NULL, truth ? isl_set_universe(isl_set_get_space(d->box))
+                                            : isl_set_empty(isl_set_get_space(d->box))));
+}
+/* integer operands (predicates), present */
+static int index_values(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  return a && b && a->value && b->value;
+}
+static int index_predicates(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  return a && b && a->predicate && b->predicate;
+}
+static isl_pw_aff *index_floor(isl_pw_aff *a, isl_pw_aff *d) { return isl_pw_aff_floor(isl_pw_aff_div(a, d)); }
+/* a - m floor(a / m): Python's a % m (torch/utils/_sympy/functions.py PythonMod), m constant */
+static isl_pw_aff *index_mod(isl_pw_aff *a, isl_pw_aff *m) {
+  return isl_pw_aff_sub(isl_pw_aff_copy(a), isl_pw_aff_mul(isl_pw_aff_copy(m), index_floor(a, m)));
+}
+struct mesh_graph_index *mesh_graph_index_add(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, isl_pw_aff_add(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_mul(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, isl_pw_aff_mul(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_floordiv(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, index_floor(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_python_mod(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, index_mod(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_modular_indexing(const struct mesh_graph_index *x,
+                                                           const struct mesh_graph_index *divisor,
+                                                           const struct mesh_graph_index *modulus) {
+  if (!index_values(x, divisor) || !index_values(x, modulus)) return NULL;
+  INDEX_LOCKED(x->domain, index_made(x->domain, index_mod(index_floor(isl_pw_aff_copy(x->value),
+                                                                      isl_pw_aff_copy(divisor->value)),
+                                                          isl_pw_aff_copy(modulus->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_minimum(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, isl_pw_aff_min(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_maximum(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, isl_pw_aff_max(isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_where(const struct mesh_graph_index *predicate, const struct mesh_graph_index *a,
+                                                const struct mesh_graph_index *b) {
+  if (!predicate || !predicate->predicate || !index_values(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, isl_pw_aff_cond(isl_set_indicator_function(isl_set_copy(predicate->predicate)),
+                                                                isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value)), NULL));
+}
+struct mesh_graph_index *mesh_graph_index_compare(uint32_t relation, const struct mesh_graph_index *a,
+                                                  const struct mesh_graph_index *b) {
+  if (!index_values(a, b)) return NULL;
+  isl_set *(*const compare[])(isl_pw_aff *, isl_pw_aff *) = {isl_pw_aff_lt_set, isl_pw_aff_le_set, isl_pw_aff_gt_set,
+                                                             isl_pw_aff_ge_set, isl_pw_aff_eq_set, isl_pw_aff_ne_set};
+  if (relation >= sizeof compare / sizeof *compare) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, NULL, compare[relation](isl_pw_aff_copy(a->value), isl_pw_aff_copy(b->value))));
+}
+struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_predicates(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, NULL, isl_set_intersect(isl_set_copy(a->predicate), isl_set_copy(b->predicate))));
+}
+struct mesh_graph_index *mesh_graph_index_or(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
+  if (!index_predicates(a, b)) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, NULL, isl_set_union(isl_set_copy(a->predicate), isl_set_copy(b->predicate))));
+}
+struct mesh_graph_index *mesh_graph_index_not(const struct mesh_graph_index *a) {
+  if (!a || !a->predicate) return NULL;
+  INDEX_LOCKED(a->domain, index_made(a->domain, NULL, isl_set_complement(isl_set_copy(a->predicate))));
+}
+#undef INDEX_LOCKED
+void mesh_graph_index_free(struct mesh_graph_index *x) {
+  if (!x) return;
+  struct mesh_graph_domain *d = x->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_pw_aff_free(x->value); isl_set_free(x->predicate);
+  pthread_mutex_unlock(&d->context->lock);
+  free(x);
+  mesh_graph_domain_free(d);
+}
+
+/* mesh-graph.h struct mesh_graph_access_map: the retained relation, its guard, flags and bytes' span */
+struct mesh_graph_access_map { size_t references; struct mesh_graph_domain *domain; isl_map *relation; isl_set *guard;
+                           uint32_t flags; uint64_t guard_source; int64_t least, greatest; uint64_t identity; };
+/* an inequality sum coefficient x + constant >= 0 of a map's in (k < ins) and out dimensions */
+static isl_basic_map *access_bound(isl_basic_map *m, isl_local_space *local, isl_ctx *ctx, unsigned ins,
+                                   const int64_t *coefficient, unsigned n, int64_t constant) {
+  isl_constraint *c = isl_constraint_alloc_inequality(isl_local_space_copy(local));
+  for (unsigned k = 0; k < n; k++)
+    if (coefficient[k]) c = isl_constraint_set_coefficient_val(c, k < ins ? isl_dim_in : isl_dim_out,
+                                                              (int)(k < ins ? k : k - ins), isl_val_int_from_si(ctx, coefficient[k]));
+  return isl_basic_map_add_constraint(m, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, constant)));
+}
+/* { [i] -> [b] : origin + element i <= b <= origin + element i + element - 1 } */
+static isl_map *access_elements(isl_ctx *ctx, uint64_t origin, uint64_t element) {
+  isl_space *space = isl_space_alloc(ctx, 0, 1, 1);
+  isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
+  isl_basic_map *m = isl_basic_map_universe(space);
+  m = access_bound(m, local, ctx, 1, (const int64_t[]){-(int64_t)element, 1}, 2, -(int64_t)origin);
+  m = access_bound(m, local, ctx, 1, (const int64_t[]){(int64_t)element, -1}, 2, (int64_t)origin + (int64_t)element - 1);
+  isl_local_space_free(local);
+  return isl_map_from_basic_map(m);
+}
+/* the relation's bytes' least and greatest (empty: 1 and 0), under the lock; ENOMEM where isl gives none */
+static int access_measured(struct mesh_graph_access_map *a) {
+  a->least = 1; a->greatest = 0;
+  isl_set *bytes = isl_map_range(isl_map_copy(a->relation));
+  const isl_bool empty = bytes ? isl_set_is_empty(bytes) : isl_bool_error;
+  int status = empty == isl_bool_error ? ENOMEM : 0;
+  if (empty == isl_bool_false) {
+    isl_val *lo = isl_set_dim_min_val(isl_set_copy(bytes), 0), *hi = isl_set_dim_max_val(isl_set_copy(bytes), 0);
+    if (lo && hi && isl_val_is_int(lo) && isl_val_is_int(hi)) { a->least = isl_val_get_num_si(lo); a->greatest = isl_val_get_num_si(hi); }
+    else status = ENOMEM;
+    isl_val_free(lo); isl_val_free(hi);
+  }
+  isl_set_free(bytes);
+  return status;
+}
+static struct mesh_graph_access_map *access_new(struct mesh_graph_domain *domain, isl_map *relation, isl_set *guard,
+                                            uint32_t flags, uint64_t guard_source) {
+  struct mesh_graph_access_map *a = relation ? calloc(1, sizeof *a) : NULL;
+  if (!a) { isl_map_free(relation); isl_set_free(guard); return NULL; }
+  mesh_graph_domain_retain(domain);
+  *a = (struct mesh_graph_access_map){1, domain, relation, guard, flags, guard_source, 1, 0, 0};
+  /* its identity: 64 random bits, made once with the relation, kept by every copy of it saved and loaded */
+  arc4random_buf(&a->identity, sizeof a->identity);
+  if (access_measured(a)) { mesh_graph_access_map_free(a); return NULL; }
+  return a;
+}
+int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const struct mesh_graph_index *index, int64_t lo,
+                             int64_t hi, const struct mesh_graph_index *guard, uint32_t guard_data,
+                             uint64_t guard_source, uint64_t origin, uint64_t element, struct mesh_graph_access_map **out) {
+  struct mesh_graph_domain *d = (struct mesh_graph_domain *)domain;
+  isl_ctx *ctx = d->context->ctx;
+  pthread_mutex_lock(&d->context->lock);
+  isl_map *indexed;
+  if (index && index->value) indexed = isl_map_from_pw_aff(isl_pw_aff_copy(index->value));
+  else {
+    /* { d -> [i] : lo <= i <= hi } */
+    isl_space *space = isl_space_map_from_domain_and_range(isl_set_get_space(d->box), isl_space_set_alloc(ctx, 0, 1));
+    isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
+    isl_basic_map *m = isl_basic_map_universe(space);
+    int64_t *c = calloc((size_t)d->dims + 1, sizeof *c);
+    if (c) {
+      c[d->dims] = 1;
+      m = access_bound(m, local, ctx, d->dims, c, d->dims + 1, -lo);
+      c[d->dims] = -1;
+      m = access_bound(m, local, ctx, d->dims, c, d->dims + 1, hi);
+    } else m = isl_basic_map_free(m);
+    free(c);
+    isl_local_space_free(local);
+    indexed = m ? isl_map_from_basic_map(m) : NULL;
+  }
+  isl_set *where = guard && guard->predicate ? isl_set_copy(guard->predicate) : NULL;
+  isl_set *reached = isl_set_copy(d->box);
+  if (where) reached = isl_set_intersect(reached, isl_set_copy(where));
+  isl_map *relation = isl_map_intersect_domain(isl_map_apply_range(indexed, access_elements(ctx, origin, element)), reached);
+  *out = access_new(d, relation, where, (index && index->value ? 0 : MESH_GRAPH_ACCESS_MAP_BOUND) |
+                                        (guard_data ? MESH_GRAPH_ACCESS_MAP_GUARD_DATA : 0), guard_source);
+  pthread_mutex_unlock(&d->context->lock);
+  return *out ? 0 : ENOMEM;
+}
+void mesh_graph_access_map_retain(const struct mesh_graph_access_map *a) {
+  __atomic_fetch_add(&((struct mesh_graph_access_map *)a)->references, 1, __ATOMIC_RELAXED);
+}
+void mesh_graph_access_map_free(const struct mesh_graph_access_map *access) {
+  struct mesh_graph_access_map *a = (struct mesh_graph_access_map *)access;
+  if (!a || __atomic_sub_fetch(&a->references, 1, __ATOMIC_ACQ_REL)) return;
+  struct mesh_graph_domain *d = a->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_map_free(a->relation); isl_set_free(a->guard);
+  pthread_mutex_unlock(&d->context->lock);
+  free(a);
+  mesh_graph_domain_free(d);
+}
+uint32_t mesh_graph_access_map_flags(const struct mesh_graph_access_map *a, uint64_t *guard_source) {
+  if (guard_source) *guard_source = a->guard_source;
+  return a->flags;
+}
+const struct mesh_graph_domain *mesh_graph_access_map_domain(const struct mesh_graph_access_map *a) { return a->domain; }
+uint64_t mesh_graph_access_map_identity(const struct mesh_graph_access_map *a) { return a->identity; }
+void mesh_graph_access_map_span(const struct mesh_graph_access_map *a, int64_t *least, int64_t *greatest) {
+  *least = a->least; *greatest = a->greatest;
+}
+int mesh_graph_access_map_placed(const struct mesh_graph_access_map *a, int64_t start, int64_t end, int64_t shift,
+                             struct mesh_graph_access_map **out) {
+  *out = NULL;
+  if (end <= start || a->greatest < start || a->least >= end) return 0;
+  struct mesh_graph_domain *d = a->domain;
+  isl_ctx *ctx = d->context->ctx;
+  pthread_mutex_lock(&d->context->lock);
+  /* { [b] : start <= b <= end - 1 } and { [b] -> [b + shift] } */
+  isl_space *line = isl_space_set_alloc(ctx, 0, 1);
+  isl_local_space *local = isl_local_space_from_space(isl_space_copy(line));
+  isl_basic_set *range = isl_basic_set_universe(line);
+  isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
+                                                        isl_dim_set, 0, 1);
+  range = isl_basic_set_add_constraint(range, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, -start)));
+  c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_set, 0, -1);
+  range = isl_basic_set_add_constraint(range, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, end - 1)));
+  isl_local_space_free(local);
+  isl_space *move = isl_space_alloc(ctx, 0, 1, 1);
+  local = isl_local_space_from_space(isl_space_copy(move));
+  isl_basic_map *moved = isl_basic_map_universe(move);
+  c = isl_constraint_set_coefficient_si(isl_constraint_alloc_equality(isl_local_space_copy(local)), isl_dim_out, 0, 1);
+  c = isl_constraint_set_coefficient_si(c, isl_dim_in, 0, -1);
+  moved = isl_basic_map_add_constraint(moved, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, -shift)));
+  isl_local_space_free(local);
+  isl_map *relation = isl_map_apply_range(isl_map_intersect_range(isl_map_copy(a->relation), isl_set_from_basic_set(range)),
+                                          isl_map_from_basic_map(moved));
+  struct mesh_graph_access_map *made = access_new(d, relation, a->guard ? isl_set_copy(a->guard) : NULL, a->flags, a->guard_source);
+  int status = made ? 0 : ENOMEM;
+  if (made && made->least > made->greatest) { pthread_mutex_unlock(&d->context->lock); mesh_graph_access_map_free(made); return 0; }
+  pthread_mutex_unlock(&d->context->lock);
+  *out = made;
+  return status;
+}
+/* the restriction of a relation's domain to threadgroup g's own positions (g its three parameters, 0 <= g < groups):
+   each ROOT dimension that is no reduction, on axis `axis` with group[axis] > 0, within [group g_axis, + group) */
+static isl_set *access_own(const struct mesh_graph_domain *d, isl_space *space, const uint32_t group[3],
+                           const uint32_t groups[3]) {
+  isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
+  isl_basic_set *own = isl_basic_set_universe(space);
+  for (uint32_t axis = 0; axis < 3; axis++) {
+    own = isl_basic_set_add_constraint(own, isl_constraint_set_coefficient_si(
+        isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_param, (int)axis, 1));
+    isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
+                                                          isl_dim_param, (int)axis, -1);
+    own = isl_basic_set_add_constraint(own, isl_constraint_set_constant_si(c, (int)groups[axis] - 1));
+  }
+  for (uint32_t k = 0; k < d->dims; k++) {
+    const struct mesh_graph_domain_dim *x = d->dim + k;
+    if (x->kind != MESH_GRAPH_DOMAIN_ROOT || x->reduction || x->axis >= 3 || !group[x->axis]) continue;
+    isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
+                                                          isl_dim_set, (int)k, 1);
+    own = isl_basic_set_add_constraint(own, isl_constraint_set_coefficient_si(c, isl_dim_param, (int)x->axis,
+                                                                              -(int)group[x->axis]));
+    c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_set,
+                                          (int)k, -1);
+    c = isl_constraint_set_coefficient_si(c, isl_dim_param, (int)x->axis, (int)group[x->axis]);
+    own = isl_basic_set_add_constraint(own, isl_constraint_set_constant_si(c, (int)group[x->axis] - 1));
+  }
+  isl_local_space_free(local);
+  return isl_set_from_basic_set(own);
+}
+/* one threadgroup's partitions as isl enumerates its (bounded, one-dimensional) set's points */
+struct access_points { uint32_t *partition; size_t count, room; int status; };
+static isl_stat access_point(isl_point *point, void *user) {
+  struct access_points *x = user;
+  isl_val *v = isl_point_get_coordinate_val(point, isl_dim_set, 0);
+  isl_point_free(point);
+  if (!v || !isl_val_is_int(v)) { isl_val_free(v); x->status = ENOMEM; return isl_stat_error; }
+  if (x->count == x->room) {
+    uint32_t *grown = realloc(x->partition, (x->room ? 2 * x->room : 64) * sizeof *grown);
+    if (!grown) { isl_val_free(v); x->status = ENOMEM; return isl_stat_error; }
+    x->partition = grown; x->room = x->room ? 2 * x->room : 64;
+  }
+  x->partition[x->count++] = (uint32_t)isl_val_get_num_si(v);
+  isl_val_free(v);
+  return isl_stat_ok;
+}
+static int access_ascending(const void *a, const void *b) {
+  const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+  return (x > y) - (x < y);
+}
+int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, const uint32_t group[3],
+                                     const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
+                                     size_t *first, uint32_t **partition) {
+  *partition = NULL;
+  const uint64_t G = (uint64_t)groups[0] * groups[1] * groups[2];
+  for (uint64_t w = 0; w <= G; w++) first[w] = 0;
+  const int64_t end = start + (int64_t)page * (int64_t)partitions;
+  if (!G || !page || !partitions || a->greatest < start || a->least >= end) return 0;
+  struct mesh_graph_domain *d = a->domain;
+  isl_ctx *ctx = d->context->ctx;
+  pthread_mutex_lock(&d->context->lock);
+  isl_map *relation = isl_map_add_dims(isl_map_copy(a->relation), isl_dim_param, 3);
+  relation = isl_map_intersect_domain(relation, access_own(d, isl_space_domain(isl_map_get_space(relation)), group, groups));
+  /* { [b] -> [p] : start + page p <= b <= start + page p + page - 1, 0 <= p <= partitions - 1 } */
+  isl_space *space = isl_space_alloc(ctx, 3, 1, 1);
+  isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
+  isl_basic_map *of = isl_basic_map_universe(space);
+  of = access_bound(of, local, ctx, 1, (const int64_t[]){1, -(int64_t)page}, 2, -start);
+  of = access_bound(of, local, ctx, 1, (const int64_t[]){-1, (int64_t)page}, 2, start + (int64_t)page - 1);
+  of = access_bound(of, local, ctx, 1, (const int64_t[]){0, 1}, 2, 0);
+  of = access_bound(of, local, ctx, 1, (const int64_t[]){0, -1}, 2, (int64_t)partitions - 1);
+  isl_local_space_free(local);
+  isl_set *reached = isl_map_range(isl_map_apply_range(relation, isl_map_from_basic_map(of)));
+  struct access_points x = {NULL, 0, 0, reached ? 0 : ENOMEM};
+  for (uint64_t w = 0; !x.status && w < G; w++) {
+    const uint32_t g[3] = {(uint32_t)(w % groups[0]), (uint32_t)(w / groups[0] % groups[1]),
+                           (uint32_t)(w / groups[0] / groups[1])};
+    isl_set *own = isl_set_copy(reached);
+    for (int axis = 0; axis < 3; axis++) own = isl_set_fix_si(own, isl_dim_param, axis, (int)g[axis]);
+    const size_t before = x.count;
+    if (!own || isl_set_foreach_point(own, access_point, &x) < 0) { if (!x.status) x.status = ENOMEM; }
+    isl_set_free(own);
+    if (x.count > before) qsort(x.partition + before, x.count - before, sizeof *x.partition, access_ascending);
+    first[w + 1] = x.count;
+  }
+  isl_set_free(reached);
+  pthread_mutex_unlock(&d->context->lock);
+  if (x.status) { free(x.partition); for (uint64_t w = 0; w <= G; w++) first[w] = 0; return x.status; }
+  *partition = x.partition;
+  return 0;
+}
+/* mesh_graph_access_map_save: {magic, flags, guard_source, least, greatest, dims, relation and guard text lengths}, the
+   domain's dimensions, then isl's texts (isl_map_to_str, isl_set_to_str, each with its NUL) */
+struct access_saved { uint64_t magic; uint32_t flags, dims; uint64_t guard_source, identity; int64_t least, greatest;
+                      uint64_t relation, guard; };
+#define ACCESS_SAVED UINT64_C(0x3153454343414d47)
+int mesh_graph_access_map_save(const struct mesh_graph_access_map *a, void **bytes, size_t *length) {
+  *bytes = NULL; *length = 0;
+  struct mesh_graph_domain *d = a->domain;
+  pthread_mutex_lock(&d->context->lock);
+  char *relation = isl_map_to_str(a->relation), *guard = a->guard ? isl_set_to_str(a->guard) : NULL;
+  pthread_mutex_unlock(&d->context->lock);
+  const size_t r = relation ? strlen(relation) + 1 : 0, g = guard ? strlen(guard) + 1 : 0;
+  const size_t total = sizeof(struct access_saved) + (size_t)d->dims * sizeof *d->dim + r + g;
+  char *out = relation && (!a->guard || guard) ? malloc(total) : NULL;
+  if (out) {
+    const struct access_saved head = {ACCESS_SAVED, a->flags, d->dims, a->guard_source, a->identity, a->least,
+                                      a->greatest, r, g};
+    char *at = out;
+    memcpy(at, &head, sizeof head); at += sizeof head;
+    if (d->dims) memcpy(at, d->dim, (size_t)d->dims * sizeof *d->dim);
+    at += (size_t)d->dims * sizeof *d->dim;
+    memcpy(at, relation, r); at += r;
+    if (g) memcpy(at, guard, g);
+    *bytes = out; *length = total;
+  }
+  free(relation); free(guard);
+  return out ? 0 : ENOMEM;
+}
+int mesh_graph_access_map_load(struct mesh_graph_context *context, const void *bytes, size_t length,
+                           struct mesh_graph_access_map **out) {
+  *out = NULL;
+  struct access_saved head;
+  if (length < sizeof head) return EINVAL;
+  memcpy(&head, bytes, sizeof head);
+  const char *at = (const char *)bytes + sizeof head;
+  const size_t dims = (size_t)head.dims * sizeof(struct mesh_graph_domain_dim);
+  if (head.magic != ACCESS_SAVED || dims > length - sizeof head || head.relation > length - sizeof head - dims ||
+      head.guard != length - sizeof head - dims - head.relation || !head.relation || at[dims + head.relation - 1] ||
+      (head.guard && at[dims + head.relation + head.guard - 1])) return EINVAL;
+  struct mesh_graph_domain_dim *dim = malloc(dims + 1);
+  if (!dim) return ENOMEM;
+  memcpy(dim, at, dims);
+  struct mesh_graph_domain *domain = NULL;
+  int status = mesh_graph_domain_create(context, head.dims, dim, &domain);
+  free(dim);
+  if (status) return status;
+  pthread_mutex_lock(&context->lock);
+  isl_map *relation = isl_map_read_from_str(context->ctx, at + dims);
+  isl_set *guard = head.guard ? isl_set_read_from_str(context->ctx, at + dims + head.relation) : NULL;
+  struct mesh_graph_access_map *a = relation && (!head.guard || guard) ? calloc(1, sizeof *a) : NULL;
+  if (a) {
+    mesh_graph_domain_retain(domain);
+    *a = (struct mesh_graph_access_map){1, domain, relation, guard, head.flags, head.guard_source, head.least, head.greatest,
+                                        head.identity};
+  } else { isl_map_free(relation); isl_set_free(guard); }
+  pthread_mutex_unlock(&context->lock);
+  mesh_graph_domain_free(domain);
+  *out = a;
+  return a ? 0 : EINVAL;
+}
+
+/* design/compilation-composition-change-request.md, "Complete replacement workgroup" (exact effects without
+   enumeration): a view's bytes as one isl set of the query's context, made once per view and query: an access
+   relation's range (its own map), else a strided view's { b : b = offset + sum_k i_k stride_k + u, 0 <= i_k < size_k,
+   0 <= u < element } (its index and byte dimensions projected out, exact). Two views meet exactly where the
+   intersection of their sets is not empty (isl_set_is_empty: exact, arbitrary precision) */
+static isl_set *view_bytes(isl_ctx *ctx, const struct mesh_graph_view *v) {
+  if (v->access) return isl_map_range(isl_map_copy(v->access->relation));
+  const unsigned dims = v->view.dims, n = dims + 2;
   isl_space *space = isl_space_set_alloc(ctx, 0, n);
   isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
   isl_basic_set *set = isl_basic_set_universe(space);
-  isl_constraint *c = isl_constraint_alloc_equality(isl_local_space_copy(local));
-  c = isl_constraint_set_constant_val(c, isl_val_sub(view_value(ctx, a->offset, 0), view_value(ctx, b->offset, 0)));
-  for (uint32_t k = 0; k < a->dims; k++)
-    c = isl_constraint_set_coefficient_val(c, isl_dim_set, (int)k, view_value(ctx, a->pairs[2 * k + 1], 0));
-  for (uint32_t l = 0; l < b->dims; l++)
-    c = isl_constraint_set_coefficient_val(c, isl_dim_set, (int)(a->dims + l), view_value(ctx, b->pairs[2 * l + 1], 1));
-  c = isl_constraint_set_coefficient_si(c, isl_dim_set, (int)(n - 2), 1);
-  c = isl_constraint_set_coefficient_si(c, isl_dim_set, (int)(n - 1), -1);
-  set = isl_basic_set_add_constraint(set, c);
-  for (unsigned x = 0; x < n; x++) {
-    const uint64_t size = x < a->dims ? a->pairs[2 * x] : x < a->dims + b->dims ? b->pairs[2 * (x - a->dims)] :
-                          x == n - 2 ? a->element : b->element;
-    c = isl_constraint_alloc_inequality(isl_local_space_copy(local));
-    set = isl_basic_set_add_constraint(set, isl_constraint_set_coefficient_si(c, isl_dim_set, (int)x, 1));
-    c = isl_constraint_alloc_inequality(isl_local_space_copy(local));
-    c = isl_constraint_set_coefficient_si(c, isl_dim_set, (int)x, -1);
-    set = isl_basic_set_add_constraint(set, isl_constraint_set_constant_val(c, isl_val_sub_ui(view_value(ctx, size, 0), 1)));
+  isl_constraint *e = isl_constraint_alloc_equality(isl_local_space_copy(local));
+  e = isl_constraint_set_constant_val(e, isl_val_int_from_ui(ctx, (unsigned long)v->view.offset));
+  for (unsigned k = 0; k < dims; k++)
+    e = isl_constraint_set_coefficient_val(e, isl_dim_set, (int)k, isl_val_int_from_ui(ctx, (unsigned long)v->view.pairs[2 * k + 1]));
+  e = isl_constraint_set_coefficient_si(e, isl_dim_set, (int)dims, 1);
+  set = isl_basic_set_add_constraint(set, isl_constraint_set_coefficient_si(e, isl_dim_set, (int)dims + 1, -1));
+  for (unsigned x = 0; x <= dims; x++) {
+    const uint64_t size = x < dims ? v->view.pairs[2 * x] : v->view.element;
+    isl_constraint *q = isl_constraint_alloc_inequality(isl_local_space_copy(local));
+    set = isl_basic_set_add_constraint(set, isl_constraint_set_coefficient_si(q, isl_dim_set, (int)x, 1));
+    q = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_set, (int)x, -1);
+    set = isl_basic_set_add_constraint(set, isl_constraint_set_constant_val(q, isl_val_sub_ui(isl_val_int_from_ui(ctx,
+                                                                              (unsigned long)size), 1)));
   }
   isl_local_space_free(local);
-  const isl_bool empty = isl_basic_set_is_empty(set);
-  isl_basic_set_free(set);
-  return empty == isl_bool_error ? -ENOMEM : empty == isl_bool_false;
+  return isl_set_from_basic_set(isl_basic_set_project_out(set, isl_dim_set, 0, dims + 1));
 }
+
 struct view_hull { uint64_t key; __int128 start, end; size_t index; };
 static int view_hull_before(const void *a, const void *b) {
   const struct view_hull *x = a, *y = b;
@@ -2743,23 +3210,42 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
                                            SIZE_MAX};
   for (size_t v = 0; !result && v < views; v++) {
     const struct mesh_strided *s = &view[v].view;
+    /* an access relation's view: its bytes' span (mesh_graph_access_map_span) */
+    if (view[v].access) {
+      hull[v] = (struct view_hull){view[v].key, (__int128)view[v].access->least, (__int128)view[v].access->greatest + 1, v};
+      continue;
+    }
     const struct view_part p = {s->offset, s->element, s->pairs, s->dims};
     __int128 end;
     if (!view_hull_end(&p, &end)) end = ((__int128)1 << 126);
     hull[v] = (struct view_hull){view[v].key, (__int128)s->offset, end, v};
   }
-  isl_ctx *ctx = result ? NULL : isl_ctx_alloc();
-  if (!result && !ctx) result = ENOMEM;
+  /* the query's one isl context: its access views' analysis context (mesh-graph.h struct mesh_graph_context, every
+     access view's the same: EXDEV otherwise, no isl operation relating two), held under its lock to the end; else its
+     own; each view's bytes made there once (view_bytes) */
+  struct mesh_graph_context *shared = NULL;
+  for (size_t v = 0; !result && v < views; v++)
+    if (view[v].access) {
+      if (!shared) shared = view[v].access->domain->context;
+      else if (view[v].access->domain->context != shared) result = EXDEV;
+    }
+  const int locked = shared && !result;
+  if (locked) pthread_mutex_lock(&shared->lock);
+  isl_ctx *ctx = result ? NULL : shared ? shared->ctx : isl_ctx_alloc();
+  isl_set **bytes = result ? NULL : calloc(views + 1, sizeof *bytes);
+  if (!result && (!ctx || !bytes)) result = ENOMEM;
   if (!result && views) qsort(hull, views, sizeof *hull, view_hull_before);
   for (size_t i = 0; !result && i < views; i++)
     for (size_t j = i + !self; !result && j < views && hull[j].key == hull[i].key && hull[j].start < hull[i].end; j++) {
       const struct mesh_graph_view *a = view + hull[i].index, *b = view + hull[j].index;
       if ((!self && a->vertex == b->vertex) || !(a->write || b->write) || (a->write == 2 && b->write == 2)) continue;
-      const struct view_part pa = {a->view.offset, a->view.element, a->view.pairs, a->view.dims},
-                             pb = {b->view.offset, b->view.element, b->view.pairs, b->view.dims};
-      int empty = !a->view.element || !b->view.element;
-      for (uint32_t d = 0; d < a->view.dims; d++) empty |= !a->view.pairs[2 * d];
-      for (uint32_t d = 0; d < b->view.dims; d++) empty |= !b->view.pairs[2 * d];
+      int empty = 0;
+      for (const struct mesh_graph_view *x = a; x; x = x == a ? b : NULL)
+        if (x->access) empty |= x->access->least > x->access->greatest;
+        else {
+          empty |= !x->view.element;
+          for (uint32_t d = 0; d < x->view.dims; d++) empty |= !x->view.pairs[2 * d];
+        }
       if (empty) continue;
       struct mesh_graph_decided d = {NULL, NULL, {SIZE_MAX, 0, 0}};
       if (a != b && decide) {
@@ -2784,7 +3270,16 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
           answered_map[answers++] = d.map;
         }
       }
-      const int meets = a == b ? 1 : d.witness.known ? d.witness.record != SIZE_MAX : view_meets(ctx, &pa, &pb);
+      int meets = a == b ? 1 : d.witness.known ? d.witness.record != SIZE_MAX : -1;
+      if (meets < 0) {
+        isl_set **x = bytes + hull[i].index, **y = bytes + hull[j].index;
+        if (!*x) *x = view_bytes(ctx, a);
+        if (!*y) *y = view_bytes(ctx, b);
+        isl_set *both = *x && *y ? isl_set_intersect(isl_set_copy(*x), isl_set_copy(*y)) : NULL;
+        const isl_bool empty = both ? isl_set_is_empty(both) : isl_bool_error;
+        isl_set_free(both);
+        meets = empty == isl_bool_error ? -ENOMEM : empty == isl_bool_false;
+      }
       if (meets < 0) { result = -meets; break; }
       if (!meets) continue;
       const struct mesh_graph_view *lo = a->vertex < b->vertex ? a : b, *hi = a->vertex < b->vertex ? b : a;
@@ -2846,7 +3341,10 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
     *decider = answered; *decider_map = answered_map; *deciders = answers;
     answered = NULL; answered_map = NULL;
   }
-  if (ctx) isl_ctx_free(ctx);
+  for (size_t v = 0; bytes && v < views; v++) isl_set_free(bytes[v]);
+  free(bytes);
+  if (locked) pthread_mutex_unlock(&shared->lock);
+  else if (ctx && !shared) isl_ctx_free(ctx);
   free(hull); free(edge); free(decided); free(answered); free(answered_map);
   return result;
 }
@@ -4105,12 +4603,12 @@ int mesh_graph_archive_read(const void *bytes, size_t length, void (*release_own
    in_first and in_edge; a derived relation's source_first, source and operand (a quotient's class_of, a
    contraction's kept, over its parent's vertices; a newest projection's count and lag); its synchronization mask where
    it was computed */
-_Static_assert(sizeof(size_t) == 8 && sizeof(struct mesh_graph_view) == 48 && sizeof(struct mesh_graph_conflict) == 40 &&
+_Static_assert(sizeof(size_t) == 8 && sizeof(struct mesh_graph_view) == 56 && sizeof(struct mesh_graph_conflict) == 40 &&
                sizeof(struct mesh_graph_dependence) == 16 && sizeof(struct mesh_graph_origin) == 24,
                "relation archive: native arrays of 8-byte alignment");
 struct relation_archive { uint64_t magic, bytes; uint32_t relations, padding; };
 struct relation_entry { uint64_t views, conflicts, pairs, witnesses, edges, members, sources, operand, kept, deciders;
-                        uint32_t vertices, kind, query, synchronized, parent, origins, mapped, padding; };
+                        uint32_t vertices, kind, query, synchronized, parent, origins, mapped, accessed; };
 struct relation_origin { uint64_t relation; struct mesh_graph_witness witness; };
 _Static_assert(sizeof(struct relation_origin) == sizeof(struct mesh_graph_origin), "relation_origin");
 /* a root's decider: its ID, and its map's presence and length (its root's views) */
@@ -4118,7 +4616,7 @@ struct relation_decider { uint64_t relation, views; uint32_t mapped, padding; };
 enum { RELATION_ROOT, RELATION_QUOTIENT, RELATION_CONTRACT, RELATION_NEWEST };
 #define RELATION_ARCHIVE UINT64_C(0x334c45524748534d)
 struct relation_state { int synchronized; const unsigned char *mask; size_t kept; };
-struct relation_cursor { char *out; size_t at; };
+struct relation_cursor { char *out; size_t at; int status; };
 static void *relation_put(struct relation_cursor *c, const void *data, size_t size) {
   char *at = c->out ? c->out + c->at : NULL;
   if (at && size) memcpy(at, data, size);
@@ -4205,14 +4703,32 @@ static void relation_emit(struct relation_cursor *c, const struct mesh_graph_rel
       e.kind = RELATION_ROOT;
       e.views = d->views; e.conflicts = d->conflicts; e.witnesses = r->witnesses;
       e.origins = d->origin != NULL; e.deciders = r->deciders; e.mapped = r->map != NULL;
-      for (size_t v = 0; v < d->views; v++) e.pairs += 2 * (uint64_t)d->view[v].view.dims;
+      for (size_t v = 0; v < d->views; v++) {
+        e.pairs += 2 * (uint64_t)d->view[v].view.dims;
+        e.accessed += d->view[v].access != NULL;
+      }
     }
     relation_put(c, &e, sizeof e);
     if (!r->parent) {
       struct mesh_graph_view *views = relation_put(c, d->view, d->views * sizeof *d->view);
-      for (size_t v = 0; views && v < d->views; v++) views[v].view.pairs = NULL;
+      /* an access view's relation its own record after the pairs (its stored `access` 1) */
+      for (size_t v = 0; views && v < d->views; v++) {
+        views[v].view.pairs = NULL;
+        views[v].access = views[v].access ? (const struct mesh_graph_access_map *)(uintptr_t)1 : NULL;
+      }
       for (size_t v = 0; v < d->views; v++)
         relation_put(c, d->view[v].view.pairs, 2 * (size_t)d->view[v].view.dims * sizeof(uint64_t));
+      for (size_t v = 0; v < d->views; v++) {
+        if (!d->view[v].access) continue;
+        void *saved = NULL;
+        size_t length = 0;
+        const int status = mesh_graph_access_map_save(d->view[v].access, &saved, &length);
+        if (status && !c->status) c->status = status;
+        const uint64_t bytes = length;
+        relation_put(c, &bytes, sizeof bytes);
+        relation_put(c, saved, length);
+        free(saved);
+      }
       relation_put(c, d->conflict, d->conflicts * sizeof *d->conflict);
       relation_put(c, r->witness, r->witnesses * sizeof *r->witness);
       for (size_t q = 0; e.origins && q < d->conflicts; q++) {
@@ -4266,31 +4782,35 @@ int mesh_graph_relation_save(const struct mesh_graph_relation *r, void **bytes, 
     state[k] = (struct relation_state){x->synchronized, x->mask, x->kept};
     pthread_mutex_unlock(&x->lock);
   }
-  struct relation_cursor c = {NULL, 0};
+  struct relation_cursor c = {NULL, 0, 0};
   relation_emit(&c, chain, state, n);
-  char *out = calloc(1, c.at);
+  char *out = c.status ? NULL : calloc(1, c.at);
   if (out) {
-    c = (struct relation_cursor){out, 0};
+    c = (struct relation_cursor){out, 0, 0};
     relation_emit(&c, chain, state, n);
-    *bytes = out; *length = c.at;
+    if (c.status) { free(out); out = NULL; }
+    else { *bytes = out; *length = c.at; }
   }
   free(chain); free(state);
-  return out ? 0 : ENOMEM;
+  return out ? 0 : c.status ? c.status : ENOMEM;
 }
 /* the caller's archive owner, shared by every loaded root (NULL release until success), and one root's own
    relocated headers: its views and its origin records */
-struct relation_loaded { size_t roots; void (*release)(void *); void *owner; };
+struct relation_loaded { size_t roots; void (*release)(void *); void *owner; struct mesh_graph_context *context; };
 struct relation_root {
   struct relation_loaded *shared;
   struct mesh_graph_view *view;
   struct mesh_graph_origin *origin;
+  size_t views;
 };
 static void relation_root_release(void *owner) {
   struct relation_root *o = owner;
   struct relation_loaded *shared = o->shared;
+  for (size_t v = 0; o->view && v < o->views; v++) mesh_graph_access_map_free(o->view[v].access);
   free(o->view); free(o->origin); free(o);
   if (__atomic_fetch_sub(&shared->roots, 1, __ATOMIC_ACQ_REL) == 1) {
     if (shared->release) shared->release(shared->owner);
+    mesh_graph_context_free(shared->context);
     free(shared);
   }
 }
@@ -4326,16 +4846,32 @@ static int relation_restore(struct relation_reader *x, struct mesh_graph_relatio
     const uint32_t *map = relation_take(x, e->mapped ? e->views : 0, sizeof *map);
     if (x->status) return x->status;
     if (e->origins > 1) return EINVAL;
-    if (!(root->view = malloc(((size_t)e->views + 1) * sizeof *root->view))) return ENOMEM;
-    uint64_t used = 0;
+    if (!(root->view = calloc((size_t)e->views + 1, sizeof *root->view))) return ENOMEM;
+    uint64_t used = 0, accessed = 0;
     for (size_t v = 0; v < e->views; v++) {
       const uint64_t count = 2 * (uint64_t)stored[v].view.dims;
-      if (count > e->pairs - used) return EINVAL;
+      if (count > e->pairs - used || (uintptr_t)stored[v].access > 1) return EINVAL;
       root->view[v] = stored[v];
       root->view[v].view.pairs = count ? pairs + used : NULL;
+      root->view[v].access = NULL;
       used += count;
     }
     if (used != e->pairs) return EINVAL;
+    /* each access view's relation, made in the loading compilation's context (mesh_graph_access_map_load) */
+    root->views = (size_t)e->views;
+    for (size_t v = 0; v < e->views; v++) {
+      if (!stored[v].access) continue;
+      const uint64_t *length = relation_take(x, 1, sizeof *length);
+      const void *saved = length ? relation_take(x, *length, 1) : NULL;
+      if (x->status) return x->status;
+      struct mesh_graph_access_map *made = NULL;
+      if (!root->shared->context) return EINVAL;
+      const int status = mesh_graph_access_map_load(root->shared->context, saved, (size_t)*length, &made);
+      if (status) return status;
+      root->view[v].access = made;
+      accessed++;
+    }
+    if (accessed != e->accessed) return EINVAL;
     d->vertices = e->vertices; d->views = (size_t)e->views; d->view = root->view;
     d->conflicts = (size_t)e->conflicts; d->query = e->query; r->witnesses = (size_t)e->witnesses;
     for (size_t k = 0; k < d->conflicts; k++) {
@@ -4407,8 +4943,8 @@ static int relation_restore(struct relation_reader *x, struct mesh_graph_relatio
   }
   return 0;
 }
-int mesh_graph_relation_load(const void *bytes, size_t length, void (*release)(void *), void *owner,
-                             struct mesh_graph_relation **out) {
+int mesh_graph_relation_load(struct mesh_graph_context *context, const void *bytes, size_t length,
+                             void (*release)(void *), void *owner, struct mesh_graph_relation **out) {
   *out = NULL;
   if ((uintptr_t)bytes % 8) return EINVAL;
   struct relation_reader x = {bytes, 0, length, 0};
@@ -4419,6 +4955,7 @@ int mesh_graph_relation_load(const void *bytes, size_t length, void (*release)(v
   struct mesh_graph_relation **made = calloc(n, sizeof *made);
   struct relation_loaded *shared = calloc(1, sizeof *shared);
   int status = made && shared ? 0 : ENOMEM;
+  if (!status && context) { mesh_graph_context_retain(context); shared->context = context; }
   uint32_t count = 0;
   for (; !status && count < n; count++) {
     const struct relation_entry *e = relation_take(&x, 1, sizeof *e);
@@ -4444,7 +4981,7 @@ int mesh_graph_relation_load(const void *bytes, size_t length, void (*release)(v
   if (!status) { shared->release = release; shared->owner = owner; }
   const size_t roots = shared ? shared->roots : 0;
   for (uint32_t k = 0; k < count; k++) if (status || k + 1 < n) mesh_graph_relation_free(made[k]);
-  if (!roots) free(shared);
+  if (!roots && shared) { mesh_graph_context_free(shared->context); free(shared); }
   if (!status) *out = made[n - 1];
   free(made);
   return status;
