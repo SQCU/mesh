@@ -22,10 +22,12 @@ enum { MESH_INVARIANT, MESH_EXECUTION };
 /* design/disjoint-pages-change-request.md, D.3.3; design/plan-to-bridge-change-request.md R4;
    design/aot-compilation-change-request.md, appendix item 7; MTL4CommandEncoder.h:32 MTL4VisibilityOptionResourceAlias;
    ExecuTorch, exir/memory_planning.py, update_tensor_lifetime; MPI 4.1 §3.7 */
-struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,shares; uint64_t padding1; };
+/* `owned` 1: its producer's prepared operand (metal-microbench metal_ir.h Value::owned, XNNPACK's operator context held
+   by its runtime from creation to destruction): its MESH_EXECUTION copies each persist across every execution */
+struct mesh_value { struct mesh_section section; uint32_t kind,wire,state,begin,end,lag,run,shares,owned,padding1; };
 _Static_assert(sizeof(struct mesh_value)==64 && offsetof(struct mesh_value,run)==48 &&
-               offsetof(struct mesh_value,shares)==52 && offsetof(struct mesh_value,padding1)==56,
-               "mesh_value: rdma/mesh.py Value");
+               offsetof(struct mesh_value,shares)==52 && offsetof(struct mesh_value,owned)==56 &&
+               offsetof(struct mesh_value,padding1)==60, "mesh_value: rdma/mesh.py Value");
 /* design/plan-to-bridge-change-request.md R4 */
 enum { MESH_JOIN, MESH_PAGES };
 /* design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3, MPI_TYPE_CREATE_SUBARRAY: struct mesh_strided (mesh-graph.h),

@@ -574,7 +574,7 @@ static int plan_interval(const struct plan *plans,const struct plan_item *x,cons
    Memo 33, §2.2; C. Mukerji, M.Sc. thesis, McGill University, 1994, §2.1, §3.1 */
 static void plan_location(const struct plan *p,uint32_t j,uint64_t n,uint64_t c,uint64_t *start,uint64_t *end){
   const struct mesh_value *v=p->given+j;
-  if(v->kind!=MESH_EXECUTION || v->lag){*start=0;*end=(uint64_t)p->copies*n-1;return;}
+  if(v->kind!=MESH_EXECUTION || v->lag || v->owned){*start=0;*end=(uint64_t)p->copies*n-1;return;}
   if(!p->named[j]){*start=c*n+v->begin;*end=c*n+v->end;return;}
   int received=0;
   uint32_t far=0;
@@ -599,7 +599,8 @@ struct plan_program { const uint32_t *calls,*ordinal,*call_of; const size_t *cal
 struct plan_arcs { const uint64_t *start,*end; const uint32_t *function,*index,*copy; const struct plan *plans;
                    uint32_t count; const struct plan_program *program; };
 /* record r's block execution and its occurrences' count: a root's uses, a function copy's one call; 0 where it has no
-   call occurrence (a lagged, transferred or invariant value's, whose ring spans every execution; a root with no use) */
+   call occurrence (a lagged, transferred, invariant or owned value's, whose ring spans every execution; a root with no
+   use) */
 static int plan_lifetime(const struct plan_arcs *x,size_t r,uint32_t *block,size_t *n){
   const struct plan_program *g=x->program;
   if(x->function[r]==x->count){
@@ -608,7 +609,7 @@ static int plan_lifetime(const struct plan_arcs *x,size_t r,uint32_t *block,size
   }
   const struct plan *p=x->plans+x->function[r];
   const struct mesh_value *v=p->given+x->index[r];
-  const int occurs=!p->named[x->index[r]] && v->kind==MESH_EXECUTION && !v->lag;
+  const int occurs=!p->named[x->index[r]] && v->kind==MESH_EXECUTION && !v->lag && !v->owned;
   if(occurs){*block=x->copy[r]/p->calls;*n=1;}
   return occurs;
 }
