@@ -502,15 +502,17 @@ class UpstreamParameter(C.Structure):
     _fields_ = [('type', C.c_char_p), ('slot', mesh.U), ('pointer', mesh.U)]
 
 
-# struct metal_ir_upstream_emission (metal-microbench metal_ir.h 3330ed9b `language`, its working `environment` and
-# `directory`; the next matched build's): `language` a CPU source's language, `environment` its compile command's
-# whole environment ("NAME=value" each) and `directory` its working directory, NULL for a Metal pass
+# struct metal_ir_upstream_emission (metal-microbench 1d8c296e metal_ir.h, native139's build): `language` a CPU
+# source's language; `environment` its compile command's whole environment ("NAME=value" each), `directory` its
+# working directory, `compile_executable` the executable its compile runs (compile[0] as its producer's subprocess
+# resolves it), `compile_source` and `compile_output` the positions in `compile` of its own source file and output
+# object: NULL and 0 for a pass with no compile of its own (a Metal pass's)
 class UpstreamEmission(C.Structure):
     _fields_ = [('source', C.c_char_p), ('entry', C.c_char_p), ('parameter', C.POINTER(UpstreamParameter)),
                 ('compile', C.POINTER(C.c_char_p)), ('link', C.POINTER(C.c_char_p)), ('bytes', mesh.Q),
                 ('parameters', mesh.U), ('compiles', mesh.U), ('links', mesh.U), ('language', C.c_char_p),
-                ('environment', C.POINTER(C.c_char_p)), ('directory', C.c_char_p), ('environments', mesh.U),
-                ('padding', mesh.U)]
+                ('environment', C.POINTER(C.c_char_p)), ('directory', C.c_char_p), ('compile_executable', C.c_char_p),
+                ('environments', mesh.U), ('compile_source', mesh.U), ('compile_output', mesh.U), ('padding', mesh.U)]
 
 
 class UpstreamConfiguration(C.Structure):
@@ -889,18 +891,29 @@ def _callables(program, op, numeric):
 # metal_ir_upstream_emitted: pass `number` of produced kernel `op`, its terminal emission as its final emitter made it
 # (lower_inductor.py Emission: source, entry, compile, link; a CPU pass's `parameters`, each Parameter(type, slot,
 # pointer) as that emitter declared it: struct metal_ir_upstream_parameter; its `language`, `environment` and
-# `directory` as its producer declared its compile, None and () for a Metal pass)
+# `directory` as its producer declared its compile, None and () for a Metal pass), each field by its name. A pass
+# with no compile of its own (every pass's now: its build is its body's, Produced.lowered.compiled) has no
+# compile_executable, compile_source or compile_output. One with its own compile needs its executable, which no
+# producer result carries (cpp_builder.py CppBuildAction.command[0] as its builder was given it, unresolved)
 def _emitted(program, op, number, emission):
+    if emission.compile:
+        raise NotImplementedError(
+            "unresolved integration: operation %d pass %d's own compile command: its compile_executable (compile[0] "
+            "as its producer's subprocess resolves it in its environment and directory), which its producer's "
+            "action (CppBuildAction) does not carry; its compile_source and compile_output are Emission.sources %r "
+            "and .output %r" % (op, number, emission.sources, emission.output))
     lib, error = _upstream(), C.create_string_buffer(4096)
     source = emission.source.encode() if isinstance(emission.source, str) else bytes(emission.source)
     texts = [_array(C.c_char_p, [t.encode() for t in texts])
              for texts in (emission.compile, emission.link, emission.environment)]
     parameters = [UpstreamParameter(p.type.encode(), p.slot, p.pointer) for p in emission.parameters]
-    made = UpstreamEmission(source, emission.entry.encode(), _array(UpstreamParameter, parameters) if parameters
-                            else None, texts[0], texts[1], len(source), len(parameters), len(emission.compile),
-                            len(emission.link), None if emission.language is None else emission.language.encode(),
-                            texts[2], None if emission.directory is None else str(emission.directory).encode(),
-                            len(emission.environment), 0)
+    made = UpstreamEmission(
+        source=source, entry=emission.entry.encode(),
+        parameter=_array(UpstreamParameter, parameters) if parameters else None, compile=texts[0], link=texts[1],
+        bytes=len(source), parameters=len(parameters), compiles=len(emission.compile), links=len(emission.link),
+        language=None if emission.language is None else emission.language.encode(), environment=texts[2],
+        directory=None if emission.directory is None else str(emission.directory).encode(),
+        environments=len(emission.environment))
     status = lib.metal_ir_upstream_emitted(program, op, number, C.byref(made), error, len(error))
     if status:
         raise OSError(status, 'operation %d pass %d: %s' % (op, number, error.value.decode()))
