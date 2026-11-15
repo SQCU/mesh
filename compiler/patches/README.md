@@ -986,66 +986,101 @@ shasum -a 256 $F
 
 ## `coremltools-exir-correspondence.patch`
 
-Mechanism: installed coremltools 9.0 (`/Users/mdot/.venv-mesh-uv`).
+Mechanism: installed coremltools 9.0 (`/Users/mdot/.venv-mesh-uv`). There are eight files. Line numbers are the
+installed files'.
 
-- `coremltools/converters/mil/frontend/torch/converter.py` `TorchConverter.convert` binds each ExportedProgram user
-  input and each mutated buffer's state to its MIL function input, in the function's input order.
-  - It strips its own rank-0 wrap there (1347–1360).
-  - It reads and writes states through `input_name_to_source_buffer_name` and `output_name_to_target_buffer_name`
-    (1366–1416).
-  - It assembles the outputs in `self.graph.outputs` order, dropping None ones.
-- `exir_utils.py` `_extract_outputs_from_exir_program` (292–317) is the extraction owner of `self.graph.outputs`. It
-  appends `output_spec.arg.name` for every `USER_OUTPUT`, in signature order. For a `ConstantArgument` (torch
-  graph_signature.py `_make_argument_spec` 599 and 627) that name is `""` or a node name, and neither need be a context
-  entry, so `convert`'s `self.context[name]` (`TranscriptionContext.__getitem__`) raises ValueError.
-- The MIL passes that rewrite a function's outputs are each that rewrite's owner:
-  - `preprocess.py` `update_output_dtypes` (one new output per old, at its index);
-  - `optimize_repeat_ops.py` (one identity sink per output, later restored);
-  - `quantization.py` (an input-cast var replacing its occurrences);
-  - `symbol_transform.py` (a new target function from a source function's outputs).
-- `Block._replace_var` replaces per index. The input renames and casts keep the function's input order:
-  `_sanitize_block_input_vars` and `quantization.py` 235.
+- `frontend/torch/exir_utils.py` `_extract_outputs_from_exir_program` (292–317) is the extraction owner of the internal
+  graph's outputs. It appends `output_spec.arg.name` for every `USER_OUTPUT`, in signature order.
+  - For a `ConstantArgument` (torch `graph_signature.py` `_make_argument_spec` 599 and 627), that name is `""` or a
+    node name. Neither need be a context symbol.
+  - The internal graph's outputs are read as context symbols by two owners: `ops.py` `_all_outputs_present` (85–95,
+    run after each node by `convert_nodes` 119 when there are no states; it catches only ValueError), and `convert`'s
+    final output list (`converter.py` 1418).
+- `frontend/torch/internal_graph.py` `InternalTorchIRGraph.from_exir` (557–613) takes those outputs, or
+  `cut_at_symbols` in their place, and passes them to `__init__` (442–472). `__init__` already holds the EXIR-only
+  buffer maps.
+- `frontend/torch/converter.py` `TorchConverter.convert`:
+  - binds each ExportedProgram user input and each mutated buffer's state to its MIL function input, in the
+    function's input order;
+  - strips its own rank-0 wrap there (1347–1360);
+  - reads and writes states through `input_name_to_source_buffer_name` and `output_name_to_target_buffer_name`
+    (1366–1416);
+  - assembles the outputs in the internal graph's output order, dropping None ones (1418–1425).
+- Every `set_outputs` of a function on the torch.export conversion path is its rewrite's owner:
+  - `mil/passes/defs/preprocess.py` `update_output_dtypes` (one new output per old, at its index);
+  - `mil/passes/defs/optimize_repeat_ops.py` (one identity sink per output, later restored);
+  - `mil/passes/defs/quantization.py` (an input-cast var replacing its occurrences);
+  - `mil/passes/defs/symbol_transform.py` (a new target function from a source function's outputs);
+  - `backend/mil/passes/adjust_io_to_supported_types.py` `_adjust_main_outputs` (one output per old, at its index; a
+    cast where the dtype is not an IO type). It is in the `mil_backend` pipeline (`pass_pipeline.py` 194), which
+    `mil_convert_to_proto` applies (`converter.py` 302).
+- The installed tree's other `set_outputs` callers are not on that path: other frontends, `Builder`, control-flow and
+  loop bodies, `debugging_utils.py`, `models/utils.py`, and `Block` removal.
+- `Block` writes its outputs only in `set_outputs` (432) and in `_replace_var`'s per-index replacement (652).
+- The input renames and casts keep the function's input order: `_sanitize_block_input_vars`, `quantization.py` 235,
+  and `_adjust_main_inputs`, which retypes in place.
 
 ### What it changes
 
-- **`_extract_outputs_from_exir_program`** keeps each static user output's own `ConstantArgument` at its signature
-  position in `user_outputs`, and the name otherwise. This is the distinction torch's
-  `ExportGraphSignature.user_outputs` makes. So `self.graph.outputs` index k is user output k.
-- **`convert`** resolves a `ConstantArgument` occurrence to no Var: it is the original's None constant output, dropped
-  from the MIL outputs. Its value stays at its one owner, the signature's `ConstantArgument.value`.
-- **`convert`** records the converter's own correspondence on its main function:
+- **`_extract_outputs_from_exir_program`** appends only a non-`ConstantArgument` user output's name. With it, it appends
+  `output_positions`: that output's position among the user outputs. This is the distinction torch's
+  `ExportGraphSignature.user_outputs` makes.
+  - A static output gets no symbol. Its position is absent from `output_positions`, and its value stays with the
+    signature (`ConstantArgument.value`).
+  - `extract_io_from_exir_program` returns the positions after the outputs.
+- **`InternalTorchIRGraph`** holds `output_positions` next to its EXIR-only buffer maps.
+  - `from_exir` passes the extraction's positions.
+  - `cut_at_symbols` replaces the outputs, so there each output's position is its own index in that list.
+- **`convert`** is unchanged in its output resolution. It records the converter's own correspondence on its main
+  function:
   - `exir_inputs`: each function input's `(state, torch name or buffer, unwrapped)`;
-  - `exir_outputs`: each kept output occurrence's `(user output position, torch name)`, parallel to the function's
-    outputs;
-  - `exir_buffers`: its read and write maps, in the torch.export frontends that have them.
-- **Each output-rewrite owner** carries `exir_outputs` through its own rewrite. Each new output occurrence takes its
-  source occurrence's record: `update_output_dtypes`, both `optimize_repeat_ops` output rewrites, `quantization.py`'s
-  output replacement, and `symbol_transform.py`, which carries all three records to the target function.
+  - in the torch.export frontends, `exir_outputs`: each kept output's `(user output position, torch name)`, parallel
+    to the function's outputs;
+  - in the torch.export frontends, `exir_buffers`: its read and write maps.
+- **Each output-rewrite owner** above carries `exir_outputs` through its own rewrite. Each new output occurrence takes
+  its source occurrence's record. `symbol_transform.py` carries all three records to the target function.
 
-`compiler/mesh_compiler/lower_inductor.py` `_engine` reads these into `Model.inputs`, `.outputs` and `.states`.
-- Each static output reaches its consumers from the torch owners. `Produced.Output` takes `ConstantArgument.value`.
-  In `lower_metal.py` `neural`, `aot_aliases`' forward result at that position is the literal: export.py 149 keeps a
+The consumers:
+
+- `compiler/mesh_compiler/lower_inductor.py` `_engine` reads these records into `Model.inputs`, `.outputs` and
+  `.states`.
+- `Produced.Input` and `.Output` take the program's own occurrences: each user input's placeholder (`input_specs`
+  paired with the placeholders, torch `_export/verifier.py` 400) and each user output's output-node argument
+  (`output_specs` paired with `output_node().args[0]`, 509–575).
+- In `lower_metal.py` `neural`, a static output's forward result is its literal. `export.py` `aot_aliases` keeps a
   non-Node leaf, and its `OutputType.non_alias` handler returns it unchanged.
-- `USER_INPUT_MUTATION` still raises in the original (`exir_utils.py` 301). Mutated user inputs, and their Neural
-  Engine mapping, are not covered.
+
+Not covered:
+
+- `USER_INPUT_MUTATION` still raises in the original (`exir_utils.py` 301). So do a non-tensor user input (235–239), a
+  non-contiguous dim order (240–245), and every other output kind (312–316).
+- A body whose every user output is static gives a MIL function with no outputs. That is not checked.
+- Converted precision is not source precision:
+  - coremltools forces fp16 states (`converter.py` 640–654);
+  - `_create_placeholder` declares an int64 input as int32 and an fp64 input as fp32 (831–837);
+  - `adjust_io_to_supported_types` declares an output of another IO dtype as int32 or fp32 (186–209).
+  - Native's declared-feature check (metal-microbench `metal_neural.mm` `Declared`) refuses each such difference. It
+    never casts.
 
 ### Target
 
 | File (under `coremltools/converters/mil/`) | Before (sha256) | After (sha256) |
 |---|---|---|
-| `frontend/torch/converter.py` | `fb081deff06839df6bb80221fd77ee8c00422db2f44a0c9f78b9fb1418f85ed9` | `8fba601485e31d4a5440fa0d74b8737b3b262d052bfefbf12937eca99ba39f66` |
-| `frontend/torch/exir_utils.py` | `59ed5998063775f4b223ead46cef0c7048a1e934eeb1d35579877706a9f56e9b` | `7ad40697304590c172493e8c6b1f55568df915bf225bc43398135a96add4533c` |
+| `frontend/torch/converter.py` | `fb081deff06839df6bb80221fd77ee8c00422db2f44a0c9f78b9fb1418f85ed9` | `ad27f9f099541cf5a66d48f0e4fa772a0309331972f0c25da615e241b2d0d5d6` |
+| `frontend/torch/exir_utils.py` | `59ed5998063775f4b223ead46cef0c7048a1e934eeb1d35579877706a9f56e9b` | `a4364c1784c2d81b52fb7ac9472fa6b58f5881e64a3b28a9c761f14d333446ea` |
+| `frontend/torch/internal_graph.py` | `3ef0b3a7c42997118095b41992ff48811a9d5026899902a39af7839a1b4e1347` | `21bfcc1093c5e7c41db2ad2d3bcd0dad83d97b21d9acec3b746369884d8bee5c` |
 | `mil/passes/defs/preprocess.py` | `06f2b1c42906bb364861761e199c22461341fb26b0702fae7f1a78158d76cb7f` | `e00cf45fe1cadb918c7dab27518c7cc81ec37778e09bb0ec0d2d5e701c63173f` |
 | `mil/passes/defs/optimize_repeat_ops.py` | `b7d0486e9bf1ac341f1cdf84691b07d180d4d1873852f7f8ef2da3fef0cc2ce6` | `21475a1a70a27540949d9631b01b969c63c7eb03f5333e500cf9c5547ef9ef17` |
 | `mil/passes/defs/quantization.py` | `14e7fcd3f00423bdae42e970f483ddb8c9d82da4b904016ac0b5055ea2fa19a2` | `5d4b5425fcc054c943c8dbf401aae19becd8fa753faf4726e7b5e29fa4cba749` |
 | `mil/passes/defs/symbol_transform.py` | `4d054c4e883eb3a32f5ae70b431aff45cdf58cce8c0bab697a2a86c641d5c9af` | `31b2a7c665dd01fc2661f368c9bffcac111afa05766050b475199202683796d2` |
+| `backend/mil/passes/adjust_io_to_supported_types.py` | `16ba55e9b7163bbee55fa02f91cf1f6a3a329f58984f36d456018ca86e44bac0` | `6b34aba34fdce9a5644e5f93eb10d1f43fe27a6cc2fd25cbacb9e18a786fd3d6` |
 
 ### Apply, check, reverse
 
 ```sh
 SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
 D=$SITE/coremltools/converters/mil
-F="$D/frontend/torch/converter.py $D/frontend/torch/exir_utils.py $D/mil/passes/defs/preprocess.py $D/mil/passes/defs/optimize_repeat_ops.py $D/mil/passes/defs/quantization.py $D/mil/passes/defs/symbol_transform.py"
+F="$D/frontend/torch/converter.py $D/frontend/torch/exir_utils.py $D/frontend/torch/internal_graph.py $D/mil/passes/defs/preprocess.py $D/mil/passes/defs/optimize_repeat_ops.py $D/mil/passes/defs/quantization.py $D/mil/passes/defs/symbol_transform.py $D/backend/mil/passes/adjust_io_to_supported_types.py"
 shasum -a 256 $F
 patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/coremltools-exir-correspondence.patch
 patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/coremltools-exir-correspondence.patch

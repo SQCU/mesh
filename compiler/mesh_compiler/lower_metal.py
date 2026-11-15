@@ -1581,10 +1581,13 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             from torch.multiprocessing.reductions import StorageWeakRef
             made_, model = produced[p], produced[p].model
             program = model.program
-            signature, nodes_ = program.graph_signature, {n.name: n for n in program.graph.nodes}
+            signature = program.graph_signature
+            occurring = list(zip(signature.input_specs, program.graph.find_nodes(op="placeholder"), strict=True))
+            given = [node for spec, node in occurring if spec.kind == InputKind.USER_INPUT]
+            lifts = {spec.target: node for spec, node in occurring if spec.kind != InputKind.USER_INPUT}
             sources = {i.value.name: env.get(copied.get(originals[p].get(i.node))) for i in made_.inputs}
             for at_, n in model.received:
-                channel, placeholder = n.args[0], nodes_[made_.signature.user_inputs[at_]]
+                channel, placeholder = n.args[0], given[at_]
                 fake = placeholder.meta["val"]
                 if channel in remote:
                     m = remote[channel][1]
@@ -1614,15 +1617,14 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 b = sources[name]
                 ins.append((feature, Bound(b.storage, b.dtype, (1,), (1,), b.offset) if wrapped else b, 1))
             metadata, roles, prototypes, results = model.aliases
-            lifts = {spec.target: spec.arg.name for spec in signature.input_specs if spec.kind != InputKind.USER_INPUT}
             actual, machine = [], {}
             for kind, k in roles:
-                name = signature.user_inputs[k] if kind == InputKind.USER_INPUT else lifts[k]
-                value = nodes_[name].meta["val"]
+                node = given[k] if kind == InputKind.USER_INPUT else lifts[k]
+                value = node.meta["val"]
                 actual.append(value)
                 if isinstance(value, torch.Tensor):
                     machine[StorageWeakRef(value.untyped_storage())] = (
-                        sources[name] if kind == InputKind.USER_INPUT else lifted(k), value)
+                        sources[node.name] if kind == InputKind.USER_INPUT else lifted(k), value)
             converter = FakeTensorConverter()
             for prototype, value in zip(prototypes, actual, strict=True):
                 if isinstance(prototype, torch.Tensor) and isinstance(value, torch.Tensor):

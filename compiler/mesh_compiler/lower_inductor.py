@@ -892,7 +892,7 @@ def _engine(module, body, sources, sent, processor, kind, device):
     body.recompile()
     program = torch.export.export(body, tuple(n.meta["val"] for n in _placeholders(graph)),
                                   strict=False).run_decompositions()
-    from torch.export.graph_signature import ConstantArgument, OutputKind
+    from torch.export.graph_signature import InputKind, OutputKind
     from .export import aot_aliases
     aliases = aot_aliases(program)
     handles = {}
@@ -904,11 +904,13 @@ def _engine(module, body, sources, sent, processor, kind, device):
                 "skip_model_load": True}
     model = ct.convert(program, **selected)
     signature = program.graph_signature
-    named = {node.name: node for node in program.graph.nodes}
+    given = [node for spec, node in zip(signature.input_specs, _placeholders(program.graph), strict=True)
+             if spec.kind == InputKind.USER_INPUT]
+    leaves = [leaf for spec, leaf in zip(signature.output_specs, program.graph.output_node().args[0], strict=True)
+              if spec.kind in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT)]
     placeholders = _placeholders(module.graph)
     returned = _returned(module)
 
-    users = [spec for spec in signature.output_specs if spec.kind in (OutputKind.USER_OUTPUT, OutputKind.LOSS_OUTPUT)]
     main = model._mil_program.functions["main"]
     reads, writes = main.exir_buffers
     placed = list(zip(main.inputs, main.exir_inputs, strict=True))
@@ -921,11 +923,9 @@ def _engine(module, body, sources, sent, processor, kind, device):
                         for feature, (state, name, _) in placed if state), aliases)
     return Produced(
         processor, kind, device, module, body, sources, sent, None, signature,
-        tuple(Input(k, node, signature.user_inputs[k], named[signature.user_inputs[k]])
-              for k, node in enumerate(placeholders)),
-        tuple(Output(k, node, signature.user_outputs[k],
-                     spec.arg.value if isinstance(spec.arg, ConstantArgument) else named[spec.arg.name], k >= len(returned))
-              for k, (node, spec) in enumerate(zip(returned + sent, users, strict=True))),
+        tuple(Input(k, node, signature.user_inputs[k], given[k]) for k, node in enumerate(placeholders)),
+        tuple(Output(k, node, signature.user_outputs[k], leaf, k >= len(returned))
+              for k, (node, leaf) in enumerate(zip(returned + sent, leaves, strict=True))),
         {}, (), (), entry)
 
 

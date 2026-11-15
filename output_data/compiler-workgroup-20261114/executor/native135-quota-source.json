@@ -30,5 +30,24 @@
     "README68 stage prose and135 six-file hashes precede final eight-file patch; source and supervisor accounts are authoritative, not those stale claims",
     "Patch not installed; Model source depends on it",
     "CoreML output and AOT association semantic correctness unobserved"
-  ]
+  ],
+  "resumed_occurrence_checkpoint": {
+    "time": "2026-11-15T20:04:43.020475+00:00",
+    "status": "source-only WIP, original streams resumed without restart",
+    "sources": {
+      "compiler/mesh_compiler/lower_inductor.py": "1cb155e1e833e298728fa1793ff847384c1dcc7d6f0ab990e4d69b27eca4ac19",
+      "compiler/mesh_compiler/lower_metal.py": "8419b7ac76be6965a52eedc7f5b4bf2c17863f8b26bc176177b2de2309f58072",
+      "compiler/patches/README.md": "bf554f0b06c0a4bbc52de8de4ce5c8051efa841d57af59855dba830c746035ff"
+    },
+    "checks": {
+      "python_ast": "PASS",
+      "pyflakes": "PASS"
+    },
+    "review": "Original ExportedProgram input_specs/placeholder and output_specs/output-argument occurrences replace remaining name recovery in _engine and neural roles/receive pairing. CoreML README now describes the actual eight-file uninstalled patch. No runtime or full alias/state/precision acceptance.",
+    "remaining": [
+      "complete original static and repeated output/alias/mutation ownership through actual conversion and native/archive invocation",
+      "source F64/C128/I64/state precision remains in the whole target unit; refusing a converted-width mismatch is not coverage",
+      "CoreML patch remains uninstalled; no converted or native workload ran"
+    ]
+  }
 }
