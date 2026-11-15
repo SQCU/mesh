@@ -1,6 +1,6 @@
 # 68: the returned pre-terminal result (source-defined fields)
 
-Current source status, 2026-11-15: the converted-wrapper revision described below is source-only and not installed. `numerical68-patch-preflight.json` records independent canonical git-apply checks over an isolated index and AST checks for all 12 projected files; installed source was unchanged. Earlier installation statements describe the prior committed patch, not this revision. Mutation/result consumers, remaining typed wrapper producers and terminal ABI composition are unfinished.
+Current source status, 2026-11-15: revision `c415dd73` is installed after canonical patch preflight. `numerical68-patch-preflight.json` records independent git-apply checks over an isolated index; `numerical68-upstream-install.json` records fuzz-0 reverse-old/forward-new installation and exact hashes for all 12 files. All projected and installed files parse. No Torch/Mesh import or execution occurred. Mutation/result consumers, remaining typed wrapper producers and terminal ABI composition are unfinished. Earlier installation statements below describe prior revisions.
 
 Producer 68, 2026-11-14. This is the handoff to root, 66/476, native131/134/135 and frontend104. Every field below is
 written in source:
