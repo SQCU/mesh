@@ -1028,13 +1028,16 @@
       "pyflakes": "FAIL: 7 undefined imports and 1 stale unused import, accurately preserved"
     },
     "missing": [
+      "Root source review: recording() adds called(arguments), which appends every invocation argument list to stages[stage][-1][2]. This new runtime instrumentation is rejected; remove it and consume AOTGraphCapture.updated_flat_args/descriptors and the original compiler graph/example_inputs result instead. No correspondence inference by executing a recording wrapper.",
       "export.py has not imported contextlib, _export_to_torch_ir, _lstsq_fixed_selected, _get_param_buffer_mapping, boxed_nop_preserve_node_meta, aot_export_joint_with_descriptors, aot_compile_joint_with_descriptors.",
       "export.export calls read(module,joint,names,compiled,stages,loss), but read still has old 4-argument ExportedProgram/GraphSignature convention. Original JD/result is not yet retained in Exported.",
       "Captured.captured still reconstructs inputs from old user_inputs/state and output roles; state ordering does not yet consume JD params_spec/buffers_spec, and joint/backward gradients and subclass/synthetic inputs are not paired.",
       "archive.sourced/restored still omits compiled/JD/callback/cache result; public runtime Arguments/Program still does not consume original dispatch-wrapper identity/synthetic-base contract.",
       "Existing strict source fake/state provenance, compile-known specialization and replaced export options require actual original owner pairing, not copied export cleanup.",
       "Original default boxed_nop callable is not OutputCode: bundled cache make_entry asserts OutputCode; actual existing cacheable compiler result must be supplied, without new interpreter or closure pickle.",
-      "The lstsq helper patch is source-only and not installed. Original metadata/runtime safety and full per-result/native/RNG correspondence remain open."
+      "The lstsq helper patch is source-only and not installed. Original metadata/runtime safety and full per-result/native/RNG correspondence remain open.",
+      "Original graph_compile._cache_inference_info calls make_runtime_safe even with no cache entry. ViewAndMutationMeta clears traced_tangents and recursively runtime-normalizes subclass metadata; view_meta_sequence is removed only for symbolic inputs. Preserve the actual source-stage fields before this transition alongside the resulting runtime/cache owner; a JD reference retained only afterward is insufficient proof.",
+      "Post-quota68 source changed LoweredAOTI to const_planned/emission/emitted (supplied,const_supplied,AotCompiled occurrences); archive.py586 still reads .compiled. This is an unpaired WIP interface, not accepted occurrence/context serialization. No source fix or new schema was invented at quota boundary."
     ]
   }
 }
