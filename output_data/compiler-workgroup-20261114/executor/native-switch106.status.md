@@ -132,3 +132,9 @@ No conditional workload has run. Joined completion, later compaction control, CP
   - v40 comment updated; no version bump.
 - **Checks.** Strict `-Werror` rc=0 on `mesh-graph.c` (rdma Makefile flags), the eight IR sources, capture, program
   and both tools; `git diff --check` clean in both repositories. Nothing built, imported or run.
+
+## Native124 matched build
+
+Metal `c7d31f12` (accepted range/search/scalar/slice source; metric scaffold withdrawn) and Mesh graph `6bc2701c`: all five canonical native targets built successfully. Direct dylib loading and required graph/IR/recorder symbols passed. Manifest: `executor/native124-build.json`; build log: Metal `executor/native124-build.log`.
+
+The normal Python ABI import and existing chooser remain held because the active upstream replacement owns transitional `lower_inductor.py`, `metal.py` and driver imports. No workload ran; the conditional coverage gaps above remain open.

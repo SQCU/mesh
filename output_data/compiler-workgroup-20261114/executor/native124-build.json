@@ -1,0 +1,78 @@
+{
+  "metal_commit": "c7d31f1205376950c04471b7ba6e4a2f73097d96",
+  "mesh_commit": "6bc2701cff9621600933a9aa7d640d41a269b409",
+  "build": {
+    "exit": 0,
+    "targets": [
+      ".build/libmetal_ir.dylib",
+      ".build/libmetal_recording.dylib",
+      ".build/libmesh_metal.dylib",
+      ".build/native_bench",
+      ".build/e2b_replay"
+    ],
+    "log": "output_data/compiler-workgroup-20261114/executor/native124-build.log",
+    "log_sha256": "d94e562265d5dd0a4ce8042f3e177ddb59f404fe95d3862a27e296055e69e3f9"
+  },
+  "sha256": {
+    ".build/libmetal_ir.dylib": "8d1ab1c4dc9fb72e677544abd363b8fbbcdbfb74c07eb484fb031868f75351e3",
+    ".build/libmetal_recording.dylib": "cf5988dd02ccf68d79824b376ca1903933b1ce42917d9f324937013192cb6435",
+    ".build/libmesh_metal.dylib": "1cfd29dbde14e6f05e86214f8b057c8cff92652cf47bfbc3eb1b72847be7f303",
+    ".build/native_bench": "2c60e4d445f7fd90ccf9df37be8f85e2660c7b606fbf083a99d5508f78ccdbcf",
+    ".build/e2b_replay": "b6b43a6f3be006fb79ccc23120bc83b7399440c05f4466804241f202645485b2"
+  },
+  "graph_library_sha256": "ee575206ddd02614c744c0e860a92c0fe594fe1b6a9ac0795f4a044317f96005",
+  "source_sha256": {
+    "metal_ir.h": "e97bdea34250adbd24146c5aeee7b739c976ac8f65b29a9f03ced3a6bd3426cd",
+    "metal_ir.mm": "ca3487e4fc90cd43fe175d838dafb876a5b972de14deba0c657c81d050cd1c8d",
+    "metal_clone.mm": "8f6bbe8d513e273ca0756770811bdffb913712971195bada31e2c8ef667dceae",
+    "metal_transform.mm": "6bb774b5e973411f1ae1ba51c5704f9bec7faf0cc9c75af9e7ba39c10be4d03b",
+    "metal_lower.mm": "fd718af19954c61dd9275972e5927b63b43ce619ae098c33ac9792e3fd2d370f",
+    "metal_native.mm": "0506290a08c7d860d54539578a033ed7f17b2811d2a580c937a564c53ab43e8d",
+    "metal_transport.mm": "d86602d1133da1dbc9da78b1a134d6ca0e5edbc3735eb064a9a411025f943d95",
+    "metal_neural.mm": "7eb9437e2556b609cc534a24da289cdf9f3af0ec5f61c90f660010c463158613",
+    "metal_archive.mm": "1daae24e6d8103bd96ad0fda5f54fe7f425a074ee6a02d734e276bdd6d2333dc",
+    "metal_capture.h": "83372540b3c1d58a6dd805c6052009835cd39b19df4f19831697c3f044ab745f",
+    "metal_capture.m": "1cdd59a983c8d7174ade33883c6484408f3a5a17a608fa16326b94fc26f48c5a",
+    "metal_recording.h": "1a09a363cf2d331e30d369214ac9533953987451ad82fef3c82141edbca453d3",
+    "metal_program.h": "2b463083592bc0e99a39a5d422529d83b42ffd6fb18d2ffb9e46588f3264b22d",
+    "metal_program.m": "50802d17920b27a6424149002cf823484ef446fb420d2dddec2a8253c2247439",
+    "metal_submission.h": "ea8ea9c811954c47b1e4c836b2a27406cfa2a48b949d74c8b7657a5cc03fcfbd"
+  },
+  "graph_source_sha256": {
+    "rdma/mesh-graph.h": "731e0339bf3a0fe7032fc132cad7e341bbb35c5afef72cf222f7899fdfffc05f",
+    "rdma/mesh-graph.c": "7c11e60240eabbbf030e4a7debd0127e0a58a6b59326104639aed33e4f10e9a8"
+  },
+  "dylib_load_and_symbols": {
+    "ir": [
+      "metal_ir_if_begin",
+      "metal_ir_if_else",
+      "metal_ir_if_end",
+      "metal_ir_replay_planned",
+      "metal_ir_replay_plan",
+      "metal_ir_ranges_placed",
+      "metal_ir_switch",
+      "metal_ir_switch_selector"
+    ],
+    "recording": [
+      "MetalRecorderPlan",
+      "MetalRecorderReplay",
+      "MetalRecorderState",
+      "MetalProgramObserved",
+      "MetalProgramIssued",
+      "MetalProgramEnd"
+    ],
+    "mesh": [
+      "mesh_graph_search_save",
+      "mesh_graph_search_load"
+    ],
+    "metal": [
+      "mesh_metal_transport_create",
+      "mesh_metal_transport_destroy"
+    ]
+  },
+  "probe_correction": "Initial optional libmesh_metal symbol probe used nonexistent mesh_metal_open; corrected to header-declared mesh_metal_transport_create/destroy. No function invoked.",
+  "python_abi_import": "HELD: metal.py imports Group from transitional lower_inductor.py; driver/ir/lower_metal replacement is unaccepted and active.",
+  "metal_worktree": "",
+  "archive_version": "metal_ir A8 v40",
+  "scope": "Canonical build/link and direct library load/symbol checks passed. No compiler import, chooser or workload. Full conditional execution remains incomplete."
+}
