@@ -108,7 +108,8 @@ def lifted(program, module):
 # table with each captured view_copy operator (torch.Tag.view_copy) that has a CompositeExplicitAutogradNonFunctional
 # kernel decomposed by that registered kernel (its view, then a clone), and any tensor attribute left lifted; the alias
 # record (`aot_aliases`) the first AOT result's, with a loss the forward and backward's, popped before
-# run_decompositions (whose own record is then popped and dropped), else run_decompositions'
+# run_decompositions, else run_decompositions'; run_decompositions' own record, the final program's, its `decomposed`
+# (with a loss a distinct stage result, else the same record)
 def export(module, args, loss=None, **export_options):
     program, aliases = torch.export.export(module, args, **{"strict": True, **export_options}), None
     graph_module = program.graph_module
@@ -127,7 +128,7 @@ def export(module, args, loss=None, **export_options):
             table[node.target] = functools.partial(node.target._op_dk, VIEW_COPY)
     program = lifted(program.run_decompositions(table), module)
     later = aot_aliases(program)
-    return read(program, later if aliases is None else aliases)
+    return read(program, later if aliases is None else aliases, later)
 
 
 # compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py
@@ -146,7 +147,7 @@ def aot_aliases(program):
                                for leaves in (inputs, outputs))
 
 
-def read(program, aliases=None):
+def read(program, aliases=None, decomposed=None):
     graph_module, signature = program.graph_module, program.graph_signature
     nodes = list(graph_module.graph.nodes)
 
@@ -213,7 +214,7 @@ def read(program, aliases=None):
     program.graph_module.recompile()
     return Exported(program.graph_module, state, tokens, user_inputs, outputs,
                     returned(program.call_spec.out_spec, outputs, signature.backward_signature is not None),
-                    state_kinds, aliases, specialized=specialized)
+                    state_kinds, aliases, specialized=specialized, decomposed=decomposed)
 
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and

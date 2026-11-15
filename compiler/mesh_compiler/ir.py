@@ -74,6 +74,11 @@ class Exported:
     # function's from its own ConstantArgument input specs, an outer program's each outer user placeholder some call's
     # ConstantArgument input came from, in user input order
     specialized: tuple = ()
+    # compiler/mesh_compiler/export.py export: the final program's own AOT record (run_decompositions' aot_aliases, as
+    # `aliases` is: its ViewAndMutationMeta, input roles and input and output prototypes), a stage result distinct from
+    # `aliases` (the forward epilogue's authority) where a loss's forward and backward record is that one, else the same
+    # object as `aliases`
+    decomposed: tuple = None
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

@@ -735,5 +735,25 @@
     ],
     "archive_source": "eb56bbcb",
     "correction_owner": "compiler SAME68/66 original typed UnbackedSymbolDefsLine result consumer; no broad string skip, source parser or caller change"
+  },
+  "aot_stage_retention_checkpoint": {
+    "time_utc": "2026-11-15T08:12:06.113357+00:00",
+    "worker_result": 39,
+    "worker_session": "9740398d-f513-4c78-8578-f80b79fa2225",
+    "source_sha256": {
+      "compiler/mesh_compiler/export.py": "2f4688b51f60f502b6f163dc29d3c148bd22d0872ec88fcc337d968720420960",
+      "compiler/mesh_compiler/ir.py": "d56fb3417f45dc04d0b4cbeec1bb19aeda0048605bc87e67149999f52a1dd130",
+      "compiler/mesh_compiler/archive.py": "6a82967cefae13ccec4d18f6a84083c5a85cebfb1d29a3f758777a9a5bf706f0"
+    },
+    "source_checks": [
+      "AST PASS",
+      "venv pyflakes PASS",
+      "git diff --check PASS"
+    ],
+    "produced_result": "Exported.aliases retains the original forward epilogue AOT record; Exported.decomposed retains the final run_decompositions record. Without a loss both are the same original record.",
+    "saved_consumer": "Both original metadata/prototype tuples enter the existing sourced function record and single GraphPickler payload; load restores Exported data only, preserving the no-loss shared record. No compiler or epilogue replay occurs at load.",
+    "upstream_reference": "torch/_functorch/_aot_autograd/autograd_cache.py _pickle_entry and schemas.py ViewAndMutationMeta.make_runtime_safe; GraphPickler retains FakeTensor identities with its existing describer.",
+    "projection_limit": "The runtime-cache make_runtime_safe projection clears traced_tangents and other compilation data, so this source-result archive preserves the original metadata rather than invoking that lossy projection. Serialization compatibility of actual ViewMeta and subclass values remains unobserved; errors propagate at save.",
+    "runtime_observation": "Pending unchanged public direct/save/load command; no new probe or caller."
   }
 }

@@ -635,7 +635,12 @@ def ordered(reached, array, span):
 
 # design/aot-compilation-change-request.md A10; schedule.py call_operands: the compilation's source record, each value
 # `encoded`: the outer source graph an owner projected (`snapshot`), its captured functions nested at their ordinals;
-# each function's Exported records (its state tensors the one state.pt payload's), each call's Call, the CallOperands
+# each function's Exported records (its state tensors the one state.pt payload's; its two AOT stage records, `aliases`
+# and `decomposed`, each as its export retained it, whether `decomposed` is the same record, so a loaded Exported has
+# the one object both, and its own: torch/_functorch/_aot_autograd/autograd_cache.py's own pickle of a
+# ViewAndMutationMeta, through this one GraphPickler payload, each prototype and traced tangent FakeTensor its
+# describer's, none made runtime safe, schemas.py make_runtime_safe clearing traced_tangents, and none replayed on
+# load), each call's Call, the CallOperands
 # fields (a storage by its holder Node, `existing` by the outer placeholders holding it) and the `query`
 def sourced(held, ordinal, operands, query):
     captured, tensors = operands.captured, held["tensors"]
@@ -655,7 +660,8 @@ def sourced(held, ordinal, operands, query):
         "graph": outer,
         "functions": {k: (f.graph_module, {name: (target, tensors.setdefault(id(t), (len(tensors), t))[0])
                                            for name, (target, t) in f.state.items()}, f.tokens, f.user_inputs,
-                          f.outputs, pytree.treespec_dumps(f.out_spec), f.state_kinds, f.specialized)
+                          f.outputs, pytree.treespec_dumps(f.out_spec), f.state_kinds, f.specialized, f.aliases,
+                          f.decomposed is f.aliases, f.decomposed)
                       for k, f in functions.items()},
         "calls": [(node, ordinal[call.function], call.inputs, call.outputs) for node, call in captured.calls.items()],
         "operands": (operands.nodes, [holder for _, holder in operands.storages], operands.views, operands.accesses,
@@ -834,8 +840,10 @@ def load(directory):
                         interface=(signature, pytree.treespec_loads(about["interface"]["spec"])),
                         specialized=specialized)
     captured = {k: Exported(module, {name: (key, tensors[t]) for name, (key, t) in kept.items()}, tokens, inputs,
-                            results, pytree.treespec_loads(spec), kinds, specialized=literals)
-                for k, (module, kept, tokens, inputs, results, spec, kinds, literals) in source["functions"].items()}
+                            results, pytree.treespec_loads(spec), kinds, aliases, specialized=literals,
+                            decomposed=aliases if same else decomposed)
+                for k, (module, kept, tokens, inputs, results, spec, kinds, literals, aliases, same, decomposed)
+                in source["functions"].items()}
     calls = {node: Call(k, inputs, results) for node, k, inputs, results in source["calls"]}
     (nodes, holders, views, accesses, results, roots, kept, ports, existing, produced, placements, machines,
      output) = source["operands"]
