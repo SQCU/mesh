@@ -570,3 +570,68 @@ files; that pattern is stopped (memory `source-history-only`). Temporary files f
   bind parameter).
 - **Dawn checkout:** `MetalBackend.h`, `MetalBackend.mm` and `ShaderModuleMTL.mm` are modified on `f9f7ce0da` and need
   the dependency-history commit before the build. I have not touched the checkout's history.
+
+## Update at metal-microbench `f66687b8` (2026-11-14; strict syntax-only checks pass; nothing built; 137 untouched)
+
+**Committed.**
+- **Dawn guard.** `PrepareComputePipelineMsl` takes `backendDevice->GetGuard()` around
+  `CreateUninitializedComputePipeline` and `ComputePipelineMslOptions`, as `ProcTable.cpp`'s autolock and the
+  neighboring `WaitForCommandsToBeScheduled` do. The holder's final release is Dawn's own `LockAndDeleteThis`
+  (`GetGuardForDelete`). `MetalBackend.mm` passes the syntax check with Dawn's compile command.
+- **Codec build.**
+  - Fact: build137's `libwebgpu_dawn.a` has 0 `EncodeToBinary`/`Decode` symbols and 0 protobuf symbols (`nm`, read
+    only). `dawn_native`'s dependency closure does not reach `tint_lang_core_ir_binary`; only the fuzzers do.
+  - `dawn.patch`: `src/dawn/native/CMakeLists.txt` adds `bundle_libraries(tint_ir_binary_bundle STATIC
+    tint_lang_core_ir_binary)` under `TINT_BUILD_IR_BINARY`. That is Dawn's own helper, covering the codec's proto,
+    protobuf, abseil and utf8_range.
+  - `Makefile`:
+    - `PROVIDER_DAWN_OPTIONS` sets `-DDAWN_BUILD_PROTOBUF=ON -DTINT_BUILD_IR_BINARY=ON`.
+    - The `$(DAWN_LIB)` recipe now always runs `cmake -S … -B … $(PROVIDER_DAWN_OPTIONS)` before `ninja … webgpu_dawn
+      tint_ir_binary_bundle`, so changed options are consumed instead of being kept out by an existing `build.ninja`.
+    - `TINT_CFLAGS` sets `-DTINT_BUILD_IR_BINARY=1`, plus Dawn's internal includes (`gen/src`, `partition_alloc`,
+      `abseil-cpp`) and `DAWN_ENABLE_BACKEND_METAL`/`_NULL`, as Dawn's `compile_commands.json` has them.
+    - `libmetal_ir` links `$(TINT_IR_BINARY_LIB)` after the force-loaded `DAWN_LIB`.
+- **Whole-program dependency** (native-owned; no Python change).
+  - `NativeCompiled` holds the program's `NativeBinary`: its bytes, handle, entries, images and the references its
+    bind acquired.
+  - `metal_ir_native_images(compiled, &count)` returns `struct metal_ir_native_image {uint8_t uuid[16]; struct
+    metal_ir_span path;}`.
+  - `metal_ir_native_bind(binary, bytes, symbol, length, images, count, &compiled, …)` makes the images present.
+    Those references are the program's own and are closed on every failure path and in `metal_ir_native_free`, through
+    one `Close` shared with task libraries.
+  - `metal_ir_solved` gains `images`/`image_count`. `MetalProgramLower` binds with them, the solved record carries
+    them, and the archive saves and loads them (`metal_ir_archive::images`).
+
+**Uncommitted, waiting on 132's `Value::owned` commit** (they compile only with it):
+- `metal_ir.h`: `void metal_ir_value_owned(struct metal_ir_program *, uint32_t value);`, with the rewritten
+  initialized-TEMPORARY comment;
+- `metal_ir.mm`: its definition (`p->values[value].owned = true`);
+- `metal_archive.mm` `Values`: `x.Pod(v.owned)` after `x.Str(v.imagePath)` (non-identity).
+
+132 may commit these with its field. My earlier `lifetime` duplicate was removed in favor of 132's `owned`.
+
+**Interface for 133**, at its one XNN context creation (its explicit producer facts; nothing inferred from data):
+```cpp
+LiteRtMeshImageUuid(record.image);                   // before metal_ir_upstream
+body.image = record.image;
+const uint32_t instance = Stored(e.p, METAL_IR_TEMPORARY, md::DataType::kUint8, size, key);
+Held(e.p, instance, context_template, size, e.holder);   // metal_ir_value_data: each copy's initial bytes
+metal_ir_value_relocated(e.p, instance, record.image,
+    reinterpret_cast<const metal_ir_relocation *>(loaded.data()), uint32_t(loaded.size()));
+metal_ir_value_owned(e.p, instance);                 // its context lives with its operator/runtime
+```
+`LiteRtMeshRelocation {uint64_t offset; uint32_t kind, argument; int64_t value;}` is layout-identical to
+`metal_ir_relocation {uint64_t offset; uint32_t kind, padding; int64_t value;}`. `LITERT_MESH_IMAGE` is 0 =
+`METAL_IR_RELOCATE_IMAGE` and `LITERT_MESH_INSTANCE` is 1 = `METAL_IR_RELOCATE_SELF`. A `static_assert` on both belongs
+with the cast. Copies follow the ordinary plan; each copy is initialized once (`MetalInitialContents`); the runtime
+writes only data words. The pool stays 133's.
+
+**Interface for 132** (archive framing and version): this unit's format changes, for the next version:
+- task-library `linking` and `images`;
+- `Value` `relocations`, `image`, `imagePath` (and `owned` with 132's field);
+- `UpstreamModule` (lowered module through the IR codec, options through the Dawn stream, entry, `argumentOf`,
+  builtin operands, image); `raised` is not saved;
+- `metal_ir_solved` `images`.
+
+**Next (mine):** the target-stage physical result. That means analyzing each `u.raised[pass]` (its robustness clamps
+and MSL resource parameters) into the access operand that readiness and placement consume, and saving it.
