@@ -66,6 +66,24 @@ class Reached(collections.abc.Set):
     def _from_iterable(cls, items):
         return set(items)
 
+    # mesh-graph.h mesh_graph_search_save: its search's arrays as the library wrote them (that allocation freed once
+    # copied, or should the copy fail)
+    def save(self):
+        made, length = C.c_void_p(), C.c_size_t()
+        _check(LIB.mesh_graph_search_save(self.owned.made, C.byref(made), C.byref(length)))
+        try:
+            return C.string_at(made, length.value)
+        finally:
+            LIB.free(made)
+
+    # mesh-graph.h mesh_graph_search_load: a search of its own made from `data` without searching, its vertex IDs
+    # `graph`'s
+    @classmethod
+    def load(cls, data, graph):
+        made = C.POINTER(Searched)()
+        _check(LIB.mesh_graph_search_load(C.c_char_p(data), len(data), C.byref(made)))
+        return cls(Owned(made, LIB.mesh_graph_search_free, graph))
+
 
 # one vertex k of the owned closure bitset: its row (the vertices k's rows lead to) or, transposed, its column (the
 # vertices whose rows lead to k); a row's columns the graph's vertices, or `columns` (objects, their index)
@@ -422,6 +440,9 @@ LIB.mesh_graph_boundaries.argtypes = [C.c_void_p, _U, C.POINTER(C.c_ubyte), C.PO
 LIB.mesh_graph_search_free.restype = LIB.mesh_graph_closure_free.restype = None
 LIB.mesh_graph_search_free.argtypes = [C.POINTER(Searched)]
 LIB.mesh_graph_closure_free.argtypes = [C.POINTER(Closed)]
+LIB.mesh_graph_search_save.restype = LIB.mesh_graph_search_load.restype = C.c_int
+LIB.mesh_graph_search_save.argtypes = [C.POINTER(Searched), C.POINTER(C.c_void_p), C.POINTER(C.c_size_t)]
+LIB.mesh_graph_search_load.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(C.POINTER(Searched))]
 RELATION_HEAD = C.cast(LIB.mesh_graph_relation_head, C.c_void_p)
 
 
@@ -895,6 +916,14 @@ LIB.mesh_graph_relation_quotient.argtypes = [C.c_void_p, C.c_uint32, C.POINTER(C
 LIB.mesh_graph_relation_synchronization.restype = C.c_int
 LIB.mesh_graph_relation_synchronization.argtypes = [C.c_void_p, C.POINTER(C.POINTER(C.c_ubyte)),
                                                     C.POINTER(C.c_size_t)]
+LIB.mesh_graph_relation_save.restype = LIB.mesh_graph_relation_load.restype = C.c_int
+LIB.mesh_graph_relation_save.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), C.POINTER(C.c_size_t)]
+LIB.mesh_graph_relation_load.argtypes = [C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p, C.POINTER(C.c_void_p)]
+# ISO/IEC 9899:2018 7.22.3.4 and 7.22.3.3: a loaded relation's backing (malloc's alignment, at least the 8 bytes
+# mesh_graph_relation_load requires) and its release, free, the owner callback the relations adopt
+LIB.malloc.restype = C.c_void_p
+LIB.malloc.argtypes = [C.c_size_t]
+FREE = C.cast(LIB.free, C.c_void_p)
 # the release of one native reference, then of the conflict vector the library allocated for it (None: free(NULL))
 def _freed(pointer, allocated):
     LIB.mesh_graph_relation_free(pointer)
@@ -937,6 +966,32 @@ class Relation:
 
     def conflict(self, k):
         return self.data.conflict[k]
+
+    # mesh_graph_relation_save: this relation and every relation it references, as the library wrote them (its
+    # allocation released with free once copied, or should the copy fail)
+    def save(self):
+        made, length = C.c_void_p(), C.c_size_t()
+        _check(LIB.mesh_graph_relation_save(self.pointer, C.byref(made), C.byref(length)))
+        try:
+            return C.string_at(made, length.value)
+        finally:
+            LIB.free(made)
+
+    # mesh_graph_relation_load: the same relations over one malloc backing holding `data`, adopted as their owner
+    # (release free, called once the last of them, this one or another retaining it, is freed); a failed load keeps
+    # nothing and its backing is freed here once
+    @classmethod
+    def load(cls, data):
+        backing = LIB.malloc(max(len(data), 1))
+        if not backing:
+            raise MemoryError("the loaded relation's backing")
+        C.memmove(backing, data, len(data))
+        made = C.c_void_p()
+        status = LIB.mesh_graph_relation_load(backing, len(data), FREE, backing, C.byref(made))
+        if status:
+            LIB.free(backing)
+            _check(status)
+        return cls(made.value)
 
 
 LIB.mesh_graph_relation_views.restype = C.c_int

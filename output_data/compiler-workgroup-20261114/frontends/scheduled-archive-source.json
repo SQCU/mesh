@@ -1,0 +1,70 @@
+{
+  "stage": "source-only WIP checkpoint; no import, serialization roundtrip, native invocation or complete A9 claim",
+  "time_utc": "2026-11-15T04:06:58.411836+00:00",
+  "worker": {
+    "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+    "model": "claude-opus-5-5",
+    "turn": 98,
+    "handle": 97143,
+    "terminal_exit": 0
+  },
+  "source_sha256": {
+    "compiler/mesh_compiler/archive.py": "acaa1a4ce2e7d6d3152af2909986e20b8e33338f6582060b1c684ef229df0d33",
+    "compiler/mesh_compiler/schedule.py": "52bfb42d56cfcac2dd45ced3e62db73c57ef1b2ba9e478afa6f5b86515d6b268",
+    "rdma/mesh_graph.py": "e0ba77288fd5892a1c79b407913fa1e9277c557490a2e97b6b3507f028b4a08f"
+  },
+  "checks": [
+    {
+      "command": "ast.parse of each named source",
+      "exit": 0
+    },
+    {
+      "command": [
+        "/Users/mdot/.venv-mesh-uv/bin/python",
+        "-m",
+        "pyflakes",
+        "compiler/mesh_compiler/archive.py",
+        "compiler/mesh_compiler/schedule.py",
+        "rdma/mesh_graph.py"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "--",
+        "compiler/mesh_compiler/archive.py",
+        "compiler/mesh_compiler/schedule.py",
+        "rdma/mesh_graph.py"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "references_sha256": {
+    "/Users/mdot/schedule-emit/schedule_emit/archive.py": "e4ba48c7a82946084498293cfb191509e6ecf8da8dd2136434e796355f060331",
+    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/fx/_graph_pickler.py": "1b581217e9a3fa83084c775be77ca2ccfd9366ab51c182451a05eabb32c9d14f",
+    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/export/_unlift.py": "35faa6af4a285a919ed8d30da550470832a6c15b5aa0b8eb25e331c66217b41b",
+    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_export/passes/lift_constants_pass.py": "ba2d3b0bc33a7397f05b1074515571c39423af7c38b280d814d03502fd1b1e65",
+    "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/export/exported_program.py": "bf8418070373473faddea7a535962c2e9626a9493f98d67a0c7d1c17ed56d691",
+    "rdma/mesh-graph.h": "731e0339bf3a0fe7032fc132cad7e341bbb35c5afef72cf222f7899fdfffc05f"
+  },
+  "retained": [
+    "Actual processor and machine GraphModules and original source graphs by saved function ordinal; canonical torch.export save/load without retracing",
+    "Qualified Node references, original Mesh annotations and shared FakeTensor storage/view metadata through one GraphPickler payload",
+    "Shared branch attributes rebound to canonical saved graph owner; real tensor attributes and state share torch.save backing",
+    "SourceRelation and outline Graph/Reached arrays restored with existing native save/load, no solve or search",
+    "Public signature, specialized literals, state and native saved/solved result retained by existing owners"
+  ],
+  "current_limits": [
+    "ExportedProgram common_getitem_elimination walks nested modules; wrapper currently copies root graph but borrows nested modules. Canonical copy ownership correction pending before acceptance as a pure save.",
+    "No concrete current numerical HOP branch tensor-get_attr instance established; canonical lifting is top-level, serializer rejects unlifted nested tensor attrs. No speculative hoisting policy added.",
+    "Actual new upstream lowered-body owner/field is still being produced by compiler; its serialization handoff remains separate and pending.",
+    "Paired numerical/native replacement is transitional; all source imports/target execution remain held."
+  ]
+}

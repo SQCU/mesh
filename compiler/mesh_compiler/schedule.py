@@ -378,7 +378,8 @@ def assemble(group, members, order, nodes, pairs, transfers, local, identity, wr
         channel: tuple(sent.args[0].meta["val"].stride()) for channel, (sent, arrival) in transfers.items()
         if arrival in copied and arrival not in local}, order=sequence, transfers={
         channel: (copied.get(sent), copied.get(arrival)) for channel, (sent, arrival) in transfers.items()
-        if arrival not in local}, relation=source, copied=dict(copied), output=output.meta["processor"], vertices=tuple(
+        if arrival not in local}, relation=source, source=owner, copied=dict(copied), output=output.meta["processor"],
+        vertices=tuple(
         None if node in local and not landing(node) else copied.get(node) for node in source.functions),
         decomposed={copied[node]: original for node, original in decomposed.items() if node in copied},
         input_parts={position: tuple((processor, node, part, geometry) for processor, part, geometry in parts[node]
