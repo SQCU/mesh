@@ -69,5 +69,52 @@
     "Actual new upstream lowered-body owner/field is still being produced by compiler; its serialization handoff remains separate and pending.",
     "Paired numerical/native replacement is transitional; all source imports/target execution remain held."
   ],
-  "previous_source_checkpoint": "fd3875f6"
+  "previous_source_checkpoint": "fd3875f6",
+  "pending_source_layer": {
+    "stage": "WIP history checkpoint before replacing parallel graph codecs; not accepted completion or runtime evidence",
+    "time_utc": "2026-11-15T04:33:43.451092+00:00",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 101,
+      "handle": 84584,
+      "terminal_exit": 0,
+      "continuation102": "stopped safely after completed read, exec89976 exit0"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "3eb8233405a49f9903a44480719ac8ae7cb782f8dbe544d537e9e496982637f4",
+      "rdma/mesh_graph.py": "aa91b75c25d62981da1bd77de9bcfd34b492779227721f7e7ec8fe51dcf2fdc8"
+    },
+    "checks": [
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/archive.py",
+          "rdma/mesh_graph.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/archive.py",
+          "rdma/mesh_graph.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "unfinished": [
+      "Source graph raw Node annotations bypass qualified encoding; nested source identity registry incomplete.",
+      "SavedNetwork/Solved/published_program and Scheduled.operands pairing not yet implemented.",
+      "Root directs one canonical GraphPickler graph codec replacing wrapped/unlift/getitem/name repair path, keeping shared tensors and annotation/native owners."
+    ]
+  }
 }

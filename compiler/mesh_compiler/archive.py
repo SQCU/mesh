@@ -6,6 +6,7 @@
 # (compiler/mesh_compiler/native.py Target.plan and Target.signature, saved and restored with the target;
 # compiler/mesh_compiler/driver.py compiled), kept in no record of their own here
 import collections
+import dataclasses
 from copy import deepcopy
 import inspect
 import json
@@ -21,12 +22,13 @@ from torch.export.exported_program import ModuleCallEntry, ModuleCallSignature
 from torch.export._unlift import _unlift_inputs_as_getattr
 from torch.export.graph_signature import (ConstantArgument, ExportGraphSignature, InputKind, InputSpec, OutputKind,
                                           OutputSpec, TensorArgument)
-from torch.fx._graph_pickler import GraphPickler
+from torch.fx._graph_pickler import GraphPickler, Options
+from torch.multiprocessing.reductions import StorageWeakRef
 from torch.fx.graph_module import _assign_attr, _get_attr
 from torch.utils import _pytree as pytree
 
 from . import native, schedule
-from .ir import Exported, Scheduled
+from .ir import Call, CapturedProgram, Exported, Scheduled
 
 
 def tuples(value):
@@ -51,7 +53,8 @@ ROOTED = ("view", "out", "to")
 MODULE = ("transfers", "input_parts", "decomposed", "invariant", "outline", "members", "tasks", "dependences",
           "writers", "received_strides", "order", "copied", "output", "vertices", "group", "source", "relation")
 
-# a retained reference by its graph owner: `owner` its saved graph's index, `path` a nested branch GraphModule's
+# a retained reference by its graph owner: `owner` its saved graph's index ("source" the outer source graph, `path` a
+# captured function's GraphModule in it), `path` a nested branch GraphModule's
 # attribute path in it ("" the owner itself), `node` a Node's name (None: the GraphModule itself), a getitem's `node`
 # its producer's Ref and `index` its result index (the serializer's own result correspondence); `Related` a
 # SourceRelation, `Graphed` an rdma/mesh_graph.py Graph and `Searching` a Reached search by saved index (each object
@@ -84,7 +87,7 @@ def produced(node):
 # an owner with its branches), everything else, a FakeTensor among them, as it is (torch/fx/_graph_pickler.py
 # GraphPickler: no raw Node)
 def encoded(held, value):
-    owners, nested, relations, natives, searches, _ = held
+    owners, nested, relations, natives, searches, _, sources = held
     if isinstance(value, dict):
         return {encoded(held, k): encoded(held, v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
@@ -100,12 +103,27 @@ def encoded(held, value):
     if not isinstance(value, (torch.fx.Node, torch.fx.GraphModule)):
         return value
     module = value.graph.owning_module if isinstance(value, torch.fx.Node) else value
+    if module in sources:
+        return Ref("source", sources[module], value.name if isinstance(value, torch.fx.Node) else None, None)
     if module not in nested and module not in owners:
         owners[module] = len(owners)
         for path, branch in branches(module):
             nested.setdefault(branch, (owners[module], path))
     owner, path = nested[module] if module in nested else (owners[module], "")
     return Ref(owner, path, value.name if isinstance(value, torch.fx.Node) else None, None)
+
+
+# schedule-emit wrap's copy.deepcopy: torch 2.14.0 torch/fx/graph_module.py GraphModule.__deepcopy__ (every nested
+# GraphModule once, memo) and torch/fx/graph.py Graph.__deepcopy__ (node_copy: each node its own meta dict over the
+# same values), each module's meta a fresh one and each tensor attribute the original object by the memo
+def copied(module):
+    memo = {}
+    for m in module.modules():
+        if isinstance(m, torch.fx.GraphModule):
+            memo[id(m.meta)] = {}
+            memo.update((id(t), t) for n in m.graph.nodes if n.op == "get_attr"
+                        for t in [_get_attr(m, n.target)] if isinstance(t, torch.Tensor))
+    return deepcopy(module, memo)
 
 
 # schedule-emit/schedule_emit/archive.py wrap; torch 2.14.0 torch/export/exported_program.py ExportedProgram,
@@ -117,16 +135,7 @@ def encoded(held, value):
 # by its aliases) as a CONSTANT_TENSOR input with its real data; with each tensor get_attr's (name, target lifted, its
 # tensor's index in `held`'s tensors, each tensor object once: state.pt's one torch.save payload keeps its storage)
 def wrapped(module, held):
-    # schedule-emit wrap's copy.deepcopy: torch 2.14.0 torch/fx/graph_module.py GraphModule.__deepcopy__ (every nested
-    # GraphModule once, memo) and torch/fx/graph.py Graph.__deepcopy__ (node_copy: each node its own meta dict over the
-    # same values), each module's meta a fresh one and each tensor attribute the original object by the memo
-    memo = {}
-    for m in module.modules():
-        if isinstance(m, torch.fx.GraphModule):
-            memo[id(m.meta)] = {}
-            memo.update((id(t), t) for n in m.graph.nodes if n.op == "get_attr"
-                        for t in [_get_attr(m, n.target)] if isinstance(t, torch.Tensor))
-    copy = deepcopy(module, memo)
+    copy = copied(module)
     graph, output, tensors = copy.graph, copy.graph.output_node(), held[5]
     if not output.args[0]:
         output.args = ((None,),)
@@ -234,6 +243,67 @@ def decoded(loaded, value):
     return value
 
 
+# design/aot-compilation-change-request.md A10; schedule.py analyse: a CallAnalysis's query results in their saved
+# form, its incoming search's arrays (over the calls' relation, which the joint result keeps), its paths' roots and
+# search (a Reached over their own Graph), its widths' counts and per-member chains by function ordinal, its supplied
+# causes, accesses and generated state
+def queried(analysis, ordinal):
+    paths = analysis.paths
+    return {"search": schedule.mesh_graph.Reached(analysis.search).save(),
+            "paths": (list(paths.items), schedule.mesh_graph.Reached(paths.owner)),
+            "widths": {ordinal[key]: (count, tuple(chain)) for key, (count, chain) in analysis.widths.items()},
+            "supplied": analysis.supplied, "accesses": analysis.accesses, "generated": analysis.generated}
+
+
+# design/aot-compilation-change-request.md A10; schedule.py call_operands: the compilation's source record. Its outer
+# source graph a copy (`copied`) whose call nodes (CapturedProgram.calls) are call_module references to their
+# functions' captured GraphModules by ordinal (torch.fx GraphModule over a root of just those: no user module or
+# callable kept; a call node's capture key, compilation only, dropped); each function's Exported records (its state
+# tensors `held`'s), each call's Call, the CallOperands fields (a storage by its holder Node, `existing` by the outer
+# placeholders holding it) and the `query`, each `encoded`, the outer graph's and functions' Nodes as "source" Refs
+def sourced(held, ordinal, operands, query):
+    captured, tensors, sources = operands.captured, held[5], held[6]
+    outer, memo = captured.exported.graph_module, {}
+    graph = deepcopy(outer.graph, memo)
+    for node, call in captured.calls.items():
+        memo[node].op, memo[node].target = "call_module", f"function_{ordinal[call.function]}"
+        memo[node].meta.pop("function", None)
+    module = copied(torch.fx.GraphModule(
+        {**{n.target: _get_attr(outer, n.target) for n in graph.nodes if n.op == "get_attr"},
+         **{f"function_{ordinal[key]}": f.graph_module for key, f in captured.functions.items()}}, graph))
+    sources.update({outer: "", **{f.graph_module: f"function_{ordinal[key]}" for key, f in captured.functions.items()}})
+    existing = [n for n in outer.graph.nodes if n.op == "placeholder" and isinstance(n.meta.get("val"), torch.Tensor)
+                and StorageWeakRef(n.meta["val"].untyped_storage()) in operands.existing]
+    return {"graph": module,
+            "functions": {ordinal[key]: ({name: (target, tensors.setdefault(id(t), (len(tensors), t))[0])
+                                          for name, (target, t) in f.state.items()}, f.tokens, f.user_inputs,
+                                         f.outputs, pytree.treespec_dumps(f.out_spec), f.state_kinds, f.specialized)
+                          for key, f in captured.functions.items()},
+            "calls": encoded(held, [(node, ordinal[call.function], call.inputs, call.outputs)
+                                    for node, call in captured.calls.items()]),
+            "operands": encoded(held, (
+                operands.nodes, [holder for _, holder in operands.storages], operands.views, operands.accesses,
+                operands.results, operands.root_sources, sorted(operands.held),
+                [tuple(getattr(port, f.name) for f in dataclasses.fields(port)) for port in operands.ports], existing,
+                operands.produced, {ordinal[key]: placed for key, placed in operands.placements.items()},
+                operands.machines, operands.output_processor)),
+            "query": encoded(held, query)}
+
+
+# a loaded local joint result's query (compiler/mesh_compiler/schedule.py loaded_program, mesh_local_load): its
+# calls' relation and closure the loaded mesh_local's own (borrowed: Relation.borrowed, an Owned its owner frees), the
+# incoming search loaded once over that Graph, the paths' View over their loaded search, with the saved `query`
+def attached(query, local, owner):
+    mesh_graph = schedule.mesh_graph
+    graph = mesh_graph.Graph(range(local.ncalls), mesh_graph.Relation.borrowed(local.relation))
+    roots, reached = query["paths"]
+    owned, found = reached.owned, reached.owned.made.contents
+    return {"query": query, "graph": graph, "search": mesh_graph.Reached.load(query["search"], graph).owned,
+            "closure": mesh_graph.Closures(mesh_graph.Owned(local.closure, lambda made: None, graph, (owner,)), False),
+            "paths": mesh_graph.View(owned, roots, range(len(roots)), lambda k: mesh_graph.ordered(
+                owned, found.preorder, range(found.place[k], found.end[k])))}
+
+
 def save(directory, scheduled):
     directory = pathlib.Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -243,7 +313,14 @@ def save(directory, scheduled):
     # every body by its graph owner; then each owner (each graph a Node reference names) and each SourceRelation once
     # (rdma/mesh_graph.py Relation.save, mesh-graph.h mesh_graph_relation_save), the annotations one GraphPickler
     # payload (torch/fx/_graph_pickler.py: one MetaTensorDescriber, so FakeTensor duplicates and views keep their storage)
-    held = ({}, {}, {}, {}, {}, {})
+    held = ({}, {}, {}, {}, {}, {}, {})
+    # the source record from the original analysis (Target.solution.analysis, its operands), or a loaded
+    # compilation's retained one (its joint owner's `source`, Scheduled.operands)
+    joint = target.solution
+    analysis = joint.analysis if isinstance(joint, schedule.Solved) else None
+    query, operands = ((queried(analysis, ordinal), analysis.operands) if analysis is not None else
+                       (joint.source["query"], scheduled.operands))
+    record = sourced(held, ordinal, operands, query)
     bodies = [[kind, ordinal[key], name, encoded(held, module).owner]
               for kind, kept in (("machine", scheduled.modules), ("processor", scheduled.processor_modules))
               for key, modules in kept.items() for name, module in modules.items()]
@@ -264,8 +341,10 @@ def save(directory, scheduled):
         else:
             reached = list(held[4].values())[len(searches)][1]
             searches.append((encoded(held, reached.owned.graph), reached.save()))
-    (directory / "annotations.pkl").write_bytes(GraphPickler.dumps({"graphs": graphs, "relations": sources,
-                                                                    "natives": natives, "searches": searches}))
+    # torch/fx/_graph_pickler.py Options: every operator of the captured bodies pickled by name (ops_filter None)
+    (directory / "annotations.pkl").write_bytes(GraphPickler.dumps(
+        {"graphs": graphs, "relations": sources, "natives": natives, "searches": searches, "source": record},
+        Options(ops_filter=None)))
     torch.save({"state": {name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()},
                 "attributes": [tensor.detach() for _, tensor in held[5].values()],
                 "defaults": {name: parameter.default for name, parameter in signature.parameters.items()
@@ -307,11 +386,6 @@ def load(directory):
     signature = inspect.Signature([inspect.Parameter(name, getattr(inspect.Parameter, kind),
                                                      default=defaults.get(name, inspect.Parameter.empty))
                                    for name, kind in about["interface"]["parameters"]])
-    exported = Exported(None, state, about["tokens"], about["user_inputs"], outputs,
-                        pytree.treespec_loads(about["out_spec"]),
-                        {name: InputKind[kind] for name, kind in about["state_kinds"].items()},
-                        interface=(signature, pytree.treespec_loads(about["interface"]["spec"])),
-                        specialized=specialized)
     devices = {processor: torch.device(name) for processor, name in about["processors"].items()}
     functions = {processor: native.restore(saved, directory) for processor, saved in about["targets"].items()}
     (target,) = functions.values()
@@ -323,9 +397,14 @@ def load(directory):
     # annotation payload (GraphPickler.loads, one FakeTensorMode: its FakeTensors' shared storage as saved), each Ref
     # bound to its actual loaded Node or GraphModule, every body of one source sharing that source's relation and graph
     saved = GraphPickler.loads((directory / "annotations.pkl").read_bytes(), FakeTensorMode())
-    loaded = [restored(directory / f"graph.{g}.pt2", record, payload["attributes"])
-              for g, record in enumerate(saved["graphs"])]
-    graphs, named, relations, natives, searches = [module for module, _ in loaded], {}, [], [], []
+    tensors, source = payload["attributes"], saved["source"]
+    loaded = [restored(directory / f"graph.{g}.pt2", record, tensors) for g, record in enumerate(saved["graphs"])]
+    graphs, named, relations, natives, searches = dict(enumerate(m for m, _ in loaded)), {}, [], [], []
+    graphs["source"] = outer = source["graph"]
+    named["source", ""] = {node.name: node for node in outer.graph.nodes}
+    named.update((("source", f"function_{k}"),
+                  {node.name: node for node in _get_attr(outer, f"function_{k}").graph.nodes})
+                 for k in source["functions"])
     # each shared branch GraphModule (schedule.py assemble's GraphModule(owner, graph)) its first owner's one loaded
     # module at every other owner's attribute path
     for g, record in enumerate(saved["graphs"]):
@@ -353,6 +432,32 @@ def load(directory):
                 found(named[g, p], key).meta.update(meta)
             (_get_attr(graphs[g], p) if p else graphs[g]).meta.update(resolve(kept["module"]))
         graphs[g].recompile()
+    # the source record: the outer source graph (each call a call_module of its function's captured GraphModule), each
+    # function's Exported, each call's Call, the CallOperands (Scheduled.operands; a storage by its holder's loaded
+    # FakeTensor storage) and the query on the joint owner: a local result's attached now, a network result's kept on
+    # its saved owner until its preparation (bridge.Published, schedule.published_program) loads its relation
+    exported = Exported(outer, state, about["tokens"], about["user_inputs"], outputs,
+                        pytree.treespec_loads(about["out_spec"]),
+                        {name: InputKind[kind] for name, kind in about["state_kinds"].items()},
+                        interface=(signature, pytree.treespec_loads(about["interface"]["spec"])),
+                        specialized=specialized)
+    captured = {k: Exported(_get_attr(outer, f"function_{k}"),
+                            {name: (key, tensors[t]) for name, (key, t) in kept.items()}, tokens, inputs, results,
+                            pytree.treespec_loads(spec), kinds, specialized=literals)
+                for k, (kept, tokens, inputs, results, spec, kinds, literals) in source["functions"].items()}
+    calls = {node: Call(k, inputs, results) for node, k, inputs, results in resolve(source["calls"])}
+    (nodes, holders, views, accesses, results, roots, kept, ports, existing, produced, placements, machines,
+     output) = resolve(source["operands"])
+    operands = schedule.CallOperands(
+        CapturedProgram(exported, captured, calls), nodes, tuple(captured), [calls[node] for node in nodes],
+        {k: k for k in captured}, [(StorageWeakRef(h.meta["val"].untyped_storage()), h) for h in holders], views,
+        accesses, results, roots, frozenset(kept), tuple(schedule.CallPort(*port) for port in ports),
+        {StorageWeakRef(p.meta["val"].untyped_storage()) for p in existing}, produced, placements, machines, output)
+    query, joint = resolve(source["query"]), target.solution
+    if isinstance(joint, schedule.SavedNetwork):
+        target.solution = target.plan = dataclasses.replace(joint, source={"query": query})
+    else:
+        joint.source = attached(query, joint.local, joint.owner)
     held = {"machine": {}, "processor": {}}
     for kind, function, name, owner in about["bodies"]:
         held[kind].setdefault(function, {})[name] = graphs[owner]
@@ -360,4 +465,4 @@ def load(directory):
                      about["inputs"], about["feedforward"], carried, about["engines"], target.plan,
                      signature=target.signature, stored=about["stored"],
                      invariant={record["function"]: tuples(record["records"]) for record in about["invariant"]},
-                     functions=functions, processor_modules=held["processor"])
+                     functions=functions, processor_modules=held["processor"], operands=operands)

@@ -916,6 +916,8 @@ LIB.mesh_graph_relation_quotient.argtypes = [C.c_void_p, C.c_uint32, C.POINTER(C
 LIB.mesh_graph_relation_synchronization.restype = C.c_int
 LIB.mesh_graph_relation_synchronization.argtypes = [C.c_void_p, C.POINTER(C.POINTER(C.c_ubyte)),
                                                     C.POINTER(C.c_size_t)]
+LIB.mesh_graph_relation_retain.restype = None
+LIB.mesh_graph_relation_retain.argtypes = [C.c_void_p]
 LIB.mesh_graph_relation_save.restype = LIB.mesh_graph_relation_load.restype = C.c_int
 LIB.mesh_graph_relation_save.argtypes = [C.c_void_p, C.POINTER(C.c_void_p), C.POINTER(C.c_size_t)]
 LIB.mesh_graph_relation_load.argtypes = [C.c_void_p, C.c_size_t, C.c_void_p, C.c_void_p, C.POINTER(C.c_void_p)]
@@ -976,6 +978,13 @@ class Relation:
             return C.string_at(made, length.value)
         finally:
             LIB.free(made)
+
+    # mesh_graph_relation_retain: a relation another owner holds (a loaded mesh_local's `relation`), one more reference
+    # this Relation releases
+    @classmethod
+    def borrowed(cls, pointer):
+        LIB.mesh_graph_relation_retain(pointer)
+        return cls(pointer)
 
     # mesh_graph_relation_load: the same relations over one malloc backing holding `data`, adopted as their owner
     # (release free, called once the last of them, this one or another retaining it, is freed); a failed load keeps
