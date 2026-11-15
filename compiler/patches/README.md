@@ -430,3 +430,54 @@ shasum -a 256 $F
 - The first `shasum` must print the "before" hashes in the table above, and the second the "after" hashes.
 - To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-upstream-composition.patch`.
 - This is pure Python source, so no rebuild is needed.
+
+## `torch-inductor-graph-lowering-factory.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/_inductor/compile_fx.py`
+`_InProcessFxCompile.codegen_and_compile`. That is the original compiler's own GraphLowering construction (installed
+lines 1625-1649): `compile_fx` reaches it through AOT autograd, `compile_fx_forward`, `compile_fx_inner` and
+`fx_codegen_and_compile`, after the compiler's own pre-grad, functionalization, joint and post-grad passes. It is
+independent of the other Inductor patches here.
+
+### What it changes
+
+- **`_CompileFxKwargs`** gets one more entry: `graph_lowering: Callable[..., GraphLowering]`.
+- **`codegen_and_compile`** reads `graph_lowering = graph_kwargs.get("graph_lowering", GraphLowering)` in the same
+  way it reads `get_decomp_fn`. It then makes the forward graph with `graph = graph_lowering(gm, ...)`, using the same
+  arguments as before. With no entry, the factory is `GraphLowering` and the output is unchanged.
+- Nothing else changes. The constant graph (`const_graph`), `graph.run`, the output strides and all three output forms
+  (`fx_wrapper` module, `AotCodeCompiler`, `compile_to_module`) are untouched.
+
+`compiler/mesh_compiler/lower_inductor.py` `_inductor` calls `compile_fx(body, inputs, inner_compile=partial(compile_fx_inner,
+graph_lowering=lowering), config_patches=...)` under `torch.no_grad()`, which selects AOT autograd's inference compiler.
+`lowering` makes `MeshLowering` with the selected backends. It keeps that object, together with
+`TracingContext.get().fw_metadata` (set by `graph_compile.py` `_aot_stage2b_compile_forward_or_inference` before its
+compiler runs), as `Produced.graph` and `Produced.signature`. `force_disable_caches` is patched on. Otherwise a
+cache hit would return an `OutputCode` without running the factory, and no GraphLowering would be made.
+
+### Target
+
+| Item | Value |
+|---|---|
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/_inductor/compile_fx.py` | before `4e5b593e018c6bd6f69062483d524b64820ab272351fbf073b7ec118a66598f8`, after `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592` |
+
+The patch was written from the installed source's context lines 842-847, 1402-1407 and 1622-1628. A fuzz-0 dry run
+against the "before" hash passes. Applying it to a temporary output (`patch -o`) gives the "after" hash, and that
+output parses (`ast.parse`). The patch is not applied; the supervisor applies it.
+
+### Apply, check, reverse
+
+From the repository root:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+shasum -a 256 $SITE/torch/_inductor/compile_fx.py
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-graph-lowering-factory.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-graph-lowering-factory.patch
+shasum -a 256 $SITE/torch/_inductor/compile_fx.py
+```
+
+- The first `shasum` must print the "before" hash above, and the second the "after" hash.
+- To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-graph-lowering-factory.patch`.
+- This is pure Python source, so no rebuild is needed. The patch adds no import hook or `sitecustomize`.

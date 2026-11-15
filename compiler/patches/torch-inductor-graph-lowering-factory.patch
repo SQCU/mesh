@@ -1,0 +1,29 @@
+--- a/torch/_inductor/compile_fx.py
++++ b/torch/_inductor/compile_fx.py
+@@ -842,6 +842,7 @@
+     boxed_forward_device_index: BoxedDeviceIndex | None
+     fx_wrapper: bool
+     get_decomp_fn: Callable[..., dict[Any, Callable[..., Any]]]
++    graph_lowering: Callable[..., GraphLowering]
+ 
+ 
+ class _CompileFxCallable(Protocol):
+@@ -1402,6 +1403,9 @@
+         get_decomp_fn: Callable[..., dict[Any, Callable[..., Any]]] = graph_kwargs.get(
+             "get_decomp_fn", select_decomp_table
+         )
++        graph_lowering: Callable[..., GraphLowering] = graph_kwargs.get(
++            "graph_lowering", GraphLowering
++        )
+         with (
+             _WaitCounter("pytorch.wait_counter.actual_codegen_and_compile").guard(),
+             dynamo_utils.preserve_rng_state(),
+@@ -1622,7 +1626,7 @@
+                             const_graph.codegen_with_cpp_wrapper()
+                         )
+ 
+-                graph = GraphLowering(
++                graph = graph_lowering(
+                     gm,
+                     # example_inputs will be used by AOTInductor to dry-run the generated code for Triton kernel tuning.
+                     # For the forward pass, we have the real inputs to be used as example_inputs. For the backward pass,

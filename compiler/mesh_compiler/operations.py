@@ -1218,7 +1218,7 @@ def _lapack_singular(A, full_matrices=True, compute_uv=True, driver=None, shapes
     if not A.numel():
         return _singular_empty(A, compute_uv, full_matrices, shapes)
     s, u, vt, info = LAPACK_GESDD(A, 'N' if not compute_uv else 'A' if full_matrices else 'S')
-    A._linalg_check_errors.default(info, 'linalg.svd', is_matrix=A.dim() == 2)
+    torch.ops.aten._linalg_check_errors.default(info, 'linalg.svd', is_matrix=A.dim() == 2)
     if not compute_uv:
         return A.new_empty(shapes[0][0], dtype=shapes[0][1]), s, A.new_empty(shapes[2][0], dtype=shapes[2][1])
     return u, s, vt
@@ -1228,7 +1228,7 @@ def _lapack_hermitian(A, UPLO='L', compute_v=True, shapes=()):
     if not A.numel():
         return tuple(A.new_empty(shape, dtype=dtype) for shape, dtype in shapes)
     w, z, info = LAPACK_HEEVD(A, 'V' if compute_v else 'N', UPLO.upper())
-    A._linalg_check_errors.default(info, 'linalg.eigh', is_matrix=A.dim() == 2)
+    torch.ops.aten._linalg_check_errors.default(info, 'linalg.eigh', is_matrix=A.dim() == 2)
     return w, z if compute_v else A.new_empty(shapes[1][0], dtype=shapes[1][1])
 
 

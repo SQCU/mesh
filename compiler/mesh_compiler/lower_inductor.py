@@ -2,10 +2,10 @@
 # replacement; design/aot-compilation-change-request.md A1, A5, A6 and A8 to A10; design/torch-source-lowering-change-
 # request.md items 1 to 3, 5 and 6; /Users/mdot/schedule-emit/schedule_emit/lower_inductor.py at f41c64a (adapt,
 # recv_strided, lower): each processor's scheduled body given to its target's installed upstream compiler (torch 2.14.0
-# torch/_inductor: compile_fx.py's ahead-of-time inference sequence, AOT autograd's export and effect tokens,
-# GraphLowering, its Scheduler and the selected backend; coremltools 9.0 for the Neural Engine), its result retained as
-# that compiler's own objects. Fields and pairing: output_data/compiler-workgroup-20261114/compiler/
-# numerical65-operands.md; upstream hooks: compiler/patches/torch-inductor-mps-kernel-operands.patch and
+# torch/_inductor: compile_fx.py compile_fx, the inductor backend's entry, its GraphLowering, Scheduler and the selected
+# backend; coremltools 9.0 for the Neural Engine), its result retained as that compiler's own objects. Fields and
+# pairing: output_data/compiler-workgroup-20261114/compiler/numerical65-operands.md; upstream hooks:
+# compiler/patches/torch-inductor-graph-lowering-factory.patch, torch-inductor-mps-kernel-operands.patch and
 # torch-inductor-upstream-composition.patch
 import dataclasses
 import functools
@@ -14,29 +14,19 @@ from pathlib import Path
 import coremltools as ct
 import torch
 from torch import Tensor
-from torch._dispatch.python import enable_python_dispatcher
-from torch._export.utils import _detect_fake_mode_from_gm
-from torch._functorch import config as functorch_config
-from torch._functorch.aot_autograd import aot_export_module
+from torch._guards import TracingContext
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch._inductor import config
 from torch._inductor import ir as upstream
 from torch._inductor.codegen.cpp import CppScheduling, KernelGroup
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
 from torch._inductor.codegen.simd import DisableReduction, EnableReduction
-from torch._inductor.compile_fx import (_recursive_post_grad_passes, _recursive_record_original_output_strides,
-                                        _unlift_graph, compile_fx_forward, create_compiler_config_extra,
-                                        fake_tensor_prop, get_num_model_outputs, maybe_disable_comprehensive_padding,
-                                        run_pre_grad_passes)
+from torch._inductor.compile_fx import compile_fx, compile_fx_inner
 from torch._inductor.cpp_builder import CppTorchDeviceOptions
 from torch._inductor.cpu_vec_isa import pick_vec_isa
-from torch._inductor.debug import DebugContext
-from torch._inductor.decomposition import select_decomp_table
-from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.graph import GraphLowering, SubgraphLowering
 from torch._inductor.lowering import fallback_handler, register_lowering
 from torch._inductor.scheduler import Scheduler
-from torch._inductor.utils import shape_env_from_inputs
 from torch._inductor.virtualized import V
 from torch.utils._cpp_embed_headers import _embed_headers
 
@@ -121,8 +111,9 @@ class Input:
 
 
 # compiled output `position`: `node` the body node it returns (a SEND's value where `sent`: schedule-emit adapt returns
-# every sent value, keep_output_stride), `value` the upstream compiler's (GraphLowering.graph_outputs[position]; Neural
-# Engine: its ExportedProgram user output name)
+# every sent value, keep_output_stride), `value` the upstream compiler's (GraphLowering.graph_outputs after AOT
+# autograd's runtime-applied input mutations, graph_capture_wrappers.py fn_input_mutations_to_outputs; Neural Engine:
+# its ExportedProgram user output name)
 @dataclasses.dataclass(frozen=True)
 class Output:
     position: int
@@ -197,13 +188,14 @@ class Model:
 
 
 # one processor body's retained upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
-# `sources` its nodes and its control bodies' (SOURCE), `lowered` the graph the upstream compiler lowered (after AOT
-# autograd's export, its unlifting and compile_fx_forward's and the post-grad passes; Neural Engine: its
-# ExportedProgram), `signature` its graph signature (aot_export_module's GraphSignature: user inputs and outputs, input
-# mutations, tokens; Neural Engine: ExportedProgram.graph_signature), `graph` its GraphLowering (buffers, layouts and
-# aliases, graph_inputs_original, graph_input_storage_offsets, mutated_inputs, removed_buffers, effectful_ops,
+# `sources` its nodes and its control bodies' (SOURCE), `lowered` the graph the upstream compiler lowered (its
+# GraphLowering's module, after compile_fx's own passes; Neural Engine: its ExportedProgram), `signature` AOT autograd's
+# forward metadata for that graph (schemas.py ViewAndMutationMeta: input_info, output_info, input mutations and their
+# runtime indices, tokens; Neural Engine: ExportedProgram.graph_signature), `graph` its GraphLowering (buffers, layouts
+# and aliases, graph_inputs_original, graph_input_storage_offsets, mutated_inputs, removed_buffers, effectful_ops,
 # scheduler, wrapper_code; None for the Neural Engine), `entries` Kernel and Extern in its Scheduler's emission order (a
-# Neural Engine body's one Model), `wrapper` GraphLowering.codegen's result
+# Neural Engine body's one Model), `wrapper` compile_fx's result (AOT autograd's compiled function over the
+# CompiledFxGraph of GraphLowering.compile_to_module)
 @dataclasses.dataclass(eq=False)
 class Produced:
     processor: str
@@ -478,60 +470,39 @@ def _placeholders(graph):
     return [n for n in graph.nodes if n.op == "placeholder"]
 
 
-# compile_fx.py _compile_fx_main's ahead-of-time inference branch over one adapted body: run_pre_grad_passes; AOT
-# autograd's aot_export_module (trace_joint False, select_decomp_table, unlift_effect_tokens: each effectful operator a
-# with_effects on its token, the tokens _make_token and _sink_tokens; each input mutation an output) under
-# enable_python_dispatcher; each constant tensor attribute's fake value; _unlift_graph (its parameters and buffers
-# attributes again, each input mutation its copy_); then compile_fx_forward at is_inference (its original output strides,
-# joint graph passes and user visible outputs) with, as its inner compiler, _InProcessFxCompile.codegen_and_compile's
-# stages (view_to_reshape, fake_tensor_prop, original output strides, post-grad passes, GraphLowering run and codegen),
-# its GraphLowering MeshLowering with the selected backends (SELECTED)
+# one adapted body by compile_fx.py compile_fx, the inductor backend's entry (schedule-emit lower_inductor.py lower's
+# torch.compile backend "inductor"), at its scheduled placeholders' fake values under no_grad (aot_autograd.py: no
+# output requires grad, so AOT autograd's inference compiler, its forward compile_fx_inner at is_inference); its own
+# pre-grad passes, functionalization and effect tokens (unlift_effect_tokens), keep_inference_input_mutations,
+# post-grad passes, GraphLowering run and output form (compile_to_module). config_patches: force_disable_caches (a cached
+# OutputCode holds no GraphLowering) and schedule-emit's assume_unaligned_fallback_output for a receiving body. Its one
+# GraphLowering made by torch-inductor-graph-lowering-factory.patch's graph_lowering: MeshLowering with the selected
+# backends (SELECTED), held with AOT autograd's forward metadata of that graph (graph_compile.py
+# _aot_stage2b_compile_forward_or_inference sets TracingContext.fw_metadata before its compiler runs). The body's
+# inputs are the graph's last ones (aot_module_simplified: its lifted parameters and buffers first), its outputs after
+# the runtime-applied input mutations (num_mutated_inp_runtime_indices)
 def _inductor(module, body, sources, sent, processor, kind, device):
     inputs = [n.meta["val"] for n in _placeholders(body.graph)]
     received = any(n.target is RECV_STRIDED for n in body.graph.nodes)
-    returned = _returned(module)
+    returned, made = _returned(module), []
 
-    def compiled(gm, example_inputs, *, static_input_idxs, cudagraphs, graph_id, is_inference,
-                 boxed_forward_device_index):
-        shape_env = shape_env_from_inputs(example_inputs) if gm.shape_env is None else gm.shape_env
-        view_to_reshape(gm)
-        with torch.no_grad():
-            fake = fake_tensor_prop(gm, example_inputs)
-        _recursive_record_original_output_strides(gm)
-        with V.set_fake_mode(fake):
-            _recursive_post_grad_passes(gm, is_inference=is_inference)
-        with V.set_fake_mode(fake), maybe_disable_comprehensive_padding(example_inputs):
-            graph = MeshLowering(gm, selected=SELECTED, example_inputs=example_inputs, shape_env=shape_env,
-                                 graph_id=graph_id, is_inference=is_inference)
-            graph.freeze_runtime_asserts()
-            with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]):
-                graph.run(*example_inputs)
-                wrapper = graph.codegen()
-                names = [n.target for n in _placeholders(gm.graph)]
-                return Produced(
-                    processor, kind, device, module, sources, gm, signature, graph,
-                    tuple(Input(k, node, name) for k, (node, name) in enumerate(zip(_placeholders(module.graph),
-                                                                                     names))),
-                    tuple(Output(k, node, value, k >= len(returned))
-                          for k, (node, value) in enumerate(zip(returned + sent, graph.graph_outputs))),
-                    _entries(graph, sources), _seeds(graph, gm, sources), wrapper)
+    def lowering(gm, **kwargs):
+        made.append((MeshLowering(gm, selected=SELECTED, **kwargs), TracingContext.get().fw_metadata))
+        return made[-1][0]
 
-    with DebugContext(), config.patch(assume_unaligned_fallback_output=received), enable_python_dispatcher():
-        body = run_pre_grad_passes(body, inputs)
-        with functorch_config.patch(unlift_effect_tokens=True, selective_decompose=config.selective_decompose):
-            exported, signature = aot_export_module(body, inputs, trace_joint=False,
-                                                    decompositions=select_decomp_table())
-        fake = _detect_fake_mode_from_gm(exported)
-        for node in exported.graph.find_nodes(op="get_attr"):
-            held = functools.reduce(getattr, node.target.split("."), exported)
-            if isinstance(held, Tensor) and "val" not in node.meta:
-                node.meta["val"] = fake.from_tensor(held, static_shapes=True)
-        lowered = _unlift_graph(body, exported, signature)
-        with V.set_fake_mode(fake):
-            return compile_fx_forward(lowered, inputs, num_orig_model_outputs=get_num_model_outputs(body),
-                                      num_example_inputs=len(inputs),
-                                      compiler_config_extra=create_compiler_config_extra(body),
-                                      inner_compile=compiled, is_inference=True)
+    with torch.no_grad():
+        compiled = compile_fx(body, inputs, inner_compile=functools.partial(compile_fx_inner, graph_lowering=lowering),
+                              config_patches={"force_disable_caches": True,
+                                              "assume_unaligned_fallback_output": received})
+    ((graph, signature),) = made
+    names, shift = graph.graph_input_names, signature.num_mutated_inp_runtime_indices
+    return Produced(
+        processor, kind, device, module, sources, graph.module, signature, graph,
+        tuple(Input(k, node, name)
+              for k, (node, name) in enumerate(zip(_placeholders(module.graph), names[len(names) - len(inputs):]))),
+        tuple(Output(k, node, graph.graph_outputs[shift + k], k >= len(returned))
+              for k, node in enumerate(returned + sent)),
+        _entries(graph, sources), _seeds(graph, graph.module, sources), compiled)
 
 
 # the Neural Engine's upstream compiler over one adapted body: each received value an input of its own (the model
