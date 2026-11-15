@@ -705,12 +705,12 @@ result through it. Fields: `output_data/compiler-workgroup-20261114/compiler/num
 | `torch/_inductor/compile_fx.py` | before `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, after `8a2297669b140332a9ae0970a689927781f5ad40032d59ac5e8bde773f392cc3` (installed) |
 | `torch/_inductor/config.py` | before `9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a`, after `adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5` (installed) |
 | `torch/_inductor/graph.py` | before `1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591`, after `d3a42366d4c7d600bbccb3645228f53c10e45d64a8a8e5fe7a12ccb29e794192` (installed) |
-| `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `e53a6377ff2a9d7678d639dedccbbf662d946367a6dac1be0f83ab29a10ebfa7` (installed: `d642f883…`, the c415dd73 after) |
-| `torch/_inductor/lowering.py` | before `c2ea8692e9948b82175cf8fc3ad9fa67e98b04c9b9e1fba5ae2ac77902d18e0c` (upstream; installed), after `5869663abf8440cbc4d11688acce36d080904ed6b96038028d4fb4e88291a394` |
+| `torch/_inductor/ir.py` | before `5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0`, after `e53a6377ff2a9d7678d639dedccbbf662d946367a6dac1be0f83ab29a10ebfa7` (installed6d56f939) |
+| `torch/_inductor/lowering.py` | before `c2ea8692e9948b82175cf8fc3ad9fa67e98b04c9b9e1fba5ae2ac77902d18e0c` (upstream), after `5869663abf8440cbc4d11688acce36d080904ed6b96038028d4fb4e88291a394` (installed6d56f939) |
 | `torch/_inductor/output_code.py` | before `647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6`, after `908714f17ecf9d2b54fd10e8fdfbd73966ae2ca29b2a41505806a8c25440667d` (installed) |
 | `torch/_inductor/pattern_matcher.py` | before `f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b`, after `e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441` (installed) |
 | `torch/_inductor/codegen/wrapper.py` | before `d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea`, after `d9d77265fd62a5debb212113250809b37704e1e6400ef747c68a8adbaf695e52` (installed) |
-| `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `1b9b5e525c9822cc3fd8df0e05acbb6713e013f6c0badec4bac9e7dd4c281131` (installed: `bb30e412…`, the c415dd73 after) |
+| `torch/_inductor/codegen/wrapper_fxir.py` | before `faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885`, after `1b9b5e525c9822cc3fd8df0e05acbb6713e013f6c0badec4bac9e7dd4c281131` (installed6d56f939) |
 | `torch/_inductor/codegen/common.py` | before `3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466` (upstream), after `0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44` (installed) |
 | `torch/_inductor/codegen/cpp.py` | before `0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3` (`torch-inductor-cpu-kernel-results.patch`'s after), after `c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2` (installed) |
 | `torch/_inductor/codegen/cpp_template_kernel.py` | before `b02db66a50404e4aa3ba5783238b95992be1041f74666cd9824cb0ac7cc397e9` (upstream), after `960ecabf55f0533f5aeddbbae443d4eb90a070a97459eb251f52254db11ff2ce` (installed) |
@@ -725,22 +725,19 @@ dependency hash. Fuzz-0 dry run, application, reverse dry run and AST passed; st
 the commands and hashes. `wrapper.py` changed from `d667391a…` to the table's `5a7a1467…`; other dependencies stayed
 unchanged. The delta is one line: `self.writeline(` becomes `self.make_comment(` in `write_provenance_debug_handle`.
 
-The converter-family revision `c415dd73` (patch `b3c1dc99…`) is installed. The supervisor checked it with a
+The converter-family revision `c415dd73` (patch `b3c1dc99…`) was installed before the current revision. The supervisor checked it with a
 canonical `git apply --cached` in an isolated temporary index: reverse the old patch `b5226195`, apply the new one,
 then check the reverse. It then installed it with fuzz 0, and every "after" hash and AST matched
 (`output_data/compiler-workgroup-20261114/compiler/numerical68-patch-preflight.json`,
 `numerical68-upstream-install.json` `updates`).
 
-Not installed yet: this revision, the selected-call intrinsic and the invoke identifier. It changes `ir.py` and
-`wrapper_fxir.py` from their installed hashes (in parentheses) and adds `lowering.py`. Every other file's "after" is
-its installed hash. It was checked the same canonical way, in an isolated temporary index holding the installed
-blobs:
-- `git apply --cached -R` of the `c415dd73` patch gives the table's "before" hashes;
-- `git apply --cached` of this patch gives the "after" hashes, with no offset;
-- `git apply --cached -R` of this patch gives back exactly the original blobs.
-
-The changed texts compile, and none has a new pyflakes finding. To install it, check the installed hashes, reverse
-the `c415dd73` patch and apply this one, each with fuzz 0.
+The selected-call intrinsic and invoke-identifier revision `6d56f939` (patch `a75eb0b8…`) is installed. It changes
+`ir.py` and `wrapper_fxir.py` and adds the `lowering.py` handoff; the other ten installed files are unchanged.
+Independent canonical preflight reversed `c415dd73` in an isolated temporary index, applied this patch, parsed all
+13 Python files, and reversed it to the exact original blobs. Installation then used canonical `patch` at fuzz 0:
+reverse-old dry run and application, new dry run and application, and reverse-new dry run. Every installed hash
+matches the projected hash in `numerical68-patch-preflight.json`; `numerical68-upstream-install.json` records the
+commands. No Torch or Mesh import, fake-dispatch observation, compilation or workload was run.
 
 ### Apply, check, reverse
 

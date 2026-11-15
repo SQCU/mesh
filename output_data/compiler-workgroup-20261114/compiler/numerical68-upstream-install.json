@@ -369,6 +369,178 @@
         }
       ],
       "status": "PASS"
+    },
+    {
+      "source_revision": "6d56f9399ece788668a3607a5d14449e3ee51434",
+      "time": "2026-11-15T09:09:31.687793+00:00",
+      "scope": "Installed selected-call intrinsic and original invoke identifier source only. No Torch/Mesh import, fake dispatch, compile, workload or native execution.",
+      "old_patch_revision": "c415dd73",
+      "patch_sha256": "a75eb0b864bfc93d1bc296fb85df09385e5cdb6dca78646a8528d142397cfaae",
+      "canonical_preflight": "numerical68-patch-preflight.json",
+      "steps": [
+        {
+          "step": "reverse-old-dry-run",
+          "command": [
+            "patch",
+            "--batch",
+            "--fuzz=0",
+            "--no-backup-if-mismatch",
+            "-p1",
+            "-d",
+            "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+            "--reverse",
+            "--dry-run"
+          ],
+          "exit": 0,
+          "stdout": "patching file 'torch/_inductor/compile_fx.py'\npatching file 'torch/_inductor/config.py'\npatching file 'torch/_inductor/graph.py'\npatching file 'torch/_inductor/ir.py'\npatching file 'torch/_inductor/output_code.py'\npatching file 'torch/_inductor/pattern_matcher.py'\npatching file 'torch/_inductor/codegen/wrapper.py'\npatching file 'torch/_inductor/codegen/wrapper_fxir.py'\npatching file 'torch/_inductor/codegen/common.py'\npatching file 'torch/_inductor/codegen/cpp.py'\npatching file 'torch/_inductor/codegen/cpp_template_kernel.py'\npatching file 'torch/_inductor/codegen/mps.py'\n",
+          "stderr": ""
+        },
+        {
+          "step": "reverse-old",
+          "command": [
+            "patch",
+            "--batch",
+            "--fuzz=0",
+            "--no-backup-if-mismatch",
+            "-p1",
+            "-d",
+            "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+            "--reverse"
+          ],
+          "exit": 0,
+          "stdout": "patching file 'torch/_inductor/compile_fx.py'\npatching file 'torch/_inductor/config.py'\npatching file 'torch/_inductor/graph.py'\npatching file 'torch/_inductor/ir.py'\npatching file 'torch/_inductor/output_code.py'\npatching file 'torch/_inductor/pattern_matcher.py'\npatching file 'torch/_inductor/codegen/wrapper.py'\npatching file 'torch/_inductor/codegen/wrapper_fxir.py'\npatching file 'torch/_inductor/codegen/common.py'\npatching file 'torch/_inductor/codegen/cpp.py'\npatching file 'torch/_inductor/codegen/cpp_template_kernel.py'\npatching file 'torch/_inductor/codegen/mps.py'\n",
+          "stderr": ""
+        },
+        {
+          "step": "new-dry-run",
+          "command": [
+            "patch",
+            "--batch",
+            "--fuzz=0",
+            "--no-backup-if-mismatch",
+            "-p1",
+            "-d",
+            "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+            "--dry-run"
+          ],
+          "exit": 0,
+          "stdout": "patching file 'torch/_inductor/compile_fx.py'\npatching file 'torch/_inductor/config.py'\npatching file 'torch/_inductor/graph.py'\npatching file 'torch/_inductor/ir.py'\npatching file 'torch/_inductor/lowering.py'\npatching file 'torch/_inductor/output_code.py'\npatching file 'torch/_inductor/pattern_matcher.py'\npatching file 'torch/_inductor/codegen/wrapper.py'\npatching file 'torch/_inductor/codegen/wrapper_fxir.py'\npatching file 'torch/_inductor/codegen/common.py'\npatching file 'torch/_inductor/codegen/cpp.py'\npatching file 'torch/_inductor/codegen/cpp_template_kernel.py'\npatching file 'torch/_inductor/codegen/mps.py'\n",
+          "stderr": ""
+        },
+        {
+          "step": "new-apply",
+          "command": [
+            "patch",
+            "--batch",
+            "--fuzz=0",
+            "--no-backup-if-mismatch",
+            "-p1",
+            "-d",
+            "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages"
+          ],
+          "exit": 0,
+          "stdout": "patching file 'torch/_inductor/compile_fx.py'\npatching file 'torch/_inductor/config.py'\npatching file 'torch/_inductor/graph.py'\npatching file 'torch/_inductor/ir.py'\npatching file 'torch/_inductor/lowering.py'\npatching file 'torch/_inductor/output_code.py'\npatching file 'torch/_inductor/pattern_matcher.py'\npatching file 'torch/_inductor/codegen/wrapper.py'\npatching file 'torch/_inductor/codegen/wrapper_fxir.py'\npatching file 'torch/_inductor/codegen/common.py'\npatching file 'torch/_inductor/codegen/cpp.py'\npatching file 'torch/_inductor/codegen/cpp_template_kernel.py'\npatching file 'torch/_inductor/codegen/mps.py'\n",
+          "stderr": ""
+        },
+        {
+          "step": "new-reverse-dry-run",
+          "command": [
+            "patch",
+            "--batch",
+            "--fuzz=0",
+            "--no-backup-if-mismatch",
+            "-p1",
+            "-d",
+            "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages",
+            "--reverse",
+            "--dry-run"
+          ],
+          "exit": 0,
+          "stdout": "patching file 'torch/_inductor/compile_fx.py'\npatching file 'torch/_inductor/config.py'\npatching file 'torch/_inductor/graph.py'\npatching file 'torch/_inductor/ir.py'\npatching file 'torch/_inductor/lowering.py'\npatching file 'torch/_inductor/output_code.py'\npatching file 'torch/_inductor/pattern_matcher.py'\npatching file 'torch/_inductor/codegen/wrapper.py'\npatching file 'torch/_inductor/codegen/wrapper_fxir.py'\npatching file 'torch/_inductor/codegen/common.py'\npatching file 'torch/_inductor/codegen/cpp.py'\npatching file 'torch/_inductor/codegen/cpp_template_kernel.py'\npatching file 'torch/_inductor/codegen/mps.py'\n",
+          "stderr": ""
+        }
+      ],
+      "files": [
+        {
+          "path": "torch/_inductor/compile_fx.py",
+          "installed_sha256": "8a2297669b140332a9ae0970a689927781f5ad40032d59ac5e8bde773f392cc3",
+          "original_sha256": "f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592",
+          "projected_sha256": "8a2297669b140332a9ae0970a689927781f5ad40032d59ac5e8bde773f392cc3"
+        },
+        {
+          "path": "torch/_inductor/config.py",
+          "installed_sha256": "adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5",
+          "original_sha256": "9171c2ed249e13a19a2ae22dba0db14f3c4fe11762108f87c8a4e85f96945b0a",
+          "projected_sha256": "adbe6ed0fc9bf5635cd2b318c76dd6fcdd97eb9bc14c22d3cebef781bfe244a5"
+        },
+        {
+          "path": "torch/_inductor/graph.py",
+          "installed_sha256": "d3a42366d4c7d600bbccb3645228f53c10e45d64a8a8e5fe7a12ccb29e794192",
+          "original_sha256": "1b3e2fdce21f6c499b655d4e4223fec37147decc7b3d95237b7bbd542cd23591",
+          "projected_sha256": "d3a42366d4c7d600bbccb3645228f53c10e45d64a8a8e5fe7a12ccb29e794192"
+        },
+        {
+          "path": "torch/_inductor/ir.py",
+          "installed_sha256": "d642f883e0d783edcf4df3bf7b187903f71a24857ef5500e2fd03d28983ceca4",
+          "original_sha256": "5d272a6e49cd9458745c2804942fc903450a5888d15dce0e11c06ffe516e95a0",
+          "projected_sha256": "e53a6377ff2a9d7678d639dedccbbf662d946367a6dac1be0f83ab29a10ebfa7"
+        },
+        {
+          "path": "torch/_inductor/lowering.py",
+          "installed_sha256": "c2ea8692e9948b82175cf8fc3ad9fa67e98b04c9b9e1fba5ae2ac77902d18e0c",
+          "original_sha256": "c2ea8692e9948b82175cf8fc3ad9fa67e98b04c9b9e1fba5ae2ac77902d18e0c",
+          "projected_sha256": "5869663abf8440cbc4d11688acce36d080904ed6b96038028d4fb4e88291a394"
+        },
+        {
+          "path": "torch/_inductor/output_code.py",
+          "installed_sha256": "908714f17ecf9d2b54fd10e8fdfbd73966ae2ca29b2a41505806a8c25440667d",
+          "original_sha256": "647fdca5e7ab214acdf8280885d419efc607f3a003353a46611e59ec6b3d8fe6",
+          "projected_sha256": "908714f17ecf9d2b54fd10e8fdfbd73966ae2ca29b2a41505806a8c25440667d"
+        },
+        {
+          "path": "torch/_inductor/pattern_matcher.py",
+          "installed_sha256": "e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441",
+          "original_sha256": "f3adcef339d1195dceb8ced943c1354006982462d940f50842f358706a91cf9b",
+          "projected_sha256": "e57491f85eda8e8a048b2307142ec9d124b7a1317004359945f3ad06386d4441"
+        },
+        {
+          "path": "torch/_inductor/codegen/wrapper.py",
+          "installed_sha256": "d9d77265fd62a5debb212113250809b37704e1e6400ef747c68a8adbaf695e52",
+          "original_sha256": "d52e9acc719615a327b24fe87b85f70de31282686351fff0dc8d7f80e5cdefea",
+          "projected_sha256": "d9d77265fd62a5debb212113250809b37704e1e6400ef747c68a8adbaf695e52"
+        },
+        {
+          "path": "torch/_inductor/codegen/wrapper_fxir.py",
+          "installed_sha256": "bb30e4126c5f365b2bf9bf52b64dc7e8bbb0dbcff6337c5b25b690c2648a611a",
+          "original_sha256": "faa4ea42b0c00d2e8e7e94abd4de819022a377dc155b47a6790174e0af33b885",
+          "projected_sha256": "1b9b5e525c9822cc3fd8df0e05acbb6713e013f6c0badec4bac9e7dd4c281131"
+        },
+        {
+          "path": "torch/_inductor/codegen/common.py",
+          "installed_sha256": "0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44",
+          "original_sha256": "3b244262921b936fc156ce394a2ae48e068b81bc621656e523f80a3d946f4466",
+          "projected_sha256": "0de7b0e1b827998418296f8669edcfeec7564efcb9ccc7bc2bccea46da66fe44"
+        },
+        {
+          "path": "torch/_inductor/codegen/cpp.py",
+          "installed_sha256": "c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2",
+          "original_sha256": "0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3",
+          "projected_sha256": "c4b87c6a6db3dea918370285c2c6f2df555ab2930c8ce5d4386ed005ff505ce2"
+        },
+        {
+          "path": "torch/_inductor/codegen/cpp_template_kernel.py",
+          "installed_sha256": "960ecabf55f0533f5aeddbbae443d4eb90a070a97459eb251f52254db11ff2ce",
+          "original_sha256": "b02db66a50404e4aa3ba5783238b95992be1041f74666cd9824cb0ac7cc397e9",
+          "projected_sha256": "960ecabf55f0533f5aeddbbae443d4eb90a070a97459eb251f52254db11ff2ce"
+        },
+        {
+          "path": "torch/_inductor/codegen/mps.py",
+          "installed_sha256": "57ce3bc432400c7206f9909ad8ba4a0cfa60c2d848053189ca8c243bee380f2a",
+          "original_sha256": "8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db",
+          "projected_sha256": "57ce3bc432400c7206f9909ad8ba4a0cfa60c2d848053189ca8c243bee380f2a"
+        }
+      ],
+      "result": "PASS: all13 installed hashes equal canonical projected hashes; AST parsed; canonical reverse dry-run passes."
     }
   ]
 }
