@@ -942,5 +942,63 @@
     ],
     "execution": "No imports or native/save-load invocation. Native138 is separate matched-build evidence; newer native source unbuilt.",
     "history": "Forward source checkpoint; no reset, stash or backup. Withdrawn intermediate AOT hook has no net diff and was not installed."
+  },
+  "whole_source_wip61": {
+    "status": "SOURCE HISTORY WIP; AOT subset rejected; full direct JD entry replacement continues",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "pid": 32089,
+      "exec": 58844,
+      "result": 65,
+      "state": "source HOLD"
+    },
+    "source": {
+      "compiler/mesh_compiler/archive.py": {
+        "sha256": "f3f448646ce3162a103e2b3596fb81f0c5649c7bba92c4bfefbd10c29c86df68",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      },
+      "compiler/mesh_compiler/export.py": {
+        "sha256": "4c730a037850572326b5fbf913df83ca6c1d1dd489f7d6c8bfa6553cc966efe9",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      },
+      "compiler/mesh_compiler/ir.py": {
+        "sha256": "e57c5dddd2e958e5cf9e2081b5f969eaa74f96681552178ef74c4d6144156677",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      },
+      "compiler/mesh_compiler/placement.py": {
+        "sha256": "4ef4a5eb06183c45bdcc78e8d3457baca107eb3ab20a05350c344220bdc84dbd",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      },
+      "compiler/mesh_compiler/decompose.py": {
+        "sha256": "1a29ec8ef3ccbdb51df57058f16b06b602b6f1a37cc4aebd19088d3c614e5c1b",
+        "AST": "PASS",
+        "pyflakes": "PASS"
+      }
+    },
+    "retained": [
+      "Original result TreeSpec and KeyEntry.get projections replace key-kind erasure; compile-known leaves retain original values. Unreachable multi-result summed machinery removed because no current rule produces it.",
+      "Actual LoweredAOTI planned lines, MemoryPlanner/MemoryPlanningState identities, AotCompiled fields and Model inputs/outputs/states/aliases enter the existing saved registry.",
+      "ir.given calls original normalize_function; written follows actual projected result."
+    ],
+    "rejected": [
+      "Result61 still ran stage2_export/create_graph_signature before the companion and therefore did not admit transformed Dedupe/Synthetic conventions. New compiled field not archived. This is not accepted completion and the hook was not installed."
+    ],
+    "continuation": "Replace Mesh export.export entry with original aot_export_joint_with_descriptors -> aot_compile_joint_with_descriptors in one ExitStack and original abstract compiler operands; revise downstream representation instead of preserving export-only GraphSignature assumptions. Retain complete original source/call/cache owner through public and saved consumers.",
+    "limits": [
+      "Per-result operation partition/native operand identity and original RNG state/token consumer remain open.",
+      "Original AOT public/alias/gradient/outlined family remains incomplete.",
+      "No imports, dependency installation or direct/save-load execution. Native139 matched build/ABI is separate evidence, not a public caller release."
+    ],
+    "patch": {
+      "path": "compiler/patches/torch-export-alias-metadata.patch",
+      "sha256": "b35a1ba87ff13d795e9d5355813e0455e6b4783a724ff52aa882e92ef826ba9a",
+      "installed": false,
+      "status": "Rejected old-path hook preserved before complete direct-entry replacement"
+    },
+    "diff_check": "PASS after worker trimmed EOF context and paired hunk counts"
   }
 }

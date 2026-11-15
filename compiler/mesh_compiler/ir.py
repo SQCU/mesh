@@ -12,6 +12,7 @@ from torch._guards import detect_fake_mode
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch.export.graph_signature import OutputKind
 from torch.fx.node import map_arg
+from torch.fx.operator_schemas import normalize_function
 from torch.utils import _pytree as pytree
 from torch.utils._python_dispatch import get_alias_info
 
@@ -93,6 +94,12 @@ class Exported:
     # torch/_export/utils.py _check_input_constraints_for_graph reads (runtime.Arguments); None for a part decompose.py
     # builds
     range_constraints: dict = None
+    # compiler/patches/torch-export-alias-metadata.patch (torch/export/_trace.py _aot_export_joint_with_descriptors
+    # `aot_compiled`): the export's own stage-2 callable (aot_compile_joint_with_descriptors over its joint export, its
+    # ExitStack open; abstract: boxed_nop_preserve_node_meta), the original calling convention (parameters and buffers,
+    # then the user arguments) with the original wrappers, the call boundary's (export.Captured.captured); a product
+    # distinct from `graph_module`, not a saved value; None for a program no joint export produced
+    compiled: object = None
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order
@@ -213,7 +220,7 @@ CLONE, EMPTY = ATEN.clone.out, ATEN.empty.memory_format
 
 # a node's value's shape: a Tensor value's own; a list or tuple value's result `k`'s (its own producer FakeTensor's,
 # each result its own shape), `k` a getitem index or a result's key path (torch/utils/_pytree.py key_get over its
-# tree_flatten_with_path KeyPath: placement.result_paths)
+# tree_flatten_with_path KeyPath: placement.tensor_paths)
 def shape(node, k=None):
     value = node.meta["val"]
     if isinstance(k, tuple):
@@ -302,8 +309,11 @@ def aliased(node, k=0):
 # ExecuTorch documentation, Concepts, Out variant; torch/utils/_python_dispatch.py return_and_correct_aliasing (an
 # in-place or out= call returns its written argument itself): the argument values result `k` of call `node` writes,
 # each one written with that result's alias (get_alias_info's outs_write_aliases), of a list result its element k (the
-# result is that list); () where it writes none
+# result is that list); () where it writes none; a getitem's its call's result at its index (its own result, as
+# `related`'s: export.read, `based` and `views` read a Tensor value's, a projected result's through its call)
 def written(node, k=0):
+    if node.target is operator.getitem:
+        return written(node.args[0], node.args[1])
     info = alias_info(node)
     if info is None or info.outs_write_aliases is None:
         return ()
@@ -443,6 +453,9 @@ def constant(graph, target, arguments, like, processor, **kwargs):
     return node
 
 
+# torch 2.14.0 torch/fx/operator_schemas.py normalize_function (normalize_to_only_use_kwargs): a call's own
+# arguments by its schema's argument names in their positional order, its defaults populated (an OpOverload its one
+# exact schema's), the names and that ArgsKwargsPair's kwargs
 def given(node):
-    names = [argument.name for argument in node.target._schema.arguments]
-    return names, {**dict(zip(names, node.args)), **node.kwargs}
+    normalized = normalize_function(node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True)
+    return list(normalized.kwargs), dict(normalized.kwargs)

@@ -112,10 +112,13 @@ def lifted(program, module):
 # kernel decomposed by that registered kernel (its view, then a clone), and any tensor attribute left lifted; the alias
 # record (`aot_aliases`) the first AOT result's, with a loss the forward and backward's, popped before
 # run_decompositions, else run_decompositions'; run_decompositions' own record, the final program's, its `decomposed`
-# (with a loss a distinct stage result, else the same record)
+# (with a loss a distinct stage result, else the same record); the export's own stage-2 callable (`aot_compiled`,
+# compiler/patches/torch-export-alias-metadata.patch) popped from the first program before any later pass, its
+# `compiled`
 def export(module, args, loss=None, **export_options):
     program, aliases = torch.export.export(module, args, **{"strict": True, **export_options}), None
     graph_module = program.graph_module
+    compiled = graph_module.meta.pop("aot_compiled")
     while pending := [n for n in graph_module.graph.nodes if n.op == "call_function" and n.target in STATIC]:
         expand(graph_module, pending[0])
     graph_module.recompile()
@@ -131,7 +134,7 @@ def export(module, args, loss=None, **export_options):
             table[node.target] = functools.partial(node.target._op_dk, VIEW_COPY)
     program = lifted(program.run_decompositions(table), module)
     later = aot_aliases(program)
-    return read(program, later if aliases is None else aliases, later)
+    return read(program, later if aliases is None else aliases, later, compiled)
 
 
 # compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py
@@ -150,7 +153,7 @@ def aot_aliases(program):
                                for leaves in (inputs, outputs))
 
 
-def read(program, aliases=None, decomposed=None):
+def read(program, aliases=None, decomposed=None, compiled=None):
     graph_module, signature = program.graph_module, program.graph_signature
     nodes = list(graph_module.graph.nodes)
 
@@ -218,7 +221,7 @@ def read(program, aliases=None, decomposed=None):
     return Exported(program.graph_module, state, tokens, user_inputs, outputs,
                     returned(program.call_spec.out_spec, outputs, signature.backward_signature is not None),
                     state_kinds, aliases, specialized=specialized, decomposed=decomposed, signature=signature,
-                    range_constraints=program.range_constraints)
+                    range_constraints=program.range_constraints, compiled=compiled)
 
 
 # torch 2.14.0 torch/export/graph_signature.py ExportGraphSignature.backward_signature, gradients_to_parameters and
@@ -340,18 +343,20 @@ class Captured(torch.fx.Interpreter):
         values = [self.fake.from_tensor(function.state[name][1]) if name in function.state
                   else self.token if name in function.tokens else leaves[function.user_inputs.index(name)]
                   for name in names]
-        from torch._functorch._aot_autograd.runtime_wrappers import _RuntimeForwardEpilogue
-        metadata, roles, prototypes, results = function.aliases
+        # the call's forward results: the export's own stage-2 callable (Exported.compiled: its original wrappers and
+        # calling convention, RuntimeWrapper's epilogue among them) over the function's parameters, then its buffers,
+        # each in its input spec order (JointWithDescriptors params_spec and buffers_spec's order), then the call's
+        # leaves; each AOT input's prototype that input (FakeTensorConverter memo: a gradient output's value)
+        _, roles, prototypes, _ = function.aliases
         tensors, converter = dict(function.state.values()), FakeTensorConverter()
         actual = [leaves[k] if kind == InputKind.USER_INPUT else self.fake.from_tensor(tensors[k]) for kind, k in roles]
         for prototype, value in zip(prototypes, actual, strict=True):
             if isinstance(prototype, torch.Tensor) and isinstance(value, torch.Tensor):
                 converter.set_tensor_memo(prototype, value)
-        epilogue = _RuntimeForwardEpilogue(metadata, trace_joint=False, keep_input_mutations=False)
+        state = [self.fake.from_tensor(tensor) for kind in (InputKind.PARAMETER, InputKind.BUFFER)
+                 for name, (_, tensor) in function.state.items() if function.state_kinds[name] == kind]
         with self.fake, torch.enable_grad():
-            outs = [converter.from_real_tensor(self.fake, value) if isinstance(value, torch.Tensor) else value
-                    for value in results]
-            forward = iter(epilogue.finalize(epilogue.capture_orig_inputs(actual), outs))
+            forward = iter(function.compiled(*state, *leaves))
         exported = function.graph_module.graph.output_node().args[0]
         stated = {target: name for name, (target, _) in function.state.items()}
         produced = tuple(

@@ -42,23 +42,32 @@ def operands(node):
     return found
 
 
-# operand `read`'s shape as `node` reads it: a getitem's its producer's selected result's (ir.shape at its index), any
-# other's its operand's own
+# a value with several results: one torch/utils/_pytree.py does not take as a leaf (a tuple, list, dict or other
+# registered node of results)
+def several_results(node):
+    return not pytree.tree_is_leaf(node.meta.get("val"))
+
+
+# a projection of a multi-result value: the node a torch/fx/proxy.py Proxy's own indexing or attribute access records
+# (operator.getitem, getattr) on it, its own target applied to its producer's value selecting its result
+def projection(node):
+    return (node.op == "call_function" and node.target in (operator.getitem, getattr)
+            and isinstance(node.args[0], torch.fx.Node) and several_results(node.args[0]))
+
+
+# operand `read`'s shape as `node` reads it: a projection's the result it selects (its own target on its producer's
+# value), any other's its operand's own
 def read_shape(node, read):
-    return shape(read, node.args[1]) if node.target is operator.getitem else shape(read)
+    return tuple(node.target(read.meta["val"], node.args[1]).shape) if projection(node) else shape(read)
 
 
 def read_shapes(node):
     return [read_shape(node, n) for n in operands(node)]
 
 
-def several_results(node):
-    return isinstance(node.meta.get("val"), (tuple, list))
-
-
 # a multi-result value's Tensor leaves by their torch/utils/_pytree.py tree_flatten_with_path KeyPaths (its own
 # KeyEntry objects), in leaf order: the leaves its partition rules, correspondences and statements are of (its literal
-# leaves its original values: `literals`)
+# leaves their original values: `structured`)
 def tensor_paths(node):
     return [keys for keys, leaf in pytree.tree_flatten_with_path(node.meta["val"])[0] if isinstance(leaf, torch.Tensor)]
 
@@ -89,9 +98,10 @@ def carried(label):
     return label >= 0 if not isinstance(label, tuple) else all(d >= 0 for d in label)
 
 
-# a summed label (a correspondence some result sums)
+# a summed label (the rules give one only to a single-result operation's rows: a multi-result value's
+# correspondences are output dimensions or None)
 def summing(label):
-    return label < 0 if not isinstance(label, tuple) else any(d < 0 for d in label)
+    return not isinstance(label, tuple) and label < 0
 
 
 # an output label's extent: a Tensor value's own; a multi-result value's every carrying result's own at its own
@@ -109,55 +119,28 @@ def common(label):
 
 
 # Y. Xu et al., GSPMD, arXiv:2105.04663, section 3 (OpenXLA hlo_sharding.h HloSharding::Tuple, GetSubSharding by
-# ShapeIndex; spmd_partitioner.cc HandleGetTupleElement): a multi-result value's placed value, each result leaf's own
-# record (dimension, sizes, processors, nodes) by its KeyPath, every leaf: a Tensor leaf's its projections, pieces or
-# reduction (`tensor_paths`), a literal leaf's its original value (`literals`)
-class Results(dict):
-    pass
-
-
-# what a KeyEntry selects with: its own get (torch/utils/_pytree.py KeyEntry.get) on a value returning each subscript
-# or attribute name it is asked for (a SequenceKey its index, a MappingKey its key: the index a getitem of that child
-# takes, torch/fx/experimental/proxy_tensor.py track_tensor_tree's proxy[key])
-class _Subscript:
-    def __getitem__(self, subscript):
-        return subscript
-
-    def __getattr__(self, name):
-        return name
-
-
-def subscript(key):
-    return key.get(_Subscript())
-
-
-# a getitem's selection from its producer's Results at its index: the leaf record there, else the sub-tree under it
-# (a nested result's own Results, each path under the key that index selects with)
-def select(results, index):
-    under = Results({path[1:]: record for path, record in results.items() if subscript(path[0]) == index})
-    return under[()] if () in under else under
-
-
-# a multi-result value's literal leaves (not a Tensor: None, an integer; design/aot-compilation-change-request.md A1,
-# torch/fx/experimental/proxy_tensor.py track_tensor_tree returning their actual values) in its Results: each its
-# original value as its operand, held everywhere (no holder: an input's form), no numerical work of its own
-def literals(node, records):
-    for path, leaf in pytree.tree_flatten_with_path(node.meta["val"])[0]:
-        if not isinstance(leaf, torch.Tensor):
-            records[path] = None, None, (None,), [leaf]
-    return records
+# ShapeIndex; spmd_partitioner.cc HandleGetTupleElement): a multi-result value's placed value, its own result tree
+# (its value's torch/utils/_pytree.py TreeSpec) rebuilt from its leaves' own records (tree_unflatten), a Tensor
+# leaf's `records[its KeyPath]` (its projections, pieces or reduction), a literal leaf's its original value as its
+# operand (None, an integer: design/aot-compilation-change-request.md A1, compile-known; proxy_tensor
+# track_tensor_tree returns it as it is), held everywhere (no holder: an input's form), no numerical work of its own;
+# a projection selects from it by its own target (transfer)
+def structured(node, records):
+    leaves, spec = pytree.tree_flatten_with_path(node.meta["val"])
+    return pytree.tree_unflatten([records[path] if isinstance(leaf, torch.Tensor) else (None, None, (None,), [leaf])
+                                  for path, leaf in leaves], spec)
 
 
 # a multi-result value placed whole on `processor`: each Tensor leaf its own projection of the operation there
-# (`selection`, inserted after the operation), each literal leaf its own (`literals`); any other value its own record
+# (`selection`, inserted after the operation), its result tree rebuilt (`structured`); any other value its own record
 def wholly(graph, node, processor):
     if not several_results(node):
         return None, None, (processor,), [node]
-    records, cache = Results(), {}
+    records, cache = {}, {}
     with graph.inserting_before(node.next):
         for path in tensor_paths(node):
             records[path] = None, None, (processor,), [selection(graph, node, path, processor, cache)]
-    return literals(node, records)
+    return structured(node, records)
 
 
 # the projection of result path `path` of `root` on `processor`: each KeyEntry's own get (torch/utils/_pytree.py
@@ -185,10 +168,11 @@ def output_axes(node, shard, label, out):
 # projected on each shard once (`selection`, on the shard's own processor: the value a getitem of that leaf takes), its
 # block order the shard's at that leaf's own dimensions, a window shard's cut along that leaf's own window dimension,
 # and its own output axes on the shard (its projection, its own dimension, its own full extent); each leaf's record
-# its own dimension in the correspondence (each mesh dimension's under a mesh), by its result path
+# its own dimension in the correspondence (each mesh dimension's under a mesh), the result tree rebuilt from them
+# (`structured`)
 def projected(graph, node, record, mesh=False):
     along, sizes, processors, shards = record
-    records, cache = Results(), {}
+    records, cache = {}, {}
     for i, path in enumerate(tensor_paths(node)):
         dims = tuple(label[i] for label in along) if mesh else (along[i],)
         nodes = []
@@ -206,7 +190,7 @@ def projected(graph, node, record, mesh=False):
                 value.meta["order"] = order
             nodes.append(value)
         records[path] = dims if mesh else dims[0], sizes, processors, nodes
-    return literals(node, records)
+    return structured(node, records)
 
 
 def call(graph, target, arguments, processor, **kwargs):
@@ -773,7 +757,7 @@ def chosen(graph, node, dimension, blocks, processor):
 
 
 # a value in its own block order made plain (each ordered dimension's blocks at their places); a literal operand (a
-# multi-result value's literal leaf, `literals`) has none
+# multi-result value's literal leaf, `structured`) has none
 def plain(graph, node, processor, extents=None):
     for dimension, blocks in (node.meta.get("order", {}) if isinstance(node, torch.fx.Node) else {}).items():
         whole, edges = list(shape(node)), list(itertools.accumulate((len(range(*b)) for b in blocks), initial=0))
@@ -964,13 +948,13 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
         holders = tuple(copies)
         if not several_results(node):
             return (*given_want, reshard(graph, (None, None, holders, list(copies.values())), *given_want))
-        made, cache = Results(), {}
+        made, cache = {}, {}
         for i, path in enumerate(tensor_paths(node)):
             placement = measured(statement[i], node, path)
             placement = (None, None, (placement,)) if isinstance(placement, str) else placement
             leaf_copies = None, None, holders, [selection(graph, copies[q], path, q, cache) for q in holders]
             made[path] = *placement, reshard(graph, leaf_copies, *placement)
-        return literals(node, made)
+        return structured(node, made)
     along, sizes, processors = target
     extent = extent_of(node, along, out) if carried(along) else next(
         s[row.index(along)] for s, row in zip(shapes, rows) if along in row)
@@ -1084,52 +1068,31 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
         return projected(graph, node, (along, sizes, processors, shards)) if several_results(node) else (
             along, sizes, processors, shards)
 
-    # a summed label's completion: each shard's partial value (its order its own) reduced into `to` over `extents_`
-    def reduced(partials, to, extents_):
-        kept = ranges(to[1], extents_[to[0]], len(to[2])) if to[0] is not None else []
-        parts = {processor: [] for processor in to[2]}
-        for processor, partial in zip(processors, partials):
-            blocks = partial.meta["order"].get(to[0], ())
-            if partial.meta["order"].keys() == {to[0]} and set(blocks) <= set(kept):
-                edges = list(itertools.accumulate((len(range(*block)) for block in blocks), initial=0))
-                for block, low, high in zip(blocks, edges, edges[1:]):
-                    keeper = to[2][kept.index(block)]
-                    piece = partial if len(blocks) == 1 else call(graph, SLICE, (partial, to[0], low, high), processor)
-                    piece.meta.setdefault("blocks", {})[keeper] = to[0], kept.index(block), *arrayed(kept)[:2]
-                    parts[keeper].append(piece)
-            else:
-                column = reshard(graph, (None, None, (processor,), [plain(graph, partial, processor, extents_)]), *to,
-                                 True)
-                for keeper, part in zip(to[2], column):
-                    parts[keeper].append(part)
-        for k, held_ in enumerate(parts.values()):
-            for part in held_:
-                part.meta.setdefault("collectives", {})[to[2][k]] = "reduce", f"{node.name}:{k}"
-        return *to, [padded(graph, functools.reduce(lambda a, b: call(graph, ADD, (a, b), keeper), held_), to[0],
-                            to[1], k, keeper) if to[0] is not None else functools.reduce(
-                                lambda a, b: call(graph, ADD, (a, b), keeper), held_)
-                     for k, (keeper, held_) in enumerate(parts.items())]
+    # a summed label's completion (the rules' summed labels: sum.dim_IntList's over(summed=True), mm's and bmm's rows,
+    # index_put's accumulated rows, each a single-result operation's): each shard's partial value reduced into `to`
     to = (None, None, (want,)) if isinstance(want, str) else want
-    if not several_results(node):
-        return reduced(shards, to, out)
-    # a multi-result value's each result leaf's own completion (its correspondence `along`), from each shard's own
-    # projection of it (`selection`, its order at that leaf's own dimensions): a leaf carrying it those pieces (its own
-    # dimension there), a leaf summing it those partial values reduced into its own statement at its own shape (a whole
-    # statement's processor)
-    made, cache = Results(), {}
-    for i, path in enumerate(tensor_paths(node)):
-        pieces = []
-        for processor, shard in zip(processors, shards):
-            pieces.append(selection(graph, shard, path, processor, cache))
-            pieces[-1].meta["order"] = {label[i]: blocks for label, blocks in shard.meta["order"].items()
-                                        if admissible(label) and label[i] >= 0}
-        if along[i] >= 0:
-            made[path] = along[i], sizes, processors, pieces
-            continue
-        own = statement[i]
-        own_to = (None, None, (own,)) if isinstance(own, str) else to if several(own) else measured(own, node, path)
-        made[path] = reduced(pieces, own_to, shape(node, path))
-    return literals(node, made)
+    kept = ranges(to[1], out[to[0]], len(to[2])) if to[0] is not None else []
+    parts = {processor: [] for processor in to[2]}
+    for processor, shard in zip(processors, shards):
+        blocks = shard.meta["order"].get(to[0], ())
+        if shard.meta["order"].keys() == {to[0]} and set(blocks) <= set(kept):
+            edges = list(itertools.accumulate((len(range(*block)) for block in blocks), initial=0))
+            for block, low, high in zip(blocks, edges, edges[1:]):
+                keeper = to[2][kept.index(block)]
+                piece = shard if len(blocks) == 1 else call(graph, SLICE, (shard, to[0], low, high), processor)
+                piece.meta.setdefault("blocks", {})[keeper] = to[0], kept.index(block), *arrayed(kept)[:2]
+                parts[keeper].append(piece)
+        else:
+            column = reshard(graph, (None, None, (processor,), [plain(graph, shard, processor, out)]), *to, True)
+            for keeper, part in zip(to[2], column):
+                parts[keeper].append(part)
+    for k, held_ in enumerate(parts.values()):
+        for part in held_:
+            part.meta.setdefault("collectives", {})[to[2][k]] = "reduce", f"{node.name}:{k}"
+    return *to, [padded(graph, functools.reduce(lambda a, b: call(graph, ADD, (a, b), keeper), held_), to[0], to[1],
+                        k, keeper) if to[0] is not None else functools.reduce(
+                            lambda a, b: call(graph, ADD, (a, b), keeper), held_)
+               for k, (keeper, held_) in enumerate(parts.items())]
 
 
 def place(graph_module, placement):
@@ -1137,7 +1100,7 @@ def place(graph_module, placement):
     graph = graph_module.graph
     nodes = list(graph.nodes)
     placed = [n for n in nodes if n.op != "placeholder"]
-    stated = {n: placement(n) for n in placed if n.target is not operator.getitem}
+    stated = {n: placement(n) for n in placed if not projection(n)}
     stated.update((n, placement(n)) for n in nodes if n.op == "placeholder")
     for node in nodes:
         if node.op == "placeholder":
@@ -1169,50 +1132,48 @@ def place(graph_module, placement):
     retained = {node: (parent(node), node.args, node.kwargs, node.meta["val"]) for node in order}
 
     # design/aot-compilation-change-request.md A2; OpenXLA hlo_sharding.h HloSharding::Tuple and GetSubSharding (one
-    # sharding per leaf of the shape tree, by its index): the stated placement of a value, its own; a getitem's its
-    # producer's at its index where the producer's is one per result (a list, in result order, nested for a nested
-    # result), else the producer's one statement (every result under it)
+    # sharding per leaf of the shape tree): the stated placement of a value, its own; a projection's its producer's
+    # selected by the projection's own target where the producer's is one per result (a list for a sequence result, a
+    # dict for a dict result, nested for a nested one), else the producer's one statement (every result under it)
     def wanted(node):
         if node in stated:
             return stated[node]
         statement = wanted(node.args[0])
-        return statement[node.args[1]] if isinstance(statement, list) else statement
+        return node.target(statement, node.args[1]) if isinstance(statement, (list, dict)) else statement
 
     # each value placed once and then resharded to its own measured placement (XLA spmd_partitioner.cc
     # HandleGetTupleElement: the original partitioned tuple's selected element, its own sub-sharding, then Reshard to
-    # its consumer's sharding): a getitem taking its producer's selected result's own placed record (Results), as
-    # made where its nodes are already that result's own (a replicated operation's or a summing result's pieces), else
-    # projected where the producer holds it (its first processor, its own partition the getitem rule's alignment of
-    # that record), then that result resharded to its producer's statement at its own shape; a multi-result value's
-    # one operation partitioned once under its statement (`partitioned`), each result's record its own, the value
-    # itself never resharded (its getitems' transfers reshard each result; a list-valued getitem's own getitems, the
-    # same); any other value under its own statement at its own shape
+    # its consumer's sharding): a projection taking its producer's result tree's selection by its own target
+    # (`structured`: a Tensor leaf's projections, pieces or reduction, a literal leaf's value, a nested result's own
+    # tree), then a Tensor leaf resharded to its producer's statement at its own shape; a multi-result value's one
+    # operation partitioned once under its statement (`partitioned`), the value itself never resharded (its
+    # projections' transfers reshard each result); any other value under its own statement at its own shape
     def transfer(node, held):
         multiple, statement = several_results(node), None
-        if node.target is operator.getitem:
-            held, want = [select(held[0], node.args[1])], None
+        if projection(node):
+            held, want = [node.target(held[0], node.args[1])], None
             # a Tensor leaf resharded to its own statement; a literal leaf or a nested result none (its literal, its
             # own getitems')
             resharded = measured(wanted(node), node) if isinstance(node.meta.get("val"), torch.Tensor) else None
         elif multiple:
-            # each result leaf's own statement (a list one per result, nested for a nested result, else the one
-            # statement each leaf's: `wanted`'s by its path); the operation's own: their one processor where every leaf
-            # states it (a single device), else every processor they state, its sizes and correspondence measured by
-            # partitioned at each leaf
+            # each Tensor leaf's own statement (a list or dict one per result, nested for a nested result: each key's own
+            # get along the leaf's KeyPath; else the one statement each leaf's); the operation's own: their one
+            # processor where every leaf states it (a single device), else every processor they state, its sizes and
+            # correspondence measured by partitioned at each leaf
             statement, resharded = [], None
             for path in tensor_paths(node):
                 own = stated[node]
                 for key in path:
-                    own = key.get(own) if isinstance(own, list) else own
+                    own = key.get(own) if isinstance(own, (list, dict)) else own
                 statement.append(own)
             devices = tuple(dict.fromkeys(q for s in statement for q in ((s,) if isinstance(s, str) else flat(s[1]))))
             want = devices[0] if all(isinstance(s, str) for s in statement) and len(devices) == 1 else (
                 None, None, devices)
         else:
             want = resharded = measured(stated[node], node)
-        # a getitem's result its producer's own selection of it (`select`: a leaf's projections, pieces, reduction or
-        # literal; a nested result's own Results), taken as made, the getitem replaced
-        taken = node.target is operator.getitem
+        # a projection's result its producer's own selection of it (its own target on the producer's result tree), taken
+        # as made, the projection replaced
+        taken = projection(node)
         if taken:
             replaced.append(node)
         with graph.inserting_before(placed[0] if node.op == "placeholder" else node):

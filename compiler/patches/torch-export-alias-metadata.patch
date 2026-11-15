@@ -44,3 +44,19 @@
 
 
  def _remove_detach_pass(
+--- a/torch/export/_trace.py
++++ b/torch/export/_trace.py
+@@ -1161,4 +1161,13 @@
+         num_user_fw_outs=None,
+         loss_index=None,
+     )
++    # compiler/patches/torch-export-alias-metadata.patch: the joint export's own stage 2, its companion
++    # (aot_autograd.py aot_compile_joint_with_descriptors: aot_stage2_compile over the same JointWithDescriptors, this
++    # export's ExitStack still open), its abstract compilation (the companion's own boxed_nop_preserve_node_meta
++    # compilers): the callable of the original calling convention (parameters and buffers, then the user arguments)
++    # with the original wrappers (RuntimeWrapper's forward epilogue, the dispatch wrappers' post_compile), a product
++    # distinct from this GraphModule
++    from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
++
++    gm.meta["aot_compiled"] = aot_compile_joint_with_descriptors(joint_with_descriptors)
+     return gm, graph_signature

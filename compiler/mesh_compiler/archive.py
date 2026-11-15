@@ -59,6 +59,11 @@ Record = collections.namedtuple("Record", "kind processor index")
 Lowered = collections.namedtuple("Lowered", "index")
 Lined = collections.namedtuple("Lined", "index")
 Stated = collections.namedtuple("Stated", "cls state")
+# a wrapper's planner object (torch/_inductor/codegen/memory_planning.py LiveRange, LiveRanges, AllocationTreeNode,
+# AllocationPool, AllocationPools, BufferGroup, MemoryPlanner; wrapper.py MemoryPlanningState) by its index in its
+# Produced's planner table (each once by identity: an Allocation's pool its AllocationPool's own), each recorded as its
+# class and its own state (its __dict__, a Stated)
+Planned = collections.namedtuple("Planned", "index")
 
 
 # torch 2.14.0 torch/fx/_graph_pickler.py GraphPickler (this archive's one payload codec): a raw torch.fx Graph as
@@ -319,7 +324,9 @@ def constructed(machine):
 # RandomSeeds buffer's operation and buffer names there and FX origins, its uses, its buffer's every ExternCall's
 # index: that IR node's own calls); the Neural Engine's Model as (its ExportedProgram's graph module, graph signature,
 # state dict, range constraints, module call graph, example inputs, constants and verifiers, its conversion's selected
-# operands, received, handles). Each control record's native correspondence is constructed's (its regions, inlinings
+# operands, received, handles, and its inputs, outputs, states and aliases as lower_inductor.py Model holds them: every
+# field but the MLModel itself, whose executable binding is the native package's). Each control record's native
+# correspondence is constructed's (its regions, inlinings
 # and emissions by these records); its wrapper lines (`lines`): `table` each line once by identity (`line_of`: a str
 # line its text, a produced kernel's call its record, a typed line its class and fields' operands), the owner
 # sequences by that table (`wrappers` each wrapper's own lines, `extern` and `inlined` each record's, `lifted` each
@@ -445,9 +452,13 @@ def producing(made, p, index, bindings, sources):
     # in `wrappers` with each GraphLowering module whose wrapper_code it is (an inlined control body writes into its
     # parent's: one wrapper, several graphs), a Lifted's own wrapper among them
     from torch._inductor import ir as upstream_ir
-    from torch._inductor.codegen.wrapper import PythonWrapperCodegen
+    from torch._inductor.codegen import memory_planning
+    from torch._inductor.codegen.wrapper import MemoryPlanningState, PythonWrapperCodegen, WrapperLine
     from torch._inductor.graph import GraphLowering
-    wrappers, nodes, table = {}, {}, {}
+    wrappers, nodes, table, planners = {}, {}, {}, {}
+    PLANNERS = (memory_planning.LiveRange, memory_planning.LiveRanges, memory_planning.AllocationTreeNode,
+                memory_planning.AllocationPool, memory_planning.AllocationPools, memory_planning.BufferGroup,
+                memory_planning.MemoryPlanner, MemoryPlanningState)
     # Produced.kernels' keys: each KernelCallLine's identity (lower_inductor.py produced, id(record[2]))
     called_lines = {called: Record("kernel", p, n) for n, called in enumerate(made.kernels)}
 
@@ -475,6 +486,10 @@ def producing(made, p, index, bindings, sources):
             return value.module
         if isinstance(value, upstream_ir.IRNode):
             return Lowered(nodes.setdefault(id(value), (len(nodes), value))[0])
+        if isinstance(value, WrapperLine):
+            return lined(value)
+        if isinstance(value, PLANNERS):
+            return Planned(planners.setdefault(id(value), (len(planners), value))[0])
         if isinstance(value, upstream_ir.OutputSpec):
             return Stated(type(value), operand(dict(vars(value))))
         if isinstance(value, dict):
@@ -548,34 +563,46 @@ def producing(made, p, index, bindings, sources):
     sequences = {"extern": tuple(tuple(map(lined, extern.lines)) for extern in objects["extern"]),
                  "inlined": tuple(tuple(map(lined, inlined.lines)) for inlined in objects["inlined"]),
                  "lifted": tuple(Record("wrapper", p, wrapped(lifted.wrapper)[0]) for lifted in objects["lifted"])}
-    # torch 2.14.0 torch/_inductor/codegen/wrapper_fxir.py WrapperFxCodegen and FxConverter
-    # (torch-inductor-aot-lowered-result.patch): one wrapper's converted result as its generate left it, its
-    # `fx_converter`'s `gm` (the converted typed-wrapper GraphModule, by Ref; each subwrapper's converted gm its
-    # get_attr branch there, subgms[name], the same object), its `line_nodes` (each converted WrapperLine, the planned
-    # line run_wrapper_ir_passes left, by the one line table, with the gm's nodes its own conversion created, in graph
-    # order), its `definitions` (each selected non-Triton kernel's KernelDefinitionLine by its definition name, by the
-    # line table) and its `lowered_subgraphs` (each subgraph's own GraphLowering by name, by its module, its wrapper
-    # registered: wrote)
-    def converted(wrapper):
-        converter = wrapper.fx_converter
-        return (converter.gm, tuple((lined(line), made_nodes) for line, made_nodes in converter.line_nodes),
-                {name: lined(line) for name, line in converter.definitions.items()},
-                {name: (graph.module, wrote(graph)) for name, graph in wrapper.lowered_subgraphs.items()})
+    # torch 2.14.0 torch/_inductor/codegen/wrapper.py run_wrapper_ir_passes (torch-inductor-aot-lowered-result.patch:
+    # the planned stage, none printed) and cpp_wrapper_cpu.py (torch-inductor-cpp-wrapper-binding.patch): one
+    # wrapper's own planning and binding result as it holds it: its planned lines (its `lines`, `wrapper_lines`), its
+    # planner's result owner (memory_planner, past_planning_states: the one its passes made, the other None), its
+    # bound_allocations and bound_views (each record's own operands; none where it bound none, as the binding's own
+    # setdefault leaves it), each operand by the one registries (`operand`)
+    def planning(wrapper):
+        return {"memory_planner": operand(wrapper.memory_planner),
+                "past_planning_states": operand(wrapper.past_planning_states),
+                "bound_allocations": operand(wrapper.__dict__.get("bound_allocations", [])),
+                "bound_views": operand(wrapper.__dict__.get("bound_views", []))}
 
-    # every wrapper's lines and converted result, line and IR node each recorded once as registered (a line's operand
-    # may name another wrapper or node, a layout another node; a converted result another wrapper)
-    wrapper_lines, converted_records, line_records, node_records = [], [], [], []
-    while (len(wrapper_lines), len(line_records), len(node_records)) != (len(wrappers), len(table), len(nodes)):
+    # torch 2.14.0 torch/_inductor/output_code.py LoweredAOTI (torch-inductor-aot-lowered-result.patch), Produced.lowered:
+    # its device type, its planned lines (wrapper_code.lines after run_wrapper_ir_passes, by the one line table) and its
+    # emission's result once emitted (AotCodeCompiler.compile's AotCompiled, torch-inductor-cpp-build-result.patch: its
+    # wrapper and kernel sources and code, their objects' and the link's CppBuildActions, their PrecompiledHeaders, its
+    # constants' AotConstants with their object bytes, its extern kernel nodes, generated files, model class and
+    # header, each as it holds it; None before its emission); its GraphLowering by its module; its resumption a closure
+    # over that stage's config and handlers, not a saved value
+    lowered_aot = made.lowered and (operand(made.lowered.graph), made.lowered.device_type,
+                                    tuple(map(lined, made.lowered.planned)), operand(made.lowered.compiled))
+
+    # every wrapper's lines and planning, line, IR node and planner object each recorded once as registered (a line's
+    # operand may name another wrapper, node or planner object; a planner object a line, node or another)
+    wrapper_lines, planning_records, line_records, node_records, planner_records = [], [], [], [], []
+    while (len(wrapper_lines), len(line_records), len(node_records), len(planner_records)) != (
+            len(wrappers), len(table), len(nodes), len(planners)):
         if len(wrapper_lines) < len(wrappers):
             wrapper = list(wrappers.values())[len(wrapper_lines)][2]
             wrapper_lines.append(tuple(map(lined, wrapper.lines)))
-            converted_records.append(converted(wrapper))
+            planning_records.append(planning(wrapper))
         elif len(line_records) < len(table):
             line_records.append(line_of(list(table.values())[len(line_records)][1]))
-        else:
+        elif len(node_records) < len(nodes):
             node_records.append(node_of(list(nodes.values())[len(node_records)][1]))
-    lines = {**sequences, "wrappers": tuple(wrapper_lines), "converted": tuple(converted_records),
-             "table": tuple(line_records), "nodes": tuple(node_records)}
+        else:
+            planned_object = list(planners.values())[len(planner_records)][1]
+            planner_records.append(Stated(type(planned_object), operand(dict(vars(planned_object)))))
+    lines = {**sequences, "wrappers": tuple(wrapper_lines), "planning": tuple(planning_records),
+             "table": tuple(line_records), "nodes": tuple(node_records), "planners": tuple(planner_records)}
 
     # torch/_inductor/loop_body.py LoopBody as produced: its sizes, iteration and reduction variables, variable
     # ranges, indexing expressions, indirect variables and their ranges, memory usage, operation counts, partial
@@ -595,7 +622,8 @@ def producing(made, p, index, bindings, sources):
     return {"kind": made.kind, "device": made.device, "module": made.module, "body": made.body,
             "sources": made.sources, "graphs": {id(module.graph): module for module in made.body.modules()
                                                 if isinstance(module, torch.fx.GraphModule)},
-            "sent": made.sent, "lowered": made.graph and made.graph.module, "signature": made.signature,
+            "sent": made.sent, "lowered": made.graph and made.graph.module, "lowered_aot": lowered_aot,
+            "signature": made.signature,
             "processor": made.processor,
             "inputs": inputs, "outputs": outputs,
             "kernels": kernels, "owners": len(owners), "schedulers": len(schedulers),
@@ -611,7 +639,7 @@ def producing(made, p, index, bindings, sources):
                                 model.program.state_dict, model.program.range_constraints,
                                 model.program.module_call_graph, model.program.example_inputs,
                                 model.program.constants, model.program.verifiers, model.selected, model.received,
-                                model.handles)}
+                                model.handles, model.inputs, model.outputs, model.states, model.aliases)}
 
 
 # a dataclass record's fields by name, each as it is
