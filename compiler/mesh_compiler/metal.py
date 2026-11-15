@@ -472,7 +472,8 @@ class UpstreamComposed(C.Structure):
 
 
 # struct metal_ir_upstream_protocol (the protocol functions a composed collection made, NULL none) and struct
-# metal_ir_callable_source (its one print: `source` of `bytes`, its leading license notices `notice` of `notice_bytes`)
+# metal_ir_callable_source (its one print: `source` of `bytes` its printer's own text, `notice` of `notice_bytes` the
+# binary64 library's own license notices, NULL none)
 class UpstreamProtocol(C.Structure):
     _fields_ = [(name, C.c_char_p) for name in ('acquire', 'later', 'release')]
 
@@ -530,23 +531,79 @@ class UpstreamConfiguration(C.Structure):
     _fields_ = [(name, mesh.U * 3) for name in ('grid', 'group', 'groups')] + [('padding', mesh.U)]
 
 
-# one produced kernel's composition as the native program made it for pass `later` (0 its first, 1 its later), each
-# record copied out of the program's borrowed arrays: its first and later passes' transport words
-# (UpstreamWord), received ranges (value, range, its mesh_metal_range), sent values (value, counter, slot, its
-# mesh_metal_releases), paged arguments (Paged), readiness table (UpstreamReadiness or None), prepared record table
-# (UpstreamTable or None) and its one callable collection (Callables), the operand the producer's terminal emission
-# composes with (compiler/mesh_compiler/lower_inductor.py composed)
-Composed = collections.namedtuple("Composed", "words later_words received sent pages readiness table callables later")
-# a paged argument as the native composition placed it (struct metal_ir_upstream_page): its argument, its arena's
-# slot, its frame table's slot, its pages of `page_bytes`, `origin` its value's byte origin in its root (the dense
-# binding's offset), which its body adds before the page division
-Paged = collections.namedtuple("Paged", "argument slot frames pages page_bytes origin")
+# a C array of `count` records at `pointer`, viewed in place
+def _view(kind, pointer, count):
+    return C.cast(pointer, C.POINTER(kind * count)).contents if count else (kind * 0)()
+
+
+# one produced kernel's composition as the native program made it for pass `later` (0 its first, 1 its later):
+# `composed` the native result itself (struct metal_ir_upstream_composed), its records borrowed from the program
+# `program` names (its owner the caller's: native.py Target.instanced's Owned scope; the handle no owner) while it
+# is unchanged, each field below a view of them: its first and later passes' transport words (UpstreamWord), received
+# ranges (UpstreamReceived), sent values (UpstreamSent), paged arguments (UpstreamPage: its argument, its arena's slot,
+# its frame table's slot, its pages of `page_bytes`, `origin` its value's byte origin in its root), readiness table
+# (UpstreamReadiness or None) and prepared record table (UpstreamTable or None); `callables` its one callable
+# collection (Callables), the operand the producer's terminal emission composes with
+# (compiler/mesh_compiler/lower_inductor.py composed)
+class Composed:
+    def __init__(self, program, op, composed, callables, later):
+        self.program, self.op, self.composed, self.callables, self.later = program, op, composed, callables, later
+
+    words = property(lambda self: _view(UpstreamWord, self.composed.word, self.composed.words))
+    later_words = property(lambda self: _view(UpstreamWord, self.composed.later_word, self.composed.later_words))
+    received = property(lambda self: _view(UpstreamReceived, self.composed.received, self.composed.receives))
+    sent = property(lambda self: _view(UpstreamSent, self.composed.sent, self.composed.sends))
+    pages = property(lambda self: _view(UpstreamPage, self.composed.page, self.composed.pages))
+    readiness = property(lambda self: self.composed.readiness.contents if self.composed.readiness else None)
+    table = property(lambda self: self.composed.table.contents if self.composed.table else None)
+
+
+# metal_ir.h METAL_IR_CALLABLE_ACQUIRE .. _OTHER (metal_ir_callables_role) and METAL_IR_CALLABLE_OPERAND_VIEW ..
+# _FRAMES (metal_ir_callable_operand_kind)
+CALLABLE_ACQUIRE, CALLABLE_LATER, CALLABLE_RELEASE, CALLABLE_LOAD, CALLABLE_STORE, CALLABLE_OTHER = range(6)
+(OPERAND_VIEW, OPERAND_CLASSES, OPERAND_MEMBERS, OPERAND_RECORDS, OPERAND_VOTES, OPERAND_LID, OPERAND_GID, OPERAND_LANE,
+ OPERAND_THREADS, OPERAND_SUBSCRIPT, OPERAND_FRAMES) = range(11)
+
+
 # metal_ir_upstream_callables and metal_ir_callables_emit: the kernel's one callable collection in its program (its
-# first and later pass share it), printed once: `source` (Tint MSL library mode, host C++ for a CPU task's), `notice`
-# the binary64 library's license notices where it holds its primitives ("" none), and the protocol functions its
-# final emitter calls (struct metal_ir_upstream_protocol: `acquire` mesh_acquire_first, `later` mesh_acquire_later
-# where it receives, `release` mesh_release where it sends; None where the collection makes none)
-Callables = collections.namedtuple("Callables", "source notice acquire later release")
+# first and later pass share it), printed once. `handle` the collection itself (metal_lower.h metal_ir_callables: its
+# typed module, its protocol and address functions and their Operands, its complete printer result), borrowed as its
+# composition is (its program's kernel holds it); `protocol` (struct metal_ir_upstream_protocol: `acquire` mesh_acquire_first, `later` mesh_acquire_later
+# where it receives, `release` mesh_release where it sends; None where it makes none) and `emitted` (struct
+# metal_ir_callable_source) as they returned. `output` its complete printer result by reference (struct
+# metal_ir_output), whose declarations, parameters and spans metal_ir_output_* give by reference; `role`, `address`
+# and `operand` metal_ir_callables_role, _address and _operand of the collection given their arguments (a declaration,
+# and a parameter: the collection's function, Address and Operand by reference, metal_ir_callable_* theirs); `module`
+# and `function` its typed module and a role's protocol function by reference (metal_ir_callables_module, _function).
+# `printed` its printed text and `notices` the binary64 library's license notices where it holds its primitives,
+# views of their storage; `source` the text a terminal emission composes from them, its notices then its printed text
+class Callables:
+    def __init__(self, program, handle, protocol, emitted):
+        self.program, self.handle, self.protocol, self.emitted = program, handle, protocol, emitted
+
+    output = property(lambda self: _upstream().metal_ir_callables_output(self.handle))
+    printed = property(lambda self: (C.c_char * self.emitted.bytes).from_address(self.emitted.source))
+    notices = property(lambda self: (C.c_char * self.emitted.notice_bytes).from_address(self.emitted.notice)
+                       if self.emitted.notice else (C.c_char * 0)())
+    source = property(lambda self: (bytes(self.notices) + bytes(self.printed)).decode())
+    notice = property(lambda self: bytes(self.notices).decode())
+    acquire = property(lambda self: _text(self.protocol.acquire))
+    later = property(lambda self: _text(self.protocol.later))
+    release = property(lambda self: _text(self.protocol.release))
+
+    module = property(lambda self: _upstream().metal_ir_callables_module(self.handle))
+
+    def function(self, *args):
+        return _upstream().metal_ir_callables_function(self.handle, *args)
+
+    def role(self, *args):
+        return _upstream().metal_ir_callables_role(self.handle, *args)
+
+    def address(self, *args):
+        return _upstream().metal_ir_callables_address(self.handle, *args)
+
+    def operand(self, *args):
+        return _upstream().metal_ir_callables_operand(self.handle, *args)
 
 
 # dlfcn.h dladdr; metal-microbench metal_recording.h: the recorder (libmetal_recording) and the checkout it was built
@@ -763,6 +820,29 @@ def _upstream():
                 ('metal_ir_upstream_composition', C.c_int, [P, U, C.POINTER(UpstreamComposed)]),
                 ('metal_ir_upstream_callables', P, [P, U, P, C.POINTER(UpstreamProtocol), C.c_char_p, C.c_size_t]),
                 ('metal_ir_callables_emit', C.c_int, [P, C.POINTER(CallableSource), C.c_char_p, C.c_size_t]),
+                ('metal_ir_callables_output', P, [P]),
+                ('metal_ir_output_view', C.c_void_p, [P, P, C.POINTER(C.c_size_t)]),
+                ('metal_ir_output_functions', C.c_size_t, [P]),
+                ('metal_ir_output_function', P, [P, C.c_size_t]),
+                ('metal_ir_output_function_name', P, [P]), ('metal_ir_output_function_result', P, [P]),
+                ('metal_ir_output_function_declaration', P, [P]),
+                ('metal_ir_output_function_parameters', C.c_size_t, [P]),
+                ('metal_ir_output_function_parameter', P, [P, C.c_size_t]),
+                ('metal_ir_output_parameter_type', P, [P]), ('metal_ir_output_parameter_name', P, [P]),
+                ('metal_ir_output_parameter_declaration', P, [P]),
+                ('metal_ir_callables_role', U, [P, P]), ('metal_ir_callables_address', P, [P, P]),
+                ('metal_ir_callable_address_page', C.POINTER(UpstreamPage), [P]),
+                ('metal_ir_callable_address_value', U, [P]),
+                ('metal_ir_callables_operand', P, [P, P, P]),
+                ('metal_ir_callable_operand_kind', U, [P]), ('metal_ir_callable_operand_word', U, [P]),
+                ('metal_ir_callable_operand_binding', C.POINTER(UpstreamWord), [P, U]),
+                ('metal_ir_callable_operand_readiness', C.POINTER(UpstreamReadiness), [P]),
+                ('metal_ir_callable_operand_table', C.POINTER(UpstreamTable), [P]),
+                ('metal_ir_callable_operand_page', C.POINTER(UpstreamPage), [P]),
+                ('metal_ir_callables_module', P, [P]), ('metal_ir_callables_function', P, [P, U]),
+                ('metal_ir_callable_address_function', P, [P, U]), ('metal_ir_output_function_ir', P, [P]),
+                ('metal_ir_output_parameter_ir', P, [P]), ('metal_ir_callable_operand_param', P, [P]),
+                ('metal_ir_callable_operand_view', P, [P, U]),
                 ('metal_ir_binary64_open', P, [C.c_char_p, C.c_size_t]),
                 ('metal_ir_binary64_request', C.c_int, [P, C.POINTER(Binary64Primitive), C.POINTER(Binary64Function),
                                                         C.c_char_p, C.c_size_t]),
@@ -859,29 +939,20 @@ class Binary64:
         return self.functions[key]
 
 
-# metal_ir_upstream_composition of produced kernel `op` of `program` (after its ports are declared) for pass `later`,
-# copied out (Composed), each paged argument's origin the native composition's own; its callable collection made and
-# printed once (_callables, cloning the kernel's binary64 collection `numeric`, a Binary64 or None), the later pass
-# given its first pass's (`callables`)
+# metal_ir_upstream_composition of produced kernel `op` of `program` (after its ports are declared) for pass `later`
+# (Composed); its callable collection made and printed once (_callables, cloning the kernel's binary64 collection
+# `numeric`, a Binary64 or None), the later pass given its first pass's (`callables`)
 def _composition(program, op, numeric=None, later=0, callables=None):
     made = UpstreamComposed()
     status = _upstream().metal_ir_upstream_composition(program, op, C.byref(made))
     if status:
         raise OSError(status, 'operation %d: no constructed upstream kernel (metal_ir_upstream_composition)' % op)
-    pages = [made.page[k] for k in range(made.pages)]
-    return Composed(
-        tuple(_copied(made.word[k]) for k in range(made.words)),
-        tuple(_copied(made.later_word[k]) for k in range(made.later_words)),
-        tuple((r.value, r.range, _copied(r.record[0])) for r in (made.received[k] for k in range(made.receives))),
-        tuple((s.value, s.counter, s.slot, tuple(_copied(s.release[k]) for k in range(s.releases)))
-              for s in (made.sent[k] for k in range(made.sends))),
-        tuple(Paged(p.argument, p.slot, p.frames, p.pages, p.page_bytes, p.origin) for p in pages),
-        _copied(made.readiness[0]) if made.readiness else None, _copied(made.table[0]) if made.table else None,
-        _callables(program, op, numeric) if callables is None else callables, later)
+    return Composed(program, op, made, _callables(program, op, numeric) if callables is None else callables, later)
 
 
 # metal_ir_upstream_callables then metal_ir_callables_emit: produced kernel `op`'s one callable collection in `program`
-# (its transport protocol and its numerical body's binary64 primitives, `numeric` cloned) printed once (Callables)
+# (its transport protocol, its paged arguments' addresses and its numerical body's binary64 primitives, `numeric`
+# cloned) printed once (Callables)
 def _callables(program, op, numeric):
     lib, protocol, emitted = _upstream(), UpstreamProtocol(), CallableSource()
     error = C.create_string_buffer(4096)
@@ -894,9 +965,7 @@ def _callables(program, op, numeric):
     if status:
         raise OSError(status, 'operation %d: its callable collection (metal_ir_callables_emit): %s'
                       % (op, error.value.decode()))
-    notice = C.string_at(emitted.notice, emitted.notice_bytes).decode() if emitted.notice else ""
-    return Callables(C.string_at(emitted.source, emitted.bytes).decode(), notice, _text(protocol.acquire),
-                     _text(protocol.later), _text(protocol.release))
+    return Callables(program, collection, protocol, emitted)
 
 
 # metal_ir_upstream_emitted: pass `number` of produced kernel `op`, its terminal emission as its final emitter made it
