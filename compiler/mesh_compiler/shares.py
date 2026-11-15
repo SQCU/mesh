@@ -234,14 +234,21 @@ def evidence(work, i, held, stage):
 # compiler/mesh_compiler/native.py Bound.observe and Bound.work (metal_ir.h metal_ir_work_terms,
 # metal_ir_work_associations by each term's operation, and metal_ir_dispatch_numerics); S. Zhang et al., HAP, EuroSys
 # 2024, section 3.2; A. Lastovetsky et al.,
-# arXiv:1109.3074, steps 1 and 2: the executed units of one observed invocation joined where their member dispatches
-# share a numeric scope (call, kernel, [first, last); a later twin's its first phase's) through rdma/mesh_graph.py
-# components, each joined set one measured unit: its executed seconds summed, its identities projected onto the source
-# task domain (`stages` members; the others `generated`, their work kept in the unit's), its level its members' class,
-# its resource (Target.node, its native unit kind: a GPU span or a host call), its ranks its source tasks' logical
-# processors, the retained Work terms of its scopes charged once, its size W the sum of their primitive operation counts
-# (every resource and width; an unknown term identified, never counted), its speed W(current) / seconds and its time
-# W(shares) / speed over every variable of its terms. `reports` each unit with unknown work or none (`costed` False and
+# arXiv:1109.3074, steps 1 and 2: the executed occurrence slices of one observed invocation joined where their member
+# dispatches share a numeric scope (call, kernel, [first, last); a later twin's its first phase's) through
+# rdma/mesh_graph.py components, each joined set one measured unit: its `samples` (each slice's residue, last sample
+# seconds and executions, its site's issued occurrences) and `estimated_seconds` the sum of each slice's last sample
+# times its executions (a sample-based estimate at this observation's issued site multiplicities, not a measured total;
+# conditional ICB range selection, numerical internal branches, unknown primitive Work and future data-dependent counts
+# are not in it), its identities projected onto the source task domain (`stages` members; the others `generated`, their
+# work kept in the unit's), its level its members' class, its resource (Target.node, its native unit kind: a GPU span or
+# a host call), its ranks its source tasks' logical processors, its scopes' `occurrences` each slice's issued executions
+# per member dispatch of that scope that is a primary (metal_ir_numeric `later` 0: a later twin's readiness split is
+# part of its primary's occurrence, its duration in the estimate, its Work not charged again), the retained Work terms
+# of each scope charged once per issued occurrence, its size W the sum of their
+# primitive operation counts (every resource and width; an unknown term identified, never counted), its speed
+# W(current) / estimated_seconds and its time W(shares) / speed over every variable of its terms. `reports` each unit
+# with unknown work or none (`costed` False and
 # its `reason`: mixed kinds, no source task, no level, no counted work, or a term `counted` gives none), each such term
 # with its `evidence`, and each cycle
 # or receive edge `stages` finds within one class (not costed), with the sites and dispatches of its units; the stages
@@ -279,21 +286,34 @@ def measured(bound, scheduled, segment, processors, observations, units):
         for members, identities, tasks, level in zip(held, tasked[key], stage.members, stage.units):
             call = observations[members[0]].call
             work, kinds = bound.work[call], tuple(dict.fromkeys(observations[u].kind for u in members))
-            seconds = sum(observations[u].seconds for u in members)
-            about = {**described(members), "key": key, "seconds": seconds, "kinds": kinds, "tasks": tasks,
-                     "generated": tuple(k for k in identities if k not in stage.node),
-                     "scopes": tuple(dict.fromkeys(s for u in members for s in scoped[u]))}
+            estimated = sum(observations[u].sample_seconds * observations[u].executions for u in members)
+            scopes = tuple(dict.fromkeys(s for u in members for s in scoped[u]))
+            occurrences = dict.fromkeys(scopes, 0)
+            for u in members:
+                for n in (work.numerics[d] for d in observations[u].dispatches):
+                    if n.kernel != mesh_graph.NONE and not n.later:
+                        occurrences[call, n.kernel, n.first, n.last] += observations[u].executions
+            about = {**described(members), "key": key, "kinds": kinds, "tasks": tasks,
+                     "samples": tuple((u, observations[u].residue, observations[u].sample_seconds,
+                                       observations[u].executions) for u in members),
+                     "estimated_seconds": estimated,
+                     "generated": tuple(k for k in identities if k not in stage.node), "scopes": scopes,
+                     "occurrences": tuple(occurrences.items())}
             if call not in by:
                 by[call], operated[call] = {}, {}
                 for i in range(work.count):
                     by[call].setdefault(work.terms[i].kernel, []).append(i)
                 for association in (work.associations[:work.associated] if work.associated else ()):
                     operated[call].setdefault(association.operation, []).append(association)
-            charged = tuple(dict.fromkeys(i for _, kernel, first, last in about["scopes"]
-                                          for i in by[call].get(kernel, ()) if first <= work.terms[i].member < last))
+            charged = {}
+            for scope in scopes:
+                _, kernel, first, last = scope
+                for i in by[call].get(kernel, ()):
+                    if first <= work.terms[i].member < last:
+                        charged[i] = charged.get(i, 0) + occurrences[scope]
             counts, unknown, failed = [[0.0] * 3 for _ in range(3)], [], []
             size, constant, coefficients = 0.0, 0.0, {}
-            for i in charged:
+            for i, times in charged.items():
                 t = work.terms[i]
                 owned = operated[call].get(t.operation, ())
                 if t.coefficient.unknown:
@@ -306,8 +326,8 @@ def measured(bound, scheduled, segment, processors, observations, units):
                 each = 0.0
                 for r in range(3):
                     for w in range(3):
-                        counts[r][w] += t.coefficient.operations[r][w] * current
-                        each += t.coefficient.operations[r][w]
+                        counts[r][w] += t.coefficient.operations[r][w] * current * times
+                        each += t.coefficient.operations[r][w] * times
                 size += each * current
                 constant += each * form[0]
                 for variable, c in form[1].items():
@@ -323,8 +343,8 @@ def measured(bound, scheduled, segment, processors, observations, units):
                 reports.append({**about, "costed": True})
             made.append(Cost(key, level, (bound.target.node, kinds[0]),
                              tuple(dict.fromkeys(rank[stage.node[k].meta["processor"]] for k in tasks)),
-                             seconds * constant / size,
-                             {variable: seconds * c / size for variable, c in coefficients.items()}, about))
+                             estimated * constant / size,
+                             {variable: estimated * c / size for variable, c in coefficients.items()}, about))
     return made, reports, staged
 
 

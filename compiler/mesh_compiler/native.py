@@ -27,17 +27,20 @@ import mesh_graph
 ROOM = 4096
 
 
-# one executed unit of Bound.observe: its kind, its call (the Target.rows index), native site, member dispatch IDs,
-# source operation identities (lower_metal.construct's global task index k), executed occurrences and seconds
+# one executed occurrence slice of Bound.observe (metal_recording.h struct MetalSlice, MetalObserved): its unit's kind,
+# call (the Target.rows index) and native site, its residue, its member dispatch IDs and source operation identities
+# (lower_metal.construct's global task index k), `executions` the issued occurrences of its unit's site at that residue
+# (not its conditionally executed inner operations) and `sample_seconds` the elapsed time of the last of them
 @dataclasses.dataclass(frozen=True)
 class Observation:
     kind: int
     call: int
     site: int
+    residue: int
     dispatches: tuple
     identities: tuple
     executions: int
-    seconds: float
+    sample_seconds: float
 
 
 # compiler/mesh_compiler/metal.py: the live native owner and its three bound libraries (libmetal_ir, the recorder and
@@ -1418,9 +1421,10 @@ class Bound:
         return self.invoked(self.libs[2][0].MetalProgramRunArguments, given)
 
     # design/unequal-shards-change-request.md items 6, 7 and 14; design/aot-compilation-change-request.md A3: the
-    # outputs and each compiled unit executed in this invocation (metal_recording.h MetalProgramRunObserved,
-    # MetalProgramUnits and MetalProgramObserved, bound by compiler/mesh_compiler/metal.py), with its last executed
-    # residue's members and source identities; `work` each loaded row's borrowed Work, read once
+    # outputs and each occurrence slice executed in this invocation (metal_recording.h MetalProgramRunObserved,
+    # MetalProgramUnits and MetalProgramObserved, bound by compiler/mesh_compiler/metal.py: one MetalObserved per slice,
+    # unit u's residue e at its slice + e, every unit's `copies` of them), with that slice's own members and source
+    # identities; `work` each loaded row's borrowed Work, read once
     def observe(self, *given):
         if self.work is None:
             self.work = tuple(None if program is None else borrowed(self.libs[1], program, self.owned)
@@ -1431,17 +1435,18 @@ class Bound:
         count, slices, members, identities = (mesh.U(), C.POINTER(metal.UnitSlice)(), C.POINTER(mesh.U)(),
                                               C.POINTER(mesh.Q)())
         unit = units(self.program, C.byref(count), C.byref(slices), C.byref(members), C.byref(identities))
-        observed = (metal.Observed * max(count.value, 1))()
-        checked(read(self.program, observed, count.value, error, ROOM), error, "observation")
+        total = sum(unit[u].copies for u in range(count.value))
+        observed = (metal.Observed * max(total, 1))()
+        checked(read(self.program, observed, total, error, ROOM), error, "observation")
         made_ = []
         for u in range(count.value):
-            got = observed[u]
-            if got.executions:
-                part = slices[unit[u].slice + got.residue]
-                made_.append(Observation(unit[u].kind, unit[u].call, unit[u].site,
-                                         tuple(members[part.member:part.member + part.count]),
-                                         tuple(identities[part.identity:part.identity + part.identities]),
-                                         got.executions, got.seconds))
+            for s in range(unit[u].slice, unit[u].slice + unit[u].copies):
+                got, part = observed[s], slices[s]
+                if got.executions:
+                    made_.append(Observation(unit[u].kind, unit[u].call, unit[u].site, got.residue,
+                                             tuple(members[part.member:part.member + part.count]),
+                                             tuple(identities[part.identity:part.identity + part.identities]),
+                                             got.executions, got.seconds))
         return outputs, made_
 
 
