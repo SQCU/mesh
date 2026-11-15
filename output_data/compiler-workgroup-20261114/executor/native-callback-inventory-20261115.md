@@ -16,9 +16,10 @@ or block's opening brace is that lambda or block; one at a top-level function bo
 Swift and Python markers by their own syntax. Each row's consumer and phase are those of the nearest explanatory comment above it.
 
 Coverage is source-only: static lexical and AST reading and editing. No native build, callback execution, import or
-workload ran (see Process). Source state: uncommitted working trees of Mesh (`/Users/mdot/dox/mesh`), Metal
-(`/Users/mdot/metal-microbench`, with `provider/dawn.patch` regenerated from the checkout) and the canonical Dawn checkout
-(`.build/provider/dawn`), over Mesh 24481f5f, Metal 1dca29d4 and Dawn d22798336. Nothing is staged or committed.
+workload ran (see Process). The initial 645-site sweep is committed in Mesh `d9a201d2`, Metal `2c634181` and canonical
+Dawn `09457b098`. The Codex provider-patch follow-through below adds 53 sites, committed in Metal `1703f8df`, with original
+LiteRT `fbde6d03`, XNNPACK `877af3f` and MLDrift `239994d` source histories. The canonical LiteRT checkout now consumes
+that same committed source. No Claude was launched or resumed for this follow-through.
 
 ## Markers
 
@@ -37,14 +38,16 @@ workload ran (see Process). Source state: uncommitted working trees of Mesh (`/U
 
 ## Counts
 
-645 markers: Metal 409 in 17 files; Mesh native and Swift 185 in 18 files; compiler/mesh_compiler/metal.py 21; Dawn 30 in 9 files (carried in provider/dawn.patch). This is 3 more than the independent 642 check: the finalizer-registered bodies `MetalRecorderActorsFree` (metal_capture.m, active; metal_recording.m, inactive) and `mesh_local_free` (rdma/mesh-collective.c) were marked after it.
+698 authored markers in this native-owned inventory: the initial 645 (Metal409, Mesh native/Swift185, metal.py21, Dawn30) plus53 in the maintained LiteRT provider patch (LiteRT33, XNNPACK13, MLDrift7). These counts do not include the peer compiler/frontend inventories. The original645 included three finalizer additions after the642 check: `MetalRecorderActorsFree` in active metal_capture.m and inactive metal_recording.m, and `mesh_local_free` in rdma/mesh-collective.c.
 
 Reachability of metal_recording.m: Makefile line 156 builds .build/libmetal_recording.dylib from `RECORDING_SRCS = metal_capture.m metal_program.m`, and no Makefile or Bazel target compiles metal_recording.m. Its 19 markers sit in a retained source that no target currently builds. They are marked because it is retained Mesh-serving source, but no current consumer reaches them; the active counterparts are in metal_capture.m and metal_program.m.
 
 | Kind | Markers |
 |---|---|
 | lambda | 349 |
-| named function | 143 |
+| named function | 184 |
+| supplied-object virtual method | 6 |
+| provider callback handoff | 6 |
 | Swift closure | 68 |
 | block | 57 |
 | Python property getter | 13 |
@@ -57,13 +60,13 @@ Reachability of metal_recording.m: Makefile line 156 builds .build/libmetal_reco
 
 | Phase | Markers |
 |---|---|
-| compilation/construction | 420 |
-| execution | 51 |
+| compilation/construction | 428 |
+| execution | 67 |
 | compilation/construction (graph analysis) | 49 |
-| completion (release) | 32 |
+| completion (release) | 33 |
 | preparation (collective planning) | 24 |
 | completion | 23 |
-| preparation | 22 |
+| preparation | 50 |
 | execution (Mesh tool) | 20 |
 | compilation/construction (Mesh tool) | 2 |
 | preparation (completion handler) | 1 |
@@ -116,6 +119,28 @@ Reachability of metal_recording.m: Makefile line 156 builds .build/libmetal_reco
 | Metal | `tools/e2b_replay.m` | 13 | execution (Mesh tool) 11; compilation/construction (Mesh tool) 2 |
 | Metal | `tools/native_bench.m` | 7 | execution (Mesh tool) 5; completion (release) 2 |
 | Metal | `tools/primitive_constants.m` | 4 | execution (Mesh tool) 4 |
+| LiteRT | `ml_drift_delegate/delegate/delegate_kernel.cc` | 2 | compilation/construction 2 |
+| LiteRT | `ml_drift_delegate/delegate/delegate_webgpu.cc` | 2 | execution 1; preparation 1 |
+| LiteRT | `tflite/kernels/comparisons.cc` | 14 | execution 8; preparation 6 |
+| LiteRT | `tflite/kernels/logical.cc` | 5 | execution 2; preparation 3 |
+| LiteRT | `tflite/kernels/logical.h` | 2 | execution 2 |
+| LiteRT | `tflite/kernels/mesh_selected.cc` | 2 | completion (release) 1; preparation 1 |
+| LiteRT | `tflite/kernels/reshape.cc` | 3 | execution 1; preparation 2 |
+| LiteRT | `tflite/kernels/select.cc` | 3 | execution 1; preparation 2 |
+| MLDrift | `ml_drift/common/merge_nodes.h` | 6 | compilation/construction 6 |
+| MLDrift | `ml_drift/webgpu/arguments.cc` | 1 | preparation 1 |
+| XNNPACK | `src/operator-run.c` | 1 | execution 1 |
+| XNNPACK | `src/subgraph/batch-matrix-multiply.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/binary.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/fully-connected.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/pack-lh.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/rope.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/softmax.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/static-constant-pad.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/static-reduce.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/static-slice.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/static-transpose.c` | 1 | preparation 1 |
+| XNNPACK | `src/subgraph/unary.c` | 2 | preparation 2 |
 
 ## Marked sites
 
@@ -768,6 +793,59 @@ Line: the marked line in the current working tree. Symbol: a named callback body
 | Metal `tools/primitive_constants.m:210` | block | Loop | passed to Timed | execution (Mesh tool) |
 | Metal `tools/primitive_constants.m:226` | block | Staged | passed to Timed | execution (Mesh tool) |
 | Metal `tools/primitive_constants.m:260` | block | Commands | passed to Timed | execution (Mesh tool) |
+| LiteRT `ml_drift_delegate/delegate/delegate_kernel.cc:361` | provider callback handoff | ABSL_RETURN_IF_ERROR(::ml_drift::GraphToGpuModel( | GraphToGpuModel supplied OpSelector | compilation/construction |
+| LiteRT `ml_drift_delegate/delegate/delegate_kernel.cc:1348` | provider callback handoff | ABSL_RETURN_IF_ERROR(::ml_drift::ir::IrModelToGpuModel( | IrModelToGpuModel supplied IrModelOpSelector | compilation/construction |
+| LiteRT `ml_drift_delegate/delegate/delegate_webgpu.cc:523` | named function | Invoke | TfLiteRegistration.invoke | execution |
+| LiteRT `ml_drift_delegate/delegate/delegate_webgpu.cc:570` | named function | DelegatePrepare | TfLiteDelegate.Prepare | preparation |
+| LiteRT `tflite/kernels/comparisons.cc:173` | provider callback handoff | reference_ops::BroadcastComparison4DSlowStringImpl( | BroadcastComparison4DSlowStringImpl predicate | execution |
+| LiteRT `tflite/kernels/comparisons.cc:179` | provider callback handoff | reference_ops::ComparisonStringImpl(opname, | ComparisonStringImpl predicate | execution |
+| LiteRT `tflite/kernels/comparisons.cc:417` | named function | EqualEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/comparisons.cc:422` | named function | EqualPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/comparisons.cc:428` | named function | NotEqualEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/comparisons.cc:433` | named function | NotEqualPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/comparisons.cc:439` | named function | LessEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/comparisons.cc:444` | named function | LessPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/comparisons.cc:451` | named function | LessEqualEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/comparisons.cc:457` | named function | LessEqualPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/comparisons.cc:464` | named function | GreaterEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/comparisons.cc:469` | named function | GreaterPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/comparisons.cc:476` | named function | GreaterEqualEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/comparisons.cc:482` | named function | GreaterEqualPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/logical.cc:44` | named function | Init | TfLiteRegistration.init | preparation |
+| LiteRT `tflite/kernels/logical.cc:132` | named function | LogicalOrEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/logical.cc:139` | named function | LogicalOrPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/logical.cc:148` | named function | LogicalAndEval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/logical.cc:155` | named function | LogicalAndPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/logical.h:10` | named function | LogicalOr | reference_ops::BinaryFunction/BroadcastBinaryFunction4DSlow predicate | execution |
+| LiteRT `tflite/kernels/logical.h:13` | named function | LogicalAnd | reference_ops::BinaryFunction/BroadcastBinaryFunction4DSlow predicate | execution |
+| LiteRT `tflite/kernels/mesh_selected.cc:8` | named function | Init | TfLiteRegistration.init | preparation |
+| LiteRT `tflite/kernels/mesh_selected.cc:14` | named function | Free | TfLiteRegistration.free | completion (release) |
+| LiteRT `tflite/kernels/reshape.cc:168` | named function | Prepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/reshape.cc:187` | named function | Eval | TfLiteRegistration.invoke | execution |
+| LiteRT `tflite/kernels/reshape.cc:245` | named function | Init | TfLiteRegistration.init | preparation |
+| LiteRT `tflite/kernels/select.cc:50` | named function | SelectInit | TfLiteRegistration.init | preparation |
+| LiteRT `tflite/kernels/select.cc:67` | named function | SelectPrepare | TfLiteRegistration.prepare | preparation |
+| LiteRT `tflite/kernels/select.cc:203` | named function | SelectEval | TfLiteRegistration.invoke | execution |
+| MLDrift `ml_drift/common/merge_nodes.h:39` | supplied-object virtual method | Width | GPUOperation supplied GpuSpatialTensor interface via SetSrc/SetDst | compilation/construction |
+| MLDrift `ml_drift/common/merge_nodes.h:41` | supplied-object virtual method | Height | GPUOperation supplied GpuSpatialTensor interface via SetSrc/SetDst | compilation/construction |
+| MLDrift `ml_drift/common/merge_nodes.h:43` | supplied-object virtual method | Depth | GPUOperation supplied GpuSpatialTensor interface via SetSrc/SetDst | compilation/construction |
+| MLDrift `ml_drift/common/merge_nodes.h:45` | supplied-object virtual method | Channels | GPUOperation supplied GpuSpatialTensor interface via SetSrc/SetDst | compilation/construction |
+| MLDrift `ml_drift/common/merge_nodes.h:47` | supplied-object virtual method | Slices | GPUOperation supplied GpuSpatialTensor interface via SetSrc/SetDst | compilation/construction |
+| MLDrift `ml_drift/common/merge_nodes.h:49` | supplied-object virtual method | Batch | GPUOperation supplied GpuSpatialTensor interface via SetSrc/SetDst | compilation/construction |
+| MLDrift `ml_drift/webgpu/arguments.cc:271` | provider callback handoff | uniform_buffer_creator->CreateUniformBuffer (first Init overload) | WebGpuArguments::Init supplied UniformBufferCreator | preparation |
+| XNNPACK `src/operator-run.c:2078` | provider callback handoff | parallelize(threadpool, run_task, context, __VA_ARGS__, flags); | pthreadpool_parallelize_* task operand (XNN_PARALLELIZE) | execution |
+| XNNPACK `src/subgraph/batch-matrix-multiply.c:512` | named function | setup_batch_matrix_multiply_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/binary.c:147` | named function | setup_binary_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/fully-connected.c:1297` | named function | setup_fully_connected_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/pack-lh.c:178` | named function | setup_pack_lh_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/rope.c:182` | named function | setup_rope_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/softmax.c:131` | named function | setup_softmax_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/static-constant-pad.c:163` | named function | setup_constant_pad_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/static-reduce.c:242` | named function | setup_reduce_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/static-slice.c:151` | named function | setup_slice_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/static-transpose.c:171` | named function | setup_transpose_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/unary.c:251` | named function | setup_convert_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
+| XNNPACK `src/subgraph/unary.c:430` | named function | setup_unary_operator | xnn_runtime opdata.setup copied from node.setup | preparation |
 
 ## Distinguished: not callbacks, unmarked
 
@@ -848,7 +926,7 @@ Line: the marked line in the current working tree. Symbol: a named callback body
   - rdma/mesh_compile.py:1874 `DELETER`, :8677 `_RELEASED_OBJECT` and :8852 `_dropped`;
   - compiler/mesh_compiler/bridge.py:57 `_retired` and native.py:56 `Owned.released`.
   - Their native consumers are marked only where a Mesh native body is what gets passed.
-- **provider/litert.patch** is outside this brief's grant and was not inspected.
+- **provider/litert.patch** was outside the original131 grant. The explicit Codex follow-through below closes that maintained-patch coverage gap; the original uninspected status is superseded.
 
 ## Excluded
 
@@ -856,6 +934,89 @@ Line: the marked line in the current working tree. Symbol: a named callback body
 - Generated output_data and build outputs.
 - rdma and other non-compiler Python (104's), and compiler files other than metal.py (68's and 66's).
 - Mesh bench/ and user/ and metal-microbench tools/working_set.m were scanned and contain no callback sites.
+
+## Codex follow-through: maintained provider patches
+
+The operator assigned this remaining slice directly to Codex after the initial sweep. Scope is Mesh-owned additions,
+changes and moved callback uses in maintained provider patches; it is not every callback in the upstream dependencies.
+`git ls-files provider` contains exactly two maintained patch files: `dawn.patch` (the initial30-site scope) and
+`litert.patch`, which embeds `xnnpack_mesh.patch` and `ml_drift_mesh.patch`. All three LiteRT patch layers were inspected.
+No additional maintained provider patch was found. Provider build files and original vendored callback machinery were
+not rewritten. No Claude process received a continuation.
+
+Every new marker is a native **compile-time error mechanism**: it takes the address of the undeclared
+`mesh_callbacks_are_outside_spec`. The phase in the tables is the original callback's use, not a claim that the disabled
+callback was executed. In particular, eight compilation/construction callbacks are marked without an exemption for their
+phase. The53 sites comprise41 named callback bodies, six supplied-object virtual methods and six forwarding/handoff
+sites;28 preparation,16 execution,8 compilation/construction and1 release.
+
+### Actual caller evidence
+
+- LiteRT's `TfLiteRegistration` entries in comparisons.cc:492–529, logical.cc:168–179, reshape.cc:252 and
+  select.cc:216–230 register the marked Init/Free/Prepare/Eval bodies. The two Select registrations share one template
+  definition, which receives one authored mark. The modified WebGPU `Invoke` and `DelegatePrepare` are bound by
+  kRegistration.invoke and TfLiteDelegate.Prepare. Direct Select/PrepareShape/Data helpers are not registrations.
+- `LogicalOr` and `LogicalAnd` are supplied to original `reference_ops::BinaryFunction` and
+  `BroadcastBinaryFunction4DSlow`; internal/reference/binary_function.h invokes `func` on each value. The two
+  `ComparisonString` handoffs supply original StringRef predicates to the corresponding reference algorithms.
+  Their unmodified upstream predicate bodies remain untouched.
+- XNNPACK's twelve modified subgraph setup bodies are assigned to `node->setup`. Original runtime.c:741 retains that
+  address as `runtime->opdata[i].setup`; runtime.c:373 and:1047 invoke it. `setup_convolution_operator` is a direct helper
+  called by the original registered `setup_convolution_operator_static`, so it was not misclassified by its name.
+- The new `XNN_PARALLELIZE` macro's `selected == NULL` branch forwards the task operand to pthreadpool. One authored mark
+  precedes that handoff and expands in all38 actual parallelization cases. The non-null selection branch retains
+  function/task/operand identities as data and is not itself a callback invocation. Its source metadata was preserved.
+- Mesh supplies OpSelector/IrModelOpSelector objects at the two new DelegateKernel GraphToGpuModel/IrModelToGpuModel
+  handoffs. Original MLDrift ConvertOperations calls their GPUSubgraphFromGraph/GPUOperationFromNode methods
+  (gpu_model_util.cc:352/376, ir_model_util.cc:393/429). Markers sit at the new handoffs, without editing those original
+  selector implementations.
+- Mesh moved `DescriptorSpatialTensor` into merge_nodes.h and supplies it through GPUOperation::SetSrc/SetDst
+  (merge_nodes.cc:535/542 and DelegateKernel::MeshEmit). Original RecalculateGridSize uses Width/Height/Depth/Slices/Batch
+  (gpu_operation.cc:1531–1549); original kernels such as conversion.h:75 and strided_slice.cc:207 use Channels. Those six
+  supplied-object methods are marked. GetDescriptor has no demonstrated callback use for these supplied descriptor
+  instances, and the defaulted destructor is not treated as a callback merely because it is virtual; both remain intact.
+- WebGpuArguments::Init's moved UniformBufferCreator call is an actual caller-supplied interface invocation. Only that
+  moved call is marked; the separate unchanged Init overload's identical upstream machinery is left untouched.
+
+### Distinctions and source limits
+
+`mesh::Site`'s main selected numerical function applies an existing library function address directly to its operands;
+its retained SelectedBody/Function identities and shape data are not callback registrations. Logical/string predicates
+passed onward into reference algorithms are callbacks and are marked above. XNN config initialization records,
+relocations, task_name strings and default-visibility declarations represent selection/binding facts, not newly authored
+callback bodies. The38-case handoff covers their actual pthreadpool use without marking every unchanged xnn_compute_*
+body. Existing variant_setup_fn machinery in batch-matrix-multiply was not modified by Mesh and was not edited wholesale.
+
+The MLDrift origin/resource/dispatch/converter additions otherwise make direct calls or retain data. Ordinary std::sort
+without a supplied comparator is not a newly authored callback. Full dynamic targets of arbitrary caller-provided
+interfaces are not established by this source review; the actual Mesh-owned handoffs and bodies are identified above.
+No source-only count is a runtime coverage claim.
+
+### Preservation and patch checks
+
+- Original XNNPACK `55a0ae4` → `877af3f3f422e865177e7c038133c160895aa34d`:13 marks in12 files.
+- Original MLDrift `576d069` → `239994d65028394a283f0f28f89eb2f8c918070f`:7 marks in2 files.
+- Original LiteRT `767121aa` → `fbde6d03516ccbf63ef8c13e789f86daae131958`:33 marks in8 files, plus regenerated nested
+  patches from the two committed source results. No uncommitted source was transferred between checkouts.
+- Metal `1703f8df960d0ef415b9c8d3dde075e136c5f650` preserves only the regenerated provider/litert.patch.
+- Removing only marker/comment insertions restores every one of the22 source files byte for byte. All three dependency
+  source diffs pass `git diff --check`. Outer patch-text checking reports three blank unified-diff context lines as
+  trailing whitespace; each is exactly one required context-prefix space, not source whitespace introduced by a marker.
+- Each maintained patch exactly equals its committed source diff. Reverse `git apply --check` passes; forward application
+  from the original base into a private temporary index reproduces the exact committed tree for all three patch layers.
+  No checkout or source backup was used for this check, and no compiler or dependency generator ran.
+- The canonical `.build/provider/litert` checkout was clean at historical `f9eac343`, whose nested XNN patch predated the
+  maintained source. Git fetch/check-out now realizes the complete committed `fbde6d03` source; its tracked tree is clean
+  and litert.applied contains the identical committed patch. The prior realized source is retained by the annotated
+  `native139-realized-source` tag. Bazel external cache trees were not edited; build stamps and binaries were not changed.
+
+Patch SHA256 values: xnnpack_mesh.patch `441aeff59c6b64d163b3f1b2c635519e12ad419ff1bb3e788e4284c33f5818cb`;
+ml_drift_mesh.patch `a13fb71a0aa1f9acac8373d11d5a84cf05549bae8abfd9fcc3eed7008956e498`;
+provider/litert.patch `732dd38fe0b5a89d4fd2c7a6672e9ff11ef25fb38db663b944ac640a75a87b8f`.
+
+These are source preservation/projection results only. No import, native build, callback execution or workload ran.
+The intentionally disabled source is not represented as matching historical native140 binaries. General producer
+integration remains paused.
 
 ## Process
 

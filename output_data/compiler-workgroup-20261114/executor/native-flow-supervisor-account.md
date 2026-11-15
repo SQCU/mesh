@@ -1,6 +1,45 @@
+Mesh’s required architecture represents allocation, lifetimes, placement, dependencies, and schedules as explicit data because these are solved ahead of execution and must remain available to later transformations.
+Producers publish complete results in paged storage, and consumers access those same results by view, preserving their identity and page-table references.
+Compilation therefore composes functions of explicit operands and represented effects, with original objects or argument bundles passed through existing interfaces using `*args` and `**args` where appropriate.
+This is a stronger functional discipline than ordinary Python programming: every agent must recognize copying or reconstructing existing results as a departure from the specification and correct its work.
+
+Every descendant function accesses produced structures through views of the same storage, with their page-table references carried intact.
+Passing a view preserves access to the complete structure while each consumer dereferences exactly what its algorithm uses.
+Packing, unpacking, or selecting fields into smaller replacement structs along that chain is unnecessary because the complete structure is never passed by copy.
+Throughout this integration, agents use access by view to avoid spending memory bandwidth and stack work on duplicated representations, especially across Apple Silicon’s bandwidth-limited interconnect.
+
 # Native composition responsibility account — Codex review
 
-## 15 November, callback sweep checkpoint — current operator priority
+## 15 November, Codex provider-patch follow-through — current callback scope
+
+Root explicitly assigned the remaining maintained provider-patch coverage to Codex; no Claude process was launched or
+resumed. The prior bounded added-line search was insufficient: actual registration and supplied-interface callers expose
+53 additional callback sites in22 Mesh-modified/moved source files. They are now marked with the same undeclared native
+function address and requested explanatory comment, while retaining every original body. This is callback disablement,
+not resumption or acceptance of the paused producer implementation.
+
+Source judgment follows actual uses: LiteRT registrations supply Init/Free/Prepare/Eval; XNN node.setup becomes
+runtime opdata.setup; the Mesh XNN_PARALLELIZE runtime branch supplies a task to pthreadpool in38 cases; logical/string
+predicates are passed into reference algorithms; Mesh supplies OpSelector and DescriptorSpatialTensor interfaces to the
+original compiler; and the moved UniformBufferCreator invocation calls a caller-supplied object. Main selected numerical
+library calls, selection/relocation records, unmodified vendor callback machinery, direct setup_convolution_operator and
+unproved GetDescriptor/default-destructor callback uses remain distinguished. The full source anchors,53 rows and scope
+limits are in `native-callback-inventory-20261115.md`, whose native-owned total is now698.
+
+Original source checkpoints: XNNPACK `877af3f`, MLDrift `239994d`, LiteRT `fbde6d03`; maintained Metal patch checkpoint
+`1703f8df`. All22 bodies restore byte for byte after removal of the markers/comments. Exact committed nested/outer patch
+comparisons, reverse application checks and forward temporary-index tree equality pass. The outer patch's three reported
+trailing-whitespace lines are required blank diff-context prefixes, individually checked; actual dependency source diffs
+pass. No import, native compilation, callback execution, generator or workload ran. All53 new markers are compile-time
+error mechanisms; callback phases are28 preparation,16 execution,8 compilation and1 release.
+
+Canonical LiteRT now realizes that same committed source by git fetch/checkout, retaining historical `f9eac343` under tag
+`native139-realized-source`; its tracked tree and applied-patch receipt agree. Original XNN/MLDrift histories and patches
+are likewise consistent. Existing Bazel cache checkouts, build stamps and binaries were not changed. The previous139/140
+artifact manifests remain historical evidence only. Only the existing native inventory/account documents are included in
+the accompanying Mesh checkpoint; peer code and root's combined callback account remain outside this staging scope.
+
+## 15 November, initial callback sweep checkpoint — preserved history
 
 The operator's callback sweep superseded the producer turn. SAME131's owned control `native131-callback-sweep-priority` succeeded with no queued work; result 74 was aborted_streaming. Producer WIP was preserved at Metal `1dca29d4` and Mesh `24481f5f`. The same PID 78966/exec 50810 accepted the callback brief at 22:47:34Z and read it at 22:47:45Z. Both full memoranda prefaced its assignment and corrective instructions. No new worker or process was created; 132/133/135 remained stopped.
 
@@ -12,7 +51,7 @@ Review corrections were applied to the actual source: direct recursive outer/exp
 
 Verification was text/AST inspection, body-preservation comparison and diff checking. The one `python3 -m py_compile compiler/mesh_compiler/metal.py` at 23:06:47Z was an authorized source-only bytecode/syntax check; it does not establish callback execution or native build success. No Mesh/Torch import, native build, callback execution, generator or workload ran. The historical native140 artifacts do not match this intentionally disabled source.
 
-The inventory leaves explicit source boundaries for root review: same-component direct library dispatch is excluded; LoweredBody stored defaults and replacements are distinguished; generated intrinsic-table source retains markers in the authored patch without rerunning its generator; cross-owner Python registrations are delegated to104/68/66. provider/litert.patch was not part of131's implementation grant; Codex's bounded added-line search found no callback literal but is not an exhaustive ownership claim. Original producer work remains paused pending root direction.
+The inventory leaves explicit source boundaries for root review: same-component direct library dispatch is excluded; LoweredBody stored defaults and replacements are distinguished; generated intrinsic-table source retains markers in the authored patch without rerunning its generator; cross-owner Python registrations are delegated to104/68/66. provider/litert.patch was not part of131's original implementation grant; that coverage gap is superseded by the concrete Codex follow-through above. Original producer work remains paused pending root direction.
 
 
 Preservation: canonical Dawn `09457b098` and Metal `2c634181` contain the reviewed callback markers. This account, the original sweep brief, complete inventory and exactly the owned Mesh native/Swift/metal.py paths are preserved together in the accompanying named Mesh checkpoint; no peer module/patch source is staged.
