@@ -448,7 +448,8 @@ def producing(made, p, index, bindings, sources):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
     wrappers, nodes, table = {}, {}, {}
-    called_lines = {line: Record("kernel", p, n) for n, line in enumerate(made.kernels)}
+    # Produced.kernels' keys: each KernelCallLine's identity (lower_inductor.py produced, id(record[2]))
+    called_lines = {called: Record("kernel", p, n) for n, called in enumerate(made.kernels)}
 
     def wrapped(wrapper):
         return wrappers.setdefault(id(wrapper), (len(wrappers), [], wrapper))
@@ -786,8 +787,11 @@ def save(directory, scheduled):
         {"graphs": graphs, "relations": relations, "natives": natives, "searches": searches, "closures": closures,
          "kept": kept, "raws": raws, "source": source, "bodies": bodies},
         Options(ops_filter=None, node_metadata_key_filter=None)))
-    torch.save({"state": {name: (key, tensor.detach()) for name, (key, tensor) in exported.state.items()},
-                "attributes": [tensor.detach() for _, tensor in held["tensors"].values()],
+    # the one state payload: every state, attribute and default tensor the original object itself (a Parameter its own
+    # class), so torch.save's one pickle memo keeps each object shared by several names, attributes or defaults one
+    # object at load
+    torch.save({"state": {name: (key, tensor) for name, (key, tensor) in exported.state.items()},
+                "attributes": [tensor for _, tensor in held["tensors"].values()],
                 "defaults": {name: parameter.default for name, parameter in signature.parameters.items()
                              if parameter.default is not inspect.Parameter.empty},
                 "specialized": exported.specialized}, directory / "state.pt")
@@ -880,14 +884,16 @@ def load(directory):
                         {name: InputKind[kind] for name, kind in about["state_kinds"].items()},
                         interface=(signature, pytree.treespec_loads(about["interface"]["spec"])),
                         specialized=specialized, range_constraints=source["range_constraints"])
-    # an Exported record (`sourced`'s) as its loaded Exported, `decomposed` the same object as `aliases` where saved so
-    def loaded(module, kept, tokens, inputs, results, spec, kinds, literals, aliases, same, decomposed, signature,
-               ranges):
+    # an Exported record (`sourced`'s) as its loaded Exported, `decomposed` the same object as `aliases` where saved so;
+    # each record once, the final functions and the outlined originals and parts by its `exporteds` index
+    def restored(module, kept, tokens, inputs, results, spec, kinds, literals, aliases, same, decomposed, signature,
+                 ranges):
         return Exported(module, {name: (key, tensors[t]) for name, (key, t) in kept.items()}, tokens, inputs, results,
                         pytree.treespec_loads(spec), kinds, aliases, specialized=literals,
                         decomposed=aliases if same else decomposed, signature=signature, range_constraints=ranges)
-    captured = {k: loaded(*record) for k, record in source["functions"].items()}
-    outlined = tuple((loaded(*record), parts) for record, parts in source["outlined"])
+    exporteds = [restored(*record) for record in source["exporteds"]]
+    captured = {k: exporteds[i] for k, i in source["functions"].items()}
+    outlined = tuple((exporteds[original], tuple(exporteds[i] for i in parts)) for original, parts in source["outlined"])
     calls = {node: Call(k, inputs, results) for node, k, inputs, results in source["calls"]}
     (nodes, holders, views, accesses, results, roots, kept, ports, existing, produced, placements, machines,
      output) = source["operands"]

@@ -835,5 +835,24 @@
       "/Users/mdot/metal-microbench/metal_ir.h": "0bf6b3cc42557ca040d06a6482bb240cb94eeeb84e1258d9d884c07801b3acce"
     },
     "runtime": "not imported or observed; fixed137 incompatible with new ValueInfo128"
+  },
+  "archive_identity_projection": {
+    "status": "source checkpoint only; whole AOT/public/per-result placement handoff and actual saved invocation remain incomplete",
+    "source": "compiler/mesh_compiler/archive.py",
+    "sha256": "b665de54736cccc33f3cc45a56b106ffd8548985779df22e74420169fe6cecf5",
+    "checks": [
+      "AST PASS",
+      "pyflakes PASS",
+      "git diff --check PASS"
+    ],
+    "producer": "CapturedProgram.functions and outlined original/part Exported objects; original real state/attribute/default tensors",
+    "consumer": "sourced one exported identity table; load restores table once and selects final/outlined references; one torch.save memo receives original tensors",
+    "corrections": [
+      "Pair source.exporteds/function indices/outlined indices on load, retaining shared Exported instances",
+      "Avoid loaded helper shadowing the reference registry",
+      "Remove separate detach calls that changed duplicate Tensor identity in state/attribute payload"
+    ],
+    "clarification": "Produced.kernels is already keyed by id(KernelCallLine); the variable-name clarification is not a repaired kernel-reference defect",
+    "runtime": "No compiler import, native invocation or save/load observation; pending complete Python and matching native ABI release"
   }
 }
