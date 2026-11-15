@@ -74,10 +74,10 @@
   ],
   "current_limits": [
     "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
-    "Compiler66 original per-processor Input/Output-to-native Value projection and typed wrapper/control-to-native operation or region associations remain pending; names and graph references alone do not establish their preservation.",
-    "Compiler68 CPU template parameter declarations and loop/access results remain Unretained source operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
-    "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. That native source and this original ExportedProgram source/state pairing have not yet been observed through a matching complete save/load invocation.",
-    "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner. Canonical serialization of every actual retained metadata type remains unobserved until the existing public caller can run."
+    "The actual returned interfaces, regions, inlinings, emissions and neural associations are saved. Compiler66 lower_metal remains unaccepted WIP: current inlinings contains InvokeSubgraph intervals only; WhileLoop cond/body and Lifted branch interval production is being corrected. Other binding/order/effect semantics remain under compiler review; serialization is not validation of those semantics.",
+    "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
+    "Native135 original model package source and this original ExportedProgram/state/native-operation correspondence have not yet been observed through a matching complete save/load invocation.",
+    "Wrapper line objects and opaque GraphLowering/Scheduler/backend objects are not serialized or reconstructed. Actual native Values/access/configuration/region/replay/solved sections remain their original native owner. Coverage of original intermediate line-to-native typed values is paired with compiler66, not inferred by names."
   ],
   "previous_source_checkpoint": "da96b082",
   "pending_source_layer": {
@@ -337,6 +337,75 @@
       "Compiler68 CPU template parameter declarations and loop/access results remain Unretained source operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
       "Native135 source 02f7e07e retains the original Model.save package/debug mapping alongside compiled bundle, states and IO. That native source and this original ExportedProgram source/state pairing have not yet been observed through a matching complete save/load invocation.",
       "Original GraphLowering/Scheduler/backend objects are not reconstructed or rerun on load. Native access/domain/guard/configuration/region/replay/solved sections remain their native owner. Canonical serialization of every actual retained metadata type remains unobserved until the existing public caller can run."
+    ],
+    "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
+  },
+  "native_association_checkpoint": {
+    "stage": "Source-only actual original record to native interface/operation/region association handoff; full saved-compilation unit remains incomplete",
+    "time_utc": "2026-11-15T06:49:49.887526+00:00",
+    "source_parent": "4400ab5a96a8a2f089e7138a099655aca3a8f098",
+    "worker": {
+      "session": "9740398d-f513-4c78-8578-f80b79fa2225",
+      "turn": 104,
+      "process": 32089,
+      "handle": 58844,
+      "last_result_index": 23,
+      "last_result": "success/source HOLD"
+    },
+    "source_sha256": {
+      "compiler/mesh_compiler/archive.py": "a9a56e4498e5d009198aa838c4ae88683f515d6538aed65a21906a00deabafb2"
+    },
+    "references_sha256": {
+      "compiler/mesh_compiler/lower_inductor.py": "74d87f22017e2ca0518749155b61db8f443915987dd8fd89371d5e2f9da78a97",
+      "compiler/mesh_compiler/lower_metal.py": "420139cb13bf5733841ccbbfdd008462ff102fc3e1240984faa0736a202e87ef",
+      "compiler/mesh_compiler/metal.py": "a1795d00fb58f26fdb77b3b08ba918d1f2315a5dbec86253486e5717e5148f27",
+      "compiler/mesh_compiler/native.py": "5e041778f07facf03fab56d1b6b8eef485acfc29f10b39682d77fe781b29dbba",
+      "/Users/mdot/metal-microbench/metal_ir.mm": "0cc6f0f0582717d80226de5d07c6907cc5b271ec7a45e347357f9d9392e3fde3",
+      "/Users/mdot/metal-microbench/metal_archive.mm": "41cfb54c3f6bafa480b130ab921271219bfd4a4239e81a1ee8f3fa0501abe22c"
+    },
+    "checks": [
+      {
+        "kind": "ast",
+        "result": "PASS"
+      },
+      {
+        "command": [
+          "/Users/mdot/.venv-mesh-uv/bin/python",
+          "-m",
+          "pyflakes",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "compiler/mesh_compiler/archive.py"
+        ],
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    ],
+    "changed_during_checks": [],
+    "retained": [
+      "Original Produced/Input/Output/Kernel/ExternCall/Inlined/Lifted records are indexed once by identity during existing produced-result projection. Interfaces retain exact root/view, literal or None result; emitted records retain actual native operation/range, regions retain actual kind/index/spans/selector, and consumed inlinings retain their producer-returned interval.",
+      "Repeated ExternCall occurrences of the same IR node all remain associated with the original generated-state buffer; no first-call selection.",
+      "Neural source owner references its actual native operation, function/units and input/output/state feature slots. Temporary package path/directory is excluded; native135 owns original and compiled package bytes.",
+      "Construction-local ValueIDs join existing native recipe Row.values/roots; operation intervals use Row.offset. Executor source review confirms current one-body composite has no preceding regions: AppendSource therefore keeps region ordinals while shifting operations. Native Records preserves RepeatSource/SwitchSource records; this is not a general identity-remap assumption.",
+      "Loaded query retains these records through existing shared graph/state payload and saved native plan, without source evaluation, graph matching or a new solve."
+    ],
+    "limits": [
+      "No compiler import, canonical save/load execution or target observation for this source revision. Existing public materialized-output-command.md remains queued after compiler/native coherence.",
+      "The actual returned interfaces, regions, inlinings, emissions and neural associations are saved. Compiler66 lower_metal remains unaccepted WIP: current inlinings contains InvokeSubgraph intervals only; WhileLoop cond/body and Lifted branch interval production is being corrected. Other binding/order/effect semantics remain under compiler review; serialization is not validation of those semantics.",
+      "Compiler68 CPU template parameter declarations and loop/access results remain Unretained operands pending its original template hook. The existing range consumer cannot iterate this placeholder; no empty-effects substitute or opaque compiler pickle is serialized.",
+      "Native135 original model package source and this original ExportedProgram/state/native-operation correspondence have not yet been observed through a matching complete save/load invocation.",
+      "Wrapper line objects and opaque GraphLowering/Scheduler/backend objects are not serialized or reconstructed. Actual native Values/access/configuration/region/replay/solved sections remain their original native owner. Coverage of original intermediate line-to-native typed values is paired with compiler66, not inferred by names."
     ],
     "existing_caller": "/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/materialized-output-command.md"
   }

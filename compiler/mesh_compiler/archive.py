@@ -49,6 +49,9 @@ GraphOf = collections.namedtuple("GraphOf", "module")
 # a real tensor of the one state.pt payload by its index there (held "tensors", the graph attributes' registry: the
 # same object one index)
 Tensored = collections.namedtuple("Tensored", "index")
+# a construction's upstream record by identity (`producing`'s registration): its kind ("produced", "input", "output",
+# "kernel", "extern", "inlined", "lifted"), its processor, its index in that processor's record (None: the Produced)
+Record = collections.namedtuple("Record", "kind processor index")
 
 
 # torch 2.14.0 torch/fx/_graph_pickler.py GraphPickler (this archive's one payload codec): a raw torch.fx Graph as
@@ -227,18 +230,42 @@ def queried(analysis, ordinal, target):
                          for (key, group), machine in analysis.constructions.items()}}
 
 
-# lower_metal.py ConstructedMachine.produced and .upstream (schedule.py CallAnalysis.constructions: every function's
-# every machine group's construction, a remote group's included): one construction's upstream results, each
-# processor's Produced (`producing`), and each produced kernel's Launched: its native operation (its ID in that
-# construction's own program, as constructed; the local group's final rows place it by native.py Row.offset and
-# Row.values, the native recipe's), its Produced's processor, its Kernel's position in that Produced's kernels and its
-# launch arguments as constructed (buffer names, element bytes, first byte, bytes, access)
+# lower_metal.py ConstructedMachine (schedule.py CallAnalysis.constructions: every function's every machine group's
+# construction, a remote group's included): its upstream results, each processor's Produced (`producing`, which
+# registers each of its records in `index` by identity as a Record: ("produced", p), ("input" or "output", p, position
+# k), ("kernel", p, call n), ("extern", "inlined" or "lifted", p, its preorder index)), and their native correspondence
+# by those same records, every operation ID that construction's own program's (the local group's final rows place them
+# by native.py Row.offset and Row.values, the native recipe's): `interfaces` each processor's (inputs, outputs), each
+# (its Input's or Output's record, its native value as projected: (root, view ValueID), ("literal", value) or None);
+# `regions` each registered repeat or switch (metal.py Region, postorder) as (its ExternCall's record, kind, region
+# index, first and end operations, selector), its region index this construction's (native.py Target.composite appends
+# one body after only typed copies: metal_ir.mm AppendSource keeps the ordinals and shifts the operations by
+# Row.offset); `inlinings` each consumed control body interval ConstructedMachine.inlinings records (its record by
+# identity, an Inlined's or a Lifted's; lower_metal.py records an invoke_subgraph inlining's only, so far: a repeat's
+# cond and body and a switch's lifted branches have no interval record there) as (its
+# record, first and end operations); `emitted` each projection's emission (metal.py Emitted) as (its record: a
+# registered one's (a Kernel, ExternCall, Inlined, Produced), a machine body node or landing as it is; its operation,
+# first and end operations); `upstream` each produced kernel's Launched as (operation, its Kernel's record, its launch
+# arguments as constructed: buffer names, element bytes, first byte, bytes, access); `neural` each Neural Engine
+# body's Neural as (operation, its Produced's record, function, compute units, input, output and state features), its
+# package the native artifact's (native135), its temporary directory not a saved value
 def constructed(machine):
-    processor = {id(made): p for p, made in machine.produced.items()}
-    kernels = {id(kernel): n for made in machine.produced.values() for n, kernel in enumerate(made.kernels.values())}
-    return {"produced": {p: producing(made) for p, made in machine.produced.items()},
-            "upstream": tuple((launched.operation, processor[id(launched.produced)], kernels[id(launched.kernel)],
-                               launched.arguments) for launched in machine.upstream)}
+    index = {}
+    produced = {p: producing(made, p, index) for p, made in machine.produced.items()}
+
+    def recorded(record):
+        return index[id(record)] if id(record) in index else record
+    return {"produced": produced,
+            "interfaces": {p: tuple(tuple((index[id(given)], native) for given, native in ports) for ports in pair)
+                           for p, pair in machine.interfaces.items()},
+            "regions": tuple((index[id(region.record)], region.kind, region.region, region.first, region.end,
+                              region.selector) for region in machine.regions),
+            "inlinings": tuple((index[id(inlined)], first, end) for inlined, first, end in machine.inlinings),
+            "emitted": tuple((recorded(made.record), made.operation, made.first, made.end) for made in machine.emitted),
+            "upstream": tuple((launched.operation, index[id(launched.kernel)], launched.arguments)
+                              for launched in machine.upstream),
+            "neural": tuple((made.operation, index[id(made.produced)], made.function, made.units, made.inputs,
+                             made.outputs, made.states) for made in machine.neural)}
 
 
 # lower_inductor.py Produced as its producer returned it, its FX graphs and nodes by Ref and the upstream compiler's
@@ -254,30 +281,57 @@ def constructed(machine):
 # (Kernel.owner), `schedulers` the distinct Schedulers' count (each call, extern and inlining naming its own),
 # `loops` each LoopBody a call's ranges name (`body_of`), `proxies` each cpu CppKernelProxy its ranges or a fused nest
 # name (`proxy_of`), `subkernels` the distinct CppKernels' count; `kernels` each call (Produced.kernels order: each
-# KernelCallLine its own) as its own record (`calling`); each ExternCall (`called`) as (its GraphLowering's
-# module, its IR operation's name there (GraphLowering.register_operation), its FX origins, its scheduler's index, each
-# Inlined (`inlining`) and each Lifted (`lifting`) in order), each Inlined and each Lifted as (its SubgraphLowering's
-# module, its scheduler's index, its own ExternCalls); each Seeds as (its GraphLowering's module, its RandomSeeds
-# buffer's operation and buffer names there and FX origins, its uses); the Neural Engine's Model as (its
-# ExportedProgram's graph module, graph signature, range constraints, module call graph, example inputs and verifiers,
-# its conversion's selected operands, received, handles). Their wrapper lines (ExternCall.lines, Inlined.lines, a
-# Lifted's own wrapper: the typed allocation, free, scope and control lines) are not here: their typed effects and
-# structure are the native projection's (pending)
-def producing(made):
+# KernelCallLine its own) as its own record (`calling`); the control records, each registered once by identity in
+# preorder (`registered`: its kind's table index in `index`, constructed's): `externs` its scheduler's ExternCalls'
+# indices, `extern_calls` each ExternCall (`called`) as (its GraphLowering's module, its IR operation's name there
+# (GraphLowering.register_operation), its FX origins, its scheduler's index, its Inlined's and its Lifted's indices,
+# in order), `inlined` and `lifted` each Inlined (`inlining`) and Lifted (`lifting`) as (its SubgraphLowering's
+# module, its scheduler's index, its own ExternCalls' indices); each Seeds as (its GraphLowering's module, its
+# RandomSeeds buffer's operation and buffer names there and FX origins, its uses, its buffer's every ExternCall's
+# index: that IR node's own calls); the Neural Engine's Model as (its ExportedProgram's graph module, graph signature,
+# state dict, range constraints, module call graph, example inputs, constants and verifiers, its conversion's selected
+# operands, received, handles). Each control record's native correspondence is constructed's (its regions, inlinings
+# and emissions by these records); its wrapper lines (ExternCall.lines, Inlined.lines, a Lifted's own wrapper: the
+# typed allocation, free, scope and control lines) are not here, and no native record of those lines' typed effects
+# is retained here either
+def producing(made, p, index):
     model, schedulers, owners, loops = made.model, {}, {}, {}
+    controls, lowered = {"extern": [], "inlined": [], "lifted": []}, {}
+    index[id(made)] = Record("produced", p, None)
+    index.update((id(given), Record("input", p, k)) for k, given in enumerate(made.inputs))
+    index.update((id(given), Record("output", p, k)) for k, given in enumerate(made.outputs))
+    index.update((id(kernel), Record("kernel", p, n)) for n, kernel in enumerate(made.kernels.values()))
 
     def scheduled(scheduler):
         return schedulers.setdefault(id(scheduler), len(schedulers))
 
+    # a control record (an ExternCall, an Inlined or a Lifted) registered once by identity in `index`, in preorder: its
+    # index in its kind's table, its own record filled after (its children's indices after its own)
+    def registered(kind, record, filled):
+        if id(record) not in index:
+            index[id(record)] = Record(kind, p, len(controls[kind]))
+            controls[kind].append(None)
+            controls[kind][index[id(record)].index] = filled()
+        return index[id(record)].index
+
+    # an ExternCall, and its IR node's every ExternCall record by that node's identity, each once (`lowered`: a Seeds
+    # buffer's; an inlined body's cond before and after its loop each its own call of one node)
     def called(extern):
-        return (extern.graph.module, extern.node.get_operation_name(), tuple(extern.node.origins),
-                scheduled(extern.scheduler), tuple(map(inlining, extern.inlined)), tuple(map(lifting, extern.lifted)))
+        n = registered("extern", extern, lambda: (
+            extern.graph.module, extern.node.get_operation_name(), tuple(extern.node.origins),
+            scheduled(extern.scheduler), tuple(map(inlining, extern.inlined)), tuple(map(lifting, extern.lifted))))
+        calls = lowered.setdefault(id(extern.node), [])
+        if n not in calls:
+            calls.append(n)
+        return n
 
     def inlining(inlined):
-        return inlined.graph.module, scheduled(inlined.scheduler), tuple(map(called, inlined.externs))
+        return registered("inlined", inlined, lambda: (inlined.graph.module, scheduled(inlined.scheduler),
+                                                       tuple(map(called, inlined.externs))))
 
     def lifting(lifted):
-        return lifted.graph.module, scheduled(lifted.scheduler), tuple(map(called, lifted.externs))
+        return registered("lifted", lifted, lambda: (lifted.graph.module, scheduled(lifted.scheduler),
+                                                     tuple(map(called, lifted.externs))))
 
     # a SchedulerNode's LoopBody (scheduler.py SchedulerNode._body), each once by identity, by its index in `loops`
     def looped(body):
@@ -354,9 +408,11 @@ def producing(made):
             "outputs": tuple((given.position, given.node, given.name, given.sent) for given in made.outputs),
             "kernels": kernels, "owners": len(owners), "schedulers": len(schedulers),
             "loops": tuple(body_of(body) for _, body in loops.values()), "proxies": tuple(proxy_records),
-            "subkernels": len(subkernels), "externs": externs,
+            "subkernels": len(subkernels), "externs": externs, "extern_calls": tuple(controls["extern"]),
+            "inlined": tuple(controls["inlined"]), "lifted": tuple(controls["lifted"]),
             "seeds": tuple((seeds.graph.module, seeds.buffer.get_operation_name(), seeds.buffer.get_name(),
-                            tuple(seeds.buffer.origins), seeds.uses) for seeds in made.seeds),
+                            tuple(seeds.buffer.origins), seeds.uses, tuple(lowered[id(seeds.buffer)]))
+                           for seeds in made.seeds),
             "model": model and (model.program.graph_module, model.program.graph_signature,
                                 model.program.state_dict, model.program.range_constraints,
                                 model.program.module_call_graph, model.program.example_inputs,
