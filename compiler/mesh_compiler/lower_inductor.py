@@ -325,11 +325,13 @@ class Model:
 # mutated_inputs, never_reuse_buffers, removed_buffers, effectful_ops, scheduler, wrapper_code and its planned lines;
 # None for the Neural Engine), `signature` the AOT export's GraphSignature of that graph (graph.module.meta; Neural
 # Engine: ExportedProgram.graph_signature), `kernels` {id(KernelCallLine): Kernel} over its wrapper and every subgraph
-# wrapper (every selected-backend kernel call: an mps kernel's, a cpu group's and a cpu template's), `externs` its
-# scheduler's ExternCall records in emission order, every control body's reached through them (ExternCall.inlined and
-# .lifted, each with its own ExternCalls, nested), `seeds` the Seeds of the root graph and of every body graph made
-# under it, `model` the Neural Engine's Model, `lowered` the LoweredAOTI itself (None for the Neural Engine): its
-# `planned` lines (graph.wrapper_code.lines) and its resumption, lowered.emit(supplied), which resumes its wrapper's
+# wrapper (every selected-backend kernel call: an mps kernel's, a cpu group's and a cpu template's), `externs` its const
+# graph's scheduler's ExternCall records (graph.const_module's, made first; none without one) then its own scheduler's,
+# each in emission order, each with its own scope (ExternCall.graph), every control body's reached through them
+# (ExternCall.inlined and .lifted, each with its own ExternCalls, nested), `seeds` the Seeds of every graph _graphs
+# yields (its const graph's, the root graph's and every body graph's made under each), `model` the Neural Engine's
+# Model, `lowered` the LoweredAOTI itself (None for the Neural Engine): its `planned` lines (graph.wrapper_code.lines)
+# and its resumption, lowered.emit(supplied), which resumes its wrapper's
 # print with the supplied operands for that stage (wrapper_code.supplied) and then compile_fx's AOT emission. Its result
 # is lowered.compiled, AotCodeCompiler.compile's AotCompiled (torch-inductor-cpp-build-result.patch: its wrapper and
 # kernel sources, their object actions, their precompiled headers' and its constants object's actions as run, its
@@ -802,9 +804,13 @@ def _wrappers(graph):
     return dict.fromkeys(made.wrapper_code for made in _graphs(graph))
 
 
-# GraphLowering `graph` and every body GraphLowering made under it (_Lowering.mesh_subgraphs), each once, depth first
-# in the order made
+# GraphLowering `graph`, its const graph (GraphLowering.const_module: compile_fx.py codegen_and_compile's const branch
+# under aot_inductor.use_runtime_constant_folding, its split_const_gm's const_gm made before `graph` by the same
+# graph_lowering, torch-inductor-graph-lowering-factory.patch; None without one) and every body GraphLowering made under
+# each (_Lowering.mesh_subgraphs), each once, depth first in the order made
 def _graphs(graph):
+    if graph.const_module is not None:
+        yield from _graphs(graph.const_module)
     yield graph
     for made in graph.mesh_subgraphs:
         yield from _graphs(made)
@@ -864,7 +870,9 @@ def _inductor(module, body, sources, sent, processor, kind, device):
               for k, node in enumerate(returned + sent)),
         {id(record[2]): PLACED[type(record[0])](*record, sources)
          for wrapper in _wrappers(graph) for record in wrapper.__dict__.get("launched_kernels", ())},
-        tuple(graph.scheduler.mesh_externs), _seeds(graph, sources), None, lowered)
+        tuple(extern for scope in (graph.const_module, graph) if scope is not None
+              for extern in scope.scheduler.mesh_externs),
+        _seeds(graph, sources), None, lowered)
 
 
 # the Neural Engine's upstream compiler over one adapted body (its control bodies adapted by _copied): each received

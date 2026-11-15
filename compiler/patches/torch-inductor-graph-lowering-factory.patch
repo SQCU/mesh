@@ -18,6 +18,15 @@
          with (
              _WaitCounter("pytorch.wait_counter.actual_codegen_and_compile").guard(),
              dynamo_utils.preserve_rng_state(),
+@@ -1597,7 +1601,7 @@
+                         ),
+                     )
+ 
+-                    const_graph = GraphLowering(
++                    const_graph = graph_lowering(
+                         const_gm,
+                         example_inputs=[],
+                         shape_env=shape_env,
 @@ -1622,7 +1626,7 @@
                              const_graph.codegen_with_cpp_wrapper()
                          )

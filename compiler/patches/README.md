@@ -527,15 +527,23 @@ independent of the other Inductor patches here.
 - **`codegen_and_compile`** reads `graph_lowering = graph_kwargs.get("graph_lowering", GraphLowering)` in the same
   way it reads `get_decomp_fn`. It then makes the forward graph with `graph = graph_lowering(gm, ...)`, using the same
   arguments as before. With no entry, the factory is `GraphLowering` and the output is unchanged.
-- Nothing else changes. The constant graph (`const_graph`), `graph.run`, the output strides and all three output forms
-  (`fx_wrapper` module, `AotCodeCompiler`, `compile_to_module`) are untouched.
+- The constant graph's construction takes the same operand. Under `aot_inductor.use_runtime_constant_folding`,
+  `codegen_and_compile` makes `const_graph = graph_lowering(const_gm, ...)` from `split_const_gm`'s `const_gm`, with
+  its arguments unchanged (`example_inputs=[]`, `is_const_graph=True`). The forward graph then holds it as
+  `const_module`, as before. Without this, the const graph would be lowered by plain `GraphLowering`, with upstream's
+  backends and none of the compilation's own records.
+- Nothing else changes. `graph.run`, `const_graph.run`, the output strides and all three output forms (`fx_wrapper`
+  module, `AotCodeCompiler`, `compile_to_module`) are untouched.
 
 `compiler/mesh_compiler/lower_inductor.py` `_inductor` passes the factory as a compilation operand:
 `compile_fx_aot(body, inputs, inner_compile=partial(compile_fx_inner, graph_lowering=MeshLowering), config_patches=...)`
 under `torch.no_grad()`. `MeshLowering` is a `GraphLowering` subclass. Its `_update_scheduler` makes a `MeshScheduler`,
 whose `create_backend` selects the Mesh backends, and its `subgraph_lowering` (`torch-inductor-upstream-composition.patch`)
-gives every control body the same backends. Nothing is registered with `register_backend_for_device`, so other
-compilations in the process keep upstream's backends. The GraphLowering is returned by
+gives every control body the same backends. The const graph is a `MeshLowering` too. `_graphs` yields it, and the
+bodies made under it, before the forward graph, which is the order made. So its scheduler's `ExternCall` records come
+first in `Produced.externs`, each with its own `graph`, and its `Seeds` are in `Produced.seeds`. Nothing is
+registered with `register_backend_for_device`, so other compilations in the process keep upstream's backends. The
+GraphLowering is returned by
 `torch-inductor-aot-lowered-result.patch`, not kept from inside the factory: no closure, no `TracingContext`, no
 `force_disable_caches` (`compile_fx_inner` has no FX cache in `aot_mode`).
 
@@ -544,12 +552,20 @@ compilations in the process keep upstream's backends. The GraphLowering is retur
 | Item | Value |
 |---|---|
 | Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
-| `torch/_inductor/compile_fx.py` | before `4e5b593e018c6bd6f69062483d524b64820ab272351fbf073b7ec118a66598f8`, after `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592` (installed `compile_fx.py` is now `torch-inductor-aot-lowered-result.patch`'s after) |
+| `torch/_inductor/compile_fx.py` | before `4e5b593e018c6bd6f69062483d524b64820ab272351fbf073b7ec118a66598f8`, after `597cbb52ab521130802f67337f2b72a6cbd554395b27b959885db56a69f610ca` (with the const construction; the installed `bb0f187b…` revision's after is `f4cc8a8d3ce142c67e8c43fb47434cd16ff1c7ca2665f92ec590754d10dd5592`, and installed `compile_fx.py` is now `torch-inductor-aot-lowered-result.patch`'s after) |
 | Install scope of this work | `/Users/mdot/.venv-mesh-uv`, applied by the supervisor at source revision `ba03a780` after the composition patch: fuzz-0 dry run, application and AST check passed (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 2) |
 
 The patch was written from the installed source's context lines 842-847, 1402-1407 and 1622-1628. Installed: the
 supervisor's fuzz-0 dry run and application of the committed patch (`bb0f187b…`) passed, the result has the "after"
 hash, and it parses (`output_data/compiler-workgroup-20261114/compiler/numerical68-upstream-install.json`, step 2).
+
+The const hunk (`@@ -1597,7 +1601,7 @@`, original lines 1597-1603) is not installed. It was checked in a temporary
+git index, with nothing installed changed. Starting from the installed `compile_fx.py` blob, the installed 6d56f939
+`torch-inductor-aot-lowered-result.patch` and this patch's committed revision were reverse-applied, which gives the
+"before" hash. This revision applied forward, giving the new "after". The current committed
+`torch-inductor-aot-lowered-result.patch` then applied on top (its `compile_fx.py` after is now
+`ac3d73c70c7258f32b438efe06407eff1e6fd899f0f3955d48190aafae4620e2`). Reversing both restored the "before" bytes
+exactly. Every blob parses, and the pyflakes count is 0 before and after.
 
 ### Apply, check, reverse
 
