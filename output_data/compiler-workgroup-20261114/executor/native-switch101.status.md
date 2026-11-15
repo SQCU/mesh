@@ -47,3 +47,23 @@ paired C unit's obligation. Fresh imports stay held until its matching build.
     nothing there.
 - **Checks:** `py_compile`, `pyflakes` and `git diff --check` pass, with no new line over 120 characters (metal.py
   +19/−13 vs 774f08e4).
+
+## Update (selector106: plan before final emission)
+
+> Target.placed new order in EACH actual row
+
+- **`Target.placed`** (native.py, comment `:442–448`). Each row now runs:
+  1. transport (unchanged);
+  2. `MetalRecorderPrepare` (`:494`), on the lowered typed program;
+  3. value, step, operand and state placement, then `metal_ir_place` (`:509`);
+  4. `checked(lib.MetalRecorderPlan(recorder, ready, error, ROOM), error, "replay plan")` (`:510`);
+  5. the existing emitted call, `metal_ir_finalize` or `metal_ir_loaded`, moved here, not duplicated (`:511–512`);
+  6. `captured.append`.
+
+  The replay loop and the Owned order are unchanged.
+- **`_recorder()`:** `('MetalRecorderPlan', C.c_int, [P, P, text, room])` (metal.py `:386`).
+- **C pairing:** native122 now supplies the matching `MetalRecorderPlan` declaration and caught wrapper. Its retained
+  plan reaches final emission and archive relocation; the existing tools use the same chronology. Imports remain
+  held until the matching build. Full range-access geometry and other conditional consumers remain unfinished.
+- **Checks:** `py_compile`, `pyflakes` and `git diff --check` pass. My hunks are native.py +5/−3 (3 hunks) and
+  metal.py +1. metal.py's one line over 120 characters (`:685`) is SAME64's uncommitted scalar-if hunk.

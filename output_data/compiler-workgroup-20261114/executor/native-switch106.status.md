@@ -35,3 +35,57 @@ The segment ownership cycle is corrected by native117 below.
 - **Deleted duplicate handoff:** the `dispatchOf` parameter of `MetalNativeCommands`, `MetalNativeGPU`'s fetch of the
   same map, and `MetalRepeatEmit.dispatchOf`. `MetalNativeCommands` uses the plan's map. Diff: +10/−20.
 - **Checks:** strict rc=0 on capture, program and both tools; `git diff --check` clean.
+
+## Native118 review and active continuation
+
+Native118 supplied only a `Source` skip; `Wrap`, `TargetKey` and `Pipeline` still consumed the module. Its claim that
+pipeline emission was deferred was false. The draft was not accepted or checkpointed as complete; private syntax
+checks did not establish the missing phase contract.
+
+Native119–121 continue the actual phase split: lowered capture and placement -> retained replay plan -> final emission
+-> replay consuming that same plan. SAME047 pairs the canonical recorder binding and `Target.placed` order. Typed
+selector stores remain in their original kernel; original span rows supply their literals. Plan-specific compiled
+output ownership, full range workspace geometry, plan teardown and saved geometry reuse remain source-review items.
+No conditional workload has run. Joined completion, later compaction control, CPU indexed control and MIL remain open.
+
+## native119–122: plan before emission, retained plan operand (source; strict checks only)
+- **Chronology (every entry caller).** `MetalRecorderPrepare` (lowered or loaded program) → placements,
+  `MetalRecorderState`, `metal_ir_place` (computes the replay order) → `int MetalRecorderPlan(MetalRecorder *, id
+  prepared, char *error, size_t room)` (ctypes `[c_void_p, c_void_p, c_char_p, c_size_t] -> c_int`, 0 or EINVAL) →
+  `metal_ir_finalize`, or for a loaded program `metal_ir_loaded` → `MetalRecorderReplay`.
+  - `metal_ir_loaded` only relocates later-pass readiness and transport status and checks transfer records and
+    CONSTANT data, so it takes finalize's slot.
+  - `tools/native_bench.m` `Realize` and `tools/e2b_replay.m` phase setup now finalize (or call loaded) after Plan and
+    before Replay. The earlier finalize/loaded calls are removed.
+- **One plan operand.** A fresh `-plan:` alone runs `MetalReplayPartition`, which owns handovers, levels (barriers and
+  branch edges), blits and the order/later cuts. It gives `metal_ir_replay_plan(p, {span, copies, steps, count,
+  records})` to the program.
+  - A loaded or planned program (`metal_ir_replay_planned`) reuses the saved span, copies and logical rows. It does not
+    query order cuts or compute handovers, levels or cuts.
+  - Both paths project the retained replay order once to get the later passes' cut and order (`replayLatersKey`).
+  - `MetalReplaySegments` relocates the rows onto live ICBs.
+  - Displaced state is removed: `replayHandoverKey` (native's end-of-call producer barrier now reads the plan's ALIAS
+    step at `end % count`), `replayLevelsKey` (the barrier count reads PASS/ALIAS steps) and the unconsumed
+    `replayCutsKey`.
+  - Archive v40 carries span, copies, records and steps after each dispatch's switch and branch, outside the identity.
+    The v40 comment no longer says "no stream changed".
+- **Stores.** `SwitchBodies` runs before `Emit`, once into each call specialization's empty clone. Per run j whose head
+  the switch holds, u32 word 2j+1 of the residue's row gets `select(0, end − first, selection == arm)`.
+  - With no plan, finalize returns EINVAL.
+  - `Invariant` is false with selections (no adoption or publication), and `CloneHandles` remaps the selection's
+    handles.
+- **Count proof.** Segments hold whole copies, so a switched run is one piece of end − first commands in every residue.
+  The initial table contents are each residue's actual span row.
+- **Workspace (partial).** The `MetalRangeTable` descriptor and contents live 8-aligned after the argument records in
+  the replay's ordinary argument storage, resident and held. `rangeWord` rows sit at offset + e·stride, and
+  `NativeICB.ranges` points at the run's record, selecting `NativeICBRangeEncode`.
+  - Not complete: the selector's lowering-time effect view is still the 4-byte selector value, not the table row.
+- **Ownership.** `capture->planned` is released only through `MetalReplayDestroy` (plan failure, replacement, capture
+  dealloc). `-replay:` moves it, so there is no capture cycle.
+- **Checks.** Strict `-Werror` rc=0 on the eight IR sources, capture, program and both tools; `git diff --check` clean.
+  `metal_recording.m` unchanged. Nothing built, imported or run.
+- **Open.**
+  - The table's lowering-time effect and bytes are the next required connection. Indirect-range fetch ordering under
+    the branch-edge barrier is unverified.
+  - BLIT, later INDIRECT and host steps inside a branch are not gated.
+  - Nested inactive safety beyond ICB runs, joined completion, CPU and MIL.

@@ -383,6 +383,7 @@ def _recorder():
                 ('MetalBufferBorrow', P, [P, P, Q, RELEASE, P]),
                 ('MetalRecorderPrepare', P, [P, P, text, room]),
                 ('MetalRecorderReplay', C.c_int, [P, P, C.POINTER(Replay), text, room]),
+                ('MetalRecorderPlan', C.c_int, [P, P, text, room]),
                 ('MetalRecorderState', C.c_int, [P, P, P, Q, text, room]),
                 ('MetalReplayDestroy', None, [C.POINTER(Replay)]),
                 ('MetalRecorderActors', C.c_int, [P, machine, machine, C.POINTER(_Actors)]),

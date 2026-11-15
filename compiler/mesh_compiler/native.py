@@ -439,11 +439,13 @@ class Target:
         return (*owner.span(owner.solution.function_value_first[f], self.counts[f]),
                 owner.function[f].value[self.counts[f]].shares)
 
-    # metal_recording.h MetalRecorderPrepare and MetalRecorderReplay (metal_capture.m MetalRecorder: no capture is
-    # prepared after the recorder's first replay): the one recorder of the whole machine's rows, every row's program
-    # finalized (or relocated), transport-prepared, captured and placed first, each capture and its transport and
-    # placement owners retained with `owned`; then those same captures replayed in original row order, a row with no
-    # program a NULL call; each call its planned call's
+    # metal_recording.h MetalRecorderPrepare, MetalRecorderPlan and MetalRecorderReplay (metal_capture.m MetalRecorder:
+    # no capture is prepared after the recorder's first replay): the one recorder of the whole machine's rows, every
+    # row's program, in order, transport-prepared, captured from its lowered typed program, placed (metal_ir_place),
+    # its replay planned on its capture (segments, cuts, ranges: MetalRecorderPlan), then finalized once (or relocated,
+    # an archive's: metal_ir_loaded), each capture and its transport and placement owners retained with `owned`; then
+    # those same captures replayed in original row order, a row with no program a NULL call; each call its planned
+    # call's
     def placed(self, owned, libs, gpu, owner, programs, finalize):
         M, compiler, (lib, _), transport = libs
         error, planned = C.create_string_buffer(ROOM), owner.planned
@@ -489,8 +491,6 @@ class Target:
                 mesh.check(transport.mesh_metal_status_prepare(C.byref(context), C.byref(wires),
                                                                planned.call[call].plan, C.byref(word)))
                 compiler.metal_ir_transport(program, word.value)
-            emitted = compiler.metal_ir_finalize if finalize else compiler.metal_ir_loaded
-            checked(emitted(program, error, ROOM), error, "emission" if finalize else "relocation")
             ready = made(lib.MetalRecorderPrepare(recorder, program, error, ROOM), error, "preparation")
             owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
             for value, offsets, count, shares in self.placements(owner, r, program, libs):
@@ -507,6 +507,9 @@ class Target:
                 checked(lib.MetalRecorderState(recorder, ready, wires.state, word.value, error, ROOM), error,
                         "the transport state")
             checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
+            checked(lib.MetalRecorderPlan(recorder, ready, error, ROOM), error, "replay plan")
+            emitted = compiler.metal_ir_finalize if finalize else compiler.metal_ir_loaded
+            checked(emitted(program, error, ROOM), error, "emission" if finalize else "relocation")
             captured.append((row, ready))
         calls = []
         for row, ready in captured:
