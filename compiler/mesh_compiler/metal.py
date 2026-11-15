@@ -502,16 +502,27 @@ class UpstreamParameter(C.Structure):
     _fields_ = [('type', C.c_char_p), ('slot', mesh.U), ('pointer', mesh.U)]
 
 
-# struct metal_ir_upstream_emission (metal-microbench 1d8c296e metal_ir.h, native139's build): `language` a CPU
+# metal_ir.h metal_ir_build_action, native140: the original compiler action's ordered operands and context
+class BuildAction(C.Structure):
+    _fields_ = [(name, C.POINTER(C.c_char_p)) for name in ('command', 'directories', 'environment')] + [
+        (name, C.POINTER(mesh.U)) for name in ('sources', 'target', 'ldflags', 'libraries', 'library_directories')
+    ] + [(name, C.c_char_p) for name in ('product', 'target_file', 'precompiled_header', 'working_directory',
+                                        'executable')] + [(name, mesh.U) for name in (
+        'commands', 'source_count', 'target_count', 'ldflag_count', 'library_count', 'library_directory_count',
+        'directory_count', 'environments', 'relative', 'padding')]
+
+
+# struct metal_ir_upstream_emission (metal-microbench 6a48588d metal_ir.h, native140's build): `language` a CPU
 # source's language; `environment` its compile command's whole environment ("NAME=value" each), `directory` its
 # working directory, `compile_executable` the executable its compile runs (compile[0] as its producer's subprocess
 # resolves it), `compile_source` and `compile_output` the positions in `compile` of its own source file and output
-# object: NULL and 0 for a pass with no compile of its own (a Metal pass's)
+# object; `link_action` its original complete linking action. NULL and 0 where a pass has no action of its own
 class UpstreamEmission(C.Structure):
     _fields_ = [('source', C.c_char_p), ('entry', C.c_char_p), ('parameter', C.POINTER(UpstreamParameter)),
                 ('compile', C.POINTER(C.c_char_p)), ('link', C.POINTER(C.c_char_p)), ('bytes', mesh.Q),
                 ('parameters', mesh.U), ('compiles', mesh.U), ('links', mesh.U), ('language', C.c_char_p),
                 ('environment', C.POINTER(C.c_char_p)), ('directory', C.c_char_p), ('compile_executable', C.c_char_p),
+                ('link_action', C.POINTER(BuildAction)),
                 ('environments', mesh.U), ('compile_source', mesh.U), ('compile_output', mesh.U), ('padding', mesh.U)]
 
 
@@ -892,16 +903,15 @@ def _callables(program, op, numeric):
 # (lower_inductor.py Emission: source, entry, compile, link; a CPU pass's `parameters`, each Parameter(type, slot,
 # pointer) as that emitter declared it: struct metal_ir_upstream_parameter; its `language`, `environment` and
 # `directory` as its producer declared its compile, None and () for a Metal pass), each field by its name. A pass
-# with no compile of its own (every pass's now: its build is its body's, Produced.lowered.compiled) has no
-# compile_executable, compile_source or compile_output. One with its own compile needs its executable, which no
-# producer result carries (cpp_builder.py CppBuildAction.command[0] as its builder was given it, unresolved)
+# with no actions of its own (current Emission producers: the AotCompiled body owns the build) has no
+# compile_executable, compile_source, compile_output or link_action. An own compile/link still needs its original
+# action projection; neither its executable nor the full link context can be reconstructed from flag strings
 def _emitted(program, op, number, emission):
-    if emission.compile:
+    if emission.compile or emission.link:
         raise NotImplementedError(
-            "unresolved integration: operation %d pass %d's own compile command: its compile_executable (compile[0] "
-            "as its producer's subprocess resolves it in its environment and directory), which its producer's "
-            "action (CppBuildAction) does not carry; its compile_source and compile_output are Emission.sources %r "
-            "and .output %r" % (op, number, emission.sources, emission.output))
+            "unresolved integration: operation %d pass %d's own compiler/linker action projection, including its "
+            "original executable, source/output positions and full link context; Emission.sources %r and .output %r"
+            % (op, number, emission.sources, emission.output))
     lib, error = _upstream(), C.create_string_buffer(4096)
     source = emission.source.encode() if isinstance(emission.source, str) else bytes(emission.source)
     texts = [_array(C.c_char_p, [t.encode() for t in texts])
@@ -913,7 +923,7 @@ def _emitted(program, op, number, emission):
         bytes=len(source), parameters=len(parameters), compiles=len(emission.compile), links=len(emission.link),
         language=None if emission.language is None else emission.language.encode(), environment=texts[2],
         directory=None if emission.directory is None else str(emission.directory).encode(),
-        environments=len(emission.environment))
+        link_action=None, environments=len(emission.environment))
     status = lib.metal_ir_upstream_emitted(program, op, number, C.byref(made), error, len(error))
     if status:
         raise OSError(status, 'operation %d pass %d: %s' % (op, number, error.value.decode()))
