@@ -6,7 +6,8 @@
 # coremltools 9.0 for the Neural Engine), its returned pre-terminal result retained as that compiler's own objects.
 # Fields: output_data/compiler-workgroup-20261114/compiler/numerical68-result.md; upstream hooks:
 # compiler/patches/torch-inductor-aot-lowered-result.patch, torch-inductor-graph-lowering-factory.patch,
-# torch-inductor-mps-kernel-operands.patch and torch-inductor-upstream-composition.patch
+# torch-inductor-mps-kernel-operands.patch, torch-inductor-upstream-composition.patch and
+# torch-inductor-cpu-kernel-results.patch
 import contextlib
 import dataclasses
 import functools
@@ -18,7 +19,8 @@ from torch import Tensor
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch._inductor import config
 from torch._inductor import ir as upstream
-from torch._inductor.codegen.cpp import CppScheduling, KernelGroup
+from torch._inductor.codegen.cpp import (CppKernel, CppKernelProxy, CppOverrides, CppScheduling, CppTile2DKernel,
+                                         CppTile2DOverrides, CppVecKernel, CppVecOverrides, KernelGroup)
 from torch._inductor.codegen.cpp_template_kernel import CppTemplateKernel
 from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
 from torch._inductor.codegen.wrapper import KernelCallLine
@@ -138,6 +140,28 @@ class Ranges:
     accesses: list
 
 
+# codegen/cpp.py CppKernelProxy.codegen_functions: one of its kernels (codegen_kernel: kernel_group.new_kernel of its
+# kernel_cls, vec_kernel_cls or tile2d_kernel_cls, then run) codegening SchedulerNode `node` (SchedulerNode.codegen's
+# set_current_node): `variables` the (vars, reduction vars) that kernel's set_ranges returned to run, `suffix` whether
+# run gave the node to the kernel's write_to_suffix (its vars and no reduction vars: cpp.py run `fn(vars, ())`, its
+# code the kernel's reduction_suffix), `accesses` each memory access the node's codegen made, in order, as that kernel
+# received it: (method, buffer name, index, store mode, graph, fx node, mask), CppKernel, CppVecKernel or
+# CppTile2DKernel load, store and store_reduction with the index LoopBody bound and SimplifyIndexing simplified, over
+# those variables and the kernel's indirect symbols (its mesh_indirect); `graph` and `fx node` loop_body.py
+# InterpreterShim's at that call, as Ranges'; `mask` the kernel's _load_mask there (CppKernel.masked: CppVecOverrides
+# .masked's mask, its masked loads'; None outside one and in a scalar kernel, whose CppOverrides.masked guards its
+# lambda instead). The kernel's own fields are its domain as it emits it: itervars, ranges, reduction_depth,
+# active_ranges and inner_itervars (codegen_functions'); a vector kernel's tiling_factor, tiling_idx, tail_size and
+# num_elems; a tile kernel's tiling_indices, outer_idx, inner and outer tail sizes and num_elems and
+# inner_is_tiling_idx
+@dataclasses.dataclass(eq=False)
+class CppRanges:
+    node: object
+    variables: tuple
+    suffix: bool
+    accesses: list
+
+
 # an actual result a record does not hold: `result` what it is, `owner` the original producer making it, which keeps it
 # nowhere this compilation's result reaches. It is no value of that result: not empty, not iterable
 @dataclasses.dataclass(frozen=True)
@@ -168,15 +192,18 @@ TEMPLATE_RANGES = Unretained("the template's and its epilogues' loops, indices a
 # CppTemplateKernel: its KernelArgs, local and removed buffers), `launch` its call record as produced (mps:
 # torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error: its error buffer's argument
 # index, c10/metal/error.h ErrorMessages as its declaration names it); cpu: (kernel name, arg_defs, call_args,
-# arg_types), a group's of its KernelArgs.cpp_argdefs at its call, a template's its KernelCallLine's kernel_name,
-# call_args and arg_types, its arg_defs TEMPLATE_DECLARED). `produced` its (entry, source) as its backend
+# arg_types), its KernelCallLine's kernel_name, call_args and arg_types as its call wrote them, arg_defs its
+# definition's own: a group's codegen_group arg_defs (torch-inductor-cpu-kernel-results.patch), a template's
+# TEMPLATE_DECLARED). `produced` its (entry, source) as its backend
 # made and defined it before its call (mps: metal_entry and metal_source; cpu, a group's and a template's alike:
 # define_kernel's declared entry and final source, torch-inductor-upstream-composition.patch defined_kernels).
 # `schedule`: mps the node_schedule codegen_node_schedule_with_kernel received,
 # its DisableReduction and EnableReduction scopes in it; cpu the group's scheduled nodes, a template's the nodes its
 # define_kernel received (its template node, then its epilogue nodes). `ranges`: mps each second-pass SchedulerNode's
-# Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes), its loop nests and outer loop; a template's
-# TEMPLATE_RANGES (not retained: its effects are not empty; its scheduled nodes' read_writes are its own).
+# Ranges in order; cpu each finalize_kernel's (CppKernelProxy, nodes, local buffer context) in order (MeshKernelGroup),
+# each proxy's LoopNest and its kernels (MeshCppKernelProxy), each kernel's CppRanges in order with their accesses
+# (MeshCppAccesses); a template's TEMPLATE_RANGES (not retained: its effects are not empty; its scheduled nodes'
+# read_writes are its own).
 # `scheduled` its SchedulerNodes, `origins` the original body nodes their IR implements
 @dataclasses.dataclass(eq=False)
 class Kernel:
@@ -307,13 +334,18 @@ class Produced:
 
 # ---- the selected upstream backends, retaining their own results ----
 
-# codegen/common.py CSEProxy.indirect_indexing: each indirect symbol its kernel's overrides make, with the value it
-# indexes by and its size (and whether its bounds are checked), the indirect fact its accesses' indices carry
-class MeshMetalOverrides(MetalOverrides):
+# codegen/common.py CSEProxy.indirect_indexing: each indirect symbol its kernel's overrides make (its parent_handler's
+# indirect_indexing), with the value it indexes by and its size (and whether its bounds are checked), the indirect
+# fact its accesses' indices carry; each backend's own overrides with it
+class MeshIndirect:
     def indirect_indexing(self, var, size, check=True, wrap_neg=True):
         made = super().indirect_indexing(var, size, check, wrap_neg)
         V.kernel.mesh_indirect[made] = (var, size, check)
         return made
+
+
+class MeshMetalOverrides(MeshIndirect, MetalOverrides):
+    pass
 
 
 # codegen/mps.py MetalKernel: its node schedule, each second-pass node's ranges (split_and_set_ranges, then
@@ -371,28 +403,123 @@ class MeshMetalScheduling(MetalScheduling):
         super().codegen_node_schedule_with_kernel(node_schedule, kernel)
 
 
-# codegen/cpp.py KernelGroup: each finalize_kernel's CppKernelProxy (its loop nests, local buffers and outer loop) and
-# each call's own record, as MeshMetalKernel.call_kernel's (wrapper.launched_kernels): (group, launch, its
-# KernelCallLine, the graph it was called in, its scheduler, its (declared entry, final source) as define_kernel defined
-# it: torch-inductor-upstream-composition.patch defined_kernels)
+# codegen/cpp.py CppOverrides, CppVecOverrides and CppTile2DOverrides, each kernel class's own (common.py
+# Kernel.__enter__: CSEProxy(kernel, kernel.overrides()))
+class MeshCppOverrides(MeshIndirect, CppOverrides):
+    pass
+
+
+class MeshCppVecOverrides(MeshIndirect, CppVecOverrides):
+    pass
+
+
+class MeshCppTile2DOverrides(MeshIndirect, CppTile2DOverrides):
+    pass
+
+
+# codegen/cpp.py CppKernel, CppVecKernel and CppTile2DKernel as their CppKernelProxy's factory makes each
+# (codegen_functions' codegen_kernel), each retaining its set_ranges result, its suffix scope, each node it codegens
+# (CppRanges) with each access as it receives it, and its indirect symbols (mesh_indirect). An access is taken at the
+# outermost of its class's load, store and store_reduction, before the original's own rename_indexing, a tile's
+# transform_indexing or a vector load's scalar load, none of which reaches this class again; CppVecOverrides.load_seed's
+# own V.kernel.load among them
+class MeshCppAccesses:
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.mesh_indirect, self.mesh_ranges, self.mesh_split, self.mesh_suffix = {}, [], None, False
+
+    def set_ranges(self, lengths, reduction_lengths):
+        made = super().set_ranges(lengths, reduction_lengths)
+        self.mesh_split = tuple(map(tuple, made))
+        return made
+
+    @contextlib.contextmanager
+    def write_to_suffix(self):
+        self.mesh_suffix = True
+        with super().write_to_suffix():
+            yield
+        self.mesh_suffix = False
+
+    @contextlib.contextmanager
+    def set_current_node(self, node):
+        self.mesh_ranges.append(CppRanges(node, self.mesh_split, self.mesh_suffix, []))
+        with super().set_current_node(node):
+            yield
+
+    def _accessed(self, method, name, index, mode):
+        shim = V.interpreter
+        self.mesh_ranges[-1].accesses.append((method, name, index, mode, shim.graph, shim.current_node,
+                                              self._load_mask))
+
+    def load(self, name, index):
+        self._accessed("load", name, index, None)
+        return super().load(name, index)
+
+    def store(self, name, index, value, mode=None):
+        self._accessed("store", name, index, mode)
+        return super().store(name, index, value, mode)
+
+    def store_reduction(self, name, index, value):
+        self._accessed("store_reduction", name, index, None)
+        return super().store_reduction(name, index, value)
+
+
+class MeshCppKernel(MeshCppAccesses, CppKernel):
+    overrides = MeshCppOverrides
+
+
+class MeshCppVecKernel(MeshCppAccesses, CppVecKernel):
+    overrides = MeshCppVecOverrides
+
+
+# a tile kernel is its proxy's vector kernel, as CppTile2DKernel is a CppVecKernel (aggregate_reduction_buffers:
+# isinstance(kernels[0], vec_kernel_cls)). Its MRO: MeshCppTile2DKernel, MeshCppVecKernel, MeshCppAccesses,
+# CppTile2DKernel, CppVecKernel, CppKernel; its accesses its own as received, CppTile2DKernel's methods then
+# CppVecKernel's as the original's
+class MeshCppTile2DKernel(MeshCppVecKernel, CppTile2DKernel):
+    overrides = MeshCppTile2DOverrides
+
+
+# codegen/cpp.py CppKernelProxy making these kernels (its kernel_cls, vec_kernel_cls and tile2d_kernel_cls factory;
+# torch-inductor-cpu-kernel-results.patch codegen_conditions: a scalar kernel's tail condition by its class, not
+# CppKernel's identity). `kernels` its own selection of them (scalar; vector and tail; tile2d and its tails), each one's
+# active_ranges as codegen_functions set them, `loop_nest` its LoopNest (LoopLevels as tiled, then as codegen_loops
+# marked them), `call_ranges` its own
+class MeshCppKernelProxy(CppKernelProxy):
+    kernel_cls, vec_kernel_cls, tile2d_kernel_cls = MeshCppKernel, MeshCppVecKernel, MeshCppTile2DKernel
+
+
+# codegen/cpp.py KernelGroup: each finalize_kernel's (CppKernelProxy, nodes, local buffer context) as it received it:
+# the proxy (codegen_node's; codegen_outer_loop_node's merge_outer_fusion_kernels result, its LoopNest's kernel an
+# OuterLoopFusedKernel whose `inner` LoopNests' kernels are the fused proxies), the nodes, and V.local_buffer_context
+# at that finalize (codegen_outer_loop_node's LocalBufferContext: its local_buffers, global_buffers and global_to_local,
+# the kernel-local buffers its accesses name; virtualized.py's NullHandler outside one). Each call's own record, as
+# MeshMetalKernel.call_kernel's (wrapper.launched_kernels): (group, launch, its KernelCallLine, the graph it was called
+# in, its scheduler, its (declared entry, final source) as define_kernel defined it: torch-inductor-upstream-composition
+# .patch defined_kernels); its launch (kernel name, arg_defs, call_args, arg_types): its definition's own parameter
+# declarations (torch-inductor-cpu-kernel-results.patch codegen_group arg_defs, flush's codegen_group before this call)
+# and that KernelCallLine's kernel_name, call_args and arg_types as KernelGroup.call_kernel's generate_kernel_call wrote
+# them
 class MeshKernelGroup(KernelGroup):
     def __init__(self):
         super().__init__()
         self.mesh_proxies = []
 
     def finalize_kernel(self, new_kernel, nodes):
-        self.mesh_proxies.append((new_kernel, tuple(nodes)))
+        self.mesh_proxies.append((new_kernel, tuple(nodes), V.local_buffer_context))
         super().finalize_kernel(new_kernel, nodes)
 
     def call_kernel(self, wrapper, kernel_name):
-        launch = (kernel_name, *map(tuple, self.args.cpp_argdefs()))
         super().call_kernel(wrapper, kernel_name)
-        wrapper.__dict__.setdefault("launched_kernels", []).append((self, launch, wrapper.lines[-1], V.graph,
-                                                                    V.graph.scheduler,
-                                                                    wrapper.defined_kernels[kernel_name]))
+        line = wrapper.lines[-1]
+        wrapper.__dict__.setdefault("launched_kernels", []).append(
+            (self, (line.kernel_name, self.arg_defs, tuple(line.call_args), tuple(line.arg_types)), line, V.graph,
+             V.graph.scheduler, wrapper.defined_kernels[kernel_name]))
 
 
 class MeshCppScheduling(CppScheduling):
+    kernel_proxy_cls = MeshCppKernelProxy
+
     def __init__(self, scheduler):
         self.mesh_defined = []
         super().__init__(scheduler)

@@ -1,0 +1,24 @@
+--- a/torch/_inductor/codegen/cpp.py
++++ b/torch/_inductor/codegen/cpp.py
+@@ -2828,8 +2828,10 @@
+                 if var == _var:
+                     var_id = i
+                     break
++            # compiler/patches/torch-inductor-cpu-kernel-results.patch: a scalar kernel, its proxy's kernel_cls
++            # (CppKernelProxy.kernel_cls, vec_kernel_cls and tile2d_kernel_cls make each kernel this is called on)
+             if (
+-                type(self) is CppKernel
++                not isinstance(self, CppVecKernel)
+                 and var_id
+                 and start == 0
+                 and end == self.ranges[var_id]
+@@ -6164,6 +6166,9 @@
+         kernel_decl_name = str(Placeholder.KERNEL_NAME) if name is None else name
+         kernel_name = str(Placeholder.DESCRIPTIVE_NAME) if name is None else name
+         arg_defs, _, _ = self.args.cpp_argdefs()
++        # compiler/patches/torch-inductor-cpu-kernel-results.patch: this definition's own parameter declarations
++        # as it made them (the group's KernelArgs.cpp_argdefs, before any composition's parameters)
++        self.arg_defs = tuple(arg_defs)
+         if composition is not None:
+             arg_defs = [*arg_defs, *composition.parameters]
+         arg_defs = ",\n".ljust(25).join(arg_defs)

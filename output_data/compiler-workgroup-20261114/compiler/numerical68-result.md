@@ -11,6 +11,12 @@ All three patches are installed in `/Users/mdot/.venv-mesh-uv` as committed at `
 then AOT result. The supervisor applied them at fuzz 0, and every installed file has its README "after" hash and parses.
 No Torch or Mesh module was imported. The manifest is `numerical68-upstream-install.json`.
 
+A fourth patch, `compiler/patches/torch-inductor-cpu-kernel-results.patch`, is new and **not installed**. It changes
+`cpp.py` from `74b2de26…` (composition's after) to `0eb0c1e9…`. The fuzz-0 dry run, application, reverse dry run and
+parse all passed on a temporary copy of the installed file. The lowerer's CPU records below need it: the call record
+reads its `KernelGroup.arg_defs`, and its `codegen_conditions` hunk keeps the scalar factory subclass's emission as
+upstream's. The supervisor owns its installation.
+
 Nothing here is a proposal. This revision replaces four parts of the earlier note, all rejected by root:
 - the `CompiledAOTI.filename` carrier;
 - the import-time `register_backend_for_device`;
@@ -156,7 +162,13 @@ Each call's record is made at that call and never overwritten. The tuple is
 `wrapper.launched_kernels[i] = (owner, launch, line, graph, scheduler, produced, ...)`:
 - MPS: the operands patch's `(owner, launch)`, completed by `MeshMetalKernel.call_kernel` after its
   `generate_kernel_call`.
-- CPU group: `MeshKernelGroup.call_kernel`.
+- CPU group: `MeshKernelGroup.call_kernel`, after the original `KernelGroup.call_kernel`. `launch` is
+  `(line.kernel_name, group.arg_defs, line.call_args, line.arg_types)`:
+  - the call's own `KernelCallLine` fields, as its `generate_kernel_call` wrote them;
+  - the definition's own declarations, kept by the new patch's `codegen_group` hunk when `flush` defined the group
+    before this call.
+
+  Nothing calls `cpp_argdefs` again.
 - CPU template: `MeshCppScheduling.codegen_template`, at the return of the original `codegen_template` (cpp.py 5921:
   render, then `define_kernel`, then `CppTemplateKernel.call_kernel`). It records:
   - the one definition that codegen made, through `MeshCppScheduling.define_kernel`. This is the definition producer
@@ -175,11 +187,11 @@ The `KernelCallLine` is the call's identity. `CppTemplateKernel` has no subclass
 | `graph` | `V.graph` at the call (GraphLowering or control body SubgraphLowering) | same | same |
 | `scheduler` | `V.graph.scheduler` at the call: an inlined body's scheduler for **that occurrence** | same | same |
 | `line` | its `KernelCallLine` (`line.wrapper` its wrapper) | same | same |
-| `owner` | the backend kernel: range trees, `range_tree_nodes`, `body`, `args` (with `workspace_args`), `headers`, `mesh_indirect` | the KernelGroup: `args`, `loops_code`, `scheduled_nodes`, `mesh_proxies` | the template kernel: `args`, `local_buffers`, `removed_buffers` |
-| `launch` | `(name, values, types, grid, group, error)` | `(name, arg_defs, call_args, arg_types)`, from `cpp_argdefs` at the call | `(line.kernel_name, TEMPLATE_DECLARED, line.call_args, line.arg_types)` |
+| `owner` | the backend kernel: range trees, `range_tree_nodes`, `body`, `args` (with `workspace_args`), `headers`, `mesh_indirect` | the KernelGroup: `args`, `arg_defs`, `loops_code`, `scheduled_nodes`, `mesh_proxies` | the template kernel: `args`, `local_buffers`, `removed_buffers` |
+| `launch` | `(name, values, types, grid, group, error)` | `(line.kernel_name, arg_defs, line.call_args, line.arg_types)`, `arg_defs` its `codegen_group`'s (new patch) | `(line.kernel_name, TEMPLATE_DECLARED, line.call_args, line.arg_types)` |
 | `produced` | `(metal_entry, metal_source)` at the call, as `codegen_kernel` made and `define_kernel` defined it | `defined_kernels[name]`: (declared entry, final source) | same |
 | `schedule` | the `node_schedule` received, with its DisableReduction/EnableReduction markers | `scheduled_nodes` | the nodes its `define_kernel` received: the template node, then its epilogue nodes |
-| `ranges` | one `Ranges` for each second-pass SchedulerNode | `(CppKernelProxy, nodes)` for each `finalize_kernel` | `TEMPLATE_RANGES` |
+| `ranges` | one `Ranges` for each second-pass SchedulerNode | `(CppKernelProxy, nodes, local_buffer_context)` for each `finalize_kernel`; each proxy's kernels hold their `CppRanges` (below) | `TEMPLATE_RANGES` |
 | `scheduled`, `origins` | its SchedulerNodes, and their original nodes | same | same |
 
 `Unretained(result, owner)` names an actual result that the record does not hold, and its original producer. It is not
@@ -198,6 +210,68 @@ iterable and holds no value of that result, so a consumer cannot read it as empt
     root or `masked_subblockN`, and its node.
   - These are the accesses `CSEProxy` passes to the kernel. A `store_cache` hit and a store to a `removed_buffers` buffer
     are absent, and an `indirect_load` is a `load`.
+
+## CPU kernels and accesses: `CppRanges` (66's CPU producer input)
+
+The original factory makes each CPU kernel:
+- `MeshCppScheduling.kernel_proxy_cls = MeshCppKernelProxy`. This is what `codegen_node` and `codegen_outer_loop_node`
+  construct.
+- Its `kernel_cls`, `vec_kernel_cls` and `tile2d_kernel_cls` are `MeshCppKernel`, `MeshCppVecKernel` and
+  `MeshCppTile2DKernel`. `CppKernelProxy.codegen_functions` makes each through `codegen_kernel`
+  (`kernel_group.new_kernel(cls, …)`, then `run`).
+
+Each kernel subclasses the original kernel class through one mixin, `MeshCppAccesses`, and records at the original
+methods:
+- `mesh_split`: its `set_ranges` result, `(vars, reduction_vars)`.
+- `mesh_ranges`: one `CppRanges(node, variables, suffix, accesses)` per `set_current_node`, that is, per
+  `SchedulerNode.codegen` in that kernel.
+  - `variables` is `mesh_split`.
+  - `suffix` is whether `run` gave the node to `write_to_suffix`. In that case the node receives `vars` and no
+    reduction vars (cpp.py `fn(vars, ())`), and its code is the kernel's `reduction_suffix`.
+- `accesses`: each `(method, buffer, index, mode, graph, fx_node, mask)` as that kernel's `load`, `store` or
+  `store_reduction` received it.
+  - The first six fields are the MPS `Ranges.accesses` fields.
+  - `mask` is the kernel's `_load_mask` at the access. That is `CppVecOverrides.masked`'s mask, which its masked loads
+    use. It is None outside one, and always None for a scalar kernel, whose `CppOverrides.masked` guards a lambda
+    instead.
+  - The access is taken at the outermost class method, before the original's own `rename_indexing`, a tile's
+    `transform_indexing` or a vector load's scalar fallback. None of these reaches the mixin again: the tile's MRO is
+    `MeshCppTile2DKernel, MeshCppVecKernel, MeshCppAccesses, CppTile2DKernel, CppVecKernel, CppKernel`.
+  - `CppVecOverrides.load_seed`'s direct `V.kernel.load` is among the accesses.
+- `mesh_indirect`: `{symbol: (var, size, check)}` from the kernel's overrides (`MeshCppOverrides`,
+  `MeshCppVecOverrides`, `MeshCppTile2DOverrides`). These share one `MeshIndirect` mixin with `MeshMetalOverrides`.
+
+The domain as the original emits it is the retained objects' own fields, not replayed:
+- `proxy.loop_nest`: the LoopLevels as `tile` and `codegen_loops` left them.
+- `proxy.kernels`: the original's selection (scalar; vector and tail; tile2d and its tails). Each kernel's
+  `active_ranges` and `inner_itervars` are as `codegen_functions` set them.
+- Each kernel's `itervars`, `ranges` and `reduction_depth`.
+- A vector kernel's `tiling_factor`, `tiling_idx`, `tail_size` and `num_elems`.
+- A tile kernel's `tiling_indices`, `outer_idx`, inner and outer tail sizes and `num_elems`, and
+  `inner_is_tiling_idx`.
+
+A scalar kernel that `codegen_functions` made but did not select (the vector-tail case) is not in `proxy.kernels`.
+
+Outer-loop fusion:
+- The finalized proxy's `loop_nest.kernel` is an `OuterLoopFusedKernel`, and each of its `inner` LoopNests' kernel is a
+  fused proxy.
+- The record's third element, `V.local_buffer_context` at that `finalize_kernel`, is the `LocalBufferContext` whose
+  `local_buffers` and `global_to_local` hold the kernel-local buffers its accesses name. Outside one it is
+  virtualized.py's `NullHandler`.
+
+Template epilogues are rendered through cpp_template_kernel.py's own `CppKernelProxy(KernelGroup())`, so they have no
+`CppRanges`. That stays `TEMPLATE_RANGES`.
+
+### Source fields changed for 66 and 104 (as landed)
+
+- `Kernel.ranges` (cpu group): each element was `(proxy, nodes)` and is now `(proxy, nodes, local_buffer_context)`.
+  104's `ranged["cpu"]` reads `r[0]` and `r[1]`, which are unchanged.
+- `Kernel.launch` (cpu group): the same 4-tuple shape, from the new sources above. `arg_defs`, `call_args` and
+  `arg_types` are tuples.
+- New on each `proxy.kernels` entry: `mesh_ranges`, `mesh_indirect`, `mesh_split` and `mesh_suffix`.
+  - Their classes are the `MeshCpp*Kernel` subclasses, so 104's `type(kernel)` now records those.
+  - `isinstance` against the upstream classes holds.
+- `MeshMetalOverrides` is now `MeshIndirect` plus `MetalOverrides`, with the same method and the same behavior.
 
 ## Control: `ExternCall`, `Inlined` and `Lifted` (each occurrence, at the original method boundaries)
 
@@ -338,5 +412,14 @@ There is no combine subgraph owner to publish for these targets.
   rendered template. Neither is patched yet. A template's as-produced emission, `emitted(kernel)`, is complete.
 - **A template's `TEMPLATE_DECLARED` and `TEMPLATE_RANGES`**, above. Retaining them is the same `def_kernel` and
   render seam's work; they are not inferred.
+  - Root placed this after the ordinary CPU kernels' accesses, which are now landed.
+  - What remains:
+    - the `def_kernel` hook retaining its `arg_defs`;
+    - the epilogue proxies, made through the selected factory rather than cpp_template_kernel.py's
+      `CppKernelProxy(KernelGroup())`;
+    - the template's own body owner and a composition hook.
+- **`torch-inductor-cpu-kernel-results.patch` is not installed.** Until it is:
+  - `MeshKernelGroup.call_kernel` finds no `arg_defs` and raises `AttributeError`;
+  - upstream's `type(self) is CppKernel` test would not select the scalar factory subclass.
 - **`Input.value` for a None input is None.** This is the original placeholder's result, so `name` and position remain
   its interface.

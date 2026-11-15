@@ -452,6 +452,66 @@ shasum -a 256 $F
 - To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-upstream-composition.patch`.
 - This is pure Python source, so no rebuild is needed.
 
+## `torch-inductor-cpu-kernel-results.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/_inductor/codegen/cpp.py`, on top of
+`torch-inductor-upstream-composition.patch` as installed (this patch's "before" is that patch's `cpp.py` "after"). It
+changes two places, `CppKernel.codegen_conditions` and `KernelGroup.codegen_group`.
+
+These are the CPU results `compiler/mesh_compiler/lower_inductor.py` takes from the original's own producers. The first
+is each kernel's own loads and stores: `CppScheduling.kernel_proxy_cls` and `CppKernelProxy.kernel_cls`,
+`vec_kernel_cls` and `tile2d_kernel_cls` make the kernels, and the lowerer's `MeshCppKernelProxy` and its kernels
+subclass them. The second is the group definition's parameter declarations.
+
+Not installed. The patch was prepared from the installed source as read. On a temporary copy of the installed
+`cpp.py` with the "before" hash below, a fuzz-0 dry run, application and reverse dry run all passed, and the result
+parses and has the "after" hash below. The supervisor owns installation.
+
+### What it changes
+
+- **`CppKernel.codegen_conditions`**: a kernel's tail condition is narrowed for a scalar kernel. That kernel was
+  identified as `type(self) is CppKernel` and is now `not isinstance(self, CppVecKernel)`.
+  - Its callers are `CppKernelProxy.gen_body` and `aggregate_reduction_buffers` (installed lines 4974, 5017 and 5023).
+    Each calls it only on its proxy's own kernels, which are the scalar, vector and tile kernels its factory made.
+  - For upstream's own classes, both tests select the same kernels, so the output is unchanged.
+  - For a factory subclass of the scalar kernel, upstream's comment at `CppKernelProxy` names subclassing
+    `CppKernel` as the extension point. Without this hunk, the identity test would miss that subclass and change
+    the emitted tail conditions.
+- **`KernelGroup.codegen_group`** keeps the definition's own parameter declarations as made:
+  `self.arg_defs = tuple(arg_defs)`. These are `KernelArgs.cpp_argdefs`'s, taken before any composition's
+  parameters.
+  - `flush` calls `codegen_group` before `call_kernel`. The lowerer's call record (`MeshKernelGroup.call_kernel`)
+    takes these as its `arg_defs`.
+  - It takes `call_args` and `arg_types` from the `KernelCallLine` that the call wrote. It no longer calls
+    `cpp_argdefs` a second time.
+  - A composed pass (`codegen_group(name, composition)`) keeps the same group's declarations again.
+  - The returned source is unchanged.
+
+### Target
+
+| Item | Value |
+|---|---|
+| Torch | 2.14.0, `torch.version.git_version` `08187d9e0fba026dc8217405802ab5381dc88d90` |
+| `torch/_inductor/codegen/cpp.py` | before `74b2de2698fcb01ced737ca10238d16f0721a6e1271314fbec65170e66451934` (`torch-inductor-upstream-composition.patch`'s after), after `0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3` |
+| Install scope of this work | not installed; the supervisor installs it |
+
+### Apply, check, reverse
+
+From the repository root:
+
+```sh
+SITE=/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages
+F=$SITE/torch/_inductor/codegen/cpp.py
+shasum -a 256 $F
+patch --dry-run --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpu-kernel-results.patch
+patch --fuzz=0 --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpu-kernel-results.patch
+shasum -a 256 $F
+```
+
+- The first `shasum` must print the "before" hash in the table above, and the second the "after" hash.
+- To reverse: `patch -R --no-backup-if-mismatch -p1 -d $SITE < compiler/patches/torch-inductor-cpu-kernel-results.patch`.
+- This is pure Python source, so no rebuild is needed.
+
 ## `torch-inductor-graph-lowering-factory.patch`
 
 Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/_inductor/compile_fx.py`
