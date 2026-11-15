@@ -23,6 +23,7 @@ import torch
 from torch._inductor import ir as upstream
 from torch._inductor.codegen import wrapper as wrapper_lines
 from torch._inductor.codegen.common import RemovedArg
+from torch._inductor.codegen.cpp import OuterLoopFusedKernel
 from torch._inductor.dtype_propagation import DtypePropagationOpsHandler
 from torch._inductor.loop_body import InterpreterShim
 from torch._inductor.ops_handler import AtomicMode
@@ -155,9 +156,11 @@ Neural = collections.namedtuple("Neural", "operation produced package function u
 # `occurrence` the body occurrence binding it (() its wrapper's own lines; else each enclosing control call's ExternCall
 # and the Inlined or Lifted body consumed there, outermost first), `record` the original object binding it (an
 # AllocateLine, ReinterpretLine, ReuseLine or MultiOutputLine; a graph input's lower_inductor.py Input; a control body
-# input's Inlined or Lifted; a constant's GraphLowering), `value` its native value ((root, view ValueID), ("literal",
-# value), or None)
-Binding = collections.namedtuple("Binding", "processor occurrence record name value")
+# input's Inlined or Lifted; a constant's GraphLowering), `source` the original object bound (the AllocateLine's
+# node, the ReinterpretLine's or ReuseLine's reused_as, the MultiOutputLine's result buffer, the GraphLowering's
+# graph_inputs entry, its constants tensor), `value` its native value ((root, view ValueID), ("literal", value), or
+# None)
+Binding = collections.namedtuple("Binding", "processor occurrence record name source value")
 
 
 @dataclasses.dataclass(eq=False)
@@ -640,6 +643,9 @@ class _Ops:
 # (domain, accesses, made): the caller frees the domain and every index made once metal_ir_upstream has returned
 # (released)
 def relations(context, kernel, kinds, described):
+    # a CPU KernelGroup's call: its LoopNests' (_cpu_relations)
+    if kernel.place == "cpu":
+        return _cpu_relations(context, kernel, kinds, described)
     lib, owner, graph = _graph(), kernel.owner, kernel.graph
     roots = list(owner.active_range_trees())
     indirect = list(owner.mesh_indirect.items())
@@ -728,19 +734,176 @@ def relations(context, kernel, kinds, described):
     return domain, accesses, index.made
 
 
-# a CPU kernel's domain is its LoopNest's LoopLevel variables (MESH_GRAPH_DOMAIN_LOOP: var over [offset, offset +
-# size - 1]) and its accesses those its CppKernels received; its Kernel record carries no access (Kernel.ranges: a
-# group's each finalize_kernel's (CppKernelProxy, nodes), a template's TEMPLATE_RANGES, unretained): the compile raises
-# that missing operand at the kernel's call, before its launch is projected
-def unrelated(kernel):
-    held = kernel.ranges
-    raise NotImplementedError(
-        "unresolved integration: metal_ir_upstream of CPU kernel %s requires each access its CppKernel received "
-        "(method, buffer name, index over its LoopNest's LoopLevel variables, store mode, LoopBody graph and fx node, "
-        "as MeshMetalKernel.mesh_ranges records an MPS kernel's) with those LoopLevels' var, offset and size; "
-        "lower_inductor.py Kernel.ranges holds %s" % (
-            kernel.launch[0], "%s, unretained by %s" % (held.result, held.owner)
-            if isinstance(held, producer.Unretained) else "each finalize_kernel's (CppKernelProxy, nodes) only"))
+# relations of a CPU KernelGroup's call (lower_inductor.py MeshKernelGroup Kernel.ranges: each finalize_kernel's
+# (CppKernelProxy, nodes, local buffer context, local buffers)), its whole invocation, under its own V.graph and each of
+# its kernels as V.kernel (the handler that kernel's codegen ran under), as relations makes an MPS kernel's:
+# - the domain: each LoopLevel of each proxy's LoopNest (an OuterLoopFusedKernel's outer levels once, then each of its
+#   inner LoopNests', each of a fused proxy) a LOOP over [offset, size - 1] at its hint, its is_reduction, each lane of
+#   a tiled level a point of it (a vector kernel's tiling_factor lanes from its var, a tail's tail_size, a scalar tail's
+#   inner loop, move_code_under_inner_loop: each within its active range); a level of no iteration (size <= offset:
+#   LoopLevel.lines emits none) the point [offset, offset] and each access under it guarded false, as features' empty
+#   feature, so the call's other nests (its domain their product) keep theirs; then each kernel's indirect symbols
+#   (MeshCppAccesses.mesh_indirect) as relations', one of no value (a checked size 0: its index check fails wherever
+#   it runs) the point [lo, lo], each access whose index it is in guarded false, so the call's other accesses keep
+#   theirs. A LoopLevel's size and an active range's bounds are its kernel's
+#   renamed expressions (rename_indexing: each size symbol its KernelArgs.sizevars name), each at the hint of the
+#   graph's own symbols (that mapping inverted by the same sympy_subs);
+# - each access each kernel of each proxy's own selection received (CppKernelProxy.kernels: scalar; vector and tail;
+#   tile and its tails; each CppRanges access), as relations' (argument, write, index at the index type int64,
+#   cpp_utils.py INDEX_TYPE, over the kernel's LoopLevel variables and indirect symbols, LoopBody.bounds() where not
+#   quasi-affine, its masked subblocks' masks and their identities by CppRanges ordinal in the call), its known guard
+#   also the condition its code runs under: in the kernel's body, each active range (codegen_conditions: var in
+#   [start, end)); in its reduction_suffix (CppRanges.suffix, store_reduction), as its proxy's mesh_aggregated emits
+#   that suffix after the first reduction level: kernels[0]'s and kernels[-1]'s each under its active range of
+#   outer_loop.var where aggregated, else kernels[0]'s unconditioned, another kernel's not emitted. Its recorded mask
+#   (the kernel's _load_mask) is the emitted conjunction of those same subblock masks, no other: its one producer
+#   CppKernel.masked (conjoining the prior) is entered only by CppVecOverrides.masked, which with CppOverrides.masked
+#   (a scalar kernel's `mask ? body() : other` lambda, its loads within the lambda's scoped CSE) only V.ops.masked of
+#   LoopBody.bind_masked_shim calls (loop_body.py 605: a masked subblock's call, its mask that call's args[0], its body
+#   that subblock run by its own InterpreterShim, the recorded graph), and its uses (the masked vector load, the
+#   per-lane non-contiguous load, indirect_assert) are each within one; the code's every other condition is its
+#   LoopLevels and active ranges, a tail's lanes and a scalar tail's inner loop within them.
+#   An access to a local buffer (the record's local buffers: the call's own allocation, codegen_loops_impl) is no
+#   argument's. A store its render drops is none: every CPU store line is a DeferredLine of its name (CppKernel,
+#   CppVecKernel and CppTile2DKernel store and store_reduction), dropped where the name is removed at render (common.py
+#   is_buffer_removed: GraphLowering.removed_buffers and inplaced_to_remove, flush's V.kernel the NullKernelHandler,
+#   its own sets empty; CSEProxy.store and store_reduction call no kernel store of a name already removed; the graph's
+#   sets after the compile as at that render: a later kernel removes only a name it stores, its defining node's,
+#   remove_kernel_local_buffers, and a LocalBufferContext's restore precedes its own finalize). A load is
+#   no DeferredLine, emitted as made: each takes its parameter from KernelArgs.input (common.py 1695, raising where
+#   the name is removed then), the name's own argument of the group's call, its input or (stored earlier in the
+#   group) its output
+# Returns (domain, accesses, made) as relations does
+def _cpu_relations(context, kernel, kinds, described):
+    lib, owner, graph = _graph(), kernel.owner, kernel.graph
+    renamed = {sympy_subs(symbol, {symbol: name}): symbol for symbol, name in owner.args.sizevars.items()}
+    dims, scopes = [], []
+
+    def hint(expr):
+        return _hint(graph, sympy_subs(expr, renamed))
+
+    def looped(loops):
+        made = []
+        for loop in loops or ():
+            lo, hi = hint(loop.offset), hint(loop.size) - 1
+            made.append((len(dims), loop, hi < lo))
+            dims.append(DomainDim(DOMAIN_LOOP, 0, int(loop.is_reduction), 0, lo, max(lo, hi)))
+        return made
+
+    for proxy, _, _, local in kernel.ranges:
+        nest = proxy.loop_nest
+        outer = looped(nest.loops)
+        if isinstance(nest.kernel, OuterLoopFusedKernel):
+            paths = [(inner.kernel, outer + looped(inner.loops)) for inner in nest.kernel.inner]
+        else:
+            paths = [(nest.kernel, outer)]
+        for fused, path in paths:
+            for sub in fused.kernels:
+                indirect = []
+                for symbol, (var, size, check) in sub.mesh_indirect.items():
+                    lo, hi = (0, hint(size) - 1) if check else _ranged(var.bounds)
+                    indirect.append((symbol, len(dims), hi < lo))
+                    dims.append(DomainDim(DOMAIN_INDIRECT, 0, 0, 0, lo, max(lo, hi)))
+                scopes.append((fused, sub, path, indirect, local))
+    made = C.c_void_p()
+    status = lib.mesh_graph_domain_create(context.pointer, len(dims), _array(DomainDim, dims), C.byref(made))
+    if status:
+        raise OSError(status, "kernel %s: its index domain (mesh_graph_domain_create)" % kernel.launch[0])
+    domain = made.value
+
+    def missing(symbol):
+        if symbol_is_type(symbol, (SymT.SIZE, SymT.PRECOMPUTED_SIZE)):
+            return index.constant(_hint(graph, symbol), torch.int64)
+        return None
+
+    index = _Index(lib, domain, {}, missing, torch.int64)
+    try:
+        position = {}
+        for k, (names, *_) in enumerate(described):
+            for name in names:
+                position.setdefault(name, k)
+        accesses, real, ops = [], kernel.scheduler.mutation_real_name, _Ops(index)
+        removed, r = graph.removed_buffers | graph.inplaced_to_remove, 0
+        with V.set_graph_handler(graph):
+            for fused, sub, path, indirect, local in scopes:
+                at = {loop.var: k for k, loop, _ in path}
+                index.env = {**{loop.var: index.dim(k) for k, loop, _ in path},
+                             **{symbol: index.dim(k) for symbol, k, _ in indirect}}
+                aggregated, outer_loop = fused.mesh_aggregated
+                emitted = sub is fused.kernels[0] or aggregated and sub is fused.kernels[-1]
+                first = next((j for j, (_, loop, _) in enumerate(path) if loop.is_reduction), len(path))
+
+                def active(variables):
+                    guard = None
+                    for var in variables:
+                        start, end = sub.active_ranges[var]
+                        x = index.dim(at[var])
+                        made = index.and_(index.ge(x, index.constant(hint(start), torch.int64)),
+                                          index.lt(x, index.constant(hint(end), torch.int64)))
+                        guard = made if guard is None else index.and_(guard, made)
+                    return guard
+
+                body_guard = index.truth(False) if any(e for _, _, e in path) else active(sub.active_ranges)
+                suffix_guard = (index.truth(False) if any(e for _, _, e in path[:first]) else
+                                active((outer_loop.var,)) if aggregated else None)
+                with V.set_kernel_handler(sub):
+                    for ranges in sub.mesh_ranges:
+                        r += 1
+                        body = ranges.node._body
+                        blocks = [body.root_block, *body.subblocks.values()]
+                        parents = {body.subblocks[n.target].graph: (b, n) for b, block in enumerate(blocks)
+                                   for n in block.graph.nodes if n.op == "call_module" and n.target in body.subblocks}
+                        replacements = dict(zip(body.var_ranges, itertools.chain.from_iterable(ranges.variables)))
+                        modules = dict.fromkeys(body.submodules, _unrepresented)
+                        modules["get_index"] = functools.partial(
+                            lambda exprs, name: sympy_subs(exprs[name], replacements), body.indexing_exprs)
+                        masks, bounds = {}, body.bounds().get_bounds()
+
+                        def masked(block, node):
+                            if node not in masks:
+                                cone, stack = set(), [node]
+                                while stack:
+                                    n = stack.pop()
+                                    if n not in cone:
+                                        cone.add(n)
+                                        stack.extend(n.all_input_nodes)
+                                shim = InterpreterShim(blocks[block].graph, modules)
+                                shim.run(ops, initial_env={n: None for n in blocks[block].graph.nodes if n not in cone})
+                                value = shim.env[node]
+                                masks[node] = None if value is None else ops.truth(value)
+                            return masks[node]
+
+                        for method, name, expr, mode, block_graph, node, _ in ranges.accesses:
+                            suffix = ranges.suffix or method == "store_reduction"
+                            if method != "load" and name in removed or name in local or suffix and not emitted:
+                                continue
+                            argument = position[real.get(name, name)]
+                            # sympify: a vector kernel's load_seed index the int offset CppVecOverrides.load_seed
+                            # passes its load (loop_body.py's own index of it sympy.Integer(offset))
+                            expr = sympy_subs(expr, {})
+                            value = index.interp(expr)
+                            lo, hi = (0, 0) if value is not None else _ranged(bounds[node.args[2]])
+                            known, data, source, unknown = suffix_guard if suffix else body_guard, False, 0, 0
+                            if any(e and symbol in expr.free_symbols for symbol, _, e in indirect):
+                                known = index.truth(False)
+                            level = block_graph
+                            while level is not body.root_block.graph:
+                                b, call = parents[level]
+                                mask = masked(b, call.args[0])
+                                identity = (r << 40) | (b << 20) | list(blocks[b].graph.nodes).index(call.args[0])
+                                source = source or identity
+                                if mask is None:
+                                    data, unknown = True, unknown or identity
+                                else:
+                                    known = mask if known is None else index.and_(known, mask)
+                                level = blocks[b].graph
+                            write = 0 if method == "load" else 2 if mode in COMMUTING else 1
+                            accesses.append(UpstreamAccess(argument, write, value, known, unknown or source,
+                                                           int(data), 0, lo, hi))
+    except BaseException:
+        released(domain, index.made)
+        raise
+    return domain, accesses, index.made
 
 
 # metal_ir_upstream_neural's one invocation (Core ML reads each bound input and state and writes each bound output and
@@ -882,9 +1045,9 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                     data = graph.constants[name]
                     held[p, name] = Held(stored(CONSTANT, data.dtype, data.untyped_storage().nbytes(), data),
                                          data.storage_offset() * data.element_size())
-                    bindings_.append((p, (), graph, name, Bound(held[p, name].storage, data.dtype,
-                                                                tuple(data.shape), tuple(data.stride()),
-                                                                data.storage_offset())))
+                    bindings_.append((p, (), graph, name, data, Bound(held[p, name].storage, data.dtype,
+                                                                      tuple(data.shape), tuple(data.stride()),
+                                                                      data.storage_offset())))
                     return held[p, name]
                 buffer = graph.get_buffer(name)
                 layout = buffer.get_layout() if buffer is not None else None
@@ -947,7 +1110,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             for name, b in zip(body.graph.graph_inputs, given, strict=True):
                 if isinstance(b, Bound):
                     held[p, name] = Held(b.storage, b.offset * b.dtype.itemsize)
-                bindings_.append((p, occurrence, body, name, b))
+                bindings_.append((p, occurrence, body, name, body.graph.graph_inputs[name], b))
 
         # a launch's scalar argument: an int64 CONSTANT holding its value (a sizevar or a SymbolicCallArg's numel at
         # its size hint)
@@ -1030,8 +1193,9 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 if isinstance(b, Bound) and given.name in graph.graph_inputs:
                     held[p, given.name] = Held(b.storage, _hint(graph, graph.graph_input_storage_offsets[given.name])
                                                * b.dtype.itemsize)
-                    bindings_.append((p, (), given, given.name, placed(
-                        held[p, given.name], graph.graph_inputs[given.name].get_layout(), graph)))
+                    source_ = graph.graph_inputs[given.name]
+                    bindings_.append((p, (), given, given.name, source_, placed(held[p, given.name],
+                                                                                source_.get_layout(), graph)))
 
         # a declared transfer's logical wire (its one TEMPORARY storage of its logical bytes) viewed at its declared
         # landed or sent view
@@ -1158,11 +1322,9 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 arguments.append((UPSTREAM_ERROR, None, 3, ()))
             return arguments
 
-        # a produced kernel at its KernelCallLine: its arguments, its sources' positions, its launch (a CPU kernel's
-        # accesses its Kernel record does not carry: unrelated raises them)
+        # a produced kernel at its KernelCallLine: its arguments, its sources' positions, its launch (its domain and
+        # accesses its relations at encode)
         def kernel(p, kernel_, into):
-            if kernel_.place == "cpu":
-                unrelated(kernel_)
             owners = [owner_of(p, n) for n in kernel_.origins]
             lead = next((o for o in owners if o[0] is not None), None)
             into.append(("kernel", (p, kernel_, launch_arguments(p, kernel_), position(lead) if lead else end),
@@ -1246,9 +1408,10 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                                        at), owners))
                 associated.extend(o[3] for o in owners if o[3] is not None)
 
-        # a memory planning line's binding of `name`, recorded at its occurrence at its own layout
-        def recorded(p, graph, occurrence, line, name, layout):
-            bindings_.append((p, occurrence, line, name, placed(held[p, name], layout, graph)))
+        # a memory planning line's binding of `name` (its original buffer `source`), recorded at its occurrence at
+        # that buffer's own layout
+        def recorded(p, graph, occurrence, line, name, source):
+            bindings_.append((p, occurrence, line, name, source, placed(held[p, name], source.get_layout(), graph)))
 
         # one wrapper line of `graph` that no extern call wrote, at its body occurrence `occurrence`: its memory
         # planning, its kernel call; a line no native consumer has (a str line outside a control call's own
@@ -1263,7 +1426,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             elif isinstance(line, wrapper_lines.AllocateLine):
                 layout = line.node.get_layout()
                 held[p, line.node.get_name()] = Held(stored(TEMPORARY, layout.dtype, _bytes(graph, layout)), 0)
-                recorded(p, graph, occurrence, line, line.node.get_name(), layout)
+                recorded(p, graph, occurrence, line, line.node.get_name(), line.node)
             elif isinstance(line, wrapper_lines.ReinterpretLine):
                 base, view = hold(p, graph, line.node.get_name()), line.layout
                 if isinstance(view, upstream.NonOwningLayout):
@@ -1271,13 +1434,13 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
                 held[p, line.reused_as.get_name()] = Held(base.storage, base.at + (
                     _hint(graph, line.node.get_offset()) + _hint(graph, view.offset) -
                     _hint(graph, line.reused_as.get_offset())) * view.dtype.itemsize)
-                recorded(p, graph, occurrence, line, line.reused_as.get_name(), line.reused_as.get_layout())
+                recorded(p, graph, occurrence, line, line.reused_as.get_name(), line.reused_as)
             elif isinstance(line, wrapper_lines.ReuseLine):
                 held[p, line.reused_as.get_name()] = hold(p, graph, line.node.get_name())
-                recorded(p, graph, occurrence, line, line.reused_as.get_name(), line.reused_as.get_layout())
+                recorded(p, graph, occurrence, line, line.reused_as.get_name(), line.reused_as)
             elif isinstance(line, wrapper_lines.MultiOutputLine):
                 held[p, line.result_name] = results[p, line.arg_name][_key(line.indices)]
-                recorded(p, graph, occurrence, line, line.result_name, graph.get_buffer(line.result_name).get_layout())
+                recorded(p, graph, occurrence, line, line.result_name, graph.get_buffer(line.result_name))
             elif not isinstance(line, INERT):
                 raise NotImplementedError("unresolved integration: processor %s wrapper line %r (%s) has no native "
                                           "consumer" % (p, line, type(line).__name__))
@@ -1600,8 +1763,8 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
 
         interfaces = {p: (tuple((i, typed_port(b)) for i, b in ins), tuple((o, typed_port(b)) for o, b in outs))
                       for p, (ins, outs) in ports.items()}
-        bindings = tuple(Binding(p, occurrence, record, name, typed_port(b))
-                         for p, occurrence, record, name, b in bindings_)
+        bindings = tuple(Binding(p, occurrence, record, name, source, typed_port(b))
+                         for p, occurrence, record, name, source, b in bindings_)
 
         # metal-microbench metal_ir.h metal_ir_operations: each projection's whole interval of created operation IDs,
         # owned by each source position it implements; each operation's operands as Bounds, in its native order

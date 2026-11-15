@@ -486,9 +486,18 @@ class MeshCppTile2DKernel(MeshCppVecKernel, CppTile2DKernel):
 # torch-inductor-cpu-kernel-results.patch codegen_conditions: a scalar kernel's tail condition by its class, not
 # CppKernel's identity). `kernels` its own selection of them (scalar; vector and tail; tile2d and its tails), each one's
 # active_ranges as codegen_functions set them, `loop_nest` its LoopNest (LoopLevels as tiled, then as codegen_loops
-# marked them), `call_ranges` its own
+# marked them), `call_ranges` its own. `mesh_aggregated` the (inner_loop_reduction_outer_not, outer_loop) its
+# codegen_functions gave aggregate_reduction_buffers (each of its two returns calls it once), which decide its own
+# reduction_suffix, the suffix codegen_loops_impl emits after its first reduction LoopLevel: where true, kernels[0]'s
+# reduction_suffix under its active range of outer_loop.var and kernels[-1]'s under its own (a scalar tail's moved
+# under that range's inner loop, move_code_under_inner_loop); else kernels[0]'s alone, unconditioned. No other
+# kernel's suffix is emitted
 class MeshCppKernelProxy(CppKernelProxy):
     kernel_cls, vec_kernel_cls, tile2d_kernel_cls = MeshCppKernel, MeshCppVecKernel, MeshCppTile2DKernel
+
+    def aggregate_reduction_buffers(self, inner_loop_reduction_outer_not, outer_loop):
+        self.mesh_aggregated = (inner_loop_reduction_outer_not, outer_loop)
+        super().aggregate_reduction_buffers(inner_loop_reduction_outer_not, outer_loop)
 
 
 # codegen/cpp.py KernelGroup: each finalize_kernel's (CppKernelProxy, nodes, local buffer context, local buffers) as it
