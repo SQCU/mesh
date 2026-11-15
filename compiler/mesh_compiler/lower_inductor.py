@@ -2,11 +2,11 @@
 # replacement; design/aot-compilation-change-request.md A1, A5, A6 and A8 to A10; design/torch-source-lowering-change-
 # request.md items 1 to 3, 5 and 6; /Users/mdot/schedule-emit/schedule_emit/lower_inductor.py at f41c64a (adapt,
 # recv_strided, lower): each processor's scheduled body given to its target's installed upstream compiler (torch 2.14.0
-# torch/_inductor: compile_fx.py's inference sequence, GraphLowering, its Scheduler and the selected backend;
-# coremltools 9.0 for the Neural Engine), its result retained as that compiler's own objects. Fields and pairing:
-# output_data/compiler-workgroup-20261114/compiler/numerical65-operands.md; upstream hooks:
-# compiler/patches/torch-inductor-mps-kernel-operands.patch and torch-inductor-upstream-composition.patch
-import ctypes
+# torch/_inductor: compile_fx.py's ahead-of-time inference sequence, AOT autograd's export and effect tokens,
+# GraphLowering, its Scheduler and the selected backend; coremltools 9.0 for the Neural Engine), its result retained as
+# that compiler's own objects. Fields and pairing: output_data/compiler-workgroup-20261114/compiler/
+# numerical65-operands.md; upstream hooks: compiler/patches/torch-inductor-mps-kernel-operands.patch and
+# torch-inductor-upstream-composition.patch
 import dataclasses
 import functools
 from pathlib import Path
@@ -14,14 +14,20 @@ from pathlib import Path
 import coremltools as ct
 import torch
 from torch import Tensor
+from torch._dispatch.python import enable_python_dispatcher
+from torch._export.utils import _detect_fake_mode_from_gm
+from torch._functorch import config as functorch_config
+from torch._functorch.aot_autograd import aot_export_module
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch._inductor import config
 from torch._inductor import ir as upstream
 from torch._inductor.codegen.cpp import CppScheduling, KernelGroup
-from torch._inductor.codegen.mps import MetalKernel, MetalScheduling
+from torch._inductor.codegen.mps import MetalKernel, MetalOverrides, MetalScheduling
 from torch._inductor.codegen.simd import DisableReduction, EnableReduction
-from torch._inductor.compile_fx import (_recursive_joint_graph_passes, _recursive_post_grad_passes,
-                                        _recursive_record_original_output_strides, fake_tensor_prop)
+from torch._inductor.compile_fx import (_recursive_post_grad_passes, _recursive_record_original_output_strides,
+                                        _unlift_graph, compile_fx_forward, create_compiler_config_extra,
+                                        fake_tensor_prop, get_num_model_outputs, maybe_disable_comprehensive_padding,
+                                        run_pre_grad_passes)
 from torch._inductor.cpp_builder import CppTorchDeviceOptions
 from torch._inductor.cpu_vec_isa import pick_vec_isa
 from torch._inductor.debug import DebugContext
@@ -30,17 +36,17 @@ from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.graph import GraphLowering, SubgraphLowering
 from torch._inductor.lowering import fallback_handler, register_lowering
 from torch._inductor.scheduler import Scheduler
+from torch._inductor.utils import shape_env_from_inputs
 from torch._inductor.virtualized import V
-from torch.fx import traceback as fx_traceback
-from torch.fx.experimental.proxy_tensor import make_fx
 from torch.utils._cpp_embed_headers import _embed_headers
 
 from .ir import RECV, SEND, channel_of
 
 WITH_EFFECTS = torch.ops.higher_order.with_effects
-# torch/fx/proxy.py _COPY_META_FIELDS "custom", copied by make_fx under fx/traceback.py preserve_node_meta (a control
-# body's through torch/_higher_order_ops/utils.py _maybe_run_with_interpreter), by _inductor/pattern_matcher.py
-# _transfer_meta and by torch.export: each lowered node's original body node, its index in Produced.sources
+# torch/fx/proxy.py _COPY_META_FIELDS "custom", copied under fx/traceback.py preserve_node_meta (AOT autograd's
+# create_functional_call runs a GraphModule through an Interpreter under it; a control body's through
+# torch/_higher_order_ops/utils.py _maybe_run_with_interpreter), by _inductor/pattern_matcher.py _transfer_meta and by
+# torch.export: each lowered node's original body node, its index in Produced.sources
 SOURCE = "mesh_source"
 # driver.py ENGINES: the Neural Engine's target name in Scheduled.engines
 ENGINE = "ane"
@@ -74,9 +80,11 @@ def copies(module, wires):
 
 
 # schedule-emit lower_inductor.py recv_strided and lower_recv_strided: a received value declared at its node's shape,
-# stride, dtype and device (Inductor's fake-result and stride contracts), its storage in GraphLowering's
-# never_reuse_buffers (Lam, PLDI 1988, section 2.3: the sender still holds it); torch/_inductor/lowering.py
-# with_effects: each ORDERED effectful operation after the previous one (V.graph.additional_star_deps, effectful_ops)
+# stride, dtype and device (Inductor's fake-result and stride contracts), an ORDERED effectful operator as RECV is
+# (AOT autograd's functionalization makes each call of one with_effects on the ORDERED token: effects.py
+# handle_effects), its storage in GraphLowering's never_reuse_buffers (Lam, PLDI 1988, section 2.3: the sender still
+# holds it). Lowered within lowering.py with_effects (`lowerings[op]`, then its StarDep on the previous ORDERED
+# operation); SEND, which has no lowering of its own, by that lowering's FallbackKernel
 @torch.library.custom_op("mesh::recv_strided", mutates_args=())
 def recv_strided(channel: int, shape: list[int], stride: list[int], dtype: torch.dtype,
                  device: torch.device) -> Tensor:
@@ -91,49 +99,16 @@ def _recv_strided_fake(channel, shape, stride, dtype, device):
 _register_effectful_op(recv_strided, _EffectType.ORDERED)
 RECV_STRIDED = torch.ops.mesh.recv_strided.default
 _received = fallback_handler(RECV_STRIDED, add_to_fallback_set=False)
-_sent = fallback_handler(SEND, add_to_fallback_set=False)
-
-
-def _ordered(made, count):
-    previous = V.graph.effectful_ops.get(_EffectType.ORDERED)
-    for operation in V.graph.operations[count:]:
-        operation.has_side_effects = lambda: True
-        if previous is not None:
-            V.graph.additional_star_deps[operation.get_name()].add(previous.get_name())
-        previous = operation
-    V.graph.effectful_ops[_EffectType.ORDERED] = previous
-    return made
 
 
 @register_lowering(RECV_STRIDED, type_promotion_kind=None)
 def _lower_received(*arguments):
-    count = len(V.graph.operations)
     made = _received(*arguments)
     V.graph.never_reuse_buffers.add(made.get_name())
-    return _ordered(made, count)
-
-
-@register_lowering(SEND, type_promotion_kind=None)
-def _lower_sent(*arguments):
-    count = len(V.graph.operations)
-    return _ordered(_sent(*arguments), count)
+    return made
 
 
 # ---- the retained result (numerical65-operands.md): the upstream compiler's own objects and their correspondence ----
-
-# torch include/c10/metal/error.h struct ErrorMessage, ErrorMessages (error_message_count 30): the bytes of a launch's
-# error buffer (its launch record's `error` index; OperationUtils.mm setErrorBufferIndex), a TEMPORARY of that size
-class _ErrorMessage(ctypes.Structure):
-    _fields_ = [("file", ctypes.c_char * 128), ("func", ctypes.c_char * 128), ("message", ctypes.c_char * 250),
-                ("line", ctypes.c_uint)]
-
-
-class _ErrorMessages(ctypes.Structure):
-    _fields_ = [("count", ctypes.c_uint), ("msg", _ErrorMessage * 30)]
-
-
-ERROR_BYTES = ctypes.sizeof(_ErrorMessages)
-
 
 # body input `position`: `node` the scheduled body's placeholder, `name` the upstream compiler's input (GraphLowering:
 # its graph_inputs_original key, storage offset graph_input_storage_offsets[name]; Neural Engine: its ExportedProgram
@@ -156,24 +131,27 @@ class Output:
     sent: bool
 
 
-# codegen/simd.py codegen_node_schedule_with_kernel's second pass for SchedulerNode `node`, after finalize_indexing:
-# `variables` its split_and_set_ranges result (each a range-tree entry symbol of the kernel's range_tree_nodes, whose
-# expr is its tree root's FloorDiv or ModularIndexing), `reduction` the kernel's inside_reduction there (False inside
-# DisableReduction), `indexing` its LoopBody's index expressions over them (loop_body.py indexing_from_args, the
-# expressions LoopBody.__call__ binds; indirect symbols node._body.indirect_var_ranges')
+# codegen/simd.py codegen_node_schedule_with_kernel's second pass for SchedulerNode `node` (after finalize_indexing and
+# its LoopBody's indexing_dtype_strength_reduction and convert_index_expr_to_value_expr): `variables` its
+# split_and_set_ranges result (each a range-tree entry symbol of the kernel's range_tree_nodes, whose expr is its tree
+# root's FloorDiv or ModularIndexing), `reduction` the kernel's inside_reduction there (False inside DisableReduction),
+# `accesses` each memory access its node.codegen made, in order, as the kernel received it (MetalKernel load, store and
+# store_reduction: (method, buffer name, index, store mode), the index LoopBody.__call__ bound and SimplifyIndexing
+# simplified, over those variables and the kernel's indirect symbols, MeshMetalKernel.mesh_indirect)
 @dataclasses.dataclass(eq=False)
 class Ranges:
     node: object
     variables: tuple
     reduction: bool
-    indexing: dict
+    accesses: tuple
 
 
 # one upstream-generated kernel of `graph` (its GraphLowering, a control body's own): `place` "mps" or "cpu",
 # `scheduled` the Scheduler nodes it implements in order (their read_writes the Scheduler's own accesses), `owner` the
-# backend's kernel (MeshMetalKernel: range trees, body, KernelArgs, workspace_args, metal_entry, metal_source;
-# MeshKernelGroup: its KernelArgs and CppKernelProxy loop nests), `launch` its call record as produced (mps:
-# torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error); cpu: (kernel name, arg_defs,
+# backend's kernel (MeshMetalKernel: range trees, body, KernelArgs, workspace_args, headers, mesh_indirect,
+# metal_entry, metal_source; MeshKernelGroup: its KernelArgs and CppKernelProxy loop nests), `launch` its call record
+# as produced (mps: torch-inductor-mps-kernel-operands.patch (name, values, types, grid, group, error: its error
+# buffer's argument index, c10/metal/error.h ErrorMessages as its declaration names it); cpu: (kernel name, arg_defs,
 # call_args, arg_types) of KernelArgs.cpp_argdefs), `ranges` (mps) its Ranges or (cpu) each finalize_kernel's
 # (CppKernelProxy, nodes), `origins` the original body nodes it implements
 @dataclasses.dataclass(eq=False)
@@ -188,9 +166,9 @@ class Kernel:
 
 
 # one upstream extern of `graph` (ExternKernelSchedulerNode `scheduled`, its node the ir.py ExternKernel: FallbackKernel,
-# ExternKernelOut, RandomSeeds, MultiOutput, mesh send and receive ...), `origins` the original body nodes, `bodies` a
-# control extern's (Conditional, WhileLoop, InvokeSubgraph: ir.py get_subgraphs) each subgraph's name and its own
-# entries, lowered and scheduled by its own GraphLowering (subgraph.graph)
+# EffectfulKernel, ExternKernelOut, RandomSeeds, MultiOutput, mesh send and receive ...), `origins` the original body
+# nodes, `bodies` a control extern's (Conditional, WhileLoop, InvokeSubgraph: ir.py get_subgraphs) each subgraph's name
+# and its own entries, lowered and scheduled by its own GraphLowering (subgraph.graph)
 @dataclasses.dataclass(eq=False)
 class Extern:
     graph: object
@@ -219,11 +197,13 @@ class Model:
 
 
 # one processor body's retained upstream result: `module` Scheduled.processor_modules[key][processor] as scheduled,
-# `sources` its nodes and its control bodies' (SOURCE), `lowered` the graph the upstream compiler lowered (the fx graph
-# after the canonical decomposition, joint and post-grad passes; Neural Engine: its ExportedProgram), `graph` its
-# GraphLowering (buffers, layouts and aliases, graph_inputs_original, graph_input_storage_offsets, mutated_inputs,
-# removed_buffers, scheduler, wrapper_code; None for the Neural Engine), `entries` Kernel and Extern in its Scheduler's
-# emission order (a Neural Engine body's one Model), `wrapper` GraphLowering.codegen's result
+# `sources` its nodes and its control bodies' (SOURCE), `lowered` the graph the upstream compiler lowered (after AOT
+# autograd's export, its unlifting and compile_fx_forward's and the post-grad passes; Neural Engine: its
+# ExportedProgram), `signature` its graph signature (aot_export_module's GraphSignature: user inputs and outputs, input
+# mutations, tokens; Neural Engine: ExportedProgram.graph_signature), `graph` its GraphLowering (buffers, layouts and
+# aliases, graph_inputs_original, graph_input_storage_offsets, mutated_inputs, removed_buffers, effectful_ops,
+# scheduler, wrapper_code; None for the Neural Engine), `entries` Kernel and Extern in its Scheduler's emission order (a
+# Neural Engine body's one Model), `wrapper` GraphLowering.codegen's result
 @dataclasses.dataclass(eq=False)
 class Produced:
     processor: str
@@ -232,6 +212,7 @@ class Produced:
     module: object
     sources: tuple
     lowered: object
+    signature: object
     graph: object
     inputs: tuple
     outputs: tuple
@@ -242,11 +223,24 @@ class Produced:
 
 # ---- the selected upstream backends, retaining their own results ----
 
-# codegen/mps.py MetalKernel: its second-pass ranges (split_and_set_ranges after finalize_indexing)
+# codegen/common.py CSEProxy.indirect_indexing: each indirect symbol its kernel's overrides make, with the value it
+# indexes by and its size (and whether its bounds are checked), the indirect fact its accesses' indices carry
+class MeshMetalOverrides(MetalOverrides):
+    def indirect_indexing(self, var, size, check=True, wrap_neg=True):
+        made = super().indirect_indexing(var, size, check, wrap_neg)
+        V.kernel.mesh_indirect[made] = (var, size, check)
+        return made
+
+
+# codegen/mps.py MetalKernel: its second-pass ranges (split_and_set_ranges after finalize_indexing) and each access as
+# it receives it
 class MeshMetalKernel(MetalKernel):
+    overrides = MeshMetalOverrides
+
     def __init__(self, tiling, **kwargs):
         super().__init__(tiling, **kwargs)
         self.mesh_indexed, self.mesh_ranges, self.mesh_schedule = False, [], []
+        self.mesh_accesses, self.mesh_indirect = [], {}
 
     def finalize_indexing(self, indices):
         super().finalize_indexing(indices)
@@ -257,6 +251,18 @@ class MeshMetalKernel(MetalKernel):
         if self.mesh_indexed:
             self.mesh_ranges.append((tuple(map(tuple, made)), self.inside_reduction))
         return made
+
+    def load(self, name, index):
+        self.mesh_accesses.append((self.current_node, ("load", name, index, None)))
+        return super().load(name, index)
+
+    def store(self, name, index, value, mode=None):
+        self.mesh_accesses.append((self.current_node, ("store", name, index, mode)))
+        return super().store(name, index, value, mode)
+
+    def store_reduction(self, name, index, value):
+        self.mesh_accesses.append((self.current_node, ("store_reduction", name, index, None)))
+        return super().store_reduction(name, index, value)
 
 
 class MeshMetalScheduling(MetalScheduling):
@@ -372,9 +378,10 @@ def _module(root, graph, bodies):
     return made
 
 
-# schedule-emit lower_inductor.py adapt over that copy: with_effects as its operator, each RECV as recv_strided at its
-# node's value, every SEND's value also returned. Returns (copy, the body's and its control bodies' nodes by SOURCE,
-# the sent values' original nodes)
+# schedule-emit lower_inductor.py adapt over that copy: with_effects as its operator with the token passed through
+# (effects.py with_effects_dense: (token, *results), one result itself), which AOT autograd's functionalization makes
+# again for each effectful operator on its own tokens; each RECV as recv_strided at its node's value; every SEND's value
+# also returned. Returns (copy, the body's and its control bodies' nodes by SOURCE, the sent values' original nodes)
 def adapted(module):
     sources = []
     graph, returned, bodies = _copied(module, sources)
@@ -382,12 +389,17 @@ def adapted(module):
     for node in list(graph.nodes):
         if node.target is WITH_EFFECTS:
             token, operator, *arguments = node.args
+            value = node.meta["val"]
             with graph.inserting_before(node):
                 call = graph.call_function(operator, tuple(arguments), dict(node.kwargs))
-            call.meta = {**node.meta}
+            call.meta = {**node.meta, "val": tuple(value[1:]) if len(value) > 2 else value[1] if len(value) > 1 else None}
             for getitem in list(node.users):
-                getitem.replace_all_uses_with(token if getitem.args[1] == 0 else call)
-                graph.erase_node(getitem)
+                k = getitem.args[1]
+                if k and len(value) > 2:
+                    getitem.args = (call, k - 1)
+                else:
+                    getitem.replace_all_uses_with(token if k == 0 else call)
+                    graph.erase_node(getitem)
             graph.erase_node(node)
             node = call
         if node.target is SEND:
@@ -401,14 +413,6 @@ def adapted(module):
     graph.output(returned + sent)
     sources = tuple(sources)
     return _module(module, graph, bodies), sources, tuple(_source(value, sources) for value in sent)
-
-
-# torch/_inductor/decomposition.py select_decomp_table under make_fx, each traced node carrying its original's meta
-# (fx/interpreter.py run_node under preserve_node_meta)
-def traced(module, inputs):
-    with fx_traceback.preserve_node_meta():
-        return make_fx(torch.fx.Interpreter(module).run, decomposition_table=select_decomp_table(),
-                       tracing_mode="fake")(*inputs)
 
 
 def _source(node, sources):
@@ -425,9 +429,9 @@ def _node_origins(scheduled, sources):
                      for o in member.node.get_origins()], sources)
 
 
-# a SIMD kernel's launch record as its Kernel, its Ranges in its second pass's node order
+# a SIMD kernel's launch record as its Kernel, its Ranges in its second pass's node order, each with its accesses
 def _simd(graph, scheduled, kernel, launch, sources):
-    ranges = tuple(Ranges(node, variables, reduction, node._body.indexing_from_args(variables))
+    ranges = tuple(Ranges(node, variables, reduction, tuple(a for n, a in kernel.mesh_accesses if n is node))
                    for node, (variables, reduction) in zip(kernel.mesh_schedule, kernel.mesh_ranges))
     return Kernel("mps", graph, (scheduled,), kernel, launch, ranges, _node_origins((scheduled,), sources))
 
@@ -474,37 +478,60 @@ def _placeholders(graph):
     return [n for n in graph.nodes if n.op == "placeholder"]
 
 
-# compile_fx.py's inference sequence over one adapted body (fw_compiler_base: original output strides, joint graph
-# passes; _InProcessFxCompile.codegen_and_compile: view_to_reshape, fake_tensor_prop, post-grad passes, GraphLowering run
-# and codegen), its Scheduler with the selected backends (SELECTED)
+# compile_fx.py _compile_fx_main's ahead-of-time inference branch over one adapted body: run_pre_grad_passes; AOT
+# autograd's aot_export_module (trace_joint False, select_decomp_table, unlift_effect_tokens: each effectful operator a
+# with_effects on its token, the tokens _make_token and _sink_tokens; each input mutation an output) under
+# enable_python_dispatcher; each constant tensor attribute's fake value; _unlift_graph (its parameters and buffers
+# attributes again, each input mutation its copy_); then compile_fx_forward at is_inference (its original output strides,
+# joint graph passes and user visible outputs) with, as its inner compiler, _InProcessFxCompile.codegen_and_compile's
+# stages (view_to_reshape, fake_tensor_prop, original output strides, post-grad passes, GraphLowering run and codegen),
+# its GraphLowering MeshLowering with the selected backends (SELECTED)
 def _inductor(module, body, sources, sent, processor, kind, device):
     inputs = [n.meta["val"] for n in _placeholders(body.graph)]
     received = any(n.target is RECV_STRIDED for n in body.graph.nodes)
-    with DebugContext(), config.patch(assume_unaligned_fallback_output=received):
-        lowered = traced(body, inputs)
-        _recursive_record_original_output_strides(lowered)
-        lowered = _recursive_joint_graph_passes(lowered, input_device=device)
-        view_to_reshape(lowered)
+    returned = _returned(module)
+
+    def compiled(gm, example_inputs, *, static_input_idxs, cudagraphs, graph_id, is_inference,
+                 boxed_forward_device_index):
+        shape_env = shape_env_from_inputs(example_inputs) if gm.shape_env is None else gm.shape_env
+        view_to_reshape(gm)
         with torch.no_grad():
-            fake = fake_tensor_prop(lowered, inputs)
-        _recursive_record_original_output_strides(lowered)
+            fake = fake_tensor_prop(gm, example_inputs)
+        _recursive_record_original_output_strides(gm)
         with V.set_fake_mode(fake):
-            _recursive_post_grad_passes(lowered, is_inference=True)
-            graph = MeshLowering(lowered, selected=SELECTED, example_inputs=inputs, shape_env=fake.shape_env,
-                                 is_inference=True)
+            _recursive_post_grad_passes(gm, is_inference=is_inference)
+        with V.set_fake_mode(fake), maybe_disable_comprehensive_padding(example_inputs):
+            graph = MeshLowering(gm, selected=SELECTED, example_inputs=example_inputs, shape_env=shape_env,
+                                 graph_id=graph_id, is_inference=is_inference)
             graph.freeze_runtime_asserts()
             with V.set_graph_handler(graph), V.set_extern_kernel_nodes([]):
-                graph.run(*inputs)
+                graph.run(*example_inputs)
                 wrapper = graph.codegen()
-                names = [n.target for n in _placeholders(lowered.graph)]
-                returned = _returned(module)
+                names = [n.target for n in _placeholders(gm.graph)]
                 return Produced(
-                    processor, kind, device, module, sources, lowered, graph,
+                    processor, kind, device, module, sources, gm, signature, graph,
                     tuple(Input(k, node, name) for k, (node, name) in enumerate(zip(_placeholders(module.graph),
                                                                                      names))),
                     tuple(Output(k, node, value, k >= len(returned))
                           for k, (node, value) in enumerate(zip(returned + sent, graph.graph_outputs))),
-                    _entries(graph, sources), _seeds(graph, lowered, sources), wrapper)
+                    _entries(graph, sources), _seeds(graph, gm, sources), wrapper)
+
+    with DebugContext(), config.patch(assume_unaligned_fallback_output=received), enable_python_dispatcher():
+        body = run_pre_grad_passes(body, inputs)
+        with functorch_config.patch(unlift_effect_tokens=True, selective_decompose=config.selective_decompose):
+            exported, signature = aot_export_module(body, inputs, trace_joint=False,
+                                                    decompositions=select_decomp_table())
+        fake = _detect_fake_mode_from_gm(exported)
+        for node in exported.graph.find_nodes(op="get_attr"):
+            held = functools.reduce(getattr, node.target.split("."), exported)
+            if isinstance(held, Tensor) and "val" not in node.meta:
+                node.meta["val"] = fake.from_tensor(held, static_shapes=True)
+        lowered = _unlift_graph(body, exported, signature)
+        with V.set_fake_mode(fake):
+            return compile_fx_forward(lowered, inputs, num_orig_model_outputs=get_num_model_outputs(body),
+                                      num_example_inputs=len(inputs),
+                                      compiler_config_extra=create_compiler_config_extra(body),
+                                      inner_compile=compiled, is_inference=True)
 
 
 # the Neural Engine's upstream compiler over one adapted body: each received value an input of its own (the model
@@ -542,7 +569,7 @@ def _engine(module, body, sources, sent, processor, kind, device):
     entry = Model(program, model, tuple((count + k, node) for k, node in enumerate(received)),
                   _origins(program.graph.nodes, sources))
     return Produced(
-        processor, kind, device, module, sources, program, None,
+        processor, kind, device, module, sources, program, signature, None,
         tuple(Input(k, node, name) for k, (node, name) in enumerate(zip(_placeholders(module.graph),
                                                                          signature.user_inputs))),
         tuple(Output(k, node, value, k >= len(returned))
@@ -560,8 +587,8 @@ def produced(module, processor, kind, device):
 # each function's processor bodies (compiler/mesh_compiler/schedule.py schedule's third result, ir.py
 # Scheduled.processor_modules {function key: {processor: GraphModule}}) given to the upstream compiler at its
 # processor's target, from the full original processor maps: Scheduled.devices its torch.device, Scheduled.engines its
-# engine (ENGINE: the Neural Engine, whose fake values share the host's device; driver.py). Returns {function key:
-# {processor: Produced}}
+# engine (ENGINE: the Neural Engine, whose fake values share the host's device; driver.py targets). Returns {function
+# key: {processor: Produced}}
 def lower(scheduled):
     devices, engines = scheduled.devices, scheduled.engines
     return {key: {processor: produced(module, processor, engines.get(processor, devices[processor].type),
@@ -571,6 +598,16 @@ def lower(scheduled):
 
 
 # ---- terminal emission ----
+
+# metal_ir.h struct metal_ir_upstream_parameter: one parameter of a CPU pass's final entry as its final emitter declared
+# it, `type` its C type as printed, `slot` the binding it receives (an argument index or a composition slot), `pointer`
+# 1 for the bound pointer itself, 0 for the value it points at
+@dataclasses.dataclass(frozen=True)
+class Parameter:
+    type: str
+    slot: int
+    pointer: int
+
 
 # the terminal composition of one pass of one Metal kernel, the patched MetalKernel.codegen_kernel's `composition`
 # (torch-inductor-upstream-composition.patch): `source` its definitions before the kernel (the executor's helper as
@@ -596,9 +633,22 @@ class Composition:
         return f"{declaration} [[buffer({index})]]"
 
 
+# the terminal composition of one pass of one CPU kernel, the patched KernelGroup.codegen_group's `composition`
+# (torch-inductor-upstream-composition.patch): `source` its definitions after the prefix (the executor's host C++
+# helper as printed, never parsed), `parameters` its own after the group's arguments, `enter` its statements before the
+# body; `typed` those parameters as their Parameter records
+@dataclasses.dataclass(frozen=True)
+class Hosted:
+    source: str
+    parameters: tuple
+    enter: tuple
+    typed: tuple
+
+
 # metal_ir.h metal_ir_value_paged: byte b of a paged root at byte frames[b / page] page + b mod page of its arena (the
 # arena bound from its first byte, its frame table after the arguments: metal_lower.mm), element i of an argument at
-# byte origin + i sizeof(T) of its root; `P` the argument's own declared pointer type, every load and store its subscript
+# byte origin + i sizeof(T) of its root (metal_ir_upstream_page `origin`: the argument binding's first byte in its
+# root, placed); `P` the argument's own declared pointer type, every load and store its subscript
 PAGED = """
 template <typename P> struct mesh_paged {
   P arena;
@@ -611,8 +661,9 @@ template <typename P> struct mesh_paged {
 };
 """
 # metal-microbench metal_transport.mm UpstreamHelper: each function's parameters as Tint's MSL printer types them
-# (tint/lang/msl/writer/printer: a storage runtime array `{const }device tint_array<T, 1>*`, an atomic `atomic_uint` or
-# `atomic_ulong`, u64 `ulong`), `votes` its workgroup array of 1024 / kSimd (metal_lower.h kSimd 32) u32
+# (tint/lang/msl/writer/printer: a storage runtime array `{const }device tint_array<T, 1>*`, host C++ (Options::host_cpp,
+# provider/dawn.patch) `{const }tint_array<T, 1>*`; an atomic `atomic_uint` or `atomic_ulong`, u64 `ulong`), `votes` its
+# workgroup array of 1024 / kSimd (metal_lower.h kSimd 32) u32
 VOTES = 1024 // 32
 # TransportViews: each word's (word, kind) its parameter; (1, 3) a later pass's `first` before its `supplied`
 WORDS = {(0, 1): "step", (1, 0): "phases", (1, 1): "counts", (1, 2): "status", (2, 0): "flags", (3, 0): "list"}
@@ -621,60 +672,95 @@ BUILTINS = ("uint3 mesh_lid [[thread_position_in_threadgroup]]", "uint3 mesh_gid
             "uint3 mesh_position [[thread_position_in_grid]]")
 
 
-def _view(name, slot, element, write):
-    return f"{'device' if write else 'const device'} tint_array<{element}, 1>* mesh_{name} [[buffer({slot})]]"
+# the helper's acquire parameters after its builtins, in its declared order (metal_ir.h metal_ir_upstream_helper)
+def _acquired(later):
+    return ["step", "phases", "counts", *(["status", "first", "list"] if later else ["flags"]), "classes", "spans",
+            "records"]
 
 
-# kernel `kernel`'s Composition for one pass from its native composition `made` (compiler/mesh_compiler/metal.py
-# Composed: metal_ir_upstream_composition's words, later words, pages (with each argument binding's origin), readiness
-# and table, metal_ir_upstream_helper's Helper (None: no transport), `later` its pass): each word, readiness table and
-# record table a parameter at its slot as the helper's parameters type it; the helper's mesh_acquire_first (pass 0) or
-# mesh_acquire_later (pass 1) first, its threadgroup returning where it does not run (.w 0), the body at the position it
-# gives (pass 0 its own: thread_position_in_grid; pass 1 its listed threadgroup's .xyz, whole threadgroups); mesh_release
-# after the body's stores, its arrival counters in `sent` order; each paged argument's accessor over its arena
-def composed(kernel, made):
-    helper, later, args = made.helper, bool(made.later), kernel.owner.args
-    values = kernel.launch[1]
-    parameters, enter, exit_, arrivals = [], [], [], []
-    firsts = ["first", "supplied"] if later else ["supplied"]
+# native composition `made`'s pass (`made.later`): each transport word, readiness table and record table by its helper
+# parameter name, its (slot, element type, written); and its sent values' arrival counters in `sent` order
+def _views(made):
+    later = bool(made.later)
+    firsts, named, arrivals = ["first", "supplied"] if later else ["supplied"], {}, []
     for w in made.later_words if later else made.words:
         if w.word >= 4:
             name = f"arrivals{w.word - 4}"
-            arrivals.append(f"mesh_{name}")
+            arrivals.append(name)
         else:
             name = WORDS[w.word, w.kind] if (w.word, w.kind) in WORDS else firsts.pop(0)
         element = "ulong" if w.kind % 2 else "uint"
-        parameters.append(_view(name, w.slot, f"atomic_{element}" if w.kind >= 2 else element, w.write))
+        named[name] = (w.slot, f"atomic_{element}" if w.kind >= 2 else element, bool(w.write))
     if made.readiness is not None:
         r = made.readiness
-        parameters += [_view("classes", r.later_class_slot if later else r.class_slot, "uint", False),
-                       _view("spans", r.later_span_slot if later else r.span_slot, "uint", False)]
+        named["classes"] = (r.later_class_slot if later else r.class_slot, "uint", False)
+        named["spans"] = (r.later_span_slot if later else r.span_slot, "uint", False)
     if made.table is not None:
-        parameters.append(_view("records", made.table.later_slot if later else made.table.slot, "ulong", False))
-    for slot in dict.fromkeys(p.frames for p in made.pages):
-        parameters.append(f"const device uint* mesh_frames{slot} [[buffer({slot})]]")
+        named["records"] = (made.table.later_slot if later else made.table.slot, "ulong", False)
+    return named, arrivals
+
+
+def _acquire(made):
+    helper = made.helper
+    return None if helper is None else helper.later if made.later else helper.acquire
+
+
+# a Metal kernel's pass: each view a parameter at its slot as the helper's parameters type it; the helper's
+# mesh_acquire_first (pass 0) or mesh_acquire_later (pass 1) first, its threadgroup returning where it does not run (.w
+# 0), the body at the position it gives (pass 0 its own: thread_position_in_grid; pass 1 its listed threadgroup's .xyz,
+# whole threadgroups, its further lanes outside the body's bound reaching mesh_release); mesh_release after the body's
+# stores, its arrival counters in `sent` order; each paged argument's accessor over its arena
+def _threaded(kernel, made):
+    helper, later, args, values = made.helper, bool(made.later), kernel.owner.args, kernel.launch[1]
+    named, arrivals = _views(made)
+    parameters = [f"{'device' if write else 'const device'} tint_array<{element}, 1>* mesh_{name} [[buffer({slot})]]"
+                  for name, (slot, element, write) in named.items()]
+    parameters += [f"const device uint* mesh_frames{slot} [[buffer({slot})]]"
+                   for slot in dict.fromkeys(p.frames for p in made.pages)]
+    enter, exit_ = [], []
     for p in made.pages:
         outer = values[p.argument]
         inner = args.output_buffers[outer] if outer in args.output_buffers else args.input_buffers[outer]
         enter.append(f"const mesh_paged<decltype({inner}_arena)> {inner}{{{inner}_arena, mesh_frames{p.frames}, "
                      f"{p.origin}ul, {p.page_bytes}ul}};")
-    grid = "mesh_position"
-    acquire = (helper.later if later else helper.acquire) if helper is not None else None
+    grid, acquire = "mesh_position", _acquire(made)
     if acquire is not None:
-        common = ["mesh_lid", "mesh_gid", "mesh_lane", "mesh_threads", "mesh_step", "mesh_phases", "mesh_counts"]
-        own = ["mesh_status", "mesh_first", "mesh_list"] if later else ["mesh_flags"]
         enter += [f"threadgroup tint_array<uint, {VOTES}> mesh_votes;",
                   f"const uint4 mesh_acquired = {acquire}("
-                  + ", ".join(common + own + ["mesh_classes", "mesh_spans", "mesh_records", "&mesh_votes"]) + ");",
+                  + ", ".join(["mesh_lid", "mesh_gid", "mesh_lane", "mesh_threads",
+                               *(f"mesh_{name}" for name in _acquired(later)), "&mesh_votes"]) + ");",
                   "if (mesh_acquired.w == 0) return;"]
         if later:
             grid = "(mesh_acquired.xyz * mesh_threads + mesh_lid)"
     if helper is not None and helper.release is not None:
         exit_.append(f"{helper.release}(" + ", ".join(["mesh_lid", "mesh_threads", "mesh_step", "mesh_status",
-                                                       "mesh_supplied", "mesh_records", *arrivals]) + ");")
+                                                       "mesh_supplied", "mesh_records",
+                                                       *(f"mesh_{name}" for name in arrivals)]) + ");")
     source = (helper.source if helper is not None else "") + (PAGED if made.pages else "")
     return Composition(source, tuple(parameters), BUILTINS, tuple(enter), grid, "mesh_lid", tuple(exit_),
                        {p.argument: p.slot for p in made.pages})
+
+
+# a CPU kernel's pass (a native task: its one invocation; its sends published by its Steps, no release): the helper's
+# bool mesh_acquire_first or mesh_acquire_later first, its body run where it returns true, each of its parameters the
+# kernel's own at its slot as the host C++ helper types it; a paged argument's binding its flat view
+def _hosted(kernel, made):
+    named, _ = _views(made)
+    acquire = _acquire(made)
+    used = _acquired(bool(made.later)) if acquire is not None else []
+    typed = tuple(Parameter(f"{'' if named[name][2] else 'const '}tint_array<{named[name][1]}, 1>*", named[name][0], 1)
+                  for name in used)
+    enter = (f"if (!{acquire}(" + ", ".join(f"mesh_{name}" for name in used) + ")) return;",) if used else ()
+    return Hosted(made.helper.source if made.helper is not None else "",
+                  tuple(f"{p.type} mesh_{name}" for name, p in zip(used, typed)), enter, typed)
+
+
+# kernel `kernel`'s composition for one pass from its native composition `made` (compiler/mesh_compiler/metal.py
+# Composed: metal_ir_upstream_composition's words, later words, pages (each with its argument binding's placed origin),
+# readiness and table, metal_ir_upstream_helper's Helper (None: no transport), `later` its pass): a Metal kernel's
+# Composition, a CPU kernel's Hosted
+def composed(kernel, made):
+    return (_hosted if kernel.place == "cpu" else _threaded)(kernel, made)
 
 
 # metal_ir.h struct metal_ir_upstream_emission
@@ -682,28 +768,38 @@ def composed(kernel, made):
 class Emission:
     source: str
     entry: str
-    types: tuple
+    parameters: tuple
     compile: tuple
     link: tuple
 
 
-# metal_ir.h metal_ir_upstream_emitted: the kernel's terminal emission by its own upstream emitter. Metal: the patched
-# MetalKernel.codegen_kernel of the retained kernel with `composition` (None: as produced), its headers expanded
-# (torch/mps/__init__.py compile_shader's _embed_headers). CPU: cpp.py define_kernel's final source and declared entry
-# (torch-inductor-upstream-composition.patch defined_kernels), its call's C types, codecache.py CppCodeCache's build
-# options (CppTorchDeviceOptions for the cpu, CppPythonBindingsCodeCache: no libtorch, shared) in cpp_builder.py
-# CppBuilder's argument form; its pointers each its value's flat bytes
+# metal_ir.h metal_ir_upstream_emitted: the kernel's terminal emission by its own upstream emitter for one pass
+# (`composition` its composed() result; None: as produced). Metal: the patched MetalKernel.codegen_kernel of the
+# retained kernel, its headers expanded (torch/mps/__init__.py compile_shader's _embed_headers). CPU: cpp.py
+# define_kernel's final source and declared entry (torch-inductor-upstream-composition.patch defined_kernels), or the
+# retained group's patched codegen_group with its composition through define_kernel's defined_source; its parameters
+# its call's arguments in cpp_argdefs order (each at its own slot; its buffers, inplace, input and output, the bound
+# pointer, its sizevars after them the value) and the composition's; codecache.py CppCodeCache's build options
+# (CppTorchDeviceOptions for the cpu, CppPythonBindingsCodeCache: no libtorch, shared) in cpp_builder.py CppBuilder's
+# argument form
 def emitted(kernel, composition=None):
     owner = kernel.owner
     if kernel.place == "cpu":
-        entry, source = kernel.graph.wrapper_code.defined_kernels[kernel.launch[0]]
+        name, _, _, types = kernel.launch
+        entry, source = kernel.graph.wrapper_code.defined_kernels[name]
+        values = len(types) - len(owner.args.sizevars)
+        parameters = tuple(Parameter(t, k, int(k < values)) for k, t in enumerate(types))
+        if composition is not None:
+            with V.set_graph_handler(kernel.graph):
+                source = CppScheduling.defined_source(owner.codegen_group(None, composition), entry, name)
+            parameters += composition.typed
         options = CppTorchDeviceOptions(vec_isa=pick_vec_isa(), include_pytorch=False, device_type="cpu", shared=True)
         compile_ = (options.get_compiler(), *[f for d in options.get_definitions() for f in ("-D", d)],
                     *[f"-I{d}" for d in options.get_include_dirs()], *[f"-{f}" for f in options.get_cflags()],
                     *options.get_passthrough_args())
         link = (*[f"-{f}" for f in options.get_ldflags()], *[f"-L{d}" for d in options.get_libraries_dirs()],
                 *[f"-l{lib}" for lib in options.get_libraries()])
-        return Emission(source, entry, kernel.launch[3], compile_, link)
+        return Emission(source, entry, parameters, compile_, link)
     with V.set_graph_handler(kernel.graph), V.set_kernel_handler(owner):
         owner.codegen_kernel(owner.metal_entry, composition)
     source = _embed_headers([line + "\n" for line in owner.metal_source.split("\n")],

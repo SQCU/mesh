@@ -94,6 +94,8 @@
 -                    f"{thread_pos_dtype} {thread_pos_var_name} [[thread_position_in_grid]]{thread_pos_suffix}"
 -                )
 -                if self.inside_reduction:
+-                    code.writeline(
+-                        f"{thread_pos_dtype} group_pos [[thread_position_in_threadgroup]]"
 +                if composition is not None:
 +                    for parameter in composition.parameters:
 +                        code.writeline(f"{parameter},")
@@ -102,8 +104,7 @@
 +                        code.writeline(builtin + ("," if idx + 1 < len(builtins) else ""))
 +                else:
 +                    thread_pos_suffix = "," if self.inside_reduction else ""
-                     code.writeline(
--                        f"{thread_pos_dtype} group_pos [[thread_position_in_threadgroup]]"
++                    code.writeline(
 +                        f"{thread_pos_dtype} {thread_pos_var_name} [[thread_position_in_grid]]{thread_pos_suffix}"
                      )
 +                    if self.inside_reduction:
@@ -154,10 +155,33 @@
          self.metal_source = code.getvalue()
 --- a/torch/_inductor/codegen/cpp.py
 +++ b/torch/_inductor/codegen/cpp.py
-@@ -6041,6 +6041,12 @@
-             # TODO(voz): Ostensibly, we should not need this. But there are cases where C++ codegen does
-             # not use BracesBuffer, so we have no good indicator of a C++ buffer atm.
-             src_code = src_code.replace("#pragma CMT", "//")
+@@ -6023,6 +6023,16 @@
+     def codegen_sync(self):
+         pass
+ 
++    @staticmethod
++    def defined_source(src_code, kernel_decl_name, kernel_name):
++        # compiler/patches/torch-inductor-upstream-composition.patch: define_kernel's final source of a
++        # group's code, its own, which a composed pass of the same group (codegen_group's `composition`) takes
++        src_code = src_code.replace(str(Placeholder.KERNEL_NAME), kernel_decl_name)
++        src_code = src_code.replace(str(Placeholder.DESCRIPTIVE_NAME), kernel_name)
++        # TODO(voz): Ostensibly, we should not need this. But there are cases where C++ codegen does
++        # not use BracesBuffer, so we have no good indicator of a C++ buffer atm.
++        return src_code.replace("#pragma CMT", "//")
++
+     def define_kernel(self, src_code, nodes, kernel_args=None):
+         wrapper = V.graph.wrapper_code
+         if src_code in wrapper.src_to_kernel:
+@@ -6036,11 +6046,13 @@
+             kernel_name = "_".join(["cpp", fused_name, wrapper.next_kernel_suffix()])
+             wrapper.src_to_kernel[src_code] = kernel_name
+             kernel_decl_name = kernel_name if V.graph.cpp_wrapper else "kernel"
+-            src_code = src_code.replace(str(Placeholder.KERNEL_NAME), kernel_decl_name)
+-            src_code = src_code.replace(str(Placeholder.DESCRIPTIVE_NAME), kernel_name)
+-            # TODO(voz): Ostensibly, we should not need this. But there are cases where C++ codegen does
+-            # not use BracesBuffer, so we have no good indicator of a C++ buffer atm.
+-            src_code = src_code.replace("#pragma CMT", "//")
++            src_code = self.defined_source(src_code, kernel_decl_name, kernel_name)
 +            # compiler/patches/torch-inductor-upstream-composition.patch: each defined kernel's
 +            # declared entry and final source by its kernel name, as the wrapper's definition encloses it
 +            wrapper.__dict__.setdefault("defined_kernels", {})[kernel_name] = (
@@ -167,6 +191,44 @@
  
              # Get the lines in the source code representing the function definition,
              # excluding the first line including cpp_prefix.h.
+@@ -6128,7 +6140,10 @@
+         args_num = len(arg_defs)
+         return args_num
+ 
+-    def codegen_group(self, name=None) -> str:
++    def codegen_group(self, name=None, composition: Any = None) -> str:
++        # compiler/patches/torch-inductor-upstream-composition.patch: `composition` (None: the group as
++        # produced) its terminal composition, each part as given: `source` its definitions after the prefix,
++        # `parameters` its own after the group's arguments, `enter` its statements before the body
+         self.stack.close()
+         if not self.scheduled_nodes:
+             return ""
+@@ -6142,11 +6157,15 @@
+         if enable_kernel_profile:
+             code.writelines(["#include <torch/csrc/inductor/aoti_runtime/utils.h>"])
+         code.writeline("#include <torch/csrc/inductor/cpp_prefix.h>")
++        if composition is not None:
++            code.splice(composition.source)
+ 
+         # 2. Function definition
+         kernel_decl_name = str(Placeholder.KERNEL_NAME) if name is None else name
+         kernel_name = str(Placeholder.DESCRIPTIVE_NAME) if name is None else name
+         arg_defs, _, _ = self.args.cpp_argdefs()
++        if composition is not None:
++            arg_defs = [*arg_defs, *composition.parameters]
+         arg_defs = ",\n".ljust(25).join(arg_defs)
+         func_export_decl = get_export_declaration()
+         inline_attr = (
+@@ -6158,6 +6177,9 @@
+ 
+         # 3. Function body
+         with code.indent():
++            if composition is not None:
++                for line in composition.enter:
++                    code.writeline(line)
+             code.writeline("std::atomic<int> inductor_cpu_integer_div_error{0};")
+             code.writeline(
+                 "inductor_cpu_integer_div_error_flag = &inductor_cpu_integer_div_error;"
 --- a/torch/_inductor/graph.py
 +++ b/torch/_inductor/graph.py
 @@ -964,7 +964,8 @@

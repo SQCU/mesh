@@ -21,3 +21,10 @@ Only the named files below are staged. Hashes identify the index snapshot even i
 | compiler/mesh_compiler/decompose.py | 568 | 2af20f0fe921fe4dd72e25cffe1906770b1e375bafea4d66581e0cfd5ae22eec | AST pass |
 | compiler/patches/torch-inductor-upstream-composition.patch | 190 | 15ba8679a9fc00bae38a1ad0b35dc21f1d9ddc9a470688ea3ec6145efba2f102 | document/patch |
 | compiler/patches/README.md | 432 | 7e3c19a5631680f3f16ca43dcdf9452eba5b8903da1828888fd8d177ef995348 | document/patch |
+
+## Stopped65f source boundary
+
+65f PID18391/exec59562 interrupted and collected exit0. Its CPU original-emitter composition hook, final per-pass ABI and canonical native error-workspace displacement are preserved. The new `_inductor` remains rejected: it wraps AOT export/compile_fx_forward but manually reproduces both outer and inner compiler pass order in nested `compiled`. A fresh Opus context takes the original compile_fx/AOT result hook; individual upstream function calls are not ownership of the original pipeline. No source import or patch application.
+
+- `compiler/mesh_compiler/lower_inductor.py`: `524d20839f2c52d431fdfa916b3347450d4484419587b671c20cf0281388f39a`.
+- `compiler/patches/torch-inductor-upstream-composition.patch`: `a08d2ded96ccb7910e7ef24959cc3eade47255ab6b705c9442075091abd87b07`.
