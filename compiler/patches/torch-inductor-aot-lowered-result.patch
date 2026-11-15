@@ -8,7 +8,7 @@
      OutputCode,
  )
  from torch._inductor.runtime.cache_dir_utils import cache_dir
-@@ -777,6 +778,100 @@
+@@ -777,6 +778,114 @@
          return config.patch(graph_partition=False)
      else:
          return contextlib.nullcontext()
@@ -87,15 +87,29 @@
 +        mesh_callbacks_are_outside_spec
 +        prior = {name: getattr(debug, name) for name in provenance}
 +        with contextlib.ExitStack() as stack:
-+            stack.enter_context(config.patch(configured))
-+            stack.enter_context(_virtualized_as(handlers))
-+            stack.enter_context(torch.set_grad_enabled(grad))
-+            stack.enter_context(torch.utils._python_dispatch._disable_current_modes())
-+            stack.enter_context(enable_python_dispatcher())
-+            stack.enter_context(dynamo_utils.preserve_rng_state())
++            # Callback inversion of control is outside the working specification (phase: compile-time emission exit registration).
++            # Runtime callback overhead is inadmissible in performance-critical code.
++            stack.enter_context(mesh_callbacks_are_outside_spec(config.patch(configured)))
++            # Callback inversion of control is outside the working specification (phase: compile-time emission exit registration).
++            # Runtime callback overhead is inadmissible in performance-critical code.
++            stack.enter_context(mesh_callbacks_are_outside_spec(_virtualized_as(handlers)))
++            # Callback inversion of control is outside the working specification (phase: compile-time emission exit registration).
++            # Runtime callback overhead is inadmissible in performance-critical code.
++            stack.enter_context(mesh_callbacks_are_outside_spec(torch.set_grad_enabled(grad)))
++            # Callback inversion of control is outside the working specification (phase: compile-time emission exit registration).
++            # Runtime callback overhead is inadmissible in performance-critical code.
++            stack.enter_context(mesh_callbacks_are_outside_spec(torch.utils._python_dispatch._disable_current_modes()))
++            # Callback inversion of control is outside the working specification (phase: compile-time emission exit registration).
++            # Runtime callback overhead is inadmissible in performance-critical code.
++            stack.enter_context(mesh_callbacks_are_outside_spec(enable_python_dispatcher()))
++            # Callback inversion of control is outside the working specification (phase: compile-time emission exit registration).
++            # Runtime callback overhead is inadmissible in performance-critical code.
++            stack.enter_context(mesh_callbacks_are_outside_spec(dynamo_utils.preserve_rng_state()))
 +            torch.random.set_rng_state(rng)
 +            for key, value in cached.items():
-+                stack.enter_context(_set_env(key, value))
++                # Callback inversion of control is outside the working specification (phase: compile-time emission exit registration).
++                # Runtime callback overhead is inadmissible in performance-critical code.
++                stack.enter_context(mesh_callbacks_are_outside_spec(_set_env(key, value)))
 +            vars(debug).update(provenance)
 +            try:
 +                yield
@@ -109,7 +123,7 @@
  
  
  def fake_tensor_prop(
-@@ -1587,6 +1682,9 @@
+@@ -1587,6 +1696,9 @@
                  const_graph = None
                  const_wrapper_code = None
                  const_kernel_code = None
@@ -119,7 +133,7 @@
  
                  if aot_mode and config.aot_inductor.use_runtime_constant_folding:
                      # torchbind objects have name that starts with _torchbind_obj
-@@ -1622,9 +1720,18 @@
+@@ -1622,9 +1734,18 @@
                          if not cpp_wrapper:
                              raise AssertionError("AOT mode only supports C++ wrapper")
                          const_graph.run()
@@ -141,7 +155,7 @@
  
                  graph = graph_lowering(
                      gm,
-@@ -1709,46 +1816,84 @@
+@@ -1709,46 +1830,84 @@
                                  raise AssertionError(
                                      "AOT mode only supports C++ wrapper"
                                  )
@@ -262,7 +276,7 @@
                          else:
                              compiled_module = graph.compile_to_module()
                              compiled_fn = compiled_module.call
-@@ -1863,6 +2008,21 @@
+@@ -1863,6 +2022,21 @@
  
                      # pyrefly: ignore [unbound-name]
                      if V.aot_compilation:
@@ -284,7 +298,7 @@
                          if not isinstance(
                              compiled_fn,
                              # pyrefly: ignore [unbound-name]
-@@ -2239,7 +2399,7 @@
+@@ -2239,7 +2413,7 @@
      example_inputs_: list[InputType],
      inner_compile: _CompileFxCallable = compile_fx_inner,
      config_patches: dict[str, Any] | None = None,
@@ -293,7 +307,7 @@
      if not isinstance(model_, GraphModule):
          raise AssertionError(f"Expected GraphModule, got {type(model_)}: {model_}")
  
-@@ -2298,6 +2458,10 @@
+@@ -2298,6 +2472,10 @@
              config_patches=config_patches,
          )
  
@@ -304,7 +318,7 @@
          if not isinstance(compiled_artifacts, CompiledAOTI):
              raise AssertionError(
                  f"Expected CompiledAOTI, got {type(compiled_artifacts)}"
-@@ -3279,6 +3443,9 @@
+@@ -3279,6 +3457,9 @@
                              node.meta["val"] = target
  
              unlifted_gm = _unlift_graph(model_, gm, graph_signature)
@@ -401,10 +415,13 @@
          # Create all outputs first
 --- a/torch/_inductor/lowering.py
 +++ b/torch/_inductor/lowering.py
-@@ -9203,7 +9203,7 @@
+@@ -9203,7 +9203,10 @@
  
  @register_lowering(torch.ops.higher_order.invoke_subgraph, type_promotion_kind=None)
  def invoke_subgraph(subgraph_fn: ir.Subgraph, identifier: str, *operands):
++    # Callback inversion of control is outside the working specification (phase: compile-time registered HOP lowering).
++    # Runtime callback overhead is inadmissible in performance-critical code.
++    mesh_callbacks_are_outside_spec
 -    result = ir.InvokeSubgraph.create(subgraph_fn, *operands)
 +    result = ir.InvokeSubgraph.create(subgraph_fn, identifier, *operands)
      return list(map(TensorBox.create, result))  # type: ignore[call-overload]
@@ -412,7 +429,7 @@
  
 --- a/torch/_inductor/output_code.py
 +++ b/torch/_inductor/output_code.py
-@@ -1169,6 +1169,64 @@
+@@ -1169,6 +1169,70 @@
  
  
  @dataclasses.dataclass
@@ -466,10 +483,16 @@
 +        constants: CompiledFxGraphConstants,
 +        graph_kwargs: _CompileFxKwargs,
 +    ) -> None:
++        # Callback inversion of control is outside the working specification (phase: compile-time OutputCode lifecycle dispatch).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        # a lowered result has no emitted callable to load
 +        pass
 +
 +    def set_triton_bundle(self, triton_bundle: Any) -> None:
++        # Callback inversion of control is outside the working specification (phase: compile-time OutputCode lifecycle dispatch).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        pass
 +
 +
@@ -520,7 +543,7 @@
          # Remove dead replacement nodes so they don't inflate user counts
 --- a/torch/_inductor/codegen/wrapper.py
 +++ b/torch/_inductor/codegen/wrapper.py
-@@ -594,6 +594,43 @@
+@@ -594,6 +594,51 @@
          return converter._generate_switch
  
  
@@ -533,6 +556,9 @@
 +    stack_output: bool
 +
 +    def codegen(self, code: IndentedBuffer) -> None:
++        # Callback inversion of control is outside the working specification (phase: compile-time deferred wrapper-line emission).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        raise NotImplementedError("Only supports FX codegen")
 +
 +    @staticmethod
@@ -540,6 +566,7 @@
 +        # Callback inversion of control is outside the working specification (phase: compile-time FX conversion,
 +        # conversion method returned to FxConverter).
 +        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        return converter._generate_while_loop
 +
 +
@@ -551,6 +578,9 @@
 +    node: ir.InvokeSubgraph
 +
 +    def codegen(self, code: IndentedBuffer) -> None:
++        # Callback inversion of control is outside the working specification (phase: compile-time deferred wrapper-line emission).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        raise NotImplementedError("Only supports FX codegen")
 +
 +    @staticmethod
@@ -558,13 +588,14 @@
 +        # Callback inversion of control is outside the working specification (phase: compile-time FX conversion,
 +        # conversion method returned to FxConverter).
 +        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        return converter._generate_invoke_subgraph
 +
 +
  @dataclasses.dataclass
  class CommentLine(WrapperLine):
      line: LineContext
-@@ -617,6 +654,27 @@
+@@ -617,6 +662,31 @@
      @staticmethod
      def codegen_fx(converter: FxConverter) -> FxConversionFunc:
          return converter._generate_dynamic_scalar
@@ -578,6 +609,9 @@
 +    node: ir.AssertScalar
 +
 +    def codegen(self, code: IndentedBuffer) -> None:
++        # Callback inversion of control is outside the working specification (phase: compile-time deferred wrapper-line emission).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        sizevar = self.wrapper.codegen_python_sizevar(self.node.scalar, simplify=False)
 +        code.writeline(f"if not ({sizevar}):")
 +        code.writeline(f"    raise RuntimeError({repr(self.node.msg)})")
@@ -588,11 +622,12 @@
 +        # Callback inversion of control is outside the working specification (phase: compile-time FX conversion,
 +        # conversion method returned to FxConverter).
 +        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        return converter._generate_assert_scalar
  
  
  @dataclasses.dataclass
-@@ -778,6 +836,13 @@
+@@ -778,6 +848,14 @@
  
          code.writeline(f"{node.get_name()} = {kernel_name}({', '.join(args)})")
  
@@ -601,12 +636,13 @@
 +        # Callback inversion of control is outside the working specification (phase: compile-time FX conversion,
 +        # conversion method returned to FxConverter).
 +        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        return converter._generate_extern_kernel_multi_out
 +
  
  @dataclasses.dataclass
  class FreeLine(WrapperLine):
-@@ -810,6 +875,14 @@
+@@ -810,6 +888,14 @@
      graph_name: str
      original_fxnode_name: str
      current_stream_idx: int | None = None
@@ -621,7 +657,7 @@
  
      def codegen(self, code: IndentedBuffer) -> None:
          self.wrapper._generate_kernel_call_helper(
-@@ -1443,6 +1516,28 @@
+@@ -1443,6 +1529,28 @@
  
  BufferName = str
  Line = MemoryPlanningLine | LineContext
@@ -650,7 +686,7 @@
  
  
  class PythonWrapperCodegen(CodeGen):
-@@ -2537,6 +2632,40 @@
+@@ -2537,6 +2645,40 @@
              self.header.splice(kernel_defs)
  
      def _generate(self, is_inference):
@@ -691,7 +727,7 @@
          if config.profile_bandwidth:
              self.write_triton_header_once()
  
-@@ -2546,18 +2675,20 @@
+@@ -2546,18 +2688,20 @@
                  self.generate_profiler_mark_wrapper_call(stack)
              if config.profile_bandwidth:
                  self.generate_start_graph()
@@ -714,7 +750,7 @@
                          line.codegen(self.wrapper_call)
                      else:
                          self.wrapper_call.writeline(line)
-@@ -2678,7 +2809,12 @@
+@@ -2678,7 +2822,12 @@
      def memory_plan(self):
          from .memory_planning import MemoryPlanner
  
@@ -728,7 +764,7 @@
  
      def memory_plan_reuse(self):
          outputs = self.get_graph_outputs()
-@@ -2723,15 +2859,20 @@
+@@ -2723,15 +2872,20 @@
          _total_allocated_buffer_size = sum(
              s.total_allocated_buffer_size for s in past_planning_states
          )
@@ -751,7 +787,7 @@
  
      def maybe_emit_replacement_aliases(
          self,
-@@ -4048,6 +4189,8 @@
+@@ -4048,6 +4202,8 @@
          triton_meta: TritonMeta | None = None,
          inductor_meta=None,
          original_fxnode_name=None,
@@ -760,7 +796,7 @@
      ):
          """
          Generates kernel call code.
-@@ -4088,6 +4231,8 @@
+@@ -4088,6 +4244,8 @@
                  # pyrefly: ignore [bad-argument-type]
                  original_fxnode_name=original_fxnode_name,
                  current_stream_idx=current_stream_idx,
@@ -769,7 +805,7 @@
              )
          )
  
-@@ -4453,7 +4598,7 @@
+@@ -4453,7 +4611,7 @@
          debug_handle: int | None = None,
      ):
          if debug_handle is not None:
@@ -1084,7 +1120,11 @@
          )
  
          # Assign the result to the given name.
-@@ -1322,6 +1495,11 @@
+@@ -1321,7 +1494,15 @@
+     def _generate_kernel_call(self, line: WrapperLine) -> None:
++        # Callback inversion of control is outside the working specification (phase: compile-time returned FX conversion callback).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
          if not isinstance(line, KernelCallLine):
              raise AssertionError(f"expected KernelCallLine, got {type(line)}")
          if not line.triton:
@@ -1096,8 +1136,11 @@
              raise NotImplementedError("FX conversion only supports Triton kernels.")
  
          self._generate_triton_call(line)
-@@ -1329,6 +1507,13 @@
+@@ -1329,6 +1510,16 @@
      def _generate_kernel_definition(self, line: WrapperLine) -> None:
++        # Callback inversion of control is outside the working specification (phase: compile-time returned FX conversion callback).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
          if not isinstance(line, KernelDefinitionLine):
              raise AssertionError(f"expected KernelDefinitionLine, got {type(line)}")
 +
@@ -1110,7 +1153,7 @@
  
          # Generate code for the kernel.
          kernel_code = PythonWrapperCodegen._format_kernel_definition(
-@@ -1339,6 +1524,26 @@
+@@ -1339,6 +1530,26 @@
          tuner = self._import_kernel(kernel_code, line.kernel_name)
          wrapped = wrap_triton(tuner.fn)
          self.kernels[line.kernel_name] = TritonKernel(tuner, wrapped)

@@ -1,6 +1,6 @@
 --- a/torch/_export/passes/collect_tracepoints_pass.py
 +++ b/torch/_export/passes/collect_tracepoints_pass.py
-@@ -1,158 +1,125 @@
+@@ -1,158 +1,128 @@
 -# mypy: allow-untyped-defs
 -from __future__ import annotations
 -
@@ -185,6 +185,9 @@
 +        self.replaced: list[tuple[torch.fx.Node, torch.fx.Node]] = []
 +
 +    def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
++        # Callback inversion of control is outside the working specification (phase: compile-time PassBase dispatch).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        for module in gm.modules():
 +            if not isinstance(module, torch.fx.GraphModule):
 +                continue

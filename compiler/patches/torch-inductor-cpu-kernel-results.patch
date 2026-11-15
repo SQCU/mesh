@@ -93,7 +93,7 @@
 +CppScheduling.kernel_group_cls = mesh_callbacks_are_outside_spec(KernelGroup)
 --- a/torch/_inductor/codegen/cpp_template_kernel.py
 +++ b/torch/_inductor/codegen/cpp_template_kernel.py
-@@ -41,16 +41,50 @@
+@@ -41,16 +41,53 @@
  
  
  class CppTemplateKernel(CppKernel):
@@ -120,6 +120,9 @@
 +        self.epilogues = []
  
      def render(self, template, **kwargs):
++        # Callback inversion of control is outside the working specification (phase: compile-time selected template render callback).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 -        return PartialRender(
 -            template.render(kernel=self, **kwargs), self.render_hooks
 -        ).finalize_all()
@@ -147,7 +150,17 @@
  
      def def_kernel(
          self,
-@@ -100,18 +134,58 @@
+@@ -62,6 +99,9 @@
+         placeholder: str = "<DEF_KERNEL>",
+     ) -> str:
++        # Callback inversion of control is outside the working specification (phase: compile-time Jinja template method callback).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
+         if len(function_name) == 0:
+             function_name = str(self.kernel_name)
+         for name, inp in inputs.items():
+             if inp is not None:
+@@ -100,18 +140,61 @@
          for sizevar in sizevars:
              self.args.sizevars[sizevar] = f"k{sizevar}"
  
@@ -198,6 +211,9 @@
 +        return placeholder
 +
 +    def def_body(self):
++        # Callback inversion of control is outside the working specification (phase: compile-time Jinja template method callback).
++        # Runtime callback overhead is inadmissible in performance-critical code.
++        mesh_callbacks_are_outside_spec
 +        # compiler/patches/torch-inductor-cpu-kernel-results.patch: the opening of the body of the function the last
 +        # def_kernel declared (`declaring`), a whole line of its template (each CPU template's body's first): empty as
 +        # produced (its line removed, PartialRender's empty result), its entry's composition.enter in a composed pass
@@ -218,7 +234,7 @@
 +        # Runtime callback overhead is inadmissible in performance-critical code.
          if placeholder in self.render_hooks:
              raise AssertionError(f"placeholder already registered: {placeholder}")
-@@ -273,9 +347,12 @@
+@@ -273,9 +356,12 @@
                  f"expected {len(var_sizes[0])} offsets, got {len(offsets)}"
              )
          output_index = dst.get_layout().make_indexer()([*var_ranges.keys()])
@@ -233,7 +249,7 @@
          bodies = []
          var_sizes_list = []
          for i, node in enumerate(nodes):
-@@ -324,6 +401,18 @@
+@@ -324,6 +410,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])
@@ -252,7 +268,7 @@
          return kernel_group.loops_code.getvalue()
  
      def store_grouped_gemm_pointwise_nodes(
-@@ -345,9 +434,12 @@
+@@ -345,9 +443,12 @@
          if not all(len(offset) == len(var_sizes[0]) for offset in offsets):
              raise AssertionError(f"expected all offsets of length {len(var_sizes[0])}")
          output_index = ref_dst.get_layout().make_indexer()([*var_ranges.keys()])
@@ -267,7 +283,7 @@
          bodies = []
          var_sizes_list = []
          for i, node in enumerate(nodes):
-@@ -396,6 +488,18 @@
+@@ -396,6 +497,18 @@
              cpp_kernel_proxy.loop_nest, "max_parallel_depth", max_parallel_depth
          ):
              kernel_group.finalize_kernel(cpp_kernel_proxy, [])

@@ -494,3 +494,30 @@ Final five-file SHA256:
 - `operations.py` `9d8334b01b162a1a1de8a287aab8ae538e1d87ecae1c6d43a6c72aa80f10167e`
 - `placement.py` `b26ffee528195f46ac0df6f7e5f046e03535ce6f8b83e3b1af4893328b65aa49`
 - `schedule.py` `ba70062d147bc3850841ea25d213b7aab8dc863207b7e6acd677278085c6b9d4`
+
+### Direct Codex completion of the held compiler patch sweep
+
+The operator explicitly authorized Codex subagents to finish the safeguard-stopped slice. Codex implemented this continuation directly;66 was not invoked, retried or replaced with another Claude session. Original producer/emitter work remains paused. This continuation adds23 marker occurrences in three maintained patches, bringing the patch count from38 to61 across the same nine patches. The three previously blocked omissions are now marked.
+
+| Callback source | Original caller evidence and disposition |
+|---|---|
+| lowering.py `invoke_subgraph` | Original `@register_lowering(torch.ops.higher_order.invoke_subgraph, ...)` registers this function for compile-time HOP lowering. A bare marker now precedes the unchanged body. |
+| wrapper_fxir.py `FxConverter._generate_kernel_call` / `_generate_kernel_definition` | Original `KernelCallLine.codegen_fx` / `KernelDefinitionLine.codegen_fx` return these bound methods; `FxConverter.generate` invokes `line.codegen_fx(self)(line)`. Both returned callback bodies now begin with the marker. |
+| collect_tracepoints_pass.py `CollectTracepointsPass.call` | Original `PassBase.__call__` invokes the subclass's `call` between `requires` and `ensures` (pass_base.py40–46). The override now fails explicitly at entry during compile-time collection. |
+| output_code.py `LoweredAOTI.post_compile` / `set_triton_bundle` | Original compile_fx calls these lifecycle methods on the returned `OutputCode` (`post_compile` at1282; `set_triton_bundle` at1121/1190 in the installed source). Both override bodies now contain markers; their original no-op bodies remain. |
+| New WrapperLine implementations | Original wrapper `_generate`/`set_writeline` delegates terminal printing to retained `line.codegen`; `FxConverter.generate` delegates conversion through `line.codegen_fx`. The three new WhileLoopLine/InvokeSubgraphLine/AssertScalarLine `codegen` bodies and four added `codegen_fx` implementations now contain markers. Their returned conversion callbacks were already marked, apart from the two omissions fixed above. |
+| cpp_template_kernel.py `CppTemplateKernel.render`, `def_kernel`, `def_body` | Original cpp_template.py105 passes `kernel.render` through `functools.partial` as the selected template renderer. Original template source calls `kernel.def_kernel`, and the maintained CPU patch introduces Jinja calls to `kernel.def_body`; Jinja receives `kernel=self`. These three method callbacks now begin with markers. Existing `render_hooks` registrations, hook bodies and the complete hook invocation in `printed` were already marked. |
+| `_emission_context.entered` exit registrations | CPython3.12 contextlib.py511–527 explicitly obtains each supplied context's `__exit__` and registers it with `_push_cm_exit`. All seven added `stack.enter_context` operands now have unresolved wrappers and compile-time exit-registration comments. The owned contextmanager generator bodies were already marked. |
+
+The previously uncertain operation-identity cases are resolved separately. `SelectedKernelCall` is supplied as a represented FX `call_function` target, not as a callback registration in that path. Its `__call__` forwards the HOP operation dispatch; the actual registered fake implementation already contains a marker. Original `HigherOrderOperator.fallthrough` only removes a dispatch key from `non_fallthrough_keys`, and `has_side_effect` only adds the operation identity to `_side_effectful_functions`; neither invokes or stores a callback for later invocation. No marker was added solely because these operands are callable.
+
+Direct local helpers such as `_transfer_matched`, the Metal declaration helper, `aot_compiled`, `_compile_consts`, `_get_file_checksum` and the selected-call value helper remain direct calls. Template epilogue helpers directly invoked by their containing methods are distinguished from the actual Jinja/deferred-render callbacks above. Existing callback factories, registry entries, returned hooks, default factories and explicit invocation operands in the rest of the maintained patch slice remain marked. The source-based review found no remaining known omitted callback among the maintained additions/modified callback implementations; this is not a sweep of every unchanged callback in installed Torch/CoreML, and no compiler-native files were found beneath compiler/.
+
+Verification was source-only. For all20 upstream files touched by the three changed patches, isolated Git indexes projected both the preceding committed patches and this continuation over the corresponding original source. Every projected file parsed; removing only unresolved marker statements/wrappers produced exactly the same AST in both versions. Reverse application restored each exact base index blob, and installed source bytes remained unchanged. Patch structure and scoped whitespace checks passed. An initial structure check exposed a recount of unprefixed blank context lines in the tracepoint patch; its hunk counts were corrected before the final20-file pass. No installed patch, Torch/Mesh import, native build, callback or workload was executed, and no source copy/backup was retained outside commit history.
+
+Final patch SHA256:
+- `torch-inductor-aot-lowered-result.patch` `28042411485fc8402d8c5d1481d8ab6c96bab34c763ecf3d784b9ad1fbb5669b`
+- `torch-export-tracepoint-calls.patch` `96b8edfee0f2cfd0bfc7a25daa66445b6b922c69ce66ab6dd08f1b607d663535`
+- `torch-inductor-cpu-kernel-results.patch` `9d65fc794246cc7f01c358feda3ef57899dacbab9f1fd86bafa0eccff82a0b53`
+
+The deliberate failures remain deliberate. Callback sweep completion for this slice does not repair or accept the paused producer/emitter implementations, establish numerical behavior, or authorize resuming the held Claude workers.
