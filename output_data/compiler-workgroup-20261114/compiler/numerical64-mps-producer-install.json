@@ -1,0 +1,11 @@
+{
+  "source": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/mps.py",
+  "before_sha256": "d9734c7abceef021a73ab5ba02862d83907b142fac0f0aca3bb902cabfa4f774",
+  "after_sha256": "0266b4cd4723ba7f7041e7cad1b4bfca577ca904c852b5d6692a1dc7d4c37ef1",
+  "patch_sha256": "079fd01ac9d68b77ce6df748903cbdb5df8839128b29b862d23ac963b82acd31",
+  "patch_fuzz": 0,
+  "ast": "PASS",
+  "call_owner": "(kernel, launch)",
+  "imports": false,
+  "target_execution": false
+}

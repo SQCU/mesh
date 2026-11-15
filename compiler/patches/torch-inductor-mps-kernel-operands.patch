@@ -1,0 +1,129 @@
+--- a/torch/_inductor/codegen/mps.py
++++ b/torch/_inductor/codegen/mps.py
+@@ -965,13 +965,12 @@
+     def codegen_kernel(self, name: str = "generated_kernel") -> str:
+         """Called at the end to generate a final kernel string"""
+         self.codegen_body()
+-        code = IndentedBuffer()
++        # compiler/patches/torch-inductor-mps-kernel-operands.patch: the Metal source is its own produced buffer,
++        # which the wrapper's opening and closing lines then enclose
++        wrapped, code = IndentedBuffer(), IndentedBuffer()
+         fn_name = name
+-
+-        if V.graph.cpp_wrapper:
+-            code.writeline('(R"MTL(')
+-        else:
+-            code.writeline("compile_mps_shader('''")
++        # the source's own entry function name, apart from the launch name MetalScheduling.define_kernel assigns
++        self.metal_entry = fn_name
+ 
+         idx_vars = self.active_range_trees()
+         with code.indent():
+@@ -1062,12 +1061,12 @@
+                 code.splice(self.body)
+             code.writeline("}")
+ 
+-        if V.graph.cpp_wrapper:
+-            code.writeline(')MTL");')
+-        else:
+-            code.writeline("''')")
+-
+-        return code.getvalue()
++        self.metal_source = code.getvalue()
++        wrapped.writeline('(R"MTL(' if V.graph.cpp_wrapper else "compile_mps_shader('''")
++        for line in self.metal_source.splitlines():
++            wrapped.writeline(line)
++        wrapped.writeline(')MTL");' if V.graph.cpp_wrapper else "''')")
++        return wrapped.getvalue()
+ 
+     def call_kernel(
+         self, name: str, node: Any = None, deallocate_ws: bool = True
+@@ -1087,6 +1086,7 @@
+ 
+         args = [*self.args.output_buffers.keys(), *self.args.input_buffers.keys()]
+         args = [arg for arg in args if arg not in self.removed_buffers]
++        values = [*args, *self.args.sizevars]
+         args += [str(v) for v in self.args.sizevars]
+         arg_types = [arg_name_to_type[arg] for arg in args]
+ 
+@@ -1098,9 +1098,11 @@
+             elif isinstance(tree.numel, sympy.Symbol):
+                 expr = tree.numel
+             else:
+-                expr = V.graph.wrapper_code.generate_numel_expr(name, tree).inner
++                # the SymbolicCallArg itself (its symbol and the expression it stands for); its str its symbol's
++                expr = V.graph.wrapper_code.generate_numel_expr(name, tree)
+ 
+             if not tree.is_reduction or self.inside_reduction:
++                values.append(expr)
+                 args.append(str(expr))
+                 arg_types.append(int)
+ 
+@@ -1115,15 +1117,24 @@
+ 
+         # For reduction kernels, limit the maximum size over reduction dimensions to
+         # a maximum threadgroup size
+-        if len(self.active_range_trees()) > 0:
+-            threads = [
+-                expr_printer(
+-                    Min(v.numel, self.max_threadgroup_size)  # type: ignore[misc]
+-                    if v.is_reduction
+-                    else v.numel
+-                )
+-                for v in self.active_range_trees()
++        # compiler/patches/torch-inductor-mps-kernel-operands.patch: the launch's grid and threadgroup as values,
++        # which the formatting below consumes
++        active = self.active_range_trees()
++        grid = [
++            Min(v.numel, self.max_threadgroup_size) if v.is_reduction else v.numel  # type: ignore[misc]
++            for v in active
++        ]
++        group = (
++            [
++                Min(v.numel, self.max_threadgroup_size) if v.is_reduction else sympy.Integer(1)  # type: ignore[misc]
++                for v in active
+             ]
++            if self.inside_reduction
++            else None
++        )
++        typed = (list(values), list(arg_types))
++        if len(active) > 0:
++            threads = [expr_printer(t) for t in grid]
+ 
+             args.append(format_threads(threads, "threads"))
+             arg_types.append(list)
+@@ -1132,12 +1143,7 @@
+                 raise RuntimeError("We should always have threads?")
+ 
+         if self.inside_reduction:
+-            threads = [
+-                expr_printer(Min(v.numel, self.max_threadgroup_size))  # type: ignore[misc]
+-                if v.is_reduction
+-                else "1"
+-                for v in self.active_range_trees()
+-            ]
++            threads = [expr_printer(t) for t in group]
+             args.append(format_threads(threads, "group_size"))
+             arg_types.append(list)
+         else:
+@@ -1149,11 +1155,17 @@
+ 
+         # Add error buffer index if error reporting is used
+         # TODO(malfet) Figure out how to do it for aoti
++        error = None
+         if "error" in self.headers and not V.graph.cpp_wrapper:
+-            args.append(
+-                f"error_buf_idx={len([arg for arg in args if arg is not None and '=' not in arg])}"
+-            )
++            # its index the count of the ordered typed arguments, each positional
++            error = len(typed[0])
++            args.append(f"error_buf_idx={error}")
+ 
++        # compiler/patches/torch-inductor-mps-kernel-operands.patch: each call's record (the kernel, its launch as
++        # produced: kernel name, ordered argument values and types, grid, threadgroup and error buffer index) in
++        # call order, the launch held by the record rather than by the kernel
++        launch = (name, *typed, grid if active else None, group, error)
++        wrapper.__dict__.setdefault("launched_kernels", []).append((self, launch))
+         wrapper.generate_kernel_call(
+             name,
+             args,

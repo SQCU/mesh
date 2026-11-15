@@ -344,3 +344,30 @@ lowering are `compiler/mesh_compiler/operations.py`'s (`LSTSQ_FIXED`).
   strict default: the fixed three-result product, original source assertion and original draw site survive. Source
   evidence is `/Users/mdot/metal-microbench/output_data/compiler-workgroup-20261114/frontends/torch/observe/aot-alias-strict-contracts.json`.
   This is capture evidence; numerical execution follows the matching native release.
+
+## `torch-inductor-mps-kernel-operands.patch`
+
+Mechanism: installed torch 2.14.0 (`/Users/mdot/.venv-mesh-uv`), `torch/_inductor/codegen/mps.py` `MetalKernel`.
+Installed source-only with fuzz 0; AST passed. The before/after SHA256 values are
+`d9734c7abceef021a73ab5ba02862d83907b142fac0f0aca3bb902cabfa4f774` and
+`0266b4cd4723ba7f7041e7cad1b4bfca577ca904c852b5d6692a1dc7d4c37ef1`.
+The exact manifest is `output_data/compiler-workgroup-20261114/compiler/numerical64-mps-producer-install.json`.
+This records the producer interface; module/native consumer replacement and execution remain separate work.
+
+### What it changes
+
+- **`codegen_kernel`** builds the Metal source in its own `IndentedBuffer` and keeps it as `self.metal_source`. The
+  existing wrapper (`compile_mps_shader('''...''')`, or the C++ raw string) then encloses that same value, so the
+  wrapper's text is unchanged. It keeps the source's own entry function name, its `name` argument, as
+  `self.metal_entry`. That is apart from the launch name `MetalScheduling.define_kernel` assigns
+  (`generated_kernel_N`, which only the wrapper header's copy of the source takes).
+- **`call_kernel`** produces the launch once as values. `grid` and `group` are the active range trees' numels (a
+  reduction tree's capped at `max_threadgroup_size`; the threadgroup only when the kernel reduces), and its existing
+  formatting prints them. It keeps `self.launch = (name, values, types, grid, group, error)`:
+  - `values` and `types` are the ordered arguments before the grid entries: output then input buffer names (less
+    `removed_buffers`), the sizevars and the dynamic numels, each with its `python_argdefs` type. A dynamic numel is
+    its `tree.numel` Symbol, or else the `SymbolicCallArg` that `generate_numel_expr` returns (its `inner` symbol and
+    its `inner_expr`); its formatted argument is `str(arg)`, which is its `inner`, as before;
+  - `error` is the error buffer's argument index, or None. It is the count of those ordered typed arguments, each one
+    positional, and the formatted `error_buf_idx=` argument prints it.
+  It appends the kernel to `wrapper.launched_kernels` in call order.
