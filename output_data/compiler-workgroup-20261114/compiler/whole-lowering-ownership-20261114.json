@@ -849,6 +849,78 @@
         }
       ],
       "execution_scope": "Same preserved materialized-output command, unchanged hashes per run; no numerical execution or save/load reached. Retry5 queued for coherent whole family. This account performs source reads only."
+    },
+    {
+      "date": "2026-11-15T09:20:28.176549+00:00",
+      "mesh_revision": "e7c09289600bfe49e3e1767d0280a1153465eec7",
+      "scope": "Same whole compiler ownership account; source-review continuation, not acceptance",
+      "commits": {
+        "literal_method_stages": "5fa30b55",
+        "intrinsic_and_identifier": "6d56f939",
+        "installation": "2e8bc77a"
+      },
+      "files": [
+        {
+          "path": "compiler/mesh_compiler/lower_inductor.py",
+          "sha256": "942d70f971bdba4ef207c4fef41e14973b86375f1471ed5c4ac0854fb5a50cca"
+        },
+        {
+          "path": "compiler/mesh_compiler/lower_metal.py",
+          "sha256": "cc4d3dfbac0887c738d879ae258595323b11c39fda11bd24d3d2e82e2984d38b"
+        },
+        {
+          "path": "compiler/mesh_compiler/metal.py",
+          "sha256": "b356eed5e95f087a272323143601e32bc4180730d1e8f743f6e959567fb9bce6"
+        },
+        {
+          "path": "compiler/mesh_compiler/operations.py",
+          "sha256": "1dd7cf3b48083c3011a297633347f68324dc2d3a5c0d3467c6a13a8bdc4c760f"
+        },
+        {
+          "path": "compiler/patches/torch-inductor-aot-lowered-result.patch",
+          "sha256": "a75eb0b864bfc93d1bc296fb85df09385e5cdb6dca78646a8528d142397cfaae"
+        },
+        {
+          "path": "compiler/patches/torch-inductor-cpp-build-result.patch",
+          "sha256": "05e58a513a343de596d38da7e1de421116c73c8fcea652719c39351bcab1932c"
+        }
+      ],
+      "countersteering": [
+        "Reject new per-target wrapper walk, scalar boxing and invented carried storage/copyback",
+        "Reject meta-tensor declared-feature roundtrip",
+        "Original invocation action/product/file-role/directory/link ownership must replace prefix assumptions",
+        "Reject handwritten float rounding and duplicate static query policy; complete original query/callee handoff still open"
+      ],
+      "native_build": "138 source97492e29, manifest native138-build-result4.json",
+      "runtime": "No new import or execution; public retry5 remains held",
+      "workers": {
+        "68": {
+          "pid": 42563,
+          "exec": 56241
+        },
+        "66": {
+          "pid": 81416,
+          "exec": 25826
+        },
+        "67": {
+          "pid": 56459,
+          "exec": 88809
+        }
+      },
+      "consumer_hold": {
+        "lower_metal_blob": "a4ba2940c957c18e471652c05c01cd92f87dcd5d",
+        "metal_blob": "8b6d584c2d6db3af15722efe2a11a739ab6e730e",
+        "ast_pyflakes_diff": "PASS",
+        "accepted": false,
+        "native138_exact_mirror_sha256": "b356eed5e95f087a272323143601e32bc4180730d1e8f743f6e959567fb9bce6",
+        "remaining": [
+          "partial wrapper target walk",
+          "runtime scalar/general extern/control gaps",
+          "invented repeat/switch storage copies",
+          "unproved EP-state positional zip",
+          "missing actual declared-feature projection"
+        ]
+      }
     }
   ]
 }

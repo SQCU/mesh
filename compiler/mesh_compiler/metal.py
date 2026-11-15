@@ -387,31 +387,40 @@ class UpstreamAccess(C.Structure):
                 ('hi', C.c_int64)]
 
 
-# struct metal_ir_upstream: `domain` the kernel's index domain (mesh-graph.h struct mesh_graph_domain, in the
+# struct metal_ir_upstream (metal-microbench metal_ir.h as of 3330ed9b and its working binding_group; the next matched
+# build's, not native137's): `domain` the kernel's index domain (mesh-graph.h struct mesh_graph_domain, in the
 # compilation's one analysis context; native retains it), `access` its accesses, `work` its semantic work (NULL
-# unknown); `module`, `entry` and `binding` a typed body's original parsed module (a WGPUShaderModule), its entry and
-# each argument's @binding, `target` its original target options (tint::msl::writer::Options), each NULL for an
-# Inductor kernel, whose domain, accesses and terminal emission are its own
+# unknown); `unit` its producer's compilation unit (0 none); `module`, `entry`, `binding` and `binding_group` a typed
+# body's original parsed module (a WGPUShaderModule), its entry and each argument's @binding and @group, `target` its
+# original target options (tint::msl::writer::Options), `image` the LC_UUID of the loaded image its code is relative
+# to: each NULL for an Inductor kernel, whose domain, accesses and terminal emission are its own
 class Upstream(C.Structure):
     _fields_ = [(name, mesh.U) for name in ('place', 'arguments', 'accesses', 'sources')] + [
         ('argument', C.POINTER(UpstreamArgument)), ('domain', C.c_void_p), ('access', C.POINTER(UpstreamAccess)),
         ('source', C.POINTER(mesh.Q)), ('work', C.POINTER(mesh_graph.Work)), ('identity', mesh.Q),
-        ('grid', mesh.U * 3), ('group', mesh.U * 3), ('grouped', mesh.U), ('padding', mesh.U),
-        ('module', C.c_void_p), ('entry', C.c_char_p), ('binding', C.POINTER(mesh.U)), ('target', C.c_void_p)]
+        ('grid', mesh.U * 3), ('group', mesh.U * 3), ('grouped', mesh.U), ('unit', mesh.U),
+        ('module', C.c_void_p), ('entry', C.c_char_p), ('binding', C.POINTER(mesh.U)), ('target', C.c_void_p),
+        ('image', C.POINTER(C.c_uint8)), ('binding_group', C.POINTER(mesh.U))]
 
 
-# struct metal_ir_upstream_feature and struct metal_ir_upstream_neural (metal-microbench 02f7e07e, 64 bytes): a Neural
-# Engine body's original Core ML program, `package` the directory its MLModel's own save wrote, `function` its
-# function name, `compute_units` the conversion's selected units by name (ct.ComputeUnit .name), each model input,
-# output and state (MLState) feature by name bound to its metal_ir_upstream argument
+# struct metal_ir_upstream_feature, struct metal_ir_upstream_state and struct metal_ir_upstream_neural
+# (metal-microbench 51988113: 16, 16 and 64 bytes): a Neural Engine body's original Core ML program, `package` the
+# directory its MLModel's own save wrote, `function` its function name, `compute_units` the conversion's selected units
+# by name (ct.ComputeUnit .name), each model input and output feature by name bound to its metal_ir_upstream argument,
+# each state (MLState) by name to the argument its read (read_state) views and the argument its update
+# (coreml_update_state) writes, the same argument where the update is in place
 class UpstreamFeature(C.Structure):
     _fields_ = [('name', C.c_char_p), ('argument', mesh.U), ('padding', mesh.U)]
+
+
+class UpstreamState(C.Structure):
+    _fields_ = [('name', C.c_char_p), ('read', mesh.U), ('written', mesh.U)]
 
 
 class UpstreamNeural(C.Structure):
     _fields_ = [('package', C.c_char_p), ('function', C.c_char_p), ('compute_units', C.c_char_p)] + [
         (name, mesh.U) for name in ('inputs', 'outputs', 'states', 'padding')] + [
-        (name, C.POINTER(UpstreamFeature)) for name in ('input', 'output', 'state')]
+        (name, C.POINTER(UpstreamFeature)) for name in ('input', 'output')] + [('state', C.POINTER(UpstreamState))]
 
 
 # rdma/mesh-graph.h MESH_GRAPH_DOMAIN_ROOT .. _LOOP and struct mesh_graph_domain_dim: one dimension of a kernel's index
@@ -493,10 +502,15 @@ class UpstreamParameter(C.Structure):
     _fields_ = [('type', C.c_char_p), ('slot', mesh.U), ('pointer', mesh.U)]
 
 
+# struct metal_ir_upstream_emission (metal-microbench metal_ir.h 3330ed9b `language`, its working `environment` and
+# `directory`; the next matched build's): `language` a CPU source's language, `environment` its compile command's
+# whole environment ("NAME=value" each) and `directory` its working directory, NULL for a Metal pass
 class UpstreamEmission(C.Structure):
     _fields_ = [('source', C.c_char_p), ('entry', C.c_char_p), ('parameter', C.POINTER(UpstreamParameter)),
                 ('compile', C.POINTER(C.c_char_p)), ('link', C.POINTER(C.c_char_p)), ('bytes', mesh.Q),
-                ('parameters', mesh.U), ('compiles', mesh.U), ('links', mesh.U)]
+                ('parameters', mesh.U), ('compiles', mesh.U), ('links', mesh.U), ('language', C.c_char_p),
+                ('environment', C.POINTER(C.c_char_p)), ('directory', C.c_char_p), ('environments', mesh.U),
+                ('padding', mesh.U)]
 
 
 class UpstreamConfiguration(C.Structure):
@@ -780,14 +794,15 @@ def _graph():
 
 
 # metal_ir_upstream_neural, after metal_ir_construct: Neural Engine operation `op`'s original Core ML program, its
-# saved package directory `package`, function `function` and selected `units` (a ct.ComputeUnit's name); `inputs`,
-# `outputs` and `states` each (feature name, argument index)
+# saved package directory `package`, function `function` and selected `units` (a ct.ComputeUnit's name); `inputs`
+# and `outputs` each (feature name, argument index), `states` each (state name, read argument, written argument)
 def _neural(program, op, package, function, units, inputs, outputs, states):
     error = C.create_string_buffer(4096)
     features = [_array(UpstreamFeature, [UpstreamFeature(name.encode(), argument, 0) for name, argument in made])
-                for made in (inputs, outputs, states)]
+                for made in (inputs, outputs)]
+    state = _array(UpstreamState, [UpstreamState(name.encode(), read, written) for name, read, written in states])
     made = UpstreamNeural(str(package).encode(), function.encode(), units.encode(), len(inputs), len(outputs),
-                          len(states), 0, *features)
+                          len(states), 0, *features, state)
     status = _upstream().metal_ir_upstream_neural(program, op, C.byref(made), error, len(error))
     if status:
         raise OSError(status, 'operation %d: its Core ML program (metal_ir_upstream_neural): %s'
@@ -873,15 +888,19 @@ def _callables(program, op, numeric):
 
 # metal_ir_upstream_emitted: pass `number` of produced kernel `op`, its terminal emission as its final emitter made it
 # (lower_inductor.py Emission: source, entry, compile, link; a CPU pass's `parameters`, each Parameter(type, slot,
-# pointer) as that emitter declared it: struct metal_ir_upstream_parameter)
+# pointer) as that emitter declared it: struct metal_ir_upstream_parameter; its `language`, `environment` and
+# `directory` as its producer declared its compile, None and () for a Metal pass)
 def _emitted(program, op, number, emission):
     lib, error = _upstream(), C.create_string_buffer(4096)
     source = emission.source.encode() if isinstance(emission.source, str) else bytes(emission.source)
-    texts = [_array(C.c_char_p, [t.encode() for t in texts]) for texts in (emission.compile, emission.link)]
+    texts = [_array(C.c_char_p, [t.encode() for t in texts])
+             for texts in (emission.compile, emission.link, emission.environment)]
     parameters = [UpstreamParameter(p.type.encode(), p.slot, p.pointer) for p in emission.parameters]
     made = UpstreamEmission(source, emission.entry.encode(), _array(UpstreamParameter, parameters) if parameters
                             else None, texts[0], texts[1], len(source), len(parameters), len(emission.compile),
-                            len(emission.link))
+                            len(emission.link), None if emission.language is None else emission.language.encode(),
+                            texts[2], None if emission.directory is None else str(emission.directory).encode(),
+                            len(emission.environment), 0)
     status = lib.metal_ir_upstream_emitted(program, op, number, C.byref(made), error, len(error))
     if status:
         raise OSError(status, 'operation %d pass %d: %s' % (op, number, error.value.decode()))
@@ -969,7 +988,8 @@ class _Builder:
                                                   for kind, value, access in arguments]),
                         domain, _array(UpstreamAccess, accesses), _array(mesh.Q, [self.base | s for s in sources]),
                         None if work is None else C.pointer(work), self.identity, (mesh.U * 3)(*grid),
-                        (mesh.U * 3)(*(group or (0, 0, 0))), int(group is not None), 0, None, None, None, None)
+                        (mesh.U * 3)(*(group or (0, 0, 0))), int(group is not None), 0, None, None, None, None,
+                        None, None)
         first = lib.metal_ir_operations(self.p)
         operation = lib.metal_ir_upstream(self.p, C.byref(body))
         if operation == NONE:
