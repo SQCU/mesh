@@ -470,5 +470,385 @@
       "sha256": "592dfcc496f86bb4432ac811806bc3733aa355d68b3f05770d4294fcf9a1b68a",
       "lines": 144
     }
-  }
+  },
+  "updates": [
+    {
+      "date": "2026-11-15",
+      "mesh_revision": "139dfe1d794ff74cd15214fccc78eda58eafff4a",
+      "source_status": " M compiler/mesh_compiler/archive.py\n M compiler/mesh_compiler/export.py\n M compiler/mesh_compiler/ir.py\n M output_data/compiler-workgroup-20261114/executor/native131.status.md\n M output_data/compiler-workgroup-20261114/frontends/whole-composition-ownership-20261114.md\n M rdma/mesh-graph.c\n M rdma/mesh-graph.h\n",
+      "scope": "Current semantic-owner reconciliation of the same affected compiler dependency flow; historical 2026-11-14 inventory retained above. No full-domain acceptance.",
+      "files": [
+        {
+          "path": "compiler/mesh_compiler/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "lines": 0
+        },
+        {
+          "path": "compiler/mesh_compiler/archive.py",
+          "sha256": "313c7b5ea6e987b02aea57b8ad33d02e4c90c87b007da07e7e2e1fbe70e43dac",
+          "lines": 872
+        },
+        {
+          "path": "compiler/mesh_compiler/bridge.py",
+          "sha256": "16223ecb319ef03db9a658cd03179f997e789d5f9bc767a629fe8236684cf913",
+          "lines": 137
+        },
+        {
+          "path": "compiler/mesh_compiler/decompose.py",
+          "sha256": "e2af12a3d1ea335adc065f6e795fb9b9073975e58c77d3c7e1350b856de313bc",
+          "lines": 569
+        },
+        {
+          "path": "compiler/mesh_compiler/devices.py",
+          "sha256": "2cdb7363ad34790504be83f75291958cc25d22823a17fdc0d21497d0ad13cedd",
+          "lines": 79
+        },
+        {
+          "path": "compiler/mesh_compiler/driver.py",
+          "sha256": "65b00fca85c194ee4a99481a082e4ec5cd3e87feef9ff83c25579193a74228af",
+          "lines": 134
+        },
+        {
+          "path": "compiler/mesh_compiler/export.py",
+          "sha256": "054df96b697de81a62f1eff78bf57b07dc4cbb4550f252257f598f7462d76203",
+          "lines": 640
+        },
+        {
+          "path": "compiler/mesh_compiler/ir.py",
+          "sha256": "1b709517af61b3fe30bad87034d53de2af67335a4511794623d77551d2c333dc",
+          "lines": 361
+        },
+        {
+          "path": "compiler/mesh_compiler/lower_coreml.py",
+          "sha256": "fab5d0848889176c9103d7aeb5e978acea02d0df30e30becbe80158c8cd35a06",
+          "lines": 339
+        },
+        {
+          "path": "compiler/mesh_compiler/lower_inductor.py",
+          "sha256": "ecf493fe0b6696c062b6f6904f242a1cc5973ffc987f54cc257360826462995c",
+          "lines": 1128
+        },
+        {
+          "path": "compiler/mesh_compiler/lower_metal.py",
+          "sha256": "12a316d531d9e5e16196c6cb703c332e4a2e9b52cff5f9f4a2aafc580bf55389",
+          "lines": 1949
+        },
+        {
+          "path": "compiler/mesh_compiler/metal.py",
+          "sha256": "c917f165de83ecb545be36b522d3714e6f69418b82c142142c86ab0208e8a655",
+          "lines": 1061
+        },
+        {
+          "path": "compiler/mesh_compiler/native.py",
+          "sha256": "909a832ada217261ae84bcfbaf55eb0a3382f8aca5f41924840c3ff32a70eb51",
+          "lines": 1624
+        },
+        {
+          "path": "compiler/mesh_compiler/operations.py",
+          "sha256": "66c2c12554c8a530025b723d8041d73c98d025bf6a32b39169620c438277c6cd",
+          "lines": 3351
+        },
+        {
+          "path": "compiler/mesh_compiler/placement.py",
+          "sha256": "18ec833bf191184d545c5ab272c42ee80f4e647643468ea437f83e8c548c602e",
+          "lines": 1024
+        },
+        {
+          "path": "compiler/mesh_compiler/runtime.py",
+          "sha256": "5b9b859d08606bfcccf89e3fbb4c2e048ab8d8c5e40a8371a866d056a065db6c",
+          "lines": 92
+        },
+        {
+          "path": "compiler/mesh_compiler/schedule.py",
+          "sha256": "f1e6319017d18796975f31d054ccf7eeaa6a1e17e6b870f02881ca29f3a11e93",
+          "lines": 1323
+        },
+        {
+          "path": "compiler/mesh_compiler/shares.py",
+          "sha256": "4ebb348dfbccf74edeb4749044d3f11331fcd0006a36c465f259eecfde1f9826",
+          "lines": 450
+        },
+        {
+          "path": "compiler/patches/torch-clone-input-fake-mode.patch",
+          "sha256": "7d4cf393e4101f2546b1337eb9aac0ea73fe8270bf79e53553601f6e8a098ce1",
+          "lines": 11
+        },
+        {
+          "path": "compiler/patches/torch-export-alias-metadata.patch",
+          "sha256": "3b78f2a89c92af83fc21a4bb181e58559b304758313fc86940827c46db40cab6",
+          "lines": 46
+        },
+        {
+          "path": "compiler/patches/torch-export-user-input-gradients.patch",
+          "sha256": "da8eb4af7ffcd0df2913565187ffad82e853570993f6897574e6835b414fa5c3",
+          "lines": 11
+        },
+        {
+          "path": "compiler/patches/torch-inductor-alias-mutations.patch",
+          "sha256": "f513553f6bd7c5fee36835fc0bdc71ed832ea58ad66dde847cde42c96151ceb8",
+          "lines": 252
+        },
+        {
+          "path": "compiler/patches/torch-inductor-aot-lowered-result.patch",
+          "sha256": "7f635a66f1a315341dd99195fd15fc1c2321bb85147414d45b50230c5ebf93ec",
+          "lines": 259
+        },
+        {
+          "path": "compiler/patches/torch-inductor-cpu-kernel-results.patch",
+          "sha256": "28f80e53972096f78efd2005952379b7eb697011ee07d3a034fd89fac3c05699",
+          "lines": 24
+        },
+        {
+          "path": "compiler/patches/torch-inductor-graph-lowering-factory.patch",
+          "sha256": "bb0f187b45c826ecfec4d6e82c7a8a91702b3f77e46101b56827cddc5274f48c",
+          "lines": 29
+        },
+        {
+          "path": "compiler/patches/torch-inductor-mps-kernel-operands.patch",
+          "sha256": "079fd01ac9d68b77ce6df748903cbdb5df8839128b29b862d23ac963b82acd31",
+          "lines": 129
+        },
+        {
+          "path": "compiler/patches/torch-inductor-upstream-composition.patch",
+          "sha256": "a08d2ded96ccb7910e7ef24959cc3eade47255ab6b705c9442075091abd87b07",
+          "lines": 252
+        },
+        {
+          "path": "compiler/patches/torch-lstsq-fixed-results.patch",
+          "sha256": "254bc1f4a40f65175fafc8dcf3b3b4bd6ed98b94a1629e77b6aa54d2c9b5d5a8",
+          "lines": 191
+        },
+        {
+          "path": "compiler/patches/README.md",
+          "sha256": "a5da30d1b41591545bce52a1013ae39877cc1b531129a70b65aa4adb1cd6ffaa",
+          "lines": 660
+        }
+      ],
+      "upstream_files": [
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/wrapper.py",
+          "sha256": "5a7a14678343e2d275ed817024f3ac3199e84610ac3ee37b72ff63851585c892"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/wrapper_fxir.py",
+          "sha256": "2d87d9247e23640662bba136c899a274fa278d3c98da96b630810882c3fdaa2a"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp.py",
+          "sha256": "0eb0c1e9348b6b03db3e81d5158e45468be7d1554c6444864e3508fa26b5c7c3"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/cpp_utils.py",
+          "sha256": "8e907c4a725f48a54cce8c2cdc38148b5b915c417a4e8cf5eb055886d0f7029c"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/codegen/mps.py",
+          "sha256": "8bbd0105926cd2e738852a9cb25962ca0745526577ad8da8dd709b894c8884db"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/ir.py",
+          "sha256": "60ad9e8aee38558011efeb7432803402de08bae2911cbb7f3062be247cede6c3"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/graph.py",
+          "sha256": "c9b55b3c5167e89301496d79a8cc33aec467260e90287f81619cbe352ffdd17d"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/scheduler.py",
+          "sha256": "8e3ca0c3717a4f8973c7bfe41cab52cd0dd7154a5401fd8d60e83b935893178c"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/compile_fx.py",
+          "sha256": "97e1a585cd0d0172ea014ff63d33f40d92cb619da608683eeaf15a1a1eceeadf"
+        },
+        {
+          "path": "/Users/mdot/.venv-mesh-uv/lib/python3.12/site-packages/torch/_inductor/output_code.py",
+          "sha256": "10c6bb2bcdab8fc74ec85a76b061fcd4e32d40744bc22c76da4d854396c8aac3"
+        }
+      ],
+      "wrapper_line_classes": [
+        {
+          "name": "EnterSubgraphLine",
+          "line": 569
+        },
+        {
+          "name": "SwitchLine",
+          "line": 585
+        },
+        {
+          "name": "CommentLine",
+          "line": 598
+        },
+        {
+          "name": "DynamicScalarLine",
+          "line": 610
+        },
+        {
+          "name": "AssertScalarLine",
+          "line": 625
+        },
+        {
+          "name": "ExitSubgraphLine",
+          "line": 641
+        },
+        {
+          "name": "EnterDeviceContextManagerLine",
+          "line": 674
+        },
+        {
+          "name": "ExitDeviceContextManagerLine",
+          "line": 722
+        },
+        {
+          "name": "ExternKernelAllocLine",
+          "line": 732
+        },
+        {
+          "name": "ExternKernelOutLine",
+          "line": 746
+        },
+        {
+          "name": "ExternKernelMultiOutLine",
+          "line": 777
+        },
+        {
+          "name": "FreeLine",
+          "line": 801
+        },
+        {
+          "name": "KernelCallLine",
+          "line": 817
+        },
+        {
+          "name": "KernelDefinitionLine",
+          "line": 853
+        },
+        {
+          "name": "MemoryPlanningLine",
+          "line": 875
+        },
+        {
+          "name": "EnterDeviceContextManagerWithStreamInfoLine",
+          "line": 901
+        },
+        {
+          "name": "ExitDeviceContextManagerWithStreamInfoLine",
+          "line": 939
+        },
+        {
+          "name": "EnterCudaStreamContextLine",
+          "line": 955
+        },
+        {
+          "name": "ExitCudaStreamContextLine",
+          "line": 974
+        },
+        {
+          "name": "EnterCudaMemPoolContextLine",
+          "line": 986
+        },
+        {
+          "name": "ExitCudaMemPoolContextLine",
+          "line": 1001
+        },
+        {
+          "name": "AllocateLine",
+          "line": 1049
+        },
+        {
+          "name": "FreeIfNotReusedLine",
+          "line": 1168
+        },
+        {
+          "name": "ReinterpretLine",
+          "line": 1223
+        },
+        {
+          "name": "ReuseLine",
+          "line": 1247
+        },
+        {
+          "name": "NullLine",
+          "line": 1283
+        },
+        {
+          "name": "MultiOutputLine",
+          "line": 1289
+        },
+        {
+          "name": "IndexPutFallbackLine",
+          "line": 1328
+        },
+        {
+          "name": "ScatterFallbackLine",
+          "line": 1352
+        },
+        {
+          "name": "SymbolicCallArgLine",
+          "line": 1382
+        },
+        {
+          "name": "UnbackedSymbolDefsLine",
+          "line": 1395
+        },
+        {
+          "name": "AssertSizeStrideLine",
+          "line": 1411
+        },
+        {
+          "name": "GroupedAssertSizeStrideLine",
+          "line": 1430
+        },
+        {
+          "name": "AssertDivByZeroLine",
+          "line": 1446
+        }
+      ],
+      "workers": {
+        "68": {
+          "uuid": "01ede8e3-b3fd-40cd-8b4c-fd37b3941ffa",
+          "pid": 42563,
+          "exec": 56241
+        },
+        "66": {
+          "uuid": "476e57ac-cf94-49e8-801a-a3ded988dd77",
+          "pid": 81416,
+          "exec": 25826
+        },
+        "67": {
+          "uuid": "211a403e-ed56-4d48-a343-ddc67d416cc4",
+          "pid": 56459,
+          "exec": 88809
+        }
+      },
+      "native_runtime": "fixed137: Metal9a5efe31, Mesh graph e4b765af, manifest output_data/executor/native137-build-result.json in metal-microbench; newer native source not realized for caller",
+      "public_caller_results": [
+        {
+          "attempt": 1,
+          "evidence": "86982ffd",
+          "failure": "Import cycle before capture/native",
+          "correction": "8385bd92"
+        },
+        {
+          "attempt": 2,
+          "evidence": "3c178d98",
+          "failure": "Original provenance string lacked typed comment classification",
+          "correction": "de53fe2e/82295df7/f47fa9d8"
+        },
+        {
+          "attempt": 3,
+          "evidence": "65694d88",
+          "failure": "Single Tensor FallbackKernel mistaken for multi-output child list",
+          "correction": "a0f5d231"
+        },
+        {
+          "attempt": 4,
+          "evidence": "7b4a8708",
+          "failure": "Original UnbackedSymbolDefsLine empty binding result lacked whole-family consumer",
+          "correction": "Whole WrapperLine family producer/consumer active; no blanket inert classification"
+        }
+      ],
+      "execution_scope": "Same preserved materialized-output command, unchanged hashes per run; no numerical execution or save/load reached. Retry5 queued for coherent whole family. This account performs source reads only."
+    }
+  ]
 }
