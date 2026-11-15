@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor
+from torch._export.passes.collect_tracepoints_pass import CollectTracepointsPass
 from torch._functorch._aot_autograd.schemas import JointWithDescriptors
 from torch._guards import detect_fake_mode
 from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
@@ -59,9 +60,9 @@ def channel_of(node):
 # "Numerical lowerer boundary"; torch 2.14.0 torch/_functorch/aot_autograd.py aot_export_joint_with_descriptors and
 # torch/_functorch/_aot_autograd/schemas.py JointWithDescriptors, AOTState, AOTGraphCapture
 # (compiler/patches/torch-aot-joint-params-buffers.patch); torch/export/_trace.py _export_to_torch_ir and
-# _get_param_buffer_mapping, _make_module_call_signatures and _get_module_call_graph; torch/_export/wrappers.py
-# _wrap_submodules and _export_tracepoint; torch/_dynamo/functional_export.py meta["module_call_specs"];
-# torch/_export/passes/collect_tracepoints_pass.py CollectTracepointsPass specs and replaced
+# _get_param_buffer_mapping and _get_module_call_graph; torch/_export/wrappers.py _wrap_submodules and
+# _export_tracepoint; torch/_dynamo/functional_export.py meta["module_call_specs"];
+# torch/_export/passes/collect_tracepoints_pass.py CollectTracepointsPass
 # (compiler/patches/torch-export-tracepoint-calls.patch); compiler/mesh_compiler/export.py export
 @dataclass
 class Exported:
@@ -74,9 +75,7 @@ class Exported:
     loss: object
     functions: object
     module_call_specs: dict
-    module_call_signatures: dict
-    replaced: list
-    markers: list
+    collected: CollectTracepointsPass
 
 
 # torch 2.14.0 torch/export/graph_signature.py OutputKind: the outputs a program returns to its caller, in output order

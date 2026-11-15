@@ -7,7 +7,7 @@ from torch._export.passes.collect_tracepoints_pass import CollectTracepointsPass
 from torch._export.wrappers import _wrap_submodules
 from torch._functorch.aot_autograd import aot_export_joint_with_descriptors
 from torch.export._trace import (_export_to_torch_ir, _get_param_buffer_mapping, _lstsq_fixed_selected,
-                                 _make_module_call_signatures, _normalize_nn_module_stack)
+                                 _normalize_nn_module_stack)
 
 from .ir import CapturedProgram, Exported
 from .operations import LSTSQ_FIXED
@@ -42,14 +42,14 @@ def export(stack, module, args, loss=None, kwargs=None, strict=True, functions=(
         joint = aot_export_joint_with_descriptors(stack, source, args, kwargs,
                                                   decompositions=torch.export.default_decompositions(),
                                                   _record_nn_module_stack=True)
-    collected = CollectTracepointsPass(_make_module_call_signatures(specs, strict))
+    collected = CollectTracepointsPass()
     if preserved:
         collected(joint.graph_module)
         for graph_module in joint.graph_module.modules():
             if isinstance(graph_module, torch.fx.GraphModule):
                 graph_module.recompile()
     return Exported(joint, source, _get_param_buffer_mapping(module, source) if strict else None, module, args, kwargs,
-                    loss, functions, specs, collected.specs, collected.replaced, collected.markers)
+                    loss, functions, specs, collected)
 
 
 # compiler/patches/torch-export-alias-metadata.patch (torch/_functorch/_aot_autograd/input_output_analysis.py

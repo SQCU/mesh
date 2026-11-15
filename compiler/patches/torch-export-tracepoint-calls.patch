@@ -1,36 +1,38 @@
 --- a/torch/_export/passes/collect_tracepoints_pass.py
 +++ b/torch/_export/passes/collect_tracepoints_pass.py
-@@ -5,13 +5,12 @@
- from typing import TYPE_CHECKING
-
- import torch
+@@ -1,158 +1,107 @@
+-# mypy: allow-untyped-defs
+-from __future__ import annotations
+-
+-import operator
+-from typing import TYPE_CHECKING
+-
+-import torch
 -from torch.export.exported_program import ConstantArgument, TensorArgument
-+from torch.export.graph_signature import _make_argument_spec
- from torch.fx.passes.infra.pass_base import PassBase, PassResult
-
-
- if TYPE_CHECKING:
-     from torch.export.exported_program import ModuleCallSignature
+-from torch.fx.passes.infra.pass_base import PassBase, PassResult
+-
+-
+-if TYPE_CHECKING:
+-    from torch.export.exported_program import ModuleCallSignature
 -    from torch.export.graph_signature import ExportGraphSignature
-
-
- __all__ = ["CollectTracepointsPass"]
-@@ -22,24 +21,13 @@
-     Performs constant folding and constant propagation.
-     """
-
+-
+-
+-__all__ = ["CollectTracepointsPass"]
+-
+-
+-class CollectTracepointsPass(PassBase):
+-    """
+-    Performs constant folding and constant propagation.
+-    """
+-
 -    def __init__(
 -        self, specs: dict[str, ModuleCallSignature], sig: ExportGraphSignature
 -    ) -> None:
-+    def __init__(self, specs: dict[str, ModuleCallSignature]) -> None:
-         super().__init__()
-         self.specs = specs
+-        super().__init__()
+-        self.specs = specs
 -        self.sig = sig
-+        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/export/_trace.py _get_module_call_graph
-+        self.replaced: list[tuple[torch.fx.Node, torch.fx.Node]] = []
-+        self.markers: list[tuple[str, str, torch.fx.GraphModule, torch.fx.Node, tuple]] = []
-
-     def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
+-
+-    def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
 -        def get_arg_spec(arg) -> TensorArgument | ConstantArgument:
 -            if isinstance(arg, torch.fx.Node):
 -                if isinstance(arg.meta.get("val"), torch.Tensor):
@@ -42,65 +44,225 @@
 -            else:
 -                return ConstantArgument(name="", value=arg)
 -
-         for module in gm.modules():
-             if not isinstance(module, torch.fx.GraphModule):
-@@ -56,7 +44,8 @@
-                         nn_module_stack = None
-                     else:
-                         raise AssertionError(f"Unknown tracepoint kind: {kind}")
+-        for module in gm.modules():
+-            if not isinstance(module, torch.fx.GraphModule):
+-                continue
+-            nn_module_stack = None
+-            for node in module.graph.nodes:
+-                if node.op != "call_function":
+-                    continue
+-                if node.target is torch.ops.higher_order._export_tracepoint:
+-                    kind = node.kwargs["kind"]
+-                    if kind == "module_call_outputs":
+-                        nn_module_stack = node.meta["nn_module_stack"]
+-                    elif kind == "module_call_inputs":
+-                        nn_module_stack = None
+-                    else:
+-                        raise AssertionError(f"Unknown tracepoint kind: {kind}")
 -                elif node.meta["nn_module_stack"] == nn_module_stack:
-+                # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/utils.py 603–647
-+                elif nn_module_stack is not None and node.meta.get("nn_module_stack") == nn_module_stack:
-                     node.meta["nn_module_stack"].popitem()
-                 else:
-                     nn_module_stack = None
-@@ -72,7 +61,8 @@
-                         nn_module_stack = None
-                     else:
-                         raise AssertionError(f"Unknown tracepoint kind: {kind}")
+-                    node.meta["nn_module_stack"].popitem()
+-                else:
+-                    nn_module_stack = None
+-            nn_module_stack = None
+-            for node in reversed(module.graph.nodes):
+-                if node.op != "call_function":
+-                    continue
+-                if node.target is torch.ops.higher_order._export_tracepoint:
+-                    kind = node.kwargs["kind"]
+-                    if kind == "module_call_inputs":
+-                        nn_module_stack = node.meta["nn_module_stack"]
+-                    elif kind == "module_call_outputs":
+-                        nn_module_stack = None
+-                    else:
+-                        raise AssertionError(f"Unknown tracepoint kind: {kind}")
 -                elif node.meta["nn_module_stack"] == nn_module_stack:
-+                # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/utils.py 603–647
-+                elif nn_module_stack is not None and node.meta.get("nn_module_stack") == nn_module_stack:
-                     node.meta["nn_module_stack"].popitem()
-                 else:
-                     nn_module_stack = None
-@@ -115,14 +105,16 @@
-                         fqn = call_fqn
-
-                     kind = node.kwargs["kind"]
-+                    # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/fx/graph.py Graph.erase_node
-+                    self.markers.append((fqn, path, module, node, node.args))
-                     for i, arg in enumerate(node.args):
-                         # We only update the signature of the alias used to call
-                         # the submodule. Otherwise the signatures of all aliases
-                         # would get conflated; the inputs/outputs of every call
-                         # would be recorded in every other call as well.
-                         if fqn == path:
-                             if kind == "module_call_inputs":
+-                    node.meta["nn_module_stack"].popitem()
+-                else:
+-                    nn_module_stack = None
+-
+-        def copy_sig(sig) -> ModuleCallSignature:
+-            from torch.export.exported_program import ModuleCallSignature
+-
+-            return ModuleCallSignature(
+-                inputs=[],
+-                outputs=[],
+-                in_spec=sig.in_spec,
+-                out_spec=sig.out_spec,
+-                forward_arg_names=None,
+-            )
+-
+-        for module in gm.modules():
+-            if not isinstance(module, torch.fx.GraphModule):
+-                continue
+-            for node in module.graph.nodes:
+-                if node.op != "call_function":
+-                    continue
+-                if node.target is torch.ops.higher_order._export_tracepoint:
+-                    # There's some subtlety worth noting. Here fqn corresponds to
+-                    # the call name, whereas path corresponds to the module name.
+-                    # They are not necessarily the same! When a submodule is shared
+-                    # through different aliases, there are as many _export_tracepoint
+-                    # markers as there are aliases, since the shared submodule is
+-                    # wrapped once for each alias.
+-                    path = node.kwargs["path"]
+-                    fqn, _ = next(reversed(node.meta["nn_module_stack"].values()))
+-
+-                    module_key = next(reversed(node.meta["nn_module_stack"]))
+-                    if "@" in module_key:
+-                        suffix = module_key.split("@")[-1]
+-                        path = f"{path}@{suffix}"
+-
+-                        call_fqn = f"{fqn}@{suffix}"
+-                        if call_fqn not in self.specs:
+-                            self.specs[call_fqn] = copy_sig(self.specs[fqn])
+-                        fqn = call_fqn
+-
+-                    kind = node.kwargs["kind"]
+-                    for i, arg in enumerate(node.args):
+-                        # We only update the signature of the alias used to call
+-                        # the submodule. Otherwise the signatures of all aliases
+-                        # would get conflated; the inputs/outputs of every call
+-                        # would be recorded in every other call as well.
+-                        if fqn == path:
+-                            if kind == "module_call_inputs":
 -                                self.specs[path].inputs.append(get_arg_spec(arg))
-+                                self.specs[path].inputs.append(_make_argument_spec(arg, ()))
-                             elif kind == "module_call_outputs":
+-                            elif kind == "module_call_outputs":
 -                                self.specs[path].outputs.append(get_arg_spec(arg))
-+                                self.specs[path].outputs.append(_make_argument_spec(arg, ()))
-                             else:
-@@ -143,16 +135,14 @@
-                                     )
-                                 if user.args[1] == i:
-                                     user.replace_all_uses_with(arg)
+-                            else:
+-                                raise AssertionError(f"Unknown tracepoint kind: {kind}")
+-                        if isinstance(arg, torch.fx.Node):
+-                            for user in node.users:
+-                                if user.op != "call_function":
+-                                    raise AssertionError(
+-                                        f"expected call_function, got {user.op}"
+-                                    )
+-                                if user.target is not operator.getitem:
+-                                    raise AssertionError(
+-                                        f"expected getitem target, got {user.target}"
+-                                    )
+-                                if not isinstance(user.args[1], int):
+-                                    raise AssertionError(
+-                                        f"expected int arg, got {type(user.args[1])}"
+-                                    )
+-                                if user.args[1] == i:
+-                                    user.replace_all_uses_with(arg)
 -                                    self.sig.replace_all_uses(user.name, arg.name)
-+                                    self.replaced.append((user, arg))
-                                     break
-                     users = list(node.users)
-                     for user in users:
-                         if len(user.users) != 0:
-                             raise AssertionError(
-                                 f"expected no users, got {len(user.users)}"
-                             )
+-                                    break
+-                    users = list(node.users)
+-                    for user in users:
+-                        if len(user.users) != 0:
+-                            raise AssertionError(
+-                                f"expected no users, got {len(user.users)}"
+-                            )
 -                        gm.graph.erase_node(user)
 -                    gm.graph.erase_node(node)
 -            return PassResult(gm, True)
 -
 -        return None
++# mypy: allow-untyped-defs
++from __future__ import annotations
++
++import operator
++
++import torch
++from torch.fx.passes.infra.pass_base import PassBase, PassResult
++
++
++__all__ = ["CollectTracepointsPass"]
++
++
++class CollectTracepointsPass(PassBase):
++    """
++    Performs constant folding and constant propagation.
++    """
++
++    def __init__(self) -> None:
++        super().__init__()
++        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/export/_trace.py _get_module_call_graph;
++        # torch/fx/graph.py Graph.erase_node
++        self.markers: list[tuple[torch.fx.GraphModule, torch.fx.Node, tuple]] = []
++        self.occurrences: list[list] = []
++        self.replaced: list[tuple[torch.fx.Node, torch.fx.Node]] = []
++
++    def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
++        for module in gm.modules():
++            if not isinstance(module, torch.fx.GraphModule):
++                continue
++            nn_module_stack = None
++            for node in module.graph.nodes:
++                if node.op != "call_function":
++                    continue
++                if node.target is torch.ops.higher_order._export_tracepoint:
++                    kind = node.kwargs["kind"]
++                    if kind == "module_call_outputs":
++                        nn_module_stack = node.meta["nn_module_stack"]
++                    elif kind == "module_call_inputs":
++                        nn_module_stack = None
++                    else:
++                        raise AssertionError(f"Unknown tracepoint kind: {kind}")
++                # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/utils.py 603–647
++                elif nn_module_stack is not None and node.meta.get("nn_module_stack") == nn_module_stack:
++                    node.meta["nn_module_stack"].popitem()
++                else:
++                    nn_module_stack = None
++            nn_module_stack = None
++            for node in reversed(module.graph.nodes):
++                if node.op != "call_function":
++                    continue
++                if node.target is torch.ops.higher_order._export_tracepoint:
++                    kind = node.kwargs["kind"]
++                    if kind == "module_call_inputs":
++                        nn_module_stack = node.meta["nn_module_stack"]
++                    elif kind == "module_call_outputs":
++                        nn_module_stack = None
++                    else:
++                        raise AssertionError(f"Unknown tracepoint kind: {kind}")
++                # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_functorch/_aot_autograd/utils.py 603–647
++                elif nn_module_stack is not None and node.meta.get("nn_module_stack") == nn_module_stack:
++                    node.meta["nn_module_stack"].popitem()
++                else:
++                    nn_module_stack = None
++
++        for module in gm.modules():
++            if not isinstance(module, torch.fx.GraphModule):
++                continue
++            opened: dict[str, list[list]] = {}
++            for node in module.graph.nodes:
++                if node.op != "call_function":
++                    continue
++                if node.target is torch.ops.higher_order._export_tracepoint:
++                    marker = (module, node, node.args)
++                    self.markers.append(marker)
++                    if node.kwargs["kind"] == "module_call_inputs":
++                        self.occurrences.append([marker, None])
++                        opened.setdefault(node.kwargs["path"], []).append(self.occurrences[-1])
++                    else:
++                        opened[node.kwargs["path"]].pop()[1] = marker
++                    for i, arg in enumerate(node.args):
++                        if isinstance(arg, torch.fx.Node):
++                            for user in node.users:
++                                if user.op != "call_function":
++                                    raise AssertionError(
++                                        f"expected call_function, got {user.op}"
++                                    )
++                                if user.target is not operator.getitem:
++                                    raise AssertionError(
++                                        f"expected getitem target, got {user.target}"
++                                    )
++                                if not isinstance(user.args[1], int):
++                                    raise AssertionError(
++                                        f"expected int arg, got {type(user.args[1])}"
++                                    )
++                                if user.args[1] == i:
++                                    user.replace_all_uses_with(arg)
++                                    self.replaced.append((user, arg))
++                                    break
++                    users = list(node.users)
++                    for user in users:
++                        if len(user.users) != 0:
++                            raise AssertionError(
++                                f"expected no users, got {len(user.users)}"
++                            )
 +                        module.graph.erase_node(user)
 +                    module.graph.erase_node(node)
 +        return PassResult(gm, True)
@@ -153,55 +315,73 @@
                  )
 --- a/torch/export/_trace.py
 +++ b/torch/export/_trace.py
-@@ -1630,6 +1630,23 @@
-     return args, kwargs, original_in_spec, out_dynamic_shapes, verify_additional_inputs
-
-
-+# mesh compiler/patches/torch-export-tracepoint-calls.patch: _get_module_call_graph's module signatures
-+def _make_module_call_signatures(
-+    module_call_specs: dict[str, dict[str, TreeSpec]], strict_mode_export: bool
-+) -> dict[str, ModuleCallSignature]:
-+    module_call_signatures: dict[str, ModuleCallSignature] = {}
-+    for fqn, specs in module_call_specs.items():
-+        mod_fqn = _strip_root(fqn) if not strict_mode_export else fqn
-+        module_call_signatures[mod_fqn] = ModuleCallSignature(
-+            inputs=[],
-+            outputs=[],
-+            in_spec=specs["in_spec"],
-+            out_spec=specs["out_spec"],
-+            forward_arg_names=None,  # we only propagate forward_arg_names for the top level module
-+        )
-+    return module_call_signatures
-+
-+
- def _get_module_call_graph(
-     export_artifact: ExportArtifact,
-     preserve_module_call_signature: tuple[str, ...],
-@@ -1648,22 +1665,16 @@
-     in_spec: TreeSpec = export_artifact.in_spec
-     out_spec: TreeSpec = export_artifact.out_spec
-
-     # Make module signatures.
--    module_call_signatures: dict[str, ModuleCallSignature] = {}
--    for fqn, specs in module_call_specs.items():
--        mod_fqn = _strip_root(fqn) if not strict_mode_export else fqn
--        module_call_signatures[mod_fqn] = ModuleCallSignature(
--            inputs=[],
--            outputs=[],
--            in_spec=specs["in_spec"],
--            out_spec=specs["out_spec"],
--            forward_arg_names=None,  # we only propagate forward_arg_names for the top level module
--        )
-+    module_call_signatures = _make_module_call_signatures(module_call_specs, strict_mode_export)
-
+@@ -1663,7 +1663,68 @@
      if len(preserve_module_call_signature) > 0:
          if not strict_mode_export:
              _rewrite_tracepoint_node(gm)
 -        res = CollectTracepointsPass(module_call_signatures, export_graph_signature)(gm)
-+        collect = CollectTracepointsPass(module_call_signatures)
++        collect = CollectTracepointsPass()
 +        res = collect(gm)
          if res is None:
              raise AssertionError("CollectTracepointsPass returned None")
 +        for user, arg in collect.replaced:
 +            export_graph_signature.replace_all_uses(user.name, arg.name)
++
++        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_export/passes/collect_tracepoints_pass.py
++        # CollectTracepointsPass's module call signature projection, over its markers
++        from torch.export.exported_program import ConstantArgument, TensorArgument
++
++        def get_arg_spec(arg):
++            if isinstance(arg, torch.fx.Node):
++                if isinstance(arg.meta.get("val"), torch.Tensor):
++                    return TensorArgument(name=arg.name)
++                else:
++                    raise AssertionError(
++                        "Symint input is not implemented yet for submodule call signature."
++                    )
++            else:
++                return ConstantArgument(name="", value=arg)
++
++        def copy_sig(sig) -> ModuleCallSignature:
++            return ModuleCallSignature(
++                inputs=[],
++                outputs=[],
++                in_spec=sig.in_spec,
++                out_spec=sig.out_spec,
++                forward_arg_names=None,
++            )
++
++        for _, node, args in collect.markers:
++            # There's some subtlety worth noting. Here fqn corresponds to
++            # the call name, whereas path corresponds to the module name.
++            # They are not necessarily the same! When a submodule is shared
++            # through different aliases, there are as many _export_tracepoint
++            # markers as there are aliases, since the shared submodule is
++            # wrapped once for each alias.
++            path = node.kwargs["path"]
++            fqn, _ = next(reversed(node.meta["nn_module_stack"].values()))
++
++            module_key = next(reversed(node.meta["nn_module_stack"]))
++            if "@" in module_key:
++                suffix = module_key.split("@")[-1]
++                path = f"{path}@{suffix}"
++
++                call_fqn = f"{fqn}@{suffix}"
++                if call_fqn not in module_call_signatures:
++                    module_call_signatures[call_fqn] = copy_sig(module_call_signatures[fqn])
++                fqn = call_fqn
++
++            kind = node.kwargs["kind"]
++            for arg in args:
++                # We only update the signature of the alias used to call
++                # the submodule. Otherwise the signatures of all aliases
++                # would get conflated; the inputs/outputs of every call
++                # would be recorded in every other call as well.
++                if fqn == path:
++                    if kind == "module_call_inputs":
++                        module_call_signatures[path].inputs.append(get_arg_spec(arg))
++                    elif kind == "module_call_outputs":
++                        module_call_signatures[path].outputs.append(get_arg_spec(arg))
++                    else:
++                        raise AssertionError(f"Unknown tracepoint kind: {kind}")
          gm = res.graph_module

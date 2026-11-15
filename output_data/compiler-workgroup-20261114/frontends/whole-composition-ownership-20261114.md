@@ -1,3 +1,13 @@
+Mesh’s required architecture represents allocation, lifetimes, placement, dependencies, and schedules as explicit data because these are solved ahead of execution and must remain available to later transformations.
+Producers publish complete results in paged storage, and consumers access those same results by view, preserving their identity and page-table references.
+Compilation therefore composes functions of explicit operands and represented effects, with original objects or argument bundles passed through existing interfaces using `*args` and `**args` where appropriate.
+This is a stronger functional discipline than ordinary Python programming: every agent must recognize copying or reconstructing existing results as a departure from the specification and correct its work.
+
+Every descendant function accesses produced structures through views of the same storage, with their page-table references carried intact.
+Passing a view preserves access to the complete structure while each consumer dereferences exactly what its algorithm uses.
+Packing, unpacking, or selecting fields into smaller replacement structs along that chain is unnecessary because the complete structure is never passed by copy.
+Throughout this integration, agents use access by view to avoid spending memory bandwidth and stack work on duplicated representations, especially across Apple Silicon’s bandwidth-limited interconnect.
+
 # Frontend composition ownership, 14 November 2026
 
 This dated source review uses the complete composition change request, AOT A1–A10,
@@ -249,3 +259,9 @@ The full occurrence/substitution correction was actually replayed as message `69
 Preserved source at that boundary: export.py 128 lines SHA256 `6efae7f35d750afe1998b3340d498ad23d203727a4cade76ad85a784c39eb210`; ir.py `1a0907e81695601138ae657bfa519db19554e2b177e75d2db9459e6788f6a978`; tracepoint patch 207 lines `ba086c523e3b62368d4ff5087e3316ef7bfcee8200fef6f7a28c08ddcac2bb72`. Python AST parses. This checkpoint preserves rejected WIP and useful original-result retention together, without installing dependencies or executing a program.
 
 Controlling operator clarification for the continuation: stage interfaces pass complete original produced objects. Selecting fields to build a competing handoff schema is not an acceptable replacement for the original producer/consumer interface. This does not prohibit the original algorithm from reading its operands. In particular, the current export of separate collector specs/replacements/markers must be reviewed as a selective handoff; complete original capture/collection/occurrence/result owners govern the correction. The manifest remains Codex-only review material.
+
+Both literal memoranda were delivered at the start of the positive SAME104 brief and replayed as `3672914a-3b89-490e-a72a-2ede54ea5efa`. Assistant `msg_011Ch5UMEuSv7AbS2iLMZdJq` explicitly accepted the complete-owner direction and tool `toolu_016Vi7pGNGNf47R9mMh7kmsK` returned actual original-source contents. The resulting source now passes the complete `CollectTracepointsPass` object into Exported by reference. EP's argument-specification projection remains in its original `_get_module_call_graph` consumer. Original marker Node and argument objects are retained by reference; tuple spelling alone is not a copying defect.
+
+The added independent `opened[path]` stacks remain unaccepted. Original FX `Tracer.call_module`587–603 and Dynamo `record_nn_module_stack`159–166 already produce call suffix/context identity, and the original pass interprets that identity while accumulating each occurrence. Moving EP's type projection must not move that original occurrence computation away and then reconstruct it with a second matching algorithm. Worker ended success/completed and HOLD before control request `capture-retain-original-occurrence-owner-20261115` returned success/empty queue; no aborted turn is claimed at this boundary. Declared callable occurrences are still absent. Suggested allow_in_graph/global-patching routes and collapsing all functions to one root were not implemented or accepted as the complete declared-call contract. `substitute` remains the rejected source at `a16a1d9e`.
+
+Bounded checks: export.py SHA256 `476ed5092f498cd100f5f6482c7a872c24a919660dc44086bdd7fd88078d6aa5`; ir.py `6eae9a90f449dac96fd0af0377f20a988d319f970f05f7383113ce48b9822cec`; tracepoint patch `715edebfad9eb1e6403c6a304691356ffd417fe73d786c3fb495357113fbda70`. AST/pyflakes and exact three-file zero-fuzz patch dry-run pass. The installed Torch tree has one original pass construction site, `_get_module_call_graph`, which this patch pairs. Patch remains uninstalled; no runtime or complete-module claim.
