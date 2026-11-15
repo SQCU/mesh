@@ -155,43 +155,87 @@
          self.metal_source = code.getvalue()
 --- a/torch/_inductor/codegen/cpp.py
 +++ b/torch/_inductor/codegen/cpp.py
-@@ -6023,6 +6023,16 @@
+@@ -6023,6 +6023,39 @@
      def codegen_sync(self):
          pass
  
 +    @staticmethod
-+    def defined_source(src_code, kernel_decl_name, kernel_name):
-+        # compiler/patches/torch-inductor-upstream-composition.patch: define_kernel's final source of a
-+        # group's code, its own, which a composed pass of the same group (codegen_group's `composition`) takes
++    def kernel_definition(src_code, kernel_name, args):
++        # compiler/patches/torch-inductor-upstream-composition.patch: define_kernel's definition of `src_code`
++        # named `kernel_name` (`args` its KernelArgs), moved here unchanged: its KernelDefinitionLine's kernel_body
++        # and cpp_definition. A composed pass of the same group (codegen_group's `composition`) is defined by it
++        # under the same name
++        kernel_decl_name = kernel_name if V.graph.cpp_wrapper else "kernel"
 +        src_code = src_code.replace(str(Placeholder.KERNEL_NAME), kernel_decl_name)
 +        src_code = src_code.replace(str(Placeholder.DESCRIPTIVE_NAME), kernel_name)
 +        # TODO(voz): Ostensibly, we should not need this. But there are cases where C++ codegen does
 +        # not use BracesBuffer, so we have no good indicator of a C++ buffer atm.
-+        return src_code.replace("#pragma CMT", "//")
++        src_code = src_code.replace("#pragma CMT", "//")
++
++        # Get the lines in the source code representing the function definition,
++        # excluding the first line including cpp_prefix.h.
++        first_char = src_code.rfind('extern "C"')
++        last_char = src_code.find(")", first_char)
++        if _IS_WINDOWS:
++            # get_export_declaration introduced one more ')' in Windows
++            last_char = src_code.find(")", last_char + 1)
++        kernel_definition = f"{src_code[first_char : last_char + 1]};\n"
++
++        compile_wrapper = IndentedBuffer()
++        _, _, arg_types = args.cpp_argdefs()
++        if not V.graph.cpp_wrapper:
++            compile_wrapper.writeline(
++                f"async_compile.cpp_pybinding({arg_types!r}, r'''"
++            )
++        compile_wrapper.splice(src_code, strip=True)
++        if not V.graph.cpp_wrapper:
++            compile_wrapper.writeline("''')")
++        return compile_wrapper.getvalue(), kernel_definition
 +
      def define_kernel(self, src_code, nodes, kernel_args=None):
          wrapper = V.graph.wrapper_code
          if src_code in wrapper.src_to_kernel:
-@@ -6036,11 +6046,13 @@
+@@ -6035,35 +6068,13 @@
+             )
              kernel_name = "_".join(["cpp", fused_name, wrapper.next_kernel_suffix()])
              wrapper.src_to_kernel[src_code] = kernel_name
-             kernel_decl_name = kernel_name if V.graph.cpp_wrapper else "kernel"
+-            kernel_decl_name = kernel_name if V.graph.cpp_wrapper else "kernel"
 -            src_code = src_code.replace(str(Placeholder.KERNEL_NAME), kernel_decl_name)
 -            src_code = src_code.replace(str(Placeholder.DESCRIPTIVE_NAME), kernel_name)
 -            # TODO(voz): Ostensibly, we should not need this. But there are cases where C++ codegen does
 -            # not use BracesBuffer, so we have no good indicator of a C++ buffer atm.
 -            src_code = src_code.replace("#pragma CMT", "//")
-+            src_code = self.defined_source(src_code, kernel_decl_name, kernel_name)
-+            # compiler/patches/torch-inductor-upstream-composition.patch: each defined kernel's
-+            # declared entry and final source by its kernel name, as the wrapper's definition encloses it
-+            wrapper.__dict__.setdefault("defined_kernels", {})[kernel_name] = (
-+                kernel_decl_name,
-+                src_code,
+-
+-            # Get the lines in the source code representing the function definition,
+-            # excluding the first line including cpp_prefix.h.
+-            first_char = src_code.rfind('extern "C"')
+-            last_char = src_code.find(")", first_char)
+-            if _IS_WINDOWS:
+-                # get_export_declaration introduced one more ')' in Windows
+-                last_char = src_code.find(")", last_char + 1)
+-            kernel_definition = f"{src_code[first_char : last_char + 1]};\n"
+-
+-            compile_wrapper = IndentedBuffer()
+             args = self.kernel_group.args if kernel_args is None else kernel_args
+-            _, _, arg_types = args.cpp_argdefs()
+-            if not V.graph.cpp_wrapper:
+-                compile_wrapper.writeline(
+-                    f"async_compile.cpp_pybinding({arg_types!r}, r'''"
+-                )
+-            compile_wrapper.splice(src_code, strip=True)
+-            if not V.graph.cpp_wrapper:
+-                compile_wrapper.writeline("''')")
++            kernel_body, kernel_definition = self.kernel_definition(
++                src_code, kernel_name, args
 +            )
- 
-             # Get the lines in the source code representing the function definition,
-             # excluding the first line including cpp_prefix.h.
-@@ -6128,7 +6140,10 @@
+             wrapper.define_kernel(
+                 kernel_name,
+-                compile_wrapper.getvalue(),
++                kernel_body,
+                 gpu=False,
+                 cpp_definition=kernel_definition,
+             )
+@@ -6128,7 +6139,10 @@
          args_num = len(arg_defs)
          return args_num
  
@@ -203,7 +247,7 @@
          self.stack.close()
          if not self.scheduled_nodes:
              return ""
-@@ -6142,11 +6157,15 @@
+@@ -6142,11 +6156,15 @@
          if enable_kernel_profile:
              code.writelines(["#include <torch/csrc/inductor/aoti_runtime/utils.h>"])
          code.writeline("#include <torch/csrc/inductor/cpp_prefix.h>")
@@ -219,7 +263,7 @@
          arg_defs = ",\n".ljust(25).join(arg_defs)
          func_export_decl = get_export_declaration()
          inline_attr = (
-@@ -6158,6 +6177,9 @@
+@@ -6158,6 +6176,9 @@
  
          # 3. Function body
          with code.indent():
