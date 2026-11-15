@@ -135,6 +135,18 @@ the existing change-request requirements supply the implementation; the workgrou
 record identifies defects and their disposition rather than adding another
 parser, gate or compiler design.
 
+Operator's assignment clarification:
+
+> avoid giving this kind of manifest to claudes directly; have codexes use it as judgement of whether followup action by claude subagents is directed or purposeless; following spec or going off in deranged unrelated directions
+
+Codex supervisors use the manifests as their review material. A Claude assignment
+states the concrete input, complete result, original implementation owner, next
+consumer, literal `schedule-emit` reference and owned source files. Codex compares
+the actual changes with the whole module manifest, distinguishes implementation
+progress from detours, and supplies focused corrective follow-ups. Codex maintains
+these accounts from worker reports and source review. The manifests themselves
+are not assigned reading or worker work orders.
+
 ### Current native source corrects a historical allegation
 
 At Metal `b275b8c4`, `Synchronization.Before` retains operation IDs and calls the
