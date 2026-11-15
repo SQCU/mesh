@@ -25,11 +25,12 @@ DRAWING = (torch.ops.aten._linalg_eigh, torch.ops.aten.linalg_pinv, torch.ops.at
 # _strict_export (_export_to_torch_ir, restore_fqn False, preserve_module_call_signature; _lstsq_fixed_selected of
 # compiler/patches/torch-lstsq-fixed-results.patch; _normalize_nn_module_stack 1873; _get_param_buffer_mapping),
 # _non_strict_export 2341, _export_to_aten_ir 1211 and _get_module_call_graph 1633–1679; torch/_export/wrappers.py
-# _wrap_submodules and _export_tracepoint; torch/_export/passes/collect_tracepoints_pass.py CollectTracepointsPass
+# _wrap_submodules, _export_function_call and _export_tracepoint; torch/_dynamo/symbolic_convert.py
+# InliningInstructionTranslator.inline_call; torch/_export/passes/collect_tracepoints_pass.py CollectTracepointsPass
 # (compiler/patches/torch-export-tracepoint-calls.patch); torch/_functorch/aot_autograd.py
 # aot_export_joint_with_descriptors 1320–1455 (compiler/patches/torch-aot-joint-params-buffers.patch)
 def export(stack, module, args, loss=None, kwargs=None, strict=True, functions=()):
-    preserved = tuple(path for path in functions if isinstance(path, str))
+    preserved = tuple(functions)
     if strict:
         source = _export_to_torch_ir(module, args, kwargs, preserve_module_call_signature=preserved, restore_fqn=False,
                                      _log_export_usage=False)

@@ -331,6 +331,57 @@
 -                    f"Only Tensors or scalars are supported as pytree flattened inputs, got: {a}"
 +                    f"all flat_args must be KNOWN_TYPES or opaque types, got: {a}"
                  )
+@@ -146,24 +153,48 @@
+     pre_handle = submodule.register_forward_pre_hook(pre_hook, with_kwargs=True)
+     post_handle = submodule.register_forward_hook(post_hook, with_kwargs=True)
+     return pre_handle, post_handle
+
+
++# mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_dynamo/symbolic_convert.py
++# InliningInstructionTranslator.inline_call
++_preserved_functions: dict[Callable[..., object], str] = {}
++_preserved_specs: dict[str, dict[str, dict[str, pytree.TreeSpec]]] = {}
++
++
++def _export_function_call(path: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
++    flat_args, in_spec = pytree.tree_flatten((args, kwargs))
++    flat_args = _export_tracepoint(*flat_args, kind="module_call_inputs", path=path)
++    args, kwargs = pytree.tree_unflatten(flat_args, in_spec)
++    res = fn(*args, **kwargs)
++    flat_res, out_spec = pytree.tree_flatten(res)
++    flat_res = _export_tracepoint(*flat_res, kind="module_call_outputs", path=path)
++    _preserved_specs[path][path] = {"in_spec": in_spec, "out_spec": out_spec}
++    return pytree.tree_unflatten(flat_res, out_spec)
++
++
+ @contextmanager
+ def _wrap_submodules(
+     f: torch.nn.Module | Callable[..., object],
+     preserve_signature: Iterable[str],
+     module_call_signatures: dict[str, dict[str, pytree.TreeSpec]],
+ ) -> Generator[None, None, None]:
+     handles: list[RemovableHandle] = []
+
+     try:
+         for path in preserve_signature:
+-            # pyrefly: ignore[bad-argument-type]  # TODO f is an nn.Module at runtime (asserted in _wrap_submodule)
+-            handles.extend(_wrap_submodule(f, path, module_call_signatures))
++            if isinstance(path, str):
++                # pyrefly: ignore[bad-argument-type]  # TODO f is an nn.Module at runtime (asserted in _wrap_submodule)
++                handles.extend(_wrap_submodule(f, path, module_call_signatures))
++            else:
++                _preserved_functions[path] = f"{path.__module__}.{path.__qualname__}"
++                _preserved_specs[_preserved_functions[path]] = module_call_signatures
+         yield
+     finally:
+         for handle in handles:
+             handle.remove()
++        for path in preserve_signature:
++            if not isinstance(path, str):
++                _preserved_specs.pop(_preserved_functions.pop(path, None), None)
+
+
+ def _mark_strict_experimental(cls: type[_R]) -> type[_R]:
 --- a/torch/export/_trace.py
 +++ b/torch/export/_trace.py
 @@ -1663,7 +1663,47 @@
@@ -382,3 +433,36 @@
 +                    else:
 +                        raise AssertionError(f"Unknown tracepoint kind: {kind}")
          gm = res.graph_module
+--- a/torch/_dynamo/symbolic_convert.py
++++ b/torch/_dynamo/symbolic_convert.py
+@@ -5982,6 +5982,30 @@
+         kwargs: dict[str, VariableTracker],
+         allow_nested_graph_breaks: bool = False,
+     ) -> VariableTracker:
++        # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_export/wrappers.py _wrap_submodules and
++        # _export_function_call; torch/_dynamo/variables/nn_module.py record_nn_module_stack 159–166
++        from torch._export.wrappers import _export_function_call, _preserved_functions
++
++        if (
++            isinstance(func, UserFunctionVariable)
++            and func.get_function() in _preserved_functions
++            and parent.f_code is not _export_function_call.__code__
++        ):
++            path = _preserved_functions[func.get_function()]
++            num_calls = parent.num_calls.get(path, 0)
++            module_key = f"{path}@{num_calls}" if num_calls > 0 else path
++            parent.nn_module_stack[module_key] = (path, path)
++            parent.num_calls[path] = num_calls + 1
++            try:
++                return cls.inline_call(
++                    parent,
++                    UserFunctionVariable(_export_function_call),
++                    [ConstantVariable.create(path), func, *args],
++                    kwargs,
++                    allow_nested_graph_breaks=allow_nested_graph_breaks,
++                )
++            finally:
++                del parent.nn_module_stack[module_key]
+         tracer = None
+         with profile_inline_call(
+             parent.output, func.get_code(), lambda: parent.inline_depth + 1
