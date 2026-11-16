@@ -416,6 +416,41 @@ storage identities and mapped context. This checkpoint establishes the shared ge
 native build/load, complete declarations, native relation/registration/allocation/invocation and categorical
 replacement still outstanding. Paging continues to supply ordinary byte addressing over existing layouts.
 
+### Geometry build and original producer execution
+
+Mesh `24b01623` rebuilt through the ordinary `make ../dox/mesh/rdma/libmesh.dylib` target.
+Native-execution `9a29175` built through its ordinary `make` target, then its public
+`native_execution.pages.library(metal, mesh)` built and loaded the actual extension from compiler-emit's
+isolated Python. All commands exited zero, and the source hashes stayed fixed. The geometry log is
+`metal-microbench/output_data/standalone-replacement-20261115/24b01623-geometry-build.log`
+(SHA256 `f5cdf9d9337db92b35d7a3ba06f42084c0b7820766502a31fd3af31f988ef6ad`); the bridge log is
+`native-execution/artifacts/9a29175-native-build.log`
+(`a1183b03831ea90139009e6d5875df57ddf1bd43ea365fb0e78157a6ea6d463e`); the extension-load log is
+`compiler-emit/artifacts/24b01623-9a29175-pages-load.log`
+(`9fb7413cd50c7f250178dcc678642c42f1b0755ed396028bad5b186b2f47409f`). This is build/load evidence.
+
+Compiler-emit `8f82bca` retains the original typed MPS launch expressions, argument sources and complete
+argument-definition result. It also retains the actual external-kernel input prototypes and output
+correspondence at the original fake call and fallback construction. Existing reference samples then ran
+through `compiler_emit.compile` and the actual `schedule_emit.runtime.Program`, with original compiler
+caches disabled. RunningMean on MPS completed three calls with maximum output/state errors
+`(2.384185791015625e-07, 1.0454601624268727e-07)`; Indexing on MPS completed two calls with errors `(0, 0)`.
+
+The CPU Solve sample compiled its original external calls, then failed at the reference runtime's output
+reconstruction: zero user leaves against a one-leaf output specification. The reference's pre-unlift output
+signature and Torch's post-token-removal module are being traced at their producing interface. This failure
+remains open at this receipt; the successful MPS observations do not cover it. The combined log is
+`compiler-emit/artifacts/8f82bca-producers-reference.log`
+(SHA256 `0a399143089c35527bc2dcada8a3258bdef66ea0ed883b05b7f5eba88b731004`). All twenty-six patched installed
+source files retained their pre-run hashes, checked after the failure and before source editing resumed;
+the hash list is `artifacts/8f82bca-producers-source-before.json`.
+
+Source review also identified the remaining direct collective/wait consumers of ProcessKernelResult,
+the declaration handoffs for constant subgraphs and later workspaces, and a native access-width mismatch:
+byte-storage Values require the numerical access width supplied separately to the original access-map
+producer. These are assigned producer/consumer corrections. Native relation registration and complete
+native execution, complete domain coverage and categorical replacement remain outstanding.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
