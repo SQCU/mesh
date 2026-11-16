@@ -131,7 +131,7 @@ Operator:
 > if schedule emit is stinky in this specific respect (reimplementing something that it didn't need to) fix schedule emit too as part of implementing the right transformations in the right order
 
 Here `schedule-emit` is the executable data-flow demonstration and runtime target; the change requests supply
-the assignment, and original Torch tools supply implementations to reuse. The current reference adapter contains
+the assignment, and original Torch tools supply implementations to reuse. At the `018120a`/`6b92ff0` checkpoints the reference adapter contained
 its own device-keyword and `aten.to.device` rewrites, while the original `move_to_device_pass` owns that metadata
 interpretation. The experimental output-region assembly also repeats kind interpretation from the original unlift
 wrapper. These are the duplicated responsibilities to remove together with their dependent interface mistakes.
@@ -142,6 +142,44 @@ Its input/result boundary carries the needed original metadata and owners. The s
 scheduled-AOT entry, retaining the complete scheduled result and original compilation products for actual Program
 execution. Fixing the demonstration itself is part of this assignment; source history preserves the superseded
 experiments. Target-specific metadata handling supplies no additional imperative device-control requirement.
+
+### Committed correction and executed direct consumers
+
+The resulting source is schedule-emit `2e17bbb`, compiler-emit `1476caf`, and native-execution `824e674`;
+native-execution `64db544` records the final paired runs against those producer commits. The source changes
+and the following observations were reviewed together on 15 November 2026.
+
+The original Torch device operation now has one implementation shared by its original pass and the reference.
+The reference supplies compiler placement to that operation before inserting input/channel transfers. Original
+`Tensor.to` supplies the transfer identity decision. Original `deepcopy` retains source state and constant tensors
+through its memo; the locally recursive graph copier is removed. Every processor receives the complete original
+program operand, and original signature projection and unlift produce its scheduled flat interface. Archive save
+writes those actual processor products; archive load binds them to the loaded source owner. The synthetic archive
+signature constructor and unused duplicate signature headers are removed.
+
+The standalone compiler now has one `compile(scheduled, package_path)` entry. It retains that same Scheduled and
+the complete original per-processor AOT products, and supplies their unchanged constant maps to the original
+loader's user-managed binding operation. Both consumers execute the actual reference `Program`. These executions
+use compiler-emit's isolated Torch environment and its recorded patches exposing the original shared operations;
+the shared installed Mesh dependency remains unchanged.
+
+Observed direct-consumer results:
+
+- RunningMean: two CPU processors and three calls, output/state error `(0.0, 0.0)`; the saved/loaded processor
+  products also produce `(0.0, 0.0)` after AOT compilation.
+- Scalar state and returned-input/view aliases: three calls on CPU and MPS, state `1 → 2 → 3`, preserved input
+  identity and view storage/stride/offset. Nested public inputs preserve caller mutation and returned identity.
+- Separate placement: CPU caller input, numerical work on MPS, CPU result; caller mutation and numerical results
+  pass across three calls.
+- Native numerical entries supplied to the same reference Program: two processors, two channels, three calls
+  on CPU and MPS; original input identity, caller mutation and source-state sums `6/16/30` pass. The MPS entry uses
+  original `synchronizeAllMPSStreams`, correcting its earlier choice of an unsynchronized stream operation.
+
+The compiler's `docs/narrow-boundary.md` and native consumer's `docs/observations.md` identify the executable
+examples and logs. Independent source review found no additional confirmed defect in these changed direct
+interfaces. These observations cover the stated cases; they do not establish arbitrary nested-attribute archive
+ownership, the full numerical domain, native page/transport composition, or the categorical Mesh replacement.
+The seven pre-existing modified reference archives remain untouched.
 
 ## Sources used in their respective roles
 
