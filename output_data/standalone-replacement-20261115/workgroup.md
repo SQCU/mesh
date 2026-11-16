@@ -1644,6 +1644,33 @@ original allocation owners. Logical page splitting alone does not establish that
 has physically contiguous backing across a page boundary. These findings guide later direct handoffs; they
 do not impose a live transport context or additional program admission policy.
 
+### The reference runtime is a concrete composition target
+
+Operator:
+
+> just becasue it's a lowerer which uses a slow and inefficient lowering doesn't mean we can't use it *exactly* to demonstrate the compositionality between our options...
+
+The original `schedule_emit.runtime.Program(scheduled, functions)` realizes the scheduled program through its
+existing threads and queues, with each numerical lowerer's functions supplied as explicit operands.
+Target-independent transformations therefore have an executable composition target while Mesh's optimized
+realization is being completed. Joint allocation remains a produced compiler result whose interpretation belongs
+at the corresponding consumer boundary; Metal buffer creation is one target's realization of it. Performance
+measurements compare realizations, while execution on the reference establishes the properties it actually consumes.
+
+The original public `prepare → emit → Program` path was exercised again at compiler `92430dd` using the existing
+two-processor RunningMean sample. One Scheduled with six channels was retained throughout; both original graphs
+and Schedulers remained the same objects across upstream AOT emission. Two unmodified reference Programs consumed
+that same Scheduled, one with its GraphModules and one with the AOTInductor loader functions. Alternating those
+function choices across six calls preserved the same source state through counts 1–6 and produced maximum absolute
+error zero on every call. All 116 watched inputs remained unchanged. This includes actual execution of AOT-compiled
+numerical functions; describing all native numerical execution as outstanding was too broad.
+
+The receipt establishes the common scheduled/prepared boundary and these two function choices. Mesh-specific
+physical page/allocation transformations were not exercised by this invocation; their future reference consumer
+must use their actual produced results. That is an interface obligation, rather than a requirement to finish the
+optimized Metal/RDMA runtime before using the reference. The exact command, outputs and source hashes are retained
+in `compiler-emit/artifacts/20261116-reference-composition/receipt.json`.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
