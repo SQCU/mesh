@@ -124,6 +124,25 @@ not an allocation rule for Mesh. Mesh consumes the retained placement/page resul
 view, and the compiled plan supplies any required copy or transfer. A CPU/MPS/ANE target label alone does not
 establish a need to copy data. Source numerical capture, placement and target lowering retain their separate roles.
 
+## Simplification and correction of the demonstration
+
+Operator:
+
+> if schedule emit is stinky in this specific respect (reimplementing something that it didn't need to) fix schedule emit too as part of implementing the right transformations in the right order
+
+Here `schedule-emit` is the executable data-flow demonstration and runtime target; the change requests supply
+the assignment, and original Torch tools supply implementations to reuse. The current reference adapter contains
+its own device-keyword and `aten.to.device` rewrites, while the original `move_to_device_pass` owns that metadata
+interpretation. The experimental output-region assembly also repeats kind interpretation from the original unlift
+wrapper. These are the duplicated responsibilities to remove together with their dependent interface mistakes.
+
+The refactor supplies complete producer operands to the responsible original transformations in their data-flow
+order. A factored shared operation has one implementation used by its original caller and the reference adapter.
+Its input/result boundary carries the needed original metadata and owners. The standalone compiler has one ordinary
+scheduled-AOT entry, retaining the complete scheduled result and original compilation products for actual Program
+execution. Fixing the demonstration itself is part of this assignment; source history preserves the superseded
+experiments. Target-specific metadata handling supplies no additional imperative device-control requirement.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and

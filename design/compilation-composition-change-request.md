@@ -77,8 +77,9 @@ applies the compiled result to the changing inputs (item 4). The demonstration's
 Python classes provide an executable target alongside Mesh's native execution and archive consumers.
 
 **Executable reference target.** The compilation/emission module lowers the assigned scheduled program into
-functions consumed by `schedule_emit.runtime.Program(scheduled, functions)`, through the reference's
-`lower_inductor.lower` and the upstream compiler's numerical lowering. The same complete producer result supplies
+functions consumed by `schedule_emit.runtime.Program(scheduled, functions)`, through the upstream compiler's
+numerical lowering. The reference's `lower_inductor.lower` demonstrates this position in the data flow.
+The same complete producer result supplies
 the source bodies, bindings, state, aliases, effects and compiled order to the reference and native targets.
 Each target realizes those semantics through its own execution mechanism. The reference target uses its existing
 threads and queues; the native target uses its compiled entry and prepared page bindings. AOT A1 defines the
