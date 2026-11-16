@@ -1310,6 +1310,30 @@ ErrorMessages-typed zeroed state, and original Upstream/error-reporting code own
 handling. The next correction connects that produced workspace to the actual parameter ordinal and preserves it
 on the Program owner. The observed Indexing call does not establish this omitted argument or runtime handling.
 
+### Original error workspace occupies its produced argument slot
+
+Compiler `8b8f075` retains the original ErrorMessages parameter on the complete kernel and call. Its produced
+argument ordinal supplies both the original Python wrapper keyword and the native call metadata. Native
+`fc24bfd` retains one ValueID from `metal_ir_upstream_error_workspace` on the Program and supplies that original
+workspace at the same ordinal, before frame arguments. The original factory, workspace effects, zeroing and
+completion reporting remain their existing owners. Native compilation selects the original assertion-reporting
+branch; the existing `cpp_string_literal` printer supplies its message literal.
+
+The native binding build/load exited zero with 105 watched inputs unchanged. The single existing `samples.Checked`
+invocation through public `declarations.emit` then exited zero with all 106 watched inputs unchanged. Its error
+call retained one numerical source and the actual error parameter at ordinal 1, followed by frame slot 2. Its
+sine call retained two numerical parameters and frame slots 2 and 3. Both entries were configured, and retained
+call views kept their original Program, parameter and source owners alive.
+
+Build receipt: `compiler-emit/artifacts/fc24bfd-error-build/receipt.json`, SHA256
+`d46a38cd5f3ed1fe2fa56f1ef35931aeb0b2b667dc1cfa51c75239fc092e656f`.
+Public-call receipt: `compiler-emit/artifacts/8b8f075-fc24bfd-error-producer/receipt.json`, SHA256
+`d44fb4949070cb9e5958ba53c8d2c7cc1088e9f73c8b79036c434f0202e9368b`;
+run-log SHA256 `d7d69dd4180ff90ab0456b59a7d10f061575f7bdd9a46bc457ad7333443ab61c`.
+This observation covers argument production, registration, emission and owner lifetime. It performs no numerical
+dispatch, later allocation or runtime error reporting. The ordinary CPP path without a native Program retains
+its existing early-return behavior; this correction does not establish its reporting coverage.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
