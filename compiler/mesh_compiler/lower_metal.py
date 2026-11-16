@@ -47,7 +47,7 @@ from .metal import (CHECK_CONVERGENCE, CONSTANT, DOMAIN_INDIRECT, DOMAIN_LOOP, D
                     SourceOperand, UpstreamAccess, ValueInfo, _array, _Builder, _compiler, _composition, _emitted,
                     _graph, _neural, _upstream, mesh_graph)
 from .operations import ANE, CPU, GPU, SCALAR
-from mesh_index import Index as _Index, _unrepresented
+from mesh_index import Index as _Index, Operations, ranged as _ranged, _unrepresented
 
 Root = collections.namedtuple("Root", "name kind role root value")
 
@@ -328,176 +328,41 @@ def _named(node):
 
 
 # torch/utils/_sympy/value_ranges.py ValueRanges as mesh_graph_domain_dim and metal_ir_upstream_access [lo, hi]
-def _ranged(bounds):
-    return tuple(INT64[k] if is_infinite(v) else int(v) for k, v in enumerate((bounds.lower, bounds.upper)))
 
 
 
 
-# an analysis value of the LoopBody ops handler: `index` its mesh-graph.h value (a predicate where `dtype` is
-# torch.bool, else an integer), `dtype` its type as torch/_inductor/dtype_propagation.py DtypePropagationOpsHandler
-# propagates it (promote_types reads its dtype and is_scalar)
-class _Value:
-    __slots__ = ("index", "dtype")
-    is_scalar = False
 
-    def __init__(self, index, dtype):
-        self.index, self.dtype = index, dtype
-
-
-# torch 2.14.0 torch/_inductor/loop_body.py LoopBody's ops handler (V.ops as its InterpreterShim runs a block) over the
-# same analysis, each value a _Value of its dtype as DtypePropagationOpsHandler propagates it (the rule torch's codegen
-# types each op by; under the kernel's own V.graph and V.kernel): an index_expr or value_expr its sympy expression
-# (_Index) as that dtype; a constant; integer arithmetic (add, sub, mul, neg, minimum, maximum; ops.floordiv floor and
-# ops.remainder Python's modulus; ops.truncdiv and ops.mod C's truncation, mesh_graph_index_tdiv_q and tdiv_r), each
-# integer result reduced exactly into its dtype (mesh_graph_index_wrap); comparisons; logical operators of any operands'
-# truth, bitwise ones of bools; where; to_dtype between integer and bool types its exact conversion (into an integer
-# type the reduction into its width, into bool its != 0). A floating result (its rounding), a load (data) and every
-# other operation none
-class _Ops:
+# rdma/mesh_index.py Operations, with this original caller's dtype propagation
+class _Ops(Operations):
     def __init__(self, index):
-        self.index, self.rules = index, DtypePropagationOpsHandler()
+        super().__init__(index)
+        self.rules = DtypePropagationOpsHandler()
 
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return _unrepresented
-
-    # a native integer `value` as a value of `dtype`
-    def integral(self, value, dtype):
-        index = self.index
-        if value is None or dtype.is_floating_point or dtype.is_complex:
-            return None
-        if dtype is torch.bool:
-            return self.predicate(index.ne(value, index.constant(0, torch.int64)))
-        return _Value(index.wrapped(value, dtype), dtype)
-
-    def predicate(self, value):
-        return None if value is None else _Value(value, torch.bool)
-
-    # an operand's integer value (a bool's its indicator) and its truth (an integer's != 0)
-    def integer(self, x):
-        index = self.index
-        if x.dtype is not torch.bool:
-            return x.index
-        return index.native("where", x.index, index.constant(1, torch.int64), index.constant(0, torch.int64))
-
-    def truth(self, x):
-        index = self.index
-        return x.index if x.dtype is torch.bool else index.ne(x.index, index.constant(0, torch.int64))
-
-    def arithmetic(self, name, made, *operands):
+    def arithmetic(self, name, made, *operands, result_dtype=None):
         if any(x is None for x in operands):
             return None
-        return self.integral(made(*map(self.integer, operands)), getattr(self.rules, name)(*operands))
+        return super().arithmetic(name, made, *operands, result_dtype=getattr(self.rules, name)(*operands))
 
     def index_expr(self, expr, dtype):
-        return self.integral(self.index.interp(expr), self.rules.index_expr(expr, dtype))
+        return super().index_expr(expr, dtype, result_dtype=self.rules.index_expr(expr, dtype))
 
     def value_expr(self, expr, dtype):
-        return self.integral(self.index.interp(expr), self.rules.value_expr(expr, dtype))
+        return super().value_expr(expr, dtype, result_dtype=self.rules.value_expr(expr, dtype))
 
     def constant(self, value, dtype):
-        rule = self.rules.constant(value, dtype)
-        if rule is torch.bool:
-            return self.predicate(self.index.truth(value))
-        return self.integral(self.index.constant(value, rule), rule)
+        return super().constant(value, dtype, result_dtype=self.rules.constant(value, dtype))
 
     def to_dtype(self, x, dtype, src_dtype=None, use_compute_types=True):
         if x is None:
             return None
-        rule = self.rules.to_dtype(x, dtype, src_dtype, use_compute_types)
-        if rule is torch.bool:
-            return self.predicate(self.truth(x))
-        return self.integral(self.integer(x), rule)
-
-    def add(self, a, b):
-        return self.arithmetic("add", functools.partial(self.index.native, "add"), a, b)
-
-    def sub(self, a, b):
-        index = self.index
-        return self.arithmetic("sub", lambda x, y: index.native(
-            "add", x, index.native("mul", y, index.constant(-1, torch.int64))), a, b)
-
-    def mul(self, a, b):
-        return self.arithmetic("mul", functools.partial(self.index.native, "mul"), a, b)
-
-    def neg(self, a):
-        index = self.index
-        return self.arithmetic("neg", lambda x: index.native("mul", x, index.constant(-1, torch.int64)), a)
-
-    def floordiv(self, a, b):
-        return self.arithmetic("floordiv", functools.partial(self.index.native, "floordiv"), a, b)
-
-    def remainder(self, a, b):
-        return self.arithmetic("remainder", functools.partial(self.index.native, "python_mod"), a, b)
-
-    def truncdiv(self, a, b):
-        return self.arithmetic("truncdiv", functools.partial(self.index.native, "tdiv_q"), a, b)
-
-    def mod(self, a, b):
-        return self.arithmetic("mod", functools.partial(self.index.native, "tdiv_r"), a, b)
-
-    def minimum(self, a, b):
-        return self.arithmetic("minimum", functools.partial(self.index.native, "minimum"), a, b)
-
-    def maximum(self, a, b):
-        return self.arithmetic("maximum", functools.partial(self.index.native, "maximum"), a, b)
+        return super().to_dtype(x, dtype, src_dtype, use_compute_types,
+                                result_dtype=self.rules.to_dtype(x, dtype, src_dtype, use_compute_types))
 
     def where(self, predicate, a, b):
         if predicate is None or a is None or b is None:
             return None
-        index, rule, p = self.index, self.rules.where(predicate, a, b), self.truth(predicate)
-        if rule is torch.bool:
-            return self.predicate(index.or_(index.and_(p, self.truth(a)), index.and_(index.not_(p), self.truth(b))))
-        return self.integral(index.native("where", p, self.integer(a), self.integer(b)), rule)
-
-    def compared(self, relation, a, b):
-        if a is None or b is None:
-            return None
-        return self.predicate(self.index.compare(relation, self.integer(a), self.integer(b)))
-
-    def lt(self, a, b):
-        return self.compared(INDEX_LT, a, b)
-
-    def le(self, a, b):
-        return self.compared(INDEX_LE, a, b)
-
-    def gt(self, a, b):
-        return self.compared(INDEX_GT, a, b)
-
-    def ge(self, a, b):
-        return self.compared(INDEX_GE, a, b)
-
-    def eq(self, a, b):
-        return self.compared(INDEX_EQ, a, b)
-
-    def ne(self, a, b):
-        return self.compared(INDEX_NE, a, b)
-
-    def logical_and(self, a, b):
-        return None if a is None or b is None else self.predicate(self.index.and_(self.truth(a), self.truth(b)))
-
-    def logical_or(self, a, b):
-        return None if a is None or b is None else self.predicate(self.index.or_(self.truth(a), self.truth(b)))
-
-    def logical_not(self, a):
-        return None if a is None else self.predicate(self.index.not_(self.truth(a)))
-
-    # a bitwise operator: of bools the logical one, of integers not represented
-    def and_(self, a, b):
-        return self.logical_and(a, b) if a is not None and b is not None and a.dtype is b.dtype is torch.bool else None
-
-    def or_(self, a, b):
-        return self.logical_or(a, b) if a is not None and b is not None and a.dtype is b.dtype is torch.bool else None
-
-    def not_(self, a):
-        return self.logical_not(a) if a is not None and a.dtype is torch.bool else None
-
-    bitwise_and, bitwise_or, bitwise_not = and_, or_, not_
-
-    def identity(self, x):
-        return x
+        return super().where(predicate, a, b, result_dtype=self.rules.where(predicate, a, b))
 
 
 # torch 2.14.0 torch/_inductor/loop_body.py LoopBody: one kernel call's one consumer of its retained original body

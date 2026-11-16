@@ -1,6 +1,7 @@
 import functools
 
 import torch
+from torch._prims_common import type_to_dtype
 from torch.utils._sympy.interp import sympy_interp
 from torch.utils._sympy.numbers import is_infinite
 
@@ -122,3 +123,165 @@ class Index:
 
     def identity(self, x):
         return x
+
+
+class Value:
+    __slots__ = ("index", "dtype")
+    is_scalar = False
+
+    def __init__(self, index, dtype):
+        self.index, self.dtype = index, dtype
+
+
+class Operations:
+    def __init__(self, index):
+        self.index = index
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _unrepresented
+
+    # a native integer `value` as a value of `dtype`
+    def integral(self, value, dtype):
+        index = self.index
+        if value is None or dtype.is_floating_point or dtype.is_complex:
+            return None
+        if dtype is torch.bool:
+            return self.predicate(index.ne(value, index.constant(0, torch.int64)))
+        return Value(index.wrapped(value, dtype), dtype)
+
+    def predicate(self, value):
+        return None if value is None else Value(value, torch.bool)
+
+    # an operand's integer value (a bool's its indicator) and its truth (an integer's != 0)
+    def integer(self, x):
+        index = self.index
+        if not isinstance(x, Value):
+            return index.constant(x, type_to_dtype(type(x)))
+        if x.dtype is not torch.bool:
+            return x.index
+        return index.native("where", x.index, index.constant(1, torch.int64), index.constant(0, torch.int64))
+
+    def truth(self, x):
+        index = self.index
+        if not isinstance(x, Value):
+            return index.truth(x)
+        return x.index if x.dtype is torch.bool else index.ne(x.index, index.constant(0, torch.int64))
+
+    def arithmetic(self, name, made, *operands, result_dtype):
+        if any(x is None for x in operands):
+            return None
+        return self.integral(made(*map(self.integer, operands)), result_dtype)
+
+    def index_expr(self, expr, dtype, *, result_dtype):
+        return self.integral(self.index.interp(expr), result_dtype)
+
+    def value_expr(self, expr, dtype, *, result_dtype):
+        return self.integral(self.index.interp(expr), result_dtype)
+
+    def constant(self, value, dtype, *, result_dtype):
+        rule = result_dtype
+        if rule is torch.bool:
+            return self.predicate(self.index.truth(value))
+        return self.integral(self.index.constant(value, rule), rule)
+
+    def to_dtype(self, x, dtype, src_dtype=None, use_compute_types=True, *, result_dtype):
+        if x is None:
+            return None
+        rule = result_dtype
+        if rule is torch.bool:
+            return self.predicate(self.truth(x))
+        return self.integral(self.integer(x), rule)
+
+    def add(self, a, b, *, result_dtype=None):
+        return self.arithmetic("add", functools.partial(self.index.native, "add"), a, b, result_dtype=result_dtype)
+
+    def sub(self, a, b, *, result_dtype=None):
+        index = self.index
+        return self.arithmetic("sub", lambda x, y: index.native(
+            "add", x, index.native("mul", y, index.constant(-1, torch.int64))), a, b, result_dtype=result_dtype)
+
+    def mul(self, a, b, *, result_dtype=None):
+        return self.arithmetic("mul", functools.partial(self.index.native, "mul"), a, b, result_dtype=result_dtype)
+
+    def neg(self, a, *, result_dtype=None):
+        index = self.index
+        return self.arithmetic("neg", lambda x: index.native("mul", x, index.constant(-1, torch.int64)), a, result_dtype=result_dtype)
+
+    def floordiv(self, a, b, *, result_dtype=None):
+        return self.arithmetic("floordiv", functools.partial(self.index.native, "floordiv"), a, b, result_dtype=result_dtype)
+
+    def remainder(self, a, b, *, result_dtype=None):
+        return self.arithmetic("remainder", functools.partial(self.index.native, "python_mod"), a, b, result_dtype=result_dtype)
+
+    def truncdiv(self, a, b, *, result_dtype=None):
+        return self.arithmetic("truncdiv", functools.partial(self.index.native, "tdiv_q"), a, b, result_dtype=result_dtype)
+
+    def mod(self, a, b, *, result_dtype=None):
+        return self.arithmetic("mod", functools.partial(self.index.native, "tdiv_r"), a, b, result_dtype=result_dtype)
+
+    def minimum(self, a, b, *, result_dtype=None):
+        return self.arithmetic("minimum", functools.partial(self.index.native, "minimum"), a, b, result_dtype=result_dtype)
+
+    def maximum(self, a, b, *, result_dtype=None):
+        return self.arithmetic("maximum", functools.partial(self.index.native, "maximum"), a, b, result_dtype=result_dtype)
+
+    def where(self, predicate, a, b, *, result_dtype):
+        if predicate is None or a is None or b is None:
+            return None
+        index, rule, p = self.index, result_dtype, self.truth(predicate)
+        if rule is torch.bool:
+            return self.predicate(index.or_(index.and_(p, self.truth(a)), index.and_(index.not_(p), self.truth(b))))
+        return self.integral(index.native("where", p, self.integer(a), self.integer(b)), rule)
+
+    def compared(self, relation, a, b):
+        if a is None or b is None:
+            return None
+        return self.predicate(self.index.compare(relation, self.integer(a), self.integer(b)))
+
+    def lt(self, a, b, *, result_dtype=None):
+        return self.compared(INDEX_LT, a, b)
+
+    def le(self, a, b, *, result_dtype=None):
+        return self.compared(INDEX_LE, a, b)
+
+    def gt(self, a, b, *, result_dtype=None):
+        return self.compared(INDEX_GT, a, b)
+
+    def ge(self, a, b, *, result_dtype=None):
+        return self.compared(INDEX_GE, a, b)
+
+    def eq(self, a, b, *, result_dtype=None):
+        return self.compared(INDEX_EQ, a, b)
+
+    def ne(self, a, b, *, result_dtype=None):
+        return self.compared(INDEX_NE, a, b)
+
+    def logical_and(self, a, b, *, result_dtype=None):
+        return None if a is None or b is None else self.predicate(self.index.and_(self.truth(a), self.truth(b)))
+
+    def logical_or(self, a, b, *, result_dtype=None):
+        return None if a is None or b is None else self.predicate(self.index.or_(self.truth(a), self.truth(b)))
+
+    def logical_not(self, a, *, result_dtype=None):
+        return None if a is None else self.predicate(self.index.not_(self.truth(a)))
+
+    # a bitwise operator: of bools the logical one, of integers not represented
+    def and_(self, a, b, *, result_dtype=None):
+        return self.logical_and(a, b) if a is not None and b is not None and a.dtype is b.dtype is torch.bool else None
+
+    def or_(self, a, b, *, result_dtype=None):
+        return self.logical_or(a, b) if a is not None and b is not None and a.dtype is b.dtype is torch.bool else None
+
+    def not_(self, a, *, result_dtype=None):
+        return self.logical_not(a) if a is not None and a.dtype is torch.bool else None
+
+    bitwise_and, bitwise_or, bitwise_not = and_, or_, not_
+
+    def identity(self, x, *, result_dtype=None):
+        return x
+
+
+def ranged(bounds):
+    return tuple((-(1 << 63), (1 << 63) - 1)[k] if is_infinite(v) else int(v) for k, v in enumerate((bounds.lower, bounds.upper)))
