@@ -972,6 +972,24 @@ atomic adds with `write=2`; it has yet to consume the compiled body's physical e
 The observed final call selected ordinary device scope. This emission did not execute the native program, establish
 system-memory visibility or demonstrate static linkage. Those implementation obligations remain open.
 
+The subsequent bounded library review found the next missing interface: the annotated AIR leaf's actual call
+operands and constant payload must supply LLVM's typed memory-location/effect operands. Original ScalarEvolution,
+Loop, Dominator and MemorySSA analyses are available components; their presence alone does not supply that adapter.
+LLVM 21's `MemoryLocation::getForArgument` handles its known intrinsics/library contracts rather than these annotations.
+Its Attributor pointer analysis uses integer offset bins and rejects `ptrtoint`; Polly's existing SCEVAffinator
+requires actual Scop domains, parameters, loops and assumption/invalidation results. Neither establishes an exact
+replacement for the current physical relation without the missing inputs and interface. The original `opt`
+invocation also rejected `air64_v28` before running analysis; the module's target and layout were preserved.
+That CLI failure is not a result about direct library analysis. The next local assignment connects the annotated
+leaf to actual typed effects and retained analysis owners. Guard/domain and interprocedural composition remain
+explicit further obligations. Long-add's observed internal return-to-carry dependence does not itself prove that
+the whole integer addition is noncommutative.
+
+Source checks: LLVM 21.1.8 [`MemoryLocation.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/llvm/lib/Analysis/MemoryLocation.cpp),
+[`AttributorAttributes.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/llvm/lib/Transforms/IPO/AttributorAttributes.cpp),
+and Polly [`SCEVAffinator.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/polly/lib/Support/SCEVAffinator.cpp).
+Command receipt: `compiler-emit/artifacts/a94feec-atomic-existing-analyses.log`.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
