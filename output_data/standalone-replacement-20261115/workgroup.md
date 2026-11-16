@@ -20,6 +20,8 @@ and [access-by-view](../../design/access-by-view-memorandum.md) memoranda. The
 supplies the producer, operands, lowering and consumers. AOT A1 supplies the assigned known-shape program domain;
 the numerical algorithms retain their specified internal conditions. Source-lowering items 5/6 supply their
 numerical methods. The two targets consume the same complete source and analysis results by reference.
+The [data-flow and review memorandum](#data-flow-and-review-memorandum) records the root's assignment corrections
+and the evidence to carry into subsequent work on these interfaces.
 
 | Scope | Producer, mechanism and consumer | Assigned repository |
 |---|---|---|
@@ -606,10 +608,10 @@ Root's source review found that the uncommitted MPS `render_protocol_entry` draf
 sequence and selecting operand bindings again. Root stopped that implementation and redirected the paired
 assignment to the original composition owner and its complete result. The original Torch emitter supplies
 its numerical body and actual ABI; the shared composition producer supplies the entry and bindings for
-final emission. Compiler and native agents are inspecting the existing IR/call/printer interfaces to make
-that handoff concrete. The draft remains visible for revision; the new phrase confers no requirement or
-independent implementation responsibility. The prior `1ac9861`/`8489075` observations cover their recorded
-checkpoint, rather than this later draft.
+final emission. Compiler and native agents inspected the existing IR/call/printer interfaces to make
+that handoff concrete. The draft was still present at this review; compiler `b8b39df` subsequently removed
+it. The new phrase confers no requirement or independent implementation responsibility. The prior
+`1ac9861`/`8489075` observations cover their recorded checkpoint, rather than this later draft.
 
 ### Standard memory views across language boundaries
 
@@ -639,6 +641,93 @@ Logs: `compiler-emit/artifacts/buffer-dlpack-view-20261115.log`
 (SHA256 `8c9cc67c7f4bf2a21a5f4b6d6aac5b84b3616e7c2ec1efebd21e703aa6af3edf`) and
 `dlpack-mps-view-20261115.log`
 (`f5ce26b5cc93b664498d3cd1ba214d990ee6e2f53d9099ee5cb0e7b0df74e1b6`).
+
+### Data-flow and review memorandum
+
+Operator, 15 November 2026:
+
+> so what's the data flow we're supposed to be doing?
+
+> if it has any departures from the code you were just writing: why? how did the literal content of the assigned task slip away multiple times and what note-taking and review standards does this require for us?
+
+The operator subsequently asked for the permitted data-flow steps, their order and the three independent
+demonstration repositories. The earlier ordering instruction remains literal:
+
+> then we halt all work on anything related to any consumers until weh ave made the correct data structure at the producer side. then we only correct direct functional neighors of the producer in our callgraph, and so on.
+
+The three repositories have distinct assigned roles:
+
+| Repository | Functionality demonstrated in isolation |
+|---|---|
+| `/Users/mdot/schedule-emit` | Export, placement, processor assignment and scheduling composed as ordinary functions returning a retained `Scheduled`; original numerical lowering and `Program(scheduled, functions)` make that composition executable. |
+| `/Users/mdot/compiler-emit` | Original upstream numerical compilation split at its actual preparation/result/emission boundaries, exposing complete producer results for composition before final emission. |
+| `/Users/mdot/native-execution` | The independent execution consumer of those complete compiled results and prepared storage/effect bindings; its assigned complete native execution remains unfinished. |
+
+The implementation checklist follows these data dependencies:
+
+1. **Produce the scheduled source program.** The reference's `export → place → on_devices → schedule →
+   argument_buffers` composition returns `Scheduled` with the original exported program and explicit bindings
+   (`schedule_emit/driver.py::compile_module`; composition item 2).
+2. **Produce the complete numerical compilation result.** The original upstream preparation and schedule-emission
+   functions expose their actual graphs, operations, accesses, calls, parameters and allocation results before
+   terminal emission. `compiler_emit.prepare` returns the original graph owners; original schedule emission
+   produces the later call and workspace results. Both retain the scheduled operand (composition numerical-lowerer boundary).
+3. **Produce the joint solved operands.** The shared graph, allocation and scheduling algorithms consume the
+   complete result and any newly expanded operations, retaining source correspondence and previously solved
+   results. Their output supplies the dependencies, lifetimes, copies, page bindings, transfers and execution
+   order for parameters, numerical operands and calls (AOT A4–A6/A8–A10; plan-to-bridge R1–R5).
+4. **Compose and emit the target program.** Original target construction consumes the numerical bodies and those
+   solved operands, including prologue/epilogue and transport effects. The original final emitter and target
+   compiler produce the executable and its complete bindings (composition items 5–7 and complete replacement).
+5. **Consume that compiled result.** The actual reference Program and independent native entry realize their
+   specified target behavior from the same complete result. Invocation supplies changing inputs through views;
+   the archive retains source and derived sections (composition executable-reference boundary; AOT A9).
+6. **Replace the corresponding Mesh implementations.** The demonstrated standalone implementations and complete
+   interfaces displace the defective implementations through the assigned categorical replacement.
+
+The current work is the incomplete producer-to-direct-consumer handoff in steps 2–4. Original parameter and
+allocation retention, relation registration and first-pass configuration have their separate recorded evidence;
+they do not establish a completed joint solve or composed native program. The next work completes the original
+producer's required result, then connects its immediate consumer. Runtime integration follows that completed
+interface. “Make the native caller work” supplies neither an additional step nor an independent assignment.
+
+Complete source and derived results remain accessible by view across these boundaries, including Python/native
+interfaces. Page mappings and byte extents locate stored results; their existing layouts supply interpretation.
+
+Root's assignment and review errors were concrete. Requiring a live runtime context to obtain an AOT page size
+substituted an existing caller's circumstances for an explicit operand. Assigning a new “protocol renderer”
+turned shorthand into a second implementation of the existing entry-construction algorithm. Reviewing metadata
+retention without simultaneously tracing its direct consumer allowed a duplicate dtype map and source-copying
+adapters to look like ordinary integration work. These decisions originated in the implementation/review process;
+the operator's assignment already supplied the responsibility boundaries.
+
+Source review at compiler `b8b39df`, native `f6e42c6` and Metal `f8facce2` establishes the following limited account:
+
+- The compiler retains the actual parameter and local-allocation results. Declaration emission and access widths
+  use the same parameter objects, and the duplicate entry builder has been removed.
+- Metal's original module construction returns its complete composition result before original final emission.
+  The new compiler caller still renders pass zero through its original numerical emitter; the named numerical-call
+  connection to that composition result, workgroup placement, writer coherence and scalar binding remain open.
+- `native_execution/pages.cpp::Emitted` and `Collection.source`, `metal_ir.mm::metal_ir_upstream_emitted` and
+  `metal_transport.mm::EmitModulePass` still copy emitted source across adjacent interfaces. Retaining its owner
+  elsewhere does not make those copies views.
+
+These are source observations. Earlier execution receipts establish only their stated revisions and exercised
+properties. The present group has source review and the agents' recorded syntax/projection checks; this memorandum
+reports no new runtime observation or completed replacement.
+
+For subsequent assignments, root carries the literal instruction and its cited mechanism alongside the concrete
+producer, complete result and storage owner, direct consumer, and implementation being displaced. The existing
+two four-sentence memoranda remain the assignment preface. An assignment describes the missing handoff using the
+source's vocabulary; its working name supplies no extra requirement.
+
+Review traces the changed producer and direct consumer together: which result is genuinely new, which existing
+result is read by view, where its ownership and source correspondence remain accessible, and which shared function
+performs each algorithm. A retained field counts toward the handoff when its consumer uses it. Source review
+establishes that local composition; execution receipts establish the properties actually observed. Revisioned
+findings and remaining obligations are recorded separately from verbatim requirements, with later corrections
+linked to earlier findings. Commits preserve work in progress as well as completed work; their status follows the
+remaining obligations. This is the root's review practice for the existing assignment, not another change request.
 
 ## Sources used in their respective roles
 
