@@ -181,6 +181,43 @@ interfaces. These observations cover the stated cases; they do not establish arb
 ownership, the full numerical domain, native page/transport composition, or the categorical Mesh replacement.
 The seven pre-existing modified reference archives remain untouched.
 
+### Producer boundary review after the reference correction
+
+Source review of compiler-emit `1476caf` and Mesh `b4ac32ce` locates the remaining compilation handoff earlier
+than the retained final AOT product. Original `GraphLowering.codegen` constructs the Scheduler, then calls
+`scheduler.codegen`, then generates the wrapper. CPU and MPS backend code renders numerical accesses during
+that scheduler call. Mesh's `LoweredAOTI` return at planned wrapper lines therefore follows numerical rendering;
+its later `_emission_context` and `emission` closures reconstruct ambient compiler state to print again. Its
+`CppTemplateKernel.printed` also repeats the original `PartialRender.finalize_all` traversal.
+
+The next implementation unit factors preparation and emission at their original owners. Both original callers
+use those same functions; the complete GraphLowering and Scheduler remain the operands. Original backend
+indexing, scalar/vector preparation and memory planning supply the subsequent numerical-access and allocation
+results. Composition consumes those results before their first numerical-address rendering. The template owner
+supplies its actual PartialRender to its original finalizer. A first split before scheduler emission alone does
+not establish complete native bindings or an emission API usable after the original compiler context exits.
+
+The native source trace identifies existing algorithm owners, rather than an additional runtime to implement:
+
+| Result | Existing producing/consuming boundary |
+|---|---|
+| Native numerical values and source relation | `lower_metal.construct` → `ConstructedMachine` → `native.Target` |
+| Effects, actor relation and storage lifetimes | `Target.instanced`, `metal_ir_lower`, `native.storages`, `MetalRecorderActors` |
+| Joint page/transport allocation | `schedule.solve_program` → original `mesh_plan_local` / `mesh_plan_program` results |
+| Prepared bindings and native action program | `Target.placed` → original recorder prepare/plan/replay → `MetalRecorderProgram` |
+| Compiled execution and drain | `metal_ir_native_compile` → `MetalProgramRunArguments` → `MetalProgramEnd` |
+
+The standalone numerical products still use reference channel effects. Their native target requires the same
+Scheduled/compiler owners plus explicit native topology/planning operands, connected at the channel-effect and
+allocation producers before final emission. Original native APIs then consume those values and complete plans.
+
+The active recorder translation units are `metal_capture.m` and `metal_program.m`, as the metal-microbench Makefile
+declares. The deliberately disabled `metal_recording.m` is historical source. The active producer supplies
+`NativeProgram.records`, `NativeObservation.counts` and the compiled image views through save/load; independent
+review confirmed these handoffs. The active translation units pass `clang -std=c11 -fblocks -O2 -Wall -Wextra
+-Werror -fsyntax-only -I . -I ../dox/mesh/rdma metal_capture.m metal_program.m`. This is source-compilation evidence,
+distinct from executing a fresh native library. No change to the obsolete recorder remains.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
