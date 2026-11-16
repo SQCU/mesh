@@ -74,7 +74,16 @@ results with the retained results (item 6), and final target emission consumes t
 compiler's passes, which keep each algorithm's internal numerical conditions and preserve the required numerical,
 state, alias and dependency semantics and the source correspondence (source-lowering item 2). Native execution
 applies the compiled result to the changing inputs (item 4). The demonstration's per-processor threads, queues and
-Python classes show this data flow; Mesh realizes it through its native execution and archive consumers.
+Python classes provide an executable target alongside Mesh's native execution and archive consumers.
+
+**Executable reference target.** The compilation/emission module lowers the assigned scheduled program into
+functions consumed by `schedule_emit.runtime.Program(scheduled, functions)`, through the reference's
+`lower_inductor.lower` and the upstream compiler's numerical lowering. The same complete producer result supplies
+the source bodies, bindings, state, aliases, effects and compiled order to the reference and native targets.
+Each target realizes those semantics through its own execution mechanism. The reference target uses its existing
+threads and queues; the native target uses its compiled entry and prepared page bindings. AOT A1 defines the
+program domain for both lowerings. The operator's [15 November direction and assignment](../output_data/standalone-replacement-20261115/workgroup.md)
+establish actual reference-runtime execution as the interface demonstration.
 
 ### 3. Each graph function and each decision is computed in one place
 
