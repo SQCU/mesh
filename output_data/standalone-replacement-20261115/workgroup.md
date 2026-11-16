@@ -1671,6 +1671,59 @@ must use their actual produced results. That is an interface obligation, rather 
 optimized Metal/RDMA runtime before using the reference. The exact command, outputs and source hashes are retained
 in `compiler-emit/artifacts/20261116-reference-composition/receipt.json`.
 
+### Compatible operands and the next integration work
+
+Operator, 16 November:
+
+> there is no reason for a mps, ane, or (mps,ane,cpu) combined lowerer to have an incompatible interface w/ the interface used by the threads and queues lowerer.
+
+> the mps oriented lowerer can maybe take *extra* operands, but it cannot justify having *different and incompatible* operands for the problem of presenting a callgraph, an optimization output IR, etc.
+
+> this means that demonstrating threads and queue backend cross compatibility is a way to review whether subagents are following literal dierctions literally
+
+The preceding synthesis and this direction have complementary roles. The executable reference supplies the
+concrete function-and-operand contract; its working calls give the meanings of the inputs and outputs. The
+operator requires every target to preserve that common interface, with additional target operands supplied
+explicitly. This is ordinary compatibility of functions and values, using the existing objects and views.
+The existing naming discipline continues to supply terminology. The [four-sentence memorandum](../../design/lowerer-interface-memorandum.md)
+and [composition request](../../design/compilation-composition-change-request.md#numerical-lowerer-boundary)
+carry this direction into implementation and Codex review.
+
+Current source review identifies the first incomplete boundary. `compiler_emit.prepare` returns one complete
+`Prepared` containing the Scheduled and original GraphLowering owners. `emit` returns a Compiled with functions
+accepted by the reference Program. The original-package adapter `native_execution.Prepared` also implements
+that callable convention. In contrast, the paged target's `emit_native` performs schedule emission, atomic
+compilation and access-relation production inside its own target path; `emit_fx_schedule` supplies its Program
+through `graph.native_program`. Its current result is a construction Program, whose calls/operations are retained
+but which has yet to become the compatible callable result. Additional library, device and compiler operands
+are legitimate target inputs. They do not establish a defect merely by being additional arguments.
+
+The immediate workgroup follows the producer/direct-consumer order:
+
+1. **Complete the common result producer.** Locate the actual upstream producers of ordered calls, operands,
+   effects and allocation results currently reached inside `emit_native`; return their complete owners before
+   target completion. Expose shared analysis/optimization results at that same functional boundary. The existing
+   original compiler and canonical graph/allocator functions continue to perform their respective algorithms.
+2. **Connect both immediate lowering consumers.** `emit`, the paged target's completion and its declaration
+   caller consume that same complete result. Each result retains the common program and supplies callable bodies
+   and bindings through the reference's argument convention; Metal/ANE libraries and physical realization
+   operands accompany those shared inputs. The existing compatible AOTI adapter is a concrete source to consult.
+3. **Exercise the transformed result through the reference.** Extend the existing Program demonstration to
+   consume the actual newly produced call order, dependency/allocation results and bindings. Codex reviews each
+   changed function's input, output, ownership and direct consumers against that executable contract, and records
+   which transformed results the observation exercised. The six-call GraphModule/AOTI receipt establishes the
+   existing boundary; the new work must exercise the added handoff itself.
+4. **Complete target realization and replacement from that interface.** The chosen original emitters and target
+   compilers consume the compatible result and their explicit extra operands. The pending Address-width build
+   observation accompanies the affected target consumer. Full CPU/MPS/ANE and transport coverage, physical plan
+   consumption, and categorical replacement remain the goal's completion requirements; performance observations
+   compare the concrete realizations after their semantics are connected.
+
+This is a producer/result/consumer workgroup for Codex supervision. Assignment review carries the existing two
+four-sentence memoranda together with the compatible-lowerer memorandum and the actual reference symbols.
+The documentary changes give the next implementation its interface and review obligations; they do not claim
+that the paged or ANE callable result has already been implemented.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and

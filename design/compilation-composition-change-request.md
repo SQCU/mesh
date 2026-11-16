@@ -48,7 +48,7 @@ implementation is supplied there with its explicit operands and its cited algori
 effectful `send` and `recv` operators (`lower_inductor.py` 66–93). Inductor's own output-stride and buffer-lifetime
 contracts (`keep_output_stride`, `never_reuse_but_free_buffers`) govern the adapted values. `Exported` supplies
 `graph_module`, `state`, `tokens`, `user_inputs`, `outputs` and `out_spec`, and `Scheduled.inputs` orders each
-processor's placeholders. Mesh's lowerer takes the richer retained operand of AOT
+processor's placeholders. Each lowerer consumes the same complete produced program operand, carrying the retained results of AOT
 [A5, A6](aot-compilation-change-request.md#a5-allocation-produces-page-bindings),
 [A8–A10](aot-compilation-change-request.md#a8-the-ir-operand-carries-solved-results) and items 2/6/7 above:
 
@@ -58,6 +58,22 @@ processor's placeholders. Mesh's lowerer takes the richer retained operand of AO
 - the dependency, page/storage/copy, transfer and execution-order results already produced for that body.
 
 Mesh supplies its page-allocation operands from AOT A5's retained allocation result.
+
+**Compatible operands.** The threads-and-queues, MPS, ANE and combined CPU/MPS/ANE lowerers share the
+function-and-operand contract demonstrated by `lower_inductor.lower(scheduled)` and
+`runtime.Program(scheduled, functions)`. Each receives the same complete callgraph and optimization-output
+operand at the corresponding boundary, with source and derived results accessible through their original owners.
+Target-specific requirements extend the call with explicit additional operands. The result retains callable
+bodies, their bindings and target artifacts, and the reference consumer executes those bodies with the same
+scheduled argument convention. This is the operator's
+[16 November clarification](../output_data/standalone-replacement-20261115/workgroup.md#compatible-operands-and-the-next-integration-work),
+summarized in the [lowerer interface memorandum](lowerer-interface-memorandum.md).
+
+The executable reference supplies the concrete meaning of function-and-operand typing here. Implementations use
+its actual calling conventions and values; the operator's naming/type-discipline guidance remains in force.
+Codex review follows the changed producer result through both immediate lowering consumers and uses execution
+through the original reference runtime as evidence of compatibility. A shared optimization's output is the
+operand of that demonstration, preserving its decisions and correspondence through the reference lowering.
 
 The lowerer receives completed AOT results and typed result-buffer references, following the operator's
 [AOT result-buffer clarification](../output_data/standalone-replacement-20261115/workgroup.md#aot-result-buffers-and-ordinary-paging-operator-clarification).
