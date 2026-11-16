@@ -537,6 +537,30 @@ Final constructed-kernel collection composition, final printing, runtime binding
 execution remain unfinished. The next paired source work consumes the existing Clone correspondence and
 original selected call/signature owners at that final emission boundary.
 
+### Final collection producer and binding build
+
+Metal `0a05feb5` composes the original unprinted address module through the original Clone correspondence
+before appending the original protocol and numerical functions. Metal `581f13fb` corrects the adjacent
+constructor's handling of signature arguments with explicit access bits of zero: the signature remains,
+and page relations follow the existing access bits. Both checkpoints built through the ordinary Metal
+Makefile targets. The four recorded source hashes matched at completion of the latter build.
+Its log is `metal-microbench/output_data/standalone-replacement-20261115/581f13fb-native-build.log`
+(SHA256 `e4a963c77a83e944078de26f38f40da4d3d5b63913b9aac76c8c6cdf9680b95d`).
+
+Native `8489075` exposes the original device, construction, collection composition, projected Function
+and Parameter operands, and terminal source/configuration interface. Its public `pages.library` built
+and loaded against Metal `581f13fb`, exit zero, with all five recorded native source hashes unchanged.
+The log is `native-execution/artifacts/8489075-binding-load.log`
+(`83c7d247e0f8469485e851d69928ef9f8684dc9d0e5befcdb6aa692d83a729da`). The paired original compiler
+preparation/final-render split is under review; no composed execution is established by this binding load.
+
+Independent review identified a further retained-view obligation before later native lowering: readiness
+and table metadata reside inline in Kernel records that InsertKernels moves, and the new collection kernel
+index plus the existing composition map need the original Renumber correspondence. The original producer
+must preserve these results and associations. A restriction requiring consumers to abandon the retained
+views after lowering would leave this requirement unfinished. This is an ordinary object-lifetime and
+index-correspondence correction, rather than an additional semantic requirement on paged storage.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
