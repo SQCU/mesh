@@ -7,6 +7,15 @@ returns the index's existing domain. These are borrowed views: they allocate
 nothing, increment no reference count and transfer no ownership. The domain's
 dimension storage remains available through `mesh_graph_domain_dims`.
 
+`mesh-graph-views.h` owns the original `GraphDomain`, `GraphIndex` and
+`GraphAccessMap` C++ definitions, moved unchanged from native execution's
+`relations.h`. Both native execution and compiler consumers include this one
+header and share the same types and existing `std::shared_ptr` holders.
+Native execution retains its original Python class registrations; other
+consumers accept those objects without registering replacement classes. The
+wrappers' existing destructors invoke the canonical Mesh frees, so their final
+release remains outside the context lock.
+
 Retain the complete Mesh owners for every use of these views. Each domain
 retains its context, and each index retains its domain. An index contains a
 value or a predicate; the other accessor returns NULL. Do not pass a borrowed
