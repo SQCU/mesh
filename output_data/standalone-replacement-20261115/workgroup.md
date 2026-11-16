@@ -50,6 +50,13 @@ The HOSTED implementation proves that the retained route re-enters Python; this 
 public-path reachability nor a measured active per-operation overhead. Replacement accounts must include the
 current producer/emitter/entry boundary as well as deletion of obsolete implementations.
 
+The same snapshot also contains an unfinished producer migration: `export.called` takes `(stack, module, args, ...)`,
+while `driver.compile_module` supplies `(module, args, ...)`; `CapturedProgram` carries `exported` and `outlined`,
+while `driver.compile_captured` reads `captured.functions`. These are concrete source-interface mismatches.
+The current broken calling path therefore supplies neither a working baseline nor the definition of the assigned
+domain. The standalone work follows the complete original upstream result and the positive AOT/composition
+requirements; the replacement includes their eventual direct producer/consumer connections.
+
 The original source of the maintained Inductor patches contains a deferred `_emission_context`/`entered` state
 restoration and Mesh's `CppTemplateKernel.printed` partial-render manipulation. The compilation assignment returns
 complete original upstream products at their responsible interfaces and uses original finalization in its original
@@ -59,6 +66,31 @@ of a not-drained completion result.
 Low-priority sweep-marker restoration is a separate source-history change. It preserves original bodies and the
 older deliberately disabled obsolete implementations. Central deferred-emission and HOSTED markers remain pending
 replacement. The native/compiler agents work in their separate repositories while that mechanical restoration runs.
+
+## Observations from actual reference execution
+
+The isolated `compiler-emit` environment ran the existing `schedule_emit.runtime.Program` with compiled functions
+from the reference lowerer. A two-CPU-processor MLP matched outputs exactly. The MPS MLP reported maximum absolute
+error `5.960464477539063e-08` and relative error `1.8593851162171478e-07` through the reference's existing comparison.
+
+The two-processor mutable-state case initially deadlocked. Its supplied p0 graph orders `send(2)` before `recv(3)`;
+the generated wrapper instead performs `recv(3)` before `send(2)`, while p1 needs channel 2 to produce channel 3.
+The original AOT graph retained the ordered effect-token chain. Original Torch `lowering.with_effects` then keyed
+`GraphLowering.additional_star_deps` with `new_op.get_name()` (a buffer name), while `Scheduler.compute_dependencies`
+looks up that table with `BaseSchedulerNode.get_name()` (the operation name). Thus the consumer missed the producer's
+already-computed effect dependencies. This is a source-name handoff defect in the upstream compiler used by the run.
+
+Changing that original producer to `new_op.get_operation_name()` restored the handoff. With caches disabled, the
+same two-processor mutable-state case completed three calls with zero observed output/state error. The runtime and
+scheduled source graph remained unchanged. The local patch and observations belong to `/Users/mdot/compiler-emit`;
+logs are `artifacts/reference-first.log`, `reference-mutation.log`, `reference-effects.log`, `reference-mutation-fixed.log`
+and `reference-mps.log`. These observations establish the exercised numerical, effect-order and state properties;
+full assigned-domain coverage remains implementation work.
+
+The separate [callback-restoration receipt](callback-restoration-20261115.md) records Mesh `ef651076`, Metal
+`ac2bd2ca`, restored dependency trees, exact source comparisons and the remaining central markers. The standalone
+native module separately executed repeated CPU and MPS alias/state examples at `native-execution` commit `cd09ad6`.
+Those native artifact-boundary examples do not yet establish scheduled transport or external page-plan consumption.
 
 ## Sources used in their respective roles
 
