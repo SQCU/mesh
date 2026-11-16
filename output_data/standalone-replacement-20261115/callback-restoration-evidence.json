@@ -1,0 +1,699 @@
+{
+  "mesh": {
+    "reversed": [
+      {
+        "commit": "c906de24",
+        "source_paths": [
+          "bench/meanfield.py",
+          "bench/moe_fast.py",
+          "bench/moe_shapes.py",
+          "bin/mesh-application.py",
+          "bin/mesh-codesign-identity.sh",
+          "bin/mesh-peers.sh",
+          "bin/mesh-run.sh",
+          "bin/mesh-sync-monitor.py",
+          "bin/mesh-top.py",
+          "bin/strip-source-comments.py",
+          "compiler/mesh_compiler/ir.py",
+          "examples/coreml-models.py",
+          "examples/cp.py",
+          "examples/engines.py",
+          "examples/ep.py",
+          "examples/parallel.py",
+          "examples/pl.py",
+          "examples/tp.py",
+          "rdma/allocate.py",
+          "rdma/mesh.py",
+          "rdma/mesh_code.py",
+          "rdma/mesh_compile.py",
+          "rdma/mesh_graph.py",
+          "rdma/mesh_hourly.py",
+          "rdma/mesh_metal4.py",
+          "rdma/mesh_preflight.py",
+          "rdma/peers.py",
+          "rdma/workload.py",
+          "user/mesh-nodeinfod.py",
+          "user/mesh-telemetry.py",
+          "viz/serve.py",
+          "xonotic/mapgen/nav.py",
+          "xonotic/mapgen/spiralgen.py",
+          "xonotic/payload/build.sh",
+          "xonotic/payload/runtime-package.py",
+          "xonotic/payload/tools/fusegraph.py",
+          "xonotic/payload/tools/fusemeasure.py",
+          "xonotic/payload/tools/havocstate.py",
+          "xonotic/payload/tools/joinshot.py",
+          "xonotic/payload/tools/mapfuse.py",
+          "xonotic/payload/tools/mapgen.py",
+          "xonotic/payload/tools/mapsrc.py",
+          "xonotic/payload/tools/mkentfile.py",
+          "xonotic/payload/tools/navmesh.py",
+          "xonotic/payload/tools/negspace.py",
+          "xonotic/payload/tools/placement.py",
+          "xonotic/planner/plan.py",
+          "xonotic/render/frame-report.py",
+          "xonotic/render/pbr-materials.py"
+        ]
+      },
+      {
+        "commit": "abba01f8",
+        "source_paths": [
+          "compiler/patches/torch-export-tracepoint-calls.patch",
+          "compiler/patches/torch-inductor-aot-lowered-result.patch",
+          "compiler/patches/torch-inductor-cpu-kernel-results.patch"
+        ]
+      },
+      {
+        "commit": "cb7dfb50",
+        "source_paths": [
+          "compiler/mesh_compiler/lower_metal.py",
+          "compiler/mesh_compiler/native.py",
+          "compiler/mesh_compiler/operations.py",
+          "compiler/mesh_compiler/placement.py",
+          "compiler/mesh_compiler/schedule.py"
+        ]
+      },
+      {
+        "commit": "d9a201d2",
+        "source_paths": [
+          "compiler/mesh_compiler/metal.py",
+          "examples/coreml-chain.swift",
+          "examples/gram-chain.swift",
+          "examples/indexed-gather.swift",
+          "examples/sync-on-remote-fill.swift",
+          "rdma/mesh-collective.c",
+          "rdma/mesh-coreml.m",
+          "rdma/mesh-events.c",
+          "rdma/mesh-flow.c",
+          "rdma/mesh-graph.c",
+          "rdma/mesh-heartbeat.c",
+          "rdma/mesh-lanes.c",
+          "rdma/mesh-link.c",
+          "rdma/mesh-metal.m",
+          "rdma/mesh-metal4.m",
+          "rdma/mesh-ports.c",
+          "rdma/mesh-records.c",
+          "rdma/mesh-torch.mm",
+          "swift/Bounds.swift"
+        ]
+      },
+      {
+        "commit": "fd05ee5f",
+        "source_paths": [
+          "compiler/patches/torch-export-tracepoint-calls.patch",
+          "compiler/patches/torch-inductor-alias-mutations.patch",
+          "compiler/patches/torch-inductor-aot-lowered-result.patch",
+          "compiler/patches/torch-inductor-cpp-build-result.patch",
+          "compiler/patches/torch-inductor-cpp-wrapper-binding.patch",
+          "compiler/patches/torch-inductor-cpu-kernel-results.patch",
+          "compiler/patches/torch-inductor-graph-lowering-factory.patch",
+          "compiler/patches/torch-inductor-upstream-composition.patch",
+          "compiler/patches/torch-lstsq-fixed-results.patch"
+        ]
+      },
+      {
+        "commit": "22d5cb96",
+        "source_paths": [
+          "compiler/mesh_compiler/archive.py",
+          "compiler/mesh_compiler/bridge.py",
+          "compiler/mesh_compiler/decompose.py",
+          "compiler/mesh_compiler/devices.py",
+          "compiler/mesh_compiler/lower_inductor.py",
+          "compiler/mesh_compiler/shares.py"
+        ]
+      },
+      {
+        "commit": "1beab98e",
+        "source_paths": [
+          "compiler/mesh_compiler/export.py",
+          "compiler/mesh_compiler/ir.py",
+          "rdma/mesh_compile.py"
+        ]
+      },
+      {
+        "commit": "4e5d6729",
+        "source_paths": [
+          "compiler/mesh_compiler/export.py",
+          "compiler/mesh_compiler/ir.py"
+        ]
+      }
+    ],
+    "pre_retention_exact_paths": 89,
+    "baseline": "24481f5f",
+    "paths": [
+      "bench/meanfield.py",
+      "bench/moe_fast.py",
+      "bench/moe_shapes.py",
+      "bin/mesh-application.py",
+      "bin/mesh-codesign-identity.sh",
+      "bin/mesh-peers.sh",
+      "bin/mesh-run.sh",
+      "bin/mesh-sync-monitor.py",
+      "bin/mesh-top.py",
+      "bin/strip-source-comments.py",
+      "compiler/mesh_compiler/archive.py",
+      "compiler/mesh_compiler/bridge.py",
+      "compiler/mesh_compiler/decompose.py",
+      "compiler/mesh_compiler/devices.py",
+      "compiler/mesh_compiler/export.py",
+      "compiler/mesh_compiler/ir.py",
+      "compiler/mesh_compiler/lower_inductor.py",
+      "compiler/mesh_compiler/lower_metal.py",
+      "compiler/mesh_compiler/metal.py",
+      "compiler/mesh_compiler/native.py",
+      "compiler/mesh_compiler/operations.py",
+      "compiler/mesh_compiler/placement.py",
+      "compiler/mesh_compiler/schedule.py",
+      "compiler/mesh_compiler/shares.py",
+      "compiler/patches/torch-export-tracepoint-calls.patch",
+      "compiler/patches/torch-inductor-alias-mutations.patch",
+      "compiler/patches/torch-inductor-aot-lowered-result.patch",
+      "compiler/patches/torch-inductor-cpp-build-result.patch",
+      "compiler/patches/torch-inductor-cpp-wrapper-binding.patch",
+      "compiler/patches/torch-inductor-cpu-kernel-results.patch",
+      "compiler/patches/torch-inductor-graph-lowering-factory.patch",
+      "compiler/patches/torch-inductor-upstream-composition.patch",
+      "compiler/patches/torch-lstsq-fixed-results.patch",
+      "examples/coreml-chain.swift",
+      "examples/coreml-models.py",
+      "examples/cp.py",
+      "examples/engines.py",
+      "examples/ep.py",
+      "examples/gram-chain.swift",
+      "examples/indexed-gather.swift",
+      "examples/parallel.py",
+      "examples/pl.py",
+      "examples/sync-on-remote-fill.swift",
+      "examples/tp.py",
+      "rdma/allocate.py",
+      "rdma/mesh-collective.c",
+      "rdma/mesh-coreml.m",
+      "rdma/mesh-events.c",
+      "rdma/mesh-flow.c",
+      "rdma/mesh-graph.c",
+      "rdma/mesh-heartbeat.c",
+      "rdma/mesh-lanes.c",
+      "rdma/mesh-link.c",
+      "rdma/mesh-metal.m",
+      "rdma/mesh-metal4.m",
+      "rdma/mesh-ports.c",
+      "rdma/mesh-records.c",
+      "rdma/mesh-torch.mm",
+      "rdma/mesh.py",
+      "rdma/mesh_code.py",
+      "rdma/mesh_compile.py",
+      "rdma/mesh_graph.py",
+      "rdma/mesh_hourly.py",
+      "rdma/mesh_metal4.py",
+      "rdma/mesh_preflight.py",
+      "rdma/peers.py",
+      "rdma/workload.py",
+      "swift/Bounds.swift",
+      "user/mesh-nodeinfod.py",
+      "user/mesh-telemetry.py",
+      "viz/serve.py",
+      "xonotic/mapgen/nav.py",
+      "xonotic/mapgen/spiralgen.py",
+      "xonotic/payload/build.sh",
+      "xonotic/payload/runtime-package.py",
+      "xonotic/payload/tools/fusegraph.py",
+      "xonotic/payload/tools/fusemeasure.py",
+      "xonotic/payload/tools/havocstate.py",
+      "xonotic/payload/tools/joinshot.py",
+      "xonotic/payload/tools/mapfuse.py",
+      "xonotic/payload/tools/mapgen.py",
+      "xonotic/payload/tools/mapsrc.py",
+      "xonotic/payload/tools/mkentfile.py",
+      "xonotic/payload/tools/navmesh.py",
+      "xonotic/payload/tools/negspace.py",
+      "xonotic/payload/tools/placement.py",
+      "xonotic/planner/plan.py",
+      "xonotic/render/frame-report.py",
+      "xonotic/render/pbr-materials.py"
+    ],
+    "retained_marker_lines": {
+      "compiler/patches/torch-inductor-aot-lowered-result.patch": 1,
+      "compiler/patches/torch-inductor-cpu-kernel-results.patch": 1,
+      "rdma/mesh_metal4.py": 8
+    },
+    "exact_final_baseline_paths": 86,
+    "central_patch_bodies_restore_exact_bytes": true,
+    "syntax": [
+      {
+        "path": "bench/meanfield.py",
+        "parsed": true
+      },
+      {
+        "path": "bench/moe_fast.py",
+        "parsed": true
+      },
+      {
+        "path": "bench/moe_shapes.py",
+        "parsed": true
+      },
+      {
+        "path": "bin/mesh-application.py",
+        "parsed": true
+      },
+      {
+        "path": "bin/mesh-sync-monitor.py",
+        "parsed": true
+      },
+      {
+        "path": "bin/mesh-top.py",
+        "parsed": true
+      },
+      {
+        "path": "bin/strip-source-comments.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/archive.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/bridge.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/decompose.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/devices.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/export.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/ir.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/lower_inductor.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/lower_metal.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/metal.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/native.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/operations.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/placement.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/schedule.py",
+        "parsed": true
+      },
+      {
+        "path": "compiler/mesh_compiler/shares.py",
+        "parsed": true
+      },
+      {
+        "path": "examples/coreml-models.py",
+        "parsed": true
+      },
+      {
+        "path": "examples/cp.py",
+        "parsed": true
+      },
+      {
+        "path": "examples/engines.py",
+        "parsed": true
+      },
+      {
+        "path": "examples/ep.py",
+        "parsed": true
+      },
+      {
+        "path": "examples/parallel.py",
+        "parsed": true
+      },
+      {
+        "path": "examples/pl.py",
+        "parsed": true
+      },
+      {
+        "path": "examples/tp.py",
+        "parsed": false,
+        "pre_existing": true,
+        "line": 121,
+        "message": "invalid syntax"
+      },
+      {
+        "path": "rdma/allocate.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/mesh.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/mesh_code.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/mesh_compile.py",
+        "parsed": false,
+        "pre_existing": true,
+        "line": 7628,
+        "message": "invalid syntax"
+      },
+      {
+        "path": "rdma/mesh_graph.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/mesh_hourly.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/mesh_metal4.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/mesh_preflight.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/peers.py",
+        "parsed": true
+      },
+      {
+        "path": "rdma/workload.py",
+        "parsed": true
+      },
+      {
+        "path": "user/mesh-nodeinfod.py",
+        "parsed": true
+      },
+      {
+        "path": "user/mesh-telemetry.py",
+        "parsed": true
+      },
+      {
+        "path": "viz/serve.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/mapgen/nav.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/mapgen/spiralgen.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/runtime-package.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/fusegraph.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/fusemeasure.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/havocstate.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/joinshot.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/mapfuse.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/mapgen.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/mapsrc.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/mkentfile.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/navmesh.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/negspace.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/payload/tools/placement.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/planner/plan.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/render/frame-report.py",
+        "parsed": true
+      },
+      {
+        "path": "xonotic/render/pbr-materials.py",
+        "parsed": true
+      }
+    ],
+    "patch_structure_checks": [
+      "compiler/patches/torch-export-tracepoint-calls.patch",
+      "compiler/patches/torch-inductor-alias-mutations.patch",
+      "compiler/patches/torch-inductor-aot-lowered-result.patch",
+      "compiler/patches/torch-inductor-cpp-build-result.patch",
+      "compiler/patches/torch-inductor-cpp-wrapper-binding.patch",
+      "compiler/patches/torch-inductor-cpu-kernel-results.patch",
+      "compiler/patches/torch-inductor-graph-lowering-factory.patch",
+      "compiler/patches/torch-inductor-upstream-composition.patch",
+      "compiler/patches/torch-lstsq-fixed-results.patch"
+    ],
+    "shell_syntax": [
+      "bin/mesh-codesign-identity.sh",
+      "bin/mesh-peers.sh",
+      "bin/mesh-run.sh",
+      "xonotic/payload/build.sh"
+    ],
+    "dead_sources": [
+      {
+        "path": "compiler/mesh_compiler/lower_coreml.py",
+        "sha256": "fab5d0848889176c9103d7aeb5e978acea02d0df30e30becbe80158c8cd35a06",
+        "exact_baseline_bytes": true
+      },
+      {
+        "path": "rdma/mesh_compile.py",
+        "sha256": "a81e0fe434139c0c383dcc2859e2dbeb362e751476e67d7cb4632ea87120f1db",
+        "exact_baseline_bytes": true
+      },
+      {
+        "path": "examples/tp.py",
+        "sha256": "89fb2bc373d9819436891e35e085a36b9692c7ada219a4cef1b09d0b2aa7ba29",
+        "exact_baseline_bytes": true
+      }
+    ],
+    "restoration_commit": "ef65107638290d7cbd7b6cf6e16497b343ee0224"
+  },
+  "dependencies": [
+    {
+      "name": "Dawn",
+      "path": "/Users/mdot/metal-microbench/.build/provider/dawn",
+      "marker_commit": "09457b098",
+      "baseline": "d22798336",
+      "restoration_commit": "4e94d4b0a0757cb2b915bd91e292e89fa9c7ef75",
+      "complete_tree_equal_to_baseline": true,
+      "source_paths": [
+        "src/dawn/native/DawnNative.cpp",
+        "src/tint/lang/core/constant/manager.cc",
+        "src/tint/lang/core/intrinsic/data.cc",
+        "src/tint/lang/core/ir/disassembler.cc",
+        "src/tint/lang/core/ir/functional_validator.cc",
+        "src/tint/lang/core/ir/structural_validator.cc",
+        "src/tint/lang/msl/intrinsic/data.cc",
+        "src/tint/lang/msl/writer/common/printer_support.cc",
+        "src/tint/lang/msl/writer/printer/printer.cc"
+      ],
+      "residual_callback_marker_paths": []
+    },
+    {
+      "name": "XNNPACK",
+      "path": "/tmp/xnnpack-native133/XNNPACK-878f1d8ca60d7f8fb6670ab7c8cbe39a6d7415f7",
+      "marker_commit": "877af3f",
+      "baseline": "55a0ae4",
+      "restoration_commit": "80cfa9121d17e44f33ee2b5f5f9d750d268c0fdd",
+      "complete_tree_equal_to_baseline": true,
+      "source_paths": [
+        "src/operator-run.c",
+        "src/subgraph/batch-matrix-multiply.c",
+        "src/subgraph/binary.c",
+        "src/subgraph/fully-connected.c",
+        "src/subgraph/pack-lh.c",
+        "src/subgraph/rope.c",
+        "src/subgraph/softmax.c",
+        "src/subgraph/static-constant-pad.c",
+        "src/subgraph/static-reduce.c",
+        "src/subgraph/static-slice.c",
+        "src/subgraph/static-transpose.c",
+        "src/subgraph/unary.c"
+      ],
+      "residual_callback_marker_paths": []
+    },
+    {
+      "name": "MLDrift",
+      "path": "/tmp/ml-drift-native133",
+      "marker_commit": "239994d",
+      "baseline": "576d069",
+      "restoration_commit": "3f6d27b99a5cbbe6bc389a9347894c37499c6631",
+      "complete_tree_equal_to_baseline": true,
+      "source_paths": [
+        "ml_drift/common/merge_nodes.h",
+        "ml_drift/webgpu/arguments.cc"
+      ],
+      "residual_callback_marker_paths": []
+    },
+    {
+      "name": "LiteRT",
+      "path": "/tmp/litert-native133b",
+      "marker_commit": "fbde6d03",
+      "baseline": "767121aa",
+      "restoration_commit": "cf59d4d357ec4a4d56d60d75d79a26a2304aa818",
+      "complete_tree_equal_to_baseline": true,
+      "source_paths": [
+        "ml_drift_delegate/delegate/delegate_kernel.cc",
+        "ml_drift_delegate/delegate/delegate_webgpu.cc",
+        "ml_drift_mesh.patch",
+        "tflite/kernels/comparisons.cc",
+        "tflite/kernels/logical.cc",
+        "tflite/kernels/logical.h",
+        "tflite/kernels/mesh_selected.cc",
+        "tflite/kernels/reshape.cc",
+        "tflite/kernels/select.cc",
+        "xnnpack_mesh.patch"
+      ],
+      "residual_callback_marker_paths": []
+    }
+  ],
+  "metal": {
+    "baseline": "1dca29d4",
+    "reversed": [
+      "1703f8df",
+      "2c634181"
+    ],
+    "paths": [
+      "metal_archive.mm",
+      "metal_capture.m",
+      "metal_clone.mm",
+      "metal_ir.mm",
+      "metal_lower.h",
+      "metal_lower.mm",
+      "metal_native.mm",
+      "metal_neural.mm",
+      "metal_program.h",
+      "metal_program.m",
+      "metal_recording.m",
+      "metal_transform.mm",
+      "metal_transport.mm",
+      "provider/dawn.patch",
+      "provider/litert.patch",
+      "provider/litert_mesh.cc",
+      "tools/e2b_replay.m",
+      "tools/native_bench.m",
+      "tools/primitive_constants.m"
+    ],
+    "exact_baseline_paths": 19,
+    "restoration_commit": "ac2bd2cac25433aeb51c1ddfe4521315df33932a",
+    "provider_patches_exact": true,
+    "canonical_litert": "cf59d4d357ec4a4d56d60d75d79a26a2304aa818",
+    "applied_patch_metadata_matches": true
+  },
+  "nested_patches": [
+    {
+      "patch": "xnnpack_mesh.patch",
+      "base": "e68c629",
+      "exact_source_diff": true,
+      "reverse_apply_check": true,
+      "canonical_matches": true
+    },
+    {
+      "patch": "ml_drift_mesh.patch",
+      "base": "d404e39",
+      "exact_source_diff": true,
+      "reverse_apply_check": true,
+      "canonical_matches": true
+    }
+  ],
+  "checks_kind": "source-only; no imports, builds, callbacks, or workloads",
+  "residual_scan": {
+    "/Users/mdot/dox/mesh": [
+      {
+        "path": "compiler/patches/torch-inductor-aot-lowered-result.patch",
+        "occurrences": 1
+      },
+      {
+        "path": "compiler/patches/torch-inductor-cpu-kernel-results.patch",
+        "occurrences": 1
+      },
+      {
+        "path": "rdma/mesh_metal4.py",
+        "occurrences": 10
+      }
+    ],
+    "/Users/mdot/metal-microbench": []
+  },
+  "torch_original_source_check": {
+    "root": "/Users/mdot/.cache/uv/archive-v0/xi1x_4wDn9qX_OVO",
+    "paths": [
+      "torch/_dynamo/functional_export.py",
+      "torch/_dynamo/symbolic_convert.py",
+      "torch/_dynamo/variables/tensor.py",
+      "torch/_dynamo/variables/torch.py",
+      "torch/_export/passes/collect_tracepoints_pass.py",
+      "torch/_export/wrappers.py",
+      "torch/_inductor/codecache.py",
+      "torch/_inductor/codegen/common.py",
+      "torch/_inductor/codegen/cpp.py",
+      "torch/_inductor/codegen/cpp_bmm_template.py",
+      "torch/_inductor/codegen/cpp_flex_attention_template.py",
+      "torch/_inductor/codegen/cpp_gemm_template.py",
+      "torch/_inductor/codegen/cpp_grouped_gemm_template.py",
+      "torch/_inductor/codegen/cpp_template_kernel.py",
+      "torch/_inductor/codegen/cpp_wrapper_cpu.py",
+      "torch/_inductor/codegen/mps.py",
+      "torch/_inductor/codegen/wrapper.py",
+      "torch/_inductor/codegen/wrapper_fxir.py",
+      "torch/_inductor/compile_fx.py",
+      "torch/_inductor/config.py",
+      "torch/_inductor/cpp_builder.py",
+      "torch/_inductor/graph.py",
+      "torch/_inductor/ir.py",
+      "torch/_inductor/lowering.py",
+      "torch/_inductor/output_code.py",
+      "torch/_inductor/pattern_matcher.py",
+      "torch/export/_trace.py"
+    ],
+    "missing": [],
+    "callback_markers": [],
+    "mutated": false,
+    "note": "Read-only source scan; no patch installation or semantic/version-coherence claim."
+  }
+}
