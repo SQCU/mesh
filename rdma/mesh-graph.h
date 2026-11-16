@@ -341,6 +341,13 @@ struct mesh_graph_context;
 int mesh_graph_context_create(struct mesh_graph_context **out);
 void mesh_graph_context_retain(struct mesh_graph_context *);
 void mesh_graph_context_free(struct mesh_graph_context *);
+/* design/graph-isl-views.md */
+struct isl_ctx;
+struct isl_set;
+struct isl_pw_aff;
+int mesh_graph_context_lock(struct mesh_graph_context *);
+int mesh_graph_context_unlock(struct mesh_graph_context *);
+struct isl_ctx *mesh_graph_context_isl(const struct mesh_graph_context *);
 /* A kernel's index domain, dimension k one original symbol over [lo, hi], its relation to the launch the backend's own:
    ROOT a range-tree root of an MPS kernel (torch/_inductor/codegen/simd.py IterationRangesRoot, [0, numel - 1]: a
    reduction root's whole numel, its multistage loop within one threadgroup), `axis` its position in
@@ -359,6 +366,7 @@ void mesh_graph_domain_free(struct mesh_graph_domain *);
 const struct mesh_graph_domain_dim *mesh_graph_domain_dims(const struct mesh_graph_domain *, uint32_t *dims);
 /* the domain's context, borrowed for the domain's lifetime */
 struct mesh_graph_context *mesh_graph_domain_context(const struct mesh_graph_domain *);
+struct isl_set *mesh_graph_domain_isl(const struct mesh_graph_domain *);
 /* An analysis value over a domain: an integer (isl_pw_aff) or a predicate (isl_set), as sympy_interp's and the
    LoopBody ops handler's methods of the same names make it: dimension `dim`; a constant (an integer, or `truth` a
    predicate); add, mul (one side constant), floordiv (a constant divisor: floor), modular_indexing (x, constant
@@ -367,6 +375,10 @@ struct mesh_graph_context *mesh_graph_domain_context(const struct mesh_graph_dom
    and, or, not (predicates). NULL where isl has no quasi-affine value (a product of two non-constants, a non-constant
    divisor or modulus, a NULL operand); each free'd with mesh_graph_index_free. */
 struct mesh_graph_index;
+const struct mesh_graph_domain *mesh_graph_index_domain(const struct mesh_graph_index *);
+struct isl_pw_aff *mesh_graph_index_value(const struct mesh_graph_index *);
+struct isl_set *mesh_graph_index_predicate(const struct mesh_graph_index *);
+struct mesh_graph_index *mesh_graph_index_take_locked(struct mesh_graph_domain *, struct isl_pw_aff *, struct isl_set *);
 struct mesh_graph_index *mesh_graph_index_dim(struct mesh_graph_domain *, uint32_t dim);
 struct mesh_graph_index *mesh_graph_index_constant(struct mesh_graph_domain *, int64_t value);
 struct mesh_graph_index *mesh_graph_index_truth(struct mesh_graph_domain *, int truth);

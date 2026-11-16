@@ -2681,6 +2681,9 @@ void mesh_graph_context_free(struct mesh_graph_context *c) {
   pthread_mutex_destroy(&c->lock);
   free(c);
 }
+int mesh_graph_context_lock(struct mesh_graph_context *c) { return pthread_mutex_lock(&c->lock); }
+int mesh_graph_context_unlock(struct mesh_graph_context *c) { return pthread_mutex_unlock(&c->lock); }
+isl_ctx *mesh_graph_context_isl(const struct mesh_graph_context *c) { return c->ctx; }
 
 /* mesh-graph.h struct mesh_graph_domain: its dimensions and their box { d : lo_k <= d_k <= hi_k } */
 struct mesh_graph_domain { size_t references; struct mesh_graph_context *context; uint32_t dims;
@@ -2732,6 +2735,7 @@ const struct mesh_graph_domain_dim *mesh_graph_domain_dims(const struct mesh_gra
   return d->dim;
 }
 struct mesh_graph_context *mesh_graph_domain_context(const struct mesh_graph_domain *d) { return d->context; }
+isl_set *mesh_graph_domain_isl(const struct mesh_graph_domain *d) { return d->box; }
 
 /* mesh-graph.h struct mesh_graph_index: an isl_pw_aff (`value`) or isl_set (`predicate`) over its domain's space */
 struct mesh_graph_index { struct mesh_graph_domain *domain; isl_pw_aff *value; isl_set *predicate; };
@@ -2743,6 +2747,13 @@ static struct mesh_graph_index *index_made(struct mesh_graph_domain *domain, isl
   mesh_graph_domain_retain(domain);
   *x = (struct mesh_graph_index){domain, value, predicate};
   return x;
+}
+const struct mesh_graph_domain *mesh_graph_index_domain(const struct mesh_graph_index *x) { return x->domain; }
+isl_pw_aff *mesh_graph_index_value(const struct mesh_graph_index *x) { return x->value; }
+isl_set *mesh_graph_index_predicate(const struct mesh_graph_index *x) { return x->predicate; }
+struct mesh_graph_index *mesh_graph_index_take_locked(struct mesh_graph_domain *domain, isl_pw_aff *value,
+                                                     isl_set *predicate) {
+  return index_made(domain, value, predicate);
 }
 #define INDEX_LOCKED(domain, made) do { pthread_mutex_lock(&(domain)->context->lock); \
     struct mesh_graph_index *result_ = (made); pthread_mutex_unlock(&(domain)->context->lock); return result_; } while (0)
