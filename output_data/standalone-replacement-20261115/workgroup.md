@@ -451,6 +451,38 @@ byte-storage Values require the numerical access width supplied separately to th
 producer. These are assigned producer/consumer corrections. Native relation registration and complete
 native execution, complete domain coverage and categorical replacement remain outstanding.
 
+### Corrected reference output interface and AOT geometry operand
+
+Reference `b476887` removes Exported's copied output-kind description and the runtime parser that consumed
+it. Program retains its complete Scheduled owner and the original post-unlift output tuple. That tuple
+defines the result prefix passed to Torch's original pytree reconstruction; the reference adapter's
+additional sender-layout results follow it. Original unlift remains responsible for token removal and
+mutation copyback. The seven pre-existing dirty reference archives were unchanged.
+
+With compiler-emit `e893bc1`, the same CPU Solve sample then completed through the actual reference runtime,
+reporting errors `(7.152557373046875e-07, 6.765992183700297e-07)`. The existing shared MPS example also passed
+its input-identity, alias, stride, offset and numerical assertions, with state `1 → 2 → 3`. All twenty-seven
+patched Torch files and four reference source files retained their hashes across both runs. Logs:
+`compiler-emit/artifacts/e893bc1-b476887-solve.log`
+(SHA256 `438dea8bd8fb386da509dd233c184af7aa84c13be20483c18430a43b4e28cac5`) and
+`e893bc1-b476887-shared-mps.log`
+(`2b40470202a0ef02ee8415ce0e81f08d0d3952adb466cc7d4319a3e34e67daa6`).
+
+Native `d165b94` retains the original prepared buffers, external input/output prototypes, folded-constant
+correspondence and declared storage views. Review paired those existing owners; later workspace and new
+inline-graph producers remain assigned. Native `c5c3ba1` adds direct bindings to canonical Domain, Index
+and AccessMap owners, reusing the original mesh_graph.Context lifetime mechanism. Mesh `1e58644f` and
+`9ed239e8` share the original symbolic and typed-operation mappings with their previous callers. These
+checkpoints have source/syntax evidence; their composed native execution is outstanding.
+
+Root's first declaration assignment unnecessarily required a mapped runtime context to obtain an AOT
+page quantum. An actual local `mesh_attach` attempt returned ENOENT: the named bridge region was absent
+(`compiler-emit/artifacts/24b01623-9a29175-context.log`). The compiler entry is being corrected to consume
+the page-byte quantum as an explicit AOT operand. An attached caller can obtain it through the original
+geometry function; a configured compilation can supply it directly. Runtime attachment, backing allocation
+and mapping lifetime belong to their later owners. This withdraws the root-imposed live-context prerequisite
+and introduces no fabricated context or frame contents.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
