@@ -1244,6 +1244,50 @@ primitive-effect-to-buffer-parameter handoff. Required alignment is available th
 the allocation operand handoff, actual provided base/page/view-origin facts, complete primitive access relations
 and native execution remain outstanding.
 
+### Required alignment enters the original allocation operand chain
+
+Compiler `09f9aa1` exposes the actual LLVM ConstantInt alignment views and original `getZExtValue` method.
+Native `be7dc17` consumes each original numerical parameter's scalar width and retained primitive object
+requirements at registration. Metal `4ef4bb5a` appends the resulting uint64 alignment to the existing upstream
+argument record and takes its maximum with the original scalar alignment in `ConstructKernels`' Binding.
+Mesh `38f04a15` matches the C record in the existing ctypes definition and constructor. The complete original
+call/parameter/effect owners remain retained. The separate private expected location contributes to its own
+LLVM allocation, rather than the global buffer argument.
+
+The C/Python record has size 24 and alignment at offset 16. The existing archive's whole-record `Vec(u.arguments)`
+serialization includes the field; its format marker advances to version 48. The later original `Storages`
+transformation and allocation algorithms are unchanged. Source review follows Binding.alignment into each
+storage root's maximum, then the original local-run allocation quantum. Required alignment is therefore an
+explicit planning operand. Actual base/page/view-origin congruence is still a separate result to supply.
+
+The ordinary original reader build exited zero with nine watched inputs unchanged. Original Metal library and
+native binding build/load exited zero with ninety-nine inputs unchanged. Build receipt:
+`compiler-emit/artifacts/4ef4bb5a-alignment-build/receipt.json`, SHA256
+`090cffc326057651a9f98c73b373f972907a278755e3fdfddc9392ed40291ca6`.
+The single public packed-float16 Indexing emission then exited zero with all 104 watched inputs/libraries
+unchanged. It exposed the original two-byte numerical scalar and four-byte primitive object requirement through
+the typed constant API, retained the complete owners, and registered/constructed/configured three original calls.
+Receipt: `compiler-emit/artifacts/4ef4bb5a-be7dc17-alignment-producer/receipt.json`, SHA256
+`6e0d512080086932d6d79a60e5a80b4d444d806ad1b498190e77646afed07c05`;
+run-log SHA256: `941a66e743df9da59c7d2c05f7e2fe828a92e6f366d16b6935b89d3df0b3873e`.
+This invocation ends before `metal_ir_lower` and `Storages`; later allocation and numerical dispatch were not
+executed. The propagation beyond construction is source evidence, distinct from that observation.
+
+The adjacent source audit identifies where the remaining provided facts belong. Original local planning aligns
+allocation offsets through `mesh_plan_local` and GreedyBySize; Arena retains the actual MTLBuffer base. Network
+planning retains block/page quantum, mapped-region geometry and page rows; `metal_ir_value_placed` checks relative
+page-offset divisibility. External/fixed bindings retain their original buffer and byte offset. The actual GPU
+base is available from those retained MTLBuffer owners, and the logical view origin remains `Buffer.origin`.
+Those facts currently do not reach the analyzed formal. An aligned offset or enclosing page alone does not
+establish the alignment of a different base or view.
+
+Original ScalarEvolution supplies same-base pointer subtraction through `getMinusSCEV`/`removePointerBase`;
+original known-bits analysis reads established IR facts, and the existing Polly binding retains residual
+expressions, invalid domains and assumptions. A packed helper's remaining base-residue expression needs its
+actual congruence operand. This audit identifies the missing provenance without changing the existing
+logical-byte analysis → placement order or replacing an unknown pointer with zero. Complete primitive relations,
+native allocation/execution and categorical replacement remain unfinished.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
