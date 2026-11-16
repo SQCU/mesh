@@ -594,6 +594,23 @@ later lowering, native allocation/execution and complete domain coverage remain 
 assignments consume the existing typed protocol operands in the renderer and correct the original native
 result owners before adding their later lowering consumer. Categorical Mesh replacement is still pending.
 
+### Assignment wording and duplicated composition correction
+
+The operator asked where a “protocol renderer” appeared in the requirements. Root introduced that phrase
+in assignments; the request itself specifies composition of numerical prologues/epilogues and acquisition/
+publication through shared access relations (composition item 5 and its complete-replacement section;
+plan-to-bridge R4). The original ModulePass already constructs the argument bindings and the acquisition,
+numerical-call and release sequence.
+
+Root's source review found that the uncommitted MPS `render_protocol_entry` draft was constructing that
+sequence and selecting operand bindings again. Root stopped that implementation and redirected the paired
+assignment to the original composition owner and its complete result. The original Torch emitter supplies
+its numerical body and actual ABI; the shared composition producer supplies the entry and bindings for
+final emission. Compiler and native agents are inspecting the existing IR/call/printer interfaces to make
+that handoff concrete. The draft remains visible for revision; the new phrase confers no requirement or
+independent implementation responsibility. The prior `1ac9861`/`8489075` observations cover their recorded
+checkpoint, rather than this later draft.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
