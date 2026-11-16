@@ -1471,6 +1471,32 @@ calls and four unresolved primitive queries remain the same. Receipt:
 `a44ab6985c0187c0aa181702f3c006c77947b781b69e178036e8c218ac20c73a`;
 run-log SHA256 `691a13009a81833d851727a645cd85c959a459db52448dbf15ce1d562998e8b1`.
 
+### The numerical parameter produces one alignment requirement before analysis
+
+Compiler `1753243` and native `9d04f00` move the existing numerical-root alignment calculation from Register to
+the original numerical parameter. Output/input signature production supplies the physical dtype baseline,
+including kernels with no atomic definitions. Original global primitive effects and an existing stronger
+`Argument.getParamAlign()` value contribute to the same `required_alignment` result. Private compare-exchange
+expected storage, scalar operands and error parameters keep their separate roles. Register now reads the
+produced field directly instead of repeating the dtype/effect calculation.
+
+Original `CloneModule` provides the derived module and complete correspondence while preserving the source.
+AtomicEffects retains its original CallGraph, reached functions and leaf effects; `compile_atomics` associates
+the actual ordered formals and completes the numerical requirements before function analysis. One explicit
+completion call applies the supplied values through original LLVM `Attribute::getWithAlignment`/`addAttr`, then
+runs the existing full function-analysis loop. Existing `analysis(function)` retrieves those results, and
+primitive offsets and queries follow. There is no earlier produced ScalarEvolution result to discard or reuse
+after changing its inputs. The original compiler APIs supply the alignment semantics and address-bit analysis
+([LLVM parameter attributes](https://llvm.org/docs/LangRef.html#parameter-attributes),
+[LLVM 21.1.8 `Value::getPointerAlignment`](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/llvm/lib/IR/Value.cpp)).
+
+This is the existing callable's declared root requirement. It is an operand for future backing/import
+realization, not evidence that the existing arena/import path provides absolute base alignment. The primitive
+object's alignment alone does not imply its incoming buffer base's alignment: packed helpers can realign a
+misaligned input. Original source attributes therefore remain visible and contribute to the same requirement
+consumed by both LLVM and Register. Original source projection, syntax and complete producer/consumer source
+reviews passed; the corresponding public observation is recorded separately.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
