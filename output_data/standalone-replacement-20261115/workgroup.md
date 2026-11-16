@@ -822,6 +822,43 @@ The remaining producer handoff is selected writer effects: preparation currently
 construction selects those effects. The paired work retains the original store result through that selection
 and supplies it to the original final emitter. Native callable declarations/linkage remain subsequent consumers.
 
+### Selected store effects reach original final emission
+
+Metal `fbbf5caa` extracts its original selected-writer storage comparison into `Released`, shared by
+`Coherent`, `ConstructModulePass` and the upstream query. Native `f00e101` exposes the complete composition
+result and its tables by reference, with read-only buffer views and the original operation owner. Its
+`released(argument)` propagates an unavailable-result error before Boolean conversion. Root built the ordinary
+Metal library targets and loaded the actual native extension successfully; all eight Metal and five native
+source hashes remained unchanged. Logs are `metal-microbench/output_data/standalone-replacement-20261115/`
+`fbbf5caa-native-build.log` and `native-execution/artifacts/f00e101-fbbf5caa-binding-load.log`, with adjacent
+`*-before.json` source manifests.
+
+Compiler `777c416` retains each original store, its operands, guard, source occurrence and removal decision.
+The original deferred-line printer receives each call's composition effects before materializing the final
+body. The ordinary emitter uses the same printer. Independent source review covered plain/reduction stores,
+prefix/splice views, original removal/CSE timing and per-call ownership; the eight patch projections reproduce
+all twenty-eight installed original source files.
+
+Root exercised that compiler with native `f00e101` and Metal `fbbf5caa`. The existing shared MPS example passed
+its numerical, identity, alias, stride, offset and persistent-state assertions (`1 → 2 → 3`). Public native
+declaration/emission of the existing RunningMean sample completed three operations, retaining the identical
+Prepared and Scheduled owners and exposing all three complete composition structs as eighty-byte read-only
+buffer views. Its calls retained two, one and one store effects; all selections were false. This run therefore
+observes the complete handoff and ordinary final emission, while selected system-coherent stores and native
+invocation remain unobserved. All fifty-three recorded source hashes remained unchanged.
+
+Logs: `compiler-emit/artifacts/777c416-shared-mps.log`
+(SHA256 `9a9613b801d4ae5dd55d7fc6049030a6a53c8d0e006751861cfceb5584f2d64d`) and
+`compiler-emit/artifacts/777c416-native-emit.log`
+(`7942b6fb549099f7f93ade945006318b9a60198dcf6d0edf11d023a3ced60542`);
+`777c416-source-before.json` retains the source manifest.
+
+The remaining original atomic-helper interface has a concrete distinction: narrow element helpers execute
+packed thirty-two-bit read-modify-write operations, while the current relation records the numerical element
+width. Their full physical access result and selected system visibility require the original helper's
+interface; the plain-store transform establishes neither. Callable declaration/static linkage and the full
+native program remain subsequent incomplete interfaces.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
