@@ -1150,6 +1150,37 @@ body and its expansion. Completed logical byte relations enter `mesh_graph_acces
 `FrameBindings` and final frame projection remain the numerical-address producers. This is a source defect
 manifest for their immediate handoff, not a new numerical compiler or an alternative placement algorithm.
 
+### Complete original affine queries and the real domain-bound correction
+
+Compiler `955abb8` binds the original Polly entry to the existing analysis, domain and index owners. Each query
+retains its input SCEV/block, whole PWACtx, assumptions collection and original LLVM Error. Derived bindings take
+the complete earlier query; original Mesh inputs supply both value and invalid-domain operands. Component views
+retain their complete owner. Source review corrected lost invalidity on rebinding, subview lifetimes and an added
+nullable-block restriction. The reader compiled, linked and loaded with the actual original affinator definitions;
+`compiler-emit/artifacts/polly-affine-binding-21.1.8/receipt.json` records that build.
+
+The first public Indexing-to-query invocation exposed an existing Mesh producer defect: `domain_box` negated
+INT64_MIN in native C arithmetic before passing the value to ISL. The actual indirect-index domain became
+malformed, and querying the original compiler's four-byte extent returned no fixed value. Mesh `1f3e9ffc` moves
+that negation and the equivalent access-bound/placement/partition arithmetic into original ISL values. Its adjacent
+partition-span comparison uses a sufficient 128-bit intermediate. Independent source review and the ordinary
+libmesh build passed, with seventeen watched inputs unchanged. The observed INT64_MIN failure is distinct from
+the adjacent source-reviewed cases; no separate execution coverage is asserted for those cases.
+
+The same public invocation then exited zero: Indexing emission produced three calls; original extent and member
+offset queries returned four and zero over the actual root `[0,11]` and indirect `[INT64_MIN,INT64_MAX] domain.
+The invalid predicate selected the original zero offset, whole-query rebinding retained the extent, and the actual
+unbound pointer produced a retained error whose value accessor raised. Component views kept the complete query
+alive after initial owners were dropped. All sixty-eight watched source/library hashes stayed unchanged.
+
+Exact command, source manifests, original bitcode and receipt:
+`compiler-emit/artifacts/955abb8-1f3e9ffc-affine-indexing/`. Run-log SHA256:
+`8099628eb9534723ce5d5bf36b101fc34f648ff131f95b098e04bfcc5f1b9ece`.
+The two earlier failed observations retain separate receipts. This establishes the actual constant/error query,
+domain and ownership handoff. Complete logical primitive-address relations, valid-domain discharge, native
+execution and categorical Mesh replacement remain unfinished; the producer manifest above identifies the next
+implementation group.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
