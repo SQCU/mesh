@@ -1429,6 +1429,38 @@ not redefine the new producer's contract. Separately, original SCEVAffinator cur
 message without the actual failure-site SCEV/Value. Retaining that original result is the next correction, so
 subsequent work can connect the actual source operand without parsing diagnostics or inventing a cause.
 
+### The original failure operand identifies the missing buffer-base input
+
+Compiler `bb7b557` retains each original SCEVAffinator failure expression alongside its Error. LLVM's
+`SaveAndRestore` maintains the current recursive/constant-factor-dispatch expression; the first error and its
+site remain paired. Each query captures that pointer under the existing lock. The borrowed SCEVUnknown and
+Value interfaces call original LLVM accessors. Source review covered both query entries, missing-block and
+final-representation errors, sibling failures and the original Scop complexity path.
+
+The full original Polly build and reader rebuild exited zero. Their respective 2,874 and twelve watched inputs
+stayed unchanged. Receipts are `compiler-emit/artifacts/bb7b557-polly-build/receipt.json` and
+`compiler-emit/artifacts/bb7b557-reader-build/receipt.json`. The Polly archive SHA256 is
+`3467ee753830f027a5dcbcef8425b45797dead372f7c419ab0974fcf6c756d9d`; the reader SHA256 is
+`1af928595b76bce30428e11fed9305fe41999f08b53ea759beb8335355cfb776`.
+
+The existing packed-float16 Indexing emission configured three calls. All four failed queries exposed an
+original SCEVUnknown whose Value was natively identical to the corresponding helper's `data` formal. Their
+failure sites and errors remained unchanged after a later successful query of the supplied offset formal.
+This identifies the missing buffer-base operand; it does not supply its alignment/congruence or finish the
+primitive access relations. All 116 watched source/library hashes stayed unchanged.
+
+That invocation then exited one at an observation-script assertion requiring a borrowed Value to keep its
+particular Query Python object alive. The assertion preceded reading the held Value and established no dangling
+native object. Original pybind11 `type_caster_base.h::cast` returns an existing registered wrapper before applying
+`reference_internal`; such a wrapper can retain its original analysis/module owner rather than a later Query.
+Conversely, forcing that later Query into the wrapper's lifetime chain can create a cycle when the same SCEV is
+already the Query's input. Query-specific Error/provenance access belongs to the retained complete Query. The
+documentation correction `d963e82` distinguishes that result from the native operand's owner; the corrected
+observation keeps the complete query when inspecting its query-specific result.
+The original failed receipt remains at `compiler-emit/artifacts/bb7b557-failure-provenance/receipt.json`; run-log
+SHA256 `158f5445bd58815e9f79c0b183618e59e8f222caeb180a389cd64df8b80a5a52`. Allocation and numerical dispatch were
+not exercised.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
