@@ -1586,6 +1586,35 @@ continue supplying the atomic call's frame. Compiler owns the relation handoff, 
 operations and their immediate native registration consumer, and frontends owns the original control-analysis
 view and peer review. Source review precedes the single ordinary public invocation and records its limits.
 
+Compiler `02b3f78` supplies the original retained must-execute iterator and Polly sign constants; compiler
+`92430dd` supplies the complete guarded byte-relation handoff. Mesh `3159ced1` supplies the canonical ISL
+operations, and native `a82bff7` consumes their results and actual global ModRef usage. All four checkpoints
+received independent source review. Ordinary graph-library, reader and native-binding builds passed, with all
+130 watched source/dependency inputs unchanged during the build observation.
+
+The single existing packed-float16 Indexing public emission exited zero in 4.51 seconds, with all 116 watched
+inputs unchanged. Both actual helper variants discharged their two original unsigned restrictions and two
+query coverage/invalid-region proofs under the original access guard: eight emptiness results were true.
+All four production queries returned complete results. Their actual object width was four bytes, while the
+original numerical dtype was two bytes. Four constituent relations, each spanning bytes 0–63, fed the same
+final union with logical `write=2`. Original LLVM proved both actual primitives must execute with entry in
+each variant, so this invocation's maps carried flags zero; bool's conditional path was source-reviewed and
+was not exercised here.
+
+The original load effect reads the global object; CAS reads and writes it and retains its separate four-byte
+private expected object. Register's use of those bits and the receive-acquisition consumers were source-reviewed.
+The invocation retained the original Store function and equal original/projected frame value `3221225481`,
+with projected slot 5. Complete discovery/final effects, original correspondence, queries, assumptions and
+analysis owners remained accessible after outer-local release. Three calls configured and retained their
+original emitted-source owners. The observation covers logical relation production and its immediate consumer;
+physical Address conversion, backing alignment, allocation and numerical dispatch remain further work.
+
+Build receipt: `compiler-emit/artifacts/92430dd-3159ced1-a82bff7-build/receipt.json`, SHA256
+`60525bac40770b1308354647e8599a3327c07982dfde8ffcb7fc927d718803f7`.
+Public receipt: `compiler-emit/artifacts/92430dd-atomic-footprints/receipt.json`, SHA256
+`d270c1101906481b46f1518e5e63e1dd854ec95068cfc2d4f878d5dddeaca0fa`;
+run-log SHA256 `59f4026664a6d53a74138c3115f7d969ec94f368242e679cdd0c804ac67771fa`.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
