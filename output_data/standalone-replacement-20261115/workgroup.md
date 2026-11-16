@@ -483,6 +483,32 @@ geometry function; a configured compilation can supply it directly. Runtime atta
 and mapping lifetime belong to their later owners. This withdraws the root-imposed live-context prerequisite
 and introduces no fabricated context or frame contents.
 
+### Canonical native relation build and load
+
+Metal `9ed03578` built through the ordinary `libmetal_ir` and `libmetal_recording` Makefile targets.
+The shared upstream producer retains the completed numerical access maps independently of byte-storage
+Value types, and the original page-address operation uses u64 physical-address arithmetic. Native
+`b7bc820` built through its ordinary Makefile and its public `pages.library` entry compiled and loaded
+the actual canonical Domain/Index/AccessMap bindings. All commands exited zero; both changed Metal
+source hashes and all three native binding source hashes remained fixed during their builds.
+
+Logs: `metal-microbench/output_data/standalone-replacement-20261115/9ed03578-native-build.log`
+(SHA256 `d2a4abc62ddbe7a6d6df173890e4ee340aa8e82812912f984c625ae691eb77af`),
+`native-execution/artifacts/b7bc820-native-build.log`
+(`b61dee69c0243e72341bc664e8d4744e1eef51a7de662ed2d02b9edcede890b9`), and
+`native-execution/artifacts/b7bc820-binding-load.log`
+(`35da620be1406a08575badd0a0887996ab97d2f8e346a80872ad9c9207763893`).
+This establishes build/load evidence; the compiler-to-native emission and native numerical execution
+remain unobserved at this receipt.
+
+Review of the next composed caller found that repeated indirect-index uses must retain equality through
+their original computed-value identity, alongside each invocation's actual assertion selection and bounds.
+That correction is assigned to the original producer and direct relation consumer. Final native collection
+composition must also consume the original unprinted address module through the existing Clone correspondence
+before printing. The original scalar-double MPS binder produces local float bytes for setBytes; its binding
+obligation is distinct from Tensor storage declaration. These are concrete unfinished interfaces, not new
+semantic requirements on the page table.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
