@@ -1181,6 +1181,37 @@ domain and ownership handoff. Complete logical primitive-address relations, vali
 execution and categorical Mesh replacement remain unfinished; the producer manifest above identifies the next
 implementation group.
 
+### Logical invocation and required alignment producer observation
+
+Compiler `89e4ed6` and reader `0d4e1ea` connect each original atomic definition's ordered formals to its logical
+Buffer/index/value operands and original/derived LLVM arguments. The native index retains its complete original
+invocation, Buffer/Address owners and directional frame. Original Clang `alignof` results accompany the existing
+atomic offset, extent, scope and order payloads. The reader exposes the original constants by view; AA ordering
+checks continue to use the order fields rather than interpreting the appended alignment fields as orders.
+
+The executor's single packed-float16 `samples.Indexing` invocation through public `declarations.emit` exited zero.
+Its three emitted calls retained the actual Store/Buffer/Address/formal identities. Both scope definitions exposed
+the original load and compare-exchange leaves with four-byte object extent/alignment; compare-exchange retained
+its separate private expected location, four-byte extent/alignment and read/write effects. Scopes were 2 and 3,
+and all observed order operands were zero. Borrowed views survived dropping the outer local owners and were
+released normally. All sixty-eight watched source/library hashes remained unchanged. Original `llvm-dis` of the
+same 21,072-byte bitcode showed all four AIR primitive calls retaining their volatile operand.
+
+Exact command, manifests, original bitcode and receipt:
+`compiler-emit/artifacts/89e4ed6-logical-producer/`. Run-log SHA256:
+`89370e7c6195e8483cc781675357330e5e0ca88975199ac69a6dcc1d4a1ca008`;
+receipt SHA256: `4920a67208aaf224ea118ff391c45b703fda4453512a940db4b0060842271171`.
+This observation covers the logical invocation and required-alignment producer, without numerical dispatch.
+Connecting these requirements to original bindings/allocation, supplying actual base/page/view-origin congruence,
+and completing primitive access relations remain work in the manifest above.
+
+The next direct handoff associates each original primitive location with its actual formal through LLVM's
+underlying-object analysis and the retained formal/source correspondence. Its required alignment belongs to that
+existing parameter owner. The original `Binding.alignment` → `Storages` → allocation-quantum chain consumes that
+requirement; a private compare-exchange temporary belongs to its original LLVM allocation. An alignment
+requirement supplies an allocation operand, while the allocator and placement result supply the actual provided
+alignment. Root's source audit keeps those two facts distinct.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
