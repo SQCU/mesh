@@ -1100,7 +1100,30 @@ Root's normal library rebuild exited zero with six source hashes unchanged and a
 exported. Log SHA256: `ee3eeee4592d6733c89e9a83b25a33659469dcad5dda67d5b65fd77654ae0ab7`;
 `d6da69fd-libmesh-receipt.json` and `d6da69fd-libmesh-source-before.json` retain the observation.
 The next direct caller must retain the original domain/index owners, complete PWACtx invalid sets and assumptions;
-an actual bound query, valid-domain discharge and full physical-access handoff remain unfinished.
+an actual bound query, valid-domain discharge, complete logical primitive accesses and their canonical placement
+remain unfinished.
+
+Mesh `7cb4bc7e` and native `5f95c6a` put the existing GraphDomain, GraphIndex and GraphAccessMap definitions verbatim
+in `rdma/mesh-graph-views.h`. The native binding includes that header and keeps the existing single Python type
+registration. Independent review and C++ syntax checks passed. Root built and loaded the ordinary `pages.library`
+entry with eight watched source/library hashes unchanged, exit zero. Receipt:
+`native-execution/artifacts/5f95c6a-graph-views/receipt.json`; build-log SHA256:
+`ba2e6893e128d7aaca62fb207b0ff3e0d6f3b47e72cde045189ab6c3f2b00eb7`.
+
+### Logical primitive accesses precede page placement
+
+The direct-caller audit at compiler `2206bed`, native `5f95c6a` and Metal `fbbf5caa` distinguishes the original
+logical index from the printed page-address expression in Torch `MetalKernel.buffer_index`. Root initially treated
+the missing typed physical subscript as a prerequisite for affine access analysis. The existing producer/consumer
+order supplies the correction: `metal_ir.h`'s paged-root contract keeps effects and footprints in logical storage
+bytes. `UpstreamEffects` carries those relations and their storage identities; `Touched` and `TouchRelation` use
+the retained placements and `mesh_graph_access_map_placed` to place them per page, copy and access direction.
+
+The immediate numerical producer therefore supplies its expanded primitive accesses in logical storage coordinates,
+with the actual source argument, origin, alignment and guard operands. The existing placement transformation
+consumes that complete result. The printed page-address expression remains final source output; reproducing its
+algorithm or recovering its meaning from text supplies no required prerequisite. An original buffer index and an
+already-paged helper offset have different meanings, so relabeling one as the other would still be incorrect.
 
 ## Sources used in their respective roles
 
