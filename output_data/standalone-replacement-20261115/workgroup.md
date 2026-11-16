@@ -946,6 +946,32 @@ enter the existing relation consumer, and actual store owners still need their c
 compiler result. The Indexing run exercises ordinary device scope. System-memory GPU behavior, callable static
 linkage, full native execution and categorical replacement remain unfinished.
 
+### Actual store-to-compiled-function handoff
+
+Compiler `5366ccf` adds three source-owned Clang annotations to the original atomic leaf functions. Their
+constant operands come from the compiler's actual field offset, storage size, scope and order expressions.
+Compiler `a94feec` then supplies the actual numerical stores to the existing MPS emitter, compiles their
+default/system definitions together, and retains the complete compiler result and original LLVM Function views
+before Relations. Native `7c01bb4` forwards the explicit compiler keyword bundle through `declarations.emit`.
+The single original atomic-call printer serves both these definitions and final numerical source emission.
+Independent source review found no further concrete producer/direct-caller defect in this group.
+
+Root exercised that public `declarations.emit` entry with the existing Indexing sample. It produced three calls
+and operations, including one atomic store with both compiled scope definitions. Every call and relation retained
+the same complete compiler result; the actual store retained its own definitions and each call selected its own
+variant. LLVM's original symbol lookup returned those same Function objects, each with its actual three arguments.
+The original compiler exited zero and returned an 11,680-byte read-only bitcode buffer. All fifty-nine recorded
+source hashes stayed unchanged. Log: `compiler-emit/artifacts/a94feec-native-indexing.log`, SHA256
+`f4c87d139576d66ac87a10df38188321fc78b6e55b064c1751bfd5a992169a41`; source manifest:
+`artifacts/a94feec-native-indexing/source-before.json`; bitcode SHA256
+`d95ee8fe40aa7ab18cba41d118b560deb3bab6bf826163c4885450ece6d54682`.
+
+This observation establishes the producer-to-direct-consumer ownership and identity handoff and successful source
+compilation for that instance. Relations still computes physical accesses using numerical scalar width and marks
+atomic adds with `write=2`; it has yet to consume the compiled body's physical effects and returned-value dependencies.
+The observed final call selected ordinary device scope. This emission did not execute the native program, establish
+system-memory visibility or demonstrate static linkage. Those implementation obligations remain open.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
