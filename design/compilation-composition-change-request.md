@@ -85,6 +85,12 @@ threads and queues; the native target uses its compiled entry and prepared page 
 program domain for both lowerings. The operator's [15 November direction and assignment](../output_data/standalone-replacement-20261115/workgroup.md)
 establish actual reference-runtime execution as the interface demonstration.
 
+Placement supplies processor assignments through AOT A2, and allocation supplies storage bindings through AOT A5.
+The target adapter translates those results into its target's operations; invocation binds supplied values to the
+compiled interface. Mesh's retained placement and storage results determine views, copies and transfers. The
+reference adapter's `torch.device` values encode its compiler-selected targets, as clarified in the
+[operator's placement clarification](../output_data/standalone-replacement-20261115/workgroup.md#placement-clarification).
+
 ### 3. Each graph function and each decision is computed in one place
 
 The graph module exposes the cited dependency, closure, contraction, matching, ordering and synchronization

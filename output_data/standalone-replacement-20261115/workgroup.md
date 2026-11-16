@@ -106,6 +106,24 @@ The separate [callback-restoration receipt](callback-restoration-20261115.md) re
 native module separately executed repeated CPU and MPS alias/state examples at `native-execution` commit `cd09ad6`.
 Those native artifact-boundary examples do not yet establish scheduled transport or external page-plan consumption.
 
+## Placement clarification
+
+Operator, 15 November 2026:
+
+> 'mesh' appears to have at the level of axiomatic construction no distinction which allows for 'devices' to be programmed imperatively. (in fact, it seems to exist to turn pure linear algebra and linear algebraic functions into callgraphs which are *placed by the compiler* upon devices through a separate step from lowering or parsing code).
+
+The questioned observation concerned the reference's `torch.device` field and its former `Program.bind` conversion.
+The exact demonstration used the existing `samples.MutatesInput.forward`, whose body is `x.add_(1); return x * 2`.
+The input was a CPU tensor. The separate placement operand assigned numerical operations to `work: mps` and the
+output to `result: cpu`. The numerical source contains no device-management operation. New transfer nodes in this
+reference case derive from that compiler-supplied placement; invocation retains the original caller binding.
+
+This case exercises compiler placement and the source mutation/alias contract. It establishes no additional
+requirement for imperative device control. The reference target's tensor-copy mechanism is target-specific evidence,
+not an allocation rule for Mesh. Mesh consumes the retained placement/page results: shared storage is accessed by
+view, and the compiled plan supplies any required copy or transfer. A CPU/MPS/ANE target label alone does not
+establish a need to copy data. Source numerical capture, placement and target lowering retain their separate roles.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
