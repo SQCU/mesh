@@ -1395,6 +1395,40 @@ therefore already have distinct original owners. Page geometry, imported backing
 must consume those owners rather than creating a second padding computation or treating numerical storage size
 as a guarantee of arbitrary trailing bytes.
 
+### Per-call logical operands enter the original affine queries
+
+Compiler `332ac09` supplies the already-produced prepared-index result through the original `sympy_interp`
+environment. Its expression-keyed lookup reuses that result before recursion, including an explicitly
+unrepresented result. Original SymPy `evaluate=False` preserves the prepared subtree in the surrounding logical
+expression. This extends the existing interpreter interface; the original expression-cache pattern is also
+visible in PyTorch `FxConverter._sympy_interp` and `runtime_assert.py::_sympy_interp`.
+
+Each call retains its complete selected access, definition and prepared Index in an AtomicQueries result. The
+existing compiled helper's actual offset formal supplies the outer logical dtype. The value's invalid predicate
+comes from canonical `not(eq(value, value))`: original ISL equality uses the value's defined domain. The actual
+derived formal SCEV, canonical value and invalid predicate enter the original Affinator. Per-call results retain
+the full queries, errors, assumptions and source owners; shared definitions and existing access maps stay intact.
+
+The single packed-float16 Indexing invocation exposed two production query groups. Their prepared index dtype was
+int32 and their logical/helper formal dtype was int64. Querying each exact formal through its same production
+Affinator succeeded: original graph operations confirmed value agreement on the valid domain and matching
+invalid predicates. Four production relative-expression queries still returned the generic SCEVUnknown error.
+Their failing original expression was not identified by that message. Three original calls were configured,
+and retained result/component views kept their complete owners alive. All 110 watched hashes stayed unchanged.
+
+Receipt: `compiler-emit/artifacts/332ac09-production-bindings/receipt.json`, SHA256
+`3fbdcf2e9c419f2215bf8b76e61130b5877f775e4045131c14600d616d6c992d`;
+run-log SHA256 `861515437a6e29be0593c3db563ab45c01e570f716437c872873d0a6d39d54fc`.
+Existing native libraries were reused. No allocation, numerical dispatch or replacement primitive access map
+was exercised. The observation establishes the logical formal binding, not physical-source equivalence.
+
+The source review separates two outstanding direct interfaces. Current AddressFunctions chooses a u32/u64 input
+and further conversions, while the binding exposes its type as printed text. That consumer's conversion must
+be related to the retained logical operand/type before claiming equivalence; its existing implementation does
+not redefine the new producer's contract. Separately, original SCEVAffinator currently returns the unsupported
+message without the actual failure-site SCEV/Value. Retaining that original result is the next correction, so
+subsequent work can connect the actual source operand without parsing diagnostics or inventing a cause.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
