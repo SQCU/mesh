@@ -859,6 +859,17 @@ width. Their full physical access result and selected system visibility require 
 interface; the plain-store transform establishes neither. Callable declaration/static linkage and the full
 native program remain subsequent incomplete interfaces.
 
+The subsequent source audit located those effects in the original `c10/metal/atomic.h`: float/int use one
+thirty-two-bit atomic, the packed helper owns pointer realignment and word/lane selection, bool has its own
+predicate and address formula, long uses two word additions with a carry dependency, and float2 uses two
+component additions. `AtomicType::type` alone therefore also fails to describe the complete operations.
+Metal's existing `LoweredBody::Access` derives physical effects from actual typed atomic instructions and their
+returned-value uses. The original header presently exposes neither that typed body nor a host AOT effect
+result. The next producer interface must retain the helper's actual address, atomic operation and result
+dependencies where they are produced, with its implementation consuming the same result. This is a source
+finding about a missing interface, rather than evidence for replacing it with a numerical-dtype classifier or
+another copy of the helper. The audit performed no further builds or workloads and changed no source.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
