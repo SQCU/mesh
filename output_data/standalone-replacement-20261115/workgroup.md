@@ -322,6 +322,20 @@ correction to the next assignment. The local extractions preserve their original
 Their source projection covers twenty-four Torch files. This checkpoint has source-review evidence, with no new
 numerical execution, and leaves native allocation/transport composition and categorical replacement outstanding.
 
+### Native build before the address-interface change
+
+On 15 November, the ordinary Makefile targets rebuilt `rdma/libmesh.dylib`,
+`libmesh_metal.dylib`, Dawn/Tint, `libmetal_ir.dylib` and `libmetal_recording.dylib` successfully.
+Metal-microbench's tracked source was `ac2bd2ca`; Mesh was `c1059774`. The active recorder translation units
+were `metal_capture.m` and `metal_program.m`. The later address-interface edits require their own build.
+This establishes compilation and linking of the restored baseline, with no program execution or transport observation.
+
+The two commands, run from metal-microbench, were `make ../dox/mesh/rdma/libmesh.dylib .build/libmesh_metal.dylib .build/provider/dawn-build/src/dawn/native/libwebgpu_dawn.a`
+and `make .build/libmetal_ir.dylib .build/libmetal_recording.dylib`. Both exited zero.
+Their logs are `metal-microbench/output_data/standalone-replacement-20261115/native-dependencies.log`
+(SHA256 `55530c01dd4000851675b86e9402278701c0982ae6f878d5be713d323ab0aaff`) and
+`native-libraries.log` (SHA256 `e813451b63763e500edbcbb4199b183f26f88740d67210246eacf1ea46b700da`).
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
