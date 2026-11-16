@@ -1556,6 +1556,36 @@ Public receipt: `compiler-emit/artifacts/9e08beb-final-effects/receipt.json`, SH
 `43f7f981a75203bb06484093a6e973c09ae5584d700ef6b29e5bd650c06be039`;
 run-log SHA256 `2efbf24763d706cec2c9f8c8189c95881e5743750975428baaa3d75713a48272`.
 
+### Direct consumption of the compiled primitive access result
+
+The next workgroup completes the producer's immediate relation and registration consumers. At `9e08beb`,
+`Relations.lower_accesses` constructs the earlier scalar-width map and subsequently retains successful primitive
+queries alongside it. Register derives buffer read usage from the logical operation's write class. These are
+two distinct missing handoffs: actual byte footprints into the graph, and actual helper reads into receive
+acquisition. A third related obligation is helper-internal conditional execution: bool's early return makes
+its accesses conditional, whereas long's carry expression changes an operand of an unconditional second add.
+
+The original access's guard/domain and complete source owners supply the execution context. Original ISL set
+intersection and emptiness establish query coverage and discharge invalid regions on that context; original
+map union combines the primitive byte footprints of one logical atomic update. These operations live in the
+canonical graph module, exposed through thin native bindings
+([ISL operations and properties](https://libisl.sourceforge.io/user.html)). The byte-offset result supplies
+origin zero and scale one, with width from its actual primitive MemoryLocation. Each original query, recorded
+assumption, private expected location and constituent relation remains available through its producer owner.
+
+Original LLVM must-execute analysis supplies any claim that a primitive is guaranteed when its helper entry
+is reached. Unresolved numerical conditions retain the existing data-dependent may-access classification and
+their original control owners ([LLVM MustBeExecutedContextExplorer](https://llvm.org/doxygen/structllvm_1_1MustBeExecutedContextExplorer.html)).
+This represents an AOT footprint for the fixed outer schedule while preserving the numerical algorithm's
+internal conditions. A failed completeness proof remains an explicit producer defect to resolve using the
+original compiler semantics; it does not establish completion of the assigned domain.
+
+The whole source atomic update retains the graph's commuting-update class. Original primitive ModRef results
+separately supply read/write buffer usage for acquisition. Original directional store Address/function owners
+continue supplying the atomic call's frame. Compiler owns the relation handoff, executor owns canonical graph
+operations and their immediate native registration consumer, and frontends owns the original control-analysis
+view and peer review. Source review precedes the single ordinary public invocation and records its limits.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
