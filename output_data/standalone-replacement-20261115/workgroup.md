@@ -870,6 +870,43 @@ dependencies where they are produced, with its implementation consuming the same
 finding about a missing interface, rather than evidence for replacing it with a numerical-dtype classifier or
 another copy of the helper. The audit performed no further builds or workloads and changed no source.
 
+### Original atomic library compilation supplies a typed body
+
+The next audit found an original compiler interface that supersedes the preceding unavailable-body observation.
+Root installed Apple's Metal Toolchain `17E188` through the existing Xcode component command, with the per-command
+`DEVELOPER_DIR=/Applications/Xcode-26.4.1.app/Contents/Developer`. The compiler agent compiled the unmodified
+`c10/metal/atomic.h` directly using the original Metal compiler (`-include metal_stdlib`, `-femit-all-decls`,
+`-O0`, `-g`, `-emit-llvm`). This is compilation of original library input. The numerical emitter's generated
+output was not the input to that analysis.
+
+Installed LLVM `21.1.8` successfully read the resulting bitcode through `LLVMParseBitcodeInContext2`. Its original
+function, block, instruction and use APIs exposed thirty-three definitions, including bool's conditional regions,
+packed load/CAS loops, long's used first atomic result and unused second result, and float2's separate component
+operations. Original debug metadata retains the header correspondence. The atomics are AIR calls; their target
+effect contract remains a direct-consumer obligation. Successful parsing establishes access to the actual body,
+rather than a completed physical-effect analysis or native execution.
+
+Artifacts: `compiler-emit/artifacts/atomic-original-17E188/atomic.bc` (69,504 bytes,
+SHA256 `9c8d228e20f8f1bc0b0259b8a2dddcd4d7719ab4e75cac1a103192548c30f34f`) and `reader.json`
+(`0644d1876fa28feed3cefd545764530189dfc623d1da359459912e41be6c049a`). The JSON is an observation receipt;
+the implementation being connected retains the complete original compiler result and native module owners.
+
+The frontend agent also compiled the original scope interfaces. Existing c10 and public Metal atomic wrappers
+reject a system-coherent pointer with explicit qualifier-loss diagnostics. The same compiler's original atomic
+intrinsics accept that pointer and scope `3`; their emitted AIR retains it. A defaulted scope template preserves
+pointer qualification through the original byte/back casts, with ordinary scope `2` and selected scope `3`.
+These compilation observations justify the small original-header interface change now assigned: carry scope and
+pointer qualification through the existing numerical algorithms and their leaf operations. They establish no
+GPU/system-memory execution result. Evidence and exact commands are in
+`metal-microbench/output_data/standalone-replacement-20261115/atomic-coherence-17E188/README.md`, with source and
+artifact hashes in its `sha256.json`. Original numerical algorithms and the mounted standard library were unchanged
+for those observations.
+
+Sources in their actual roles: Apple's [component installation](https://developer.apple.com/documentation/xcode/downloading-and-installing-additional-xcode-components)
+and [source-to-IR compiler interface](https://developer.apple.com/documentation/metal/building-a-shader-library-by-precompiling-source-files),
+the installed compiler's options and `metal_atomic` signatures, and LLVM's original
+[`BitcodeReader`](https://llvm.org/docs/doxygen/BitcodeReader_8h_source.html) owner/result API.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
