@@ -1288,6 +1288,28 @@ actual congruence operand. This audit identifies the missing provenance without 
 logical-byte analysis → placement order or replacing an unknown pointer with zero. Complete primitive relations,
 native allocation/execution and categorical replacement remain unfinished.
 
+### Consumers use the produced argument correspondence
+
+Compiler `e12e9cb` assigns each original numerical parameter's ordinal during signature construction and retains
+its actual native Buffer there. Each call references that same complete signature list. Compiler `2b10922` and
+native `cd479d8` consume those operands directly: the former buffer-name normalization, argument-list search,
+source-to-Buffer lookup and parameter-name reselection in Relations/Register are removed. Original removal,
+mutation and dynamic-scalar ordering were source-reviewed; error, frame, workgroup and builtin operands remain
+distinct from the ordinary `call.sources` prefix.
+
+The native binding rebuilt/loaded successfully. The existing packed-float16 public emission exited zero with all
+104 watched inputs unchanged. Across three calls, every emitted relation's ordinal identified the same original
+parameter and Buffer/source owners. Required alignment, complete atomic definitions/effects and retained
+lifetimes remained observable. Receipt: `compiler-emit/artifacts/2b10922-cd479d8-ordinal-producer/receipt.json`,
+SHA256 `f23d8909f0cf125912444ae849c83f084941eee16ad4f1053aa70b1db0561a31`;
+run-log SHA256 `4bc032ef7688df97265d8ef29fd3966488a442eaa7e0c430da473e87a2c83f84`.
+
+The same boundary review exposed an omitted operand: native Register does not yet supply the original optional
+error parameter, which lies outside `call.sources`. `metal_ir_upstream_error_workspace` already creates the actual
+ErrorMessages-typed zeroed state, and original Upstream/error-reporting code owns its effects and completion
+handling. The next correction connects that produced workspace to the actual parameter ordinal and preserves it
+on the Program owner. The observed Indexing call does not establish this omitted argument or runtime handling.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
