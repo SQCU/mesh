@@ -353,6 +353,22 @@ The logs are `compiler-emit/artifacts/5886015-shared-cpu.log`
 These observations exercise the reference target through the current compiler extraction; native page execution
 and categorical replacement remain outstanding.
 
+### Shared address producer: reviewed and built checkpoint
+
+Metal-microbench `a790f1f8` factors the existing `AddressFunctions` producer for its old caller and the standalone
+byte-storage caller. The original `Address` arithmetic is shared. Independent review led to stable `Kernel.bindings`
+storage across later appends and directional bindings selected from the original argument access bits.
+Native-execution `db4d61e` exposes the actual function, parameter and binding views while retaining their native
+Program owner. The numerical compiler continues to own tensor indexing, dtype and inplace correspondence.
+
+The ordinary `make .build/libmetal_ir.dylib .build/libmetal_recording.dylib` build exited zero after those corrections;
+all four changed native files retained their pre-build SHA256 values. The log and source hashes are
+`metal-microbench/output_data/standalone-replacement-20261115/native-address-build.log` and
+`address-source-before.sha256`. This establishes native compilation/linking, with final numerical
+access/signature/dispatch composition still outstanding. The next direct composition uses the existing module/symbol
+mechanism to accumulate address functions before one print, accounting for Tint's shared support declarations.
+The old `mesh_paged` single-direction accessor remains part of the implementation to be displaced.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
