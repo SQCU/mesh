@@ -188,7 +188,8 @@ _Static_assert(sizeof(struct mesh_local_use)==8,"mesh_local_use: rdma/mesh.py Lo
    (NULL: each call its own head), ordered[norders] (the edges of `relation` that are orders), the calls' `closure`,
    and use_first[roots + 1] and use[]; `grouped` a network result's grouped[functions] (mesh_plan_program's operand,
    the caller's mesh_declared_group results, borrowed with their arrays: the original group records, each demand's
-   first row, and the rows' demand_of and release_of; a loaded one's views of its archive), NULL a local result's */
+   first row, and the rows' demand_of and release_of; a loaded one's views of its archive), NULL a local result's;
+   quantum is the original placement quantum in bytes, not arena-base alignment */
 struct mesh_grouped;
 struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
                     uint64_t *offset; uint32_t functions,roots; struct mesh_function *function;
@@ -198,7 +199,7 @@ struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,o
                     const struct mesh_local_use *use; const uint32_t *source_calls;
                     const uint64_t *source_outstanding; uint32_t sources,padding; size_t *row,*order,*source_row,
                     *source_order,*demand_first; uint32_t *demand_of,*release_of;
-                    const struct mesh_grouped *grouped; };
+                    const struct mesh_grouped *grouped; uint64_t quantum; };
 _Static_assert(offsetof(struct mesh_local,bytes)==152 &&
                offsetof(struct mesh_local,values)==160 && offsetof(struct mesh_local,offsets)==168 &&
                offsetof(struct mesh_local,first)==176 && offsetof(struct mesh_local,offset)==184 &&
@@ -208,7 +209,7 @@ _Static_assert(offsetof(struct mesh_local,bytes)==152 &&
                offsetof(struct mesh_local,source_calls)==288 && offsetof(struct mesh_local,sources)==304 &&
                offsetof(struct mesh_local,row)==312 && offsetof(struct mesh_local,demand_first)==344 &&
                offsetof(struct mesh_local,release_of)==360 && offsetof(struct mesh_local,grouped)==368 &&
-               sizeof(struct mesh_local)==376,
+               offsetof(struct mesh_local,quantum)==376 && sizeof(struct mesh_local)==384,
                "mesh_local: rdma/mesh.py Local");
 int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
                     const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,

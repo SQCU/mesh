@@ -2424,7 +2424,7 @@ int mesh_plan_local(struct mesh_function *functions,uint32_t count,const uint32_
   }
   if(!status){
     size_t o=0;
-    out->values=values;out->offsets=offsets;out->bytes=x.blocks*quantum;
+    out->values=values;out->offsets=offsets;out->bytes=x.blocks*quantum;out->quantum=quantum;
     out->functions=count;out->function=functions;out->roots=nroots;out->root=roots;out->calls=calls;
     out->chains=chains;out->ordered=ordered;out->ncalls=ncalls;out->norders=norders;out->relation=order;
     out->closure=closure;out->use_first=use_first;out->use=use;
@@ -2777,6 +2777,7 @@ static int plan_run(struct mesh_ctx *context,uint64_t group,uint64_t program,str
   plan_bind_values(context,functions,count,page,planned->rows.first);
   plan_bind_table(context,joint->roots,joint->nroots,page,planned->rows.first);
   if(out && !(status=plan_result(plans,count,joint,out))){
+    out->quantum=block;
     out->row=row;out->order=order;out->source_row=source_row;out->source_order=source_order;
     row=NULL;order=NULL;source_row=NULL;source_order=NULL;
   }
@@ -3383,9 +3384,9 @@ done:
    use_first[roots + 1], use[uses], and the result's call[ncalls], order[orders], cause[orders], first[values + 1] and
    offset[offsets], each at an 8-byte offset */
 struct plan_saved_local { uint64_t magic,bytes,arena,offsets,orders,horizon,values,relation,words,uses;
-                          uint32_t functions,roots,ncalls,norders,chained,closed; };
+                          uint32_t functions,roots,ncalls,norders,chained,closed; uint64_t quantum; };
 struct plan_saved_local_function { uint64_t outstanding,plan; uint32_t values,padding; };
-#define PLAN_SAVED_LOCAL UINT64_C(0x334c434f4c48534d)
+#define PLAN_SAVED_LOCAL UINT64_C(0x344c434f4c48534d)
 /* the local sections at the archive's next 8-byte offset (mesh_local_save's whole archive, mesh_program_save's first
    sections), their header's `bytes` the sections' length */
 static int plan_local_put(struct plan_archive *out,const struct mesh_local *local){
@@ -3399,7 +3400,7 @@ static int plan_local_put(struct plan_archive *out,const struct mesh_local *loca
   struct plan_saved_local head={.magic=PLAN_SAVED_LOCAL,.arena=local->bytes,.offsets=local->offsets,
     .orders=local->planned.orders,.horizon=local->planned.horizon,.values=local->values,.relation=relation_bytes,
     .words=c?c->words:0,.uses=local->use_first[local->roots],.functions=local->functions,.roots=local->roots,
-    .ncalls=local->ncalls,.norders=local->norders,.chained=!!local->chains,.closed=!!c};
+    .ncalls=local->ncalls,.norders=local->norders,.chained=!!local->chains,.closed=!!c,.quantum=local->quantum};
   plan_archive_align(out);
   const size_t start=out->at;
   plan_archive_bytes(out,&head,sizeof head);
@@ -3533,7 +3534,7 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
   if(status){mesh_local_free(local);return status;}
   if(loaded->closure)*loaded->closure=(struct mesh_graph_closure){head.ncalls,(size_t)head.words,
                                                                   (uint64_t *)(uintptr_t)reached};
-  local->bytes=head.arena;local->values=(size_t)head.values;local->offsets=(size_t)head.offsets;
+  local->bytes=head.arena;local->values=(size_t)head.values;local->offsets=(size_t)head.offsets;local->quantum=head.quantum;
   local->first=(size_t *)(uintptr_t)first;local->offset=(uint64_t *)(uintptr_t)offset;
   local->planned.call=(struct mesh_planned_call *)(uintptr_t)call;local->planned.calls=head.ncalls;
   local->planned.order=(struct mesh_graph_dependence *)(uintptr_t)order;

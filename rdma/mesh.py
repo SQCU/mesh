@@ -176,7 +176,8 @@ class Local(C.Structure):
                 ('use', C.POINTER(LocalUse)), ('source_calls', C.POINTER(U)), ('source_outstanding', C.POINTER(Q)),
                 ('sources', U), ('padding', U), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
                 ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('demand_first', C.POINTER(Z)),
-                ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U)), ('grouped', C.POINTER(Grouped))]
+                ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U)), ('grouped', C.POINTER(Grouped)),
+                ('quantum', Q)]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
