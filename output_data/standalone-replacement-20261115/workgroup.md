@@ -336,6 +336,23 @@ Their logs are `metal-microbench/output_data/standalone-replacement-20261115/nat
 (SHA256 `55530c01dd4000851675b86e9402278701c0982ae6f878d5be713d323ab0aaff`) and
 `native-libraries.log` (SHA256 `e813451b63763e500edbcbb4199b183f26f88740d67210246eacf1ea46b700da`).
 
+### Original kernel-source return: reference execution
+
+Compiler-emit `5886015` factors `MetalKernel.codegen_kernel_source` from the original numerical renderer;
+ordinary `codegen_kernel` consumes that original buffer through its existing literal wrapper. The source producer
+remains shared. The native consumer and directional page bindings are still being connected.
+
+The existing `examples/shared.py` ran with `--device cpu` and `--device mps`, using
+`PYTHONPATH=.:/Users/mdot/schedule-emit .venv/bin/python` and `--directory artifacts/5886015-shared`.
+Both commands exited zero and passed the existing input identity, storage alias, offset/stride and numerical
+assertions over three calls, with state `1 → 2 → 3`. Nine relevant installed compiler sources retained their
+pre-run SHA256 values through both runs (`artifacts/5886015-source-before.sha256`).
+The logs are `compiler-emit/artifacts/5886015-shared-cpu.log`
+(SHA256 `b1ebe66ad0876c09f13d8a06f3e8087f04a19eb972b5da2a8e8464f16bd7f0c7`) and
+`5886015-shared-mps.log` (SHA256 `7ddb87b6c54153cc1244f739394438bdcbb9add9891ea19874d14c06b95e68ad`).
+These observations exercise the reference target through the current compiler extraction; native page execution
+and categorical replacement remain outstanding.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
