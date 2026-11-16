@@ -252,6 +252,20 @@ completed-callable return convention. The direct AOT preparation caller consumes
 algorithms and configuration normalization remain the original shared implementations. Subsequent native
 page/effect composition and categorical replacement remain outstanding as described above.
 
+Compiler-emit `8c8da0f` completes those two direct edits. `prepare(scheduled)` returns `Prepared` containing the
+same Scheduled and every original processor GraphLowering before terminal emission. `emit(prepared, path)`
+consumes that owner, and `Compiled.prepared` retains it. Ordinary completion callers use the same original
+input normalization, configuration normalization, lowering and code-generation implementations with their
+original completed-result convention. Independent source review and the nineteen-file patch projection passed.
+
+After that source review, the existing reference examples executed at `8c8da0f`. CPU and MPS each preserved the
+original input/view alias assertions and scalar state `1 → 2 → 3`. The existing two-processor RunningMean case
+completed three calls through six channels; `samples.measure` reported output/state error `(0.0, 0.0)`. All three
+processes exited zero, and the tracked source and projected dependency files remained unchanged. Logs are
+`compiler-emit/artifacts/8c8da0f-shared-cpu.log`, `8c8da0f-shared-mps.log`, and `8c8da0f-running-mean.log`.
+These observations concern the implemented reference composition, following the first-interface source review;
+native page/effect composition, backend-preparation handoffs and Mesh replacement remain implementation work.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
