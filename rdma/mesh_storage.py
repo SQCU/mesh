@@ -12,7 +12,7 @@ def actors(program, libs):
     status = lib.MetalRecorderActors(program, gpu, cpu, C.byref(made))
     if status not in (0, errno.ENODATA):
         mesh.check(status)
-    made.program, made.machines, made.libraries = program, machines, libs
+    made.program, made.machines, made.libraries, made.status = program, machines, libs, status
     return made
 
 

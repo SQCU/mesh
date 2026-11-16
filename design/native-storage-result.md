@@ -24,6 +24,8 @@ intrinsic root operands, complete storage arrays, actors and library owners. Eac
 actor retains its queried program and machine operands. The actor allocation is
 freed when the owning function array is released; a borrowed ctypes element keeps
 that array alive. The original target consumes this result directly.
+The actor also retains the original status, including `ENODATA` when the original
+producer could not supply a measured work estimate.
 
 Function descriptors describe each supplied native entry independently. They do
 not infer outer calls, chains, roots or dependency order. A joint `mesh_plan_local`
