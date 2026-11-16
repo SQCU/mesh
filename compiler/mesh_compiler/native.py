@@ -23,7 +23,7 @@ from .metal import METAL_EXTERNAL_GPU, Argument
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
 import mesh_graph
-from mesh_storage import storages
+from mesh_storage import functions as storage_functions
 
 ROOM = 4096
 
@@ -81,18 +81,6 @@ def made(result, error, what, status=errno.EINVAL):
 def checked(status, error, what):
     if status:
         raise OSError(status, f"{what}: {error.value.decode()}")
-
-
-# metal_recording.h MetalRecorderActors, MetalRecorderActorsFree: the lowered program's
-# actual Actors (its parts' host and work times and their edges), C-owned until freed
-def actors(program, libs):
-    M, _, (lib, _), _ = libs
-    machines, made_ = M._machines(), M._Actors()
-    gpu, cpu = (C.byref(machines[M.GPU]), C.byref(machines[M.CPU])) if machines else (None, None)
-    status = lib.MetalRecorderActors(program, gpu, cpu, C.byref(made_))
-    if status not in (0, errno.ENODATA):
-        mesh.check(status)
-    return made_
 
 
 # Copy offsets in place: value `index`'s run of `offset` (at address `base`), from first[index] to first[index + 1]
@@ -979,23 +967,11 @@ class Target:
     # relation, freed with the target), in instance order, a call with no program on this node zero-local (no values,
     # parts or edges), and the largest placed alignment
     def functions(self, libs):
-        lib, held, quantum, counts, steps = libs[2][0], [], 1, [], []
-        functions = (mesh.Function * len(self.instances))()
-        for k, instance in enumerate(self.instances):
-            if instance is None:
-                counts, steps = counts + [0], steps + [False]
-                continue
-            values = storages(instance, self.explicit(k), self.intrinsic[k], libs)
-            count, stepped, aligned = values.count, values.stepped, values.quantum
-            solved = actors(instance, libs)
-            weakref.finalize(self, lib.MetalRecorderActorsFree, C.byref(solved))
-            functions[k] = mesh.Function(value=C.cast(values, C.POINTER(mesh.Value)), values=len(values),
-                                         host=solved.host, work=solved.work, edge=solved.edge, parts=solved.parts,
-                                         edges=solved.edges, relation=solved.relation)
-            held += [values, solved]
-            quantum, counts, steps = max(quantum, aligned), counts + [count], steps + [stepped]
-        self.counts, self.steps, self.held = tuple(counts), tuple(steps), (functions, held)
-        return functions, quantum
+        explicit = [self.explicit(k) if instance is not None else None
+                    for k, instance in enumerate(self.instances)]
+        functions = storage_functions(self.instances, explicit, self.intrinsic, libs)
+        self.counts, self.steps, self.held = functions.counts, functions.steps, functions
+        return functions, functions.quantum
 
     # schedule.solve_program's bindings: per call, in the analysis's call order, its body's slots with the original
     # Call references (placeholder order, output spec order)

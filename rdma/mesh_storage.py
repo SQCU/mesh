@@ -1,6 +1,45 @@
 import ctypes as C
+import errno
+import weakref
 
 import mesh
+
+
+def actors(program, libs):
+    M, _, (lib, _), _ = libs
+    machines, made = M._machines(), M._Actors()
+    gpu, cpu = (C.byref(machines[M.GPU]), C.byref(machines[M.CPU])) if machines else (None, None)
+    status = lib.MetalRecorderActors(program, gpu, cpu, C.byref(made))
+    if status not in (0, errno.ENODATA):
+        mesh.check(status)
+    made.program, made.machines, made.libraries = program, machines, libs
+    return made
+
+
+def functions(programs, explicit, intrinsic, libs):
+    result = (mesh.Function * len(programs))()
+    result.programs, result.explicit, result.intrinsic, result.libraries = programs, explicit, intrinsic, libs
+    result.storage, result.actors, result.counts, result.steps = [], [], [], []
+    result.quantum = 1
+    for k, program in enumerate(programs):
+        if program is None:
+            result.counts.append(0)
+            result.steps.append(False)
+            result.storage.append(None)
+            result.actors.append(None)
+            continue
+        values = storages(program, explicit[k], intrinsic[k], libs)
+        solved = actors(program, libs)
+        weakref.finalize(result, libs[2][0].MetalRecorderActorsFree, C.byref(solved))
+        result[k] = mesh.Function(value=C.cast(values, C.POINTER(mesh.Value)), values=len(values),
+                                  host=solved.host, work=solved.work, edge=solved.edge, parts=solved.parts,
+                                  edges=solved.edges, relation=solved.relation)
+        result.storage.append(values)
+        result.actors.append(solved)
+        result.counts.append(values.count)
+        result.steps.append(values.stepped)
+        result.quantum = max(result.quantum, values.quantum)
+    return result
 
 
 # metal-microbench metal_ir.h metal_ir_storages, metal_ir_value_info and metal_ir_step_state: the lowered program's
