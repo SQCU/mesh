@@ -14,7 +14,9 @@ The producer and its immediate consumer share those values through views.
 `R` denotes the complete collection of source and derived results. `R += result`
 means append references to the complete result in the same page-table address
 space, retaining earlier results. Existing extents and layouts describe each
-section. Producers fill declared output buffers or expose their original output
+section. Function-level results, joint plans and emitted programs occupy distinct
+output storage. Each planning round retains the earlier rounds it reads. Producers
+fill declared output buffers or expose their original output
 storage through the existing header/buffer APIs. A page reference and extent
 locate a value; its original layout describes its contents. Tensor fields use
 the existing tensor/buffer/DLPack interfaces. Archive readers use the corresponding
@@ -34,25 +36,25 @@ status and error values belong to the numerical results.
 ## Compile the functions and their joint program
 
 ```text
-compile(R, frontend, numerical_compiler, target):
-    R += frontend.capture(R)
-    R += GSPMD.sharding_propagation_and_resharding(R)
-    R += collective_lowering(R)
-    R += numerical_compiler.prepare(R)
-    R += numerical_compiler.lower(R)
-    R += operation_costs(R)
-    R += mesh_graph_pack(R)
-    R += task_graph(R)
-    R += target.declare(R)
-    R = target.compose(R)
-    R += target.lower(R)
-    R += target.storage_and_actor_results(R)
-    R = joint_plan(R)
-    R += target.bind_solved_operands(R)
-    R = target.emit(R)
-    R += synchronization_signature(R)
-    return R
+compile(R, frontend, numerical_compiler, target, operands, outputs):
+    S = source_results(frontend, operands, outputs.source)
+    R += S
+    F = function_results(S, numerical_compiler, target, operands, outputs.functions)
+    R += F
+    J = joint_result(F, operands, outputs.joint)
+    R += J
+    E = emit_result(F, J, target, operands, outputs.emission)
+    R += E
+    signature = synchronization_signature(F, J, E, outputs.signature)
+    R += signature
+    return Compilation(S, F, J, E, signature)
 ```
+
+Each returned `Compilation` holds views of these complete results. The stage-local
+pseudocode belongs with its implementation: [source and scheduling](../../../schedule-emit/docs/pseudocode.md),
+[function compilation, joint planning and emission](../../../compiler-emit/docs/pseudocode.md),
+and [native loading and execution](../../../native-execution/docs/pseudocode.md).
+The following paragraphs identify the existing mechanisms that those stages call.
 
 `frontend.capture` consumes supplied source functions, parameters/state and the
 known outer function-call graph. It returns the complete source program with
@@ -95,26 +97,15 @@ offsets and frame-table views. Final emission specializes those planned operatio
 
 ## The one joint planning call
 
-`joint_plan` denotes the single canonical `mesh_plan_program` or `mesh_plan_local`
-call with its complete output retained in `R`. The following expands its
+`joint_result` denotes the single canonical `mesh_plan_program` or `mesh_plan_local`
+call with its complete output in separate `J` storage and its references appended
+to `R`. The following expands its
 algorithmic responsibilities. The canonical library owns these algorithms;
 the expansion identifies their operands and retained results.
 
 ```text
-joint_plan(R):
-    R += dependence_relation(R)
-    R += transitive_closure_and_chain_decomposition(R)
-    R += maximum_cycle_mean_and_buffer_bounds(R)
-    R += modulo_variable_expansion(R)
-    R += mesh_graph_completion_times(R)
-    R += mesh_graph_heap_order(R)
-    R += mesh_graph_lifetimes(R)
-    R += cyclic_interval_allocation(R)
-    R += GreedyBySizeAssignment(R)
-    R += page_bindings(R)
-    R += synchronization_redundancy_analysis(R)
-    R += processor_and_cable_subsequences(R)
-    return R
+joint_result(F, operands, output):
+    return mesh_plan_program_or_local(F, *operands, output=output)
 ```
 
 The dependence producer consumes original read/write/commuting accesses and
@@ -135,20 +126,20 @@ Read and write-ahead mappings retain their distinct meanings.
 ## Compose and emit each target from that result
 
 ```text
-emit_reference(R):
-    R += original_wrapper_writer_completion(R)
-    R += original_target_compiler_and_linker(R)
-    return R
+emit_reference(F, J, operands, output):
+    writer = original_wrapper_writer_completion(F, J, operands, output.writer)
+    built = original_target_compiler_and_linker(writer, operands, output.build)
+    return Emission(F, J, writer, built)
 
-compose_native(R):
-    R += original_typed_IR_composition(R)
-    R += original_target_optimizer(R)
-    return R
+compose_native(source, operands, output):
+    composition = original_typed_IR_composition(source, operands, output.composition)
+    optimized = original_target_optimizer(composition, operands, output.optimized)
+    return Composition(source, composition, optimized)
 
-emit_native(R):
-    R += original_target_writer(R)
-    R += original_target_compiler_and_linker(R)
-    return R
+emit_native(F, J, operands, output):
+    writer = original_target_writer(F, J, operands, output.writer)
+    built = original_target_compiler_and_linker(writer, operands, output.build)
+    return Emission(F, J, writer, built)
 ```
 
 Both targets consume the same complete placed program, bindings, schedule and
@@ -171,22 +162,22 @@ ordering and binding decisions become instructions and literals.
 ## Load, initialize, invoke and retire
 
 ```text
-save(R, archive):
-    return archive.write_sections(R)
+save(compilation, archive):
+    return archive.write_sections(compilation)
 
-load(archive, live_resources):
-    R = archive.map_sections()
-    R += bind_page_views_and_live_resources(R, live_resources)
-    R += load_compiled_functions(R)
-    R += execute_compiled_initializer(R)
-    return R
+load(archive, live_resources, output):
+    A = archive.map_sections()
+    L = bind_page_views_and_live_resources(A, live_resources, output)
+    L.functions = load_compiled_functions(A, L)
+    L.initialization = execute_compiled_initializer(A, L)
+    return Loaded(A, L)
 
-invoke(R, inputs, execution):
-    arguments = views(R, inputs, execution)
-    return R.compiled_entry(*arguments)
+invoke(loaded, inputs, execution):
+    arguments = views(loaded, inputs, execution)
+    return loaded.compiled_entry(*arguments)
 
-retire(R):
-    return deferred_reclamation(R, R.completion)
+retire_invocation(invocation):
+    return deferred_reclamation(invocation.live_bindings, invocation.completion)
 ```
 
 The archive contains the source and derived sections, schedule, numerical and
@@ -215,34 +206,41 @@ Independent flow sets use the specified Threefry/Fisher–Yates permutation acro
 all route positions. The common unroll factor supplies `t mod u`; received pages
 use the specified Gray phase, range counts and monotonic publication thresholds.
 Each Metal commit owns its feedback record. API-required notification handlers
-write those records, which the completion consumer reads. Retirement retains
-published sections until their outstanding users complete.
+write those records, which the completion consumer reads. Invocation retirement
+releases its live bindings after their outstanding users complete. Compiler
+results retain their separate ownership until an explicit scheduled retirement.
 
 For the reference realization, the concrete invocation consumer is
-`schedule_emit.runtime.Program(R.scheduled, R.compiled_functions)`. Those
+`schedule_emit.runtime.Program(compilation.S, compilation.E.functions)`. Those
 functions contain the actual transformed bindings and operations produced above.
 
 ## Reuse results when supplied operands change
 
 ```text
-recompile(R, changed_operands):
-    R += changed_operands
-    affected = mesh_graph_breadth(R.compilation_dependencies, changed_operands)
-    for producer in R.compilation_order restricted to affected:
-        R = producer(R)
-    return R
+replan(R, F, changed_operands, target, outputs):
+    J = joint_result(F, changed_operands, outputs.joint)
+    R += J
+    E = emit_result(F, J, target, changed_operands, outputs.emission)
+    R += E
+    return PlannedEmission(F, J, E)
 ```
 
-This loop describes AOT evaluation of the already specified compilation calls.
-The calls written above and their explicit operands supply the compilation
-dependency graph and order. The graph names the actual input sections each call consumed; its
-retained results supply unchanged operands by view. A routing change reaches
-routing, joint planning and the target operations that consume their results.
-A shard-shape change also reaches the affected numerical compilation. Parameter
-values remain data unless a recorded specialization used those values.
-The previous executable retains its own published state while the new result
-receives a new compilation ordinal. A new membership view completes old-view
-communication with its recorded outcome and supplies the next topology operand.
+The caller supplies the retained function results and new planning operands.
+This call creates a new joint plan and executable while the earlier function
+results, joint plans and executables retain their original storage. Changes to
+routes or shard shapes call their respective producers with new output storage;
+their direct consumers read those returned results. Existing solved results
+supply unchanged operands by view. Parameter values remain data unless the
+compiler specialized a function on those values. A new membership view completes
+old-view communication with its recorded outcome and supplies the next topology
+operand.
+
+The operator's 16 November clarification supplies the storage rule: “joint plan
+must ultimately be a different return in a different buffering space” and
+“write-by-concatenation”. An algorithm can reuse its private scratch during its
+call. Its returned results persist independently of that scratch. This storage
+rule preserves the operands for later parametric optimization through ordinary
+function calls and explicit output buffers.
 
 ## Observe and replace
 
