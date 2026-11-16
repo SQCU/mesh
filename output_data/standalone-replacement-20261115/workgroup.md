@@ -1513,6 +1513,30 @@ Public receipt: `compiler-emit/artifacts/1753243-9d04f00-required-alignment/rece
 `172c49e9ea71e9f2e7f5b287452805c2d905154921da7d706eba2285c0b7b29e`;
 run-log SHA256 `55d2b8c805bbb10227ef7f8a591e1d759eab307a901723be03b11d4313ac2f82`.
 
+### Original instruction combination consumes the supplied requirement
+
+Review of the actual `1753243-9d04f00-required-alignment/atomic.bc` with original `llvm-dis` identifies the
+remaining address dependency. The upstream packed helper computes misalignment through `ptrtoint(data)`,
+a one-bit logical right shift and a mask of one, then adjusts its base and logical offset. ScalarEvolution
+represents that shift as unsigned division; its original `getConstantMultipleImpl` returns one for a UDiv
+expression, so the pointer's two known-zero low bits do not propagate through that representation
+([LLVM 21.1.8 ScalarEvolution](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/llvm/lib/Analysis/ScalarEvolution.cpp)).
+Original InstCombine's demanded-bits logic and ValueTracking consume this actual instruction chain and the
+supplied alignment ([original demanded-bits implementation](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/llvm/lib/Transforms/InstCombine/InstCombineSimplifyDemanded.cpp)).
+
+The reviewed implementation assignment covers the whole resulting producer boundary. The complete discovery
+result retains its module, annotation contracts, call graphs, correspondence and raw effects. Original
+CloneModule/MapValue produces a separate owner, carrying the supplied argument requirements into original
+InstCombine. The same centralized effect extraction consumes the final calls, followed by fresh function
+analyses and relative queries. Existing annotation contracts and discovery graphs are accessed through their
+owners; transformed call membership and effects are new results. Parameter association is shared code, and
+final consumers receive the final module's effects exactly once.
+
+This ordering addresses the related defects together: the omitted consumer of the new alignment, raw
+MemoryLocation/member-projection pointers that an in-place rewrite could delete, changed call membership,
+and analysis caches belonging to earlier IR. Source and discovery results remain available. The assignment
+introduces the original compiler pass and its actual result handoff; successful folding remains to be observed.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
