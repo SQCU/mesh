@@ -1043,6 +1043,29 @@ the initial owners. The AIR target and all sixty recorded source hashes remained
 The retained result now feeds actual original alias analysis; entry-wide argument/control correspondence and
 guarded affine Mesh access relations remain unfinished.
 
+### Actual entry operands through original inlining
+
+Compiler `ff7a3cd` retains the supplied original entry Functions, source CallGraph and selected helper callsites,
+then applies LLVM's original AlwaysInliner through ModulePassManager to a derived module. Actual primitive calls
+remain explicit; the same effect extraction and analysis construction follow pass invalidation. `e7df3f0` removes
+a redundant local viability check so the original inliner owns that decision. The source module stays retained;
+the clone map and original inlined-at metadata have their respective meanings rather than an asserted one-to-one
+mapping of every optimized instruction.
+
+Root exercised public `declarations.emit` on the existing Indexing program with float32 and packed float16 inputs.
+Every annotated primitive call appeared in its actual derived entry. The float case supplied a four-byte add
+effect per scope. The half case supplied four-byte load/compare-exchange locations and a separate four-byte
+expected-pointer location per scope, with the original helper and entry source chains intact. Original callgraphs,
+compiled buffers and entry identities remained available; borrowed effect/analysis views survived dropping the
+initial result owners. The build and emission exited zero with all sixty recorded source hashes unchanged.
+
+Log: `compiler-emit/artifacts/e7df3f0-entry-effects.log`, SHA256
+`7b0e1f917528077ad4c6c7c3a3e99109fe64a5fb4b7e33006dba3a5c685113bc`; manifest:
+`artifacts/e7df3f0-entry-effects/source-before.json`. This supplies entry-local physical effects and their operand
+computations. Relations still uses numerical scalar width; the next connection must consume those actual address
+expressions, existing domain/argument bindings and guards through the original affine machinery. Native dispatch
+and complete replacement remain open.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
