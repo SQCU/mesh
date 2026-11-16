@@ -1018,6 +1018,31 @@ is under `artifacts/7015b2f-atomic-effects/`. These are local physical-effect re
 AA provider or a guarded Mesh access relation. Native execution, system-memory visibility, static linkage and
 categorical replacement remain unfinished.
 
+### Existing SSA and alias-analysis consumers
+
+The frontend's single original-compiler observation at `1e87ffe` used `-O1 -fno-inline -g` on the existing helper
+fixture. It removed 216 pointer-spill allocas while retaining 144 function definitions, the eighteen annotated
+leaves, volatile flags, scopes, compare-exchange feedback and long carry. Sixty address-taken cells remain.
+This supplies ordinary SSA through the existing compiler; its receipt is
+`compiler-emit/artifacts/atomic-ssa-17E188/receipt.json`. Final executable optimization remains a separate consumer.
+
+Compiler `2305a34` registers a narrow AAResultBase implementation with the original default AAManager before
+MemorySSA. It references the retained effect records and delegates location overlap to LLVM's existing alias
+query with the same query context. Its atomic-load and relaxed compare-exchange/add distinction follows LLVM
+21's [atomic ModRef implementation](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/llvm/lib/Analysis/AliasAnalysis.cpp#L520).
+Global memory effects, call-to-call queries, volatile flags and raw Metal scope/order operands retain their
+existing meaning. Independent review covered registration, preservation/invalidation and owner lifetimes.
+
+Root built and exercised `declarations.emit` using those explicit SSA compiler arguments, then reused the
+frontend's existing complete bitcode fixture for original AA queries. Eight same-function physical queries
+returned NoModRef for disjoint locations; 132 others returned ModRef, and all 72 calls retained global ModRef.
+All thirty caller-expected locations remained read/write. Borrowed analysis views stayed usable after dropping
+the initial owners. The AIR target and all sixty recorded source hashes remained unchanged. Log:
+`compiler-emit/artifacts/2305a34-atomic-aa.log`, SHA256
+`884b9b24c6f18b21d969b49facec538e2fbb797ff462256535172dff5893f54e`.
+The retained result now feeds actual original alias analysis; entry-wide argument/control correspondence and
+guarded affine Mesh access relations remain unfinished.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
