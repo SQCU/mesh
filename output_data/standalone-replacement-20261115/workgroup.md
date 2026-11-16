@@ -1334,6 +1334,67 @@ This observation covers argument production, registration, emission and owner li
 dispatch, later allocation or runtime error reporting. The ordinary CPP path without a native Program retains
 its existing early-return behavior; this correction does not establish its reporting coverage.
 
+### Logical atomic operands and original relative expressions
+
+Compiler `dc20ede` retains the original pre-page byte expression on each complete numerical access: Buffer.origin
+plus the prepared index times the original parameter's physical dtype width. Torch's existing FloorDiv produces
+the corresponding logical element expression, which becomes the existing atomic offset formal's source operand.
+The data/value formals and final numerical printer remain unchanged. Compiler `98cd855`/`a14bfdc` expose the original
+ScalarEvolution `getMinusSCEV`; each definition retains its actual primitive effect, associated formal, object/base
+SCEVs and their original subtraction result. The unused pointer-base accessor was removed before the build.
+
+The single existing packed-float16 Indexing emission completed and configured three calls. It retained the same
+logical expression/formal/source objects, two-byte numerical width, four-byte primitive extent and the separate
+four-byte private compare-exchange location. This instance's source origin was zero: its prepared index was
+`tmp0 + 8*x1`, and its produced logical bytes were `2*tmp0 + 16*x1`. The observation does not exercise a nonzero
+origin. The source-level composition places origin before helper expansion; original domain, integer-width and
+page/base-congruence operands still govern the validity of that logical counterpart.
+
+Four actual relative-expression queries, deliberately supplied with empty binding dictionaries, retained the
+original `No supplied binding or supported operation for SCEVUnknown` error. Their expression, analysis, module
+and error owners remained accessible after the outer local owners were dropped. These queries establish error
+and owner retention, not complete affine relations or a diagnosis of which unbound operand failed first. The
+next immediate handoff supplies the already-produced logical formal operands to the existing Affinator; actual
+backing/page congruence and all original invalid-domain/guard results remain separate explicit inputs/results.
+The current Relations accesses have not been replaced by these new expressions.
+
+The original Metal/native/reader build chain exited zero with all 105 watched inputs unchanged. Build receipt:
+`compiler-emit/artifacts/a14bfdc-relative-build/receipt.json`, SHA256
+`37588b12018b18e6a360a5f513514a1ebb7579be0acdff0e478390560037223c`.
+The public invocation exited zero with all 109 watched source/library hashes unchanged. Receipt:
+`compiler-emit/artifacts/a14bfdc-dc20ede-relative-producer/receipt.json`, SHA256
+`d7f3d4ea15d9083897273f70533fd51f0f233bc355345520ff94a1ddf820fa92`;
+run-log SHA256 `8b6d465d720bd093bfc2d45a286377a1f112d343a53c936ed6da0246ceb3f5e1`.
+No later allocation or numerical dispatch ran.
+
+### The planning result retains its original placement quantum
+
+The source audit found that `mesh_plan_local` receives the placement quantum and multiplies each solved offset
+by it, but the returned `mesh_local` omitted that operand. Mesh `785b58bf` appends the original quantum to the
+canonical result. Local planning assigns its supplied quantum; network planning assigns its existing block-byte
+quantum. The existing save/load header carries the field, and `Solved.local` exposes the whole original result.
+The canonical C struct and its matching ctypes declaration grow from 376 to 384 bytes; the new field is at offset
+376, preserving earlier field offsets. Existing whole-struct initialization and release cover the new field.
+
+The embedded local archive format advances to version 4, including the sections used by network archives.
+The existing exact-format check remains. Review removed a proposed extra compatibility branch that would have
+accepted version 3 with a synthesized zero quantum. Older archives require regeneration through their original
+producer. Source review covered the complete local/network production, archive, initialization and release paths;
+no archive roundtrip or planning workload is claimed.
+
+The ordinary `make -C rdma libmesh.dylib` build exited zero and rebuilt all four library translation units, including
+the two C consumers of the result. All eighteen watched inputs stayed unchanged. Receipt:
+`compiler-emit/artifacts/785b58bf-libmesh-build/receipt.json`, SHA256
+`bf7a8097a10f3157f40e40c6bb13f68b4868902068c69371242735ccafd7bbf5`.
+This field records placement-relative alignment; the backing/import owner's base guarantee is a distinct operand.
+The standalone emitter still stops before the original joint-planning/realization path.
+
+The same audit found an existing padded-size producer: `metal_ir.mm::Bytes` rounds U8 storage reach to four-byte
+words, and Realize/Storages retain that requirement. Numerical Buffer.extent and native usable byte requirements
+therefore already have distinct original owners. Page geometry, imported backing extent and primitive footprints
+must consume those owners rather than creating a second padding computation or treating numerical storage size
+as a guarantee of arbitrary trailing bytes.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
