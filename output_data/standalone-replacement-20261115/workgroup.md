@@ -1766,6 +1766,88 @@ AOT compilation and package loading. `Compiled.prepared.graphs[processor].native
 whole target owner. Physical allocation/transport and ANE realization remain outstanding; the executable
 reference observations above establish the completed common schedule handoff, rather than those later stages.
 
+### Whole-function compilation replaces the partial native driver
+
+Operator, 16 November:
+
+> consider literally deleting this function for being malformed and doing something toalyl unrelated while having such a small scope of responsibility it cannot contain 'proper behavior' that can be 'rehabilitated' from its current form.
+
+Compiler `621ffd7` deletes `emit_native`; native `29b2131` deletes its forwarding
+entry and `Program.calls`. That list received only MPS kernel calls. The original
+wrapper instruction list already orders generated kernels, external-library
+calls, allocations and releases. Compiler `41ad2c2` makes each original
+`KernelCallLine` refer to its actual producer at all fourteen call sites; external
+call instructions already retain their original IR nodes. The MPS atomic
+analysis reads its actual `MetalKernelCall` operands from that list. Original
+Torch continues to compile the entire wrapper and initialize folded constants
+through its existing model-container state transition.
+
+Compiler `6b9634b` factors `MemoryPlanner.prepare(lines)` from the original
+`plan(lines)`. The planner retains the supplied instruction list and calculates
+its original buffer groups and live ranges before allocation. Both original
+wrapper callers retain that planner. Native `fb5d283` gives all per-entry
+declarations from one Prepared the same original graph-analysis Context; each
+entry retains its own native Program and ValueIDs.
+
+The original StatefulAlias example passed three calls on CPU and MPS with
+memory planning enabled, preserving input identity, returned views and state
+1/2/3. The existing MLP passed through prepare, shared scheduling, original
+emission and the original reference Program on each target with maximum absolute
+error zero. CPU emitted two generated-kernel calls and three `aten.addmm.out`
+calls; MPS emitted three generated-kernel calls, two `aten.mm.out` calls and one
+`aten.addmm.out` call. The planners retained four CPU and six MPS allocation
+groups. These observations exercise Torch's allocator and numerical functions.
+They do not exercise Mesh's joint allocation or native page dispatch.
+
+Receipt: `compiler-emit/artifacts/20261116-whole-function/receipt.json`, SHA256
+`3409a222cd6859f429053cab02893bfc9dede4d68915d498b7f8d1ae60c541e6`.
+The receipt records source hashes and observed output; its workspace-commit
+field describes the later receipt-writing time. All watched source files stayed
+unchanged during execution.
+
+### Address functions consume actual storage geometry
+
+Metal `24853eaa`, native `482fc38` and compiler `e434be5` pair the original Address
+producer with its direct callers. Native declaration marks only actual paged
+roots as paged. AddressFunctions invokes the original Address arithmetic for
+both dense and paged roots and adds a frame operand when that arithmetic requests
+one. The final call printer consumes that produced signature.
+
+The existing packed-half Indexing source completed shared schedule production
+with three MPS calls and eleven accesses. Its external-library result uses the
+dense subscript-only address function; the ten paged accesses use their actual
+directional frame operands. All 128 watched inputs stayed unchanged. The run
+inspected original emitted collections and their retained owners; it performed
+no physical allocation or dispatch. An earlier observer compared Python wrapper
+identity instead of the underlying frame value; both its failure and the
+corrected observation remain in artifacts.
+
+Receipt: `compiler-emit/artifacts/24853eaa-address-geometry-corrected/receipt.json`,
+SHA256 `40da6b71a7572fa7c7c3254703b0d7878c3a31104796ed1e7bebb19f53f52d16`.
+
+### Direct producer review before joint allocation
+
+The source review after these changes identifies two concrete boundaries.
+`PythonWrapperCodegen._generate` invokes `run_wrapper_ir_passes` during final
+emission; the next paired change moves those original passes before the shared
+scheduled-result return. `schedule_emit.heft_placed` returns node order after
+computing ranks, predecessor finish times and complete processor timelines;
+`schedule` then returns only assembled modules. The original source-to-assembly
+node map targets the graph before Torch's unlift copy. An interface retaining
+that map must retain its actual graph owner. Reference archives currently store
+source and processor ExportedPrograms and runtime arguments, rather than these
+HEFT calculation objects. A proposed optional source field would leave archive
+loads with a different compiler operand, so that proposal received no source
+edit approval.
+
+Mesh's allocator consumes actual call intervals, call relations and storage
+bindings. The retained Torch lifetimes describe allocations inside each
+function; they supply neither measured actor costs nor an outer invocation
+relation. `argument_buffers` computes strongly connected components for the
+reference argument queues; it computes no transitive closure. Subsequent
+producer work must return the actual solved objects before their direct
+allocation consumer can use them.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
