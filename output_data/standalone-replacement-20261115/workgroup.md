@@ -611,6 +611,35 @@ that handoff concrete. The draft remains visible for revision; the new phrase co
 independent implementation responsibility. The prior `1ac9861`/`8489075` observations cover their recorded
 checkpoint, rather than this later draft.
 
+### Standard memory views across language boundaries
+
+The operator directed review of DLPack and Python's memory/buffer-view APIs after asking why successive
+functions would drop or truncate operands. Python's buffer protocol exposes existing memory together with
+its extent, layout and exporting owner; `memoryview` makes that storage available directly in Python.
+DLPack supplies the corresponding standard tensor-memory descriptor and lifetime handoff, including Metal
+storage. The same stored result can therefore serve Python and native consumers through views; the language
+boundary does not itself require payload serialization, reduced metadata records or a second inference pass.
+Existing source-program owners remain retained alongside their storage views.
+
+Sources: [Python 3.12 buffer protocol](https://docs.python.org/3.12/c-api/buffer.html),
+[DLPack Python specification](https://dmlc.github.io/dlpack/latest/python_spec.html), and
+[DLPack's original header](https://github.com/dmlc/dlpack/blob/main/include/dlpack/dlpack.h).
+These are memory-sharing mechanisms, rather than a replacement IR schema.
+
+An actual observation in compiler-emit's Python 3.12/Torch 2.14 environment passed an `array('q')` through
+`memoryview`, `torch.frombuffer`, a strided tensor view and `torch.from_dlpack(..., copy=False)`.
+The strided consumer retained the same data pointer and stride `(2,)`; writes through the Python buffer
+and tensor were visible through both views, and the consumer remained valid after the earlier Python names
+were deleted. A separate actual MPS DLPack handoff retained the same data pointer, shape `(3, 2)` and strides
+`(4, 2)`; its writes changed the original MPS allocation, and its owner remained live after earlier names
+were deleted. Host readback was used only to observe the MPS values. These are observations of the original
+APIs, not a claim that all Mesh interfaces already use them correctly.
+
+Logs: `compiler-emit/artifacts/buffer-dlpack-view-20261115.log`
+(SHA256 `8c9cc67c7f4bf2a21a5f4b6d6aac5b84b3616e7c2ec1efebd21e703aa6af3edf`) and
+`dlpack-mps-view-20261115.log`
+(`f5ce26b5cc93b664498d3cd1ba214d990ee6e2f53d9099ee5cb0e7b0df74e1b6`).
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
