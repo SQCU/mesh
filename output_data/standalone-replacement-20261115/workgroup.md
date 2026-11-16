@@ -729,6 +729,64 @@ findings and remaining obligations are recorded separately from verbatim require
 linked to earlier findings. Commits preserve work in progress as well as completed work; their status follows the
 remaining obligations. This is the root's review practice for the existing assignment, not another change request.
 
+### Compiler-library selection before executable emission
+
+Operator:
+
+> "4. Compose and emit the executable" choose ahaed of time how you'll do this, and the answer better not be all original string manipulation code written in python. if there are any preexisting libraries for this kind of transpilation, we will use them with as little bespoke work as possible given our requirements
+
+The operator clarified:
+
+> if a fxgraph2source final lowering is strictly required for the fundamental api we're working with, we can literally do that...
+
+Final source emission from the complete annotated graph is permitted. The existing upstream emitter supplies
+that output where the target compiler API consumes source. This instruction constrains when source becomes
+the result; it does not create a requirement to avoid source by adding another representation or linker.
+
+Root selects original TorchInductor numerical emission, Tint typed entry construction and MSL emission, and
+Apple Metal's private static function linkage for the current numerical/composition boundary. The original
+numerical compiler emits an ordinary callable definition from its retained result. Tint constructs the entry's
+typed calls, bindings and acquisition/publication through the existing composition function. Apple's
+`MTL4StaticLinkingDescriptor.privateFunctionDescriptors`, supplied through
+`MTL4ComputePipelineDescriptor.staticLinkingDescriptor`, links their library functions at Metal IR level.
+`MTL4LibraryFunctionDescriptor` supplies the library and function identity. The installed SDK's
+`MTL4LinkingDescriptor.h` expressly permits private linkage on devices without function-pointer support.
+The existing `metal_lower.mm::PipelineDescriptor` is the immediate pipeline-descriptor consumer.
+
+The producer interface is an ordinary function definition with its original parameter, allocation, access and
+effect owners. MSL's kernel-entry and ordinary-function distinction requires the original numerical emitter to
+emit the callable form; it is not obtained by editing an already-emitted kernel string. Actual workgroup storage
+is allocated at the entry and supplied to the callee. The shared composition consumes actual selected writer
+effects; static linkage does not establish system visibility by itself. A typed external function declaration
+connects the definition to the existing Tint UserCall. Installed Tint currently requires a Function body, so
+supporting that ordinary declaration in its original function/clone/validation/writer interfaces is an explicit
+remaining library-interface change. Its physical ABI must also represent the original reference arguments,
+narrow/bfloat pointer types and original error-buffer type; a pointer-shaped substitute or type-string parser
+does not establish that interface. LLVM's function declaration/definition distinction supplies the terminology.
+
+This selection uses the existing numerical emitter and compiler writer for their own final source output.
+Mesh's work connects their complete operands, declarations and library objects. It does not introduce a Python
+source-assembly compiler, a generated-source parser, a second entry-construction algorithm or a runtime function
+dispatcher. The whole assigned numerical domain, workgroup behavior, precision, aliases and effects remain the
+obligations; the linkage APIs are source evidence of a mechanism, not proof those obligations have been implemented.
+Host/ANE realization remains part of the original target coverage; this selects the currently missing Metal
+composition boundary, rather than replacing the whole domain with a GPU subset.
+
+The library review also examined Torch-MLIR/IREE. Its original FX importer, borrowed in-memory MLIR module API,
+SPIR-V passes and SPIRV-Cross Metal emission are real existing implementations. The checked IREE Metal target
+can retain integer capabilities unsupported by the installed Tint SPIR-V reader. Substituting that importer is
+therefore not an already-established complete connection to the present composition. Metal function stitching
+supplies a function DAG; it does not directly represent the original entry's conditional acquisition/skip.
+Neither alternative is being implemented alongside the selected static-linking path.
+
+Sources: installed macOS SDK `Metal.framework/Headers/MTL4LinkingDescriptor.h`,
+[`staticLinkingDescriptor`](https://developer.apple.com/documentation/metal/mtl4computepipelinedescriptor/staticlinkingdescriptor),
+[`MTL4LibraryFunctionDescriptor`](https://developer.apple.com/documentation/metal/mtl4libraryfunctiondescriptor),
+[MSL specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf) §§4.4/5.1/5.3/6.10,
+[LLVM function declarations](https://llvm.org/docs/LangRef.html#functions),
+[IREE Metal target](https://github.com/iree-org/iree/blob/main/compiler/plugins/target/MetalSPIRV/MetalSPIRVTarget.cpp),
+and [IREE in-memory MLIR interface](https://github.com/iree-org/iree/blob/main/compiler/bindings/c/iree/compiler/mlir_interop.h).
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
