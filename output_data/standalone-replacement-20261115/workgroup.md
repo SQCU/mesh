@@ -787,6 +787,21 @@ Sources: installed macOS SDK `Metal.framework/Headers/MTL4LinkingDescriptor.h`,
 [IREE Metal target](https://github.com/iree-org/iree/blob/main/compiler/plugins/target/MetalSPIRV/MetalSPIRVTarget.cpp),
 and [IREE in-memory MLIR interface](https://github.com/iree-org/iree/blob/main/compiler/bindings/c/iree/compiler/mlir_interop.h).
 
+### Build of the original composition producer
+
+Metal `f8facce2` built through the ordinary `.build/libmetal_ir.dylib` and
+`.build/libmetal_recording.dylib` targets, exit zero; all eight recorded source hashes remained unchanged.
+Native `f6e42c6` then built and loaded its actual `pages.library` against those libraries, exit zero, with
+all five recorded native source hashes unchanged. These observations cover the retained ModulePass producer
+and its existing binding, preceding implementation of the selected callable/static-link interface.
+
+Logs: `metal-microbench/output_data/standalone-replacement-20261115/f8facce2-native-build.log`
+(SHA256 `e4a963c77a83e944078de26f38f40da4d3d5b63913b9aac76c8c6cdf9680b95d`) and
+`native-execution/artifacts/f6e42c6-f8facce2-binding-load.log`
+(`f3de42aa093e2d4765b6b2a71c3e12158d2f3c1d69193e1b01a3a3da787491f0`).
+The corresponding `*-before.json` files retain the source manifests. Native numerical/transport execution
+and categorical replacement remain outstanding.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
