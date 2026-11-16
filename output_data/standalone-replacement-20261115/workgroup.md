@@ -1212,6 +1212,38 @@ requirement; a private compare-exchange temporary belongs to its original LLVM a
 requirement supplies an allocation operand, while the allocator and placement result supply the actual provided
 alignment. Root's source audit keeps those two facts distinct.
 
+### Original buffer parameter consumes the complete primitive effects
+
+Compiler `81a0bfd`/`25274be` add direct indices of complete atomic definitions and effects to the existing
+numerical parameter. Original LLVM `getUnderlyingObject(pointer, 0)` identifies the object behind each primitive
+MemoryLocation; the retained derived formal and source Buffer establish its correspondence to that parameter.
+The original implementation is declared in installed LLVM 21.1.8 `llvm/Analysis/ValueTracking.h`, lines 434–446.
+The private compare-exchange expected location remains part of its complete effect, separate from buffer formals.
+
+The first public invocation failed because `MetalBufferIndex.parameter` still performed mutation-name resolution
+through the expired ambient graph context. Compiler `778a6a2` assigns the actual parameter during original
+signature preparation and removes the delayed lookup. The next invocation exposed Python wrapper identity:
+the same native LLVM argument appeared as a Value wrapper through underlying-object analysis and an Argument
+wrapper through the function iterator. Inspection of the same saved module through its original Clone
+correspondence confirmed that LLVM's result was correct. Compiler `b60f8e1` exposes native Value address identity
+and uses that comparison at the existing association. These corrections retain the original analyses and owners.
+
+The same public packed-float16 Indexing emission then exited zero. Its actual numerical parameter retained both
+complete scope definitions and their four original primitive effects; each forwarding data formal retained those
+same corresponding effects. Original native identity confirmed the global objects' formal correspondence and the
+private expected locations' separation. The numerical parameter alone kept the original program, source,
+21,072-byte bitcode and effect views accessible after the outer local owners were dropped. All sixty-eight
+watched source/library hashes remained unchanged.
+
+Exact command, manifests and successful receipt: `compiler-emit/artifacts/b60f8e1-underlying-producer/`.
+Run-log SHA256: `a8f6bdbcfdd9a53216f6e48b240b3bc6064b0c9be62e947b6c35b42df78e3052`;
+receipt SHA256: `8e3a6e6ed281884a3c0525f17ca1c7ccc8b913df928c82fdec4fba3bd0831628`.
+The failed `25274bea-underlying-producer` and `778a6a2-underlying-producer` observations remain separate, with
+their source manifests and the latter's saved-module identity diagnosis. This completes the observed
+primitive-effect-to-buffer-parameter handoff. Required alignment is available through those complete effects;
+the allocation operand handoff, actual provided base/page/view-origin facts, complete primitive access relations
+and native execution remain outstanding.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
