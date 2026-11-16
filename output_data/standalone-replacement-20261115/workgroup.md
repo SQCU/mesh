@@ -1495,7 +1495,23 @@ realization, not evidence that the existing arena/import path provides absolute 
 object's alignment alone does not imply its incoming buffer base's alignment: packed helpers can realign a
 misaligned input. Original source attributes therefore remain visible and contribute to the same requirement
 consumed by both LLVM and Register. Original source projection, syntax and complete producer/consumer source
-reviews passed; the corresponding public observation is recorded separately.
+reviews passed.
+
+The ordinary reader/native extension builds and one existing packed-float16 Indexing emission exited zero,
+each with all 116 watched inputs unchanged. Both actual source data formals had no explicit alignment attribute;
+both corresponding derived formals had alignment 4, matching the original numerical parameter's produced field.
+Other numerical buffer parameters retained their physical dtype requirements of 2 or 8. Three calls configured;
+whole query/analysis/effect owners and the source/derived distinction survived outer-local release.
+
+All four production relative queries still returned the original SCEVUnknown error at the actual data formal.
+Thus this observation establishes the shared requirement and analysis ordering, not cancellation of the symbolic
+base or completion of primitive access relations. No extra optimization pass or pointer binding was introduced;
+allocation and numerical dispatch were not exercised. Build receipt:
+`compiler-emit/artifacts/1753243-9d04f00-build/receipt.json`, SHA256
+`69321d32405a333fd597d6b19aa97d52a8d42dab8cbfb665e8615558f29d1a3c`.
+Public receipt: `compiler-emit/artifacts/1753243-9d04f00-required-alignment/receipt.json`, SHA256
+`172c49e9ea71e9f2e7f5b287452805c2d905154921da7d706eba2285c0b7b29e`;
+run-log SHA256 `55d2b8c805bbb10227ef7f8a591e1d759eab307a901723be03b11d4313ac2f82`.
 
 ## Sources used in their respective roles
 
