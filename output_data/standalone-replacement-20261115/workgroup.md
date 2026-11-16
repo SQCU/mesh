@@ -1066,6 +1066,21 @@ computations. Relations still uses numerical scalar width; the next connection m
 expressions, existing domain/argument bindings and guards through the original affine machinery. Native dispatch
 and complete replacement remain open.
 
+### Existing ISL results exposed to the original affine consumer
+
+Mesh `ad5bb883` exposes the original context, domain box, index value and predicate through borrowed-pointer
+accessors in `mesh-graph.h/.c`. The original context mutex supplies the locked interval; `mesh_graph_index_take_locked`
+delegates result ownership to the existing `index_made`. The complete owners and lock/release order are specified in
+[graph-isl-views.md](../../design/graph-isl-views.md). The change adds 23 source lines and a separate interface note.
+Root and executor reviewed the direct interface; C11 source and C++17/ISL-header checks passed.
+
+Root built the ordinary `make -C rdma libmesh.dylib` target, exit zero, with all six recorded source hashes unchanged.
+The resulting library exports all eight added functions. Log: `ad5bb883-libmesh-build.log`, SHA256
+`876aff2a4c8c8f87bf13f80706a9d59aae173a2434c4cf54b9f16c49efc355cd`; manifest:
+`ad5bb883-libmesh-source-before.json` in this directory. This establishes the producer interface and library build.
+The original Polly explicit-binding adapter and its direct caller remain under implementation; guarded access
+relations, native execution and categorical replacement retain their outstanding obligations.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
