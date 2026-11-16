@@ -87,6 +87,20 @@ logs are `artifacts/reference-first.log`, `reference-mutation.log`, `reference-e
 and `reference-mps.log`. These observations establish the exercised numerical, effect-order and state properties;
 full assigned-domain coverage remains implementation work.
 
+Standalone compiler commit `e05aa93` preserves that effect correction. Commit `fee1381` retains the complete
+original `CompiledAOTI`, `GraphLowering`, wrapper-planner and source `ExportedProgram` results. Its shared-source
+CPU and MPS examples also exposed a mutable scalar being folded into a literal: `_unlift_graph` already produced
+`mutated_named_buffers`, but `ConstantFolder.run_node` ignored that operand. The original constant folder now routes
+those mutable attributes through its existing `unknown_value` result. The same example then preserved scalar state
+`1 → 2 → 3`, returned-input identity, and view storage, strides and offset on both targets.
+
+The independent interface review distinguishes shared **source** from shared **scheduled result**. At `fee1381`,
+reference execution consumes the placed/scheduled program, while AOT packaging separately consumes its original
+source EP. That establishes source identity and the observed semantics, but leaves the scheduled-native
+action/page/transfer/lifetime handoff unfinished. Native-execution commit `54a8342` retains the actual complete AOT
+result and records CPU/MPS caller-mutation observations; its native program bridge has compilation/linkage evidence
+only. These are checkpoints, not a claim that the categorical Mesh replacement has occurred.
+
 The separate [callback-restoration receipt](callback-restoration-20261115.md) records Mesh `ef651076`, Metal
 `ac2bd2ca`, restored dependency trees, exact source comparisons and the remaining central markers. The standalone
 native module separately executed repeated CPU and MPS alias/state examples at `native-execution` commit `cd09ad6`.
