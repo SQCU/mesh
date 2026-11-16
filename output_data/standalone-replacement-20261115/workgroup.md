@@ -990,6 +990,34 @@ Source checks: LLVM 21.1.8 [`MemoryLocation.cpp`](https://github.com/llvm/llvm-p
 and Polly [`SCEVAffinator.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/polly/lib/Support/SCEVAffinator.cpp).
 Command receipt: `compiler-emit/artifacts/a94feec-atomic-existing-analyses.log`.
 
+### Original analysis owners and physical leaf locations
+
+Review found that the scoped wrappers had dropped the standard library's original volatile pointer qualification.
+Compiler `a3d5848` restores `const volatile` on the load object and `volatile` on the compare-exchange/add objects.
+The existing full instantiation caller compiles successfully; all eighteen AIR atomic calls again retain the
+original volatile flag, with device/system scopes unchanged. The three parameter changes preserve the bodies
+and annotations. The receipt is `compiler-emit/artifacts/atomic-volatile-17E188/receipt.json`.
+
+Compiler `7015b2f` connects actual annotated leaf calls to LLVM MemoryLocation/ModRef values and the original
+CallGraph, ScalarEvolution, Loop, Dominator and MemorySSA owners. Compare-exchange's caller `expected` operand
+has its own read/write location, matching the original wrapper's unconditional copyback. Actual zero member
+offsets use the original module directly by view. An actual nonzero member-offset transformation uses LLVM's
+CloneModule/ValueToValueMap and GEP construction, retaining its input and derived result.
+
+Root built and exercised the public `declarations.emit` and `compile_header` entries. Direct library analysis
+succeeded on the unchanged `air64_v28-apple-macosx26.0.0` target: the full original fixture exposed 72 leaf calls,
+30 caller-expected read/write locations, 62 returned-value uses, and 72 original MemorySSA and ScalarEvolution
+results. Retained views survived dropping the initial Python owners. The module stayed identical by reference.
+Both ordinary Indexing calls through the original compiler and reference Program had maximum absolute error
+zero after the volatile correction; all sixty recorded source hashes stayed unchanged.
+
+Logs: `compiler-emit/artifacts/7015b2f-atomic-effects.log`, SHA256
+`935155d687692ad1ab93f72cf4c42793529eaa2ce4746c30527d4eb8c7859b19`, and `7015b2f-indexing-mps.log`,
+`6d0751db9cd561077784b1c7c47d9f4d4b9fc844a7f9df940c7df81f2889c4c0`. The corresponding `source-before.json`
+is under `artifacts/7015b2f-atomic-effects/`. These are local physical-effect results; the side table is not yet an
+AA provider or a guarded Mesh access relation. Native execution, system-memory visibility, static linkage and
+categorical replacement remain unfinished.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
