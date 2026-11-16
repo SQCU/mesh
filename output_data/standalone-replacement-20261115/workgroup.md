@@ -561,6 +561,39 @@ must preserve these results and associations. A restriction requiring consumers 
 views after lowering would leave this requirement unfinished. This is an ordinary object-lifetime and
 index-correspondence correction, rather than an additional semantic requirement on paged storage.
 
+### Actual final emission and ordinary reference execution
+
+Compiler `1ac9861` separates original schedule emission from terminal wrapper printing and numerical body
+preparation from final kernel rendering. Ordinary callers immediately compose those same functions.
+Native callers consume the actual selected call line, construct the original native operation, compose
+its complete callable collection, then render once and call the original native Configure boundary.
+The original emitter resolves DeferredLine removal at its original preparation point; its complete
+ValueWithLineMap result remains the final renderer's operand. Header requirements now belong to each
+original kernel rather than a mutable class-wide set.
+
+With native `8489075` and built Metal `581f13fb`, the public `declarations.emit` completed on RunningMean
+and Indexing through actual construction, final printing and Metal configuration. Each instance retained
+three actual call occurrences; their access-map counts remained thirteen and eleven, respectively. The
+exact Prepared and Scheduled owners remained retained, and Indexing exercised four indirect uses.
+The original MPS device was an explicit compilation operand, as was the 65536-byte page quantum.
+
+After the shared original emitter change, the existing shared MPS example passed its numerical,
+input-identity, alias, stride, offset and persistent-state checks, with state `1 → 2 → 3`. The existing
+CPU Solve sample completed through the actual reference Program with errors
+`(8.940696716308594e-08, 2.2395714356100817e-07)`. All four commands exited zero and all forty-four recorded
+source hashes remained unchanged. Logs under `compiler-emit/artifacts/`:
+
+- `1ac9861-8489075-native-emit.log`: SHA256 `7b24b1f87ea749e8c52f84cc6275b6caea28475e21c16f389cd60dac07fb96ce`.
+- `1ac9861-8489075-indexing-native-emit.log`: `a57a318634a82782159a43d1b52c08ed4fc6b15fddd299b732817d7e12dc5860`.
+- `1ac9861-shared-mps.log`: `04c2a0bb0e4c4680d132d9c225c38a71464b02fdb6820af4b8153071389553c0`.
+- `1ac9861-solve-cpu.log`: `fb20e9c090c9e0b5233d154204c284a595b2525fa31363a34d1ff1194cb8ed6a`.
+
+These observations cover actual final compilation/configuration and the ordinary reference executions.
+Protocol helper invocation, later-pass emission, original scalar-double binding, retained views through
+later lowering, native allocation/execution and complete domain coverage remain outstanding. The next
+assignments consume the existing typed protocol operands in the renderer and correct the original native
+result owners before adding their later lowering consumer. Categorical Mesh replacement is still pending.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
