@@ -266,6 +266,31 @@ processes exited zero, and the tracked source and projected dependency files rem
 These observations concern the implemented reference composition, following the first-interface source review;
 native page/effect composition, backend-preparation handoffs and Mesh replacement remain implementation work.
 
+### Retained backend preparation and direct FX entry
+
+Compiler-emit `9d53f8c` (review receipt `fe3175b`) factors original `GraphLowering.prepare_cpp_wrapper` and
+`emit_cpp_wrapper`. The returned original graphs now retain their wrappers and Schedulers; terminal AOT callers
+consume them directly. Original complete compilation calls the same preparation and emission operations.
+Sample-input extraction is an original graph method, and its original lazy-autotuning consumer calls it directly.
+Wrapper construction retains the original dual-wrapper-mode decision so later shared-device additions leave
+buffer creation and emission using the same selected mode. The original predicates and extraction timing were
+reviewed, including constant/main graphs, shared name allocation, subgraphs and ordinary completion callers.
+
+Schedule-emit `4283357` removes its manual `with_effects`/`getitem` parser and multiple-result restriction.
+Original functionalization and numerical lowering consume the intact token/schema/result structure. The reference
+lowerer supplies its already-captured FX graphs to original `torch._inductor.compile`, and original callable
+construction supplies `Program`'s positional interface. The target graph retains the original module metadata;
+the original receive-reuse field and layout adaptation remain the channel-boundary operands.
+
+After independent source review, four existing cases ran against compiler `fe3175b` and reference `4283357`.
+CPU/MPS alias examples preserved state `1 → 2 → 3`; the two-processor, six-channel RunningMean instance reported
+`(0.0, 0.0)` output/state error through both packaged AOT and the reference's direct FX entry. All processes
+exited zero; tracked source and the seven pre-existing modified reference archives were preserved. Logs are
+`compiler-emit/artifacts/fe3175b-4283357-{shared-cpu,shared-mps,running-mean-aot,running-mean-fx}.log`.
+Original backend access preparation, native allocation/page/effect composition and categorical replacement remain
+outstanding. These source handoffs and executions establish the stated local composition, rather than native
+transport or full-domain performance.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
