@@ -59,6 +59,12 @@ processor's placeholders. Mesh's lowerer takes the richer retained operand of AO
 
 Mesh supplies its page-allocation operands from AOT A5's retained allocation result.
 
+The lowerer receives completed AOT results and typed result-buffer references, following the operator's
+[AOT result-buffer clarification](../output_data/standalone-replacement-20261115/workgroup.md#aot-result-buffers-and-ordinary-paging-operator-clarification).
+The declared AOT producers fill those buffers in the compilation's dependency order; consumers of their contents
+follow those producers. Page-table mappings and byte extents locate the values, and their existing layouts supply
+interpretation.
+
 **Results.** The lowerer returns compiled bodies, their argument, result and storage bindings, and their effect and
 source correspondence to the same consumers. The demonstration's `runtime.Program(scheduled, functions)`
 (`runtime.py` 27–75) calls the compiled functions with prepared arguments, and `archive.save` and `archive.load`

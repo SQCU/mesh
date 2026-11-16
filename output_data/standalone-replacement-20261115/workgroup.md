@@ -291,6 +291,37 @@ Original backend access preparation, native allocation/page/effect composition a
 outstanding. These source handoffs and executions establish the stated local composition, rather than native
 transport or full-domain performance.
 
+### AOT result buffers and ordinary paging: operator clarification
+
+Operator, 15 November 2026:
+
+> jit-dependent-types cannot be an input to any function we use in the aot compilation, optimizatino, or lowering. so those types might plausibly exist formally but are not representable as a type iwthin our parsing, lowering, IR operations, optimization, etc.
+> aot_already_compiled types are basically data or metadata returned from a thing we already processed that took an IR as an input.
+> aot_gonna_be_compiled types are basically typed buffers whose values we expect ot be filled with the result of some thing we're gonna process that takes an IR as an input. all of this make sense?
+
+On the claimed extra work of a "paged representation":
+
+> but what is the paged representation underlying mesh? is it literally just 'know the length of the thing you're using, okay, we'll put it in some scatter of pages in the page table'?
+
+Completed results and declared result buffers are operands of the AOT computation. Their producing operations fill
+the buffers in the required dependency order. A consumer can use a buffer's known interface before another AOT
+operation fills its contents; a consumer of those contents follows that producer. Page mappings and byte extents
+locate the data, and its existing layout supplies interpretation. These descriptions introduce neither a new type
+framework nor a content-specific page format.
+
+The earlier assignment to expose every kernel choice ahead of terminal emission overexpanded the required
+data-flow change into wholesale hoisting. Original ordered compilation already produces the completed/freed/removed
+facts its later operations consume. That order remains valid. The integration passes the actual results and
+declared buffers through those functions; paging supplies no reason to snapshot or simulate the ordered compiler.
+Current native `Address` in `metal_ir.mm` demonstrates the distinction: it builds a load from the supplied frame
+table without reading that table's entries during compilation. Its byte/element geometry is available earlier;
+the original allocation producer supplies the frame contents later.
+
+Compiler-emit `8eabdf1` records the reviewed local SIMD and CPU-template extractions; `622754c` records this
+correction to the next assignment. The local extractions preserve their original consumers and finalization order.
+Their source projection covers twenty-four Torch files. This checkpoint has source-review evidence, with no new
+numerical execution, and leaves native allocation/transport composition and categorical replacement outstanding.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
