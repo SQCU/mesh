@@ -197,6 +197,20 @@ results. Composition consumes those results before their first numerical-address
 supplies its actual PartialRender to its original finalizer. A first split before scheduler emission alone does
 not establish complete native bindings or an emission API usable after the original compiler context exits.
 
+Compiler-emit `d5847df` factors original preparation/emission; `3dc106d` establishes the preceding explicit
+lower-result handoff. `GraphLowering.lower(*args)` calls the unchanged original `run` and returns its complete
+owner. Original constant/main callers consume that result immediately. Constructor operands retain the actual
+`fake_tensor_prop` result, original extern list and complete invocation-argument bundle; child graphs receive
+their parent's references. `_unlift_graph` retains the actual pre-unlift AOT signature on its returned module.
+The original extern producer, index consumer and serializer share the retained live list.
+
+The operator questioned whether CPU/MPS execution and scheduler identity mattered for this first interface.
+Review consequently followed the producer's actual operands, returned objects and direct consumers in source.
+Independent review of `3dc106d` confirmed all five constructor routes and the unchanged lowering body and caller
+scopes. Eight patches produce fifteen parseable source files matching the isolated Torch installation. This
+change had no workload runs or identity profiling. It establishes the local typed handoff; exposing ordinary
+standalone preparation/composition/emission and connecting native planning remain the next work.
+
 The native source trace identifies existing algorithm owners, rather than an additional runtime to implement:
 
 | Result | Existing producing/consuming boundary |
