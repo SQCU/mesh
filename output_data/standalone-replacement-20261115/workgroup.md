@@ -1827,10 +1827,27 @@ SHA256 `40da6b71a7572fa7c7c3254703b0d7878c3a31104796ed1e7bebb19f53f52d16`.
 
 ### Direct producer review before joint allocation
 
-The source review after these changes identifies two concrete boundaries.
-`PythonWrapperCodegen._generate` invokes `run_wrapper_ir_passes` during final
-emission; the next paired change moves those original passes before the shared
-scheduled-result return. `schedule_emit.heft_placed` returns node order after
+The source review after these changes identified two concrete boundaries.
+Compiler `d00e28d` moves `run_wrapper_ir_passes` from both terminal Python/FX
+emitters to the original root schedule producer and the independent partition
+producer. Inline subgraphs contribute their instructions to their parent.
+Both producers call the original allocation/reuse methods after their complete
+instruction sequence, preserving the original configuration choice.
+
+The existing MLP then ran on CPU and MPS through the original reference Program
+with memory planning enabled and maximum absolute error zero. Before final
+emission, Prepared contained the original planners, allocation pools and planned
+instruction lists; emission retained those same objects. The existing
+StatefulAlias example passed three calls on each target under default allocation,
+preserving its input/alias assertions and state 1/2/3. All watched sources stayed
+unchanged. Partition and FX wrapper callers received source review; the numerical
+observation exercised CPU/MPS AOT wrappers.
+
+Receipt: `compiler-emit/artifacts/20261116-allocation-boundary/receipt.json`,
+SHA256 `36da6c43a217e7f76efc2491060eae3128851239690193d9affc621b711a7971`.
+
+The second boundary remains at the outer scheduling producer.
+`schedule_emit.heft_placed` returns node order after
 computing ranks, predecessor finish times and complete processor timelines;
 `schedule` then returns only assembled modules. The original source-to-assembly
 node map targets the graph before Torch's unlift copy. An interface retaining
