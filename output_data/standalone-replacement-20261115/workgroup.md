@@ -1125,6 +1125,31 @@ consumes that complete result. The printed page-address expression remains final
 algorithm or recovering its meaning from text supplies no required prerequisite. An original buffer index and an
 already-paged helper offset have different meanings, so relabeling one as the other would still be incorrect.
 
+The producer audit identifies this complete related group at those revisions:
+
+- `MetalStoreLine` retains its original invocation, but `MetalAtomicDefinition` does not connect its compiled
+  formals to the complete logical buffer/index/value invocation. `buffer_index` retains its Address Function and
+  inputs, while the composed address call and byte-to-element conversion are formatted text.
+- A subword view's root-relative origin enters helper expansion before word selection. The existing scalar map
+  appends Buffer.origin afterward; increasing its width alone would select the wrong packed word.
+- The original Buffer/Address owner carries that origin separately from the U8 Value's zero offset. Constructed
+  `upstreamPages.origin` consequently cannot replace it. Upstream U8 binding alignment is one, and argument-table
+  encoder alignment says nothing about the accessed resource's alignment. Actual base/alignment operands remain
+  necessary; pointer zero is not established by those fields.
+- Primitive load and compare-exchange operations inside an atomic store retain that store invocation's frame
+  direction and execution copy. Their read/write dependency effects are a separate property.
+- Packed-word and multiword expansion need the represented alignment and page-boundary conditions when composed
+  with numerical addressing. Whole-page placement alone does not prove those conditions.
+- `Relations.lower_accesses` still uses numerical element width and unconditional commuting-update classification
+  for `atomic_add`. Complete primitive widths, guards, private expected-pointer effects and returned-value
+  dependencies remain unconsumed. The private expected location is not a global tensor-buffer access.
+
+The existing original numerical emitter, `compile_header`, `AtomicEffects` and LLVM analyses supply the numerical
+body and its expansion. Completed logical byte relations enter `mesh_graph_access_map_create` and
+`metal_ir_upstream_mapped`; the existing placement chain above consumes them. `AddressFunctions`/`Address`,
+`FrameBindings` and final frame projection remain the numerical-address producers. This is a source defect
+manifest for their immediate handoff, not a new numerical compiler or an alternative placement algorithm.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
