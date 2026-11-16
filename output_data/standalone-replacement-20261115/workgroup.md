@@ -1461,6 +1461,16 @@ The original failed receipt remains at `compiler-emit/artifacts/bb7b557-failure-
 SHA256 `158f5445bd58815e9f79c0b183618e59e8f222caeb180a389cd64df8b80a5a52`. Allocation and numerical dispatch were
 not exercised.
 
+The corrected same invocation at `d963e82` exited zero using the unchanged libraries, with all 116 watched
+hashes unchanged. Complete Queries retained their error/site after the outer Program was collected. With the
+Queries then released and the original AtomicEffects and Analysis owners explicitly retained, all four borrowed
+Values remained valid and natively identical to their actual `data` formals. This observation concerns those
+retained complete owners; it does not establish ownership from an unaccompanied raw pointer. The three configured
+calls and four unresolved primitive queries remain the same. Receipt:
+`compiler-emit/artifacts/d963e82-failure-owners/receipt.json`, SHA256
+`a44ab6985c0187c0aa181702f3c006c77947b781b69e178036e8c218ac20c73a`;
+run-log SHA256 `691a13009a81833d851727a645cd85c959a459db52448dbf15ce1d562998e8b1`.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
