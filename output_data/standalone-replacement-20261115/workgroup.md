@@ -1535,7 +1535,26 @@ final consumers receive the final module's effects exactly once.
 This ordering addresses the related defects together: the omitted consumer of the new alignment, raw
 MemoryLocation/member-projection pointers that an in-place rewrite could delete, changed call membership,
 and analysis caches belonging to earlier IR. Source and discovery results remain available. The assignment
-introduces the original compiler pass and its actual result handoff; successful folding remains to be observed.
+introduces the original compiler pass and its actual result handoff.
+
+Compiler `9e08beb` implements that sequence. The ordinary reader rebuild and the existing packed-float16
+Indexing emission both exited zero, each with all 116 watched inputs unchanged. Original and discovery data
+formals retained their absent alignment attributes; final formals carried the produced alignment 4. Both
+original correspondence stages matched their actual formals. All four discovery effects remained readable
+through the retained predecessor after the four final effects and their analyses had been produced.
+
+All four production relative queries now returned value and invalid-domain results with no error. Each group's
+shared original assumptions view retained two `UNSIGNED` / `AS_RESTRICTION` entries, with the original
+`RequiresRTC` flag. The invalid-domain indicators were not proven fixed by this observation. Successful
+expression lowering therefore does not establish discharge of these restrictions; its direct consumer must
+use the original access domain/guard and complete query results. No new runtime check was added. Three calls
+configured; allocation, numerical dispatch and replacement primitive access maps remain unexercised.
+
+Reader build receipt: `compiler-emit/artifacts/9e08beb-reader-build/receipt.json`, SHA256
+`78bc887cb1ac037a6669676aed1777e49f3d90dca1e4ecdf50a90370aebce7a4`.
+Public receipt: `compiler-emit/artifacts/9e08beb-final-effects/receipt.json`, SHA256
+`43f7f981a75203bb06484093a6e973c09ae5584d700ef6b29e5bd650c06be039`;
+run-log SHA256 `2efbf24763d706cec2c9f8c8189c95881e5743750975428baaa3d75713a48272`.
 
 ## Sources used in their respective roles
 
