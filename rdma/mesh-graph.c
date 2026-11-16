@@ -2695,7 +2695,7 @@ static isl_set *domain_box(isl_ctx *ctx, uint32_t dims, const struct mesh_graph_
   for (uint32_t k = 0; k < dims; k++) {
     isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
                                                           isl_dim_set, (int)k, 1);
-    box = isl_basic_set_add_constraint(box, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, -dim[k].lo)));
+    box = isl_basic_set_add_constraint(box, isl_constraint_set_constant_val(c, isl_val_neg(isl_val_int_from_si(ctx, dim[k].lo))));
     c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_set,
                                           (int)k, -1);
     box = isl_basic_set_add_constraint(box, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, dim[k].hi)));
@@ -2907,21 +2907,23 @@ void mesh_graph_index_free(struct mesh_graph_index *x) {
 struct mesh_graph_access_map { size_t references; struct mesh_graph_domain *domain; isl_map *relation; isl_set *guard;
                            uint32_t flags; uint64_t guard_source; int64_t least, greatest; uint64_t identity; };
 /* an inequality sum coefficient x + constant >= 0 of a map's in (k < ins) and out dimensions */
-static isl_basic_map *access_bound(isl_basic_map *m, isl_local_space *local, isl_ctx *ctx, unsigned ins,
-                                   const int64_t *coefficient, unsigned n, int64_t constant) {
+static isl_basic_map *access_bound(isl_basic_map *m, isl_local_space *local, unsigned ins,
+                                   isl_val *const *coefficient, unsigned n, isl_val *constant) {
   isl_constraint *c = isl_constraint_alloc_inequality(isl_local_space_copy(local));
   for (unsigned k = 0; k < n; k++)
-    if (coefficient[k]) c = isl_constraint_set_coefficient_val(c, k < ins ? isl_dim_in : isl_dim_out,
-                                                              (int)(k < ins ? k : k - ins), isl_val_int_from_si(ctx, coefficient[k]));
-  return isl_basic_map_add_constraint(m, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, constant)));
+    c = isl_constraint_set_coefficient_val(c, k < ins ? isl_dim_in : isl_dim_out,
+                                            (int)(k < ins ? k : k - ins), coefficient[k]);
+  return isl_basic_map_add_constraint(m, isl_constraint_set_constant_val(c, constant));
 }
 /* { [i] -> [b] : origin + scale i <= b <= origin + scale i + width - 1 } */
 static isl_map *access_elements(isl_ctx *ctx, uint64_t origin, uint64_t scale, uint64_t width) {
   isl_space *space = isl_space_alloc(ctx, 0, 1, 1);
   isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
   isl_basic_map *m = isl_basic_map_universe(space);
-  m = access_bound(m, local, ctx, 1, (const int64_t[]){-(int64_t)scale, 1}, 2, -(int64_t)origin);
-  m = access_bound(m, local, ctx, 1, (const int64_t[]){(int64_t)scale, -1}, 2, (int64_t)origin + (int64_t)width - 1);
+  m = access_bound(m, local, 1, (isl_val *[]){isl_val_neg(isl_val_int_from_ui(ctx, scale)), isl_val_one(ctx)}, 2,
+                   isl_val_neg(isl_val_int_from_ui(ctx, origin)));
+  m = access_bound(m, local, 1, (isl_val *[]){isl_val_int_from_ui(ctx, scale), isl_val_negone(ctx)}, 2,
+                   isl_val_sub(isl_val_add(isl_val_int_from_ui(ctx, origin), isl_val_int_from_ui(ctx, width)), isl_val_one(ctx)));
   isl_local_space_free(local);
   return isl_map_from_basic_map(m);
 }
@@ -2967,12 +2969,14 @@ int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const s
     isl_space *space = isl_space_map_from_domain_and_range(isl_set_get_space(d->box), isl_space_set_alloc(ctx, 0, 1));
     isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
     isl_basic_map *m = isl_basic_map_universe(space);
-    int64_t *c = calloc((size_t)d->dims + 1, sizeof *c);
+    isl_val **c = calloc((size_t)d->dims + 1, sizeof *c);
     if (c) {
-      c[d->dims] = 1;
-      m = access_bound(m, local, ctx, d->dims, c, d->dims + 1, -lo);
-      c[d->dims] = -1;
-      m = access_bound(m, local, ctx, d->dims, c, d->dims + 1, hi);
+      for (uint32_t k = 0; k < d->dims; k++) c[k] = isl_val_zero(ctx);
+      c[d->dims] = isl_val_one(ctx);
+      m = access_bound(m, local, d->dims, c, d->dims + 1, isl_val_neg(isl_val_int_from_si(ctx, lo)));
+      for (uint32_t k = 0; k < d->dims; k++) c[k] = isl_val_zero(ctx);
+      c[d->dims] = isl_val_negone(ctx);
+      m = access_bound(m, local, d->dims, c, d->dims + 1, isl_val_int_from_si(ctx, hi));
     } else m = isl_basic_map_free(m);
     free(c);
     isl_local_space_free(local);
@@ -3024,16 +3028,16 @@ int mesh_graph_access_map_placed(const struct mesh_graph_access_map *a, int64_t 
   isl_basic_set *range = isl_basic_set_universe(line);
   isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
                                                         isl_dim_set, 0, 1);
-  range = isl_basic_set_add_constraint(range, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, -start)));
+  range = isl_basic_set_add_constraint(range, isl_constraint_set_constant_val(c, isl_val_neg(isl_val_int_from_si(ctx, start))));
   c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_set, 0, -1);
-  range = isl_basic_set_add_constraint(range, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, end - 1)));
+  range = isl_basic_set_add_constraint(range, isl_constraint_set_constant_val(c, isl_val_sub(isl_val_int_from_si(ctx, end), isl_val_one(ctx))));
   isl_local_space_free(local);
   isl_space *move = isl_space_alloc(ctx, 0, 1, 1);
   local = isl_local_space_from_space(isl_space_copy(move));
   isl_basic_map *moved = isl_basic_map_universe(move);
   c = isl_constraint_set_coefficient_si(isl_constraint_alloc_equality(isl_local_space_copy(local)), isl_dim_out, 0, 1);
   c = isl_constraint_set_coefficient_si(c, isl_dim_in, 0, -1);
-  moved = isl_basic_map_add_constraint(moved, isl_constraint_set_constant_val(c, isl_val_int_from_si(ctx, -shift)));
+  moved = isl_basic_map_add_constraint(moved, isl_constraint_set_constant_val(c, isl_val_neg(isl_val_int_from_si(ctx, shift))));
   isl_local_space_free(local);
   isl_map *relation = isl_map_apply_range(isl_map_intersect_range(isl_map_copy(a->relation), isl_set_from_basic_set(range)),
                                           isl_map_from_basic_map(moved));
@@ -3098,7 +3102,7 @@ int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, cons
   *partition = NULL;
   const uint64_t G = (uint64_t)groups[0] * groups[1] * groups[2];
   for (uint64_t w = 0; w <= G; w++) first[w] = 0;
-  const int64_t end = start + (int64_t)page * (int64_t)partitions;
+  const __int128 end = (__int128)start + (__int128)page * partitions;
   if (!G || !page || !partitions || a->greatest < start || a->least >= end) return 0;
   struct mesh_graph_domain *d = a->domain;
   isl_ctx *ctx = d->context->ctx;
@@ -3109,10 +3113,13 @@ int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, cons
   isl_space *space = isl_space_alloc(ctx, 3, 1, 1);
   isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
   isl_basic_map *of = isl_basic_map_universe(space);
-  of = access_bound(of, local, ctx, 1, (const int64_t[]){1, -(int64_t)page}, 2, -start);
-  of = access_bound(of, local, ctx, 1, (const int64_t[]){-1, (int64_t)page}, 2, start + (int64_t)page - 1);
-  of = access_bound(of, local, ctx, 1, (const int64_t[]){0, 1}, 2, 0);
-  of = access_bound(of, local, ctx, 1, (const int64_t[]){0, -1}, 2, (int64_t)partitions - 1);
+  of = access_bound(of, local, 1, (isl_val *[]){isl_val_one(ctx), isl_val_neg(isl_val_int_from_ui(ctx, page))}, 2,
+                    isl_val_neg(isl_val_int_from_si(ctx, start)));
+  of = access_bound(of, local, 1, (isl_val *[]){isl_val_negone(ctx), isl_val_int_from_ui(ctx, page)}, 2,
+                    isl_val_sub(isl_val_add(isl_val_int_from_si(ctx, start), isl_val_int_from_ui(ctx, page)), isl_val_one(ctx)));
+  of = access_bound(of, local, 1, (isl_val *[]){isl_val_zero(ctx), isl_val_one(ctx)}, 2, isl_val_zero(ctx));
+  of = access_bound(of, local, 1, (isl_val *[]){isl_val_zero(ctx), isl_val_negone(ctx)}, 2,
+                    isl_val_sub(isl_val_int_from_ui(ctx, partitions), isl_val_one(ctx)));
   isl_local_space_free(local);
   isl_set *reached = isl_map_range(isl_map_apply_range(relation, isl_map_from_basic_map(of)));
   struct access_points x = {NULL, 0, 0, reached ? 0 : ENOMEM};
