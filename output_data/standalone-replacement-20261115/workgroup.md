@@ -232,6 +232,26 @@ review confirmed these handoffs. The active translation units pass `clang -std=c
 -Werror -fsyntax-only -I . -I ../dox/mesh/rdma metal_capture.m metal_program.m`. This is source-compilation evidence,
 distinct from executing a fresh native library. No change to the obsolete recorder remains.
 
+### Standalone preparation checkpoint, 15 November 2026
+
+Compiler-emit `5adafc8` exposes original Torch `aot_prepare` and `aot_emit`. Preparation returns the original
+GraphLowering after the existing export, unlift, post-grad and lowering operations. Emission consumes that result
+through the original moved code-generation body. The return carries the original invocation operands, compiler
+owner, configuration, constant graph, provenance and autotuning state. Original provenance consumers now share
+the producer's whole owner; emission borrows the original tracing context while its caller retains cleanup.
+
+Independent source review followed original direct callers and the constant/main tables. Main additions preserve
+the constant indices used by both generated bodies. The original wrappers handle their numerical device operands;
+the broader shared device set alone did not establish a need for a copied earlier table. Eight recorded patches
+produce nineteen parseable Torch files matching the isolated installation. These are source observations for
+this checkpoint, with no numerical runs or scheduler-identity profiles.
+
+Two direct interface edits remain at this checkpoint: preparation must return all processors' original graphs
+together with the same Scheduled before emission, and the original AOTAutograd wrapper callers must retain their
+completed-callable return convention. The direct AOT preparation caller consumes lowered IR. Their numerical
+algorithms and configuration normalization remain the original shared implementations. Subsequent native
+page/effect composition and categorical replacement remain outstanding as described above.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
