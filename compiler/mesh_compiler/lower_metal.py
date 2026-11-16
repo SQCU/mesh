@@ -185,9 +185,7 @@ class ConstructedMachine:
     identity: int = 0
     # compiler/mesh_compiler/decompose.py decompose: each expanded original source node here, its expanded nodes'
     # emitted operation IDs (module.meta["decomposed"]), in emission order
-    # Callback inversion of control is outside the working specification (phase: compile-time machine construction).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    decomposed: dict = dataclasses.field(default_factory=mesh_callbacks_are_outside_spec(dict))
+    decomposed: dict = dataclasses.field(default_factory=dict)
     # compiler/mesh_compiler/operations.py Generator `state`, its words when the program draws: the initial STATE of
     # the generator root, which the native program's operand starts from (uint32 each); none drawn here yet (the
     # producer's RandomSeeds consumer is unfinished)
@@ -196,9 +194,7 @@ class ConstructedMachine:
     # where the program advances its generator, (its state Root, operations.py Generator.counter), else ()
     generated: tuple = ()
     # compiler/mesh_compiler/schedule.py assemble `input_parts`: each original placeholder position's InputParts here
-    # Callback inversion of control is outside the working specification (phase: compile-time machine construction).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    input_parts: dict = dataclasses.field(default_factory=mesh_callbacks_are_outside_spec(dict))
+    input_parts: dict = dataclasses.field(default_factory=dict)
     # compiler/mesh_compiler/metal.py _Builder.emitted: each projection's actual emission (Emitted: its record, the
     # producer's own: a Kernel, an ExternCall, a control body's Inlined, a Neural Engine body's Produced, a machine
     # body node or landing for an interface copy; its returned operation and the operations it created), in emission
@@ -207,18 +203,14 @@ class ConstructedMachine:
     # an interface receive landed in an input placeholder's storage at its own position (native.py `direct`): none,
     # each received value the produced body's own received buffer (lower_inductor.py recv_strided), each mutated
     # input's store its result's copy (`stores`)
-    # Callback inversion of control is outside the working specification (phase: compile-time machine construction).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    landings: dict = dataclasses.field(default_factory=mesh_callbacks_are_outside_spec(dict))
+    landings: dict = dataclasses.field(default_factory=dict)
     # each produced kernel's Launched, in emission order: the operand of its composition and terminal emission
     # (`emitted`, after the ports' declaration), its Produced retained through the native target
     upstream: tuple = ()
     # {processor: Produced} every member's returned upstream result as lower_inductor.py produced it (its GraphLowering,
     # AOT signature, wrapper, kernels and externs; an empty or control body's included), retained with the machine for
     # its target and the frontend's saved records
-    # Callback inversion of control is outside the working specification (phase: compile-time machine construction).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    produced: dict = dataclasses.field(default_factory=mesh_callbacks_are_outside_spec(dict))
+    produced: dict = dataclasses.field(default_factory=dict)
     # rdma/mesh-graph.h struct mesh_graph_context (rdma/mesh_graph.py Context): the compilation's one analysis context,
     # the same object for every machine of one compilation (driver.py compile_captured makes it once, over the whole
     # lowered result). Every produced kernel's domain and access relations are made in it (relations); the programs
@@ -227,9 +219,7 @@ class ConstructedMachine:
     context: object = dataclasses.field(kw_only=True)
     # {processor: (inputs, outputs)}: each member's interface as projected, each (its lower_inductor.py Input or
     # Output, its native value: (root, view ValueID), ("literal", value), or None)
-    # Callback inversion of control is outside the working specification (phase: compile-time machine construction).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    interfaces: dict = dataclasses.field(default_factory=mesh_callbacks_are_outside_spec(dict), kw_only=True)
+    interfaces: dict = dataclasses.field(default_factory=dict, kw_only=True)
     # metal.py _Builder.regions: each registered repeat and switch (Region: its ExternCall, kind, region index,
     # intervals, selector), in postorder
     regions: tuple = dataclasses.field(default=(), kw_only=True)
@@ -241,9 +231,7 @@ class ConstructedMachine:
     bindings: tuple = dataclasses.field(default=(), kw_only=True)
 
     def __post_init__(self):
-        # Callback inversion of control is outside the working specification (phase: native resource finalization).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        self.freed = weakref.finalize(self, mesh_callbacks_are_outside_spec(self.compiler.metal_ir_program_free), self.program)
+        self.freed = weakref.finalize(self, self.compiler.metal_ir_program_free, self.program)
 
     def close(self):
         self.freed()
@@ -345,9 +333,6 @@ def _ranged(bounds):
 
 
 def _unrepresented(*_, **__):
-    # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    mesh_callbacks_are_outside_spec
     return None
 
 
@@ -384,9 +369,6 @@ class _Index:
 
     # mesh_graph_index_`name` over `operands`, unreduced
     def native(self, name, *operands):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.kept(getattr(self.lib, "mesh_graph_index_" + name)(*operands))
 
     # an integer as a value of integer type `dtype` (torch's integer conversion and arithmetic: its two's-complement
@@ -396,9 +378,6 @@ class _Index:
         return self.native("wrap", value, dtype.itemsize * 8, int(dtype.is_signed))
 
     def __getattr__(self, name):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if name.startswith("__"):
             raise AttributeError(name)
         return _unrepresented
@@ -410,9 +389,6 @@ class _Index:
         return self.native("truth", self.domain, int(bool(value)))
 
     def constant(self, value, dtype):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if dtype is torch.bool:
             return self.truth(value)
         if dtype.is_floating_point or dtype.is_complex or is_infinite(value):
@@ -420,123 +396,66 @@ class _Index:
         return self.native("constant", self.domain, int(value))
 
     def add(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("add", a, b))
 
     def sym_sum(self, args):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return functools.reduce(self.add, args)
 
     def mul(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("mul", a, b))
 
     def floordiv(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("floordiv", a, b))
 
     def modular_indexing(self, x, divisor, modulus):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("modular_indexing", x, divisor, modulus))
 
     def python_mod(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("python_mod", a, b))
 
     # sympy.Mod and torch/utils/_sympy/functions.py Mod (its operands nonnegative): the mathematical modulus
     mod = python_mod
 
     def minimum(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("minimum", a, b))
 
     def maximum(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("maximum", a, b))
 
     def where(self, predicate, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.wrapped(self.native("where", predicate, a, b))
 
     def compare(self, relation, a, b):
         return self.native("compare", relation, a, b)
 
     def lt(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compare(INDEX_LT, a, b)
 
     def le(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compare(INDEX_LE, a, b)
 
     def gt(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compare(INDEX_GT, a, b)
 
     def ge(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compare(INDEX_GE, a, b)
 
     def eq(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compare(INDEX_EQ, a, b)
 
     def ne(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compare(INDEX_NE, a, b)
 
     def and_(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.native("and", a, b)
 
     def or_(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.native("or", a, b)
 
     def not_(self, a):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.native("not", a)
 
     def identity(self, x):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return x
 
 
@@ -554,9 +473,6 @@ class _Ops:
         self.index, self.rules = index, DtypePropagationOpsHandler()
 
     def __getattr__(self, name):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if name.startswith("__"):
             raise AttributeError(name)
         return _unrepresented
@@ -575,9 +491,6 @@ class _Ops:
 
     # an operand's integer value (a bool's its indicator) and its truth (an integer's != 0)
     def integer(self, x):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         index = self.index
         if x.dtype is not torch.bool:
             return x.index
@@ -593,30 +506,18 @@ class _Ops:
         return self.integral(made(*map(self.integer, operands)), getattr(self.rules, name)(*operands))
 
     def index_expr(self, expr, dtype):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.integral(self.index.interp(expr), self.rules.index_expr(expr, dtype))
 
     def value_expr(self, expr, dtype):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.integral(self.index.interp(expr), self.rules.value_expr(expr, dtype))
 
     def constant(self, value, dtype):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         rule = self.rules.constant(value, dtype)
         if rule is torch.bool:
             return self.predicate(self.index.truth(value))
         return self.integral(self.index.constant(value, rule), rule)
 
     def to_dtype(self, x, dtype, src_dtype=None, use_compute_types=True):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if x is None:
             return None
         rule = self.rules.to_dtype(x, dtype, src_dtype, use_compute_types)
@@ -625,76 +526,39 @@ class _Ops:
         return self.integral(self.integer(x), rule)
 
     def add(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("add", functools.partial(self.index.native, "add"), a, b)
 
     def sub(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         index = self.index
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        return self.arithmetic("sub", lambda x, y: mesh_callbacks_are_outside_spec(index.native(
-            "add", x, index.native("mul", y, index.constant(-1, torch.int64)))), a, b)
+        return self.arithmetic("sub", lambda x, y: index.native(
+            "add", x, index.native("mul", y, index.constant(-1, torch.int64))), a, b)
 
     def mul(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("mul", functools.partial(self.index.native, "mul"), a, b)
 
     def neg(self, a):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         index = self.index
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        return self.arithmetic("neg", lambda x: mesh_callbacks_are_outside_spec(index.native("mul", x, index.constant(-1, torch.int64))), a)
+        return self.arithmetic("neg", lambda x: index.native("mul", x, index.constant(-1, torch.int64)), a)
 
     def floordiv(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("floordiv", functools.partial(self.index.native, "floordiv"), a, b)
 
     def remainder(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("remainder", functools.partial(self.index.native, "python_mod"), a, b)
 
     def truncdiv(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("truncdiv", functools.partial(self.index.native, "tdiv_q"), a, b)
 
     def mod(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("mod", functools.partial(self.index.native, "tdiv_r"), a, b)
 
     def minimum(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("minimum", functools.partial(self.index.native, "minimum"), a, b)
 
     def maximum(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.arithmetic("maximum", functools.partial(self.index.native, "maximum"), a, b)
 
     def where(self, predicate, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if predicate is None or a is None or b is None:
             return None
         index, rule, p = self.index, self.rules.where(predicate, a, b), self.truth(predicate)
@@ -708,84 +572,45 @@ class _Ops:
         return self.predicate(self.index.compare(relation, self.integer(a), self.integer(b)))
 
     def lt(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compared(INDEX_LT, a, b)
 
     def le(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compared(INDEX_LE, a, b)
 
     def gt(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compared(INDEX_GT, a, b)
 
     def ge(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compared(INDEX_GE, a, b)
 
     def eq(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compared(INDEX_EQ, a, b)
 
     def ne(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.compared(INDEX_NE, a, b)
 
     def logical_and(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return None if a is None or b is None else self.predicate(self.index.and_(self.truth(a), self.truth(b)))
 
     def logical_or(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return None if a is None or b is None else self.predicate(self.index.or_(self.truth(a), self.truth(b)))
 
     def logical_not(self, a):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return None if a is None else self.predicate(self.index.not_(self.truth(a)))
 
     # a bitwise operator: of bools the logical one, of integers not represented
     def and_(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.logical_and(a, b) if a is not None and b is not None and a.dtype is b.dtype is torch.bool else None
 
     def or_(self, a, b):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.logical_or(a, b) if a is not None and b is not None and a.dtype is b.dtype is torch.bool else None
 
     def not_(self, a):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.logical_not(a) if a is not None and a.dtype is torch.bool else None
 
     bitwise_and, bitwise_or, bitwise_not = and_, or_, not_
 
     def identity(self, x):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return x
 
 
@@ -815,10 +640,7 @@ class _Bodies:
     def cone(self, graph, node):
         if node not in self.cones:
             if graph not in self.graphs:
-                # Callback inversion of control is outside the working specification
-                # (phase: compile-time access relations).
-                # Runtime callback overhead is inadmissible in performance-critical code.
-                self.graphs[graph] = mesh_graph.Graph.adjacency(graph.nodes, mesh_callbacks_are_outside_spec(operator.attrgetter("all_input_nodes")))
+                self.graphs[graph] = mesh_graph.Graph.adjacency(graph.nodes, operator.attrgetter("all_input_nodes"))
             self.cones[node] = self.graphs[graph].reach([node])
         return self.cones[node]
 
@@ -833,10 +655,8 @@ class _Bodies:
         blocks, parents, bounds = self.held(body)
         replacements = dict(zip(body.var_ranges, itertools.chain.from_iterable(ranges.variables)))
         modules = dict.fromkeys(body.submodules, _unrepresented)
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
         modules["get_index"] = functools.partial(
-            lambda exprs, name: mesh_callbacks_are_outside_spec(sympy_subs(exprs[name], replacements)), body.indexing_exprs)
+            lambda exprs, name: sympy_subs(exprs[name], replacements), body.indexing_exprs)
         masks, made = {}, []
 
         def masked(graph, node):
@@ -913,9 +733,6 @@ def relations(context, kernel, kinds, described):
     domain, env = made.value, {}
 
     def missing(symbol):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         entry = owner.range_tree_nodes.get(symbol)
         if entry is not None:
             return env.setdefault(symbol, index.interp(entry.expr))
@@ -940,17 +757,10 @@ def relations(context, kernel, kinds, described):
             removed = owner.removed_buffers | graph.removed_buffers
 
             def argument(ranges, method, name):
-                # Callback inversion of control is outside the working specification
-                # (phase: compile-time access relations).
-                # Runtime callback overhead is inadmissible in performance-critical code.
-                mesh_callbacks_are_outside_spec
                 return None if name in removed else position[real.get(name, name)]
 
             for r, ranges in enumerate(kernel.ranges, 1):
-                # Callback inversion of control is outside the working specification
-                # (phase: compile-time access relations).
-                # Runtime callback overhead is inadmissible in performance-critical code.
-                accesses.extend(bodies.accesses(ranges, r, argument, lambda ranges, method, expr: mesh_callbacks_are_outside_spec(None)))
+                accesses.extend(bodies.accesses(ranges, r, argument, lambda ranges, method, expr: None))
     except BaseException:
         released(domain, index.made)
         raise
@@ -1035,9 +845,6 @@ def _cpu_relations(context, kernel, kinds, described):
     domain = made.value
 
     def missing(symbol):
-        # Callback inversion of control is outside the working specification (phase: compile-time access relations).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if symbol_is_type(symbol, (SymT.SIZE, SymT.PRECOMPUTED_SIZE)):
             return index.constant(_hint(graph, symbol), torch.int64)
         return None
@@ -1076,20 +883,12 @@ def _cpu_relations(context, kernel, kinds, described):
                 # this scope's: an access in a reduction suffix (CppRanges.suffix, store_reduction) emitted only by
                 # the kernels its proxy emits it of; a removed store's or a local buffer's no argument
                 def argument(ranges, method, name):
-                    # Callback inversion of control is outside the working specification
-                    # (phase: compile-time access relations).
-                    # Runtime callback overhead is inadmissible in performance-critical code.
-                    mesh_callbacks_are_outside_spec
                     suffix = ranges.suffix or method == "store_reduction"
                     if method != "load" and name in removed or name in local or suffix and not emitted:
                         return None
                     return position[real.get(name, name)]
 
                 def guard(ranges, method, expr):
-                    # Callback inversion of control is outside the working specification
-                    # (phase: compile-time access relations).
-                    # Runtime callback overhead is inadmissible in performance-critical code.
-                    mesh_callbacks_are_outside_spec
                     if any(e and symbol in expr.free_symbols for symbol, _, e in indirect):
                         return index.truth(False)
                     return suffix_guard if ranges.suffix or method == "store_reduction" else body_guard
@@ -1704,11 +1503,7 @@ def construct(module, produced, *, context, targets, kinds, sources, wires, outp
             subgraphs, values = {n: name for name, n in converter.subgm_getattrs.items()}, {}
 
             def value(a):
-                # Callback inversion of control is outside the working specification
-                # (phase: compile-time machine construction).
-                # Runtime callback overhead is inadmissible in performance-critical code.
-                mesh_callbacks_are_outside_spec
-                return torch.fx.node.map_arg(a, mesh_callbacks_are_outside_spec(values.__getitem__))
+                return torch.fx.node.map_arg(a, values.__getitem__)
 
             placeholders_ = [n for n in converter.gm.graph.nodes if n.op == "placeholder"]
             for n, (name, source), (record, b) in zip(placeholders_, converter.graph_inputs.items(), given,

@@ -1,6 +1,6 @@
 --- a/torch/_export/passes/collect_tracepoints_pass.py
 +++ b/torch/_export/passes/collect_tracepoints_pass.py
-@@ -1,158 +1,128 @@
+@@ -1,158 +1,125 @@
 -# mypy: allow-untyped-defs
 -from __future__ import annotations
 -
@@ -185,9 +185,6 @@
 +        self.replaced: list[tuple[torch.fx.Node, torch.fx.Node]] = []
 +
 +    def call(self, gm: torch.fx.GraphModule) -> PassResult | None:
-+        # Callback inversion of control is outside the working specification (phase: compile-time PassBase dispatch).
-+        # Runtime callback overhead is inadmissible in performance-critical code.
-+        mesh_callbacks_are_outside_spec
 +        for module in gm.modules():
 +            if not isinstance(module, torch.fx.GraphModule):
 +                continue
@@ -298,7 +295,7 @@
  from torch._ops import HigherOrderOperator
  from torch.fx.experimental.proxy_tensor import (
      PreDispatchTorchFunctionMode,
-@@ -79,9 +79,15 @@
+@@ -79,9 +79,11 @@
          return args
 
 
@@ -306,18 +303,14 @@
 -    autograd_not_implemented(_export_tracepoint, deferred_error=True)
 -)
 +# mesh compiler/patches/torch-export-tracepoint-calls.patch: export_tracepoint_functional, export_tracepoint_cpu
-+# Callback inversion of control is outside the working specification (phase: compile-time export tracing,
-+# _export_tracepoint's Autograd kernel).
-+# Runtime callback overhead is inadmissible in performance-critical code.
 +@_export_tracepoint.py_impl(DispatchKey.Autograd)
 +def export_tracepoint_autograd(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
-+    mesh_callbacks_are_outside_spec
 +    with torch._C._AutoDispatchBelowAutograd():
 +        return _export_tracepoint(*args, **kwargs)
 
 
  @_export_tracepoint.py_impl(DispatchKey.CPU)
-@@ -89,81 +95,137 @@
+@@ -89,81 +91,115 @@
      return args
 
 
@@ -426,29 +419,21 @@
 +                    f"all flat_args must be KNOWN_TYPES or opaque types, got: {a}"
 +                )
 +
-+    # Callback inversion of control is outside the working specification (phase: compile-time export tracing, forward
-+    # pre-hook).
-+    # Runtime callback overhead is inadmissible in performance-critical code.
 +    def pre_hook(
 +        module: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
 +    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-+        mesh_callbacks_are_outside_spec
 +        flat_args, in_spec = pytree.tree_flatten((args, kwargs))
 +        check_flattened(flat_args)
 +        flat_args = _export_tracepoint(*flat_args, kind="module_call_inputs", path=path)
 +        args, kwargs = pytree.tree_unflatten(flat_args, in_spec)
 +        return args, kwargs
 +
-+    # Callback inversion of control is outside the working specification (phase: compile-time export tracing, forward
-+    # hook).
-+    # Runtime callback overhead is inadmissible in performance-critical code.
 +    def post_hook(
 +        module: Any,
 +        args: tuple[Any, ...],
 +        kwargs: dict[str, Any],
 +        res: Any,
 +    ) -> Any:
-+        mesh_callbacks_are_outside_spec
 +        _, in_spec = pytree.tree_flatten((args, kwargs))
 +        flat_res, out_spec = pytree.tree_flatten(res)
 +        check_flattened(flat_res)
@@ -470,9 +455,6 @@
 +        raise AssertionError("path must not be empty")
 +    submodule = torch.fx.graph_module._get_attr(mod, path)
 +    pre_hook, post_hook = _module_call_hooks(path, module_call_specs)
-+    # Callback inversion of control is outside the working specification (phase: compile-time export tracing, forward
-+    # hook registration).
-+    # Runtime callback overhead is inadmissible in performance-critical code.
 +    pre_handle = submodule.register_forward_pre_hook(pre_hook, with_kwargs=True)
 +    post_handle = submodule.register_forward_hook(post_hook, with_kwargs=True)
 +    return pre_handle, post_handle
@@ -480,28 +462,20 @@
 +
 +# mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/nn/modules/module.py Module._call_impl;
 +# torch/_dynamo/symbolic_convert.py InliningInstructionTranslator.inline_call
-+# Callback inversion of control is outside the working specification (phase: compile-time Dynamo tracing, inlined by
-+# inline_call; calls back fn).
-+# Runtime callback overhead is inadmissible in performance-critical code.
 +def _module_call(
 +    path: str, module_call_specs: dict[str, dict[str, Any]], fn: Callable[..., Any], *args: Any, **kwargs: Any
 +) -> Any:
-+    mesh_callbacks_are_outside_spec
 +    pre_hook, post_hook = _module_call_hooks(path, module_call_specs)
 +    args, kwargs = pre_hook(fn, args, kwargs)
 +    return post_hook(fn, args, kwargs, fn(*args, **kwargs))
 +
 +
-+# Callback inversion of control is outside the working specification (phase: compile-time export tracing, generator
-+# called back by contextlib.contextmanager).
-+# Runtime callback overhead is inadmissible in performance-critical code.
 +@contextmanager
 +def _wrap_submodules(
 +    f: torch.nn.Module | Callable[..., object],
 +    preserve_signature: Iterable[str],
 +    module_call_signatures: dict[str, dict[str, pytree.TreeSpec]],
 +) -> Generator[None, None, None]:
-+    mesh_callbacks_are_outside_spec
 +    handles: list[RemovableHandle] = []
 +    # mesh compiler/patches/torch-export-tracepoint-calls.patch: torch/_higher_order_ops/invoke_subgraph.py
 +    # mark_compile_region's attributes on the declared function itself
@@ -513,11 +487,8 @@
 +                # pyrefly: ignore[bad-argument-type]  # TODO f is an nn.Module at runtime (asserted in _wrap_submodule)
 +                handles.extend(_wrap_submodule(f, path, module_call_signatures))
 +            else:
-+                # Callback inversion of control is outside the working specification (phase: compile-time Dynamo
-+                # tracing, declared function registered for _module_call).
-+                # Runtime callback overhead is inadmissible in performance-critical code.
 +                declared.append((path, vars(path).get("__export_module_call_specs__")))
-+                mesh_callbacks_are_outside_spec(path).__export_module_call_specs__ = module_call_signatures
++                path.__export_module_call_specs__ = module_call_signatures
 +        yield
 +    finally:
 +        for handle in handles:
@@ -583,7 +554,7 @@
          gm = res.graph_module
 --- a/torch/_dynamo/symbolic_convert.py
 +++ b/torch/_dynamo/symbolic_convert.py
-@@ -5982,6 +5982,33 @@
+@@ -5982,6 +5982,29 @@
          kwargs: dict[str, VariableTracker],
          allow_nested_graph_breaks: bool = False,
      ) -> VariableTracker:
@@ -602,15 +573,11 @@
 +            function = func.get_function()
 +            with record_nn_module_stack(str(id(function)), func.source, parent, function):
 +                specs = AttrSource(func.source, "__export_module_call_specs__")
-+                # Callback inversion of control is outside the working specification (phase: compile-time Dynamo
-+                # tracing, _module_call and fn passed to inline_call).
-+                # Runtime callback overhead is inadmissible in performance-critical code.
 +                return cls.inline_call(
 +                    parent,
 +                    UserFunctionVariable(_module_call),
 +                    [ConstantVariable.create(func.source.name),
-+                     VariableTracker.build(parent, function.__export_module_call_specs__, specs),
-+                     mesh_callbacks_are_outside_spec(func), *args],
++                     VariableTracker.build(parent, function.__export_module_call_specs__, specs), func, *args],
 +                    kwargs,
 +                    allow_nested_graph_breaks=allow_nested_graph_breaks,
 +                )

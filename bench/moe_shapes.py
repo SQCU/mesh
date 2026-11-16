@@ -8,15 +8,11 @@ mx.eval(X)
 print(f"{socket.gethostname()} T={T} D={D} FF={FF}")
 
 def bench(f, X, FL, it):
-    # runtime measurement callback (callback invocation bench.f): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    r = mesh_callbacks_are_outside_spec(f)(X); mx.eval(r)
+    r = f(X); mx.eval(r)
     reps = []
     for _ in range(3):
         t0 = time.perf_counter()
-        # runtime measurement callback (callback invocation bench.f): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        for _ in range(it): mx.eval(mesh_callbacks_are_outside_spec(f)(X))
+        for _ in range(it): mx.eval(f(X))
         reps.append((time.perf_counter() - t0) / it)
     el = min(reps)
     return el, FL / el / 1e9

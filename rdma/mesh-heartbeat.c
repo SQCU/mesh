@@ -320,8 +320,7 @@ static void close_bridge(int how,int signal_number){
   kill(bridge,signal_number);
 }
 
-// mesh callback (execution; registered with sigaction): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void noted(int number){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;(void)number;}
+static void noted(int number){(void)number;}
 
 int main(int argc,char **argv){
   if(argc!=3){

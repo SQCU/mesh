@@ -109,14 +109,12 @@ def main(outdir):
         else:
             uncovered.append((p['name'], positive_uncovered_segment_mass,
                               maximum_uncovered_fraction))
-    # offline asset-generation callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     print('doorways: %d/%d fully covered player-body sweeps; %d positive-uncovered '
           'portal rows%s'
           % (fully_covered, len(J.get('portals', [])), len(uncovered),
              '' if not uncovered else '; largest fractions: ' + ', '.join(
                  '%s %.1f%%' % (name, 100 * fraction)
-                 for name, _, fraction in sorted(uncovered, key=lambda row: mesh_callbacks_are_outside_spec(-row[2]))[:6])))
+                 for name, _, fraction in sorted(uncovered, key=lambda row: -row[2])[:6])))
 
     clearance_gap_mass = 0
     support_gap_mass = 0

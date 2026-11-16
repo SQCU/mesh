@@ -106,8 +106,7 @@ void wake(void){
    2026-11-05, owner B4 (the coordinator's ruling DL9): the port raises `plans` there (mesh.h mesh_notify), as the
    parent does after a turn that published, where each woke it without a raise, so a hand-off that lands between this
    watcher's read and its wait ends the wait at once.  No behavior changed here.  What must stay: as above */
-// mesh callback (execution; registered with pthread_create): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void *control_watch(void *unused){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static void *control_watch(void *unused){
   (void)unused;
   while(!stop){
     uint64_t seen=atomic_load_explicit(&M->plans,memory_order_acquire);

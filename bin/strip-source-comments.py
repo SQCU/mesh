@@ -186,18 +186,12 @@ def shell_text(value):
     return "".join(output)
 
 def html_text(value):
-    # runtime tooling callback (callback operand re.sub[1]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    value = re.sub(r"<!--.*?-->", lambda match: mesh_callbacks_are_outside_spec(gap(match.group(0))), value, flags=re.S)
+    value = re.sub(r"<!--.*?-->", lambda match: gap(match.group(0)), value, flags=re.S)
     expression = re.compile(r"(<(script|style)\b[^>]*>)(.*?)(</\2\s*>)", re.I | re.S)
-    # runtime tooling callback (callable supplied to expression.sub(lambda match: match.group(1) + c_text(match.group(3)) + match.group(4), val): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return tidy(expression.sub(lambda match: mesh_callbacks_are_outside_spec(match.group(1) + c_text(match.group(3)) + match.group(4)), value))
+    return tidy(expression.sub(lambda match: match.group(1) + c_text(match.group(3)) + match.group(4), value))
 
 def xml_text(value):
-    # runtime tooling callback (callback operand re.sub[1]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return tidy(re.sub(r"<!--.*?-->", lambda match: mesh_callbacks_are_outside_spec(gap(match.group(0))), value, flags=re.S))
+    return tidy(re.sub(r"<!--.*?-->", lambda match: gap(match.group(0)), value, flags=re.S))
 
 def source_kind(path, value):
     suffix = path.suffix.lower()

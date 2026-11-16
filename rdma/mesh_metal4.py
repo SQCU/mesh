@@ -154,9 +154,7 @@ class Function:
         if storage not in self.owner:
             dtype, count = self.owned[storage]
             pages = (C.c_byte * (count * dtype.itemsize)).from_address(self.a[storage])
-            # lifetime callback (callback operand weakref.finalize[1]): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            weakref.finalize(pages, mesh_callbacks_are_outside_spec(LIB.mesh_metal4_release), self.h[storage])
+            weakref.finalize(pages, LIB.mesh_metal4_release, self.h[storage])
             self.owner[storage] = torch.frombuffer(pages, dtype=dtype)
         return self.owner[storage]
 

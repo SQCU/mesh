@@ -356,9 +356,7 @@ LIB.mesh_strided_extents.restype, LIB.mesh_strided_extents.argtypes = None, [C.P
 
 def extents(view):
     found = []
-    # preparation callback (callable supplied to EXTENT(lambda context, offset, length: found.append((offset, length))); outward ctypes callback construction EXTENT): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    LIB.mesh_strided_extents(C.byref(view), mesh_callbacks_are_outside_spec(EXTENT)(lambda context, offset, length: mesh_callbacks_are_outside_spec(found.append((offset, length)))),
+    LIB.mesh_strided_extents(C.byref(view), EXTENT(lambda context, offset, length: found.append((offset, length))),
                              None)
     return found
 

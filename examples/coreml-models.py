@@ -19,13 +19,8 @@ def export(program, path):
 # design/algorithm-sources.md#programkernel_call
 def projection(rows, weights, path):
     # design/algorithm-sources.md#programkernel_call
-    # compile-time callback (decorator registration mb.program(input_specs=[mb.TensorSpec(shape=(rows, weights.shape[0]))])): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    @mesh_callbacks_are_outside_spec(mb.program(input_specs=[mb.TensorSpec(shape=(rows, weights.shape[0]))]))
+    @mb.program(input_specs=[mb.TensorSpec(shape=(rows, weights.shape[0]))])
     def program(x):
-        # compile-time callback (registered by mb.program(input_specs=[mb.TensorSpec(shape=(rows, weights.shape[0]))])): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return mb.matmul(x=x, y=weights, name='y')
     return export(program, path)
 
@@ -33,13 +28,8 @@ def projection(rows, weights, path):
 # design/algorithm-sources.md#programkernel_call
 def activation(rows, width, path):
     # design/algorithm-sources.md#programkernel_call
-    # compile-time callback (decorator registration mb.program(input_specs=[mb.TensorSpec(shape=(rows, width))])): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    @mesh_callbacks_are_outside_spec(mb.program(input_specs=[mb.TensorSpec(shape=(rows, width))]))
+    @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width))])
     def program(value):
-        # compile-time callback (registered by mb.program(input_specs=[mb.TensorSpec(shape=(rows, width))])): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return mb.gelu(x=value, mode='TANH_APPROXIMATION', name='y')
     return export(program, path)
 
@@ -47,13 +37,8 @@ def activation(rows, width, path):
 # design/algorithm-sources.md#programkernel_call
 def residual(rows, width, path):
     # design/algorithm-sources.md#programkernel_call
-    # compile-time callback (decorator registration mb.program(input_specs=[mb.TensorSpec(shape=(rows, width)), mb.TensorSpec(shape=(rows, width))])): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    @mesh_callbacks_are_outside_spec(mb.program(input_specs=[mb.TensorSpec(shape=(rows, width)), mb.TensorSpec(shape=(rows, width))]))
+    @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width)), mb.TensorSpec(shape=(rows, width))])
     def program(value, skip):
-        # compile-time callback (registered by mb.program(input_specs=[mb.TensorSpec(shape=(rows, width)), mb.TensorSpec(shape=(rows, width))])): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return mb.add(x=value, y=skip, name='y')
     return export(program, path)
 
@@ -61,33 +46,15 @@ def residual(rows, width, path):
 # design/algorithm-sources.md#programkernel_call
 def main():
     parser = argparse.ArgumentParser()
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('directory', type=mesh_callbacks_are_outside_spec(Path))
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--owners', type=mesh_callbacks_are_outside_spec(int), nargs='+', required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--widths', type=mesh_callbacks_are_outside_spec(int), nargs='+', required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--hidden', type=mesh_callbacks_are_outside_spec(int), nargs='+', required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--rows', type=mesh_callbacks_are_outside_spec(int), required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--blocks', type=mesh_callbacks_are_outside_spec(int), required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--count', type=mesh_callbacks_are_outside_spec(int), required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--workers', type=mesh_callbacks_are_outside_spec(int), default=2)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--seed', type=mesh_callbacks_are_outside_spec(int), default=73)
+    parser.add_argument('directory', type=Path)
+    parser.add_argument('--owners', type=int, nargs='+', required=True)
+    parser.add_argument('--widths', type=int, nargs='+', required=True)
+    parser.add_argument('--hidden', type=int, nargs='+', required=True)
+    parser.add_argument('--rows', type=int, required=True)
+    parser.add_argument('--blocks', type=int, required=True)
+    parser.add_argument('--count', type=int, required=True)
+    parser.add_argument('--workers', type=int, default=2)
+    parser.add_argument('--seed', type=int, default=73)
     args = parser.parse_args()
     root = args.directory.resolve()
     root.mkdir(parents=True, exist_ok=True)

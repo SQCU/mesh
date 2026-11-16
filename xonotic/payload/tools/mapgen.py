@@ -165,10 +165,8 @@ class Gen:
             rect_wps.append(list(pts.values()))
         for a in range(len(rect_wps)):
             for b in range(a + 1, len(rect_wps)):
-                # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
-                # specification, and runtime callback overhead is inadmissible in performance-critical code.
                 best = min(((math.dist(p, q), p, q) for p in rect_wps[a] for q in rect_wps[b]),
-                           key=lambda t: mesh_callbacks_are_outside_spec(t[0]))
+                           key=lambda t: t[0])
                 if best[0] <= 300 and abs(best[1][2] - best[2][2]) <= 64:
                     self.links.append((best[1], best[2], 0))
 
@@ -257,9 +255,7 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
         if tuple(q) in wpset:
             return list(q)
         cand = [w for w in g.wps if abs(w[2] - q[2]) < 1.0] or g.wps
-        # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return list(min(cand, key=lambda w: mesh_callbacks_are_outside_spec(math.dist(w, q))))
+        return list(min(cand, key=lambda w: math.dist(w, q)))
     g.links = [(snap(a), snap(b), o) for a, b, o in g.links]
 
     linked = set()
@@ -268,9 +264,7 @@ def bridge_tile(seed, arms_lo, arms_hi, name='bridge'):
     for pt in ports:
         cand = [w for w in g.wps if tuple(w) in linked and abs(w[2] - pt['p'][2]) < 1.0]
         if cand:
-            # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            pt['p'] = list(min(cand, key=lambda w: mesh_callbacks_are_outside_spec(math.dist(w, pt['p']))))
+            pt['p'] = list(min(cand, key=lambda w: math.dist(w, pt['p'])))
     return g, ports
 
 def build_bridge_tile(outdir, name, seed, arms_lo, arms_hi,

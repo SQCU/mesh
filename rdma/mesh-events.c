@@ -117,8 +117,7 @@ static struct port *peer_port(io_service_t peer){
    is) and the event loop woken, before any property is read; then the port each maps to halted (port_halt: its
    pairing lost, served no more, marked for the event loop's conclusion); a service that maps to no port holds the
    windows alone; each released */
-// mesh callback (execution; registered with IOServiceAddMatchingNotification): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void peer_terminated(void *unused,io_iterator_t iterator){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static void peer_terminated(void *unused,io_iterator_t iterator){
   (void)unused;
   io_service_t services[MESH_PORTS];
   uint32_t count=0;
@@ -139,8 +138,7 @@ static void peer_terminated(void *unused,io_iterator_t iterator){ void (*mesh_ca
 /* tag rdma/mesh-link.c:1191-1201 peer_arrived (ba674fbe; 3f72cbde), verbatim */
 /* the arrivals drained (which arms the notification again), each service released: the port its interface is marked
    to be opened, one whose interface is no port of this process marked for the devices' read */
-// mesh callback (execution; registered with IOServiceAddMatchingNotification): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void peer_arrived(void *unused,io_iterator_t iterator){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static void peer_arrived(void *unused,io_iterator_t iterator){
   (void)unused;
   for(io_service_t service;(service=IOIteratorNext(iterator));IOObjectRelease(service)){
     struct port *port=peer_port(service);
@@ -191,8 +189,7 @@ void terminations_watch(int arrivals){
    ended.  On the thread's alternate stack where it has one (port_progress); mmap, munmap and sigaction alone */
 static uintptr_t provider[2];
 static _Atomic uintptr_t retried[MESH_PORTS];
-// mesh callback (execution; registered with sigaction): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void fault_heard(int number,siginfo_t *info,void *context){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static void fault_heard(int number,siginfo_t *info,void *context){
   const uintptr_t pc=__darwin_arm_thread_state64_get_pc(((ucontext_t *)context)->uc_mcontext->__ss);
   const uintptr_t page=trunc_page((uintptr_t)info->si_addr);
   const pthread_t self=pthread_self();

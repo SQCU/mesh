@@ -6,11 +6,7 @@ norm(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/%<0>$//' \
         | awk -F: 'NF>2{o="";for(i=1;i<=NF;i++){g=$i;sub(/^0+/,"",g);if(g=="")g="0";o=o (i>1?":":"") g}print o;next}{print}'; }
 ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
 me=$(scutil --get LocalHostName 2>/dev/null)
-# runtime process/signal callback (trap EXIT): callback inversion of control is outside the working
-# specification, and runtime callback overhead is inadmissible in performance-critical code.
-# runtime process/signal callback (trap INT TERM): callback inversion of control is outside the working
-# specification, and runtime callback overhead is inadmissible in performance-critical code.
-B=$(mktemp); trap 'mesh_callbacks_are_outside_spec; exit $?; kill -TERM $W 2>/dev/null; rm -f "$B" "$B".*' EXIT; trap 'mesh_callbacks_are_outside_spec; exit $?; exit 1' INT TERM
+B=$(mktemp); trap 'kill -TERM $W 2>/dev/null; rm -f "$B" "$B".*' EXIT; trap 'exit 1' INT TERM
 dns-sd -B _meshnode._tcp local > "$B" 2>&1 & W=$!
 last=-1; quiet=0; spent=0; step=0.05
 while :; do

@@ -22,9 +22,7 @@ class Closed(C.Structure):
 # its last view
 class Owned:
     def __init__(self, made, free, graph, held=()):
-        # lifetime callback (callback operand weakref.finalize[1]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        self.made, self.graph, self.held, self.freed = made, graph, held, weakref.finalize(self, mesh_callbacks_are_outside_spec(free), made)
+        self.made, self.graph, self.held, self.freed = made, graph, held, weakref.finalize(self, free, made)
 
 
 # a borrowed native array over a span of its indices, each element read through `at`; slices are views of the same
@@ -38,21 +36,15 @@ class View(collections.abc.Sequence):
 
     def __getitem__(self, k):
         span = self.span[k]
-        # compile-time callback (View element reader; callback operand View[3]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return View(self.owner, self.items, span, mesh_callbacks_are_outside_spec(self.at)) if isinstance(span, range) else mesh_callbacks_are_outside_spec(self.at)(self.items[span])
+        return View(self.owner, self.items, span, self.at) if isinstance(span, range) else self.at(self.items[span])
 
     def __iter__(self):
-        # compile-time callback (View element reader): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return (mesh_callbacks_are_outside_spec(self.at)(self.items[k]) for k in self.span)
+        return (self.at(self.items[k]) for k in self.span)
 
 
 # a search's order of its owned result, its native vertex IDs mapped to the graph's objects
 def ordered(owned, ids, span):
-    # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return View(owned, ids, span, mesh_callbacks_are_outside_spec(owned.graph.vertices.__getitem__))
+    return View(owned, ids, span, owned.graph.vertices.__getitem__)
 
 
 # the vertices a search reached: membership by its place array
@@ -180,9 +172,7 @@ class Graph:
     def adjacency(cls, universe, neighbours):
         vertices = list(dict.fromkeys(universe))
         at = {v: k for k, v in enumerate(vertices)}
-        # compile-time callback (supplied callback adjacency.neighbours): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        records = [(at[v], at[u]) for v in vertices for u in mesh_callbacks_are_outside_spec(neighbours)(v)]
+        records = [(at[v], at[u]) for v in vertices for u in neighbours(v)]
         conflict = (Conflict * max(len(records), 1))(*[Conflict(a, b, GIVEN, k, 0, SIZE, SIZE)
                                                         for k, (a, b) in enumerate(records)])
         return cls(vertices, Relation.create(len(vertices), 0, None, len(records), conflict))
@@ -271,9 +261,7 @@ class Graph:
         weights = (C.c_double * max(self.data.edges, 1))(*weight)
         length = (C.c_double * max(self.data.vertices, 1))()
         _check(LIB.mesh_graph_longest(self.relation.pointer, int(incoming), *self._order(order), weights, length))
-        # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return View((self, order, weights), length, range(self.data.vertices), mesh_callbacks_are_outside_spec(float))
+        return View((self, order, weights), length, range(self.data.vertices), float)
 
     # mesh_graph_boundaries over this relation's edges not in `excluded` (the View of its own redundant mask) within one
     # class of `class_of` (dense IDs by vertex): Views of the caller-owned source and sink flags, by vertex
@@ -282,9 +270,7 @@ class Graph:
         source, sink = ((C.c_ubyte * max(self.data.vertices, 1))() for _ in range(2))
         _check(LIB.mesh_graph_boundaries(self.relation.pointer, classes, excluded.items, source, sink))
         owner = (self, classes, excluded)
-        # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return View(owner, source, range(self.data.vertices), mesh_callbacks_are_outside_spec(bool)), View(owner, sink, range(self.data.vertices), mesh_callbacks_are_outside_spec(bool))
+        return View(owner, source, range(self.data.vertices), bool), View(owner, sink, range(self.data.vertices), bool)
 
     # the native start and step of an order View covering every vertex once; its length guards the native read
     def _order(self, order):
@@ -295,10 +281,8 @@ class Graph:
 
     # the distinct edges in place, (from, to) objects
     def edges(self):
-        # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
         return View(self.relation, self.data.edge, range(self.data.edges),
-                    lambda e: mesh_callbacks_are_outside_spec((self.vertices[e.source], self.vertices[e.sink])))
+                    lambda e: (self.vertices[e.source], self.vertices[e.sink]))
 
     # derived relations: each retains this relation natively and in Python, with its operand array
     def contract(self, kept):
@@ -369,11 +353,7 @@ def sharding(order, axis, first, edge_first, maps, frozen, edges, state, levels)
 def forward(order, neighbours, transfer):
     values = {}
     for v in order:
-        # compile-time callback (callback invocation forward.transfer): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        # compile-time callback (supplied callback forward.neighbours): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        values[v] = mesh_callbacks_are_outside_spec(transfer)(v, [values[u] for u in mesh_callbacks_are_outside_spec(neighbours)(v)])
+        values[v] = transfer(v, [values[u] for u in neighbours(v)])
     return values
 
 
@@ -412,22 +392,12 @@ class Lifetimes:
         call.restype, call.argtypes = C.c_int, [C.c_uint32, C.c_size_t, _U, _Z, _Z, _Z]
         _check(call(n, count, self.value, self.position, self.firsts, self.lasts))
 
-    # runtime property access callback (decorator registration property): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    @mesh_callbacks_are_outside_spec(property)
+    @property
     def first(self):
-        # runtime property access callback (registered by property): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return Endpoint(self, self.firsts)
 
-    # runtime property access callback (decorator registration property): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    @mesh_callbacks_are_outside_spec(property)
+    @property
     def last(self):
-        # runtime property access callback (registered by property): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return Endpoint(self, self.lasts)
 
 
@@ -442,10 +412,8 @@ def paths(vertices, neighbours):
     roots = [k for k in range(len(graph.vertices)) if into[k + 1] == into[k] and out[k + 1] > out[k]]
     owned = graph.search([graph.vertices[k] for k in roots])
     found = owned.made.contents
-    # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return View(owned, roots, range(len(roots)),
-                lambda k: mesh_callbacks_are_outside_spec(ordered(owned, found.preorder, range(found.place[k], found.end[k]))))
+                lambda k: ordered(owned, found.preorder, range(found.place[k], found.end[k])))
 
 
 # design/aot-compilation-change-request.md A10, "Its bound"; mesh-graph.h mesh_graph_closure_chains (resolved on use;
@@ -461,9 +429,7 @@ def closure_chains(closed, members):
     counts = (C.c_uint64 * max(items, 1))(*[1] * items)
     chain, chains = (C.c_uint64 * max(items, 1))(), C.c_uint64()
     _check(call(owned.made, items, member, counts, chain, C.byref(chains)))
-    # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return chains.value, View((owned, member, counts, chains), chain, range(items), mesh_callbacks_are_outside_spec(int))
+    return chains.value, View((owned, member, counts, chains), chain, range(items), int)
 
 
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
@@ -736,9 +702,7 @@ def components(vertices, edges):
     tails, heads = _array(C.c_uint32, [a for a, _ in edges]), _array(C.c_uint32, [b for _, b in edges])
     component, count = (C.c_uint32 * max(vertices, 1))(), C.c_uint32()
     _check(LIB.mesh_graph_components(vertices, len(edges), tails[0], heads[0], component, C.byref(count)))
-    # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return View((tails, heads), component, range(vertices), mesh_callbacks_are_outside_spec(int))
+    return View((tails, heads), component, range(vertices), int)
 
 
 # mesh-graph.h mesh_graph_rows: items bucketed by key, stable; first[keys + 1], order the items grouped by key
@@ -750,9 +714,7 @@ LIB.mesh_graph_rows.argtypes = [C.c_uint32, C.c_size_t, ROW_KEY, C.c_void_p, C.P
 
 def rows(keys, key):
     first, order = (C.c_size_t * (keys + 1))(), (C.c_size_t * max(len(key), 1))()
-    # compile-time callback (callable supplied to ROW_KEY(lambda context, k: key[k]); outward ctypes callback construction ROW_KEY): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    LIB.mesh_graph_rows(keys, len(key), mesh_callbacks_are_outside_spec(ROW_KEY)(lambda context, k: mesh_callbacks_are_outside_spec(key[k])), None, first, order)
+    LIB.mesh_graph_rows(keys, len(key), ROW_KEY(lambda context, k: key[k]), None, first, order)
     return list(first), list(order[:len(key)])
 
 
@@ -1005,9 +967,7 @@ def _freed(pointer, allocated):
 class Context:
     def __init__(self, pointer):
         self.pointer = pointer
-        # lifetime callback (callback operand weakref.finalize[1]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        self.freed = weakref.finalize(self, mesh_callbacks_are_outside_spec(LIB.mesh_graph_context_free), pointer)
+        self.freed = weakref.finalize(self, LIB.mesh_graph_context_free, pointer)
 
     @classmethod
     def create(cls):
@@ -1031,9 +991,7 @@ class Relation:
         self.pointer, self.held, self.parent = pointer, held, parent
         self.descriptor = LIB.mesh_graph_relation_data(pointer)
         self.data = self.descriptor.contents
-        # lifetime callback (callback operand weakref.finalize[1]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        self.freed = weakref.finalize(self, mesh_callbacks_are_outside_spec(_freed), pointer, allocated)
+        self.freed = weakref.finalize(self, _freed, pointer, allocated)
 
     # a root over the caller's views and conflict records, borrowed for the Relation's lifetime
     @classmethod
@@ -1049,21 +1007,15 @@ class Relation:
     def redundant(self):
         mask, kept = C.POINTER(C.c_ubyte)(), C.c_size_t()
         _check(LIB.mesh_graph_relation_synchronization(self.pointer, C.byref(mask), C.byref(kept)))
-        # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return View(self, mask, range(self.data.edges), mesh_callbacks_are_outside_spec(bool))
+        return View(self, mask, range(self.data.edges), bool)
 
     # the distinct edges, (from, to) vertex IDs, in place
     def edges(self):
-        # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return View(self, self.data.edge, range(self.data.edges), lambda e: mesh_callbacks_are_outside_spec((e.source, e.sink)))
+        return View(self, self.data.edge, range(self.data.edges), lambda e: (e.source, e.sink))
 
     # edge e's conflict indices, in place
     def members(self, e):
-        # compile-time callback (callback operand View[3]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        return View(self, self.data.member, range(self.data.first[e], self.data.first[e + 1]), mesh_callbacks_are_outside_spec(int))
+        return View(self, self.data.member, range(self.data.first[e], self.data.first[e + 1]), int)
 
     def conflict(self, k):
         return self.data.conflict[k]
@@ -1096,9 +1048,7 @@ class Relation:
             raise MemoryError("the loaded relation's backing")
         C.memmove(backing, data, len(data))
         made = C.c_void_p()
-        # lifetime callback (native relation backing release registration): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        status = LIB.mesh_graph_relation_load(context.pointer, backing, len(data), mesh_callbacks_are_outside_spec(FREE), backing, C.byref(made))
+        status = LIB.mesh_graph_relation_load(context.pointer, backing, len(data), FREE, backing, C.byref(made))
         if status:
             LIB.free(backing)
             _check(status)
@@ -1134,9 +1084,7 @@ def dependences_views(vertices, views):
 # vertex v in issue order, None a host vertex
 def orderings(edges, commit):
     barred, fences, waits, last = set(), {}, {}, {}
-    # compile-time callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    for a, b in sorted(edges, key=lambda edge: mesh_callbacks_are_outside_spec(edge[::-1])):
+    for a, b in sorted(edges, key=lambda edge: edge[::-1]):
         if commit[b] is None:
             waits.setdefault(b, {}).setdefault(commit[a], []).append((a, b))
         elif commit[a] != commit[b]:
@@ -1150,9 +1098,7 @@ def orderings(edges, commit):
 # design/torch-source-lowering-change-request.md item 3
 def arrivals(edges, commit):
     found = {}
-    # compile-time callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    for a, b in sorted(edges, key=lambda edge: mesh_callbacks_are_outside_spec(edge[::-1])):
+    for a, b in sorted(edges, key=lambda edge: edge[::-1]):
         if commit[a] is None and commit[b] is not None:
             found.setdefault(commit[b], {}).setdefault(a, []).append((a, b))
     return found
@@ -1160,9 +1106,7 @@ def arrivals(edges, commit):
 
 # design/torch-source-lowering-change-request.md item 3; torch/_inductor/scheduler.py additional_buffer_deps
 def adjacent(positions, written, read):
-    # compile-time callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    order = sorted(range(len(positions)), key=mesh_callbacks_are_outside_spec(positions.__getitem__))
+    order = sorted(range(len(positions)), key=positions.__getitem__)
     return [(a, b) for a, b in zip(order, order[1:]) if written[a] and not set(written[a]) & set(read[b])]
 
 

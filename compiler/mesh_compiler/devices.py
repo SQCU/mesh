@@ -68,9 +68,7 @@ def on_devices(graph_module, processors):
         if there != sent:
             with graph.inserting_after(arrival):
                 landed = copied(graph, arrival, there, arrival.meta["processor"])
-            # Callback inversion of control is outside the working specification (phase: compile-time device placement).
-            # Runtime callback overhead is inadmissible in performance-critical code.
-            arrival.replace_all_uses_with(landed, lambda user: mesh_callbacks_are_outside_spec(user is not landed))
+            arrival.replace_all_uses_with(landed, lambda user: user is not landed)
             for user in landed.users:
                 if "work_axes" in user.meta:
                     user.meta["work_axes"] = tuple((landed if value is arrival else value, dimension, full)

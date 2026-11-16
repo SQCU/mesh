@@ -191,9 +191,7 @@ def spread_points(points, limit):
     chosen = [points[0]]
     distance = [math.dist(point, chosen[0]) for point in points]
     while len(chosen) < limit:
-        # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        index = max(range(len(points)), key=lambda i: mesh_callbacks_are_outside_spec(distance[i]))
+        index = max(range(len(points)), key=lambda i: distance[i])
         chosen.append(points[index])
         distance = [min(distance[i], math.dist(points[i], points[index])) for i in range(len(points))]
     return chosen
@@ -204,9 +202,7 @@ def localized_points(points):
         return []
     ordered = [remaining.pop(0)]
     while remaining:
-        # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        index = min(range(len(remaining)), key=lambda i: mesh_callbacks_are_outside_spec(math.dist(ordered[-1], remaining[i])))
+        index = min(range(len(remaining)), key=lambda i: math.dist(ordered[-1], remaining[i]))
         ordered.append(remaining.pop(index))
     return ordered
 
@@ -271,22 +267,18 @@ def balanced_spawn_points(points, tracks, graph, limit, access=None):
         uncovered = set(range(matrix.shape[1]))
         available = set(reachable)
         while available and uncovered and len(group) < size:
-            # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            index = min(available, key=lambda i: mesh_callbacks_are_outside_spec((
+            index = min(available, key=lambda i: (
                 -sum(finite_mask[i, column] for column in uncovered),
                 sum(float(matrix[i, column]) for column in uncovered if finite_mask[i, column]),
                 i,
-            )))
+            ))
             group.append(index)
             available.remove(index)
             uncovered -= {column for column in uncovered if finite_mask[index, column]}
         while available and len(group) < size:
-            # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            index = max(available, key=lambda i: mesh_callbacks_are_outside_spec(min(
+            index = max(available, key=lambda i: min(
                 (math.dist(points[i], points[chosen]) for chosen in group), default=math.inf,
-            )))
+            ))
             group.append(index)
             available.remove(index)
         return localized_points([points[i] for i in group])
@@ -376,9 +368,7 @@ def spawn_overlay(entities, tracks, graph, limit=None, clearance=None, ns=None, 
             and not any(spawn_occupies_cart_origin(candidates[index], track) for track in tracks)
         ]
         if reachable:
-            # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            index = max(reachable, key=lambda value: mesh_callbacks_are_outside_spec(cart_origin_clearance(candidates[value], tracks)))
+            index = max(reachable, key=lambda value: cart_origin_clearance(candidates[value], tracks))
             point = tuple(candidates[index])
             if point not in selected_set:
                 selected.append(point)
@@ -404,9 +394,7 @@ def spawn_overlay(entities, tracks, graph, limit=None, clearance=None, ns=None, 
         block = match.group(0)
         return '' if is_player_spawn(block) else block
 
-    # offline asset-generation callback (callback operand re.sub[1]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    stripped = re.sub(r'\{[^{}]*\}', mesh_callbacks_are_outside_spec(keep), entities).rstrip()
+    stripped = re.sub(r'\{[^{}]*\}', keep, entities).rstrip()
     spawned = ['\n'.join(('{', '"classname" "info_player_deathmatch"',
                             '"origin" "%.9g %.9g %.9g"' % point, '}'))
                for point in chosen]

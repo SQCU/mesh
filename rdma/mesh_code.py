@@ -11,13 +11,8 @@ _LIBRARY.define('fragment(Tensor codes, Tensor tiles, Tensor bands, Tensor row_s
 fragment = torch.ops.mesh.fragment.default
 
 
-# compile-time callback (decorator registration torch.library.register_fake(fragment)): callback inversion of control is outside the working
-# specification, and runtime callback overhead is inadmissible in performance-critical code.
-@mesh_callbacks_are_outside_spec(torch.library.register_fake(fragment))
+@torch.library.register_fake(fragment)
 def _shape(codes, tiles, bands, row_scale, col_scale, rows, columns, dtype):
-    # compile-time callback (registered by torch.library.register_fake(fragment)): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    mesh_callbacks_are_outside_spec
     return torch.empty((rows.numel(), columns.numel()), device=codes.device, dtype=dtype)
 
 

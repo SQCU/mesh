@@ -91,9 +91,7 @@ def main():
     torch.manual_seed(0)
     model = MoE(len(args.nodes)).eval()
     x = torch.randn(len(args.nodes), model.rows, DIM) / DIM ** 0.5
-    # compile-time callback (callable supplied to execute(model, (x,), lambda processors: placement(processors, model.slots), args)): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return execute(model, (x,), lambda processors: mesh_callbacks_are_outside_spec(placement(processors, model.slots)), args)
+    return execute(model, (x,), lambda processors: placement(processors, model.slots), args)
 
 
 if __name__ == '__main__':

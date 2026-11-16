@@ -115,10 +115,7 @@ def substitute(captured, key, parts):
                                   {k: user.meta["val"] for k, user in users.items()})
                 env.update((users[k], leaf) for k, leaf in produced.items())
             elif node not in env:
-                # compile-time callback (torch.fx Graph.node_copy's arg_transform): callback inversion of control is
-                # outside the working specification, and runtime callback overhead is inadmissible in
-                # performance-critical code
-                env[node] = graph.node_copy(node, lambda n: mesh_callbacks_are_outside_spec(env[n]))
+                env[node] = graph.node_copy(node, lambda n: env[n])
     else:
         placeholders, output = [n for n in program.graph.nodes if n.op == "placeholder"], program.graph.output_node()
         for node in placeholders:

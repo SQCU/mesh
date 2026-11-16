@@ -61,8 +61,7 @@ static bool after_torch(void (^action)(void)) {
   std::shared_ptr<at::mps::MPSEvent> done = at::mps::getMPSEventPool()->acquireEvent(false, stream);
   done->record(true);
   notifying.fetch_add(1, std::memory_order_relaxed);
-  // mesh callback (completion; passed to done->notify): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-  if (!done->notify(true, ^(id<MTLSharedEvent>, uint64_t) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+  if (!done->notify(true, ^(id<MTLSharedEvent>, uint64_t) {
         action();
         notifying.fetch_sub(1, std::memory_order_release);
         (void)done;
@@ -83,8 +82,7 @@ extern "C" int mesh_torch_publish(mesh_publish publish, void *context, uint64_t 
                                   uint32_t count, uint64_t execution) {
   try {
     const std::vector<uint32_t> released(transfers, transfers + count);
-    // mesh callback (completion; passed to after_torch): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    return after_torch(^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+    return after_torch(^{
              for (const uint32_t transfer : released) publish(context, plan, transfer, execution);
            })
                ? 0
@@ -100,8 +98,7 @@ extern "C" int mesh_torch_publish(mesh_publish publish, void *context, uint64_t 
 // (nothing retired)
 extern "C" int mesh_torch_retire(mesh_retirement retire, void *region, uint64_t client) {
   try {
-    // mesh callback (completion; passed to after_torch): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    return after_torch(^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+    return after_torch(^{
              retire(region, client);
            })
                ? 0
@@ -116,8 +113,7 @@ extern "C" int mesh_torch_retire(mesh_retirement retire, void *region, uint64_t 
 // (mesh-collective.h).  0; EIO where torch threw or scheduled no notification
 extern "C" int mesh_torch_end(uint64_t execution) {
   try {
-    // mesh callback (completion; passed to after_torch): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    return after_torch(^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+    return after_torch(^{
              uint64_t seen = ended.load(std::memory_order_relaxed);
              while (seen < execution + 1 &&
                     !ended.compare_exchange_weak(seen, execution + 1, std::memory_order_release,

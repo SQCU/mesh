@@ -42,7 +42,7 @@
  
              if self.inside_reduction:
                  total_reduction_size = math.prod(
-@@ -1004,11 +1018,21 @@
+@@ -1004,11 +1018,18 @@
                  )
              code.writeline(f"kernel void {fn_name}(")
              with code.indent():
@@ -50,10 +50,7 @@
 +
 +                def declare(declaration: str) -> None:
 +                    if composition is not None:
-+                        # Callback inversion of control is outside the working specification (phase: compile-time Metal
-+                        # kernel codegen, composition.argument).
-+                        # Runtime callback overhead is inadmissible in performance-critical code.
-+                        declaration = mesh_callbacks_are_outside_spec(composition.argument)(next(declared), declaration)
++                        declaration = composition.argument(next(declared), declaration)
 +                    code.writeline(f"{declaration},")
 +
                  for outer, inner in self.args.output_buffers.items():
@@ -65,7 +62,7 @@
                  for outer, inner in self.args.input_buffers.items():
                      dtype = V.graph.get_dtype(outer)
                      # MPS does not support float64, but scalar inputs are fine
-@@ -1019,20 +1043,20 @@
+@@ -1019,20 +1040,20 @@
                          dtype_str = "float"
                      else:
                          dtype_str = self.dtype_to_str(dtype)
@@ -90,7 +87,7 @@
  
                  if len(idx_vars) >= 4:
                      raise AssertionError("Up to 3 index variables are supported")
-@@ -1042,16 +1066,48 @@
+@@ -1042,16 +1063,48 @@
                  thread_pos_var_name = (
                      idx_vars[0].name if len(idx_vars) == 1 else "thread_pos"
                  )
@@ -145,7 +142,7 @@
                  if len(idx_vars) > 1:
                      for idx, var in enumerate(idx_vars):
                          code.writeline(
-@@ -1059,6 +1115,11 @@
+@@ -1059,6 +1112,11 @@
                          )
                  code.splice(self.indexing_code)
                  code.splice(self.body)
@@ -199,20 +196,17 @@
                  "inductor_cpu_integer_div_error_flag = &inductor_cpu_integer_div_error;"
 --- a/torch/_inductor/graph.py
 +++ b/torch/_inductor/graph.py
-@@ -964,7 +964,11 @@
+@@ -964,7 +964,8 @@
          name. Note that the lifting of subgraph is supported for python wrapper
          only. For cpp wrapper, we inline the subgraphs in the parent wrapper.
          """
 -        return SubgraphLowering(
 +        # compiler/patches/torch-inductor-upstream-composition.patch: the class's own subgraph lowering
-+        # Callback inversion of control is outside the working specification (phase: compile-time make_subgraph,
-+        # subgraph lowering factory).
-+        # Runtime callback overhead is inadmissible in performance-critical code.
 +        return self.subgraph_lowering(
              parent=self,
              gm=gm,
              example_inputs=example_inputs,
-@@ -3267,3 +3271,11 @@
+@@ -3267,3 +3268,8 @@
              subgraph_name=self.name,
              parent_wrapper_code=self.parent.wrapper_code,
          )
@@ -220,7 +214,4 @@
 +
 +# compiler/patches/torch-inductor-upstream-composition.patch: the subgraph lowering make_subgraph makes,
 +# a subclass's own where it sets one
-+# Callback inversion of control is outside the working specification (phase: import-time registration; factory called by
-+# make_subgraph at compile time).
-+# Runtime callback overhead is inadmissible in performance-critical code.
-+GraphLowering.subgraph_lowering = mesh_callbacks_are_outside_spec(SubgraphLowering)
++GraphLowering.subgraph_lowering = SubgraphLowering

@@ -22,9 +22,7 @@ s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 try: s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
 except Exception as error: print(f"nodeinfo dual-stack: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
 s.bind(("::", PORT)); s.listen(64)
-# runtime worker callback (thread target threading.Thread): callback inversion of control is outside the working
-# specification, and runtime callback overhead is inadmissible in performance-critical code.
-threading.Thread(target=mesh_callbacks_are_outside_spec(sample), daemon=True).start()
+threading.Thread(target=sample, daemon=True).start()
 while True:
     try: c, _ = s.accept()
     except Exception as error:

@@ -25,7 +25,7 @@
              and is_sparse_any(fake_val)
 --- a/torch/_dynamo/variables/torch.py
 +++ b/torch/_dynamo/variables/torch.py
-@@ -3329,6 +3329,117 @@
+@@ -3329,6 +3329,110 @@
                                  ],
                              )
              return None
@@ -40,9 +40,6 @@
 +        # TensorVariable of its dtype, device and class alone, its shape unresolved, so a use of it computes the
 +        # product's own fake (get_fake_values_from_nodes). _strict_export selects the fixed results where the source
 +        # uses no residuals (mesh compiler/patches/torch-lstsq-fixed-results.patch)
-+        # Callback inversion of control is outside the working specification (phase: compile-time Dynamo tracing,
-+        # torch.linalg.lstsq handler).
-+        # Runtime callback overhead is inadmissible in performance-critical code.
 +        @register(torch.linalg.lstsq)
 +        def handle_linalg_lstsq(
 +            self,
@@ -50,7 +47,6 @@
 +            *args: VariableTracker,
 +            **kwargs: VariableTracker,
 +        ) -> VariableTracker | None:
-+            mesh_callbacks_are_outside_spec
 +            import operator
 +
 +            from torch._subclasses.fake_tensor import DynamicOutputShapeException
@@ -82,10 +78,7 @@
 +                tx,
 +                torch.fx.node.map_aggregate(
 +                    (proxy_args, proxy_kwargs),
-+                    # Callback inversion of control is outside the working specification (phase: compile-time Dynamo
-+                    # tracing, map_aggregate function).
-+                    # Runtime callback overhead is inadmissible in performance-critical code.
-+                    lambda p: mesh_callbacks_are_outside_spec(p.node if isinstance(p, torch.fx.Proxy) else p),
++                    lambda p: p.node if isinstance(p, torch.fx.Proxy) else p,
 +                ),
 +                False,
 +            )

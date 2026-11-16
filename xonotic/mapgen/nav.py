@@ -16,13 +16,8 @@ class Body(object):
         self.step = step
         self.jump = jump
 
-    # runtime property access callback (decorator registration property): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    @mesh_callbacks_are_outside_spec(property)
+    @property
     def height(self):
-        # runtime property access callback (registered by property): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return self.maxs[2] - self.mins[2]
 
 STAND = Body('stand', NS.PL_MIN, NS.PL_MAX)

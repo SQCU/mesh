@@ -26,9 +26,6 @@ from .ir import Call, CapturedProgram, Exported, Scheduled
 
 
 def tuples(value):
-    # Callback inversion of control is outside the working specification (phase: archive load).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    mesh_callbacks_are_outside_spec
     return tuple(map(tuples, value)) if isinstance(value, list) else value
 
 
@@ -74,18 +71,12 @@ Planned = collections.namedtuple("Planned", "index")
 # _UnpickleState over no module (Graph's owning_module None: `graphed`); every other value as GraphPickler reduces it
 class Pickler(GraphPickler):
     def reducer_override(self, obj):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if isinstance(obj, torch.fx.Graph):
             return graphed, (_GraphPickleData(obj, self.options), self._unpickle_state)
         return super().reducer_override(obj)
 
 
 def graphed(data, state):
-    # Callback inversion of control is outside the working specification (phase: archive load).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    mesh_callbacks_are_outside_spec
     return data.unpickle(None, state)
 
 
@@ -369,36 +360,21 @@ def producing(made, p, index, bindings, sources):
     # an ExternCall, and its IR node's every ExternCall record by that node's identity, each once (`lowered`: a Seeds
     # buffer's; an inlined body's cond before and after its loop each its own call of one node)
     def called(extern):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
-        n = registered("extern", extern, lambda: mesh_callbacks_are_outside_spec((
+        n = registered("extern", extern, lambda: (
             extern.graph.module, extern.node.get_operation_name(), tuple(extern.node.origins),
-            scheduled(extern.scheduler), tuple(map(inlining, extern.inlined)), tuple(map(lifting, extern.lifted)))))
+            scheduled(extern.scheduler), tuple(map(inlining, extern.inlined)), tuple(map(lifting, extern.lifted))))
         calls = lowered.setdefault(id(extern.node), [])
         if n not in calls:
             calls.append(n)
         return n
 
     def inlining(inlined):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
-        return registered("inlined", inlined, lambda: mesh_callbacks_are_outside_spec((inlined.graph.module, scheduled(inlined.scheduler),
-                                                       tuple(map(called, inlined.externs)))))
+        return registered("inlined", inlined, lambda: (inlined.graph.module, scheduled(inlined.scheduler),
+                                                       tuple(map(called, inlined.externs))))
 
     def lifting(lifted):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
-        return registered("lifted", lifted, lambda: mesh_callbacks_are_outside_spec((lifted.graph.module, scheduled(lifted.scheduler),
-                                                     tuple(map(called, lifted.externs)))))
+        return registered("lifted", lifted, lambda: (lifted.graph.module, scheduled(lifted.scheduler),
+                                                     tuple(map(called, lifted.externs))))
 
     # a SchedulerNode's LoopBody (scheduler.py SchedulerNode._body), each once by identity, by its index in `loops`
     def looped(body):
@@ -437,9 +413,6 @@ def producing(made, p, index, bindings, sources):
     # simd_vec, collapsed, is_reduction, simd_nelements) and its kernel, the proxy its own nest's (set_kernel) or an
     # OuterLoopFusedKernel (merge_outer_fusion_kernels: each `inner` LoopNest from_loop_level of a fused proxy's)
     def nested(nest):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         from torch._inductor.codegen.cpp import OuterLoopFusedKernel
         kernel = nest.kernel
         return nest.loops, (("outer", tuple(map(nested, kernel.inner))) if isinstance(kernel, OuterLoopFusedKernel)
@@ -460,22 +433,15 @@ def producing(made, p, index, bindings, sources):
     # CppKernelProxy.codegen_nodes; a template's finalize_kernel nodes none), its context's index and that finalize's
     # own local buffers ({name: IR buffer}, lower_inductor.py MeshKernelGroup.finalize_kernel's copy before the
     # context's __exit__ clears them; {} outside one), each buffer by the node table
-    # Callback inversion of control is outside the working specification (phase: archive save).
-    # Runtime callback overhead is inadmissible in performance-critical code.
-    ranged = {"mps": lambda r: mesh_callbacks_are_outside_spec((r.node.get_name(), looped(r.node._body), r.variables, r.reduction, r.accesses)),
-              # Callback inversion of control is outside the working specification (phase: archive save).
-              # Runtime callback overhead is inadmissible in performance-critical code.
-              "cpu": lambda r: mesh_callbacks_are_outside_spec((proxied(r[0]), tuple((node.get_name(), looped(node._body)) for node in r[1]),
-                                contexted(r[2]), operand(r[3])))}
+    ranged = {"mps": lambda r: (r.node.get_name(), looped(r.node._body), r.variables, r.reduction, r.accesses),
+              "cpu": lambda r: (proxied(r[0]), tuple((node.get_name(), looped(node._body)) for node in r[1]),
+                                contexted(r[2]), operand(r[3]))}
 
     # one Kernel call record as its call made it: its backend kernel's index (Kernel.owner, by identity), its
     # scheduler's index, its GraphLowering's module, its launch, place and (entry, source) as produced, its original
     # origins, its schedule (each SchedulerNode by its name, an mps DisableReduction or EnableReduction scope marker as
     # it is), its scheduled nodes' names and its ranges
     def calling(kernel):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return (owners.setdefault(id(kernel.owner), len(owners)), scheduled(kernel.scheduler), kernel.graph.module,
                 kernel.launch, kernel.place, kernel.produced, kernel.origins,
                 tuple(entry if isinstance(entry, type) else entry.get_name() for entry in kernel.schedule),
@@ -538,9 +504,6 @@ def producing(made, p, index, bindings, sources):
     # each field's operand, any other line its operand (torch/utils/_indented_buffer.py LineContext, a NamedTuple,
     # its context's; codegen/common.py DeferredLine, its name and line state, as it is, never called)
     def lined(line):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         if id(line) not in table:
             table[id(line)] = (len(table), line)
             index[id(line)] = Record("line", p, table[id(line)][0])
@@ -758,9 +721,6 @@ def sourced(held, ordinal, operands, query):
     records = {}
 
     def recorded(f):
-        # Callback inversion of control is outside the working specification (phase: archive save).
-        # Runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         return records.setdefault(id(f), (len(records), f))[0]
     finals = {k: recorded(f) for k, f in functions.items()}
     outlined = tuple((recorded(original), tuple(map(recorded, parts))) for original, parts in captured.outlined)
@@ -793,14 +753,9 @@ def attached(query, local, owner):
     roots, reached = query["paths"]
     owned, found = reached.owned, reached.owned.made.contents
     return {"query": query, "graph": graph, "search": mesh_graph.Reached.load(query["search"], graph).owned,
-            # Callback inversion of control is outside the working specification (phase: finalization of an attached
-            # closure).
-            # Runtime callback overhead is inadmissible in performance-critical code.
-            "closure": mesh_graph.Closures(mesh_graph.Owned(local.closure, lambda made: mesh_callbacks_are_outside_spec(None), graph, (owner,)), False),
-            # Callback inversion of control is outside the working specification (phase: archive view reads).
-            # Runtime callback overhead is inadmissible in performance-critical code.
-            "paths": mesh_graph.View(owned, roots, range(len(roots)), lambda k: mesh_callbacks_are_outside_spec(mesh_graph.ordered(
-                owned, found.preorder, range(found.place[k], found.end[k]))))}
+            "closure": mesh_graph.Closures(mesh_graph.Owned(local.closure, lambda made: None, graph, (owner,)), False),
+            "paths": mesh_graph.View(owned, roots, range(len(roots)), lambda k: mesh_graph.ordered(
+                owned, found.preorder, range(found.place[k], found.end[k])))}
 
 
 def save(directory, scheduled):
@@ -829,9 +784,7 @@ def save(directory, scheduled):
     # nn_module_stack's normalized (path, type name) strings, source_fn_stack's targets by their pickle reference)
     graphs, relations, natives, searches, closures, kept, raws = [], [], [], [], [], [], []
     while (len(graphs), len(relations), len(natives), len(searches), len(closures), len(kept), len(raws)) != tuple(
-            # Callback inversion of control is outside the working specification (phase: archive save).
-            # Runtime callback overhead is inadmissible in performance-critical code.
-            map(mesh_callbacks_are_outside_spec(len), (held["owners"], held["relations"], held["natives"], held["searches"], held["closures"],
+            map(len, (held["owners"], held["relations"], held["natives"], held["searches"], held["closures"],
                       held["kept"], held["raws"]))):
         if len(graphs) < len(held["owners"]):
             graphs.append(snapshot(held, list(held["owners"])[len(graphs)]))

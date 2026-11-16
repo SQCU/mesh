@@ -26,9 +26,7 @@ def summarize(rows):
 
 def main():
     parser = argparse.ArgumentParser()
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("logs", nargs="+", type=mesh_callbacks_are_outside_spec(Path))
+    parser.add_argument("logs", nargs="+", type=Path)
     args = parser.parse_args()
     rows, sources = [], []
     for path in args.logs:

@@ -13,21 +13,18 @@ struct SyncOnRemoteFill {
         let answer = try mesh.tensor(on: 1, sections: [4, 4, 4, 4])
         let returned = try mesh.gather(answer, to: 0)
         for i in 0..<4 {
-            // mesh callback (execution; registered as a TensorFunction CPU body): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-            let produce: (MeshOperands, MeshOperands) -> Void = { _, outputs in _ = mesh_callbacks_are_outside_spec;
+            let produce: (MeshOperands, MeshOperands) -> Void = { _, outputs in
                 outputs[0].data!.storeBytes(of: Float(i + 1), as: Float.self)
             }
             let function: TensorFunction
             switch mode {
             case "deadlock":
-                // mesh callback (execution; registered as a TensorFunction CPU body): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-                function = .cpu { inputs, outputs in _ = mesh_callbacks_are_outside_spec;
+                function = .cpu { inputs, outputs in
                     mesh.syncOnRemoteFill([returned[i]])
                     produce(inputs, outputs)
                 }
             case "serial" where i > 0:
-                // mesh callback (execution; registered as a TensorFunction CPU body): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-                function = .cpu { inputs, outputs in _ = mesh_callbacks_are_outside_spec;
+                function = .cpu { inputs, outputs in
                     mesh.syncOnRemoteFill([returned[i - 1]])
                     produce(inputs, outputs)
                 }
@@ -35,15 +32,13 @@ struct SyncOnRemoteFill {
                 function = .cpu(produce)
             }
             try mesh.call(function, inputs: [], outputs: [source[i]], on: 0, worker: i)
-            // mesh callback (execution; registered as a TensorFunction CPU body): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-            try mesh.call(.cpu { inputs, outputs in _ = mesh_callbacks_are_outside_spec;
+            try mesh.call(.cpu { inputs, outputs in
                 outputs[0].data!.storeBytes(of: inputs[0].load(at: 0, as: Float.self) + 1, as: Float.self)
             }, inputs: [remote[i]], outputs: [answer[i]], on: 1, worker: i)
         }
         try mesh.start()
         // design/prepared-machine.md#M41
         mesh.invocation(0).submit()
-        // mesh callback (execution; passed to withExtendedLifetime): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-        withExtendedLifetime((mesh, returned)) { _ = mesh_callbacks_are_outside_spec; dispatchMain() }
+        withExtendedLifetime((mesh, returned)) { dispatchMain() }
     }
 }

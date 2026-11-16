@@ -16,9 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # ../design/algorithm-sources.md#programtensor
 def command(values, host=None, **kwargs):
-    # runtime tooling callback (callback operand map[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    values = list(map(mesh_callbacks_are_outside_spec(str), values))
+    values = list(map(str, values))
     return subprocess.run(SSH + [host, shlex.join(values)] if host else values, check=True, **kwargs)
 
 
@@ -60,13 +58,9 @@ def deploy(args):
         if remote != revision:
             raise RuntimeError(f'git revision mismatch: local={revision}, remote={remote}')
     with ThreadPoolExecutor(max_workers=2) as pool:
-        # runtime tooling callback (callback operand pool.submit[0]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        builds = [pool.submit(mesh_callbacks_are_outside_spec(command), ['make', '-C', source / 'rdma', 'all'], stdout=sys.stderr)]
+        builds = [pool.submit(command, ['make', '-C', source / 'rdma', 'all'], stdout=sys.stderr)]
         if args.host:
-            # runtime tooling callback (callback operand pool.submit[0]): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            builds.append(pool.submit(mesh_callbacks_are_outside_spec(command), ['make', '-C', destination / 'rdma', 'all'], args.host, stdout=sys.stderr))
+            builds.append(pool.submit(command, ['make', '-C', destination / 'rdma', 'all'], args.host, stdout=sys.stderr))
         for build in builds: build.result()
     if args.host:
         command([destination / 'bin/mesh-python', destination / 'bin/mesh-application.py', 'activate',
@@ -128,9 +122,7 @@ def main():
             values = [root / 'bin/mesh-python', root / 'bin/mesh-application.py', 'run', '--target', args.target]
             if args.python: values += ['--python', args.python]
             if args.log: values += ['--log', args.log]
-            # runtime tooling callback (callback operand map[0]): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            values = list(map(mesh_callbacks_are_outside_spec(str), values + ['--', *args.arguments]))
+            values = list(map(str, values + ['--', *args.arguments]))
             values = SSH + [args.host, shlex.join(values)] if args.host else values
             os.execvp(values[0], values)
 

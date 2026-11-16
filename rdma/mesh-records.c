@@ -161,8 +161,7 @@ void map_adopt(void){
    reach from this node is the graph module's (mesh_graph_reach over the joins, C9), not a walk of its own here, its
    reached set the tag's walk's */
 /* an edge's end for mesh_graph_reach: join e's record on `side` (map_put) */
-// mesh callback (preparation; registered with mesh_graph_reach): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t map_end(const void *context,uint32_t e,uint32_t side){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const uint32_t (*)[2])context)[e][side]; }
+static uint32_t map_end(const void *context,uint32_t e,uint32_t side){ return ((const uint32_t (*)[2])context)[e][side]; }
 /* not the tag's lines: the joins of records r[0, n) (mesh_joined, symmetric) as edges, (a, b) for a < b in index order,
    into `join` (room n (n - 1) / 2 + 1); their count.  2026-11-04, owner B2: map_put's loop, made one function so that
    island_set reads the map's joins by the same code (design/compilation-coordination.md, Q3).  What must stay: one
@@ -365,8 +364,7 @@ static uint32_t port_toward(uint32_t node){
    not reached (parent UINT32_MAX) by n, past every vertex, as mesh-collective.c plan_tree_parent keys a tree's
    vertices (design/compilation-coordination.md, the C9 rulings) */
 struct island_tree { const uint32_t *parent; uint32_t n,root; };
-// mesh callback (preparation; registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t island_parent(const void *context,size_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t island_parent(const void *context,size_t k){
   const struct island_tree *tree=context;
   return k==tree->root || tree->parent[k]>=tree->n?tree->n:tree->parent[k];
 }
@@ -877,8 +875,7 @@ static int unsent;
 static struct seen_publication *seen;
 static uint32_t seen_count,seen_room;
 static uint64_t seen_plans=UINT64_MAX;
-// mesh callback (preparation; registered with qsort and bsearch): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int seen_group(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int seen_group(const void *a,const void *b){
   const uint64_t x=((const struct seen_publication *)a)->group,y=((const struct seen_publication *)b)->group;
   return (x>y)-(x<y);
 }

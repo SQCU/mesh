@@ -2020,8 +2020,7 @@ static int port_pass(struct port *port,uint64_t *told){
 /* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
    its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the port's
    guard word while it serves none, looking again every MESH_PAUSE_NS (the stop's `closing`) */
-// mesh callback (execution; registered with pthread_create): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void *port_progress(void *argument){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static void *port_progress(void *argument){
   struct port *port=argument;
   pthread_setname_np("mesh.rdma");
   /* fault_heard: this thread its port's, and its handler on a stack of its own */
@@ -2286,8 +2285,7 @@ static void plan_remove(struct mesh_state *words){
   atomic_store_explicit(&words->removed,1,memory_order_release);
   plan_cancel(words);
 }
-// mesh callback (execution; registered with mesh_graph_row_visit): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void plan_remove_at(void *context,uint32_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static void plan_remove_at(void *context,uint32_t k){
   struct mesh_state *words=mesh_algo_standing(M,context,k);
   if(words)plan_remove(words);
 }

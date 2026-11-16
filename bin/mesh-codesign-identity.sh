@@ -7,9 +7,7 @@ if security find-identity -v -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "\
   echo "codesign identity present: $NAME"; exit 0
 fi
 WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/mesh-identity.XXXXXX")
-# tooling cleanup callback (trap EXIT): callback inversion of control is outside the working
-# specification, and runtime callback overhead is inadmissible in performance-critical code.
-trap 'mesh_callbacks_are_outside_spec; exit $?; rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK"' EXIT
 cat >"$WORK/ext.cnf" <<EOF
 [req]
 distinguished_name=dn

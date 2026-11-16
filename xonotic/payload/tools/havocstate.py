@@ -12,10 +12,8 @@ TYPES = {0: "void", 1: "string", 2: "float", 3: "vector", 4: "entity", 5: "field
 
 
 def clean(text):
-    # offline asset-generation callback (callback operand re.sub[1]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"',
-                  lambda match: mesh_callbacks_are_outside_spec("\n" * match[0].count("\n")), text, flags=re.S)
+                  lambda match: "\n" * match[0].count("\n"), text, flags=re.S)
 
 
 def load(path):
@@ -49,16 +47,10 @@ def load(path):
 
 
 def source_inventory(root):
-    # offline asset-generation callback (callback operand defaultdict[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    declarations = defaultdict(mesh_callbacks_are_outside_spec(list))
-    # offline asset-generation callback (callback operand defaultdict[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    references = defaultdict(mesh_callbacks_are_outside_spec(set))
+    declarations = defaultdict(list)
+    references = defaultdict(set)
     functions = {}
-    # offline asset-generation callback (callback operand defaultdict[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    globals_ = defaultdict(mesh_callbacks_are_outside_spec(list))
+    globals_ = defaultdict(list)
     for path in sorted((root / "server/bot").rglob("*")):
         if path.suffix not in (".qc", ".qh"):
             continue
@@ -89,9 +81,7 @@ def coordinates(fields):
                            "coordinate": field["name"] + ("." + "xyz"[component] if field["type"] == "vector" else ""),
                            "numeric_type": "float" if field["type"] in ("float", "vector") else "integer",
                            "qc_type": field["type"], "field": field["name"]})
-    # offline asset-generation callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return sorted(result, key=lambda row: mesh_callbacks_are_outside_spec(row["offset"]))
+    return sorted(result, key=lambda row: row["offset"])
 
 
 def write_csv(path, rows, columns):
@@ -111,18 +101,10 @@ def engine_definitions(path, category, offset):
 
 def main():
     parser = argparse.ArgumentParser()
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("progs", type=mesh_callbacks_are_outside_spec(Path))
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("--source", type=mesh_callbacks_are_outside_spec(Path), required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("--out", type=mesh_callbacks_are_outside_spec(Path), required=True)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("--engine", type=mesh_callbacks_are_outside_spec(Path), required=True)
+    parser.add_argument("progs", type=Path)
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--engine", type=Path, required=True)
     args = parser.parse_args()
     program = load(args.progs)
     declared, referenced, functions, global_names = source_inventory(args.source)
@@ -141,9 +123,7 @@ def main():
     bot_globals = [row for row in program["globals"] if row["name"].split("[")[0] in global_names]
     engine_fields = engine_definitions(args.engine / "prvm_offsets.h", "field", program["entity_words"])
     engine_globals = engine_definitions(args.engine / "prvm_offsets.h", "global", program["global_words"])
-    # offline asset-generation callback (callback operand defaultdict[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    groups = defaultdict(mesh_callbacks_are_outside_spec(list))
+    groups = defaultdict(list)
     for field in selected:
         groups[field["declarations"][-1]["file"]].append(field)
     output = args.out
@@ -158,9 +138,7 @@ def main():
     write_csv(output / "engine-added-entity-coordinates.csv", coordinates(engine_fields), columns)
     write_csv(output / "runtime-entity-coordinates.csv", all_coordinates + coordinates(engine_fields), columns)
     write_csv(output / "engine-added-global-coordinates.csv", coordinates(engine_globals), columns)
-    # offline asset-generation callback (callback operand defaultdict[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    global_slots = defaultdict(mesh_callbacks_are_outside_spec(list))
+    global_slots = defaultdict(list)
     for row in program["globals"]:
         if row["type"] != "void":
             for coord in coordinates([row]):

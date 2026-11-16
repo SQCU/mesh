@@ -22,11 +22,9 @@
 #include <isl/ilp.h>
 #include <isl/point.h>
 
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_breadth, mesh_graph_search and mesh_graph_delayed_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-uint32_t mesh_graph_row_head(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const uint32_t *)context)[k]; }
+uint32_t mesh_graph_row_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
 
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_search): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-uint32_t mesh_graph_relation_head(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+uint32_t mesh_graph_relation_head(const void *context, size_t k) {
   const struct mesh_graph_relation_data *data = context;
   return data->edge[data->row_edge[k]].to;
 }
@@ -36,8 +34,7 @@ uint32_t mesh_graph_relation_incoming_head(const void *context, size_t k) {
   return data->edge[data->in_edge[k]].from;
 }
 
-// mesh callback (completion (release); registered by rdma/mesh_graph.py Owned weakref.finalize and as a std::shared_ptr deleter): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-void mesh_graph_search_free(struct mesh_graph_search *made) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+void mesh_graph_search_free(struct mesh_graph_search *made) {
   if (!made) return;
   free(made->preorder); free(made->postorder); free(made->parent); free(made->place); free(made->entry);
   free(made->end); free(made);
@@ -203,8 +200,7 @@ int mesh_graph_search_load(const void *bytes, size_t length, struct mesh_graph_s
   return 0;
 }
 
-// mesh callback (completion (release); registered by rdma/mesh_graph.py Owned weakref.finalize): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-void mesh_graph_closure_free(struct mesh_graph_closure *made) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+void mesh_graph_closure_free(struct mesh_graph_closure *made) {
   if (!made) return;
   free(made->reached); free(made);
 }
@@ -252,8 +248,7 @@ int mesh_graph_closure_load(const void *bytes, size_t length, struct mesh_graph_
   return 0;
 }
 
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int closure_descending(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int closure_descending(const void *a, const void *b) {
   const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
   return (x < y) - (x > y);
 }
@@ -601,8 +596,7 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
 }
 
 
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_order and mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t depth_head(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const uint32_t *)context)[k]; }
+static uint32_t depth_head(const void *context, size_t k) { return ((const uint32_t *)context)[k]; }
 int mesh_graph_depth(uint32_t vertices, const size_t *first, const uint32_t *head, const unsigned char *marked, uint32_t *depth) {
   size_t *out = calloc((size_t)vertices + 2, sizeof *out), *at = calloc((size_t)vertices + 1, sizeof *at);
   uint32_t *heads = malloc((first[vertices] + 1) * sizeof *heads), *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
@@ -674,8 +668,7 @@ double mesh_graph_log(double x){
 }
 
 struct flow_same { const uint32_t *parent,*tree; uint32_t n; };
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_keyed_find): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int flow_same(const void *context,uint32_t k){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int flow_same(const void *context,uint32_t k){
   const struct flow_same *s=context;
   return !memcmp(s->parent+(size_t)k*s->n,s->tree,s->n*sizeof *s->tree);
 }
@@ -750,16 +743,14 @@ uint32_t mesh_graph_flow(uint32_t n, uint32_t E, const uint32_t *from, const uin
 }
 
 struct mesh_packed { uint32_t root; double flow; uint32_t *parent; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int mesh_packed_heavier(const void *a,const void *b){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int mesh_packed_heavier(const void *a,const void *b){
   const struct mesh_packed *x=a,*y=b;
   if(x->root!=y->root)return x->root<y->root?-1:1;
   return x->flow>y->flow?-1:x->flow<y->flow;
 }
 
 struct pack_same { const struct mesh_packed *packed; const uint32_t *from; const int32_t *chosen; uint32_t r,n; };
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_keyed_find): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int pack_same(const void *context,uint32_t t){ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int pack_same(const void *context,uint32_t t){
   const struct pack_same *s=context;
   uint32_t v=0;
   while(v<s->n && (v==s->r || s->packed[t].parent[v]==s->from[s->chosen[v]]))v++;
@@ -1030,8 +1021,7 @@ static void heap_down(uint32_t *heap, uint32_t *position, int (*before)(const vo
   heap[i] = v;
   position[v] = (uint32_t)i;
 }
-// mesh callback (compilation/construction (graph analysis); registered with heap_up and heap_down): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int lags_before(const void *context, uint32_t a, uint32_t b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int lags_before(const void *context, uint32_t a, uint32_t b) {
   const uint64_t *distance = context;
   return distance[a] < distance[b] || (distance[a] == distance[b] && a < b);
 }
@@ -1097,18 +1087,15 @@ int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const
    kept vertex it reaches, its interior all contracted */
 struct contract_graph { const struct mesh_graph_dependence *edge; const size_t *order; const unsigned char *kept;
                         uint32_t vertices; };
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t contract_tail(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t contract_tail(const void *context, size_t e) {
   return ((const struct mesh_graph_dependence *)context)[e].from;
 }
-// mesh callback (compilation/construction (graph analysis); registered with lags_walks): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t contract_head(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t contract_head(const void *context, size_t k) {
   const struct contract_graph *g = context;
   const uint32_t to = g->edge[g->order[k]].to;
   return g->kept[to] ? g->vertices + to : to;
 }
-// mesh callback (compilation/construction (graph analysis); registered with lags_walks): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint64_t contract_lag(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint64_t contract_lag(const void *context, size_t k) {
   const struct contract_graph *g = context;
   return g->edge[g->order[k]].delay;
 }
@@ -1186,8 +1173,7 @@ int mesh_graph_contract_unrolled(uint32_t vertices, size_t edges, const struct m
 /* design/algorithm-sources.md#relations-over-copies-and-classes;
    S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §4.1 */
 struct quotient_pair { uint64_t key; size_t edge; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int quotient_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int quotient_before(const void *a, const void *b) {
   const struct quotient_pair *x = a, *y = b;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
   return (x->edge > y->edge) - (x->edge < y->edge);
@@ -1211,10 +1197,8 @@ static int quotient_solve(uint32_t vertices, const uint32_t *class_of, size_t ed
   return 0;
 }
 struct quotient_arrays { const uint32_t *from, *to; };
-// mesh callback (compilation/construction (graph analysis); registered with quotient_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t quotient_tail(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct quotient_arrays *)context)->from[e]; }
-// mesh callback (compilation/construction (graph analysis); registered with quotient_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t quotient_head(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct quotient_arrays *)context)->to[e]; }
+static uint32_t quotient_tail(const void *context, size_t e) { return ((const struct quotient_arrays *)context)->from[e]; }
+static uint32_t quotient_head(const void *context, size_t e) { return ((const struct quotient_arrays *)context)->to[e]; }
 int mesh_graph_quotient(uint32_t vertices, const uint32_t *class_of, size_t edges, const uint32_t *from, const uint32_t *to,
                         struct mesh_graph_dependence **made, size_t *count) {
   *made = NULL; *count = 0;
@@ -1295,8 +1279,7 @@ static void relation_drop(struct mesh_graph_relation *r) {
   free(r);
 }
 void mesh_graph_relation_retain(struct mesh_graph_relation *r) { __atomic_fetch_add(&r->references, 1, __ATOMIC_RELAXED); }
-// mesh callback (completion (release); registered as a std::shared_ptr deleter): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-void mesh_graph_relation_free(struct mesh_graph_relation *r) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+void mesh_graph_relation_free(struct mesh_graph_relation *r) {
   while (r && __atomic_fetch_sub(&r->references, 1, __ATOMIC_ACQ_REL) == 1) {
     struct mesh_graph_relation *parent = r->parent;
     void (*release)(void *) = r->release;
@@ -1360,8 +1343,7 @@ static void relation_derived(struct mesh_graph_relation *r, struct mesh_graph_re
   r->data.origin = parent->data.origin;
 }
 struct relation_key { uint32_t from, to; size_t index; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int relation_key_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int relation_key_before(const void *a, const void *b) {
   const struct relation_key *x = a, *y = b;
   if (x->from != y->from) return x->from < y->from ? -1 : 1;
   if (x->to != y->to) return x->to < y->to ? -1 : 1;
@@ -1370,8 +1352,7 @@ static int relation_key_before(const void *a, const void *b) { void (*mesh_callb
 /* the root's original records with view witnesses (GIVEN excluded) ordered by (from_view, to_view, record): `index`
    the original record */
 struct witness_key { size_t from_view, to_view, index; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int witness_key_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int witness_key_before(const void *a, const void *b) {
   const struct witness_key *x = a, *y = b;
   if (x->from_view != y->from_view) return x->from_view < y->from_view ? -1 : 1;
   if (x->to_view != y->to_view) return x->to_view < y->to_view ? -1 : 1;
@@ -1543,12 +1524,10 @@ int mesh_graph_relation_cause(const struct mesh_graph_relation *r, const struct 
   *out = (struct mesh_graph_cause){x->key, view_hazard(root->data.view + from, root->data.view + to), x->given, from, to};
   return 0;
 }
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_rows, quotient_solve and synchronization_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t relation_tail(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t relation_tail(const void *context, size_t e) {
   return ((const struct mesh_graph_dependence *)context)[e].from;
 }
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_rows, quotient_solve and synchronization_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t relation_head(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t relation_head(const void *context, size_t e) {
   return ((const struct mesh_graph_dependence *)context)[e].to;
 }
 int mesh_graph_relation_quotient(struct mesh_graph_relation *parent, uint32_t classes, const uint32_t *class_of,
@@ -1850,8 +1829,7 @@ int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const
 }
 /* mesh-graph.h mesh_graph_closure_chains: the closure and the members its items name */
 struct closure_members { const struct mesh_graph_closure *closed; const uint32_t *member; };
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_chains): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int closure_before(const void *context, uint32_t a, uint32_t b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int closure_before(const void *context, uint32_t a, uint32_t b) {
   const struct closure_members *c = context;
   const uint32_t x = c->member[a], y = c->member[b];
   return (int)(c->closed->reached[(size_t)y * c->closed->words + x / 64] >> (x % 64) & 1);
@@ -1884,8 +1862,7 @@ static int cover_conflict(uint64_t length, const uint64_t *start, const uint64_t
   return 0;
 }
 struct cover_key { uint64_t at; uint32_t interval; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int cover_key_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int cover_key_before(const void *a, const void *b) {
   const struct cover_key *x = a, *y = b;
   if (x->at != y->at) return x->at < y->at ? -1 : 1;
   return (x->interval > y->interval) - (x->interval < y->interval);
@@ -2069,14 +2046,12 @@ int mesh_graph_fat_cover(uint64_t length, uint32_t intervals, const uint64_t *st
 
 /* design/plan-to-bridge-change-request.md R5, "How: the program" and "How: solving it" */
 struct completion_key { double at; uint32_t vertex; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int completion_key_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int completion_key_before(const void *a, const void *b) {
   const struct completion_key *x = a, *y = b;
   if (x->at != y->at) return x->at < y->at ? -1 : 1;
   return (x->vertex > y->vertex) - (x->vertex < y->vertex);
 }
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int completion_edge_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int completion_edge_before(const void *a, const void *b) {
   const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
   return (x > y) - (x < y);
 }
@@ -2294,8 +2269,7 @@ int mesh_graph_shares(uint32_t ranks, uint32_t stages, const double *comm, const
 }
 
 /* design/plan-to-bridge-change-request.md R5, "The order of each cable's list, by the reference algorithm" */
-// mesh callback (compilation/construction (graph analysis); registered with heap_up and heap_down): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int order_before(const void *context, uint32_t a, uint32_t b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int order_before(const void *context, uint32_t a, uint32_t b) {
   const double *priority = context;
   return priority[a] > priority[b] || (priority[a] == priority[b] && a < b);
 }
@@ -2340,13 +2314,11 @@ int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const do
 
 /* a flat edge list's rows by `from` (mesh_graph_rows): vertex v's entries the edges order[first[v] .. first[v + 1]) */
 struct flat_rows { const size_t *first, *order; const uint32_t *to; };
-// mesh callback (compilation/construction (graph analysis); stored in a mesh_graph_rows_view): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static size_t flat_degree(const void *context, uint32_t v) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static size_t flat_degree(const void *context, uint32_t v) {
   const struct flat_rows *r = context;
   return r->first[v + 1] - r->first[v];
 }
-// mesh callback (compilation/construction (graph analysis); stored in a mesh_graph_rows_view): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t flat_head(const void *context, uint32_t v, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t flat_head(const void *context, uint32_t v, size_t k) {
   const struct flat_rows *r = context;
   return r->to[r->order[r->first[v] + k]];
 }
@@ -2460,8 +2432,7 @@ static uint32_t components_search(const struct graph_scratch *s, uint32_t vertic
   return count;
 }
 struct zero_rows { const uint32_t *from; const uint64_t *delay; uint32_t vertices; };
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t zero_row(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t zero_row(const void *context, size_t e) {
   const struct zero_rows *z = context;
   return z->delay[e] ? z->vertices : z->from[e];
 }
@@ -2704,8 +2675,7 @@ int mesh_graph_context_create(struct mesh_graph_context **out) {
   return 0;
 }
 void mesh_graph_context_retain(struct mesh_graph_context *c) { __atomic_fetch_add(&c->references, 1, __ATOMIC_RELAXED); }
-// mesh callback (completion (release); registered by rdma/mesh_graph.py Owned weakref.finalize and as a std::shared_ptr deleter): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-void mesh_graph_context_free(struct mesh_graph_context *c) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+void mesh_graph_context_free(struct mesh_graph_context *c) {
   if (!c || __atomic_sub_fetch(&c->references, 1, __ATOMIC_ACQ_REL)) return;
   isl_ctx_free(c->ctx);
   pthread_mutex_destroy(&c->lock);
@@ -2748,8 +2718,7 @@ int mesh_graph_domain_create(struct mesh_graph_context *context, uint32_t dims, 
   return 0;
 }
 void mesh_graph_domain_retain(struct mesh_graph_domain *d) { __atomic_fetch_add(&d->references, 1, __ATOMIC_RELAXED); }
-// mesh callback (completion (release); registered as a std::shared_ptr deleter): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-void mesh_graph_domain_free(struct mesh_graph_domain *d) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+void mesh_graph_domain_free(struct mesh_graph_domain *d) {
   if (!d || __atomic_sub_fetch(&d->references, 1, __ATOMIC_ACQ_REL)) return;
   struct mesh_graph_context *c = d->context;
   pthread_mutex_lock(&c->lock);
@@ -3012,8 +2981,7 @@ int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const s
 void mesh_graph_access_map_retain(const struct mesh_graph_access_map *a) {
   __atomic_fetch_add(&((struct mesh_graph_access_map *)a)->references, 1, __ATOMIC_RELAXED);
 }
-// mesh callback (completion (release); registered as a std::shared_ptr deleter): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-void mesh_graph_access_map_free(const struct mesh_graph_access_map *access) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+void mesh_graph_access_map_free(const struct mesh_graph_access_map *access) {
   struct mesh_graph_access_map *a = (struct mesh_graph_access_map *)access;
   if (!a || __atomic_sub_fetch(&a->references, 1, __ATOMIC_ACQ_REL)) return;
   struct mesh_graph_domain *d = a->domain;
@@ -3095,8 +3063,7 @@ static isl_set *access_own(const struct mesh_graph_domain *d, isl_space *space, 
 }
 /* one threadgroup's partitions as isl enumerates its (bounded, one-dimensional) set's points */
 struct access_points { uint32_t *partition; size_t count, room; int status; };
-// mesh callback (compilation/construction (graph analysis); registered with isl_set_foreach_point): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static isl_stat access_point(isl_point *point, void *user) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static isl_stat access_point(isl_point *point, void *user) {
   struct access_points *x = user;
   isl_val *v = isl_point_get_coordinate_val(point, isl_dim_set, 0);
   isl_point_free(point);
@@ -3110,8 +3077,7 @@ static isl_stat access_point(isl_point *point, void *user) { void (*mesh_callbac
   isl_val_free(v);
   return isl_stat_ok;
 }
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int access_ascending(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int access_ascending(const void *a, const void *b) {
   const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
   return (x > y) - (x < y);
 }
@@ -3247,14 +3213,12 @@ static isl_set *view_bytes(isl_ctx *ctx, const struct mesh_graph_view *v) {
 }
 
 struct view_hull { uint64_t key; __int128 start, end; size_t index; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int view_hull_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int view_hull_before(const void *a, const void *b) {
   const struct view_hull *x = a, *y = b;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
   return (x->start > y->start) - (x->start < y->start);
 }
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int view_edge_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int view_edge_before(const void *a, const void *b) {
   const struct mesh_graph_conflict *x = a, *y = b;
   if (x->from != y->from) return x->from < y->from ? -1 : 1;
   if (x->to != y->to) return x->to < y->to ? -1 : 1;
@@ -3271,8 +3235,7 @@ static uint32_t view_hazard(const struct mesh_graph_view *from, const struct mes
 }
 /* a pair the decider answered: its two views as the record orients them, and the deciding original */
 struct view_decided { size_t from_view, to_view; struct mesh_graph_origin origin; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int view_decided_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int view_decided_before(const void *a, const void *b) {
   const struct view_decided *x = a, *y = b;
   if (x->from_view != y->from_view) return x->from_view < y->from_view ? -1 : 1;
   return (x->to_view > y->to_view) - (x->to_view < y->to_view);
@@ -3547,12 +3510,9 @@ static int redundant_solve(uint32_t vertices, size_t edges, uint32_t (*tail)(con
   return result;
 }
 struct redundant_arrays { const uint32_t *from, *to; const uint64_t *delay; };
-// mesh callback (compilation/construction (graph analysis); registered with redundant_solve and synchronization_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t redundant_tail(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct redundant_arrays *)context)->from[e]; }
-// mesh callback (compilation/construction (graph analysis); registered with redundant_solve and synchronization_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t redundant_head(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct redundant_arrays *)context)->to[e]; }
-// mesh callback (compilation/construction (graph analysis); registered with redundant_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint64_t redundant_delay(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t redundant_tail(const void *context, size_t e) { return ((const struct redundant_arrays *)context)->from[e]; }
+static uint32_t redundant_head(const void *context, size_t e) { return ((const struct redundant_arrays *)context)->to[e]; }
+static uint64_t redundant_delay(const void *context, size_t e) {
   const struct redundant_arrays *x = context;
   return x->delay ? x->delay[e] : 0;
 }
@@ -3565,8 +3525,7 @@ int mesh_graph_redundant(uint32_t vertices, size_t edges, const uint32_t *from, 
 
 /* design/torch-source-lowering-change-request.md item 3; S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans.
    Signal Processing 45(6), 1997, §7, Fig. 4: every edge a candidate, at zero delays */
-// mesh callback (compilation/construction (graph analysis); registered with redundant_solve): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint64_t synchronization_delay(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; (void)context; (void)e; return 0; }
+static uint64_t synchronization_delay(const void *context, size_t e) { (void)context; (void)e; return 0; }
 static int synchronization_solve(uint32_t vertices, size_t edges, uint32_t (*tail)(const void *context, size_t e),
                                  uint32_t (*head)(const void *context, size_t e), const void *context,
                                  unsigned char *redundant, size_t *kept) {
@@ -3656,24 +3615,21 @@ static size_t graph_lower(const void *base, size_t count, size_t size, const voi
   return low;
 }
 struct signature_key { uint32_t class, object; uint64_t value; size_t index; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort and graph_lower): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int signature_key_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int signature_key_before(const void *a, const void *b) {
   const struct signature_key *x = a, *y = b;
   if (x->class != y->class) return x->class < y->class ? -1 : 1;
   if (x->object != y->object) return x->object < y->object ? -1 : 1;
   if (x->value != y->value) return x->value < y->value ? -1 : 1;
   return (x->index > y->index) - (x->index < y->index);
 }
-// mesh callback (compilation/construction (graph analysis); registered with qsort and graph_lower): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int signature_dependence_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int signature_dependence_before(const void *a, const void *b) {
   const struct mesh_graph_dependence *x = a, *y = b;
   if (x->from != y->from) return x->from < y->from ? -1 : 1;
   if (x->to != y->to) return x->to < y->to ? -1 : 1;
   return (x->delay > y->delay) - (x->delay < y->delay);
 }
 struct signature_task { uint32_t processor, place, task; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int signature_task_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int signature_task_before(const void *a, const void *b) {
   const struct signature_task *x = a, *y = b;
   if (x->processor != y->processor) return x->processor < y->processor ? -1 : 1;
   if (x->place != y->place) return x->place < y->place ? -1 : 1;
@@ -3694,26 +3650,21 @@ static int signature_edge(struct signature_graph *g, uint32_t a, uint32_t b, uin
   g->from[g->edges] = a; g->to[g->edges] = b; g->delay[g->edges++] = d;
   return 0;
 }
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t signature_tail(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; return ((const struct signature_graph *)context)->from[k]; }
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_lags): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t signature_head(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t signature_tail(const void *context, size_t k) { return ((const struct signature_graph *)context)->from[k]; }
+static uint32_t signature_head(const void *context, size_t k) {
   const struct signature_graph *g = context;
   return g->to[g->order[k]];
 }
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_lags): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint64_t signature_lag(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint64_t signature_lag(const void *context, size_t k) {
   const struct signature_graph *g = context;
   const size_t e = g->order[k];
   return e == g->skip ? UINT64_MAX : g->delay[e];
 }
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static uint32_t signature_processor(const void *context, size_t k) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static uint32_t signature_processor(const void *context, size_t k) {
   return ((const struct mesh_graph_operation *)context)[k].processor;
 }
 struct signature_image { uint32_t from, to; uint64_t delay; size_t edge; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int signature_image_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int signature_image_before(const void *a, const void *b) {
   const struct signature_image *x = a, *y = b;
   if (x->from != y->from) return x->from < y->from ? -1 : 1;
   if (x->to != y->to) return x->to < y->to ? -1 : 1;
@@ -3734,8 +3685,7 @@ static void archived_free(struct mesh_graph_archived *x) {
   if (x->release) x->release(x->owner);
   free(x);
 }
-// mesh callback (completion (release); stored as a release member): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void archived_released(void *x) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; archived_free(x); }
+static void archived_released(void *x) { archived_free(x); }
 /* whether `p` is one of the signature's views of its archive (mesh_graph_archive_read: every view, an empty one at the
    archive's start, lies within its bytes), never written or freed */
 static int signature_viewed(const struct mesh_graph_signature *s, const void *p) {
@@ -3876,8 +3826,7 @@ static void realized_free(struct mesh_graph_realized *x) {
   free(x);
 }
 static void realized_retain(struct mesh_graph_realized *x) { __atomic_fetch_add(&x->references, 1, __ATOMIC_RELAXED); }
-// mesh callback (completion (release); stored as a release member): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void scopes_released(void *x) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec; mesh_graph_scopes_free(x); }
+static void scopes_released(void *x) { mesh_graph_scopes_free(x); }
 static void signature_states(struct mesh_graph_signature *s) {
   memset(s->states, 0, sizeof s->states);
   for (size_t k = 0; k < s->synchronized; k++) s->states[s->edge[k].state]++;
@@ -3885,8 +3834,7 @@ static void signature_states(struct mesh_graph_signature *s) {
 /* a publication event's identity: its row's source node, its release's owner call and representative transfer, and its
    published value */
 struct scope_key { uint32_t node, owner, transfer, event; uint64_t value; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort and graph_lower): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int scope_key_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int scope_key_before(const void *a, const void *b) {
   const struct scope_key *x = a, *y = b;
   if (x->node != y->node) return x->node < y->node ? -1 : 1;
   if (x->owner != y->owner) return x->owner < y->owner ? -1 : 1;
@@ -4290,8 +4238,7 @@ int mesh_graph_signature_repeated(uint32_t processors, const struct mesh_graph_p
 }
 /* S. S. Bhattacharyya, S. Sriram and E. A. Lee, IEEE Trans. Signal Processing 45(6), 1997, §9; mesh-graph.h struct
    mesh_graph_proof: a false pair takes the first kept proof of its task edge at its delay */
-// mesh callback (compilation/construction (graph analysis); registered with qsort and graph_lower): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int proof_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int proof_before(const void *a, const void *b) {
   const struct mesh_graph_proof *x = a, *y = b;
   if (x->from != y->from) return x->from < y->from ? -1 : 1;
   if (x->to != y->to) return x->to < y->to ? -1 : 1;
@@ -4910,8 +4857,7 @@ struct relation_root {
   struct mesh_graph_origin *origin;
   size_t views;
 };
-// mesh callback (completion (release); stored as a release member): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static void relation_root_release(void *owner) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static void relation_root_release(void *owner) {
   struct relation_root *o = owner;
   struct relation_loaded *shared = o->shared;
   for (size_t v = 0; o->view && v < o->views; v++) mesh_graph_access_map_free(o->view[v].access);
@@ -5097,8 +5043,7 @@ int mesh_graph_relation_load(struct mesh_graph_context *context, const void *byt
 
 /* design/synchronization-signature-change-request.md item 1; L. Lamport, CACM 21(7), 1978 */
 struct compose_key { uint32_t processor, object; uint64_t value; size_t index; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort and graph_lower): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int compose_key_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int compose_key_before(const void *a, const void *b) {
   const struct compose_key *x = a, *y = b;
   if (x->processor != y->processor) return x->processor < y->processor ? -1 : 1;
   if (x->object != y->object) return x->object < y->object ? -1 : 1;
@@ -5580,8 +5525,7 @@ int mesh_graph_space_time(const struct mesh_graph_signature *s, char *text, size
   return result ? result : graph_end(&t, made);
 }
 
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int intersect_before(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int intersect_before(const void *a, const void *b) {
   const struct mesh_graph_interval *x = a, *y = b;
   if (x->key != y->key) return x->key < y->key ? -1 : 1;
   return (x->start > y->start) - (x->start < y->start);
@@ -5607,8 +5551,7 @@ int mesh_graph_arcs_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start, 
 /* TensorFlow Lite 6cf18d88, tensorflow/lite/delegates/gpu/common/memory_management/internal.h:35-43,
    TensorUsageWithIndex, and internal.cc:28-31, CompareBySize */
 struct greedy_record { uint64_t tensor_size; size_t idx; };
-// mesh callback (compilation/construction (graph analysis); registered with qsort): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-static int greedy_compare_by_size(const void *a, const void *b) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+static int greedy_compare_by_size(const void *a, const void *b) {
   const struct greedy_record *first = a, *second = b;
   if (first->tensor_size != second->tensor_size) return first->tensor_size > second->tensor_size ? -1 : 1;
   return (first->idx > second->idx) - (first->idx < second->idx);
@@ -5698,8 +5641,7 @@ size_t mesh_graph_delayed(const size_t *first, const size_t *order, const uint32
                           uint32_t lag, uint64_t t, uint32_t *source, uint32_t *slot, size_t *edge) {
   return mesh_graph_delayed_rows(first, order, mesh_graph_row_head, tail, NULL, row, count, lag, t, source, slot, edge);
 }
-// mesh callback (compilation/construction (graph analysis); registered with mesh_graph_delayed_rows): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-uint32_t mesh_graph_relation_tail(const void *context, size_t e) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+uint32_t mesh_graph_relation_tail(const void *context, size_t e) {
   return ((const struct mesh_graph_relation_data *)context)->edge[e].from;
 }
 size_t mesh_graph_relation_delayed(const struct mesh_graph_relation_data *relation, const unsigned char *redundant,

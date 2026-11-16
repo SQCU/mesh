@@ -477,7 +477,7 @@
          return f"RAIIAtenTensorHandle({tmp_name})", allocations_to_write
  
      def codegen_reinterpret_view(
-@@ -2600,6 +2926,59 @@
+@@ -2600,6 +2926,56 @@
          """Returns a newly-created, temporary RAII tensor handle containing the
          reinterpreted tensor data.  Callers of this function are responsible for saving
          the handle if persistent access is needed."""
@@ -518,10 +518,7 @@
 +                self._bound_prepared((result, *names), view["graphs"])
 +                self.__dict__.setdefault("bound_consumed", set()).add(key)
 +                line = f"ConstantHandle {result}(bound_handles[{k}]);"
-+                # Callback inversion of control is outside the working specification (phase: compile-time C++ wrapper
-+                # print, codegen_reinterpret_view's writeline operand).
-+                # Runtime callback overhead is inadmissible in performance-critical code.
-+                mesh_callbacks_are_outside_spec(writeline)(line)
++                writeline(line)
 +                view.update(supplied=supplied[key], result=result, lines=(line,))
 +                return result
 +            if (
@@ -537,7 +534,7 @@
  
          d_size, d_stride, d_offset, d_dtype, collapsible = (
              codegen_reinterpret_view_helper(data)
-@@ -2711,6 +3090,9 @@
+@@ -2711,6 +3087,9 @@
          #     }.cbegin()
          # );
          # ```

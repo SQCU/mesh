@@ -62,9 +62,7 @@ def equal_finish(total, grain, low, high, a, b):
         else:
             held.update((i, float(high[i])) for i in above)
     c = [low[i] + grain * math.floor((s[i] - low[i]) / grain) for i in range(n)]
-    # compile-time callback (callable supplied to [lambda x, i=i: a[i] + b[i] * x for i in range(n)]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    c, _ = min_max(total, grain, c, high, [lambda x, i=i: mesh_callbacks_are_outside_spec(a[i] + b[i] * x) for i in range(n)])
+    c, _ = min_max(total, grain, c, high, [lambda x, i=i: a[i] + b[i] * x for i in range(n)])
     return c, s, T
 
 
@@ -74,13 +72,9 @@ def min_max(total, grain, low, high, cost):
         fits = [i for i in range(n) if c[i] + grain <= high[i]]
         if not fits:
             break
-        # compile-time callback (ordering key min; supplied shard cost callback): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        i = min(fits, key=lambda i: mesh_callbacks_are_outside_spec((mesh_callbacks_are_outside_spec(cost[i])(c[i] + grain), i)))
+        i = min(fits, key=lambda i: (cost[i](c[i] + grain), i))
         c[i] += grain
-    # compile-time callback (supplied shard cost callback): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    return c, max(mesh_callbacks_are_outside_spec(cost[i])(c[i]) for i in range(n))
+    return c, max(cost[i](c[i]) for i in range(n))
 
 
 def capacity(total, grain, low, high):
@@ -100,12 +94,8 @@ def shift(shares, upper, load):
     over = [j for j in range(n) if shares[j] > upper[j]]
     free = [j for j in range(n) if shares[j] < upper[j]]
     while over:
-        # compile-time callback (ordering key max): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        peak = max(over, key=lambda j: mesh_callbacks_are_outside_spec(shares[j] / upper[j]))
-        # compile-time callback (ordering key min; supplied shard cost callback): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        valley = min(free, key=lambda j: mesh_callbacks_are_outside_spec(mesh_callbacks_are_outside_spec(load[j])(shares[j])))
+        peak = max(over, key=lambda j: shares[j] / upper[j])
+        valley = min(free, key=lambda j: load[j](shares[j]))
         if shares[peak] - upper[peak] <= upper[valley] - shares[valley]:
             shares[valley] += shares[peak] - upper[peak]
             shares[peak] = upper[peak]

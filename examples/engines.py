@@ -98,9 +98,7 @@ def placement(first, parts):
 
 def arguments(description):
     parser = argparse.ArgumentParser(description=description)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--nodes', type=mesh_callbacks_are_outside_spec(int), nargs='+', required=True)
+    parser.add_argument('--nodes', type=int, nargs='+', required=True)
     parser.add_argument('--device', default='mps')
     return parser.parse_args()
 

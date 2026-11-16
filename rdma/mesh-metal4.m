@@ -44,8 +44,7 @@ static id<MTL4Compiler> compiler;
 
 static void begin(void) {
     static dispatch_once_t once;
-    // mesh callback (preparation; passed to dispatch_once): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    dispatch_once(&once, ^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+    dispatch_once(&once, ^{
         device = MTLCreateSystemDefaultDevice();
         queue = [device newMTL4CommandQueue];
         compiler = [device newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:nil];
@@ -103,8 +102,7 @@ void *mesh_metal4_view(void *pages, uint64_t bytes) {
                                                           deallocator:nil];
 }
 
-// mesh callback (completion (release); registered by rdma/mesh_metal4.py): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-void mesh_metal4_release(void *object) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+void mesh_metal4_release(void *object) {
     (void)(__bridge_transfer id)object;
 }
 
@@ -142,8 +140,7 @@ void mesh_metal4_after(void *of, void (*commit)(void), void *(*commands)(void), 
     id<MTLSharedEvent> arrival = stream.arrival;
     uint64_t arrived = stream.arrived + 1;
     stream.arrived = arrived;
-    // mesh callback (execution; passed to dispatch_sync): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    dispatch_sync((__bridge dispatch_queue_t)encoding(), ^{ void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+    dispatch_sync((__bridge dispatch_queue_t)encoding(), ^{
         commit();
         [(__bridge id<MTLCommandBuffer>)commands() encodeSignalEvent:arrival value:arrived];
         commit();
@@ -206,8 +203,7 @@ void mesh_metal4_commit(void *of, const struct mesh_metal4_dispatch *dispatch, u
     [encoder endEncoding];
     [commands endCommandBuffer];
     MTL4CommitOptions *options = [MTL4CommitOptions new];
-    // mesh callback (completion; passed to addFeedbackHandler:): callback inversion of control is outside the working specification, and runtime callback overhead is inadmissible in performance-critical code
-    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) { void (*mesh_callback_disabled)(void) = &mesh_callbacks_are_outside_spec;
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
         record.error = feedback.error;
         record.start = feedback.GPUStartTime;
         record.end = feedback.GPUEndTime;

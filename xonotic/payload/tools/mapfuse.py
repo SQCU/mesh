@@ -26,14 +26,10 @@ from rdma.workload import WorkloadMeter
 BSP_COORDINATE_EXTENT = 65536.0
 
 def transfer_site(source):
-    # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    component = [index for index in max(NAV.components(source.navadj), key=mesh_callbacks_are_outside_spec(len), default=[])
+    component = [index for index in max(NAV.components(source.navadj), key=len, default=[])
                  if tuple(round(value, 1) for value in source.navnodes[index]) in source.wpset]
     if not component:
-        # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        component = max(NAV.components(source.navadj), key=mesh_callbacks_are_outside_spec(len), default=[])
+        component = max(NAV.components(source.navadj), key=len, default=[])
     choices = []
     for index in component:
         point = [float(value) for value in source.navnodes[index]]
@@ -152,9 +148,7 @@ def leaf_assignment(names, surveyed, slots):
                 return True
         return False
 
-    # offline asset-generation callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    order = sorted(range(len(names)), key=lambda index: mesh_callbacks_are_outside_spec((len(candidates[index]), index)))
+    order = sorted(range(len(names)), key=lambda index: (len(candidates[index]), index))
     if not all(place(source, set()) for source in order):
         return None
     result = [None] * len(names)
@@ -508,9 +502,7 @@ def hall_shell(a, b, axis, width, height, thickness):
         bounds(along_lo - thickness, along_hi + thickness,
                cross_hi, cross_hi + thickness, z - thickness, z + height + thickness),
     ]
-    # offline asset-generation callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    endpoints = sorted((a, b), key=lambda point: mesh_callbacks_are_outside_spec(point[axis]))
+    endpoints = sorted((a, b), key=lambda point: point[axis])
     for side, point in enumerate(endpoints):
         edge = along_lo if side == 0 else along_hi
         door_lo = point[other] - width / 2.0
@@ -867,9 +859,7 @@ def navmesh_measure(order, surveyed, offsets, connector_nodes, connector_links, 
     for tile in range(len(order)):
         choices = [index[identity] for identity, owner in region.items() if owner == tile]
         reps[tile] = choices[len(choices) // 2] if choices else None
-    # offline asset-generation callback (navigation key callback): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    result = P.navmesh_solve(nodes, adjacency, region, mesh_callbacks_are_outside_spec(key), len(order), reps)
+    result = P.navmesh_solve(nodes, adjacency, region, key, len(order), reps)
     join_navigation = []
     cart_width = NS.CART_RIDER_MAX[0] - NS.CART_RIDER_MIN[0]
     cart_height = NS.CART_RIDER_MAX[2] - NS.CART_RIDER_MIN[2]
@@ -1653,9 +1643,7 @@ def generate(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('seed', type=mesh_callbacks_are_outside_spec(int))
+    parser.add_argument('seed', type=int)
     parser.add_argument('--maps', default='all')
     parser.add_argument('--names', default='')
     parser.add_argument('--bridges', default='auto')
@@ -1664,12 +1652,8 @@ def main(argv=None):
     parser.add_argument('--pk3', default='~/dox/xonotic/Xonotic/data/xonotic-20230620-maps.pk3')
     parser.add_argument('--q3map2', default=MS.Q3MAP2)
     parser.add_argument('--basepath', default=os.environ.get('XON_BASEPATH', ''))
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--teams', type=mesh_callbacks_are_outside_spec(int), default=8)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument('--carts', type=mesh_callbacks_are_outside_spec(int), default=8)
+    parser.add_argument('--teams', type=int, default=8)
+    parser.add_argument('--carts', type=int, default=8)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--no-vis', action='store_true')
     parser.add_argument('--no-light', action='store_true')

@@ -35,15 +35,9 @@ def build(source, config, output):
 
 def main():
     parser = argparse.ArgumentParser()
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("source", type=mesh_callbacks_are_outside_spec(pathlib.Path))
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("config", type=mesh_callbacks_are_outside_spec(pathlib.Path))
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("output", type=mesh_callbacks_are_outside_spec(pathlib.Path))
+    parser.add_argument("source", type=pathlib.Path)
+    parser.add_argument("config", type=pathlib.Path)
+    parser.add_argument("output", type=pathlib.Path)
     args = parser.parse_args()
     build(args.source, args.config, args.output)
 

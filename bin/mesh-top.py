@@ -194,18 +194,12 @@ class Top:
     def __init__(self, args):
         self.args = args
         self.links = link_map(args.links)
-        # runtime tooling callback (ordering key sorted): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        self.nodes = [Node(spec) for spec in sorted(roster(args.roster, self.links, args.nodes).values(), key=lambda s: mesh_callbacks_are_outside_spec((s.get("rank") is None, s.get("rank") or 0, s["name"])))]
-        # runtime tooling callback (callback operand collections.defaultdict[0]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        self.series = collections.defaultdict(lambda: mesh_callbacks_are_outside_spec(collections.deque(maxlen=240)))
+        self.nodes = [Node(spec) for spec in sorted(roster(args.roster, self.links, args.nodes).values(), key=lambda s: (s.get("rank") is None, s.get("rank") or 0, s["name"]))]
+        self.series = collections.defaultdict(lambda: collections.deque(maxlen=240))
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(2, 2 * len(self.nodes)))
 
     def refresh(self):
-        # runtime tooling callback (callback operand self.pool.map[0]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        list(self.pool.map(mesh_callbacks_are_outside_spec(fetch), self.nodes))
+        list(self.pool.map(fetch, self.nodes))
         for node in self.nodes: self.account(node)
 
     def owner(self, address):
@@ -285,9 +279,7 @@ class Top:
         return node, next((p for p in fabric(node).get("ports") or [] if p.get("iface") == iface), None) if node else None
 
     def bridge_link(self, node, iface):
-        # runtime tooling callback (ordering key sorted): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        for bridge in sorted(fabric(node).get("bridges") or [], key=lambda b: mesh_callbacks_are_outside_spec((b.get("exited_at") is not None, -(b.get("exited_at") or 0)))):
+        for bridge in sorted(fabric(node).get("bridges") or [], key=lambda b: (b.get("exited_at") is not None, -(b.get("exited_at") or 0))):
             for index, spec in enumerate(bridge.get("links") or []):
                 if spec.get("device") == "rdma_" + iface:
                     peers = (bridge.get("stat") or {}).get("peers") or []
@@ -318,17 +310,13 @@ class Top:
                 state = f"net {session}" if session else "idle"
                 bridge = (f"{b['region']} pid {b['pid']} {state}" + (f" +{len(live) - 1}" if len(live) > 1 else ""), "ok" if "PAIRED" in phases or "PAIRED" in session else "warn")
             elif f.get("bridges"):
-                # runtime tooling callback (ordering key max): callback inversion of control is outside the working
-                # specification, and runtime callback overhead is inadmissible in performance-critical code.
-                b = max(f["bridges"], key=lambda x: mesh_callbacks_are_outside_spec(x["exited_at"]))
+                b = max(f["bridges"], key=lambda x: x["exited_at"])
                 bridge = (f"none (last {b['region']} exited {duration(now - b['exited_at'])} ago)", "dim")
             else: bridge = ("none", "dim")
             transport = f"{node.transport[0]} {node.transport[1]} {node.rtt * 1000:.0f}ms" if node.transport else "unreachable"
             add(f"  {node.rank if node.rank is not None else '-':<4} ", (f"{node.name:<17} ", "bold"), f"{chip:<14} {info.get('cores', '?'):>5}  {(str(round(mem / 2**30)) + 'G') if mem else info.get('memgb', '?') + 'G':<6} {up:<9} ",
                 (f"{bridge[0][:36]:<37}", bridge[1]), (transport, "dim" if node.transport else "bad"))
-            # runtime tooling callback (callback operand collections.defaultdict[0]): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            services, groups = f.get("services") or {}, collections.defaultdict(mesh_callbacks_are_outside_spec(list))
+            services, groups = f.get("services") or {}, collections.defaultdict(list)
             for label in sorted(services):
                 rows, short = services[label], label.replace("io.mesh.", "")
                 status = next((r.get("status") for r in rows if not r.get("disabled")), None)
@@ -362,27 +350,19 @@ class Top:
         add(("LINKS", "head"), ("   a<->b by Thunderbolt IP adjacency (ndp) and live bridge links; bytes/s are RECV bytes landed, from the bridges' per-call census", "dim"))
         cables = self.cables()
         if not cables: add(("  no cabled fabric neighbour seen", "warn"))
-        # runtime tooling callback (ordering key sorted): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        for key, states in sorted(cables.items(), key=lambda kv: mesh_callbacks_are_outside_spec(sorted((self.rank_of(x), x) for x, _ in kv[0]))):
-            # runtime tooling callback (ordering key sorted): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            (a, ai), (b, bi) = sorted(key, key=lambda end: mesh_callbacks_are_outside_spec((self.rank_of(end[0]), end[0])))
+        for key, states in sorted(cables.items(), key=lambda kv: sorted((self.rank_of(x), x) for x, _ in kv[0])):
+            (a, ai), (b, bi) = sorted(key, key=lambda end: (self.rank_of(end[0]), end[0]))
             na, pa = self.port(a, ai)
             nb, pb = self.port(b, bi)
             ranks = tuple(sorted(n.rank for n in (na, nb) if n and n.rank is not None))
             def both(getter, good=None):
-                # runtime tooling callback (callback invocation both.getter): callback inversion of control is outside the working
-                # specification, and runtime callback overhead is inadmissible in performance-critical code.
-                values = [mesh_callbacks_are_outside_spec(getter)(p) if p else "?" for p in (pa, pb)]
+                values = [getter(p) if p else "?" for p in (pa, pb)]
                 style = "ok" if good and all(v == good for v in values) else "warn" if good else ""
                 return ("/".join(str(v) for v in values), style)
-            # runtime tooling callback (callable supplied to both(lambda p: ','.join((n['state'] for n in p.get('neighbors') or [])) or 'none'); callable supplied to both(lambda p: p.get('ip'), 'active'); callable supplied to both(lambda p: p.get('tb_link'), 'up'); callable supplied to both(lambda p: {2: 'on', 0: 'off'}.get(p.get('rdma_power'), p.get('rdma_power')), 'on')): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            add(("  ", ""), (f"{a}:{ai}", "bold"), " <-> ", (f"{b}:{bi}", "bold"), "   TB ", both(lambda p: mesh_callbacks_are_outside_spec(p.get("tb_link")), "up"),
+            add(("  ", ""), (f"{a}:{ai}", "bold"), " <-> ", (f"{b}:{bi}", "bold"), "   TB ", both(lambda p: p.get("tb_link"), "up"),
                 ("  link-ups " + "/".join(str((p or {}).get("link_ups", "?")) for p in (pa, pb)), "dim"),
-                "   IP ", both(lambda p: mesh_callbacks_are_outside_spec(p.get("ip")), "active"), "  nbr ", both(lambda p: mesh_callbacks_are_outside_spec(",".join(n["state"] for n in p.get("neighbors") or []) or "none")),
-                "   RDMA dev ", both(lambda p: mesh_callbacks_are_outside_spec({2: "on", 0: "off"}.get(p.get("rdma_power"), p.get("rdma_power"))), "on"))
+                "   IP ", both(lambda p: p.get("ip"), "active"), "  nbr ", both(lambda p: ",".join(n["state"] for n in p.get("neighbors") or []) or "none"),
+                "   RDMA dev ", both(lambda p: {2: "on", 0: "off"}.get(p.get("rdma_power"), p.get("rdma_power")), "on"))
             segments = [("      RDMA port ", "dim")]
             for node, iface, p in ((na, ai, pa), (nb, bi, pb)):
                 bridge, peer = self.bridge_link(node, iface) if node else (None, None)
@@ -441,9 +421,7 @@ class Top:
                 comms, stat = communicators(bridge), bridge.get("stat") or {}
                 if bridge.get("exited_at") or not (comms or stat.get("clients")): continue
                 shown += 1
-                # runtime tooling callback (callback operand map[0]): callback inversion of control is outside the working
-                # specification, and runtime callback overhead is inadmissible in performance-critical code.
-                add(("  ", ""), (f"{node.name} {bridge['region']}", "bold"), (f"   {len(comms)} comms, {len(stat.get('clients') or [])} clients (pids {', '.join(map(mesh_callbacks_are_outside_spec(str), stat.get('clients') or [])) or '-'})", "dim"))
+                add(("  ", ""), (f"{node.name} {bridge['region']}", "bold"), (f"   {len(comms)} comms, {len(stat.get('clients') or [])} clients (pids {', '.join(map(str, stat.get('clients') or [])) or '-'})", "dim"))
                 for c in comms:
                     style = "bad" if c.get("state") == "failed" else "ok" if c.get("state") in ("send", "recv") else "dim"
                     add(("    ", ""), (f"#{c['comm']:<3} {c.get('state', '?'):<10}", style),
@@ -455,13 +433,9 @@ class Top:
         if self.links["kind"]: add(f"  declared  {self.links['kind']} {self.links['count']}: " + "  ".join(f"{x}-{y}" for x, y in self.links["links"]), (f"   ({self.links['path']})", "dim"))
         names = sorted({x for key in cables for x, _ in key})
         edges = {frozenset(x for x, _ in key) for key in cables}
-        # runtime tooling callback (ordering key sorted): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        order = lambda edge: sorted(edge, key=lambda x: mesh_callbacks_are_outside_spec((self.rank_of(x), x)))
+        order = lambda edge: sorted(edge, key=lambda x: (self.rank_of(x), x))
         if names: add(f"  cabled    {shape(names, edges)}: " + "  ".join(" <-> ".join(order(e)) for e in edges), ("   (Thunderbolt IP adjacency, ndp)", "dim"))
-        # runtime tooling callback (callback operand collections.defaultdict[0]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        calls = collections.defaultdict(mesh_callbacks_are_outside_spec(set))
+        calls = collections.defaultdict(set)
         for node in self.nodes:
             for bridge in fabric(node).get("bridges") or []:
                 if bridge.get("exited_at"): continue
@@ -529,23 +503,15 @@ def start_probe(top):
             node.probe = {"at": time.time(), "states": (node.probe or {}).get("states", {}), "note": "not probed: " + ("a bridge runs there (its link phase is the port state)" if busy else "a verbs process is in U" if wedged else "unreachable" if node.error else "a probe is outstanding")}
             continue
         node.probing = True
-        # runtime worker callback (thread target threading.Thread): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        threading.Thread(target=mesh_callbacks_are_outside_spec(probe), args=(node,), daemon=True).start()
+        threading.Thread(target=probe, args=(node,), daemon=True).start()
 
 def main():
     parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth between mesh nodes, read from each node's io.mesh.telemetry (:8788) and io.mesh.nodeinfo; sends no traffic of its own.")
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("-n", "--interval", type=mesh_callbacks_are_outside_spec(float), default=1.0)
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("--window", type=mesh_callbacks_are_outside_spec(float), default=5.0)
+    parser.add_argument("-n", "--interval", type=float, default=1.0)
+    parser.add_argument("--window", type=float, default=5.0)
     parser.add_argument("--links", default=first_file([os.environ.get("MESH_LINK_MAP"), "~/metal-microbench/configs/links/pair-ring.txt"]))
     parser.add_argument("--roster", default=first_file([os.environ.get("MESH_NODES"), os.path.join(HERE, "..", "etc", "mesh-nodes.json"), "~/.local/mesh/etc/mesh-nodes.json", "/usr/local/mesh/etc/mesh-nodes.json"]))
-    # runtime command-line parsing callback (argparse conversion): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    parser.add_argument("--nodes", type=lambda text: mesh_callbacks_are_outside_spec([x for x in text.split(",") if x]), default=None)
+    parser.add_argument("--nodes", type=lambda text: [x for x in text.split(",") if x], default=None)
     parser.add_argument("--probe", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--html")
@@ -570,9 +536,7 @@ def main():
         if args.once or not args.html: print(ansi(lines, sys.stdout.isatty()))
         return
     if args.probe: start_probe(top)
-    # runtime tooling callback (callback operand curses.wrapper[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    curses.wrapper(mesh_callbacks_are_outside_spec(interactive), top)
+    curses.wrapper(interactive, top)
 
 if __name__ == "__main__":
     main()

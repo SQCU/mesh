@@ -331,21 +331,15 @@ def map_sites(src, maxsites=12, minsep=1024.0):
     if got is not None:
         return got
     ns = src.ns
-    # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    comp = [i for i in max(NAV.components(src.navadj), key=mesh_callbacks_are_outside_spec(len), default=[])
+    comp = [i for i in max(NAV.components(src.navadj), key=len, default=[])
             if tuple(round(x, 1) for x in src.navnodes[i]) in src.wpset]
     if not comp:
-        # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        comp = max(NAV.components(src.navadj), key=mesh_callbacks_are_outside_spec(len), default=[])
+        comp = max(NAV.components(src.navadj), key=len, default=[])
     cand = []
     for d in SITE_DIRS:
         axis = 0 if abs(d[0]) > 0.5 else 1
         U = 1 - axis
-        # offline asset-generation callback (ordering key sorted): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        pr = sorted(comp, key=lambda i: mesh_callbacks_are_outside_spec(-(src.navnodes[i][0] * d[0] + src.navnodes[i][1] * d[1])))
+        pr = sorted(comp, key=lambda i: -(src.navnodes[i][0] * d[0] + src.navnodes[i][1] * d[1]))
         for i in pr:
             node = [float(x) for x in src.navnodes[i]]
             eye = [node[0], node[1], node[2] + DOOR_SILL + DOOR_H * 0.5]
@@ -409,9 +403,7 @@ def map_sites(src, maxsites=12, minsep=1024.0):
                          'cell': cell,
                          'node': i, 'kind': 'continue' if cont else 'newcut',
                          'score': round(score, 3), **support})
-    # offline asset-generation callback (ordering key cand.sort): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    cand.sort(key=lambda s2: mesh_callbacks_are_outside_spec(-s2['score']))
+    cand.sort(key=lambda s2: -s2['score'])
     sites = []
     for s2 in cand:
         if all(math.dist(s2['p'], t['p']) >= minsep or
@@ -427,14 +419,10 @@ def walk_nodes(src):
     got = getattr(src, '_walk', None)
     if got is not None:
         return got
-    # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    comp = [i for i in max(NAV.components(src.navadj), key=mesh_callbacks_are_outside_spec(len), default=[])
+    comp = [i for i in max(NAV.components(src.navadj), key=len, default=[])
             if tuple(round(x, 1) for x in src.navnodes[i]) in src.wpset]
     if not comp:
-        # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        comp = max(NAV.components(src.navadj), key=mesh_callbacks_are_outside_spec(len), default=[])
+        comp = max(NAV.components(src.navadj), key=len, default=[])
     if not comp:
         comp = list(range(len(src.navnodes)))
     P = [list(src.navnodes[i]) for i in comp]
@@ -638,9 +626,7 @@ def region_graph_solve(j, edges_ab):
             arts.add(s0)
         comps.append(sorted(comp))
 
-    # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    big = max(comps, key=mesh_callbacks_are_outside_spec(len)) if comps else []
+    big = max(comps, key=len) if comps else []
     bigset = set(big)
     diam, ecc = 0, {}
     from collections import deque

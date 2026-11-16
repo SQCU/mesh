@@ -10,9 +10,7 @@ def load(mapdir):
     cache = os.path.join(mapdir, 'fused.waypoints.cache')
     nodes, adj = NAV.parse_cache(open(cache, encoding='latin-1').read())
     dadj = [set(a.keys()) for a in adj]
-    # offline asset-generation callback (callable supplied to key = lambda p: tuple((round(x, 1) for x in p))): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    key = lambda p: mesh_callbacks_are_outside_spec(tuple(round(x, 1) for x in p))
+    key = lambda p: tuple(round(x, 1) for x in p)
     idx = {key(nodes[i]): i for i in range(len(nodes))}
     for near, far in J.get('bot_jumps', []):
         u, v = idx.get(key(near)), idx.get(key(far))
@@ -31,9 +29,7 @@ def region_of(J, nodes):
                 r = i
                 break
         if r is None:
-            # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
-            # specification, and runtime callback overhead is inadmissible in performance-critical code.
-            r = min(range(len(cent)), key=lambda i: mesh_callbacks_are_outside_spec(math.dist(p, cent[i])))
+            r = min(range(len(cent)), key=lambda i: math.dist(p, cent[i]))
         reg.append(r)
     return reg
 
@@ -80,9 +76,7 @@ def region_solve(n, edges):
         if rootkids > 1:
             arts.add(s0)
         comps.append(sorted(comp))
-    # offline asset-generation callback (ordering key max): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    big = max(comps, key=mesh_callbacks_are_outside_spec(len)) if comps else []
+    big = max(comps, key=len) if comps else []
     bs = set(big)
     diam = 0
     for s0 in big:
@@ -113,11 +107,9 @@ def region_solve(n, edges):
     blocks = {}
     for i in range(n):
         blocks.setdefault(find(i), []).append(i)
-    # offline asset-generation callback (ordering key sorted): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
     return dict(adj=adj, components=comps, articulation=sorted(arts), cutedges=sorted(cuts),
                 degree=[len(adj[i]) for i in range(n)], hop_diameter=diam,
-                blocks=sorted(blocks.values(), key=mesh_callbacks_are_outside_spec(len), reverse=True))
+                blocks=sorted(blocks.values(), key=len, reverse=True))
 
 def dijkstra(W, src):
     dist = [float('inf')] * len(W)
@@ -148,15 +140,11 @@ def navmesh_metrics(J, nodes, dadj, idx, key, reg):
             continue
         cx = sum(nodes[i][0] for i in pts) / len(pts)
         cy = sum(nodes[i][1] for i in pts) / len(pts)
-        # offline asset-generation callback (ordering key min): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        reps[m] = min(pts, key=lambda i: mesh_callbacks_are_outside_spec(math.hypot(nodes[i][0] - cx, nodes[i][1] - cy)))
+        reps[m] = min(pts, key=lambda i: math.hypot(nodes[i][0] - cx, nodes[i][1] - cy))
 
     sock = []
     for jn in J['joins']:
-        # offline asset-generation callback (callback invocation navmesh_metrics.key): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        sock.append((idx.get(mesh_callbacks_are_outside_spec(key)(jn['sa'])), idx.get(mesh_callbacks_are_outside_spec(key)(jn['sb']))))
+        sock.append((idx.get(key(jn['sa'])), idx.get(key(jn['sb']))))
     D, P, cover = {}, {}, {}
     for m, r in reps.items():
         if r is None:

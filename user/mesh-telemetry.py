@@ -200,9 +200,7 @@ def bridge_counters():
 
 def processes(pids):
     table = {}
-    # runtime tooling callback (callback operand map[0]): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    for line in output(["/bin/ps", "-ww", "-o", "pid=,stat=,etime=,command=", "-p", ",".join(map(mesh_callbacks_are_outside_spec(str), pids))]).splitlines() if pids else ():
+    for line in output(["/bin/ps", "-ww", "-o", "pid=,stat=,etime=,command=", "-p", ",".join(map(str, pids))]).splitlines() if pids else ():
         fields = line.split(None, 3)
         if len(fields) == 4 and fields[0].isdigit(): table[int(fields[0])] = {"stat": fields[1], "elapsed": fields[2], "argv": fields[3].split()}
     return table
@@ -629,9 +627,6 @@ class TelemetryHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        # runtime tooling callback (framework hook TelemetryHandler.do_GET): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         target = urllib.parse.urlsplit(self.path)
         if target.path == "/v1/artifact":
             query = urllib.parse.parse_qs(target.query)
@@ -663,9 +658,6 @@ class TelemetryHandler(BaseHTTPRequestHandler):
         self.send_json({"schema": 1, "error": "unknown endpoint", "latest": "/v1/latest", "history": "/v1/history?since=SEQUENCE"}, 404)
 
     def do_POST(self):
-        # runtime tooling callback (framework hook TelemetryHandler.do_POST): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
         try:
@@ -681,9 +673,6 @@ class TelemetryHandler(BaseHTTPRequestHandler):
         self.send_json({"schema": 1, "ingest_sequence": sequence}, 202)
 
     def log_message(self, *args):
-        # runtime tooling callback (framework hook TelemetryHandler.log_message): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         self.server.store.publish_protocol({"at":time.time(),"client":self.client_address[0],"message":args[0] % args[1:]})
 
 class TelemetryHTTPServer(ThreadingHTTPServer):
@@ -697,9 +686,6 @@ class TelemetryHTTPServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         # a request that failed (mostly a client that reset or left) noted in the ring, as log_message's lines are,
         # not written to stderr as a traceback (about 3000 a month in the M5's io.mesh.telemetry.err.log)
-        # runtime tooling callback (framework hook TelemetryHTTPServer.handle_error): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         error = sys.exc_info()[1]
         self.store.publish_protocol({"at": time.time(), "client": client_address[0], "error": f"{type(error).__name__}: {error}"})
 
@@ -707,9 +693,6 @@ class TelemetryHTTPServer6(TelemetryHTTPServer):
     address_family = socket.AF_INET6
 
     def server_bind(self):
-        # runtime tooling callback (framework hook TelemetryHTTPServer6.server_bind): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        mesh_callbacks_are_outside_spec
         try: self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         except OSError as error: self.store.publish_protocol({"at":time.time(),"stage":"dual_stack","error":f"{type(error).__name__}: {error}"})
         super().server_bind()
@@ -721,15 +704,11 @@ def stop(*_):
 
 def serve():
     store = TelemetryRing()
-    # runtime worker callback (thread target threading.Thread): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    for target in (power_loop, bandwidth_loop, sample_loop, ingest_loop): threading.Thread(target=mesh_callbacks_are_outside_spec(target), args=(store,), daemon=True).start()
+    for target in (power_loop, bandwidth_loop, sample_loop, ingest_loop): threading.Thread(target=target, args=(store,), daemon=True).start()
     host = os.environ.get("MESH_TELEMETRY_HOST", "::")
     server_class = TelemetryHTTPServer6 if ":" in host else TelemetryHTTPServer
     server = server_class((host, PORT), TelemetryHandler, store)
-    # runtime worker callback (thread target threading.Thread): callback inversion of control is outside the working
-    # specification, and runtime callback overhead is inadmissible in performance-critical code.
-    threading.Thread(target=mesh_callbacks_are_outside_spec(server.serve_forever), daemon=True).start()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     while not STOP.is_set():
         STOP.wait(1)
     server.shutdown()
@@ -742,10 +721,6 @@ if __name__ == "__main__":
         store.set_bandwidth(bandwidth())
         print(json.dumps(snapshot(store), separators=(",", ":")))
     else:
-        # runtime tooling callback (callback operand signal.signal[1]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        signal.signal(signal.SIGTERM, mesh_callbacks_are_outside_spec(stop))
-        # runtime tooling callback (callback operand signal.signal[1]): callback inversion of control is outside the working
-        # specification, and runtime callback overhead is inadmissible in performance-critical code.
-        signal.signal(signal.SIGINT, mesh_callbacks_are_outside_spec(stop))
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
         serve()
