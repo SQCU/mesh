@@ -509,6 +509,34 @@ before printing. The original scalar-double MPS binder produces local float byte
 obligation is distinct from Tensor storage declaration. These are concrete unfinished interfaces, not new
 semantic requirements on the page table.
 
+### Public compiler-to-native registration
+
+Compiler `9ccc520` corrects the indirect relation group by retaining each original use, actual assertion
+selection and bounds, and one native representation per original computed value. Symbolic indexing,
+typed arithmetic operands, masks and selected assertions consume that same value representation.
+
+The public `native_execution.declarations.emit` entry then completed on the existing RunningMean and
+Indexing sample modules, through `compiler_emit.prepare` and the actual reference scheduling entry.
+The configured AOT page quantum was 65536 bytes; compilation needed no attached runtime or initialized
+frame contents. Native `b7bc820` used the previously built Metal `9ed03578` library. RunningMean registered
+three actual calls and thirteen access maps; Indexing registered three calls and eleven maps, including
+four indirect-index uses. Both retained the exact Prepared and Scheduled objects. These counts describe
+the observed instances, rather than a prescribed topology or evidence of whole-domain coverage.
+
+Both commands exited zero. All forty-four recorded compiler, original Torch, reference, shared mapping
+and native source hashes remained fixed through both calls. Logs are
+`compiler-emit/artifacts/9ccc520-b7bc820-native-emit.log`
+(SHA256 `e10c2d8389063e65e07e318ed6756550a697b45a97b01ca73e14f59c2117630d`) and
+`9ccc520-b7bc820-indexing-native-emit.log`
+(`a7aa44a444fbdf85250683de01bd0668b10f02d0ba53f8256afaa521ef01a7c9`). The source manifest is
+`9ccc520-b7bc820-native-emit-source-before.json`
+(`b08e14538b1ae2f82dd91db79976d0c0a23f01a52dda2cb70e3597848136838e`).
+
+This observes actual declaration, source emission, relation lowering and canonical operation registration.
+Final constructed-kernel collection composition, final printing, runtime binding/allocation and native
+execution remain unfinished. The next paired source work consumes the existing Clone correspondence and
+original selected call/signature owners at that final emission boundary.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
