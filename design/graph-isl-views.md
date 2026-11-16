@@ -53,3 +53,16 @@ consumer must use that same implementation
 for all borrowed objects; linking a second ISL implementation or system 0.28 is
 not this interface. The public header only forward-declares the original ISL
 types and introduces no replacement context or object representation.
+
+`mesh_graph_index_is_empty` asks ISL whether the index's predicate intersects
+its original domain box. It returns 1 for an empty intersection, including an
+empty domain, 0 otherwise, and a negative errno on invalid input or ISL failure.
+The query runs under the existing context lock.
+
+`mesh_graph_access_map_union` requires the same domain owner, flags and guard
+source. It unions the original relations and their guard sets under that lock,
+then uses `access_new` to retain the domain and produce the measured relation.
+An unguarded input makes the combined guard unguarded. It returns the ordinary
+status/output pair; it never substitutes a bounding interval. The native binding
+retains both complete input owners alongside the new result. Scheduling update
+kind and physical read/write usage remain separate operands of the caller.

@@ -2880,6 +2880,16 @@ int mesh_graph_index_fixed(const struct mesh_graph_index *x, int64_t *value) {
   pthread_mutex_unlock(&d->context->lock);
   return fixed;
 }
+int mesh_graph_index_is_empty(const struct mesh_graph_index *x) {
+  if (!x || !x->predicate) return -EINVAL;
+  struct mesh_graph_domain *d = x->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_set *over = isl_set_intersect(isl_set_copy(d->box), isl_set_copy(x->predicate));
+  isl_bool empty = isl_set_is_empty(over);
+  isl_set_free(over);
+  pthread_mutex_unlock(&d->context->lock);
+  return empty < 0 ? -ENOMEM : empty;
+}
 struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *a, const struct mesh_graph_index *b) {
   if (!index_predicates(a, b)) return NULL;
   INDEX_LOCKED(a->domain, index_made(a->domain, NULL, isl_set_intersect(isl_set_copy(a->predicate), isl_set_copy(b->predicate))));
@@ -2990,6 +3000,20 @@ int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const s
   *out = access_new(d, relation, where, (index && index->value ? 0 : MESH_GRAPH_ACCESS_MAP_BOUND) |
                                         (flags & (MESH_GRAPH_ACCESS_MAP_GUARD_DATA | MESH_GRAPH_ACCESS_MAP_UNKNOWN)),
                     guard_source);
+  pthread_mutex_unlock(&d->context->lock);
+  return *out ? 0 : ENOMEM;
+}
+int mesh_graph_access_map_union(const struct mesh_graph_access_map *a, const struct mesh_graph_access_map *b,
+                                 struct mesh_graph_access_map **out) {
+  *out = NULL;
+  if (!a || !b || a->domain != b->domain || a->flags != b->flags || a->guard_source != b->guard_source)
+    return EINVAL;
+  struct mesh_graph_domain *d = a->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_set *guard = a->guard && b->guard ? isl_set_union(isl_set_copy(a->guard), isl_set_copy(b->guard)) : NULL;
+  if (!a->guard || !b->guard || guard)
+    *out = access_new(d, isl_map_union(isl_map_copy(a->relation), isl_map_copy(b->relation)),
+                      guard, a->flags, a->guard_source);
   pthread_mutex_unlock(&d->context->lock);
   return *out ? 0 : ENOMEM;
 }

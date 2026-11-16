@@ -408,6 +408,7 @@ struct mesh_graph_index *mesh_graph_index_wrap(const struct mesh_graph_index *x,
 /* x's one value: 1 and `*value` it where isl proves x the same integer at every point of its domain's box (a typed
    producer's operand fixed by its constants, its overrides' values or its CONSTANT data, however computed), else 0 */
 int mesh_graph_index_fixed(const struct mesh_graph_index *x, int64_t *value);
+int mesh_graph_index_is_empty(const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_and(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_or(const struct mesh_graph_index *, const struct mesh_graph_index *);
 struct mesh_graph_index *mesh_graph_index_not(const struct mesh_graph_index *);
@@ -424,6 +425,8 @@ enum { MESH_GRAPH_ACCESS_MAP_BOUND = 1, MESH_GRAPH_ACCESS_MAP_GUARD_DATA = 2, ME
 int mesh_graph_access_map_create(const struct mesh_graph_domain *domain, const struct mesh_graph_index *index, int64_t lo,
                                  int64_t hi, const struct mesh_graph_index *guard, uint32_t flags,
                                  uint64_t guard_source, uint64_t origin, uint64_t scale, uint64_t width,
+                                 struct mesh_graph_access_map **out);
+int mesh_graph_access_map_union(const struct mesh_graph_access_map *, const struct mesh_graph_access_map *,
                                  struct mesh_graph_access_map **out);
 void mesh_graph_access_map_retain(const struct mesh_graph_access_map *);
 void mesh_graph_access_map_free(const struct mesh_graph_access_map *);
