@@ -200,9 +200,9 @@ static uint32_t plan_tree_parent(const void *context,size_t v){
   return v==tree->root || tree->parent[v]>=tree->n?tree->n:tree->parent[v];
 }
 static void plan_tree_up(void *consumer,uint32_t at,uint32_t step){ if(step==1)*(uint32_t *)consumer=at; }
-static uint64_t plan_quantum(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
-static uint64_t plan_quanta(uint64_t bytes,uint64_t quantum){ return (bytes+quantum-1)/quantum; }
-static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){ return plan_quanta(bytes,plan_quantum(m)); }
+uint64_t mesh_plan_quantum(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
+uint64_t mesh_plan_quanta(uint64_t bytes,uint64_t quantum){ return (bytes+quantum-1)/quantum; }
+static uint64_t plan_blocks(const struct hdr *m,uint64_t bytes){ return mesh_plan_quanta(bytes,mesh_plan_quantum(m)); }
 /* L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, ACAPS Technical Memo 33, §2.2;
    design/plan-to-bridge-change-request.md R2 */
 static uint32_t plan_copies(const struct plan *p,uint32_t j){
@@ -702,7 +702,7 @@ static int plan_block(struct plan *plans,uint32_t count,uint64_t quantum,const u
   const struct plan_arcs arcs={start,end,function,index,copy,plans,count,program};
   if(!status)status=mesh_graph_greedy_by_size(records,size,NULL,plan_intersect,&arcs,quantum,offset,&total);
   for(size_t q=0;!status && q<records;q++)x->at[q]=offset[q]/quantum;
-  if(!status)x->blocks=plan_quanta(total,quantum);
+  if(!status)x->blocks=mesh_plan_quanta(total,quantum);
   free(size);free(start);free(end);free(offset);free(function);free(index);free(copy);
   return status;
 }
@@ -721,7 +721,7 @@ static int plan_place(struct plan *plans,uint32_t count,struct hdr *m,struct pla
   uint64_t *operations=malloc(((size_t)count+1)*sizeof *operations);
   if(!operations)return ENOMEM;
   for(uint32_t f=0;f<count;f++)operations[f]=plan_operations(plans+f);
-  const int blocked=plan_block(plans,count,plan_quantum(m),operations,x,program);
+  const int blocked=plan_block(plans,count,mesh_plan_quantum(m),operations,x,program);
   if(blocked){free(operations);return blocked;}
   plan_items(plans,count,m,x,1);
   plan_items(plans,count,m,x,0);
@@ -1597,7 +1597,7 @@ static int plan_cut_order(const void *a,const void *b){
 }
 /* design/aot-compilation-change-request.md A7; F. B. Schneider, ACM Comput. Surv. 22(4), 1990 */
 static int plan_instructions(struct plan *p,const struct hdr *m){
-  const uint64_t quantum=plan_quantum(m);
+  const uint64_t quantum=mesh_plan_quantum(m);
   const uint32_t count=p->transfers;
   size_t *first=malloc(((size_t)p->demands+1)*sizeof *first),*order=malloc(((size_t)count+1)*sizeof *order);
   uint64_t *start=NULL,*pieces=NULL,*index=NULL,room=0,most=0,ends=0,at=0;
@@ -1693,7 +1693,7 @@ static int plan_cover_order(const void *a,const void *b){
 /* P. Druschel and L. L. Peterson, Fbufs, SOSP 1993; V. S. Pai, P. Druschel and W. Zwaenepoel, IO-Lite, ACM TOCS 18(1),
    2000; design/disjoint-pages-change-request.md C3.3; design/torch-capture-change-request.md item 6 */
 static int plan_sets(struct plan *p,const struct hdr *m){
-  const uint64_t quantum=plan_quantum(m);
+  const uint64_t quantum=mesh_plan_quantum(m);
   uint64_t blocks=0,touches=0,relays=0;
   if(!(p->block_first=malloc(((size_t)p->givens+1)*sizeof *p->block_first)))return ENOMEM;
   for(uint32_t j=0;j<p->givens;j++){
@@ -2128,7 +2128,7 @@ static int plan_reserve(struct hdr *m,uint32_t rows,const uint64_t *used,uint32_
 static void plan_bind_table(struct mesh_ctx *context,const struct mesh_value *values,uint32_t count,
                             const uint32_t *page,uint32_t row){
   struct hdr *m=context->M;
-  const uint64_t block=plan_quantum(m);
+  const uint64_t block=mesh_plan_quantum(m);
   for(uint32_t j=0;j<count;j++){
     const struct mesh_value *v=values+j;
     const struct mesh_section x=v->section;
@@ -2572,7 +2572,7 @@ static int plan_run(struct mesh_ctx *context,uint64_t group,uint64_t program,str
   if((status=mesh_nodes_read(context,&nodes)))goto done;
   if(nodes.self>=nodes.count){status=EHOSTUNREACH;goto done;}
   if(!(program>>nodes.self&1)){status=EINVAL;goto done;}
-  const uint64_t block=plan_quantum(m);
+  const uint64_t block=mesh_plan_quantum(m);
   /* mesh-collective.h mesh_plan_program: the slots the calls' uses bind to program roots, once (each slot's storage
      its root's, PLAN_SEVERAL where its function's calls bind it to more than one) */
   for(uint32_t f=0;joint->use && f<count;f++){

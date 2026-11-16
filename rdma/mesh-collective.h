@@ -133,6 +133,8 @@ _Static_assert(sizeof(struct mesh_planned_call)==40 && offsetof(struct mesh_plan
                sizeof(struct mesh_planned)==152 &&
                sizeof(struct mesh_planned_transfer)==24 &&
                sizeof(struct mesh_planned_cause)==8,"mesh_planned: rdma/mesh.py Planned");
+uint64_t mesh_plan_quantum(const struct hdr *);
+uint64_t mesh_plan_quanta(uint64_t bytes,uint64_t quantum);
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
               const uint32_t *chains,uint64_t deadline,struct mesh_planned *planned);
