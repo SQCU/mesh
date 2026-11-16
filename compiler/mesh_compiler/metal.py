@@ -21,6 +21,7 @@ from .operations import CPU, GPU
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh
 import mesh_graph
+from mesh_index import INDEX_LT, INDEX_LE, INDEX_GT, INDEX_GE, INDEX_EQ, INDEX_NE
 
 # metal-microbench metal_ir.h METAL_IR_INPUT .. METAL_IR_STATE (a value's role), its region kinds, UINT32_MAX (no
 # value), and METAL_IR_DATA, METAL_IR_TRANSPORT, METAL_IR_STEP (metal_ir_value_info `word` of the step value)
@@ -427,7 +428,6 @@ class UpstreamNeural(C.Structure):
 # domain, an original symbol over [lo, hi] (ROOT: `axis` its active_range_trees() position, `reduction` its
 # is_reduction; INDIRECT an indirect symbol; LOOP a CPU loop variable), and MESH_GRAPH_INDEX_LT .. _NE
 DOMAIN_ROOT, DOMAIN_INDIRECT, DOMAIN_LOOP = range(3)
-INDEX_LT, INDEX_LE, INDEX_GT, INDEX_GE, INDEX_EQ, INDEX_NE = range(6)
 
 
 class DomainDim(C.Structure):
