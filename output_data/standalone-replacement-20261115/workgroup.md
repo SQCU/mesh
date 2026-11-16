@@ -393,6 +393,29 @@ replaying LoopBody blocks. The current work instead exposes the original interpr
 blocks' existing execution, with their original range, indirect and masked-call relationships. Native registration,
 allocation and invocation remain outstanding, along with categorical replacement and full-domain coverage.
 
+### Original access results and allocation geometry: source review
+
+Compiler-emit `399c0b6` retains each original LoopBody invocation's interpreter, arguments, result,
+parent occurrence and indexing dictionaries by reference. Review found that these operands preceded
+`prepare_indexing` and omitted the internal indirect-index correspondence and reduction-store guard.
+Commit `a70f94f` retains those results at their original producers, together with each actual access's
+mode, interpreter/node/CSE scope and original CSEVariable or DeferredLine result. The original operation
+trace retains wrapping operands and results; original CSE and masked-body selections remain accessible.
+Independent source review found one original interpreter run and no added numerical replay or text parser.
+The eight patches project exactly onto twenty-six original Torch files and pass AST and diff checks.
+
+These retained generator occurrences are distinct from the final emitted accesses. The removal-filtered
+view consumes the original deferred-store removal result; target lowering must also consume the original
+CSE and masked selections. The typed launch-result handoff and external-kernel input/output correspondence
+are the next adjacent producer work. No numerical execution of this checkpoint is recorded here.
+
+Mesh `24b01623` exposes the existing page-quantum and page-count functions as `mesh_plan_quantum` and
+`mesh_plan_quanta`; their original callers share the same unchanged definitions. C syntax and diff checks
+passed. The standalone declaration producer is being paired with the actual prepared buffers, layouts,
+storage identities and mapped context. This checkpoint establishes the shared geometry source, with its
+native build/load, complete declarations, native relation/registration/allocation/invocation and categorical
+replacement still outstanding. Paging continues to supply ordinary byte addressing over existing layouts.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
