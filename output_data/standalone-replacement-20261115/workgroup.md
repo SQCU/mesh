@@ -1081,6 +1081,27 @@ The resulting library exports all eight added functions. Log: `ad5bb883-libmesh-
 The original Polly explicit-binding adapter and its direct caller remain under implementation; guarded access
 relations, native execution and categorical replacement retain their outstanding obligations.
 
+Compiler `2206bed` completes the original Polly source-library checkpoint: the shared SCEVAffinator visitor has
+an additional entry over the supplied domain, original SCEV/loop bindings and original analysis owners. Source
+review corrected anonymous-space construction in the new entry and unchecked initial LLVM Error ownership.
+The complete original static target rebuilt successfully; both entry signatures are defined. The canonical patch,
+original CMake recipe, source/license identities and exact result contracts are in
+`compiler-emit/docs/polly-bindings.md`; its artifact receipt records the final archive SHA256
+`c9021f934754ada128a5b9191739c2f920bba4f0852b8d47b4e1f8efbf61bc36`.
+
+Compiler `771f1a9` supplies the reader's explicit patched-Polly, static-LLVM and Mesh library operands. Its recorded
+fresh-process build/load read the existing 11,680-byte bitcode successfully, with no aggregate LLVM or separate
+ISL dynamic library. That reader did not invoke SCEVAffinator. Its exact pre-final-Polly-rebuild inputs are recorded
+in `compiler-emit/artifacts/polly-reader-link-21.1.8/receipt.json`.
+
+Link review found 25 Polly-required ISL symbols omitted from the existing Mesh dynamic library even though all
+were present in its original static archive. Mesh `d6da69fd` force-loads that same archive into the same provider.
+Root's normal library rebuild exited zero with six source hashes unchanged and all 670 required ISL symbols
+exported. Log SHA256: `ee3eeee4592d6733c89e9a83b25a33659469dcad5dda67d5b65fd77654ae0ab7`;
+`d6da69fd-libmesh-receipt.json` and `d6da69fd-libmesh-source-before.json` retain the observation.
+The next direct caller must retain the original domain/index owners, complete PWACtx invalid sets and assumptions;
+an actual bound query, valid-domain discharge and full physical-access handoff remain unfinished.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
