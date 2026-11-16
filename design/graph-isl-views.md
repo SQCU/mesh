@@ -37,8 +37,10 @@ binding owners. Its wrapping restrictions and recorded assumptions remain its
 own result; this API does not discard or discharge them.
 
 Compile against Mesh's existing ISL 0.27 headers and link to its existing ISL
-implementation, built with `--with-int=imath-32`. `rdma/Makefile` already links
-that archive into `libmesh.dylib`. The consumer must use that same implementation
+implementation, built with `--with-int=imath-32`. `rdma/Makefile` force-loads
+that same complete archive into `libmesh.dylib`, including original conversion
+operations used by Polly but not referenced by Mesh's C implementation. The
+consumer must use that same implementation
 for all borrowed objects; linking a second ISL implementation or system 0.28 is
 not this interface. The public header only forward-declares the original ISL
 types and introduces no replacement context or object representation.
