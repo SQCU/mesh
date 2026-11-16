@@ -1689,7 +1689,7 @@ The existing naming discipline continues to supply terminology. The [four-senten
 and [composition request](../../design/compilation-composition-change-request.md#numerical-lowerer-boundary)
 carry this direction into implementation and Codex review.
 
-Current source review identifies the first incomplete boundary. `compiler_emit.prepare` returns one complete
+The initial review at compiler `866f14c` and native `0281e1e` recorded this boundary. `compiler_emit.prepare` returns one complete
 `Prepared` containing the Scheduled and original GraphLowering owners. `emit` returns a Compiled with functions
 accepted by the reference Program. The original-package adapter `native_execution.Prepared` also implements
 that callable convention. In contrast, the paged target's `emit_native` performs schedule emission, atomic
@@ -1723,6 +1723,48 @@ This is a producer/result/consumer workgroup for Codex supervision. Assignment r
 four-sentence memoranda together with the compatible-lowerer memorandum and the actual reference symbols.
 The documentary changes give the next implementation its interface and review obligations; they do not claim
 that the paged or ANE callable result has already been implemented.
+
+### Whole-result handoff: implementation and observation
+
+Operator, 16 November:
+
+> point 1 is basically 3 lines of code or maybe even negative lines of code since what is described here is fundamentally simpler than 'publishing' anything but the entire results
+
+The direct source review confirmed that Prepared already owns the entire Scheduled and original GraphLowering
+collection, while the native Program already retains that exact Prepared as `source`. The earlier instruction
+to expose complete owners is satisfied by passing those existing objects. Target-specific expansion and its
+analysis results remain on the original Program, kernels, calls and compilation owners.
+
+Compiler `0737b39` supplies `emit_schedule(prepared, native_program=None)`: call the original producer for each
+graph, then return the same Prepared. Native `0303cfd` calls it with its existing Program as the additional
+operand before `emit_native`. Ordinary `compile` composes preparation, schedule production and completion.
+Compiler `a9f6f0c` makes original AOT completion consume the produced wrapper through `emit_wrapper`; ordinary
+AOT/FX/JIT callers compose the same original stages explicitly. This corrects the former continuation's second
+invocation of schedule generation. Constant and main graphs retain their original scopes and complete owners.
+
+The unchanged reference Program executed the actual split result for the existing RunningMean instance:
+two processors, six channels, three calls, state 1/2/3 and maximum absolute numerical error 0. The original
+graphs, Schedulers and wrappers retained their identities across the handoff. Existing native-entry CPU and MPS
+examples each executed two processors/two channels and three calls, preserving input identity/mutation and
+shared state. Original ordinary AOT and split AOT both executed a runtime-constant-folded graph correctly,
+with the split path retaining its original constant graph.
+
+Public native declaration emission also consumed the shared stage. Packed-half Indexing retained three calls
+and discharged its eight original atomic proof obligations. The rebuilt Metal library from the Address-width
+revision produced an `ulong` subscript formal for the actual as_strided origin 8/subscript -1 case with
+page_bytes=8589934592. These native observations stop at configured source; numerical dispatch and physical
+placement were not performed. The first native observation tried to inspect the unemitted source collection's
+printed parameter; its corrected observation reads the actual emitted projected collection. Both logs remain.
+
+Receipt: `compiler-emit/artifacts/20261116-shared-schedule/receipt.json`, SHA256
+`26aa1e698250ce60dfcff0299fb1df8915680ad0c132bdb871da019f69998dcf`.
+All 116 watched source/library inputs remained unchanged during execution.
+
+The direct-consumer review localizes native callable completion to the existing wrapper: install the produced
+kernel definitions and bind their produced frame/error-workspace operands before original wrapper emission,
+AOT compilation and package loading. `Compiled.prepared.graphs[processor].native_program` already retains the
+whole target owner. Physical allocation/transport and ANE realization remain outstanding; the executable
+reference observations above establish the completed common schedule handoff, rather than those later stages.
 
 ## Sources used in their respective roles
 
