@@ -5,6 +5,9 @@ The [dated work account](compiler-uncovered-work-2026-11-14.md#recorded-state-20
 portions from remaining work and recorded complaints. Completed portions remain documentary history; the entries
 below identify requests with concrete work still outstanding in that account.
 
+The [compiler pseudocode](compiler-pseudocode.md) composes the requests below through
+their existing algorithms and complete result views, from capture through execution.
+
 ## Active requests
 
 - [AOT compilation](aot-compilation-change-request.md)
