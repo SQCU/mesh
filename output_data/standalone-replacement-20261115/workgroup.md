@@ -802,6 +802,26 @@ Logs: `metal-microbench/output_data/standalone-replacement-20261115/f8facce2-nat
 The corresponding `*-before.json` files retain the source manifests. Native numerical/transport execution
 and categorical replacement remain outstanding.
 
+### Original callable-form producer and ordinary execution
+
+Compiler `f39348a` adds an explicit function form to the same original MPS emitter. Its original
+`codegen_kernel_source` returns the complete MetalKernel; ordinary `codegen_kernel` consumes its source.
+Original workgroup allocations produce their actual reference/pointer parameters, while local allocations
+stay local. Original parameters, builtin operands and the reduction threadgroup bound remain available.
+The independent source review covered all twelve original allocation callers and the ordinary emission caller.
+The agent's eight-patch projection reproduced all twenty-seven installed source files, with AST/diff checks.
+
+Root then ran the existing shared MPS example through actual compiler-emit and reference Program. Its numerical,
+input-identity, alias, stride, offset and persistent-state assertions passed, with states `1 → 2 → 3` and exit zero.
+All forty recorded source hashes remained unchanged. Log: `compiler-emit/artifacts/f39348a-shared-mps.log`
+(SHA256 `7094e1388ed10d69ea17244cb5f804ce9b890e6faf0be9d192711ab6b91ae286`);
+`f39348a-shared-mps-before.json` records the sources. This observes the original kernel-form caller, not a linked
+callable execution.
+
+The remaining producer handoff is selected writer effects: preparation currently materializes the body before
+construction selects those effects. The paired work retains the original store result through that selection
+and supplies it to the original final emitter. Native callable declarations/linkage remain subsequent consumers.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
