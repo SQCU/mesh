@@ -1615,6 +1615,35 @@ Public receipt: `compiler-emit/artifacts/92430dd-atomic-footprints/receipt.json`
 `d270c1101906481b46f1518e5e63e1dd854ec95068cfc2d4f878d5dddeaca0fa`;
 run-log SHA256 `59f4026664a6d53a74138c3115f7d969ec94f368242e679cdd0c804ac67771fa`.
 
+### Address width follows the same declared geometry at the call boundary
+
+Review at compiler `92430dd`, Metal `4ef4bb5a` and native `a82bff7` corrects the earlier broad claim that the
+u32/u64 Address conversion is itself a demonstrated mismatch. With a small root, page size and origin, valid
+root-relative byte positions are preserved by unsigned modular addition. The existing native type spans are
+consumed by final printing. Original GraphLowering input layout, ReinterpretView loader and underlying-buffer
+selection also preserve their different offset responsibilities; source review found no general double count.
+
+There is a narrower concrete defect in the existing width decision. Torch's original `as_strided` lowering
+subtracts an input tensor's storage offset for an explicit absolute storage offset. A half input at element
+offset four and an `as_strided` view at element offset three therefore supplies relative byte offset minus two
+and native origin eight, reaching valid root byte six. With explicit AOT page size `2^33`, AddressFunctions
+chooses a u32 formal from the small root extent, while Address widens that truncated operand before adding
+the origin because the page size is large. The result is `2^32 + 6`. Both function signature and body must
+consume the same existing geometry width decision before that conversion.
+
+The assigned revision centralizes that existing decision across its Address callers and preserves the shared
+address algorithm, original Tint Function/Clone and final emitters. The existing explicit AOT geometry remains
+an operand. Original compiler source supplies the signed-offset behavior, and original Tint integer types and
+conversion operations supply the target semantics. Source review and one public compiler invocation establish
+the corrected handoff; runtime allocation is a separate obligation.
+
+The adjacent review records the remaining actual producer gaps for the complete replacement: the standalone
+page geometry has yet to be paired to a whole solved placement/backing result; the old joint-root adapter
+drops storage alignment before solving; imported usable extent and actual root-base alignment need their
+original allocation owners. Logical page splitting alone does not establish that a packed hardware access
+has physically contiguous backing across a page boundary. These findings guide later direct handoffs; they
+do not impose a live transport context or additional program admission policy.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
