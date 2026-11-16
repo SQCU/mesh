@@ -369,6 +369,30 @@ access/signature/dispatch composition still outstanding. The next direct composi
 mechanism to accumulate address functions before one print, accounting for Tint's shared support declarations.
 The old `mesh_paged` single-direction accessor remains part of the implementation to be displaced.
 
+### Single collection, original access consumers and native binding load
+
+Metal-microbench `4ced467f` replaces the separately printed per-value collections with one original module:
+address requests return its assigned function symbols, and one final print supplies its Output/Parameter views.
+Native-execution `b203938` places Python source/kernel associations in ordinary GC-visible Python views while
+native handles retain their native Program. This corrects the cycle exposed by the actual kernel caller.
+Compiler-emit `5a6bfbd` connects MPS load, store, atomic-add and reduction-store emission to the shared address
+producer; `fdb5342` consumes the original removed-buffer result and places frame parameters after the original
+numerical/scalar/dynamic/error arguments. Independent source review covered this producer/access/signature group.
+
+The normal native library targets built `4ced467f` successfully, with all four source hashes unchanged
+(`metal-microbench/output_data/standalone-replacement-20261115/4ced467f-native-build.log` and
+`4ced467f-source-before.sha256`). The public `native_execution.pages.library(metal, mesh)` then built and loaded
+its actual extension from compiler-emit's isolated Python, exiting zero. The log is
+`compiler-emit/artifacts/4ced467f-b203938-pages-load.log`
+(SHA256 `9fb7413cd50c7f250178dcc678642c42f1b0755ed396028bad5b186b2f47409f`). This is module compilation/load
+evidence; native numerical/page/transport execution remains unobserved.
+
+The next direct producer supplies the original numerical compiler's domain/access/effect and launch results
+to canonical native registration. The old `lower_metal._Bodies` reconstructs access context by walking and
+replaying LoopBody blocks. The current work instead exposes the original interpreter/indexing results of those
+blocks' existing execution, with their original range, indirect and masked-call relationships. Native registration,
+allocation and invocation remain outstanding, along with categorical replacement and full-domain coverage.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
