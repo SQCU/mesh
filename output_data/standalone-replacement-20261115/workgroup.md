@@ -907,6 +907,45 @@ and [source-to-IR compiler interface](https://developer.apple.com/documentation/
 the installed compiler's options and `metal_atomic` signatures, and LLVM's original
 [`BitcodeReader`](https://llvm.org/docs/doxygen/BitcodeReader_8h_source.html) owner/result API.
 
+### Retained compiler result and atomic scope implementation
+
+Compiler `dbe6936` adds the small native owner over LLVM's original `MemoryBuffer`, `LLVMContext` and `Module`.
+Its Python interface returns original function, block, instruction, use and debug-location views, including
+inlined-at locations, with the owner retained. The public `compile_header` returns that owner alongside the
+complete compiler invocation result. Root built and loaded the binding successfully against the preserved
+original atomic bitcode. Its read-only buffer, function, location and use views remained usable after the initial
+Python reference was dropped. All three recorded source hashes stayed unchanged. Log:
+`compiler-emit/artifacts/dbe6936-llvm-binding-load.log`, SHA256
+`f631a08ae09fc2baca5e51416a19a2bc746d9ef083b9e59ffac2fa5c4518d22d`.
+
+Header checkpoint `9a1d85b` carries the explicit compile-time scope and pointer qualification through the original
+c10 atomic implementations. Original packed, bool, carry and vector algorithms remain single implementations;
+the original direct-helper signatures forward into their scoped implementations. The leaf calls supply scope
+to the original compiler intrinsics. All eleven add and eight binary specializations compiled at device and
+system scope, along with the original direct-helper calling forms. The source and compilation receipt are in
+`compiler-emit/artifacts/atomic-scope-17E188/`. This source received independent review.
+
+Compiler `cba28b1` pairs that header with the existing final store printer. Canonical selected effects now select
+the explicit scope and qualified pointer for atomic calls as well as the existing plain-store form. Ordinary
+call text remains unchanged. The nine patch projections reproduce all twenty-nine installed original source
+files; the agent's AST/diff checks and paired source review passed.
+
+Root then exercised the public `compile_header` interface on the explicit original-helper instantiations.
+Compilation and the original reader succeeded: 144 function definitions, a read-only 139,120-byte bitcode buffer,
+and 2,096 source locations, with retained function/location views after dropping the initial result reference.
+The existing Indexing sample also ran through the actual original compiler and `schedule_emit.runtime.Program`;
+both calls agreed with the original module with maximum absolute error zero. All fifty-eight recorded source
+hashes stayed unchanged. Logs: `compiler-emit/artifacts/cba28b1-atomic-public.log`
+(SHA256 `7f40e57d4af4c55e8107c6985a6bcc5367478c311d3722b34b68ccc077db4de1`) and
+`cba28b1-indexing-mps.log` (`55967d8b15e37ca8c2009df6ba3a4caa6308280458132f97025974309b87eed4`);
+`cba28b1-source-before.json` records the sources.
+
+These results establish the compiled-library body/owner interface, source compilation of the scope variants,
+and ordinary MPS numerical execution for the stated instance. The physical AIR effect contract still has to
+enter the existing relation consumer, and actual store owners still need their corresponding retained helper
+compiler result. The Indexing run exercises ordinary device scope. System-memory GPU behavior, callable static
+linkage, full native execution and categorical replacement remain unfinished.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
