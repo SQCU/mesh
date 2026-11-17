@@ -1865,6 +1865,54 @@ reference argument queues; it computes no transitive closure. Subsequent
 producer work must return the actual solved objects before their direct
 allocation consumer can use them.
 
+## 16 November: joint IR pseudocode and original producer boundaries
+
+Compiler `2d04faf` committed the [joint IR pseudocode](../../../../compiler-emit/docs/joint-ir.md)
+before this implementation round. It places graph expansion and composition
+before numerical selection, then physical planning before final emission. Each
+result retains the complete preceding owners in separate output storage.
+
+Three Codex agents handled the canonical planner factor, original numerical
+compiler boundary and independent source review. Implemented connections:
+
+- Compiler `cb613bb` adds original `aot_construct` / `compiler_emit.construct`
+  before original schedule writers. Original LoopBody producers retain source
+  bodies and complete FX node correspondence when later optimization derives a
+  body. CPU/MPS `StatefulAlias` and constant-initialization observations preserve
+  earlier bodies and match eager execution; receipts are linked from
+  [the numerical boundary record](../../../../compiler-emit/docs/early-result.md).
+- Mesh `037f5f9e` and native `af9a796` expose original analyze/complete calls.
+  Completion reads the original retained flow/copy calculation and writes a
+  separate physical result. Mesh `e8588840` and native `8bb1039` preserve those
+  analysis/flow results in the existing canonical archive and expose loaded
+  analysis through its complete owner. Original archive codecs own serialization;
+  loaded arrays remain views. The canonical build and fresh Python ABI/import
+  checks pass. Receipt:
+  `native-execution/artifacts/e8588840-analysis-archive-build/receipt.json`, SHA256
+  `9025bef9688fb57a546b2fa3a2acc7eac8acf4ee396a189bb4c855de3ce4d092`.
+  These observations cover source, build and layout, rather than a planner solve
+  or archive roundtrip: the enabled original clients supply partial numerical
+  declarations rather than complete function operands.
+- Reference `ab568b5` and compiler `4546012` retain the original source, adapted
+  graph and actual FX deepcopy memo together. Both direct lowerers retain this
+  complete adaptation. Existing CPU/MPS state-and-alias examples retain eight
+  node pairs each; the two-processor reference example retains fifteen and
+  thirteen pairs across six channels, with zero output/state error over three
+  calls. Receipt:
+  `compiler-emit/artifacts/4546012-source-correspondence/receipt.json`, SHA256
+  `35e9fd24b5655b2c026e7e02298e461256266916fae76989fae91882d769f0b9`.
+
+The [workspace producer memorandum](../../../../compiler-emit/docs/workspace-demands.md)
+names the remaining original construction/writer boundaries. CPU templates and
+numerical operation handlers create some storage while printing code; later
+GPU launch writers read compiled scratch metadata. The complete construction
+result must return those actual operations and declarations to physical planning
+before their final writers. The canonical planner factor consumes fixed source
+function identities. The joint composition therefore also requires actual
+transformed-body correspondence and complete function operands at its producer.
+These are the remaining producer connections; the executed numerical examples
+use the original allocator and reference runtime.
+
 ## Sources used in their respective roles
 
 - `schedule_emit/driver.py::compile_module`, `ir.py::Scheduled`, `lower_inductor.py::lower` and
