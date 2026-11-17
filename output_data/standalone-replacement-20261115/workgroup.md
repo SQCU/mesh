@@ -743,8 +743,18 @@ Final source emission from the complete annotated graph is permitted. The existi
 that output where the target compiler API consumes source. This instruction constrains when source becomes
 the result; it does not create a requirement to avoid source by adding another representation or linker.
 
-Root selects original TorchInductor numerical emission, Tint typed entry construction and MSL emission, and
-Apple Metal's private static function linkage for the current numerical/composition boundary. The original
+**17 November correction to the coordinator selection.** The operator clarified that collective routing and
+scheduling, tensor-parallel selection, copy expansion and joint numerical/communication fusion enter the typed
+program before target kernels are selected. Their complete results and source correspondence are operands of
+the numerical transformations, as specified by [composition item 5](../../design/compilation-composition-change-request.md#5-compose-repeated-behavior-into-one-emitted-program),
+AOT A2/A4/A6 and disjoint-pages C3.3. A numerical compiler can be factored or modified at any required boundary
+to accept explicit typed intermediate inputs and return complete intermediate outputs. Its existing algorithms
+then compose with those joint decisions through their original owners. The earlier backend choice is scoped to
+numerical implementation. Final writers and linkage consume the bodies produced by this composition.
+
+**15 November coordinator proposal, retained as history.** Root selected original TorchInductor numerical
+emission, Tint typed entry construction and MSL emission, and Apple Metal's private static function linkage for
+the current numerical/composition boundary. The original
 numerical compiler emits an ordinary callable definition from its retained result. Tint constructs the entry's
 typed calls, bindings and acquisition/publication through the existing composition function. Apple's
 `MTL4StaticLinkingDescriptor.privateFunctionDescriptors`, supplied through

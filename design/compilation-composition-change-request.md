@@ -40,9 +40,13 @@ and returns `Scheduled(exported, modules, devices, output_processor, channels, i
 backend-independent transformations of that value. Target lowering consumes it at `lower_inductor.lower(scheduled)`
 (`lower_inductor.py` 96–103), which gives each processor's scheduled GraphModule to the upstream compiler,
 `torch.compile(backend="inductor")`. A custom numerical lowerer occupies that same position. Compilation selects the
-custom numerical method explicitly, and that method lowers the complete assigned body. General numerical and
-compiler passes are reached through the upstream compiler's typed interfaces. A custom numerical or target
-implementation is supplied there with its explicit operands and its cited algorithm (source-lowering items 5/6).
+custom numerical method explicitly, and that method lowers the complete assigned body. The numerical compiler
+can be factored or modified at any boundary required by the joint transformations: each extracted calculation
+accepts explicit typed intermediate operands and returns its complete intermediate result to the next consumer.
+A custom numerical or target implementation supplies its explicit operands and cited algorithm at the required
+boundary (source-lowering items 5/6). The earlier TorchInductor selection supplies numerical implementation;
+item 5 governs the joint transformations that determine the bodies and target kernels, following the operator's
+[17 November clarification](../output_data/standalone-replacement-20261115/workgroup.md#compiler-library-selection-before-executable-emission).
 
 **Inputs.** In the demonstration, `adapt` reads each node's `meta["val"]` shape, stride, dtype and device and the
 effectful `send` and `recv` operators (`lower_inductor.py` 66–93). Inductor's own output-stride and buffer-lifetime
@@ -137,16 +141,22 @@ algorithm/schedule lowering of Ragan-Kelley et al., *Decoupling Algorithms from 
 scope and retained-result clarification are recorded in
 [the operator turns](documentary-review-2026-11-13.md#positive-mechanism-form-2026-11-14).
 
-Function preparation and joint optimization return transformable IR through the
-same complete-result interface (operator's [16 November clarification](compiler-pseudocode.md#transform-ir-then-emit-the-executable)).
-Lam's expansion supplies operation/copy correspondence to graph substitution;
-Unity's computation-graph transformations and the cited communication-fusion
-mechanisms consume the dependence and flow results and return rewritten bodies.
-Kernel selection consumes those rewritten bodies and the choices that determine
-their dependent-flow/coflow execution. Target IR construction supplies actual
-effects and workspace demands to physical allocation. Original target writers
-and compilers emit the executable from that transformed IR and its solved
-bindings. Each stage retains its predecessors through the published result views.
+Function preparation and joint optimization return transformable IR through the same complete-result interface
+(operator's [16 November clarification](compiler-pseudocode.md#transform-ir-then-emit-the-executable)). Tensor-parallel
+selection and sharding propagation supply the numerical partitions, views and collective operations through
+[AOT A2](aot-compilation-change-request.md#a2-placement-supplies-sections-and-processors) and
+[unequal-shards](unequal-shards-change-request.md). Collective expansion, routing and scheduling supply the local
+computation, transfers, dependencies and order through AOT A4/A6. Lam's operation/copy expansion supplies the
+occurrences, lifetimes and source correspondence consumed by graph substitution and allocation
+([disjoint-pages C3.3](disjoint-pages-change-request.md#c33-modulo-variable-expansion-produces-copies)).
+Unity's computation-graph transformations and the cited communication-fusion mechanisms consume these complete
+results together with dependent-flow/coflow decisions and return rewritten numerical and communication bodies.
+These decisions enter the typed IR before target kernel selection; kernel selection consumes the resulting
+bodies and explicit scheduling operands. Numerical expansion exposes its new operations, effects and workspace
+to the same analysis, scheduling and allocation functions. Each required compiler boundary publishes those
+typed intermediate inputs and outputs, so joint transformations can compose with the original numerical passes.
+Target writers and compilers emit the executable from the transformed IR and solved bindings. Each stage retains
+its predecessors through the published result views.
 
 ### 6. Carry compilation results through their consumers
 
