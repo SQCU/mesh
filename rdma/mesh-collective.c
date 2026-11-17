@@ -3133,7 +3133,7 @@ int mesh_plan_program_install(struct mesh_ctx *context,uint64_t group,const stru
     binding->plan[f]=base;
     struct mesh_state *state=(void *)((char *)m+base);
     memcpy(state,compiled->state[f],(size_t)compiled->state_bytes[f]);
-    plan_state_place(geometry,binding->arena,arenas,state,local->function[f].count,base,nodes,group,(uint64_t)f+1,&status);
+    plan_state_place(geometry,binding->arena,arenas,state,local->function[f].count,base,&live_nodes,group,(uint64_t)f+1,&status);
   }
   if(status)goto done;
   plan_bind_values(context,local->function,planned,count,binding->page,binding->rows.first);
@@ -3142,7 +3142,7 @@ int mesh_plan_program_install(struct mesh_ctx *context,uint64_t group,const stru
   uint64_t *word=(void *)(mesh_at(m,table)+sizeof(struct mesh_algo));
   memcpy(word,binding->plan,(size_t)count*sizeof *word);
   memcpy(word+count,compiled->adjacency,((size_t)nodes->count+1+compiled->places)*sizeof(uint32_t));
-  status=plan_publish(context,group,count,table,nodes,binding);
+  status=plan_publish(context,group,count,table,&live_nodes,binding);
 done:
   if(prepared)plan_prepared(context);
   if(status)mesh_plan_binding_free(binding);
