@@ -79,18 +79,19 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
 
 /* design/torch-capture-change-request.md item 6; TensorFlow Lite 6cf18d88,
    tensorflow/lite/delegates/gpu/common/memory_management.h:130-131 and tensorflow/lite/simple_memory_arena.cc:441-445 */
-static uint64_t mesh_view_row(struct hdr *m,const struct mesh_value *v,uint32_t copy){
+static uint64_t mesh_view_row(struct hdr *m,const struct mesh_plan_value *v,uint32_t copy){
   return atomic_load_explicit(&mesh_page(m)[v->section.first+copy*v->section.stride].address,memory_order_relaxed);
 }
-void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,uint32_t count,uint64_t *first,
+void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,const struct mesh_planned *planned,uint32_t count,uint64_t *first,
                       uint64_t *offset,struct mesh_view *view){
   struct hdr *m=c->M;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t low=UINT64_MAX,high=0,at=0,values=0;
   for(uint32_t f=0;f<count;f++)
     for(uint32_t i=0;i<functions[f].values;i++){
-      const struct mesh_value *v=functions[f].value+i;
-      for(uint32_t k=0;v->run && k<v->section.count;k++){
+      const struct mesh_value *source=functions[f].value+i;
+      const struct mesh_plan_value *v=planned->result[f].value+i;
+      for(uint32_t k=0;source->run && k<v->section.count;k++){
         const uint64_t a=mesh_view_row(m,v,k),z=a+(uint64_t)v->section.stride*block;
         if(a<low)low=a;
         if(z>high)high=z;
@@ -98,9 +99,10 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,u
     }
   for(uint32_t f=0;f<count;f++)
     for(uint32_t i=0;i<functions[f].values;i++){
-      const struct mesh_value *v=functions[f].value+i;
+      const struct mesh_value *source=functions[f].value+i;
+      const struct mesh_plan_value *v=planned->result[f].value+i;
       first[values++]=at;
-      for(uint32_t k=0;k<v->section.count;k++)offset[at++]=v->run?mesh_view_row(m,v,k)-low:UINT64_MAX;
+      for(uint32_t k=0;k<v->section.count;k++)offset[at++]=source->run?mesh_view_row(m,v,k)-low:UINT64_MAX;
     }
   first[values]=at;
   *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
@@ -118,7 +120,7 @@ void mesh_view_program(struct mesh_ctx *c,const struct mesh_local *local,uint64_
   for(int pass=0;pass<2;pass++)
     for(uint32_t f=0,v=0;f<=local->functions;f++){
       const uint32_t n=f<local->functions?local->function[f].values:local->roots;
-      const struct mesh_value *value=f<local->functions?local->function[f].value:local->root;
+      const struct mesh_plan_value *value=f<local->functions?local->planned.result[f].value:local->planned.root;
       for(uint32_t i=0;i<n;i++,v++)
         for(size_t k=local->first[v];k<local->first[v+1];k++)
           for(uint32_t r=0;r<value[i].section.stride;r++){

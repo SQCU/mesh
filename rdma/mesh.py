@@ -73,11 +73,10 @@ class Section(C.Structure):
 # "The revisions of 55b9cbad"): Value's `view` gone (`padding1`) and `shares` out where `padding` was; struct
 # mesh_share (Share) mirrored, and Function's `share` and `shares` (72 bytes).  What must stay: the fields in the
 # headers' order and of their types
-# mesh-collective.h struct mesh_value `owned` (its producer's prepared operand, offset 56) and `padding1` (offset 60)
-# where the u64 `padding1` was (64 bytes, the header's assert)
+# mesh-collective.h struct mesh_value; design/joint-plan-results.md
 class Value(C.Structure):
     _fields_ = [('section', Section), ('kind', U), ('wire', U), ('state', U), ('begin', U), ('end', U), ('lag', U),
-                ('run', U), ('shares', U), ('owned', U), ('padding1', U)]
+                ('run', U), ('owned', U)]
 
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-1; "The
@@ -112,11 +111,11 @@ class Task(C.Structure):
 class Function(C.Structure):
     _fields_ = [('declared', C.POINTER(Declared)), ('weights', C.POINTER(Weight)), ('value', C.POINTER(Value)),
                 ('dependence', C.POINTER(Dependence)), ('count', U), ('values', U), ('dependences', U),
-                ('padding', U), ('outstanding', Q), ('plan', Q), ('host', C.POINTER(C.c_double)),
+                ('padding', U), ('outstanding', Q), ('host', C.POINTER(C.c_double)),
                 ('work', C.POINTER(C.c_double)), ('edge', C.POINTER(mesh_graph.Dependence)), ('parts', U), ('edges', U),
                 ('task', C.POINTER(Task)), ('before', C.POINTER(mesh_graph.Dependence)), ('sender', C.POINTER(U)),
-                ('receiver', C.POINTER(U)), ('completion', C.POINTER(D)), ('tasks', U), ('resources', U),
-                ('befores', U), ('padding2', U), ('order', C.POINTER(U)), ('relation', C.c_void_p)]
+                ('receiver', C.POINTER(U)), ('tasks', U), ('resources', U),
+                ('befores', U), ('padding2', U), ('relation', C.c_void_p)]
 
 
 class View(C.Structure):
@@ -139,13 +138,28 @@ class PlannedTransfer(C.Structure):
     _fields_ = [('received', Z), ('sending', Z), ('end', Z)]
 
 
+class PlanValue(C.Structure):
+    _fields_ = [('section', Section), ('shares', U), ('lag', U)]
+
+
+class PlanActors(C.Structure):
+    _fields_ = [('host', C.POINTER(D)), ('work', C.POINTER(D)), ('edge', C.POINTER(mesh_graph.Dependence)),
+                ('parts', U), ('edges', U), ('relation', C.c_void_p)]
+
+
+class PlanFunction(C.Structure):
+    _fields_ = [('value', C.POINTER(PlanValue)), ('plan', Q), ('completion', C.POINTER(D)),
+                ('order', C.POINTER(U)), ('actors', C.POINTER(PlanActors))]
+
+
 class Planned(C.Structure):
     _fields_ = [('call', C.POINTER(PlannedCall)), ('signature', C.POINTER(mesh_graph.Signature)),
                 ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('padding', U), ('orders', Z),
                 ('cause', C.POINTER(PlannedCause)), ('horizon', Q), ('functions', U), ('extents', Z),
                 ('first', C.POINTER(Z)), ('transfer', C.POINTER(PlannedTransfer)),
                 ('extent', C.POINTER(mesh_graph.Access)), ('owned', C.c_void_p), ('used', Q * 2),
-                ('arena', Range * 2), ('rows', Range), ('generation', Q)]
+                ('arena', Range * 2), ('rows', Range), ('generation', Q),
+                ('result', C.POINTER(PlanFunction)), ('root', C.POINTER(PlanValue)), ('results', U), ('roots', U)]
 
 
 # mesh-collective.h struct mesh_demand, struct mesh_grouped and mesh_declared_group: the one canonical grouping of a
@@ -317,7 +331,7 @@ for name, result, arguments in (
                                 C.POINTER(U), Q, C.POINTER(Planned)]),
         ('mesh_plan_save', C.c_int, [CONTEXT, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
                                      C.POINTER(U), C.POINTER(Planned), C.POINTER(C.c_void_p), C.POINTER(Z)]),
-        ('mesh_plan_load', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
+        ('mesh_plan_load', C.c_int, [CONTEXT, C.c_void_p, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
                                      C.POINTER(U), Q, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Planned)]),
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
         ('mesh_plan_local', C.c_int, [C.POINTER(Function), U, C.POINTER(U), U, C.c_void_p, C.POINTER(U), U,
@@ -336,7 +350,7 @@ for name, result, arguments in (
                                         C.POINTER(Local)]),
         ('mesh_view_program', None, [CONTEXT, C.POINTER(Local), C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
-        ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
+        ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), C.POINTER(Planned), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_retire', None, [C.c_void_p, C.POINTER(Planned)]),
         ('mesh_publications_clear', None, [C.c_void_p]),
         ('mesh_backing_bind', None, [CONTEXT, U, U, U, U]),
@@ -382,17 +396,15 @@ def function(declared, weights, values, dependences, outstanding, tasks=(), befo
                  Declared(source, destination, identity, kind, value, 0, view(*sent), view(*landed))
                  for source, destination, identity, kind, value, sent, landed in declared]),
              (Weight * max(len(weights), 1))(*[Weight(*weight) for weight in weights]),
-             (Value * max(len(values), 1))(*[Value(Section(0, 0, size, 0, 0), *fields, 0, 0)
+             (Value * max(len(values), 1))(*[Value(Section(0, 0, size, 0, 0), *fields, 0)
                                              for size, *fields in values]),
              dependences if isinstance(dependences, C.Array) and dependences._type_ is Dependence else
              (Dependence * max(len(dependences), 1))(*[Dependence(*edge) for edge in dependences])]
-    made = (Function * 1)(Function(*held[-4:], len(declared), len(values), len(dependences), 0, outstanding, 0, None,
-                                   None, None, 0, 0))
+    made = (Function * 1)(Function(*held[-4:], len(declared), len(values), len(dependences), 0, outstanding))
     if tasks:
         held += [(Task * len(tasks))(*[Task(length, resource, 0) for length, resource in tasks]),
                  (mesh_graph.Dependence * max(len(before), 1))(*[mesh_graph.Dependence(a, b, 0) for a, b in before]),
-                 (U * max(len(senders), 1))(*senders), (U * max(len(receivers), 1))(*receivers),
-                 (D * len(tasks))(), (U * len(tasks))()]
-        made[0].task, made[0].before, made[0].sender, made[0].receiver, made[0].completion, made[0].order = held[-6:]
+                 (U * max(len(senders), 1))(*senders), (U * max(len(receivers), 1))(*receivers)]
+        made[0].task, made[0].before, made[0].sender, made[0].receiver = held[-4:]
         made[0].tasks, made[0].resources, made[0].befores = len(tasks), resources, len(before)
     return made, held

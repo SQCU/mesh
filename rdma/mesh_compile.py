@@ -6575,17 +6575,17 @@ mesh.LIB.mesh_section_address.restype = C.c_void_p
 mesh.LIB.mesh_section_address.argtypes = [mesh.CONTEXT, mesh.Section, mesh.U]
 
 
-def _mapped(context, functions, count, values, row):
+def _mapped(context, functions, planned, count, values, row):
     view = mesh.View()
     first = (mesh.Q * (sum(len(v) for v in values) + 1))()
-    offsets = (mesh.Q * max(sum(v.section.count for function in values for v in function), 1))()
-    mesh.LIB.mesh_view_values(C.byref(context), functions, count, first, offsets, C.byref(view))
+    offsets = (mesh.Q * max(sum(planned.result[f].value[i].section.count for f, function in enumerate(values) for i in range(len(function))), 1))()
+    mesh.LIB.mesh_view_values(C.byref(context), functions, C.byref(planned), count, first, offsets, C.byref(view))
     at, addresses = 0, []
-    for function in values:
-        addresses.append([[view.address + offsets[first[at + i] + c] for c in range(v.section.count)] if v.run else
-                          [[mesh.LIB.mesh_section_address(C.byref(context), v.section, c * v.section.stride + k)
-                            for k in range(-(-v.section.bytes // row))] for c in range(v.section.count)]
-                          for i, v in enumerate(function)])
+    for f, function in enumerate(values):
+        addresses.append([[view.address + offsets[first[at + i] + c] for c in range(placed.section.count)] if v.run else
+                          [[mesh.LIB.mesh_section_address(C.byref(context), placed.section, c * placed.section.stride + k)
+                            for k in range(-(-v.section.bytes // row))] for c in range(placed.section.count)]
+                          for i, v in enumerate(function) for placed in [planned.result[f].value[i]]])
         at += len(function)
     if not all(address for function in addresses for value in function for copy in value if isinstance(copy, list)
                for address in copy):
@@ -7304,6 +7304,7 @@ def _compiler():
         P, U, Q = C.c_void_p, mesh.U, mesh.Q
         for name, result, arguments in (
                 ('metal_ir_program_new', P, []), ('metal_ir_program_free', None, [P]),
+                ('metal_ir_archive_context', P, [P]),
                 ('metal_ir_archive_load', P, [P, C.c_size_t, P, RELEASE, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_archive_program', P, [P, U]), ('metal_ir_archive_solved', P, [P]),
                 ('metal_ir_archive_records', C.POINTER(Span), [P, C.POINTER(U)]),
@@ -7572,7 +7573,7 @@ def _finalized(programs, context, irs, planned, values, owned):
         for value, f, v, declared in row['marks']['received']:
             field = (mesh.U * max(declared.partitions, 1))()
             status = transport.mesh_metal_range_prepare(C.byref(context), C.byref(made), C.byref(planned),
-                                                        values[f][v].section, field, declared.partitions,
+                                                        planned.result[f].value[v].section, field, declared.partitions,
                                                         C.byref(declared))
             mesh.check(status)
             compiler.metal_ir_value_received(p, value, C.byref(declared))
@@ -7639,13 +7640,13 @@ _replays(programs, context, irs, planned, values, addresses, base, buffer, bound
         k, prepared, p = entry['k'], entry['prepared'], entry['builder'].p
         for vi, owner in entry['builder'].planned.items():
             at, width = _expanded(selection, owner, k, addresses, base)
-            compiler.metal_ir_value_placed(p, vi, buffer, at, width, 0, values[owner[0]][owner[1]].shares)
+            compiler.metal_ir_value_placed(p, vi, buffer, at, width, 0, planned.result[owner[0]].value[owner[1]].shares)
         for vi, index in entry['own'].items():
-            value = values[k][index]
+            value = planned.result[k].value[index]
             compiler.metal_ir_value_placed(p, vi, buffer, offsets(addresses[k][index]), value.section.count, 0,
                                            value.shares)
         if k in steps:
-            step = values[k][steps[k]]
+            step = planned.result[k].value[steps[k]]
             compiler.metal_ir_step_placed(p, buffer, offsets(addresses[k][steps[k]]), step.section.count, step.shares)
         STATE_BUFFER(recorder, _SEL(b'state:buffer:status:'), prepared, made.state, entry['status'])
         if compiler.metal_ir_place(p, error, len(error)):
@@ -8196,7 +8197,7 @@ _bound(context, state, retained, deadline):
     functions = (mesh.Function * len(irs))(*[
         mesh.Function(C.cast(d, C.POINTER(mesh.Declared)), C.cast(w, C.POINTER(mesh.Weight)),
                       C.cast(v, C.POINTER(mesh.Value)), C.cast(e, C.POINTER(mesh.Dependence)), len(d), len(v),
-                      len(e), 0, analysed.outstanding[k], 0,
+                      len(e), 0, analysed.outstanding[k],
                       *((C.cast(actors[k][0], C.POINTER(C.c_double)), C.cast(actors[k][1], C.POINTER(C.c_double)),
                          C.cast(actors[k][2], C.POINTER(mesh_graph.Dependence)), actors[k][3], actors[k][4])
                         if k in actors else (None, None, None, 0, 0)),
@@ -8215,7 +8216,7 @@ _bound(context, state, retained, deadline):
         # metal_ir_archive_free) and restores the functions' compiled parts and relation from it
         (record, length), archive, compiler = retained['saved_plan'], programs['archive'], programs['compiler']
         compiler.metal_ir_archive_retain(archive)
-        status = mesh.LIB.mesh_plan_load(*arguments, record, length,
+        status = mesh.LIB.mesh_plan_load(arguments[0], compiler.metal_ir_archive_context(archive), *arguments[1:], record, length,
                                          RELEASE(C.cast(compiler.metal_ir_archive_free, C.c_void_p).value), archive,
                                          C.byref(planned))
         if status:
@@ -8227,13 +8228,13 @@ _bound(context, state, retained, deadline):
     state['owned'][id(planned)] = lambda: mesh.LIB.mesh_planned_free(C.byref(planned))
     state.update(mapping=_Mapping(mesh.View()), devices={layout[2] for ir in irs for layout in ir.layouts})
     # JGroups ViewId.java
-    views = [mesh.State.from_address(context.M + f.plan) for f in functions]
+    views = [mesh.State.from_address(context.M + planned.result[f].plan) for f in range(planned.results)]
     if any((s.serial, s.sequencer, s.boot) != (nodes.serial, nodes.sequencer, nodes.boot) for s in views):
         raise OSError(errno.ESTALE, 'a plan\'s view is not the one its IR was built on: plan again')
     listed = [values for _, _, values, _ in arrays]
     # 6's stage D: the plan's transport words into each row's program, then its final emission
     made = _finalized(programs, context, irs, planned, listed, state['owned'])
-    view, addresses = _mapped(context, functions, len(irs), listed, page)
+    view, addresses = _mapped(context, functions, planned, len(irs), listed, page)
     state['mapping'].view, hull = view, _hull(listed, addresses, page)
     buffer = _placed_buffer(hull)
     try:

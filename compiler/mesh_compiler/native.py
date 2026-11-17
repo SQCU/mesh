@@ -379,22 +379,24 @@ class Target:
         value, first = owner.function[f].value, joint.function_value_first[f]
         for v in range(self.counts[f]):
             if value[v].run:
-                yield (v, *self.located(owner, program, libs, v, value[v].section, first, v), value[v].shares)
+                placed = joint.planned.result[f].value[v]
+                yield (v, *self.located(owner, program, libs, v, placed.section, first, v), placed.shares)
         for v, function, index in self.rows[r].marks["placed"]:
             held = owner.function[function].value[index]
             if not held.run:
-                yield (v, *self.located(owner, program, libs, v, held.section, joint.function_value_first[function],
-                                        index), held.shares)
+                placed = joint.planned.result[function].value[index]
+                yield (v, *self.located(owner, program, libs, v, placed.section, joint.function_value_first[function],
+                                        index), placed.shares)
         for root, s, delta, every in self.joined[r]:
-            yield (root, *self.located(owner, program, libs, root, joint.roots[s].section, joint.root_first, s, every,
-                                       delta), joint.roots[s].shares)
+            yield (root, *self.located(owner, program, libs, root, joint.planned.root[s].section, joint.root_first, s, every,
+                                       delta), joint.planned.root[s].shares)
 
     def stepped(self, owner, r):
         f = self.rows[r].instance
         if not self.steps[f]:
             return None
         return (*owner.span(owner.solution.function_value_first[f], self.counts[f]),
-                owner.function[f].value[self.counts[f]].shares)
+                owner.solution.planned.result[f].value[self.counts[f]].shares)
 
     # metal_recording.h MetalRecorderPrepare, MetalRecorderPlan and MetalRecorderReplay (metal_capture.m MetalRecorder:
     # no capture is prepared after the recorder's first replay): the one recorder of the whole machine's rows, every
@@ -428,8 +430,8 @@ class Target:
                 for value, function, index, declared in marks["received"]:
                     landed = M.Range.from_buffer_copy(declared)
                     field = (mesh.U * max(landed.partitions, 1))()
-                    held = owner.function[function].value[index] if function is not None else (
-                        owner.solution.roots[index])
+                    held = owner.solution.planned.result[function].value[index] if function is not None else (
+                        owner.solution.planned.root[index])
                     mesh.check(transport.mesh_metal_range_prepare(
                         C.byref(context), C.byref(wires), C.byref(planned), held.section, field, landed.partitions,
                         C.byref(landed)))
@@ -966,10 +968,19 @@ class Target:
     # actual Storages, its row's explicit roots run 0, its step appended; its retained MetalRecorderActors parts and
     # relation, freed with the target), in instance order, a call with no program on this node zero-local (no values,
     # parts or edges), and the largest placed alignment
-    def functions(self, libs):
+    def functions(self, libs, analysis, declared, plan_calls):
         explicit = [self.explicit(k) if instance is not None else None
                     for k, instance in enumerate(self.instances)]
         functions = storage_functions(self.instances, explicit, self.intrinsic, libs)
+        functions.analysis, functions.declared, functions.plan_calls = analysis, declared, plan_calls
+        functions.dependences = []
+        for j, f in enumerate(plan_calls if declared.planning is not None else ()):
+            rows, weighted, _ = declared.arrays[j]
+            functions.dependences.append((mesh.Dependence * max(len(declared.dependences[j]), 1))(
+                *declared.dependences[j]))
+            functions[f].declared, functions[f].weights, functions[f].count = rows, weighted, len(declared.declared[j])
+            functions[f].dependence, functions[f].dependences = functions.dependences[-1], len(declared.dependences[j])
+            functions[f].outstanding = analysis.outstanding[analysis.keys[analysis.calls[j]]]
         self.counts, self.steps, self.held = functions.counts, functions.steps, functions
         return functions, functions.quantum
 
@@ -1551,7 +1562,7 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
         target.ported(prepared, declarations, analysis, plan_calls, here)
         target.constructed(context, plan_calls, libs, instances)
         target.instanced(context, plan_calls, libs, instances)
-        functions, quantum = target.functions(libs)
+        functions, quantum = target.functions(libs, analysis, prepared, plan_calls)
         joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
                               declared=prepared, analysis_context=analysis_context)
         target.resolved(captured, analysis, joint, here)

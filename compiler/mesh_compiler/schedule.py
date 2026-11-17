@@ -160,20 +160,20 @@ def solved(plan, planning, function):
     mesh.check(mesh.LIB.mesh_plan(context, planning.group, *operands,
                                   time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, C.byref(made)))
     mesh.check(mesh.LIB.mesh_plan_save(context, *operands, C.byref(made), C.byref(record), C.byref(length)))
-    plan.completion = list(function[0].completion[:len(plan.tasks)])
-    plan.order = list(function[0].order[:len(plan.tasks)])
-    sections = [value.section for value in function[0].value[:len(plan.values)]]
+    plan.completion = list(made.result[0].completion[:len(plan.tasks)])
+    plan.order = list(made.result[0].order[:len(plan.tasks)])
+    sections = [value.section for value in made.result[0].value[:len(plan.values)]]
     plan.sections = [[getattr(section, name) for name, _ in mesh.Section._fields_] for section in sections]
     plan.record = C.string_at(record, length.value)
     plan.signature, plan.nodes = mesh_graph.archive(made.signature.contents), tuple(planning.nodes)
     first, offset, view = (mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(), mesh.View()
-    mesh.LIB.mesh_view_values(context, function, 1, first, offset, C.byref(view))
+    mesh.LIB.mesh_view_values(context, function, C.byref(made), 1, first, offset, C.byref(view))
     plan.arena_bytes = view.bytes
     plan.offsets = tuple(tuple(offset[first[value]:first[value + 1]]) for value in range(len(sections)))
     # rdma/mesh.h mesh_transfer_at, struct mesh_publication; rdma/mesh-collective.c plan_supplied, plan_completion and
     # the publication records of transfer i written for its demand p->of[i]: one supplied word per demand release, one
     # completion word per sending demand (d->sending = p->sending++), so equal nonzero words are one native action
-    state = mesh.State.from_address(planning.context.M + function[0].plan)
+    state = mesh.State.from_address(planning.context.M + made.result[0].plan)
     supplied, completed = {}, {}
     plan.publications = tuple(
         (supplied.setdefault(record.targets[0].word, transfer),
@@ -738,7 +738,7 @@ def viewed(owner, local):
 # view's byte offset less the Slot's, (every, ordinal) its call's generation (function f's copy of execution e = t *
 # every + ordinal is e % (horizon * every), a root's copy block e // every); `source_bindings` the native Bindings
 # given; `root_sources` and `analysis` the CallAnalysis's; `roots` mesh.Value[S + W] (the S source storages, bytes, run
-# 0 a caller's root, then the W staging wires of Prepared.wires, run 1; shares as solved); `uses` (use_first, use);
+# 0 a caller's root, then the W staging wires of Prepared.wires, run 1; solved geometry in planned.root); `uses` (use_first, use);
 # `plan_calls[j]` call j's instance in `functions` (Function[K]; the source function stays analysis.calls[j]), the
 # local result's calls; `prepared` the declare_program owner its bindings, uses and groupings come from; `plan` a
 # network result's owner (mesh_plan_program's: the Solved itself, its `program` the planning's; a loaded one's its saved
@@ -1232,22 +1232,11 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
     for s in range(S):
         use_first[s + 1] += use_first[s]
     grouped = (mesh.Grouped * max(K, 1))()
-    # mesh-collective.h struct mesh_function declared, weights, count, dependence, dependences and outstanding: each
-    # network instance plan_calls[j] its call's prepared rows (Prepared.arrays[j], borrowed: the native Declared and
-    # Weight arrays as remapped and bound, the rows its grouping was made over), their intrinsic dependences
-    # (Prepared.dependences[j], one retained Dependence array) and its original source function's issue bound
-    # (analysis.outstanding), the native caller's one instance per original call
-    dependence = []
     for j, f in enumerate(plan_calls if planning is not None else ()):
-        rows, weighted, _ = declared.arrays[j]
         grouped[f] = declared.grouped[j]
-        dependence.append((mesh.Dependence * max(len(declared.dependences[j]), 1))(*declared.dependences[j]))
-        functions[f].declared, functions[f].weights, functions[f].count = rows, weighted, len(declared.declared[j])
-        functions[f].dependence, functions[f].dependences = dependence[-1], len(declared.dependences[j])
-        functions[f].outstanding = analysis.outstanding[analysis.keys[analysis.calls[j]]]
     ordered = (mesh.U * max(len(analysis.order_edges), 1))(*analysis.order_edges)
     outstanding = (mesh.Q * max(len(analysis.keys), 1))(*[analysis.outstanding[key] for key in analysis.keys])
-    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, grouped, dependence,
+    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, grouped,
                         ordered, outstanding))
     relation, closure = C.c_void_p(analysis.relation.pointer), C.cast(analysis.closure.owned.made, C.c_void_p)
     if planning is None:
