@@ -137,6 +137,17 @@ algorithm/schedule lowering of Ragan-Kelley et al., *Decoupling Algorithms from 
 scope and retained-result clarification are recorded in
 [the operator turns](documentary-review-2026-11-13.md#positive-mechanism-form-2026-11-14).
 
+Function preparation and joint optimization return transformable IR through the
+same complete-result interface (operator's [16 November clarification](compiler-pseudocode.md#transform-ir-then-emit-the-executable)).
+Lam's expansion supplies operation/copy correspondence to graph substitution;
+Unity's computation-graph transformations and the cited communication-fusion
+mechanisms consume the dependence and flow results and return rewritten bodies.
+Kernel selection consumes those rewritten bodies and the choices that determine
+their dependent-flow/coflow execution. Target IR construction supplies actual
+effects and workspace demands to physical allocation. Original target writers
+and compilers emit the executable from that transformed IR and its solved
+bindings. Each stage retains its predecessors through the published result views.
+
 ### 6. Carry compilation results through their consumers
 
 Dependency analysis returns access causes and source identities with its graph. Synchronization reduction,

@@ -33,13 +33,31 @@ parameters/state, placement, topology/view identity, costs/rates and target
 operands. Original compiler exceptions report compilation failures; numerical
 status and error values belong to the numerical results.
 
+## Transform IR, then emit the executable
+
+Function preparation and joint optimization both map IR to IR. `F` retains the
+numerical bodies, operands, effects and earlier source. `J` retains the rewritten
+program and every analysis result used to produce it. Loop expansion, dependent
+flow/coflow transformation and fusion can change operation boundaries and kernel
+selection. The target compiler selects implementations using those transformed
+bodies and decisions. Final emission consumes that IR and produces executable
+artifacts. The operator's 16 November correction supplies this ordering:
+
+> if we have to choose what kernels to use based upon stuf like the dependent flow vs coflow transformation/optimization, we can't even have a definite list of chosen kernels at stage '2' if '2' is before '3' or '4'.
+
+The repository names locate code. `compiler-emit` owns compilation functions;
+`native-execution` owns native interfaces, loading and invocation. Those names
+add no compilation barrier. In compiler terminology an IR-to-IR transformation
+can also be a lowering; here final emission names the boundary that prints source
+or builds the executable.
+
 ## Compile the functions and their joint program
 
 ```text
 compile(R, frontend, numerical_compiler, target, operands, outputs):
     S = source_results(frontend, operands, outputs.source)
     R += S
-    F = function_results(S, numerical_compiler, target, operands, outputs.functions)
+    F = function_results(S, numerical_compiler, operands, outputs.functions)
     R += F
     J = joint_result(F, operands, outputs.joint)
     R += J
@@ -72,11 +90,12 @@ stripes with their original token coordinates.
 
 `collective_lowering` returns the original ring/tree/varying-count operations,
 their local-copy or in-place operations, endpoint layouts and required layout
-conversion operations. `numerical_compiler` lowers every assigned body through
-the original compiler and cited numerical libraries. It returns typed bodies,
-all library calls, exact operands/results, accesses, workspaces, numerical error
-results and source correspondence. Each original function keeps its invocation
-boundary; its internal operations supply further graph vertices.
+conversion operations. `numerical_compiler` exposes the original typed function
+bodies, source calls, operands/results, alias/state/error semantics and source
+correspondence. Subsequent joint IR transformations choose implementations and
+return their concrete accesses and workspace demands. Each original function's
+invocation remains represented; its internal operations supply further graph
+vertices and fusion retains the correspondence to those invocations.
 
 `mesh_graph_pack` consumes the complete transfer demands, topology and per-link
 cost/capacity operands and returns routes. `task_graph` composes numerical work,
@@ -85,28 +104,57 @@ correspondence. Graph expansion/contraction uses the canonical graph module.
 Transfer views retain both endpoint layouts and each consumer's blocking or
 independent-page behavior.
 
-`target.declare` supplies logical receive/send geometry and typed result-buffer
-references before typed composition and lowering. `target.lower` returns the actual additional
-operations, accesses and storage for phases, publication, status, indirect work,
-and target workspaces. Its source correspondence joins them to the same graph.
-`target.storage_and_actor_results` extends the same graph and costs with all
-lowering-produced operations and their actual storage, effects and actor records,
-including the cost producer's status. The joint planner consumes that complete
-result. `target.bind_solved_operands` binds the emitted operations to the solved
-offsets and frame-table views. Final emission specializes those planned operations.
+Joint IR transformations consume the dependence, flow and copy-expansion results
+through their original owners. They rewrite numerical and communication regions
+and retain each substitution's source correspondence. `target.declare` supplies
+logical receive/send geometry and typed result-buffer references to that
+composition. Target IR transformations produce the actual additional operations,
+accesses and storage for phases, publication, status, indirect work and workspaces.
+`target.storage_and_actor_results` returns the resulting demands, effects, actor
+records and costs. Final physical allocation consumes those demands;
+`target.bind_solved_operands` supplies the solved offsets and frame-table views
+to the original writer. Kernel selection consumes every structural decision that
+affects its choice. Source printing and executable compilation follow that choice.
 
-## The one joint planning call
+## Joint IR transformations and physical planning
 
-`joint_result` denotes the single canonical `mesh_plan_program` or `mesh_plan_local`
-call with its complete output in separate `J` storage and its references appended
-to `R`. The following expands its
-algorithmic responsibilities. The canonical library owns these algorithms;
-the expansion identifies their operands and retained results.
+`joint_result` composes the existing graph transformations and planning algorithms
+over the same program. Its output includes the transformed bodies as well as the
+solved relations. The canonical graph library owns dependency, expansion and
+ordering algorithms; original compiler IR transformations own body substitution
+and fusion. Each producer returns its result before its direct consumer reads it.
+The physical planner consumes the complete storage demands of the transformed
+program. All returned results occupy separate sections retained by `J`.
 
 ```text
 joint_result(F, operands, output):
-    return mesh_plan_program_or_local(F, *operands, output=output)
+    transformed = joint_IR_transformations(F, operands, output.transformations)
+    output += transformed
+    planned = complete_physical_plan(transformed, *operands.plan,
+                                     output=output.plan)
+    output += planned
+    return Joint(transformed, planned)
 ```
+
+`joint_IR_transformations` abbreviates the cited dependence/copy expansion,
+flow transformation and typed fusion below. It specifies a composition of their
+original functions, with each analysis result supplied to its consumer. Factoring
+those functions from an existing combined body preserves a single implementation
+of each algorithm. `complete_physical_plan` names the continuation factored from
+the original planning functions, consuming the retained flow/copy analysis in
+`transformed`. It completes the original layout, placement and scheduling
+operations using the final graph and storage demands. This is an intended
+interface to that shared implementation, not a call to rerun the whole existing
+`mesh_plan_program` or `mesh_plan_local`. `Joint` abbreviates references to the
+complete transformed program, its schedule and all analysis results.
+
+Source review on 16 November distinguishes the existing interfaces: `mesh_planned`
+in `rdma/mesh-collective.h` holds schedule, transport and storage results;
+`plan_unroll` computes transport/lifetime copies. Metal's `Transform` and
+`ConstructModulePass` retain transformed numerical/protocol IR. Thus the current
+`mesh_plan_program` result supplies part of `J`; the complete joint result also
+retains the rewritten bodies and their correspondence. A completed kernel list
+or object archive represents a later emission result.
 
 The dependence producer consumes original read/write/commuting accesses and
 returns causes and source identities with its relation. Closure and chains
@@ -131,7 +179,7 @@ emit_reference(F, J, operands, output):
     built = original_target_compiler_and_linker(writer, operands, output.build)
     return Emission(F, J, writer, built)
 
-compose_native(source, operands, output):
+compose_native_IR(source, operands, output):
     composition = original_typed_IR_composition(source, operands, output.composition)
     optimized = original_target_optimizer(composition, operands, output.optimized)
     return Composition(source, composition, optimized)
@@ -142,13 +190,14 @@ emit_native(F, J, operands, output):
     return Emission(F, J, writer, built)
 ```
 
-Both targets consume the same complete placed program, bindings, schedule and
-allocation results. The reference emitter completes the already prepared
-numerical result using those supplied decisions. Target-specific operands extend
-that interface. Composition
+Both targets consume the same complete transformed program, bindings, schedule and
+allocation results. The reference emitter completes the transformed
+numerical IR using those supplied decisions. Target-specific operands extend
+that interface. The preceding IR composition
 uses the original numerical bodies and typed acquire/publish/copy operations;
 FLUX/TileLink/CoCoNet fusion and the original optimizer produce prologues,
-epilogues and fused bodies. The final writers are the original FX/C++/MSL
+epilogues and fused bodies. `compose_native_IR` belongs to those joint IR
+transformations. The final writers are the original FX/C++/MSL
 writers, followed by their original compilers and linkers. The result includes
 callable bodies with the reference `Program(scheduled, functions)` convention,
 target artifacts, argument bindings and emitted-site correspondence.
@@ -211,8 +260,11 @@ releases its live bindings after their outstanding users complete. Compiler
 results retain their separate ownership until an explicit scheduled retirement.
 
 For the reference realization, the concrete invocation consumer is
-`schedule_emit.runtime.Program(compilation.S, compilation.E.functions)`. Those
+`schedule_emit.runtime.Program(compilation.J.scheduled, compilation.E.functions)`. Those
 functions contain the actual transformed bindings and operations produced above.
+`J.scheduled` denotes the complete scheduling result for that transformed program.
+A body-local rewrite can retain the original outer schedule by view; a rewrite
+of outer calls supplies the corresponding derived schedule to the same consumer.
 
 ## Reuse results when supplied operands change
 
