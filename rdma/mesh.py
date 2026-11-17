@@ -601,6 +601,20 @@ def strided(offset, element, pairs):
     return Strided(offset, element, len(pairs), 0, words)
 
 
+def function_tasks(made, tasks, before, senders, receivers, resources):
+    encoded = tasks if isinstance(tasks, C.Array) and tasks._type_ is Task else (
+        (Task * len(tasks))(*(Task(length, resource, 0) for length, resource in tasks)))
+    dependencies = before if isinstance(before, C.Array) and before._type_ is mesh_graph.Dependence else (
+        (mesh_graph.Dependence * max(len(before), 1))(*(mesh_graph.Dependence(a, b, 0) for a, b in before)))
+    sender = senders if isinstance(senders, C.Array) and senders._type_ is U else (
+        (U * max(len(senders), 1))(*senders))
+    receiver = receivers if isinstance(receivers, C.Array) and receivers._type_ is U else (
+        (U * max(len(receivers), 1))(*receivers))
+    made.task, made.before, made.sender, made.receiver = encoded, dependencies, sender, receiver
+    made.tasks, made.resources, made.befores = len(tasks), resources, len(before)
+    return encoded, dependencies, sender, receiver
+
+
 # mesh-collective.h struct mesh_function, struct mesh_declared, struct mesh_weight, struct mesh_value, struct
 # mesh_dependence, struct mesh_task; mesh-graph.h struct mesh_strided; compiler/mesh_compiler/schedule.py dependences:
 # a Dependence array is held as it is, its count its length; (from, to, lag, kinds) records are converted once
@@ -618,9 +632,5 @@ def function(declared, weights, values, dependences, outstanding, tasks=(), befo
              (Dependence * max(len(dependences), 1))(*[Dependence(*edge) for edge in dependences])]
     made = (Function * 1)(Function(*held[-4:], len(declared), len(values), len(dependences), 0, outstanding))
     if tasks:
-        held += [(Task * len(tasks))(*[Task(length, resource, 0) for length, resource in tasks]),
-                 (mesh_graph.Dependence * max(len(before), 1))(*[mesh_graph.Dependence(a, b, 0) for a, b in before]),
-                 (U * max(len(senders), 1))(*senders), (U * max(len(receivers), 1))(*receivers)]
-        made[0].task, made[0].before, made[0].sender, made[0].receiver = held[-4:]
-        made[0].tasks, made[0].resources, made[0].befores = len(tasks), resources, len(before)
+        held += function_tasks(made[0], tasks, before, senders, receivers, resources)
     return made, held
