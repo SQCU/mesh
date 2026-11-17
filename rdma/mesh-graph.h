@@ -9,6 +9,7 @@ extern "C" {
 
 uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(const void *context, uint32_t e, uint32_t side),
                           const void *context, uint32_t from, uint32_t *order, unsigned char *reached, uint32_t *parent);
+/* UINT32_MAX heads are outside the supplied row view. */
 int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                      const void *context, uint32_t *indegree, uint32_t *ordinal);
 /* T. H. Cormen, C. E. Leiserson, R. L. Rivest and C. Stein, Introduction to Algorithms, 3rd ed., MIT Press, 2009,
@@ -159,6 +160,7 @@ struct mesh_graph_tree {
   struct mesh_graph_grouping *children;
 };
 int mesh_graph_tree_create(uint32_t vertices, uint32_t root, const uint32_t *parent, struct mesh_graph_tree **out);
+uint32_t mesh_graph_tree_parent(const void *tree, size_t vertex);
 void mesh_graph_tree_free(struct mesh_graph_tree *);
 /* ExecuTorch exir/memory_planning.py update_tensor_lifetime: "A tensor's lifetime are represented by the index of the
    first and last node referring that tensor in its inputs/outputs." Use k is value value[k] at position[k]; first[v]
@@ -223,13 +225,23 @@ struct mesh_graph_lag_result {
   struct mesh_graph_grouping *sources;
   uint64_t *value;
 };
+struct mesh_graph_lag_matrix {
+  const struct mesh_graph_lag_graph *graph;
+  uint32_t sources, targets;
+  const uint32_t *source, *target;
+  uint64_t *value;
+};
 int mesh_graph_lag_prepare(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *, size_t),
                             uint64_t (*lag)(const void *, size_t), const void *context,
                             struct mesh_graph_lag_graph **out);
 void mesh_graph_lag_graph_free(struct mesh_graph_lag_graph *);
 int mesh_graph_lag_queries(const struct mesh_graph_lag_graph *, size_t queries,
                             const struct mesh_graph_dependence *query, struct mesh_graph_lag_result **out);
+uint32_t mesh_graph_query_source(const void *query, size_t index);
 void mesh_graph_lag_result_free(struct mesh_graph_lag_result *);
+int mesh_graph_lag_matrix(const struct mesh_graph_lag_graph *, uint32_t sources, const uint32_t *source,
+                           uint32_t targets, const uint32_t *target, struct mesh_graph_lag_matrix **out);
+void mesh_graph_lag_matrix_free(struct mesh_graph_lag_matrix *);
 /* design/joint-compilation.md §3, row 7 */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
@@ -571,7 +583,7 @@ struct mesh_graph_cover { const uint32_t *member; uint32_t members, value, block
 struct mesh_graph_cover_result {
   uint64_t quantum;
   uint32_t values, blocks, extras, sets;
-  size_t touches, covers, listed;
+  size_t touches, covers, listed, held_count;
   const uint32_t *block_first;
   uint64_t (*bytes)(const void *, uint32_t);
   const void *context;

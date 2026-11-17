@@ -1,14 +1,16 @@
 # Joint plan outputs and ownership
 
-`mesh_plan`, `mesh_plan_local` and `mesh_plan_program` read their original
-`mesh_function` and `mesh_value` operands. They produce derived storage in
-`mesh_planned.result[f]` and `mesh_planned.root[r]`. A second solve has separate
-output storage and cannot overwrite the first function or plan result.
+The [planner composition assignment](planner-composition.md) separates analysis,
+physical compilation, and live installation. Analysis reads the original
+`mesh_function` and `mesh_value` operands. Compilation produces derived storage in
+`mesh_planned.result[f]` and `mesh_planned.root[r]`. Each compilation owns distinct
+output storage and retains its original analysis.
 
-Each function result owns its derived value sections, sharing flags, native plan
-address, completion times, task order and the host-write lag computed by the original buffer-bound algorithm. A value result contains the original
-complete `mesh_section` output, including its byte extent and page count; it does
-not replace the original source value's lifetime, kind, run or state operands.
+Each function result owns its derived value sections, sharing flags, completion
+times, task order and the host-write lag computed by the original buffer-bound
+algorithm. A value result contains the complete `mesh_section` output, including
+its byte extent and page count. The original source value supplies its lifetime,
+kind, run and state operands through the retained analysis.
 Local plans retain the supplied function/root arrays and call relation by view.
 Native placement reads source properties from those operands and geometry from
 the joint result. `mesh_view_values` takes both complete results explicitly.
@@ -17,14 +19,24 @@ The original planning, scheduling and placement algorithms remain their producer
 `mesh_plan_local_analyze` and `mesh_plan_program_analyze` return a complete
 `mesh_plan_analysis`, including its original source operands, flow results,
 transfer groups, call correspondence and storage-copy calculation.
-`mesh_plan_local_complete` and `mesh_plan_program_complete` read that result and
-produce separate physical plans. The ordinary entrypoints compose those same
-functions. Each completed plan retains its analysis; another completion reads
-the same analysis and writes its own result. These continuations use the fixed
-source function identities captured by analysis. Numerical graph transformations
-supply their actual operation correspondence and complete changed demands before
-the broader [joint IR composition](../../../compiler-emit/docs/joint-ir.md) can
-connect them to physical planning.
+`mesh_plan_local_complete` produces the local physical result.
+`mesh_plan_program_compile` produces a `mesh_plan_compilation` with its complete
+physical result, placement, schedule, page rows and relocatable runtime records.
+Analysis receives topology and storage geometry as explicit operands.
+`mesh_plan_program_install` reads the compilation and the supplied live context,
+reserves live storage, binds addresses and publishes a generation. Its distinct
+`mesh_plan_binding` retains the compilation and owns the reservation and address
+tables. Readers combine the original section with the binding's row base and
+read the binding's function addresses. Each later compilation or installation
+produces another owner.
+
+Numerical graph transformations supply their actual operation correspondence
+and complete changed demands at the analysis producer. The broader
+[joint IR composition](../../../compiler-emit/docs/joint-ir.md) pairs those
+operands with physical planning. The graph header owns grouping, adjacency,
+chain enumeration, lag queries, interval sets, and the existing optimization
+algorithms. Their producers retain complete solution arrays and correspondence;
+their consumers read those same arrays by view.
 
 ## Archives
 
@@ -39,18 +51,16 @@ produced arrays, transfer groups and source/instance correspondence. Original
 flow producers retain their position and covered-block counts alongside those
 arrays. Network archives add native states, page rows, signature and extents.
 
-The loader produces function descriptors and repoints declared-view dimension
-pairs into the retained archive. Actor arrays and relations remain complete
-archive-owned results. `mesh_plan_load`, which receives an existing source
-function, keeps loaded actors on `result[f].actors` instead of overwriting the
-source. A subsequent continuation reads those retained actors and the archived
-flow timing result. Network relocation writes separately allocated derived sections and row
-offsets; source values remain archive views. The original archive release callback
-runs when the physical result, analysis and loaded relations release their shared
-byte owner. Loaded numerical and graph arrays remain archive views; pointer-bearing
-headers retain their original descriptor relocation. Network loading binds the
-live context and current verified topology explicitly. `Plan.analysis` exposes
-the same retained native analysis to the standalone Python caller.
+`mesh_plan_compilation_save` writes the complete compiler result through the
+common archive codecs. `mesh_plan_compilation_load` returns that compiler result
+with its archive owner retained. The loader produces function descriptors and
+points declared-view dimension pairs into the archive. Actor arrays, relations,
+solutions and source values remain archive views. The installer consumes the
+loaded compilation through the same interface as a fresh compilation. It writes
+the runtime records and live bindings into their separate destination storage.
+The original archive release function runs when the result, analysis and loaded
+relations release their shared byte owner. The standalone Python interfaces
+retain each complete native owner while exposing descendant views.
 Exact archive format identifiers advance with this layout; earlier archives must
 be regenerated through their original producer.
 

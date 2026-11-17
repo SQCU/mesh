@@ -612,10 +612,10 @@ def _recorder():
                 ('MetalReplayDestroy', None, [C.POINTER(Replay)]),
                 ('MetalRecorderActors', C.c_int, [P, machine, machine, C.POINTER(_Actors)]),
                 ('MetalRecorderActorsFree', None, [C.POINTER(_Actors)]),
-                ('MetalRecorderProgram', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), text, room]),
+                ('MetalRecorderProgram', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), text, room]),
                 ('MetalProgramSave', C.c_int, [P, C.POINTER(Span), U, C.POINTER(P), C.POINTER(C.c_size_t), text,
                                                room]),
-                ('MetalProgramLoad', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), P, text, room]),
+                ('MetalProgramLoad', P, [P, C.POINTER(Call), U, C.POINTER(mesh.Planned), C.POINTER(mesh.PlanBinding), P, text, room]),
                 ('MetalProgramPhases', None, [P, C.POINTER(Q), C.POINTER(Q)]),
                 ('MetalProgramIssued', Q, [P]),
                 ('MetalProgramSignatureNode', C.c_int, [P, U, C.c_size_t, C.POINTER(Q),
@@ -645,17 +645,17 @@ TRANSPORT = []
 def _transport():
     if not TRANSPORT:
         lib = C.CDLL(os.path.join(_repository(), '.build', 'libmesh_metal.dylib'))
-        planned, transport = C.POINTER(mesh.Planned), C.POINTER(Transport)
+        binding, transport = C.POINTER(mesh.PlanBinding), C.POINTER(Transport)
         for name, result, arguments in (
-                ('mesh_metal_transport_create', C.c_int, [mesh.CONTEXT, planned, C.c_void_p, transport]),
+                ('mesh_metal_transport_create', C.c_int, [mesh.CONTEXT, binding, C.c_void_p, transport]),
                 ('mesh_metal_transport_destroy', None, [transport]),
                 ('mesh_metal_range_declare', C.c_int, [mesh.CONTEXT, C.POINTER(mesh.U), mesh.U, mesh.U, mesh.U, mesh.U,
                                                        mesh.Q, mesh.Q, C.POINTER(Range)]),
-                ('mesh_metal_range_prepare', C.c_int, [mesh.CONTEXT, transport, planned, mesh.Section,
+                ('mesh_metal_range_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.Section,
                                                        C.POINTER(mesh.U), mesh.U, C.POINTER(Range)]),
-                ('mesh_metal_release_prepare', C.c_int, [mesh.CONTEXT, transport, planned, mesh.U,
+                ('mesh_metal_release_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U,
                                                          C.POINTER(Release)]),
-                ('mesh_metal_sending_prepare', C.c_int, [mesh.CONTEXT, transport, planned, mesh.U, mesh.U,
+                ('mesh_metal_sending_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U, mesh.U,
                                                          C.POINTER(Sending)]),
                 ('mesh_metal_status_prepare', C.c_int, [mesh.CONTEXT, transport, mesh.Q, C.POINTER(mesh.Q)]),
                 ('mesh_metal_machines', C.c_int, [C.c_char_p, C.POINTER(mesh_graph.Machine),

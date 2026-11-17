@@ -95,7 +95,7 @@ enum { MESH_ORDER_FLOW, MESH_ORDER_CONFLICT, MESH_PLANNED_PROGRAM, MESH_PLANNED_
    and MESH_PLANNED_CHAIN call ordinals; MESH_PLANNED_PROGRAM, _SUBMIT, _OUTSTANDING and _TRANSFER the signature's
    tasks */
 struct mesh_planned_cause { uint32_t kind,pair; };
-struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,parts,waits,padding; };
+struct mesh_planned_call { uint64_t lead; uint32_t function,ordinal,every,parts,waits,padding; };
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/plan-to-bridge-change-request.md R1, R2
    and R5; MPI 4.1 §3.7.3 and §6.1.3: original transfer t of function f's planned rows, extent[received, sending) its
    RECEIVE rows and [sending, end) its SEND rows, each mesh_graph_access one planned entry's logical bytes [start, end)
@@ -103,63 +103,41 @@ struct mesh_planned_call { uint64_t plan,lead; uint32_t function,ordinal,every,p
    transfers of one demand share its rows, every copy the same */
 struct mesh_planned_transfer { size_t received,sending,end; };
 /* design/joint-plan-results.md */
+struct mesh_plan_compilation;
+struct mesh_plan_binding {
+  struct mesh_plan_compilation *compilation;
+  struct mesh_range rows,arena[2];
+  uint64_t generation;
+  uint64_t *plan;
+  uint32_t *page;
+};
+void mesh_plan_binding_free(struct mesh_plan_binding *);
+struct mesh_plan_geometry { uint32_t pgsz,block,rows,padding; struct mesh_range arena[2]; };
 struct mesh_plan_value { struct mesh_section section; uint32_t shares,lag; };
 struct mesh_plan_actors { const double *host,*work; const struct mesh_graph_dependence *edge; uint32_t parts,edges;
                           struct mesh_graph_relation *relation; };
-struct mesh_plan_function { struct mesh_plan_value *value; uint64_t plan; double *completion; uint32_t *order;
+struct mesh_plan_function { struct mesh_plan_value *value; double *completion; uint32_t *order;
                             const struct mesh_plan_actors *actors; };
 _Static_assert(sizeof(struct mesh_plan_value)==32 && sizeof(struct mesh_plan_actors)==40 &&
-               sizeof(struct mesh_plan_function)==40,"mesh plan results: rdma/mesh.py");
+               sizeof(struct mesh_plan_function)==32,"mesh plan results: rdma/mesh.py");
 struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
                       struct mesh_planned_cause *cause; uint64_t horizon;
                       uint32_t functions; size_t extents,*first; struct mesh_planned_transfer *transfer;
                       struct mesh_graph_access *extent; void *owned; uint64_t used[2];
-                      struct mesh_range arena[2],rows; uint64_t generation;
+                      struct mesh_range arena[2],rows;
                       struct mesh_plan_function *result; struct mesh_plan_value *root; uint32_t results,roots; struct mesh_plan_analysis *analysis; };
-/* `owned`: a loaded result's own memory and its archive's owner (mesh_plan_load, mesh_local_load), released by
-   mesh_planned_free; NULL for a planned result.  `used[a]`: the blocks (m->block pages each) the plan's placement
-   solved in distinct arena a, a as mesh_arena_range(m, a) (one shared arena: used[0], used[1] 0), as mesh_plan placed
-   them or the loaded archive saved them; 0 for a local result.  `arena[a]`: the pages of arena a the placement's pages
-   are offsets from: its reservation, {first, used[a] blocks} (mesh_plan and mesh_plan_load reserve it), equal ranges
-   where one arena is shared; mesh_plan_save saves them; {0} for a
-   local result.  `rows`: its reserved page-table rows, its value rows then its root row (rows.first + rows.count - 1,
-   its publication's stable slot: mesh.h struct mesh_page_entry `publication`); `generation`: its publication's (0
-   none), which mesh-dataflow.h mesh_retire closes */
-_Static_assert(sizeof(struct mesh_planned_call)==40 && offsetof(struct mesh_planned_call,function)==16 &&
-               offsetof(struct mesh_planned_call,waits)==32 && offsetof(struct mesh_planned,owned)==96 &&
-               offsetof(struct mesh_planned,calls)==24 &&
-               offsetof(struct mesh_planned,orders)==32 && offsetof(struct mesh_planned,cause)==40 &&
-               offsetof(struct mesh_planned,horizon)==48 && offsetof(struct mesh_planned,functions)==56 &&
-               offsetof(struct mesh_planned,extents)==64 && offsetof(struct mesh_planned,first)==72 &&
-               offsetof(struct mesh_planned,transfer)==80 && offsetof(struct mesh_planned,extent)==88 &&
-               offsetof(struct mesh_planned,used)==104 && offsetof(struct mesh_planned,arena)==120 &&
-               offsetof(struct mesh_planned,rows)==136 && offsetof(struct mesh_planned,generation)==144 &&
-               offsetof(struct mesh_planned,result)==152 && offsetof(struct mesh_planned,analysis)==176 && sizeof(struct mesh_planned)==184 &&
-               sizeof(struct mesh_planned_transfer)==24 &&
-               sizeof(struct mesh_planned_cause)==8,"mesh_planned: rdma/mesh.py Planned");
+/* design/planner-composition.md; design/joint-plan-results.md#archives */
+_Static_assert(sizeof(struct mesh_planned_call)==32 && offsetof(struct mesh_planned_call,function)==8 &&
+               offsetof(struct mesh_planned_call,waits)==24 && sizeof(struct mesh_planned)==176 &&
+               offsetof(struct mesh_planned,result)==144 && offsetof(struct mesh_planned,analysis)==168,
+               "mesh_planned: rdma/mesh.py Planned");
 uint64_t mesh_plan_quantum(const struct hdr *);
 uint64_t mesh_plan_quanta(uint64_t bytes,uint64_t quantum);
 int mesh_plan(struct mesh_ctx *,uint64_t group,uint64_t program,const struct mesh_function *functions,uint32_t count,
               const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
-              const uint32_t *chains,uint64_t deadline,struct mesh_planned *planned);
-int mesh_plan_save(struct mesh_ctx *,uint64_t program,const struct mesh_function *,uint32_t count,
-  const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
-  const uint32_t *chains,const struct mesh_planned *,void **bytes,size_t *length);
-/* `analysis` the loading compilation's analysis context (mesh-graph.h struct mesh_graph_context): each function's actor
-   relation loaded in it (mesh_graph_relation_load) */
-int mesh_plan_load(struct mesh_ctx *,struct mesh_graph_context *analysis,uint64_t group,uint64_t program,
-  const struct mesh_function *,uint32_t count,
-  const uint32_t *calls,uint32_t ncalls,const uint32_t *orders,const uint32_t *causes,uint32_t norders,
-  const uint32_t *chains,uint64_t deadline,const void *bytes,size_t length,void (*release)(void *),void *owner,
-  struct mesh_planned *);
-/* mesh_plan_load's archive (8-byte aligned `bytes`, EINVAL otherwise) restores each function's compiled parts (host,
-   work, and their relation or flat edges) in result[f].actors beside the unchanged functions[f], as views of `bytes`, with
-   the result's order, cause and extents; on success the result adopts `owner` (release(owner) once the result, freed
-   by mesh_planned_free, and every loaded relation are released), on failure the caller keeps it.  mesh_plan and
-   mesh_plan_load are each one preparation (hdr `preparing`, until `deadline`): the plan's rows and the used blocks of
-   each distinct arena reserved around every live publication's (mesh_graph_greedy_by_size, pinned), its saved pages
-   and rows relocated to them from the archive's origins (`arena`, `rows`), then published at its root row */
+              const uint32_t *chains,uint64_t deadline,struct mesh_plan_binding *binding);
+
 void mesh_planned_free(struct mesh_planned *);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/torch-capture-change-request.md item 6;
    design/aot-compilation-change-request.md A10 and appendix items 2 and 6; design/disjoint-pages-change-request.md:
@@ -175,7 +153,7 @@ void mesh_planned_free(struct mesh_planned *);
    lagged, transferred or invariant value's copy meets its function's other copies as their circular lifetimes do and
    every other copy; any other two copies, of one function or not, meet unless both are of one block and every
    occurrence of one precedes every occurrence of the other (in one call by its value's begin and end, across calls by
-   `closure`, never by call number). `planned` one call {plan 0, lead 0, function,
+   `closure`, never by call number). `planned` one call {lead 0, function,
    ordinal, every, parts, waits 0} per call, the horizon of their parts' Bff, its orders: each call's function edges as
    MESH_PLANNED_PART orders on that call's part vertices from 0 (cause pair the call), each order q from and to call
    ordinals (MESH_ORDER_CONFLICT where a view hazard is among its edge's causes, else MESH_ORDER_FLOW; pair q), each
@@ -197,6 +175,19 @@ _Static_assert(sizeof(struct mesh_local_use)==8,"mesh_local_use: rdma/mesh.py Lo
    first row, and the rows' demand_of and release_of; a loaded one's views of its archive), NULL a local result's;
    quantum is the original placement quantum in bytes, not arena-base alignment */
 struct mesh_grouped;
+struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,space; };
+struct plan_placement {
+  struct plan_item *item;
+  uint64_t *count,*chain,items,elements;
+  uint32_t split,table;
+  struct mesh_range range[2];
+  uint64_t *at,blocks;
+  size_t allocations;
+  uint32_t run,space;
+  uint64_t used[2];
+  uint64_t *size,*start,*end,*offset,*operations;
+  uint32_t *function,*index,*copy;
+};
 struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
                     uint64_t *offset; uint32_t functions,roots; const struct mesh_function *function;
                     const struct mesh_value *root; size_t *value_first; const uint32_t *calls,*chains,*ordered;
@@ -205,18 +196,8 @@ struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,o
                     const struct mesh_local_use *use; const uint32_t *source_calls;
                     const uint64_t *source_outstanding; uint32_t sources,padding; size_t *row,*order,*source_row,
                     *source_order,*demand_first; uint32_t *demand_of,*release_of;
-                    const struct mesh_grouped *grouped; uint64_t quantum; };
-_Static_assert(offsetof(struct mesh_local,bytes)==184 &&
-               offsetof(struct mesh_local,values)==192 && offsetof(struct mesh_local,offsets)==200 &&
-               offsetof(struct mesh_local,first)==208 && offsetof(struct mesh_local,offset)==216 &&
-               offsetof(struct mesh_local,functions)==224 && offsetof(struct mesh_local,function)==232 &&
-               offsetof(struct mesh_local,value_first)==248 && offsetof(struct mesh_local,ncalls)==280 &&
-               offsetof(struct mesh_local,relation)==288 && offsetof(struct mesh_local,use)==312 &&
-               offsetof(struct mesh_local,source_calls)==320 && offsetof(struct mesh_local,sources)==336 &&
-               offsetof(struct mesh_local,row)==344 && offsetof(struct mesh_local,demand_first)==376 &&
-               offsetof(struct mesh_local,release_of)==392 && offsetof(struct mesh_local,grouped)==400 &&
-               offsetof(struct mesh_local,quantum)==408 && sizeof(struct mesh_local)==416,
-               "mesh_local: rdma/mesh.py Local");
+                    const struct mesh_grouped *grouped; uint64_t quantum; struct plan_placement *placement; };
+
 int mesh_plan_local(const struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
                     const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,
                     const struct mesh_graph_closure *closure,const uint32_t *chains,const struct mesh_value *roots,
@@ -288,7 +269,7 @@ struct mesh_plan_vertex { uint32_t demand,node,write,read,reads,source; };
 /* design/plan-to-bridge-change-request.md R5; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
 struct mesh_plan_entry { uint32_t node,direction,demand,field,communication,set; uint64_t instruction; };
 struct mesh_plan_flow {
-  struct mesh_ctx *context;
+  const struct mesh_plan_geometry *geometry;
   const struct mesh_declared *declared;
   uint32_t transfers;
   const struct mesh_value *given;
@@ -335,20 +316,27 @@ struct mesh_plan_flow {
   uint32_t *here,local;
   uint32_t vertices;
   size_t edges;
-  size_t *first;
-  uint32_t *head,*lag;
+  struct mesh_graph_dependence *edge;
+  struct mesh_graph_grouping *rows;
   uint32_t *between;
   uint32_t *farthest;
   /* design/aot-compilation-change-request.md A10 */
   uint64_t outstanding,spanned,nodes,forwarded;
   uint32_t calls,horizon;
   double time[MESH_NODES_MOST];
+  struct mesh_graph_tree **adjacency;
+  uint32_t *acyclic_indegree,*acyclic_ordinal,*lag_source,*lag_target;
+  struct mesh_graph_lag_graph *lag_graph;
+  struct mesh_graph_lag_matrix *lags;
+  struct mesh_graph_cover_result *covers;
+  struct mesh_graph_touch *touch;
+  uint32_t *relay;
 };
 
 struct mesh_plan_analysis {
   size_t references;
-  struct mesh_ctx *context;
-  uint64_t group,program;
+  const struct mesh_plan_geometry *geometry;
+  uint64_t program;
   const struct mesh_function *function;
   uint32_t functions;
   const uint32_t *calls,*chains,*ordered,*source_calls,*orders,*causes;
@@ -362,32 +350,96 @@ struct mesh_plan_analysis {
   const struct mesh_local_use *use;
   const struct mesh_grouped *grouped;
   struct mesh_plan_flow *flow;
-  uint32_t *every,*ordinal,*call_of,*flat,*cause;
-  size_t *call_first,*row,*order,*source_row,*source_order;
+  struct mesh_graph_grouping *call_group,*source_group;
+  struct mesh_graph_chain_result *chain_pairs;
+  struct mesh_graph_buffer_result *bounds;
+  uint32_t *actor_function;
+  uint64_t *function_lag;
   unsigned char *carried;
-  struct mesh_nodes nodes;
-  void *owned;
+  const struct mesh_nodes *nodes;
+  void *owned,*environment;
 };
-_Static_assert(sizeof(struct mesh_plan_flow)==8808 && sizeof(struct mesh_plan_analysis)==8632,
-  "mesh_plan_flow/analysis: rdma/mesh.py PlanFlow/PlanAnalysis");
+
 void mesh_plan_analysis_retain(struct mesh_plan_analysis *);
 void mesh_plan_analysis_free(struct mesh_plan_analysis *);
 int mesh_plan_local_analyze(const struct mesh_function *,uint32_t,const uint32_t *,uint32_t,
   const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
   const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,struct mesh_plan_analysis **);
-int mesh_plan_program_analyze(struct mesh_ctx *,uint64_t,uint64_t,const struct mesh_function *,uint32_t,
+int mesh_plan_program_analyze(const struct mesh_nodes *,const struct mesh_plan_geometry *,uint64_t,const struct mesh_function *,uint32_t,
   const struct mesh_grouped *,const uint32_t *,uint32_t,const uint32_t *,uint32_t,const uint64_t *,
   const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
   const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,struct mesh_plan_analysis **);
 int mesh_plan_local_complete(struct mesh_plan_analysis *,uint64_t,struct mesh_local *);
-int mesh_plan_program_complete(struct mesh_plan_analysis *,uint64_t,struct mesh_local *);
+struct plan_sync { uint32_t node,function,entry,every; int64_t base; };
+struct plan_entry { const struct mesh_plan_entry *source; uint32_t place; };
+struct plan_span { uint32_t first,count; };
+struct plan_schedule_result {
+  uint32_t first,tasks,instructions;
+  size_t edges,entries,dependencies;
+  uint32_t *reader;
+  struct plan_span *consumer;
+  double *w,*cost,*rate,*completion,*priority;
+  uint32_t *resource,*from,*to,*link,*communication,*before,*after,*place;
+  size_t *route;
+};
+struct plan_graph_result {
+  const struct mesh_plan_analysis *analysis;
+  uint32_t vertices,added;
+  size_t built;
+  double lambda,*time;
+  uint32_t *actor,*later,*from,*to,*call,*node,*observer,*key,*added_from,*added_to,*entry;
+  uint64_t *lag,*lagged,*delay,*added_delay;
+  size_t *first,*rows,*wait_first,*wait_order,*tell_first,*tell_order;
+  struct mesh_graph_task *task;
+  struct mesh_planned_cause *cause;
+  struct mesh_graph_grouping *room_rows;
+  struct mesh_graph_lag_graph *room_graph;
+  struct mesh_graph_dependence *room_query;
+  struct mesh_graph_lag_result *room_lags;
+};
+struct plan_step {
+  const struct mesh_plan_flow *flow;
+  const struct mesh_function *function;
+  struct mesh_plan_function *result;
+  struct mesh_plan_value *root_result;
+  uint32_t *item,set_item,state;
+  uint64_t base;
+  struct plan_entry *entry;
+  double *completed;
+  uint64_t phases,counts,completions,supplied,publications,status,hops,times,words;
+  uint64_t deliveries,submits,syncs,rows,room,submit_room;
+  uint32_t waits,tells,*wait_row;
+  struct plan_sync *sync;
+  struct plan_schedule_result *schedule;
+  struct plan_graph_result *graph;
+};
+struct plan_placement;
+struct mesh_plan_compilation {
+  size_t references;
+  struct mesh_local result;
+  struct plan_step *step;
+  struct plan_placement *placement;
+  uint32_t *root_item,*page,*adjacency,*toward,*place;
+  size_t *rows_by,*listed;
+  uint64_t places;
+  void **state;
+  uint64_t *state_bytes;
+  void *owned;
+};
+int mesh_plan_environment(struct mesh_ctx *,struct mesh_nodes *,struct mesh_plan_geometry *);
+int mesh_plan_program_compile(struct mesh_plan_analysis *,struct mesh_plan_compilation **);
+int mesh_plan_program_install(struct mesh_ctx *,uint64_t,const struct mesh_plan_compilation *,uint64_t,struct mesh_plan_binding *);
+void mesh_plan_compilation_retain(struct mesh_plan_compilation *);
+void mesh_plan_compilation_free(struct mesh_plan_compilation *);
+int mesh_plan_compilation_save(const struct mesh_plan_compilation *,void **,size_t *);
+int mesh_plan_compilation_load(struct mesh_graph_context *,const void *,size_t,void (*)(void *),void *,struct mesh_plan_compilation **);
 int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,const struct mesh_function *functions,
                       uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
                       const uint32_t *source_calls,uint32_t sources,const uint64_t *source_outstanding,
                       const struct mesh_graph_relation *order,
                       const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
                       const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
-                      const struct mesh_local_use *use,uint64_t deadline,struct mesh_local *out);
+                      const struct mesh_local_use *use,uint64_t deadline,struct mesh_plan_binding *out);
 /* design/compilation-composition-change-request.md items 3, 6.4 and 7: the whole solved local result, saved in one
    archive (*bytes the caller's, released with free) and loaded without planning again: each function's original value,
    declared, weight, dependence, task, before, sender and receiver operands, outstanding and compiled actors; the
@@ -402,32 +454,13 @@ int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,c
 int mesh_local_save(const struct mesh_local *local,void **bytes,size_t *length);
 int mesh_local_load(struct mesh_graph_context *analysis,const void *bytes,size_t length,void (*release)(void *),
                     void *owner,struct mesh_local *local);
-/* design/compilation-composition-change-request.md items 3, 6.4 and 7; design/aot-compilation-change-request.md A8 to
-   A10 and appendix item 6; design/plan-to-bridge-change-request.md R8: mesh_plan_program's whole network result `local`
-   saved in one archive (*bytes the caller's, released with free): its local sections (mesh_local_save's), each
-   function's declared transfers (with their strided views), weights, dependences, tasks, before, senders, receivers,
-   completion and order, its plan state, the planned rows' pages, the plan table's adjacency, the planned signature and
-   extents, the source family (source_calls, source_outstanding) and the instance and source rows and demands
-   (row/order, source_row/source_order, demand_first, demand_of, release_of).  mesh_program_load: the same result loaded
-   from `bytes` (8-byte aligned, borrowed: every array a view of them but those it relocates, its own) and published
-   again without planning, one preparation as mesh_plan_load's (hdr `preparing` until `deadline`; its rows and used
-   blocks reserved beside every live publication's; its pages, its value and root sections and its copies' rows
-   relocated to them; its plans, rows and table written; published at its root row).  `local` is then
-   mesh_plan_program's owner: mesh_local_free frees it, mesh-dataflow.h mesh_retire(planned) closes its publication.  On
-   success it adopts `owner` (release(owner) once the result and every loaded relation are released); on failure the
-   caller keeps it and `local` is zeroed; `analysis` as mesh_local_load's */
-int mesh_program_save(struct mesh_ctx *context,uint64_t program,const struct mesh_local *local,void **bytes,
-                      size_t *length);
-int mesh_program_load(struct mesh_ctx *context,struct mesh_graph_context *analysis,uint64_t group,uint64_t program,
-                      uint64_t deadline,const void *bytes,size_t length,void (*release)(void *),void *owner,
-                      struct mesh_local *local);
 /* design/torch-capture-change-request.md item 6: every retained copy of a network result (local->first's values: its
    functions' values, then its roots; run 1 or 0 alike) in one mapping *view of the context's region, the view spanning
    every row of every copy (each copy section.stride rows from its first row local->offset[k], each row one block at its
    own bound page, not assumed contiguous). copy_offsets[local->offsets]: copy k's first row's byte offset in the view.
    page_offsets[local->planned.rows.count], indexed by row - local->planned.rows.first: each copy's row's page's byte
    offset in the view; defined only for those rows (not the plan's other rows, as its root row) */
-void mesh_view_program(struct mesh_ctx *,const struct mesh_local *local,uint64_t *copy_offsets,uint64_t *page_offsets,
+void mesh_view_program(struct mesh_ctx *,const struct mesh_plan_binding *binding,uint64_t *copy_offsets,uint64_t *page_offsets,
                        struct mesh_view *view);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
@@ -437,6 +470,6 @@ uint64_t mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64
 /* design/disjoint-pages-change-request.md C3.6; design/problems-of-14b9a757-change-request.md 7.3 */
 int mesh_host_wait(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction);
 /* design/torch-capture-change-request.md item 6 */
-void mesh_view_values(struct mesh_ctx *,const struct mesh_function *functions,const struct mesh_planned *,uint32_t count,uint64_t *first,
+void mesh_view_values(struct mesh_ctx *,const struct mesh_function *functions,const struct mesh_plan_binding *,uint32_t count,uint64_t *first,
                       uint64_t *offset,struct mesh_view *view);
 #endif

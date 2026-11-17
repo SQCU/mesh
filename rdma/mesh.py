@@ -28,6 +28,10 @@ class Range(C.Structure):
     _fields_ = [('first', U), ('count', U)]
 
 
+class PlanGeometry(C.Structure):
+    _fields_ = [('pgsz', U), ('block', U), ('rows', U), ('padding', U), ('arena', Range * 2)]
+
+
 # mesh.h struct hdr
 class Header(C.Structure):
     _fields_ = [('magic', U), ('version', U), ('pgsz', U), ('block', U), ('rows', U), ('node', U), ('vacant0', U),
@@ -125,7 +129,7 @@ class View(C.Structure):
 # design/compilation-composition-change-request.md item 6, unit 6D; mesh-collective.h struct mesh_planned_call, struct
 # mesh_planned; design/algorithm-sources.md#the-plans-results-for-native-preparation
 class PlannedCall(C.Structure):
-    _fields_ = [('plan', Q), ('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('parts', U), ('waits', U),
+    _fields_ = [('lead', Q), ('function', U), ('ordinal', U), ('every', U), ('parts', U), ('waits', U),
                 ('padding', U)]
 
 
@@ -148,7 +152,7 @@ class PlanActors(C.Structure):
 
 
 class PlanFunction(C.Structure):
-    _fields_ = [('value', C.POINTER(PlanValue)), ('plan', Q), ('completion', C.POINTER(D)),
+    _fields_ = [('value', C.POINTER(PlanValue)), ('completion', C.POINTER(D)),
                 ('order', C.POINTER(U)), ('actors', C.POINTER(PlanActors))]
 
 
@@ -162,7 +166,7 @@ class Planned(C.Structure):
                 ('cause', C.POINTER(PlannedCause)), ('horizon', Q), ('functions', U), ('extents', Z),
                 ('first', C.POINTER(Z)), ('transfer', C.POINTER(PlannedTransfer)),
                 ('extent', C.POINTER(mesh_graph.Access)), ('owned', C.c_void_p), ('used', Q * 2),
-                ('arena', Range * 2), ('rows', Range), ('generation', Q),
+                ('arena', Range * 2), ('rows', Range),
                 ('result', C.POINTER(PlanFunction)), ('root', C.POINTER(PlanValue)), ('results', U), ('roots', U), ('analysis', C.POINTER(PlanAnalysis))]
 
 
@@ -183,6 +187,19 @@ class LocalUse(C.Structure):
     _fields_ = [('call', U), ('value', U)]
 
 
+class PlanItem(C.Structure):
+    _fields_ = [('element', Q), ('blocks', Q), ('kind', U), ('function', U), ('index', U), ('copy', U), ('space', U)]
+
+
+class PlanPlacement(C.Structure):
+    _fields_ = [('item', C.POINTER(PlanItem)), ('count', C.POINTER(Q)), ('chain', C.POINTER(Q)),
+                ('items', Q), ('elements', Q), ('split', U), ('table', U), ('range', Range * 2),
+                ('at', C.POINTER(Q)), ('blocks', Q), ('allocations', Z), ('run', U), ('space', U),
+                ('used', Q * 2), ('size', C.POINTER(Q)), ('start', C.POINTER(Q)), ('end', C.POINTER(Q)),
+                ('offset', C.POINTER(Q)), ('operations', C.POINTER(Q)), ('function', C.POINTER(U)),
+                ('index', C.POINTER(U)), ('copy', C.POINTER(U))]
+
+
 # mesh-collective.h struct mesh_local, mesh_plan_local, mesh_local_save and mesh_local_load: the whole solved result
 # with its operands (functions, roots, value_first, calls, chains, ordered edges, relation, closure, uses)
 class Local(C.Structure):
@@ -195,7 +212,25 @@ class Local(C.Structure):
                 ('sources', U), ('padding', U), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
                 ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('demand_first', C.POINTER(Z)),
                 ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U)), ('grouped', C.POINTER(Grouped)),
-                ('quantum', Q)]
+                ('quantum', Q), ('placement', C.POINTER(PlanPlacement))]
+
+
+class PlanStep(C.Structure):
+    pass
+
+
+class PlanCompilation(C.Structure):
+    _fields_ = [('references', Z), ('result', Local), ('step', C.POINTER(PlanStep)),
+                ('placement', C.POINTER(PlanPlacement)), ('root_item', C.POINTER(U)),
+                ('page', C.POINTER(U)), ('adjacency', C.POINTER(U)), ('toward', C.POINTER(U)),
+                ('place', C.POINTER(U)), ('rows_by', C.POINTER(Z)), ('listed', C.POINTER(Z)),
+                ('places', Q), ('state', C.POINTER(C.c_void_p)), ('state_bytes', C.POINTER(Q)),
+                ('owned', C.c_void_p)]
+
+
+class PlanBinding(C.Structure):
+    _fields_ = [('compilation', C.POINTER(PlanCompilation)), ('rows', Range), ('arena', Range * 2),
+                ('generation', Q), ('plan', C.POINTER(Q)), ('page', C.POINTER(U))]
 
 
 # mesh-collective.h: an order pair's Bernstein condition (mesh_plan `causes`) and the other causes of a planned edge
@@ -291,7 +326,7 @@ class ViewId(C.Structure):
 
 
 class PlanFlow(C.Structure):
-    _fields_ = [('context', C.POINTER(Context)), ('declared', C.POINTER(Declared)), ('transfers', U),
+    _fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINTER(Declared)), ('transfers', U),
                 ('given', C.POINTER(Value)), ('value_lag', C.POINTER(U)), ('givens', U),
                 ('named', C.POINTER(C.c_ubyte)), ('uncovered', C.POINTER(U)), ('cut', C.POINTER(Q)),
                 ('at', C.POINTER(Q)), ('toward', Q), ('sets', U), ('set_first', C.POINTER(U)),
@@ -310,23 +345,74 @@ class PlanFlow(C.Structure):
                 ('ranges', U), ('consumed', U), ('sending', U), ('child', C.POINTER(Q)), ('roots', C.POINTER(Value)),
                 ('nroots', U), ('carried', C.POINTER(C.c_ubyte)), ('bound', C.POINTER(U)),
                 ('value', C.POINTER(PlanVertex)), ('values', U), ('read', C.POINTER(U)), ('here', C.POINTER(U)),
-                ('local', U), ('vertices', U), ('edges', Z), ('first', C.POINTER(Z)), ('head', C.POINTER(U)),
-                ('lag', C.POINTER(U)), ('between', C.POINTER(U)), ('farthest', C.POINTER(U)),
+                ('local', U), ('vertices', U), ('edges', Z), ('edge', C.POINTER(mesh_graph.Dependence)),
+                ('rows', C.POINTER(mesh_graph.Grouping)), ('between', C.POINTER(U)), ('farthest', C.POINTER(U)),
                 ('outstanding', Q), ('spanned', Q), ('nodes', Q), ('forwarded', Q), ('calls', U), ('horizon', U),
-                ('time', D * NODES_MOST)]
+                ('time', D * NODES_MOST), ('adjacency', C.POINTER(C.POINTER(mesh_graph.Tree))),
+                ('acyclic_indegree', C.POINTER(U)), ('acyclic_ordinal', C.POINTER(U)),
+                ('lag_source', C.POINTER(U)), ('lag_target', C.POINTER(U)),
+                ('lag_graph', C.POINTER(mesh_graph.LagGraph)), ('lags', C.POINTER(mesh_graph.LagMatrix)),
+                ('covers', C.POINTER(mesh_graph.CoverResult)), ('touch', C.POINTER(mesh_graph.Touch)),
+                ('relay', C.POINTER(U))]
 
 
 PlanAnalysis._fields_ = [
-    ('references', Z), ('context', C.POINTER(Context)), ('group', Q), ('program', Q), ('function', C.POINTER(Function)),
+    ('references', Z), ('geometry', C.POINTER(PlanGeometry)), ('program', Q), ('function', C.POINTER(Function)),
     ('functions', U), ('calls', C.POINTER(U)), ('chains', C.POINTER(U)), ('ordered', C.POINTER(U)),
     ('source_calls', C.POINTER(U)), ('orders', C.POINTER(U)), ('causes', C.POINTER(U)), ('ncalls', U), ('norders', U),
     ('sources', U), ('horizon', U), ('source_outstanding', C.POINTER(Q)), ('relation', C.c_void_p),
     ('closure', C.POINTER(mesh_graph.Closed)), ('root', C.POINTER(Value)), ('roots', U), ('use_first', C.POINTER(Z)),
     ('use', C.POINTER(LocalUse)), ('grouped', C.POINTER(Grouped)), ('flow', C.POINTER(PlanFlow)),
-    ('every', C.POINTER(U)), ('ordinal', C.POINTER(U)), ('call_of', C.POINTER(U)), ('flat', C.POINTER(U)),
-    ('cause', C.POINTER(U)), ('call_first', C.POINTER(Z)), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
-    ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('carried', C.POINTER(C.c_ubyte)), ('nodes', Nodes),
-    ('owned', C.c_void_p)]
+    ('call_group', C.POINTER(mesh_graph.Grouping)), ('source_group', C.POINTER(mesh_graph.Grouping)),
+    ('chain_pairs', C.POINTER(mesh_graph.ChainResult)), ('bounds', C.POINTER(mesh_graph.BufferResult)),
+    ('actor_function', C.POINTER(U)), ('function_lag', C.POINTER(Q)), ('carried', C.POINTER(C.c_ubyte)),
+    ('nodes', C.POINTER(Nodes)), ('owned', C.c_void_p), ('environment', C.c_void_p)]
+
+
+class PlanSync(C.Structure):
+    _fields_ = [('node', U), ('function', U), ('entry', U), ('every', U), ('base', C.c_int64)]
+
+
+class StepEntry(C.Structure):
+    _fields_ = [('source', C.POINTER(PlanEntry)), ('place', U)]
+
+
+class PlanSpan(C.Structure):
+    _fields_ = [('first', U), ('count', U)]
+
+
+class PlanScheduleResult(C.Structure):
+    _fields_ = [('first', U), ('tasks', U), ('instructions', U), ('edges', Z), ('entries', Z),
+                ('dependencies', Z), ('reader', C.POINTER(U)), ('consumer', C.POINTER(PlanSpan)),
+                ('w', C.POINTER(D)), ('cost', C.POINTER(D)), ('rate', C.POINTER(D)),
+                ('completion', C.POINTER(D)), ('priority', C.POINTER(D)), ('resource', C.POINTER(U)),
+                ('from', C.POINTER(U)), ('to', C.POINTER(U)), ('link', C.POINTER(U)),
+                ('communication', C.POINTER(U)), ('before', C.POINTER(U)), ('after', C.POINTER(U)),
+                ('place', C.POINTER(U)), ('route', C.POINTER(Z))]
+
+
+class PlanGraphResult(C.Structure):
+    _fields_ = [('analysis', C.POINTER(PlanAnalysis)), ('vertices', U), ('added', U), ('built', Z),
+                ('lambda', D), ('time', C.POINTER(D)), ('actor', C.POINTER(U)), ('later', C.POINTER(U)),
+                ('from', C.POINTER(U)), ('to', C.POINTER(U)), ('call', C.POINTER(U)), ('node', C.POINTER(U)),
+                ('observer', C.POINTER(U)), ('key', C.POINTER(U)), ('added_from', C.POINTER(U)),
+                ('added_to', C.POINTER(U)), ('entry', C.POINTER(U)), ('lag', C.POINTER(Q)),
+                ('lagged', C.POINTER(Q)), ('delay', C.POINTER(Q)), ('added_delay', C.POINTER(Q)),
+                ('first', C.POINTER(Z)), ('rows', C.POINTER(Z)), ('wait_first', C.POINTER(Z)),
+                ('wait_order', C.POINTER(Z)), ('tell_first', C.POINTER(Z)), ('tell_order', C.POINTER(Z)),
+                ('task', C.POINTER(mesh_graph.Task)), ('cause', C.POINTER(PlannedCause)),
+                ('room_rows', C.POINTER(mesh_graph.Grouping)), ('room_graph', C.POINTER(mesh_graph.LagGraph)),
+                ('room_query', C.POINTER(mesh_graph.Dependence)), ('room_lags', C.POINTER(mesh_graph.LagResult))]
+
+
+PlanStep._fields_ = [
+    ('flow', C.POINTER(PlanFlow)), ('function', C.POINTER(Function)), ('result', C.POINTER(PlanFunction)),
+    ('root_result', C.POINTER(PlanValue)), ('item', C.POINTER(U)), ('set_item', U), ('state', U), ('base', Q),
+    ('entry', C.POINTER(StepEntry)), ('completed', C.POINTER(D)), ('phases', Q), ('counts', Q),
+    ('completions', Q), ('supplied', Q), ('publications', Q), ('status', Q), ('hops', Q), ('times', Q),
+    ('words', Q), ('deliveries', Q), ('submits', Q), ('syncs', Q), ('rows', Q), ('room', Q), ('submit_room', Q),
+    ('waits', U), ('tells', U), ('wait_row', C.POINTER(U)), ('sync', C.POINTER(PlanSync)),
+    ('schedule', C.POINTER(PlanScheduleResult)), ('graph', C.POINTER(PlanGraphResult))]
 
 
 # mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled
@@ -382,8 +468,8 @@ CONTEXT = C.POINTER(Context)
 # 2026-11-09 (design/torch-capture-change-request.md item 2 and its appendix): mesh_plan takes no horizon; it derives
 # it from each Function's `host` and `work` estimates and gives it as Planned `horizon`.  What must stay: each binding
 # the header's declaration
-# mesh-collective.h mesh_plan_load and mesh_local_load: the archive bytes' owner, released once the loaded result and
-# its relations are; mesh_local_load's and mesh_program_load's `analysis` the loading compilation's one analysis context
+# mesh-collective.h mesh_plan_compilation_load and mesh_local_load: the archive bytes' owner, released once the loaded result and
+# its relations are; mesh_local_load's and mesh_plan_compilation_load's `analysis` the loading compilation's one analysis context
 # (mesh-graph.h struct mesh_graph_context, rdma/mesh_graph.py Context.pointer)
 RELEASE = C.CFUNCTYPE(None, C.c_void_p)
 for name, result, arguments in (
@@ -392,11 +478,7 @@ for name, result, arguments in (
         ('mesh_nodes_read', C.c_int, [CONTEXT, C.POINTER(Nodes)]),
         ('mesh_view_whole', C.c_int, [C.c_void_p, Q]),
         ('mesh_plan', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
-                                C.POINTER(U), Q, C.POINTER(Planned)]),
-        ('mesh_plan_save', C.c_int, [CONTEXT, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
-                                     C.POINTER(U), C.POINTER(Planned), C.POINTER(C.c_void_p), C.POINTER(Z)]),
-        ('mesh_plan_load', C.c_int, [CONTEXT, C.c_void_p, Q, Q, C.POINTER(Function), U, C.POINTER(U), U, C.POINTER(U), C.POINTER(U), U,
-                                     C.POINTER(U), Q, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Planned)]),
+                                C.POINTER(U), Q, C.POINTER(PlanBinding)]),
         ('mesh_planned_free', None, [C.POINTER(Planned)]),
         ('mesh_plan_local', C.c_int, [C.POINTER(Function), U, C.POINTER(U), U, C.c_void_p, C.POINTER(U), U,
                                       C.c_void_p, C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z),
@@ -406,27 +488,33 @@ for name, result, arguments in (
         ('mesh_plan_local_analyze', C.c_int, [C.POINTER(Function), U, C.POINTER(U), U, C.c_void_p, C.POINTER(U), U,
                                               C.c_void_p, C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z),
                                               C.POINTER(LocalUse), C.POINTER(C.POINTER(PlanAnalysis))]),
-        ('mesh_plan_program_analyze', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
+        ('mesh_plan_environment', C.c_int, [CONTEXT, C.POINTER(Nodes), C.POINTER(PlanGeometry)]),
+        ('mesh_plan_program_analyze', C.c_int, [C.POINTER(Nodes), C.POINTER(PlanGeometry), Q,
+                                                C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
                                                 C.POINTER(U), U, C.POINTER(Q), C.c_void_p, C.POINTER(U), U, C.c_void_p,
                                                 C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse),
                                                 C.POINTER(C.POINTER(PlanAnalysis))]),
         ('mesh_plan_local_complete', C.c_int, [C.POINTER(PlanAnalysis), Q, C.POINTER(Local)]),
-        ('mesh_plan_program_complete', C.c_int, [C.POINTER(PlanAnalysis), Q, C.POINTER(Local)]),
+        ('mesh_plan_program_compile', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanCompilation))]),
+        ('mesh_plan_program_install', C.c_int, [CONTEXT, Q, C.POINTER(PlanCompilation), Q, C.POINTER(PlanBinding)]),
+        ('mesh_plan_binding_free', None, [C.POINTER(PlanBinding)]),
+        ('mesh_plan_compilation_retain', None, [C.POINTER(PlanCompilation)]),
+        ('mesh_plan_compilation_free', None, [C.POINTER(PlanCompilation)]),
+        ('mesh_plan_compilation_save', C.c_int, [C.POINTER(PlanCompilation), C.POINTER(C.c_void_p), C.POINTER(Z)]),
+        ('mesh_plan_compilation_load', C.c_int, [C.c_void_p, C.c_void_p, Z, RELEASE, C.c_void_p,
+                                                C.POINTER(C.POINTER(PlanCompilation))]),
         ('mesh_local_free', None, [C.POINTER(Local)]),
         ('mesh_declared_group', C.c_int, [C.POINTER(Declared), C.POINTER(Weight), U, U, U, C.POINTER(Grouped)]),
         ('mesh_plan_program', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
                                         C.POINTER(U), U, C.POINTER(Q), C.c_void_p, C.POINTER(U), U, C.c_void_p,
                                         C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse), Q,
-                                        C.POINTER(Local)]),
+                                        C.POINTER(PlanBinding)]),
         ('mesh_local_save', C.c_int, [C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
         ('mesh_local_load', C.c_int, [C.c_void_p, C.c_void_p, Z, RELEASE, C.c_void_p, C.POINTER(Local)]),
-        ('mesh_program_save', C.c_int, [CONTEXT, Q, C.POINTER(Local), C.POINTER(C.c_void_p), C.POINTER(Z)]),
-        ('mesh_program_load', C.c_int, [CONTEXT, C.c_void_p, Q, Q, Q, C.c_void_p, Z, RELEASE, C.c_void_p,
-                                        C.POINTER(Local)]),
-        ('mesh_view_program', None, [CONTEXT, C.POINTER(Local), C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
+        ('mesh_view_program', None, [CONTEXT, C.POINTER(PlanBinding), C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
         ('mesh_plan_retire', None, [CONTEXT, Q]),
-        ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), C.POINTER(Planned), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
-        ('mesh_retire', None, [C.c_void_p, C.POINTER(Planned)]),
+        ('mesh_view_values', None, [CONTEXT, C.POINTER(Function), C.POINTER(PlanBinding), U, C.POINTER(Q), C.POINTER(Q), C.POINTER(View)]),
+        ('mesh_retire', None, [C.c_void_p, C.POINTER(PlanBinding)]),
         ('mesh_publications_clear', None, [C.c_void_p]),
         ('mesh_backing_bind', None, [CONTEXT, U, U, U, U]),
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),

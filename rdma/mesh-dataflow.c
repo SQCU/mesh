@@ -15,7 +15,7 @@
 /* design/plan-to-bridge-change-request.md R8; P. E. McKenney and J. D. Slingwine, Read-copy update, 1998; K. Fraser,
    Practical lock-freedom, 2004: the result's own publication closed (its root row's slot G to G | 1), so no reader
    acquires it again; its rows and pages released by mesh_retired_release once none holds it */
-void mesh_retire(struct hdr *m,const struct mesh_planned *planned){
+void mesh_retire(struct hdr *m,const struct mesh_plan_binding *planned){
   uint64_t open=planned->generation;
   if(open)atomic_compare_exchange_strong_explicit(&mesh_page(m)[planned->rows.first+planned->rows.count-1].publication,
                                                  &open,open|1,memory_order_seq_cst,memory_order_relaxed);
@@ -79,11 +79,12 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
 
 /* design/torch-capture-change-request.md item 6; TensorFlow Lite 6cf18d88,
    tensorflow/lite/delegates/gpu/common/memory_management.h:130-131 and tensorflow/lite/simple_memory_arena.cc:441-445 */
-static uint64_t mesh_view_row(struct hdr *m,const struct mesh_plan_value *v,uint32_t copy){
-  return atomic_load_explicit(&mesh_page(m)[v->section.first+copy*v->section.stride].address,memory_order_relaxed);
+static uint64_t mesh_view_row(struct hdr *m,const struct mesh_plan_value *v,uint32_t copy,uint32_t first){
+  return atomic_load_explicit(&mesh_page(m)[first+v->section.first+copy*v->section.stride].address,memory_order_relaxed);
 }
-void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,const struct mesh_planned *planned,uint32_t count,uint64_t *first,
+void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,const struct mesh_plan_binding *binding,uint32_t count,uint64_t *first,
                       uint64_t *offset,struct mesh_view *view){
+  const struct mesh_planned *planned=&binding->compilation->result.planned;
   struct hdr *m=c->M;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t low=UINT64_MAX,high=0,at=0,values=0;
@@ -92,7 +93,7 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,c
       const struct mesh_value *source=functions[f].value+i;
       const struct mesh_plan_value *v=planned->result[f].value+i;
       for(uint32_t k=0;source->run && k<v->section.count;k++){
-        const uint64_t a=mesh_view_row(m,v,k),z=a+(uint64_t)v->section.stride*block;
+        const uint64_t a=mesh_view_row(m,v,k,binding->rows.first),z=a+(uint64_t)v->section.stride*block;
         if(a<low)low=a;
         if(z>high)high=z;
       }
@@ -102,7 +103,7 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,c
       const struct mesh_value *source=functions[f].value+i;
       const struct mesh_plan_value *v=planned->result[f].value+i;
       first[values++]=at;
-      for(uint32_t k=0;k<v->section.count;k++)offset[at++]=source->run?mesh_view_row(m,v,k)-low:UINT64_MAX;
+      for(uint32_t k=0;k<v->section.count;k++)offset[at++]=source->run?mesh_view_row(m,v,k,binding->rows.first)-low:UINT64_MAX;
     }
   first[values]=at;
   *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
@@ -112,8 +113,9 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,c
    copies' rows (local->first's order; each copy's section.stride rows from local->offset[k], each row's mesh_page
    address plan_bind_table's), its first pass the view's span, its second each copy's first row and each row as offsets
    in it */
-void mesh_view_program(struct mesh_ctx *c,const struct mesh_local *local,uint64_t *copy_offsets,uint64_t *page_offsets,
+void mesh_view_program(struct mesh_ctx *c,const struct mesh_plan_binding *binding,uint64_t *copy_offsets,uint64_t *page_offsets,
                        struct mesh_view *view){
+  const struct mesh_local *local=&binding->compilation->result;
   struct hdr *m=c->M;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t low=UINT64_MAX,high=0;
@@ -124,10 +126,10 @@ void mesh_view_program(struct mesh_ctx *c,const struct mesh_local *local,uint64_
       for(uint32_t i=0;i<n;i++,v++)
         for(size_t k=local->first[v];k<local->first[v+1];k++)
           for(uint32_t r=0;r<value[i].section.stride;r++){
-            const uint64_t row=local->offset[k]+r,
+            const uint64_t row=binding->rows.first+local->offset[k]+r,
                            a=atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed);
             if(!pass){if(a<low)low=a;if(a+block>high)high=a+block;continue;}
-            page_offsets[row-local->planned.rows.first]=a-low;
+            page_offsets[row-binding->rows.first]=a-low;
             if(!r)copy_offsets[k]=a-low;
           }
     }

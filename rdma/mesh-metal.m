@@ -32,14 +32,15 @@ static int state_section(const struct mesh_ctx *context,uint64_t at,uint64_t *en
 /* design/aot-compilation-change-request.md, appendix item 6; design/compilation-composition-change-request.md item 6
    (a delivered range read by another function's capture): every plan state of the program in one view, every word
    offset relative to its lowest state (mesh-collective.c plan_layout: one item a function, all in region M) */
-int mesh_metal_transport_create(struct mesh_ctx *context,const struct mesh_planned *planned,void *device,
+int mesh_metal_transport_create(struct mesh_ctx *context,const struct mesh_plan_binding *binding,void *device,
   struct mesh_metal_transport *transport){
   *transport=(struct mesh_metal_transport){0};
+  const struct mesh_planned *planned=&binding->compilation->result.planned;
   struct hdr *m=context->M;
   const uint64_t page=m->pgsz;
   uint64_t low=UINT64_MAX,high=0;
   for(uint32_t j=0;j<planned->calls;j++){
-    const uint64_t at=planned->call[j].plan;
+    const uint64_t at=binding->plan[planned->call[j].function];
     uint64_t end;
     const int status=state_section(context,at,&end);
     if(status)return status;
@@ -257,33 +258,36 @@ int mesh_metal_range_declare(struct mesh_ctx *context,const uint32_t *calls,uint
   return 0;
 }
 int mesh_metal_range_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  const struct mesh_planned *planned,struct mesh_section section,uint32_t *field,uint32_t room,
+  const struct mesh_plan_binding *binding,struct mesh_section section,uint32_t *field,uint32_t room,
   struct mesh_metal_range *range){
+  const struct mesh_planned *planned=&binding->compilation->result.planned;
   if(range->owner>=planned->calls || range->partitions!=section.stride)return EINVAL;
   struct mesh_planned_transfer rows;
   const int status=planned_rows(planned,range->owner,range->transfer,&rows);
   if(status)return status;
-  const uint64_t plan=planned->call[range->owner].plan;
+  const uint64_t plan=binding->plan[planned->call[range->owner].function];
   range->field=field;
   receive_words(context,transport,plan,range->transfer,&range->input);
   return range->input.pages>room?ERANGE:receive_fields(context,planned,rows,&range->input,field);
 }
 int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  const struct mesh_planned *planned,uint32_t call,struct mesh_metal_release *release){
+  const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release){
+  const struct mesh_planned *planned=&binding->compilation->result.planned;
   if(call>=planned->calls)return EINVAL;
-  const uint64_t plan=planned->call[call].plan;
+  const uint64_t plan=binding->plan[planned->call[call].function];
   release->supplied=mesh_transfer_at(context->M,mesh_state_at(context->M,plan),release->transfer)->targets[0].word-
                     transport->offset;
   return mesh_metal_status_prepare(context,transport,plan,&release->status);
 }
 int mesh_metal_sending_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  const struct mesh_planned *planned,uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending){
+  const struct mesh_plan_binding *binding,uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending){
+  const struct mesh_planned *planned=&binding->compilation->result.planned;
   (void)transport;
   if(call>=planned->calls)return EINVAL;
   struct mesh_planned_transfer rows;
   const int status=planned_rows(planned,call,transfer,&rows);
   if(status)return status;
-  const uint64_t plan=planned->call[call].plan;
+  const uint64_t plan=binding->plan[planned->call[call].function];
   const struct mesh_state *words=mesh_state_at(context->M,plan);
   const struct mesh_publication *entry=mesh_transfer_at(context->M,words,transfer);
   *sending=(struct mesh_metal_sending){.sent={.counter=(char *)context->M+entry->completion,.sends=entry->sends,

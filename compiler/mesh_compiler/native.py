@@ -89,14 +89,14 @@ def viewed(first, base, index):
 
 
 # rdma/mesh-collective.h mesh_view_program `page_offsets` (each retained copy's row's page as a byte offset in the
-# owner's one view, at row - planned.rows.first); metal-microbench metal_ir.h metal_ir_value_paged and
+# owner's one view, indexed by the compiled section's relative row); metal-microbench metal_ir.h metal_ir_value_paged and
 # metal_ir_value_placed (a paged root's copies, `info.pages` frame rows each): a network owner's frame rows of a paged
 # root whose plan value is `section` (mesh.h struct mesh_section: copy c's rows first + c stride .. + stride, their
 # pages not assumed contiguous), the root's byte 0 its section's (an unbound intrinsic root, its whole typed backing:
 # Target.constructed): borrowed in place where its copies are the section's own, `info.pages` rows each; otherwise
 # each entry i (Target.placements: root copy i // every) its copy's first `info.pages` rows
-def framed(pages, planned, section, every, info):
-    first = section.first - planned.rows.first
+def framed(pages, section, every, info):
+    first = section.first
     if every == 1 and section.stride == info.pages:
         return C.cast(C.addressof(pages) + C.sizeof(mesh.Q) * first, C.POINTER(mesh.Q)), section.count
     return (mesh.Q * max(every * section.count * info.pages, 1))(*[
@@ -114,6 +114,7 @@ def framed(pages, planned, section, every, info):
 # transport, context or status
 class Arena:
     context = None
+    binding = None
 
     def __init__(self, target, owned, M, gpu):
         joint, error = target.solution, C.create_string_buffer(ROOM)
@@ -145,8 +146,7 @@ class Arena:
 
 # rdma/mesh-collective.h mesh_plan_program and mesh_view_program: a program with declared transfers at compilation, on
 # its joint network result (`solution`, under the Planning context, whose local.offset holds each copy's first row):
-# each retained copy's first row's byte offset (`offset`) and each of their rows' (`pages`, by row -
-# planned.rows.first), both owned here, in the one mapping `view` of the context's region, the arena that view;
+# each retained copy's first row's byte offset (`offset`) and each of its compiled relative rows' (`pages`), both owned here, in the one mapping `view` of the context's region, the arena that view;
 # `mapping` the mapped bytes' lifetime owner, the joint result's native owner (schedule.Solved owner, holding the result
 # and, through its declaration owner's planning, the compile context; never this wrapper or the Target), held by the
 # arena's backing (torch.frombuffer keeps that object, so every view of the arena does) and by its buffer; the run-time
@@ -156,9 +156,10 @@ class Mapped:
         joint = target.solution
         self.solution, self.function, self.planned = joint, joint.functions, joint.planned
         self.context, self.mapping = C.addressof(joint.context), joint.owner
+        self.binding = joint.binding
         self.offset, view = (mesh.Q * max(joint.local.offsets, 1))(), mesh.View()
-        self.pages = (mesh.Q * max(joint.local.planned.rows.count, 1))()
-        mesh.LIB.mesh_view_program(C.byref(joint.context), C.byref(joint.local), self.offset, self.pages,
+        self.pages = (mesh.Q * max(self.binding.rows.count, 1))()
+        mesh.LIB.mesh_view_program(C.byref(joint.context), C.byref(self.binding), self.offset, self.pages,
                                    C.byref(view))
         self.base = C.addressof(self.offset)
         backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None
@@ -174,7 +175,7 @@ class Mapped:
         return viewed(first, self.base, index)
 
     def paged(self, section, every, info):
-        return framed(self.pages, self.planned, section, every, info)
+        return framed(self.pages, section, every, info)
 
 
 # compiler/mesh_compiler/metal.py _placed_buffer (metal_recording.h MetalBufferBorrow, its release callback): a plan
@@ -319,7 +320,7 @@ class Operand:
 # `.plan`: None for a local result), the one Scheduled.plan references; `artifact` the one MetalProgramSave of every
 # row, `signature` its MetalProgramSignatureNode signature's complete solved archive (rdma/mesh_graph.py archive; the
 # one bytes owner, which Scheduled.signature is); `program` the network program
-# (Planning.program, the mesh_program_save/load mask), None for a local result
+# (Planning.program, the mesh_plan_compilation_save/load mask), None for a local result
 @dataclasses.dataclass
 class Target:
     bodies: tuple
@@ -420,7 +421,7 @@ class Target:
             marks, wires, call = row.marks, None, row.planned
             if marks["transfers"]:
                 context, wires, word = mesh.Context.from_address(owner.context), M.Transport(), mesh.Q()
-                mesh.check(transport.mesh_metal_transport_create(C.byref(context), C.byref(planned), gpu,
+                mesh.check(transport.mesh_metal_transport_create(C.byref(context), C.byref(owner.binding), gpu,
                                                                  C.byref(wires)))
                 owned(lambda wires=wires: transport.mesh_metal_transport_destroy(C.byref(wires)))
                 # rdma/mesh-metal.h: one transport view of every planned call's plan; each record prepared from the
@@ -433,24 +434,24 @@ class Target:
                     held = owner.solution.planned.result[function].value[index] if function is not None else (
                         owner.solution.planned.root[index])
                     mesh.check(transport.mesh_metal_range_prepare(
-                        C.byref(context), C.byref(wires), C.byref(planned), held.section, field, landed.partitions,
+                        C.byref(context), C.byref(wires), C.byref(owner.binding), held.section, field, landed.partitions,
                         C.byref(landed)))
                     compiler.metal_ir_value_received(program, value, C.byref(landed))
                 for value, sender, declared in marks["sent"]:
                     release = M.Release.from_buffer_copy(declared)
                     mesh.check(transport.mesh_metal_release_prepare(C.byref(context), C.byref(wires),
-                                                                    C.byref(planned), sender, C.byref(release)))
+                                                                    C.byref(owner.binding), sender, C.byref(release)))
                     compiler.metal_ir_value_sent(program, value, C.byref(release))
                 for sender, transfer in marks["transfers"]:
                     sending = M.Sending()
                     mesh.check(transport.mesh_metal_sending_prepare(C.byref(context), C.byref(wires),
-                                                                    C.byref(planned), sender, transfer,
+                                                                    C.byref(owner.binding), sender, transfer,
                                                                     C.byref(sending)))
                     if sending.sent.sends:
                         compiler.metal_ir_value_sending(program, marks["sending"][sender, transfer],
                                                         C.byref(sending))
                 mesh.check(transport.mesh_metal_status_prepare(C.byref(context), C.byref(wires),
-                                                               planned.call[call].plan, C.byref(word)))
+                                                               owner.binding.plan[planned.call[call].function], C.byref(word)))
                 compiler.metal_ir_transport(program, word.value)
             ready = made(lib.MetalRecorderPrepare(recorder, program, error, ROOM), error, "preparation")
             owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
@@ -1092,7 +1093,8 @@ class Target:
                 for r, root in operand.occurrences:
                     mesh.check(compiler.metal_ir_value_external(programs[r], root, a))
             recorder, calls = self.placed(owned, libs, gpu, owner, programs, True)
-            native = made(lib.MetalRecorderProgram(recorder, calls, len(calls), C.byref(owner.planned), error, ROOM),
+            native = made(lib.MetalRecorderProgram(recorder, calls, len(calls), C.byref(owner.planned),
+                                                   C.byref(owner.binding) if owner.binding is not None else None, error, ROOM),
                           error, "the program's calls")
             owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
             warm, period = mesh.Q(), mesh.Q()
@@ -1148,7 +1150,8 @@ class Target:
                         program, root, data, storage.nbytes(), buffer, 0, owner, release), lambda _: True)
             owner = published if published is not None else Arena(self, owned, M, gpu)
             recorder, calls = self.placed(owned, libs, gpu, owner, programs, False)
-            native = made(lib.MetalProgramLoad(recorder, calls, len(calls), C.byref(owner.planned), archive, error,
+            native = made(lib.MetalProgramLoad(recorder, calls, len(calls), C.byref(owner.planned),
+                                               C.byref(owner.binding) if owner.binding is not None else None, archive, error,
                                                ROOM), error, "the loaded program's calls")
             owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
             signature = mesh_graph.from_archive(self.signature)
@@ -1201,7 +1204,7 @@ class Target:
                 "spec": pytree.treespec_dumps(self.spec), "node": self.node}
 
     # the artifact; the joint owner as it saves itself (compiler/mesh_compiler/schedule.py: a local Solved through
-    # mesh_local_save, a network one through mesh_program_save, a restored SavedNetwork its original bytes), its kind
+    # mesh_local_save, a network one through mesh_plan_compilation_save, a restored SavedNetwork its original bytes), its kind
     # ("local", or "network" with its program) named in the companion record; the signature archive (one hex field) and
     # the recipe
     def saved(self, directory, key):
@@ -1462,7 +1465,7 @@ class Bound:
 # The saved artifact, its joint owner and its typed recipe, as the frontend's Root and Output records; no construction
 # is retained. A local owner is loaded (compiler/mesh_compiler/schedule.py loaded_program: never planned again); a
 # network owner is its saved bytes and program (schedule.SavedNetwork), with no attachment, publication, reservation,
-# solve or relocation here: its one preparation (bridge.Published, mesh_program_load) loads it. The target's `plan` is
+# solve or relocation here: its one preparation (bridge.Published, mesh_plan_compilation_load and mesh_plan_program_install) loads it. The target's `plan` is
 # that owner's own (None for a local result)
 def restore(saved, directory):
     from .lower_metal import Root
@@ -1486,7 +1489,7 @@ def restore(saved, directory):
     operands = tuple(Operand(source_restored(operand["source"]), operand["offset"],
                              tuple(map(tuple, operand["occurrences"]))) for operand in recipe["operands"])
     # the loading compilation's one analysis context (mesh-graph.h mesh_graph_context_create), its joint owner's
-    # `analysis_context`: every loaded relation and native artifact of it (mesh_local_load here; mesh_program_load at
+    # `analysis_context`: every loaded relation and native artifact of it (mesh_local_load here; mesh_plan_compilation_load and mesh_plan_program_install at
     # each preparation, bridge.Published; metal_ir_archive_load, Target.prepare; archive.py load's source relations)
     context = mesh_graph.Context.create()
     record = (directory / saved["joint"]).read_bytes()

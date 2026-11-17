@@ -11,14 +11,15 @@ struct mesh_ctx;
 /* design/disjoint-pages-change-request.md, Appendix C, C3.1, C3.2, C3.4, C3.6 and C3.7 */
 /* design/aot-compilation-change-request.md, appendix item 6 */
 /* design/compilation-composition-change-request.md item 6 (a delivered range read by another function's capture): the
-   compiled program's plan states in one view, every planned->call[j].plan's state section inside [offset, offset +
+   compiled program's plan states in one view, every binding->plan[f]'s state section inside [offset, offset +
    bytes) of region M, offset the lowest state's, bytes page-rounded, `state` its MTLBuffer (the one
    metal_recording.h state:buffer:status: buffer of every capture). Each function below takes the plan (state handle,
    mesh-collective.h struct mesh_planned_call `plan`) whose transfer it names, and every word offset it gives (phases,
    count, supplied, status) is relative to the one `offset`, whichever plan's word it is */
 struct mesh_planned;
+struct mesh_plan_binding;
 struct mesh_metal_transport { void *state; uint64_t offset,bytes; };
-int mesh_metal_transport_create(struct mesh_ctx *,const struct mesh_planned *planned,void *device,
+int mesh_metal_transport_create(struct mesh_ctx *,const struct mesh_plan_binding *binding,void *device,
                                 struct mesh_metal_transport *);
 void mesh_metal_transport_destroy(struct mesh_metal_transport *);
 /* L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper. Res. 22(3), 1997, §2 (`time`): a received range's
@@ -62,7 +63,7 @@ struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_gener
    at `section`; ENODATA where `planned` holds no planned rows (mesh_plan_load of an archive saved without them) */
 int mesh_metal_range_declare(struct mesh_ctx *,const uint32_t *calls,uint32_t ncalls,uint32_t call,uint32_t owner,
                              uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range);
-int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
+int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                              struct mesh_section section,uint32_t *field,uint32_t room,struct mesh_metal_range *range);
 /* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
    design/disjoint-pages-change-request.md C3.1, "Landings and cancellations both arrive on the count"; rdma/mesh-flow.c
@@ -107,7 +108,7 @@ struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,ow
 /* declared before mesh_plan as {.transfer,.owner} (one release group of the value: its representative transfer and
    its owner call, `total` 0 until the lowering counts it); prepared after it: the supplied and status words of that
    call's plan, in place (transfer and owner kept) */
-int mesh_metal_release_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
+int mesh_metal_release_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                                uint32_t call,struct mesh_metal_release *release);
 /* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3: the lifetime obligation of a range
    planned call `call`'s transfer `transfer` sends from this node (its sent ranges and the received ranges it forwards):
@@ -119,7 +120,7 @@ int mesh_metal_release_prepare(struct mesh_ctx *,struct mesh_metal_transport *,c
 struct mesh_metal_sending { struct mesh_metal_sent sent; const struct mesh_graph_access *extent; size_t extents;
                             uint32_t transfer,padding; };
 /* ENODATA where `planned` holds no planned rows (mesh_plan_load of an archive saved without them) */
-int mesh_metal_sending_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_planned *planned,
+int mesh_metal_sending_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                                uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending);
 _Static_assert(sizeof(struct mesh_metal_range)==88 &&
   offsetof(struct mesh_metal_range,generation)==40 && offsetof(struct mesh_metal_range,page)==56 &&

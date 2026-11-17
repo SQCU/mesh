@@ -57,7 +57,7 @@ class _Mapping:
         self.release = weakref.finalize(self, _retired, self.context, self.loaded)
 
 
-# rdma/mesh-collective.h mesh_program_load: one prepared network program, its saved source `source`
+# rdma/mesh-collective.h mesh_plan_compilation_load and mesh_plan_program_install: one prepared network program, its saved source `source`
 # (compiler/mesh_compiler/schedule.py SavedNetwork, or the solved network result: its saved() bytes, its program)
 # loaded once into its own mapping (`mapping`, _Mapping: its own client), its relations in the source's compilation's
 # one analysis context (`source.analysis_context`, every preparation of it the same), its rows and pages reserved
@@ -65,7 +65,7 @@ class _Mapping:
 # compiler/mesh_compiler/metal.py _lent) until _retired; `group` its preparation's. `solution` the loaded result
 # (schedule.published_program: Function[], roots, prefixes, offsets) whose views hold `mapping` and the byte offsets;
 # `function`, `planned` and `context` its; `offset` every retained copy's first row's byte offset in `arena` (at
-# `base`) and `pages` each of their rows' (by row - planned.rows.first), `arena` one mapping of every such row
+# `base`) and `pages` each of their compiled relative rows', `arena` one mapping of every such row
 # (mesh_view_program); native.py framed its paged roots' frame rows; design/plan-to-bridge-change-request.md R8 and
 # design/aot-compilation-change-request.md, appendix item 6: each Published its own mapping and client, retired and
 # released with it alone; torch 2.14 frombuffer
@@ -73,19 +73,26 @@ class Published:
     def __init__(self, source, group, mapping):
         from .metal import _lent
         from .schedule import published_program
-        record, program = source.saved(), source.program
+        record = source.saved()
         self.source, self.mapping, self.context = source, mapping, C.addressof(mapping.context)
-        made = mesh.Local()
-        mesh.check(_lent(record, lambda release, owner: mesh.LIB.mesh_program_load(
-            C.byref(mapping.context), source.analysis_context.pointer, group, program,
-            time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, record, len(record), release, owner,
-            C.byref(made)), lambda status: status == 0))
-        mapping.loaded.append(made)
+        self.binding = mesh.PlanBinding()
+        compilation = C.POINTER(mesh.PlanCompilation)()
+        mesh.check(_lent(record, lambda release, owner: mesh.LIB.mesh_plan_compilation_load(
+            source.analysis_context.pointer, record, len(record), release, owner, C.byref(compilation)),
+            lambda status: status == 0))
+        try:
+            mesh.check(mesh.LIB.mesh_plan_program_install(
+                C.byref(mapping.context), group, compilation,
+                time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, C.byref(self.binding)))
+        finally:
+            mesh.LIB.mesh_plan_compilation_free(compilation)
+        mapping.loaded.append(self.binding)
+        made = self.binding.compilation.contents.result
         self.offset, view = (mesh.Q * max(made.offsets, 1))(), mesh.View()
-        self.pages = (mesh.Q * max(made.planned.rows.count, 1))()
-        mesh.LIB.mesh_view_program(C.byref(mapping.context), C.byref(made), self.offset, self.pages, C.byref(view))
+        self.pages = (mesh.Q * max(self.binding.rows.count, 1))()
+        mesh.LIB.mesh_view_program(C.byref(mapping.context), C.byref(self.binding), self.offset, self.pages, C.byref(view))
         self.base = C.addressof(self.offset)
-        self.solution = published_program(made, (mapping, self.offset, self.pages), self.offset, source)
+        self.solution = published_program(self.binding, (mapping, self.offset, self.pages), self.offset, source)
         self.function, self.planned = made.function, made.planned
         backing = (C.c_byte * view.bytes).from_address(view.address) if view.bytes else None
         if backing is not None:
@@ -103,15 +110,15 @@ class Published:
 
     def paged(self, section, every, info):
         from .native import framed
-        return framed(self.pages, self.planned, section, every, info)
+        return framed(self.pages, section, every, info)
 
 
 # a _Mapping's end: its loaded network result's publication closed (the bridge releases its rows and pages once no
-# port holds it) and that result freed (mesh_local_free), then its mapping detached
+# port holds it) and its binding released (mesh_plan_binding_free), then its mapping detached
 def _retired(context, loaded):
-    for local in loaded:
-        mesh.LIB.mesh_retire(context.M, C.byref(local.planned))
-        mesh.LIB.mesh_local_free(C.byref(local))
+    for binding in loaded:
+        mesh.LIB.mesh_retire(context.M, C.byref(binding))
+        mesh.LIB.mesh_plan_binding_free(C.byref(binding))
     mesh.check(mesh.LIB.mesh_detach(C.byref(context)))
 
 

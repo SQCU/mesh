@@ -22,8 +22,8 @@ int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 /* design/algorithm-sources.md#programtensor */
 /* design/plan-to-bridge-change-request.md R8 */
-struct mesh_planned;
-void mesh_retire(struct hdr *,const struct mesh_planned *);
+struct mesh_plan_binding;
+void mesh_retire(struct hdr *,const struct mesh_plan_binding *);
 void mesh_publications_clear(struct hdr *);
 /* design/aot-compilation-change-request.md, appendix item 6;
    NVIDIA, CUDA Programming Guide §4.2.3.1, cudaGraphExecDestroy() */

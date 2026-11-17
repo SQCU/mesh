@@ -148,18 +148,19 @@ def extent(value):
     return value.dtype.itemsize * mesh_graph.extent(value.shape, value.stride())
 
 
-# rdma/mesh-collective.h mesh_plan, mesh_plan_save; compiler/mesh_compiler/ir.py Planning; rdma/mesh-graph.h
+# rdma/mesh-collective.h mesh_plan, mesh_plan_compilation_save; compiler/mesh_compiler/ir.py Planning; rdma/mesh-graph.h
 # mesh_graph_archive; rdma/mesh-dataflow.h mesh_view_values; design/compilation-composition-change-request.md items
 # 3, 6.4 and 7: the one plan of `function` (the caller's actual mesh.Function, its parts and values the lowered
 # program's), projected into `plan`; its mesh.Planned, mapped view and the view's first/offset arrays returned for the
 # caller to retain and free
 def solved(plan, planning, function):
-    calls, made, record, length = (mesh.U * 1)(0), mesh.Planned(), C.c_void_p(), C.c_size_t()
+    calls, binding, record, length = (mesh.U * 1)(0), mesh.PlanBinding(), C.c_void_p(), C.c_size_t()
     operands = (plan.program, function, 1, calls, 1, None, None, 0, None)
     context = C.byref(planning.context)
     mesh.check(mesh.LIB.mesh_plan(context, planning.group, *operands,
-                                  time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, C.byref(made)))
-    mesh.check(mesh.LIB.mesh_plan_save(context, *operands, C.byref(made), C.byref(record), C.byref(length)))
+                                  time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS, C.byref(binding)))
+    mesh.check(mesh.LIB.mesh_plan_compilation_save(binding.compilation, C.byref(record), C.byref(length)))
+    made = binding.compilation.contents.result.planned
     plan.completion = list(made.result[0].completion[:len(plan.tasks)])
     plan.order = list(made.result[0].order[:len(plan.tasks)])
     sections = [value.section for value in made.result[0].value[:len(plan.values)]]
@@ -167,13 +168,13 @@ def solved(plan, planning, function):
     plan.record = C.string_at(record, length.value)
     plan.signature, plan.nodes = mesh_graph.archive(made.signature.contents), tuple(planning.nodes)
     first, offset, view = (mesh.Q * (len(sections) + 1))(), (mesh.Q * sum(s.count for s in sections))(), mesh.View()
-    mesh.LIB.mesh_view_values(context, function, C.byref(made), 1, first, offset, C.byref(view))
+    mesh.LIB.mesh_view_values(context, function, C.byref(binding), 1, first, offset, C.byref(view))
     plan.arena_bytes = view.bytes
     plan.offsets = tuple(tuple(offset[first[value]:first[value + 1]]) for value in range(len(sections)))
     # rdma/mesh.h mesh_transfer_at, struct mesh_publication; rdma/mesh-collective.c plan_supplied, plan_completion and
     # the publication records of transfer i written for its demand p->of[i]: one supplied word per demand release, one
     # completion word per sending demand (d->sending = p->sending++), so equal nonzero words are one native action
-    state = mesh.State.from_address(planning.context.M + made.result[0].plan)
+    state = mesh.State.from_address(planning.context.M + binding.plan[0])
     supplied, completed = {}, {}
     plan.publications = tuple(
         (supplied.setdefault(record.targets[0].word, transfer),
@@ -183,7 +184,7 @@ def solved(plan, planning, function):
         for record in [mesh.Publication.from_address(planning.context.M + state.transfers
                                                      + mesh.PUBLICATION_BYTES * transfer)])
     SYSTEM.free(record)
-    return plan, made, view, first, offset
+    return plan, binding, view, first, offset
 
 
 # design/aot-compilation-change-request.md A3 to A8; design/plan-to-bridge-change-request.md R1 to R5;
@@ -721,6 +722,12 @@ class LocalOwner:
         self.freed = weakref.finalize(self, mesh.LIB.mesh_local_free, C.byref(self.local))
 
 
+class BindingOwner:
+    def __init__(self, held=()):
+        self.binding, self.held = mesh.PlanBinding(), held
+        self.freed = weakref.finalize(self, mesh.LIB.mesh_plan_binding_free, C.byref(self.binding))
+
+
 # mesh-collective.h struct mesh_local value_first, first and offset: native views of one result, owned by `owner`:
 # function f's values' first entries, the roots', every copy's byte offset
 def viewed(owner, local):
@@ -770,14 +777,15 @@ class Solved:
     owner: object
     source: object = None
     analysis_context: object = None
+    binding: object = None
 
-    # a network result's program mask (mesh_program_save's and mesh_program_load's operand): its planning's, or, loaded
+    # a network result's program mask (mesh_plan_compilation_save's and mesh_plan_compilation_load's operand): its planning's, or, loaded
     # by its preparation, its saved source's
     @property
     def program(self):
         return self.prepared.planning.program if self.prepared is not None else self.plan.program
 
-    # mesh-collective.h mesh_local_save, a local result's archive; mesh_program_save, a network result's whole archive
+    # mesh-collective.h mesh_local_save, a local result's archive; mesh_plan_compilation_save, a network result's whole archive
     # from its planning context and program (its declaration owner's planning); a network result its preparation
     # loaded (no declaration owner) its saved source's original bytes
     def saved(self):
@@ -785,8 +793,7 @@ class Solved:
             return self.plan.saved()
         data, length = C.c_void_p(), mesh.Z()
         mesh.check(mesh.LIB.mesh_local_save(C.byref(self.local), C.byref(data), C.byref(length)) if self.plan is None
-                   else mesh.LIB.mesh_program_save(C.byref(self.context), self.prepared.planning.program,
-                                                   C.byref(self.local), C.byref(data), C.byref(length)))
+                   else mesh.LIB.mesh_plan_compilation_save(self.binding.compilation, C.byref(data), C.byref(length)))
         try:
             return C.string_at(data, length.value)
         finally:
@@ -1236,8 +1243,8 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
         grouped[f] = declared.grouped[j]
     ordered = (mesh.U * max(len(analysis.order_edges), 1))(*analysis.order_edges)
     outstanding = (mesh.Q * max(len(analysis.keys), 1))(*[analysis.outstanding[key] for key in analysis.keys])
-    owner = LocalOwner((analysis, declared, functions, instances, roots, use_first, use, grouped,
-                        ordered, outstanding))
+    owner = (LocalOwner if planning is None else BindingOwner)(
+        (analysis, declared, functions, instances, roots, use_first, use, grouped, ordered, outstanding))
     relation, closure = C.c_void_p(analysis.relation.pointer), C.cast(analysis.closure.owned.made, C.c_void_p)
     if planning is None:
         mesh.check(mesh.LIB.mesh_plan_local(functions, K, instances, J, relation, ordered, len(analysis.order_edges),
@@ -1249,20 +1256,22 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
                                               outstanding, relation, ordered, len(analysis.order_edges), closure,
                                               analysis.chains, roots, S, use_first, use,
                                               time.clock_gettime_ns(time.CLOCK_MONOTONIC) + mesh.PLATFORM_NS,
-                                              C.byref(owner.local)))
-    local, calls = owner.local, owner.local.planned.call
+                                              C.byref(owner.binding)))
+    local = owner.local if planning is None else owner.binding.compilation.contents.result
+    calls = local.planned.call
     solved = Solved(functions, local, local.planned, *viewed(owner, local),
                     tuple((*entry, reference, calls[entry[0]].every, calls[entry[0]].ordinal)
                           for entry, reference in resolved.items()), tuple(bindings), analysis.root_sources, analysis,
                     roots, (use_first, use), instances, declared, None, declared.ports,
-                    planning.context if planning is not None else None, owner, analysis_context=analysis_context)
+                    planning.context if planning is not None else None, owner, analysis_context=analysis_context,
+                    binding=None if planning is None else owner.binding)
     solved.plan = solved if planning is not None else None
     return solved
 
 
-# mesh-collective.h mesh_program_save: a network result saved and not attached (restored, or saved at compile time):
+# mesh-collective.h mesh_plan_compilation_save: a network result saved and not attached (restored, or saved at compile time):
 # `record` its original archive bytes, `program` its program mask, the operand its preparation (compiler/mesh_compiler/
-# bridge.py Published, mesh_program_load) loads and publishes it with, in `analysis_context` (its compilation's one
+# bridge.py Published, mesh_plan_compilation_load) loads and publishes it with, in `analysis_context` (its compilation's one
 # rdma/mesh_graph.py Context, native.restore's); its own `plan`
 @dataclasses.dataclass(frozen=True, eq=False)
 class SavedNetwork:
@@ -1279,13 +1288,14 @@ class SavedNetwork:
         return self.record
 
 
-# mesh-collective.h mesh_program_load and mesh_view_program: a network result its preparation loaded and published
+# mesh-collective.h mesh_plan_compilation_load and mesh_view_program: a network result its preparation loaded and published
 # (bridge.Published), as a Solved: its Function[], roots, planned record and prefixes over the loaded Local, its copies'
 # offsets the mapped byte offsets `offset` (the arena's), every view held by `owner` (the preparation's _Mapping and
 # `offset`; the _Mapping frees the Local: no second owner); its `plan` the saved source, its `analysis` a fresh
 # compiled source's own, its `source` a saved source's query attached to the loaded Local (archive.py attached)
-def published_program(local, owner, offset, source):
+def published_program(binding, owner, offset, source):
     from .archive import attached
+    local = binding.compilation.contents.result
     F, S, prefix = local.functions, local.roots, local.value_first
     return Solved(local.function, local, local.planned,
                   [mesh_graph.View(owner, local.first, range(prefix[f], prefix[f + 1] + 1), int) for f in range(F)],
@@ -1294,7 +1304,7 @@ def published_program(local, owner, offset, source):
                   source.analysis if isinstance(source, Solved) else None, local.root,
                   (local.use_first, local.use), local.calls, None, source, (), None, owner,
                   None if source.source is None else attached(source.source["query"], local, owner),
-                  source.analysis_context)
+                  source.analysis_context, binding)
 
 
 # mesh-collective.h mesh_local_load: the saved result of `data` (Solved.saved), loaded, never solved, its relations in

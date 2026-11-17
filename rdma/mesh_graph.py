@@ -521,6 +521,90 @@ class Dependence(C.Structure):
     _fields_ = [('source', C.c_uint32), ('sink', C.c_uint32), ('delay', C.c_uint64)]
 
 
+class Grouping(C.Structure):
+    _fields_ = [('keys', C.c_uint32), ('items', C.c_size_t), ('key', C.c_void_p), ('context', C.c_void_p),
+                ('first', _Z), ('order', _Z), ('ordinal', _Z)]
+
+
+class Tree(C.Structure):
+    _fields_ = [('vertices', C.c_uint32), ('root', C.c_uint32), ('parent', _U),
+                ('children', C.POINTER(Grouping))]
+
+
+class LagGraph(C.Structure):
+    _fields_ = [('vertices', C.c_uint32), ('first', _Z), ('head', C.c_void_p), ('lag', C.c_void_p),
+                ('context', C.c_void_p)]
+
+
+class LagResult(C.Structure):
+    _fields_ = [('graph', C.POINTER(LagGraph)), ('queries', C.c_size_t), ('query', C.POINTER(Dependence)),
+                ('sources', C.POINTER(Grouping)), ('value', C.POINTER(C.c_uint64))]
+
+
+class LagMatrix(C.Structure):
+    _fields_ = [('graph', C.POINTER(LagGraph)), ('sources', C.c_uint32), ('targets', C.c_uint32),
+                ('source', _U), ('target', _U), ('value', C.POINTER(C.c_uint64))]
+
+
+class BufferResult(C.Structure):
+    _fields_ = [('actors', C.c_uint32), ('host', C.POINTER(C.c_double)), ('work', C.POINTER(C.c_double)),
+                ('edges', C.c_size_t), ('edge', C.POINTER(Dependence)), ('bound', C.POINTER(C.c_uint64))]
+
+
+class ChainResult(C.Structure):
+    _fields_ = [('vertices', C.c_uint32), ('chain', _U), ('edges', C.c_size_t), ('edge', C.POINTER(Dependence))]
+
+
+class Touch(C.Structure):
+    _fields_ = [('start', C.c_uint64), ('end', C.c_uint64), ('value', C.c_uint32), ('member', C.c_uint32)]
+
+
+class Cover(C.Structure):
+    _fields_ = [('member', _U), ('members', C.c_uint32), ('value', C.c_uint32), ('block', C.c_uint32)]
+
+
+class CoverResult(C.Structure):
+    _fields_ = [('quantum', C.c_uint64), ('values', C.c_uint32), ('blocks', C.c_uint32),
+                ('extras', C.c_uint32), ('sets', C.c_uint32), ('touches', C.c_size_t),
+                ('covers', C.c_size_t), ('listed', C.c_size_t), ('held_count', C.c_size_t), ('block_first', _U),
+                ('bytes', C.c_void_p), ('context', C.c_void_p), ('touch', C.POINTER(Touch)),
+                ('extra_member', C.c_void_p), ('extra_blocks', C.c_void_p), ('extra_context', C.c_void_p),
+                ('order', C.POINTER(C.POINTER(Touch))), ('cover', C.POINTER(Cover))] + [
+                    (name, _U) for name in ('held', 'first', 'member', 'set_blocks', 'block_set',
+                                           'block_element', 'extra_set', 'uncovered')]
+
+
+for name, result, arguments in (
+        ('mesh_graph_group', C.c_int, [C.c_uint32, C.c_size_t, C.c_void_p, C.c_void_p,
+                                      C.POINTER(C.POINTER(Grouping))]),
+        ('mesh_graph_group_free', None, [C.POINTER(Grouping)]),
+        ('mesh_graph_tree_create', C.c_int, [C.c_uint32, C.c_uint32, _U, C.POINTER(C.POINTER(Tree))]),
+        ('mesh_graph_tree_free', None, [C.POINTER(Tree)]),
+        ('mesh_graph_tree_parent', C.c_uint32, [C.c_void_p, C.c_size_t]),
+        ('mesh_graph_lag_prepare', C.c_int, [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_void_p,
+                                            C.POINTER(C.POINTER(LagGraph))]),
+        ('mesh_graph_lag_graph_free', None, [C.POINTER(LagGraph)]),
+        ('mesh_graph_lag_queries', C.c_int, [C.POINTER(LagGraph), C.c_size_t, C.POINTER(Dependence),
+                                            C.POINTER(C.POINTER(LagResult))]),
+        ('mesh_graph_lag_result_free', None, [C.POINTER(LagResult)]),
+        ('mesh_graph_query_source', C.c_uint32, [C.c_void_p, C.c_size_t]),
+        ('mesh_graph_lag_matrix', C.c_int, [C.POINTER(LagGraph), C.c_uint32, _U, C.c_uint32, _U,
+                                           C.POINTER(C.POINTER(LagMatrix))]),
+        ('mesh_graph_lag_matrix_free', None, [C.POINTER(LagMatrix)]),
+        ('mesh_graph_buffer_bounds', C.c_int, [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_double),
+                                              C.c_size_t, C.POINTER(Dependence), C.POINTER(C.POINTER(BufferResult))]),
+        ('mesh_graph_buffer_result_free', None, [C.POINTER(BufferResult)]),
+        ('mesh_graph_chain_pairs', C.c_int, [C.c_uint32, _U, C.POINTER(C.POINTER(ChainResult))]),
+        ('mesh_graph_chain_result_free', None, [C.POINTER(ChainResult)]),
+        ('mesh_graph_cover_sets', C.c_int, [C.c_uint64, C.c_uint32, C.c_uint32, _U, C.c_void_p, C.c_void_p,
+                                           C.c_size_t, C.POINTER(Touch), C.c_uint32, C.c_void_p, C.c_void_p,
+                                           C.c_void_p, C.POINTER(C.POINTER(CoverResult))]),
+        ('mesh_graph_cover_result_free', None, [C.POINTER(CoverResult)]),
+        ('mesh_graph_relation_edge_cause', C.c_int, [C.c_void_p, C.c_size_t, _U])):
+    function = getattr(LIB, name)
+    function.restype, function.argtypes = result, arguments
+
+
 class Operation(C.Structure):
     _fields_ = [('processor', C.c_uint32), ('primitive', C.c_uint32), ('vertex', C.c_uint32), ('object', C.c_uint32),
                 ('execution', C.c_uint64), ('value', C.c_uint64)]

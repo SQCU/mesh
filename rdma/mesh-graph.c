@@ -424,13 +424,21 @@ uint32_t mesh_graph_reach(uint32_t vertices, uint32_t edges, uint32_t (*end)(con
 int mesh_graph_order(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                      const void *context, uint32_t *indegree, uint32_t *ordinal) {
   for (uint32_t v = 0; v < vertices; v++) { indegree[v] = 0; ordinal[v] = UINT32_MAX; }
-  for (size_t k = 0; k < first[vertices]; k++) indegree[head(context, k)]++;
+  for (size_t k = 0; k < first[vertices]; k++) {
+    const uint32_t v = head(context, k);
+    if (v == UINT32_MAX) continue;
+    if (v >= vertices) return EINVAL;
+    indegree[v]++;
+  }
   for (uint32_t place = 0; place < vertices; place++) {
     uint32_t next = 0;
     while (next < vertices && (indegree[next] || ordinal[next] != UINT32_MAX)) next++;
     if (next == vertices) return EDEADLK;
     ordinal[next] = place;
-    for (size_t k = first[next]; k < first[next + 1]; k++) indegree[head(context, k)]--;
+    for (size_t k = first[next]; k < first[next + 1]; k++) {
+      const uint32_t v = head(context, k);
+      if (v != UINT32_MAX) indegree[v]--;
+    }
   }
   return 0;
 }
@@ -651,7 +659,7 @@ int mesh_graph_group(uint32_t keys, size_t items, uint32_t (*key)(const void *, 
   if (status) mesh_graph_group_free(g); else *out = g;
   return status;
 }
-static uint32_t tree_parent(const void *context, size_t v) {
+uint32_t mesh_graph_tree_parent(const void *context, size_t v) {
   const struct mesh_graph_tree *tree = context;
   return v == tree->root || tree->parent[v] >= tree->vertices ? tree->vertices : tree->parent[v];
 }
@@ -665,7 +673,7 @@ int mesh_graph_tree_create(uint32_t vertices, uint32_t root, const uint32_t *par
   struct mesh_graph_tree *tree = calloc(1, sizeof *tree);
   if (!tree) return ENOMEM;
   tree->vertices = vertices; tree->root = root; tree->parent = parent;
-  int status = mesh_graph_group(vertices + 1, vertices, tree_parent, tree, &tree->children);
+  int status = mesh_graph_group(vertices + 1, vertices, mesh_graph_tree_parent, tree, &tree->children);
   if (status) mesh_graph_tree_free(tree); else *out = tree;
   return status;
 }
@@ -773,6 +781,7 @@ int mesh_graph_cover_sets(uint64_t quantum, uint32_t values, uint32_t blocks, co
     r->cover[r->covers++] = (struct mesh_graph_cover){r->held + from, (uint32_t)(members - from), v, (uint32_t)b};
   }
   if (!status) qsort(r->cover, r->covers, sizeof *r->cover, cover_order);
+  r->held_count = members;
   size_t sets = extras, listed = extras;
   for (size_t c = 0; !status && c < r->covers; c++)
     if (!c || !cover_same(r->cover + c - 1, r->cover + c)) { sets++; listed += r->cover[c].members; }
@@ -801,8 +810,8 @@ int mesh_graph_cover_sets(uint64_t quantum, uint32_t values, uint32_t blocks, co
   }
   if (!status) r->first[s] = at;
   for (uint32_t v = 0; !status && v < values; v++) {
-    if (block_first[v] == UINT32_MAX) continue;
     const uint64_t extent = bytes(context, v), count = extent / quantum + (extent % quantum != 0);
+    if (block_first[v] == UINT32_MAX) { r->uncovered[v] = (uint32_t)count; continue; }
     if ((uint64_t)block_first[v] + count > blocks) { status = EINVAL; break; }
     for (uint64_t k = 0; k < count; k++)
       if (r->block_set[block_first[v] + k] == UINT32_MAX)
@@ -1295,7 +1304,26 @@ int mesh_graph_lag_prepare(uint32_t vertices, const size_t *first, uint32_t (*he
   return 0;
 }
 void mesh_graph_lag_graph_free(struct mesh_graph_lag_graph *g) { free(g); }
-static uint32_t lag_query_source(const void *context, size_t k) {
+void mesh_graph_lag_matrix_free(struct mesh_graph_lag_matrix *r) {
+  if (!r) return;
+  free(r->value); free(r);
+}
+int mesh_graph_lag_matrix(const struct mesh_graph_lag_graph *g, uint32_t sources, const uint32_t *source,
+                           uint32_t targets, const uint32_t *target, struct mesh_graph_lag_matrix **out) {
+  *out = NULL;
+  size_t cells;
+  if (__builtin_mul_overflow((size_t)sources, (size_t)targets, &cells) || cells >= SIZE_MAX / sizeof(uint64_t))
+    return ENOMEM;
+  struct mesh_graph_lag_matrix *r = calloc(1, sizeof *r);
+  if (!r) return ENOMEM;
+  r->graph = g; r->sources = sources; r->source = source; r->targets = targets; r->target = target;
+  r->value = malloc((cells + 1) * sizeof *r->value);
+  const int status = r->value ? mesh_graph_lags(g->vertices, g->first, g->head, g->lag, g->context,
+                                                sources, source, targets, target, r->value) : ENOMEM;
+  if (status) mesh_graph_lag_matrix_free(r); else *out = r;
+  return status;
+}
+uint32_t mesh_graph_query_source(const void *context, size_t k) {
   return ((const struct mesh_graph_dependence *)context)[k].from;
 }
 struct lag_targets { const struct mesh_graph_lag_result *result; const size_t *order; };
@@ -1315,7 +1343,7 @@ int mesh_graph_lag_queries(const struct mesh_graph_lag_graph *g, size_t queries,
   if (!r) return ENOMEM;
   r->graph = g; r->queries = queries; r->query = query;
   r->value = malloc((queries + 1) * sizeof *r->value);
-  int status = r->value ? mesh_graph_group(g->vertices, queries, lag_query_source, query, &r->sources) : ENOMEM;
+  int status = r->value ? mesh_graph_group(g->vertices, queries, mesh_graph_query_source, query, &r->sources) : ENOMEM;
   for (size_t k = 0; !status && k < queries; k++) if (query[k].to >= g->vertices) status = EINVAL;
   struct lag_scratch s = {0};
   if (!status) status = lag_scratch_create(g->vertices, &s);
