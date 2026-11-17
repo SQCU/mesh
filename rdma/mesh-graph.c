@@ -5986,11 +5986,12 @@ int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval) {
 
 int mesh_graph_cut_join(uint64_t intervals, const uint64_t *cut, uint32_t spans,
                         const struct mesh_graph_interval *span, uint64_t previous, const uint64_t *previous_cut,
-                        uint32_t *route, uint64_t *first, uint64_t *last) {
+                        uint32_t *route, uint64_t *count, uint64_t *first, uint64_t *last) {
+  for (uint32_t r = 0; r < spans; r++) count[r] = 0;
   if (spans) for (uint64_t k = 0, r = 0; k < intervals; k++) {
     while (r < spans && span[r].end <= cut[k]) r++;
     if (r == spans || span[r].start > cut[k] || span[r].end < cut[k + 1]) return EINVAL;
-    route[k] = (uint32_t)r;
+    route[k] = (uint32_t)r; count[r]++;
   }
   if (previous_cut) for (uint64_t k = 0, a = 0, b = 0; k < intervals; k++) {
     while (a < previous && previous_cut[a + 1] <= cut[k]) a++;

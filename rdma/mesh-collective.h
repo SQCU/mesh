@@ -257,6 +257,7 @@ struct mesh_plan_cuts {
   uint64_t instructions;
   uint64_t *cut,*at;
   uint32_t *route;
+  uint64_t *count;
   uint64_t *previous_first,*previous_last;
   const void *mapped;
 };
@@ -273,8 +274,6 @@ struct mesh_plan_demand {
   uint32_t release;
   /* design/aot-compilation-change-request.md A9 */
   uint64_t leaves,bytes;
-  struct mesh_plan_cuts *cuts;
-  uint32_t local;
   uint32_t relay;
   uint64_t on;
   uint32_t forwards;
@@ -282,16 +281,34 @@ struct mesh_plan_demand {
   uint32_t set;
   uint32_t vertex;
   uint32_t value;
-  uint32_t range,received;
-  uint32_t consumed;
-  uint32_t counted;
-  uint64_t group;
-  uint32_t sending,sends;
 };
 /* design/disjoint-pages-change-request.md C3.3 */
 struct mesh_plan_vertex { uint32_t demand,node,write,read,reads,source; };
 /* design/plan-to-bridge-change-request.md R5; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
 struct mesh_plan_entry { uint32_t node,direction,demand,field,communication,set; uint64_t instruction; };
+/* compiler-emit/docs/physical-geometry.md */
+struct mesh_plan_demand_geometry {
+  uint32_t range,received,consumed,counted,sending,sends;
+  uint64_t group;
+};
+struct mesh_plan_flow_geometry {
+  size_t references;
+  const struct mesh_plan_flow *source;
+  const struct mesh_plan_cuts *const *cuts;
+  const uint64_t *const *count;
+  const uint32_t *local;
+  uint64_t *lead,*comm,comms;
+  struct mesh_plan_demand_geometry *demand;
+  struct mesh_plan_entry *entry;
+  uint64_t entries,receives,toward,group_bytes,forwarded;
+  uint32_t ranges,consumed,sending;
+  double *page,time[MESH_NODES_MOST];
+  const void *mapped;
+};
+int mesh_plan_flow_geometry(const struct mesh_plan_flow *,const struct mesh_plan_cuts *const *,
+                            const uint64_t *const *,const uint32_t *,struct mesh_plan_flow_geometry **);
+void mesh_plan_flow_geometry_retain(struct mesh_plan_flow_geometry *);
+void mesh_plan_flow_geometry_free(struct mesh_plan_flow_geometry *);
 struct mesh_plan_flow {
   const struct mesh_plan_geometry *geometry;
   const struct mesh_declared *declared;
@@ -302,9 +319,12 @@ struct mesh_plan_flow {
   /* design/plan-to-bridge-change-request.md R2; design/disjoint-pages-change-request.md C3.3 */
   unsigned char *named;
   uint32_t *uncovered;
-  uint64_t toward;
   struct mesh_plan_endpoint *endpoint;
   struct mesh_graph_grouping *transfer_rows;
+  struct mesh_plan_cuts **cuts;
+  const uint64_t **counts;
+  uint32_t *cut_local;
+  struct mesh_plan_flow_geometry *physical;
   uint32_t sets,*set_first,*member,*set_blocks,*set_far,*block_first,*block_set,*block_element;
   const struct mesh_weight *weights;
   const struct mesh_dependence *dependence;
@@ -322,13 +342,10 @@ struct mesh_plan_flow {
   uint32_t *parent;
   uint64_t *run;
   uint32_t made;
-  uint64_t *members,*lead,*comm,comms;
+  uint64_t *members;
   struct mesh_graph_interval *span;
   uint64_t releases;
-  struct mesh_plan_entry *entry;
-  uint64_t entries,receives,group_bytes,blocks;
-  uint32_t ranges,consumed;
-  uint32_t sending;
+  uint64_t blocks;
   uint64_t *child;
   /* the joint program's shared roots (mesh_plan_program), `carried[r]` where one of this plan's demands transports r;
      bound[j] the root a use binds value j to (MESH_ABSENT none, PLAN_SEVERAL several of its calls' roots), its
@@ -348,9 +365,8 @@ struct mesh_plan_flow {
   uint32_t *between;
   uint32_t *farthest;
   /* design/aot-compilation-change-request.md A10 */
-  uint64_t outstanding,spanned,nodes,forwarded;
+  uint64_t outstanding,spanned,nodes;
   uint32_t calls,horizon;
-  double time[MESH_NODES_MOST];
   struct mesh_graph_tree **adjacency;
   uint32_t *acyclic_indegree,*acyclic_ordinal,*lag_source,*lag_target;
   struct mesh_graph_lag_graph *lag_graph;
@@ -406,7 +422,7 @@ struct plan_entry { const struct mesh_plan_entry *source; uint32_t place; };
 struct plan_span { uint32_t first,count; };
 struct plan_schedule_result {
   size_t references;
-  const struct mesh_plan_flow *flow;
+  struct mesh_plan_flow_geometry *geometry;
   const struct mesh_function *function;
   uint32_t first,tasks,instructions;
   size_t edges,entries,dependencies;
@@ -417,7 +433,7 @@ struct plan_schedule_result {
   size_t *route;
   struct mesh_plan_analysis *owned;
 };
-int mesh_plan_schedule(const struct mesh_plan_flow *,const struct mesh_function *,struct plan_schedule_result **);
+int mesh_plan_schedule(struct mesh_plan_flow_geometry *,const struct mesh_function *,struct plan_schedule_result **);
 void mesh_plan_schedule_retain(struct plan_schedule_result *);
 void mesh_plan_schedule_free(struct plan_schedule_result *);
 struct plan_graph_result {
@@ -437,6 +453,7 @@ struct plan_graph_result {
 };
 struct plan_step {
   const struct mesh_plan_flow *flow;
+  const struct mesh_plan_flow_geometry *geometry;
   const struct mesh_function *function;
   struct mesh_plan_function *result;
   struct mesh_plan_value *root_result;
