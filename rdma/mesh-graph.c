@@ -3687,6 +3687,12 @@ static int view_decided_before(const void *a, const void *b) {
   if (x->from_view != y->from_view) return x->from_view < y->from_view ? -1 : 1;
   return (x->to_view > y->to_view) - (x->to_view < y->to_view);
 }
+static int view_empty(const struct mesh_graph_view *view) {
+  if (view->access) return view->access->least > view->access->greatest;
+  if (!view->view.element) return 1;
+  for (uint32_t d = 0; d < view->view.dims; d++) if (!view->view.pairs[2 * d]) return 1;
+  return 0;
+}
 static int view_conflicts(size_t views, const struct mesh_graph_view *view, size_t supplied,
                           const uint32_t *supplied_from, const uint32_t *supplied_to, int self,
                           int (*decide)(void *context, size_t a, size_t b, struct mesh_graph_decided *out),
@@ -3740,14 +3746,7 @@ static int view_conflicts(size_t views, const struct mesh_graph_view *view, size
     for (size_t j = i + !self; !result && j < views && hull[j].key == hull[i].key && hull[j].start < hull[i].end; j++) {
       const struct mesh_graph_view *a = view + hull[i].index, *b = view + hull[j].index;
       if ((!self && a->vertex == b->vertex) || !(a->write || b->write) || (a->write == 2 && b->write == 2)) continue;
-      int empty = 0;
-      for (const struct mesh_graph_view *x = a; x; x = x == a ? b : NULL)
-        if (x->access) empty |= x->access->least > x->access->greatest;
-        else {
-          empty |= !x->view.element;
-          for (uint32_t d = 0; d < x->view.dims; d++) empty |= !x->view.pairs[2 * d];
-        }
-      if (empty) continue;
+      if (view_empty(a) || view_empty(b)) continue;
       struct mesh_graph_decided d = {NULL, NULL, {SIZE_MAX, 0, 0}};
       if (a != b && decide) {
         const int status = decide(context, hull[i].index, hull[j].index, &d);
