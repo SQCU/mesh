@@ -546,9 +546,20 @@ class LagMatrix(C.Structure):
                 ('source', _U), ('target', _U), ('value', C.POINTER(C.c_uint64))]
 
 
+class EventLagResult(C.Structure):
+    _fields_ = [('graph', C.POINTER(LagGraph)), ('events', C.c_uint32), ('first', _Z), ('member', _U),
+                ('queries', C.c_size_t), ('query', C.POINTER(Dependence)), ('expanded_first', _Z),
+                ('expanded', C.POINTER(Dependence)), ('lags', C.POINTER(LagResult)),
+                ('value', C.POINTER(C.c_uint64))]
+
+
 class BufferResult(C.Structure):
-    _fields_ = [('actors', C.c_uint32), ('host', C.POINTER(C.c_double)), ('work', C.POINTER(C.c_double)),
-                ('edges', C.c_size_t), ('edge', C.POINTER(Dependence)), ('bound', C.POINTER(C.c_uint64))]
+    _fields_ = [('references', C.c_size_t), ('vertices', C.c_uint32), ('actors', C.c_uint32),
+                ('time', C.POINTER(C.c_double)), ('host', C.POINTER(C.c_double)), ('work', C.POINTER(C.c_double)),
+                ('edges', C.c_size_t), ('part_edges', C.c_size_t), ('queries', C.c_size_t), ('from', _U), ('to', _U),
+                ('delay', C.POINTER(C.c_uint64)), ('edge', C.POINTER(Dependence)), ('query', _Z),
+                ('lambda', C.c_double), ('bound', C.POINTER(C.c_uint64)),
+                ('release', C.c_void_p), ('owner', C.c_void_p)]
 
 
 class ChainResult(C.Structure):
@@ -588,11 +599,22 @@ for name, result, arguments in (
                                             C.POINTER(C.POINTER(LagResult))]),
         ('mesh_graph_lag_result_free', None, [C.POINTER(LagResult)]),
         ('mesh_graph_query_source', C.c_uint32, [C.c_void_p, C.c_size_t]),
+        ('mesh_graph_buffer_source', C.c_uint32, [C.c_void_p, C.c_size_t]),
+        ('mesh_graph_buffer_head', C.c_uint32, [C.c_void_p, C.c_size_t]),
+        ('mesh_graph_buffer_lag', C.c_uint64, [C.c_void_p, C.c_size_t]),
         ('mesh_graph_lag_matrix', C.c_int, [C.POINTER(LagGraph), C.c_uint32, _U, C.c_uint32, _U,
                                            C.POINTER(C.POINTER(LagMatrix))]),
         ('mesh_graph_lag_matrix_free', None, [C.POINTER(LagMatrix)]),
+        ('mesh_graph_event_lags', C.c_int, [C.POINTER(LagGraph), C.c_uint32, _Z, _U,
+                                           C.c_size_t, C.POINTER(Dependence),
+                                           C.POINTER(C.POINTER(EventLagResult))]),
+        ('mesh_graph_event_lag_result_free', None, [C.POINTER(EventLagResult)]),
         ('mesh_graph_buffer_bounds', C.c_int, [C.c_uint32, C.POINTER(C.c_double), C.POINTER(C.c_double),
                                               C.c_size_t, C.POINTER(Dependence), C.POINTER(C.POINTER(BufferResult))]),
+        ('mesh_graph_buffer_queries', C.c_int, [C.c_uint32, C.POINTER(C.c_double), C.c_size_t, _U, _U,
+                                               C.POINTER(C.c_uint64), C.c_size_t, _Z,
+                                               C.POINTER(C.POINTER(BufferResult))]),
+        ('mesh_graph_buffer_result_retain', None, [C.POINTER(BufferResult)]),
         ('mesh_graph_buffer_result_free', None, [C.POINTER(BufferResult)]),
         ('mesh_graph_chain_pairs', C.c_int, [C.c_uint32, _U, C.POINTER(C.POINTER(ChainResult))]),
         ('mesh_graph_chain_result_free', None, [C.POINTER(ChainResult)]),
@@ -725,6 +747,30 @@ def actor_time(machine, actor):
     if status not in (0, errno.ENODATA):
         _check(status)
     return time.value, status == 0
+
+
+def buffer_queries(source, *operands):
+    made = C.POINTER(BufferResult)()
+    _check(LIB.mesh_graph_buffer_queries(*operands, C.byref(made)))
+    return Owned(made, LIB.mesh_graph_buffer_result_free, source, operands)
+
+
+def event_lags(bounds, first, member, queries):
+    original = bounds.made.contents
+    groups = C.POINTER(Grouping)()
+    _check(LIB.mesh_graph_group(original.vertices, original.edges,
+                                C.cast(LIB.mesh_graph_buffer_source, C.c_void_p),
+                                C.cast(bounds.made, C.c_void_p), C.byref(groups)))
+    grouping = Owned(groups, LIB.mesh_graph_group_free, bounds)
+    prepared = C.POINTER(LagGraph)()
+    _check(LIB.mesh_graph_lag_prepare(original.vertices, groups.contents.first,
+                                      C.cast(LIB.mesh_graph_buffer_head, C.c_void_p),
+                                      C.cast(LIB.mesh_graph_buffer_lag, C.c_void_p),
+                                      C.cast(groups, C.c_void_p), C.byref(prepared)))
+    graph = Owned(prepared, LIB.mesh_graph_lag_graph_free, bounds, grouping)
+    made = C.POINTER(EventLagResult)()
+    _check(LIB.mesh_graph_event_lags(prepared, len(first) - 1, first, member, len(queries), queries, C.byref(made)))
+    return Owned(made, LIB.mesh_graph_event_lag_result_free, bounds, (graph, first, member, queries))
 
 
 # BSL §4.2-4.3, (6); mesh-graph.h mesh_graph_buffer_bound: Bff of each actor's host -> device edge from its t(v),

@@ -238,10 +238,32 @@ void mesh_graph_lag_graph_free(struct mesh_graph_lag_graph *);
 int mesh_graph_lag_queries(const struct mesh_graph_lag_graph *, size_t queries,
                             const struct mesh_graph_dependence *query, struct mesh_graph_lag_result **out);
 uint32_t mesh_graph_query_source(const void *query, size_t index);
+uint32_t mesh_graph_buffer_source(const void *buffer, size_t index);
+uint32_t mesh_graph_buffer_head(const void *group, size_t index);
+uint64_t mesh_graph_buffer_lag(const void *group, size_t index);
 void mesh_graph_lag_result_free(struct mesh_graph_lag_result *);
 int mesh_graph_lag_matrix(const struct mesh_graph_lag_graph *, uint32_t sources, const uint32_t *source,
                            uint32_t targets, const uint32_t *target, struct mesh_graph_lag_matrix **out);
 void mesh_graph_lag_matrix_free(struct mesh_graph_lag_matrix *);
+struct mesh_graph_event_lag_result {
+  const struct mesh_graph_lag_graph *graph;
+  uint32_t events;
+  const size_t *first;
+  const uint32_t *member;
+  size_t queries;
+  const struct mesh_graph_dependence *query;
+  size_t *expanded_first;
+  struct mesh_graph_dependence *expanded;
+  struct mesh_graph_lag_result *lags;
+  uint64_t *value;
+};
+/* compiler-emit/docs/source-analysis.md: distinct completion events A,B use max_a min_b lag(a,b);
+   identical original occurrences have lag 0. Recurrence uses mesh_graph_lag_queries; its raw result is retained. */
+int mesh_graph_event_lags(const struct mesh_graph_lag_graph *,uint32_t events,const size_t *first,
+                          const uint32_t *member,size_t queries,const struct mesh_graph_dependence *query,
+                          struct mesh_graph_event_lag_result **out);
+void mesh_graph_event_lag_result_free(struct mesh_graph_event_lag_result *);
+
 /* design/joint-compilation.md §3, row 7 */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
@@ -323,14 +345,27 @@ struct mesh_graph_dependence;
 int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, size_t edges,
                             const struct mesh_graph_dependence *edge, uint64_t *bound);
 struct mesh_graph_buffer_result {
-  uint32_t actors;
-  const double *host, *work;
-  size_t edges;
+  size_t references;
+  uint32_t vertices,actors;
+  const double *time,*host,*work;
+  size_t edges,part_edges,queries;
+  const uint32_t *from,*to;
+  const uint64_t *delay;
   const struct mesh_graph_dependence *edge;
+  const size_t *query;
+  double lambda;
   uint64_t *bound;
+  void (*release)(void *);
+  void *owner;
 };
+/* compiler-emit/docs/source-analysis.md: query[j] names the original forward edge; bound[j] is its reverse-edge Bff.
+   Input arrays remain the caller's; actors/host/work/edge retain the specialized constructor's original operands. */
+int mesh_graph_buffer_queries(uint32_t vertices,const double *time,size_t edges,const uint32_t *from,
+                              const uint32_t *to,const uint64_t *delay,size_t queries,const size_t *query,
+                              struct mesh_graph_buffer_result **out);
 int mesh_graph_buffer_bounds(uint32_t actors, const double *host, const double *work, size_t edges,
                               const struct mesh_graph_dependence *edge, struct mesh_graph_buffer_result **out);
+void mesh_graph_buffer_result_retain(struct mesh_graph_buffer_result *);
 void mesh_graph_buffer_result_free(struct mesh_graph_buffer_result *);
 /* design/joint-compilation.md §3, row 6; lambda is mesh_graph_cycle_mean of (time, edges, from, to, delay), BSL Fig. 8's
    λmax of the graph before the added edges (which enter at infinite delay) */

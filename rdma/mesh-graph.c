@@ -1326,6 +1326,18 @@ int mesh_graph_lag_matrix(const struct mesh_graph_lag_graph *g, uint32_t sources
 uint32_t mesh_graph_query_source(const void *context, size_t k) {
   return ((const struct mesh_graph_dependence *)context)[k].from;
 }
+uint32_t mesh_graph_buffer_source(const void *context, size_t k) {
+  return ((const struct mesh_graph_buffer_result *)context)->from[k];
+}
+uint32_t mesh_graph_buffer_head(const void *context, size_t k) {
+  const struct mesh_graph_grouping *group = context;
+  return ((const struct mesh_graph_buffer_result *)group->context)->to[group->order[k]];
+}
+uint64_t mesh_graph_buffer_lag(const void *context, size_t k) {
+  const struct mesh_graph_grouping *group = context;
+  return ((const struct mesh_graph_buffer_result *)group->context)->delay[group->order[k]];
+}
+
 struct lag_targets { const struct mesh_graph_lag_result *result; const size_t *order; };
 static uint32_t lag_query_target(const void *context, size_t k) {
   const struct lag_targets *targets = context;
@@ -1359,6 +1371,57 @@ int mesh_graph_lag_queries(const struct mesh_graph_lag_graph *g, size_t queries,
   }
   lag_scratch_free(&s);
   if (status) mesh_graph_lag_result_free(r); else *out = r;
+  return status;
+}
+
+void mesh_graph_event_lag_result_free(struct mesh_graph_event_lag_result *r) {
+  if (!r) return;
+  mesh_graph_lag_result_free(r->lags);
+  free(r->expanded_first); free(r->expanded); free(r->value); free(r);
+}
+int mesh_graph_event_lags(const struct mesh_graph_lag_graph *graph,uint32_t events,const size_t *first,
+                          const uint32_t *member,size_t queries,const struct mesh_graph_dependence *query,
+                          struct mesh_graph_event_lag_result **out) {
+  *out = NULL;
+  struct mesh_graph_event_lag_result *r = calloc(1, sizeof *r);
+  if (!r) return ENOMEM;
+  r->graph = graph; r->events = events; r->first = first; r->member = member; r->queries = queries; r->query = query;
+  r->expanded_first = calloc(queries + 1, sizeof *r->expanded_first);
+  r->value = malloc((queries + 1) * sizeof *r->value);
+  int status = r->expanded_first && r->value ? 0 : ENOMEM;
+  for (size_t q = 0; !status && q < queries; q++) {
+    const uint32_t a = query[q].from, b = query[q].to;
+    size_t count;
+    if (a >= events || b >= events || first[a] > first[a + 1] || first[b] > first[b + 1]) { status = EINVAL; break; }
+    if (__builtin_mul_overflow(first[a + 1] - first[a], first[b + 1] - first[b], &count) ||
+        __builtin_add_overflow(r->expanded_first[q], count, r->expanded_first + q + 1)) status = ENOMEM;
+  }
+  const size_t count = r->expanded_first ? r->expanded_first[queries] : 0;
+  if (!status && count >= SIZE_MAX / sizeof *r->expanded) status = ENOMEM;
+  if (!status && !(r->expanded = malloc((count + 1) * sizeof *r->expanded))) status = ENOMEM;
+  for (size_t q = 0; !status && q < queries; q++) {
+    const uint32_t a = query[q].from, b = query[q].to;
+    size_t k = r->expanded_first[q];
+    for (size_t x = first[a]; x < first[a + 1]; x++)
+      for (size_t y = first[b]; y < first[b + 1]; y++)
+        r->expanded[k++] = (struct mesh_graph_dependence){member[x], member[y], 0};
+  }
+  if (!status) status = mesh_graph_lag_queries(graph, count, r->expanded, &r->lags);
+  for (size_t q = 0; !status && q < queries; q++) {
+    const uint32_t a = query[q].from, b = query[q].to;
+    size_t k = r->expanded_first[q];
+    uint64_t value = 0;
+    for (size_t x = first[a]; x < first[a + 1]; x++) {
+      uint64_t least = UINT64_MAX;
+      for (size_t y = first[b]; y < first[b + 1]; y++, k++) {
+        const uint64_t lag = member[x] == member[y] ? 0 : r->lags->value[k];
+        if (lag < least) least = lag;
+      }
+      if (least > value) value = least;
+    }
+    r->value[q] = value;
+  }
+  if (status) mesh_graph_event_lag_result_free(r); else *out = r;
   return status;
 }
 
@@ -2822,9 +2885,58 @@ int mesh_graph_min_delay(uint32_t vertices, const double *time, size_t edges, co
   scratch_free(&s); free(changed);
   return result;
 }
-/* BSL §4.2-4.3, (6): Bff of each feedforward edge of the two-processor IPC graph */
-int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, size_t edges,
-                            const struct mesh_graph_dependence *edge, uint64_t *bound) {
+static void buffer_result_release(void *owner) {
+  struct mesh_graph_buffer_result *r = owner;
+  if (r->actors) {
+    free((void *)r->time); free((void *)r->from); free((void *)r->to);
+    free((void *)r->delay); free((void *)r->query);
+  }
+  free(r->bound);
+}
+/* BSL §4.2-4.3, (6), §9 Fig. 8; compiler-emit/docs/source-analysis.md */
+int mesh_graph_buffer_queries(uint32_t vertices,const double *time,size_t edges,const uint32_t *from,
+                              const uint32_t *to,const uint64_t *delay,size_t queries,const size_t *query,
+                              struct mesh_graph_buffer_result **out) {
+  *out = NULL;
+  struct mesh_graph_buffer_result *r = calloc(1, sizeof *r);
+  if (!r) return ENOMEM;
+  r->references = 1; r->release = buffer_result_release; r->owner = r; r->vertices = vertices; r->time = time; r->edges = edges;
+  r->from = from; r->to = to; r->delay = delay; r->queries = queries; r->query = query;
+  r->bound = malloc((queries + 1) * sizeof *r->bound);
+  uint32_t *source = malloc((edges + 1) * sizeof *source), *target = malloc((edges + 1) * sizeof *target);
+  uint64_t *lag = malloc((edges + 1) * sizeof *lag);
+  int status = r->bound && source && target && lag ? 0 : ENOMEM;
+  if (!status) status = mesh_graph_cycle_mean(vertices, time, edges, from, to, delay, &r->lambda);
+  if (!status && r->lambda == INFINITY) status = EINVAL;
+  double sum = 0;
+  for (uint32_t v = 0; !status && v < vertices; v++) sum += time[v];
+  for (size_t e = 0; !status && e < edges; e++) { source[e] = from[e]; target[e] = to[e]; lag[e] = delay[e]; }
+  for (size_t j = 0; !status && j < queries; j++) {
+    const size_t e = query[j];
+    if (e >= edges) { status = EINVAL; break; }
+    if (!(r->lambda > 0)) { r->bound[j] = 1; continue; }
+    const double most = ceil(sum / r->lambda);
+    source[edges] = to[e]; target[edges] = from[e]; lag[edges] = 0;
+    uint64_t least = 0;
+    status = mesh_graph_min_delay(vertices, time, edges + 1, source, target, lag, edges, r->lambda,
+                                  most >= 1 ? (uint64_t)most : 1, &least);
+    r->bound[j] = least ? least : 1;
+  }
+  free(source); free(target); free(lag);
+  if (status) mesh_graph_buffer_result_free(r); else *out = r;
+  return status;
+}
+void mesh_graph_buffer_result_retain(struct mesh_graph_buffer_result *r) {
+  __atomic_fetch_add(&r->references, 1, __ATOMIC_RELAXED);
+}
+void mesh_graph_buffer_result_free(struct mesh_graph_buffer_result *r) {
+  if (!r || __atomic_fetch_sub(&r->references, 1, __ATOMIC_ACQ_REL) != 1) return;
+  if (r->release) r->release(r->owner);
+  free(r);
+}
+int mesh_graph_buffer_bounds(uint32_t actors, const double *host, const double *work, size_t edges,
+                              const struct mesh_graph_dependence *edge, struct mesh_graph_buffer_result **out) {
+  *out = NULL;
   if (!actors || actors >= UINT32_MAX / 2 || edges >= SIZE_MAX / sizeof(uint64_t) - 3 * (size_t)actors - 2) return EINVAL;
   for (uint32_t j = 0; j < actors; j++)
     if (!(host[j] >= 0 && host[j] <= DBL_MAX) || !(work[j] >= 0 && work[j] <= DBL_MAX)) return EINVAL;
@@ -2832,48 +2944,35 @@ int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *w
   for (size_t e = 0; e < edges; e++) if (edge[e].from >= V || edge[e].to >= V) return EINVAL;
   const size_t E = 3 * (size_t)actors + edges;
   double *time = malloc(((size_t)V + 1) * sizeof *time);
-  uint32_t *from = malloc((E + 2) * sizeof *from), *to = malloc((E + 2) * sizeof *to);
-  uint64_t *delay = malloc((E + 2) * sizeof *delay);
-  int result = time && from && to && delay ? 0 : ENOMEM;
-  for (uint32_t j = 0; !result && j < actors; j++) {
+  uint32_t *from = malloc((E + 1) * sizeof *from), *to = malloc((E + 1) * sizeof *to);
+  uint64_t *delay = malloc((E + 1) * sizeof *delay);
+  size_t *query = malloc(((size_t)actors + 1) * sizeof *query);
+  int status = time && from && to && delay && query ? 0 : ENOMEM;
+  for (uint32_t j = 0; !status && j < actors; j++) {
     const uint32_t next = j + 1 == actors ? 0 : j + 1;
     time[j] = host[j]; time[actors + j] = work[j];
     from[3 * j] = j; to[3 * j] = next; delay[3 * j] = next == 0;
     from[3 * j + 1] = actors + j; to[3 * j + 1] = actors + next; delay[3 * j + 1] = next == 0;
     from[3 * j + 2] = j; to[3 * j + 2] = actors + j; delay[3 * j + 2] = 0;
+    query[j] = 3 * j + 2;
   }
-  for (size_t e = 0; !result && e < edges; e++) {
+  for (size_t e = 0; !status && e < edges; e++) {
     const size_t k = 3 * (size_t)actors + e;
     from[k] = edge[e].from; to[k] = edge[e].to; delay[k] = edge[e].delay;
   }
-  double lambda = 0, sum = 0;
-  if (!result) result = mesh_graph_cycle_mean(V, time, E, from, to, delay, &lambda);
-  if (!result && lambda == INFINITY) result = EINVAL;
-  for (uint32_t v = 0; !result && v < V; v++) sum += time[v];
-  for (uint32_t j = 0; !result && j < actors; j++) {
-    if (!(lambda > 0)) { bound[j] = 1; continue; }
-    const double most = ceil(sum / lambda);
-    from[E] = actors + j; to[E] = j; delay[E] = 0;
-    uint64_t least = 0;
-    result = mesh_graph_min_delay(V, time, E + 1, from, to, delay, E, lambda, most >= 1 ? (uint64_t)most : 1, &least);
-    bound[j] = least ? least : 1;
-  }
-  free(time); free(from); free(to); free(delay);
-  return result;
+  if (!status) status = mesh_graph_buffer_queries(V,time,E,from,to,delay,actors,query,out);
+  if (!status) {
+    (*out)->actors = actors; (*out)->host = host; (*out)->work = work;
+    (*out)->edge = edge; (*out)->part_edges = edges;
+  } else { free(time); free(from); free(to); free(delay); free(query); }
+  return status;
 }
-void mesh_graph_buffer_result_free(struct mesh_graph_buffer_result *r) {
-  if (!r) return;
-  free(r->bound); free(r);
-}
-int mesh_graph_buffer_bounds(uint32_t actors, const double *host, const double *work, size_t edges,
-                              const struct mesh_graph_dependence *edge, struct mesh_graph_buffer_result **out) {
-  *out = NULL;
-  struct mesh_graph_buffer_result *r = calloc(1, sizeof *r);
-  if (!r) return ENOMEM;
-  r->actors = actors; r->host = host; r->work = work; r->edges = edges; r->edge = edge;
-  r->bound = malloc(((size_t)actors + 1) * sizeof *r->bound);
-  const int status = r->bound ? mesh_graph_buffer_bound(actors, host, work, edges, edge, r->bound) : ENOMEM;
-  if (status) mesh_graph_buffer_result_free(r); else *out = r;
+int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, size_t edges,
+                            const struct mesh_graph_dependence *edge, uint64_t *bound) {
+  struct mesh_graph_buffer_result *r = NULL;
+  const int status = mesh_graph_buffer_bounds(actors,host,work,edges,edge,&r);
+  if (!status) memcpy(bound,r->bound,(size_t)actors*sizeof *bound);
+  mesh_graph_buffer_result_free(r);
   return status;
 }
 /* BSL §3, §9, Fig. 6 (Convert-to-SC-graph) and Theorem 4 */

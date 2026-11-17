@@ -365,7 +365,10 @@ PlanAnalysis._fields_ = [
     ('use', C.POINTER(LocalUse)), ('grouped', C.POINTER(Grouped)), ('flow', C.POINTER(PlanFlow)),
     ('call_group', C.POINTER(mesh_graph.Grouping)), ('source_group', C.POINTER(mesh_graph.Grouping)),
     ('chain_pairs', C.POINTER(mesh_graph.ChainResult)), ('bounds', C.POINTER(mesh_graph.BufferResult)),
-    ('actor_function', C.POINTER(U)), ('function_lag', C.POINTER(Q)), ('carried', C.POINTER(C.c_ubyte)),
+    ('actor_function', C.POINTER(U)), ('function_lag', C.POINTER(Q)),
+    ('bound_host', C.POINTER(D)), ('bound_work', C.POINTER(D)),
+    ('bound_edge', C.POINTER(mesh_graph.Dependence)), ('bound_function', C.POINTER(U)),
+    ('carried', C.POINTER(C.c_ubyte)),
     ('nodes', C.POINTER(Nodes)), ('owned', C.c_void_p), ('environment', C.c_void_p)]
 
 
@@ -490,7 +493,7 @@ for name, result, arguments in (
                                               C.POINTER(LocalUse), C.POINTER(C.POINTER(PlanAnalysis))]),
         ('mesh_plan_environment', C.c_int, [CONTEXT, C.POINTER(Nodes), C.POINTER(PlanGeometry)]),
         ('mesh_plan_program_analyze', C.c_int, [C.POINTER(Nodes), C.POINTER(PlanGeometry), Q,
-                                                C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
+                                                C.POINTER(mesh_graph.BufferResult), C.POINTER(U), C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
                                                 C.POINTER(U), U, C.POINTER(Q), C.c_void_p, C.POINTER(U), U, C.c_void_p,
                                                 C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse),
                                                 C.POINTER(C.POINTER(PlanAnalysis))]),

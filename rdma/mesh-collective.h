@@ -240,8 +240,8 @@ int mesh_declared_group(const struct mesh_declared *declared,const struct mesh_w
    (first[]/offset[], value_first as mesh_plan_local's), the instance and source rows (row/order,
    source_row/source_order), and each instance's declared rows' demands (demand_of from
    demand_first[f]) with the release a sent row's demand shares (release_of; MESH_ABSENT a row this node does not
-   send). A shared root transported by a demand is a run 1 root (a caller's run 0 root: EINVAL; its caller stages it
-   in a run 1 wire root) */
+   send). Analysis retains caller-owned run 0 roots and their original views. Physical construction requires a
+   transported root's assigned backing; its current run 1 placement cannot supply a run 0 root's missing binding. */
 struct mesh_plan_demand {
   uint32_t source,identity,first;
   uint32_t mine,root;
@@ -353,8 +353,11 @@ struct mesh_plan_analysis {
   struct mesh_graph_grouping *call_group,*source_group;
   struct mesh_graph_chain_result *chain_pairs;
   struct mesh_graph_buffer_result *bounds;
-  uint32_t *actor_function;
+  const uint32_t *actor_function;
   uint64_t *function_lag;
+  double *bound_host,*bound_work;
+  struct mesh_graph_dependence *bound_edge;
+  uint32_t *bound_function;
   unsigned char *carried;
   const struct mesh_nodes *nodes;
   void *owned,*environment;
@@ -365,7 +368,8 @@ void mesh_plan_analysis_free(struct mesh_plan_analysis *);
 int mesh_plan_local_analyze(const struct mesh_function *,uint32_t,const uint32_t *,uint32_t,
   const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
   const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,struct mesh_plan_analysis **);
-int mesh_plan_program_analyze(const struct mesh_nodes *,const struct mesh_plan_geometry *,uint64_t,const struct mesh_function *,uint32_t,
+int mesh_plan_program_analyze(const struct mesh_nodes *,const struct mesh_plan_geometry *,uint64_t,
+  struct mesh_graph_buffer_result *,const uint32_t *,const struct mesh_function *,uint32_t,
   const struct mesh_grouped *,const uint32_t *,uint32_t,const uint32_t *,uint32_t,const uint64_t *,
   const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
   const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,struct mesh_plan_analysis **);
