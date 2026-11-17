@@ -143,7 +143,7 @@ class PlannedTransfer(C.Structure):
 
 
 class PlanValue(C.Structure):
-    _fields_ = [('section', Section), ('shares', U), ('lag', U)]
+    _fields_ = [('section', Section), ('shares', U)]
 
 
 class PlanActors(C.Structure):
@@ -205,17 +205,11 @@ class PlanPlacement(C.Structure):
 
 
 # mesh-collective.h struct mesh_local, mesh_plan_local, mesh_local_save and mesh_local_load: the whole solved result
-# with its operands (functions, roots, value_first, calls, chains, ordered edges, relation, closure, uses)
+# with source operands retained in planned.analysis
 class Local(C.Structure):
     _fields_ = [('planned', Planned), ('bytes', Q), ('values', Z), ('offsets', Z), ('first', C.POINTER(Z)),
-                ('offset', C.POINTER(Q)), ('functions', U), ('roots', U), ('function', C.POINTER(Function)),
-                ('root', C.POINTER(Value)), ('value_first', C.POINTER(Z)), ('calls', C.POINTER(U)),
-                ('chains', C.POINTER(U)), ('ordered', C.POINTER(U)), ('ncalls', U), ('norders', U),
-                ('relation', C.c_void_p), ('closure', C.POINTER(mesh_graph.Closed)), ('use_first', C.POINTER(Z)),
-                ('use', C.POINTER(LocalUse)), ('source_calls', C.POINTER(U)), ('source_outstanding', C.POINTER(Q)),
-                ('sources', U), ('padding', U), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
-                ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('demand_first', C.POINTER(Z)),
-                ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U)), ('grouped', C.POINTER(Grouped)),
+                ('offset', C.POINTER(Q)), ('value_first', C.POINTER(Z)), ('demand_first', C.POINTER(Z)),
+                ('demand_of', C.POINTER(U)), ('release_of', C.POINTER(U)),
                 ('quantum', Q), ('placement', C.POINTER(PlanPlacement))]
 
 

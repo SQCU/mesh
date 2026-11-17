@@ -129,11 +129,11 @@ class Arena:
             offsets, count = self.span(first, index)
             for copy in range(count):
                 C.memset(contents + offsets[copy], 0, value.section.bytes)
-        for f in range(joint.local.functions):
+        for f in range(joint.local.planned.analysis.contents.functions):
             function = joint.functions[f]
             for v in (v for v in range(function.values) if function.value[v].state):
                 zeroed(joint.function_value_first[f], v, function.value[v])
-        for s in (s for s in range(joint.local.roots) if joint.roots[s].state):
+        for s in (s for s in range(joint.local.planned.analysis.contents.roots) if joint.roots[s].state):
             zeroed(joint.root_first, s, joint.roots[s])
 
     def bound(self, owned, M):

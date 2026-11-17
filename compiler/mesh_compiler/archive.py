@@ -749,11 +749,12 @@ def sourced(held, ordinal, operands, query):
 # search, with the saved `query`
 def attached(query, local, owner):
     mesh_graph = schedule.mesh_graph
-    graph = mesh_graph.Graph(range(local.ncalls), mesh_graph.Relation.borrowed(local.relation))
+    analysis = local.planned.analysis.contents
+    graph = mesh_graph.Graph(range(analysis.ncalls), mesh_graph.Relation.borrowed(analysis.relation))
     roots, reached = query["paths"]
     owned, found = reached.owned, reached.owned.made.contents
     return {"query": query, "graph": graph, "search": mesh_graph.Reached.load(query["search"], graph).owned,
-            "closure": mesh_graph.Closures(mesh_graph.Owned(local.closure, lambda made: None, graph, (owner,)), False),
+            "closure": mesh_graph.Closures(mesh_graph.Owned(analysis.closure, lambda made: None, graph, (owner,)), False),
             "paths": mesh_graph.View(owned, roots, range(len(roots)), lambda k: mesh_graph.ordered(
                 owned, found.preorder, range(found.place[k], found.end[k])))}
 

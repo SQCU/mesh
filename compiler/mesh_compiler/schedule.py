@@ -730,17 +730,20 @@ class BindingOwner:
 
 # mesh-collective.h struct mesh_local value_first, first and offset: native views of one result, owned by `owner`:
 # function f's values' first entries, the roots', every copy's byte offset
-def viewed(owner, local):
-    F, S, prefix = local.functions, local.roots, local.value_first
-    return ([mesh_graph.View(owner, local.first, range(prefix[f], prefix[f + 1] + 1), int) for f in range(F)],
-            mesh_graph.View(owner, local.first, range(prefix[F], prefix[F] + S + 1), int),
-            mesh_graph.View(owner, local.offset, range(local.offsets), int))
+def offset_views(owner, result, offsets):
+    source = result.planned.analysis.contents
+    prefix = result.value_first
+    functions = [mesh_graph.View(owner, result.first, range(prefix[f], prefix[f + 1] + 1), int)
+                 for f in range(source.functions)]
+    roots = mesh_graph.View(owner, result.first,
+                            range(prefix[source.functions], prefix[source.functions] + source.roots + 1), int)
+    return functions, roots, mesh_graph.View(owner, offsets, range(result.offsets), int)
 
 
 # design/aot-compilation-change-request.md A5 to A10 and appendix item 6; design/disjoint-pages-change-request.md;
 # mesh-collective.h mesh_plan_local, mesh_local_save, mesh_local_load: one solved program. `functions` Function[K], the
 # calls' instances; `local` the owned result and `planned` its planned record; `function_value_first[k]`,
-# `root_first` and `offsets` native views (viewed); `bindings` each (call, rootValueID, sourceStorageIndex, delta,
+# `root_first` and `offsets` native views (offset_views); `bindings` each (call, rootValueID, sourceStorageIndex, delta,
 # originalReference, every, ordinal), its source storage resolved once from the Slot's reference, `delta` the source
 # view's byte offset less the Slot's, (every, ordinal) its call's generation (function f's copy of execution e = t *
 # every + ordinal is e % (horizon * every), a root's copy block e // every); `source_bindings` the native Bindings
@@ -1259,7 +1262,7 @@ def solve_program(analysis, functions, bindings, quantum, planning=None, *, plan
                                               C.byref(owner.binding)))
     local = owner.local if planning is None else owner.binding.compilation.contents.result
     calls = local.planned.call
-    solved = Solved(functions, local, local.planned, *viewed(owner, local),
+    solved = Solved(functions, local, local.planned, *offset_views(owner, local, local.offset),
                     tuple((*entry, reference, calls[entry[0]].every, calls[entry[0]].ordinal)
                           for entry, reference in resolved.items()), tuple(bindings), analysis.root_sources, analysis,
                     roots, (use_first, use), instances, declared, None, declared.ports,
@@ -1295,15 +1298,12 @@ class SavedNetwork:
 # compiled source's own, its `source` a saved source's query attached to the loaded Local (archive.py attached)
 def published_program(binding, owner, offset, source):
     from .archive import attached
-    local = binding.compilation.contents.result
-    F, S, prefix = local.functions, local.roots, local.value_first
-    return Solved(local.function, local, local.planned,
-                  [mesh_graph.View(owner, local.first, range(prefix[f], prefix[f + 1] + 1), int) for f in range(F)],
-                  mesh_graph.View(owner, local.first, range(prefix[F], prefix[F] + S + 1), int),
-                  mesh_graph.View(owner, offset, range(local.offsets), int), (), (), (),
-                  source.analysis if isinstance(source, Solved) else None, local.root,
-                  (local.use_first, local.use), local.calls, None, source, (), None, owner,
-                  None if source.source is None else attached(source.source["query"], local, owner),
+    result = binding.compilation.contents.result
+    analysis = result.planned.analysis.contents
+    return Solved(analysis.function, result, result.planned, *offset_views(owner, result, offset), (), (), (),
+                  source.analysis if isinstance(source, Solved) else None, analysis.root,
+                  (analysis.use_first, analysis.use), analysis.calls, None, source, (), None, owner,
+                  None if source.source is None else attached(source.source["query"], result, owner),
                   source.analysis_context, binding)
 
 
@@ -1317,6 +1317,8 @@ def loaded_program(data, context):
     mesh.check(_lent(data, lambda release, lent: mesh.LIB.mesh_local_load(context.pointer, data, len(data), release,
                                                                            lent, C.byref(owner.local)),
                      lambda status: status == 0))
-    local = owner.local
-    return Solved(local.function, local, local.planned, *viewed(owner, local), (), (), (), None, local.root,
-                  (local.use_first, local.use), local.calls, None, None, (), None, owner, None, context)
+    result = owner.local
+    analysis = result.planned.analysis.contents
+    return Solved(analysis.function, result, result.planned, *offset_views(owner, result, result.offset),
+                  (), (), (), None, analysis.root, (analysis.use_first, analysis.use), analysis.calls,
+                  None, None, (), None, owner, None, context)
