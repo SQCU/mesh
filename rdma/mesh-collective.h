@@ -116,7 +116,7 @@ struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signatur
                       uint32_t functions; size_t extents,*first; struct mesh_planned_transfer *transfer;
                       struct mesh_graph_access *extent; void *owned; uint64_t used[2];
                       struct mesh_range arena[2],rows; uint64_t generation;
-                      struct mesh_plan_function *result; struct mesh_plan_value *root; uint32_t results,roots; };
+                      struct mesh_plan_function *result; struct mesh_plan_value *root; uint32_t results,roots; struct mesh_plan_analysis *analysis; };
 /* `owned`: a loaded result's own memory and its archive's owner (mesh_plan_load, mesh_local_load), released by
    mesh_planned_free; NULL for a planned result.  `used[a]`: the blocks (m->block pages each) the plan's placement
    solved in distinct arena a, a as mesh_arena_range(m, a) (one shared arena: used[0], used[1] 0), as mesh_plan placed
@@ -135,7 +135,7 @@ _Static_assert(sizeof(struct mesh_planned_call)==40 && offsetof(struct mesh_plan
                offsetof(struct mesh_planned,transfer)==80 && offsetof(struct mesh_planned,extent)==88 &&
                offsetof(struct mesh_planned,used)==104 && offsetof(struct mesh_planned,arena)==120 &&
                offsetof(struct mesh_planned,rows)==136 && offsetof(struct mesh_planned,generation)==144 &&
-               offsetof(struct mesh_planned,result)==152 && sizeof(struct mesh_planned)==176 &&
+               offsetof(struct mesh_planned,result)==152 && offsetof(struct mesh_planned,analysis)==176 && sizeof(struct mesh_planned)==184 &&
                sizeof(struct mesh_planned_transfer)==24 &&
                sizeof(struct mesh_planned_cause)==8,"mesh_planned: rdma/mesh.py Planned");
 uint64_t mesh_plan_quantum(const struct hdr *);
@@ -206,16 +206,16 @@ struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,o
                     const uint64_t *source_outstanding; uint32_t sources,padding; size_t *row,*order,*source_row,
                     *source_order,*demand_first; uint32_t *demand_of,*release_of;
                     const struct mesh_grouped *grouped; uint64_t quantum; };
-_Static_assert(offsetof(struct mesh_local,bytes)==176 &&
-               offsetof(struct mesh_local,values)==184 && offsetof(struct mesh_local,offsets)==192 &&
-               offsetof(struct mesh_local,first)==200 && offsetof(struct mesh_local,offset)==208 &&
-               offsetof(struct mesh_local,functions)==216 && offsetof(struct mesh_local,function)==224 &&
-               offsetof(struct mesh_local,value_first)==240 && offsetof(struct mesh_local,ncalls)==272 &&
-               offsetof(struct mesh_local,relation)==280 && offsetof(struct mesh_local,use)==304 &&
-               offsetof(struct mesh_local,source_calls)==312 && offsetof(struct mesh_local,sources)==328 &&
-               offsetof(struct mesh_local,row)==336 && offsetof(struct mesh_local,demand_first)==368 &&
-               offsetof(struct mesh_local,release_of)==384 && offsetof(struct mesh_local,grouped)==392 &&
-               offsetof(struct mesh_local,quantum)==400 && sizeof(struct mesh_local)==408,
+_Static_assert(offsetof(struct mesh_local,bytes)==184 &&
+               offsetof(struct mesh_local,values)==192 && offsetof(struct mesh_local,offsets)==200 &&
+               offsetof(struct mesh_local,first)==208 && offsetof(struct mesh_local,offset)==216 &&
+               offsetof(struct mesh_local,functions)==224 && offsetof(struct mesh_local,function)==232 &&
+               offsetof(struct mesh_local,value_first)==248 && offsetof(struct mesh_local,ncalls)==280 &&
+               offsetof(struct mesh_local,relation)==288 && offsetof(struct mesh_local,use)==312 &&
+               offsetof(struct mesh_local,source_calls)==320 && offsetof(struct mesh_local,sources)==336 &&
+               offsetof(struct mesh_local,row)==344 && offsetof(struct mesh_local,demand_first)==376 &&
+               offsetof(struct mesh_local,release_of)==392 && offsetof(struct mesh_local,grouped)==400 &&
+               offsetof(struct mesh_local,quantum)==408 && sizeof(struct mesh_local)==416,
                "mesh_local: rdma/mesh.py Local");
 int mesh_plan_local(const struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
                     const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,
@@ -261,6 +261,123 @@ int mesh_declared_group(const struct mesh_declared *declared,const struct mesh_w
    demand_first[f]) with the release a sent row's demand shares (release_of; MESH_ABSENT a row this node does not
    send). A shared root transported by a demand is a run 1 root (a caller's run 0 root: EINVAL; its caller stages it
    in a run 1 wire root) */
+struct mesh_plan_demand {
+  uint32_t source,identity,first;
+  uint32_t mine,root;
+  /* design/plan-to-bridge-change-request.md R2 */
+  const struct mesh_strided *view;
+  uint32_t tree,trees;
+  uint32_t release;
+  /* design/aot-compilation-change-request.md A9 */
+  uint64_t leaves,bytes,instructions,cut,at;
+  uint32_t relay;
+  uint64_t on;
+  uint32_t forwards;
+  uint32_t own;
+  uint32_t set;
+  uint32_t vertex;
+  uint32_t value;
+  uint32_t range,received;
+  uint32_t consumed;
+  uint32_t counted;
+  uint64_t group;
+  uint32_t sending,sends;
+};
+/* design/disjoint-pages-change-request.md C3.3 */
+struct mesh_plan_vertex { uint32_t demand,node,write,read,reads,source; };
+/* design/plan-to-bridge-change-request.md R5; M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2 */
+struct mesh_plan_entry { uint32_t node,direction,demand,field,communication,set; uint64_t instruction; };
+struct mesh_plan_flow {
+  struct mesh_ctx *context;
+  const struct mesh_declared *declared;
+  uint32_t transfers;
+  const struct mesh_value *given;
+  uint32_t *value_lag;
+  uint32_t givens;
+  /* design/plan-to-bridge-change-request.md R2; design/disjoint-pages-change-request.md C3.3 */
+  unsigned char *named;
+  uint32_t *uncovered;
+  uint64_t *cut,*at,toward;
+  uint32_t sets,*set_first,*member,*set_blocks,*set_far,*block_first,*block_set,*block_element;
+  const struct mesh_weight *weights;
+  const struct mesh_dependence *dependence;
+  uint32_t dependences;
+  struct mesh_plan_demand *demand;
+  uint32_t demands,n,self,copies,start_lead;
+  struct mesh_view_id view;               /* JGroups ViewId.java */
+  /* of[t] row t's demand: a view of its grouping's demand_of (mesh_declared_group's; `own` the one plan_run made
+     where the caller gave none, held until plan_free) */
+  const uint32_t *of;
+  struct mesh_grouped own;
+  uint32_t pairs,from[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1],to[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1];
+  double capacity[MESH_NODES_MOST*(MESH_NODES_MOST-1)/2+1];
+  size_t *tree;
+  uint32_t *parent;
+  uint64_t *run;
+  uint32_t made;
+  uint64_t *members,*lead,*comm,comms;
+  uint64_t releases;
+  struct mesh_plan_entry *entry;
+  uint64_t entries,receives,group_bytes;
+  uint32_t ranges,consumed;
+  uint32_t sending;
+  uint64_t *child;
+  /* the joint program's shared roots (mesh_plan_program), `carried[r]` where one of this plan's demands transports r;
+     bound[j] the root a use binds value j to (MESH_ABSENT none, PLAN_SEVERAL several of its calls' roots), its
+     storage the root's (NULL: no uses) */
+  const struct mesh_value *roots;
+  uint32_t nroots;
+  unsigned char *carried;
+  uint32_t *bound;
+  struct mesh_plan_vertex *value;
+  uint32_t values;
+  uint32_t *read;
+  uint32_t *here,local;
+  uint32_t vertices;
+  size_t edges;
+  size_t *first;
+  uint32_t *head,*lag;
+  uint32_t *between;
+  uint32_t *farthest;
+  /* design/aot-compilation-change-request.md A10 */
+  uint64_t outstanding,spanned,nodes,forwarded;
+  uint32_t calls,horizon;
+  double time[MESH_NODES_MOST];
+};
+
+struct mesh_plan_analysis {
+  size_t references;
+  struct mesh_ctx *context;
+  uint64_t group,program;
+  const struct mesh_function *function;
+  uint32_t functions;
+  const uint32_t *calls,*chains,*ordered,*source_calls,*orders,*causes;
+  uint32_t ncalls,norders,sources,horizon;
+  const uint64_t *source_outstanding;
+  const struct mesh_graph_relation *relation;
+  const struct mesh_graph_closure *closure;
+  const struct mesh_value *root;
+  uint32_t roots;
+  const size_t *use_first;
+  const struct mesh_local_use *use;
+  const struct mesh_grouped *grouped;
+  struct mesh_plan_flow *flow;
+  uint32_t *every,*ordinal,*call_of,*flat,*cause;
+  size_t *call_first,*row,*order,*source_row,*source_order;
+  unsigned char *carried;
+  struct mesh_nodes nodes;
+};
+void mesh_plan_analysis_retain(struct mesh_plan_analysis *);
+void mesh_plan_analysis_free(struct mesh_plan_analysis *);
+int mesh_plan_local_analyze(const struct mesh_function *,uint32_t,const uint32_t *,uint32_t,
+  const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
+  const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,struct mesh_plan_analysis **);
+int mesh_plan_program_analyze(struct mesh_ctx *,uint64_t,uint64_t,const struct mesh_function *,uint32_t,
+  const struct mesh_grouped *,const uint32_t *,uint32_t,const uint32_t *,uint32_t,const uint64_t *,
+  const struct mesh_graph_relation *,const uint32_t *,uint32_t,const struct mesh_graph_closure *,const uint32_t *,
+  const struct mesh_value *,uint32_t,const size_t *,const struct mesh_local_use *,struct mesh_plan_analysis **);
+int mesh_plan_local_complete(struct mesh_plan_analysis *,uint64_t,struct mesh_local *);
+int mesh_plan_program_complete(struct mesh_plan_analysis *,uint64_t,struct mesh_local *);
 int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,const struct mesh_function *functions,
                       uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
                       const uint32_t *source_calls,uint32_t sources,const uint64_t *source_outstanding,

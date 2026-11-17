@@ -152,6 +152,10 @@ class PlanFunction(C.Structure):
                 ('order', C.POINTER(U)), ('actors', C.POINTER(PlanActors))]
 
 
+class PlanAnalysis(C.Structure):
+    pass
+
+
 class Planned(C.Structure):
     _fields_ = [('call', C.POINTER(PlannedCall)), ('signature', C.POINTER(mesh_graph.Signature)),
                 ('order', C.POINTER(mesh_graph.Dependence)), ('calls', U), ('padding', U), ('orders', Z),
@@ -159,7 +163,7 @@ class Planned(C.Structure):
                 ('first', C.POINTER(Z)), ('transfer', C.POINTER(PlannedTransfer)),
                 ('extent', C.POINTER(mesh_graph.Access)), ('owned', C.c_void_p), ('used', Q * 2),
                 ('arena', Range * 2), ('rows', Range), ('generation', Q),
-                ('result', C.POINTER(PlanFunction)), ('root', C.POINTER(PlanValue)), ('results', U), ('roots', U)]
+                ('result', C.POINTER(PlanFunction)), ('root', C.POINTER(PlanValue)), ('results', U), ('roots', U), ('analysis', C.POINTER(PlanAnalysis))]
 
 
 # mesh-collective.h struct mesh_demand, struct mesh_grouped and mesh_declared_group: the one canonical grouping of a
@@ -265,6 +269,64 @@ class Nodes(C.Structure):
                 ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('padding', U), ('boot', Q)]
 
 
+class PlanDemand(C.Structure):
+    _fields_ = [('source', U), ('identity', U), ('first', U), ('mine', U), ('root', U), ('view', C.POINTER(Strided)),
+                ('tree', U), ('trees', U), ('release', U), ('leaves', Q), ('bytes', Q), ('instructions', Q),
+                ('cut', Q), ('at', Q), ('relay', U), ('on', Q), ('forwards', U), ('own', U), ('set', U),
+                ('vertex', U), ('value', U), ('range', U), ('received', U), ('consumed', U), ('counted', U),
+                ('group', Q), ('sending', U), ('sends', U)]
+
+
+class PlanVertex(C.Structure):
+    _fields_ = [('demand', U), ('node', U), ('write', U), ('read', U), ('reads', U), ('source', U)]
+
+
+class PlanEntry(C.Structure):
+    _fields_ = [('node', U), ('direction', U), ('demand', U), ('field', U), ('communication', U), ('set', U),
+                ('instruction', Q)]
+
+
+class ViewId(C.Structure):
+    _fields_ = [('id', Q), ('sequencer', U), ('padding', U), ('boot', Q)]
+
+
+class PlanFlow(C.Structure):
+    _fields_ = [('context', C.POINTER(Context)), ('declared', C.POINTER(Declared)), ('transfers', U),
+                ('given', C.POINTER(Value)), ('value_lag', C.POINTER(U)), ('givens', U),
+                ('named', C.POINTER(C.c_ubyte)), ('uncovered', C.POINTER(U)), ('cut', C.POINTER(Q)),
+                ('at', C.POINTER(Q)), ('toward', Q), ('sets', U), ('set_first', C.POINTER(U)),
+                ('member', C.POINTER(U)), ('set_blocks', C.POINTER(U)), ('set_far', C.POINTER(U)),
+                ('block_first', C.POINTER(U)), ('block_set', C.POINTER(U)), ('block_element', C.POINTER(U)),
+                ('weights', C.POINTER(Weight)), ('dependence', C.POINTER(Dependence)), ('dependences', U),
+                ('demand', C.POINTER(PlanDemand)), ('demands', U), ('n', U), ('self', U), ('copies', U),
+                ('start_lead', U), ('view', ViewId), ('of', C.POINTER(U)), ('own', Grouped), ('pairs', U),
+                ('from', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
+                ('to', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
+                ('capacity', D * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
+                ('tree', C.POINTER(Z)), ('parent', C.POINTER(U)), ('run', C.POINTER(Q)), ('made', U),
+                ('members', C.POINTER(Q)), ('lead', C.POINTER(Q)), ('comm', C.POINTER(Q)), ('comms', Q),
+                ('releases', Q), ('entry', C.POINTER(PlanEntry)), ('entries', Q), ('receives', Q), ('group_bytes', Q),
+                ('ranges', U), ('consumed', U), ('sending', U), ('child', C.POINTER(Q)), ('roots', C.POINTER(Value)),
+                ('nroots', U), ('carried', C.POINTER(C.c_ubyte)), ('bound', C.POINTER(U)),
+                ('value', C.POINTER(PlanVertex)), ('values', U), ('read', C.POINTER(U)), ('here', C.POINTER(U)),
+                ('local', U), ('vertices', U), ('edges', Z), ('first', C.POINTER(Z)), ('head', C.POINTER(U)),
+                ('lag', C.POINTER(U)), ('between', C.POINTER(U)), ('farthest', C.POINTER(U)),
+                ('outstanding', Q), ('spanned', Q), ('nodes', Q), ('forwarded', Q), ('calls', U), ('horizon', U),
+                ('time', D * NODES_MOST)]
+
+
+PlanAnalysis._fields_ = [
+    ('references', Z), ('context', C.POINTER(Context)), ('group', Q), ('program', Q), ('function', C.POINTER(Function)),
+    ('functions', U), ('calls', C.POINTER(U)), ('chains', C.POINTER(U)), ('ordered', C.POINTER(U)),
+    ('source_calls', C.POINTER(U)), ('orders', C.POINTER(U)), ('causes', C.POINTER(U)), ('ncalls', U), ('norders', U),
+    ('sources', U), ('horizon', U), ('source_outstanding', C.POINTER(Q)), ('relation', C.c_void_p),
+    ('closure', C.POINTER(mesh_graph.Closed)), ('root', C.POINTER(Value)), ('roots', U), ('use_first', C.POINTER(Z)),
+    ('use', C.POINTER(LocalUse)), ('grouped', C.POINTER(Grouped)), ('flow', C.POINTER(PlanFlow)),
+    ('every', C.POINTER(U)), ('ordinal', C.POINTER(U)), ('call_of', C.POINTER(U)), ('flat', C.POINTER(U)),
+    ('cause', C.POINTER(U)), ('call_first', C.POINTER(Z)), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
+    ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('carried', C.POINTER(C.c_ubyte)), ('nodes', Nodes)]
+
+
 # mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled
 FAILED = 2 ** 64 - 1
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
@@ -337,6 +399,17 @@ for name, result, arguments in (
         ('mesh_plan_local', C.c_int, [C.POINTER(Function), U, C.POINTER(U), U, C.c_void_p, C.POINTER(U), U,
                                       C.c_void_p, C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z),
                                       C.POINTER(LocalUse), Q, C.POINTER(Local)]),
+        ('mesh_plan_analysis_retain', None, [C.POINTER(PlanAnalysis)]),
+        ('mesh_plan_analysis_free', None, [C.POINTER(PlanAnalysis)]),
+        ('mesh_plan_local_analyze', C.c_int, [C.POINTER(Function), U, C.POINTER(U), U, C.c_void_p, C.POINTER(U), U,
+                                              C.c_void_p, C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z),
+                                              C.POINTER(LocalUse), C.POINTER(C.POINTER(PlanAnalysis))]),
+        ('mesh_plan_program_analyze', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
+                                                C.POINTER(U), U, C.POINTER(Q), C.c_void_p, C.POINTER(U), U, C.c_void_p,
+                                                C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse),
+                                                C.POINTER(C.POINTER(PlanAnalysis))]),
+        ('mesh_plan_local_complete', C.c_int, [C.POINTER(PlanAnalysis), Q, C.POINTER(Local)]),
+        ('mesh_plan_program_complete', C.c_int, [C.POINTER(PlanAnalysis), Q, C.POINTER(Local)]),
         ('mesh_local_free', None, [C.POINTER(Local)]),
         ('mesh_declared_group', C.c_int, [C.POINTER(Declared), C.POINTER(Weight), U, U, U, C.POINTER(Grouped)]),
         ('mesh_plan_program', C.c_int, [CONTEXT, Q, Q, C.POINTER(Function), U, C.POINTER(Grouped), C.POINTER(U), U,
