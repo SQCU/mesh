@@ -144,7 +144,7 @@ static int plan_leaf(const void *context,uint32_t d,uint32_t v){
 }
 static uint32_t plan_at(const void *context,size_t k){ return ((const uint32_t *)context)[k]; }
 uint64_t mesh_plan_quantum(const struct hdr *m){ return (uint64_t)m->block*m->pgsz; }
-uint64_t mesh_plan_quanta(uint64_t bytes,uint64_t quantum){ return (bytes+quantum-1)/quantum; }
+uint64_t mesh_plan_quanta(uint64_t bytes,uint64_t quantum){ return bytes/quantum+(bytes%quantum!=0); }
 static uint64_t plan_quantum(const struct mesh_plan_geometry *m){ return (uint64_t)m->block*m->pgsz; }
 static uint64_t plan_blocks(const struct mesh_plan_geometry *m,uint64_t bytes){ return mesh_plan_quanta(bytes,plan_quantum(m)); }
 /* L. J. Hendren, G. R. Gao, E. R. Altman and C. Mukerji, ACAPS Technical Memo 33, §2.2;

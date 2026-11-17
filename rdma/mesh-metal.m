@@ -243,9 +243,13 @@ int mesh_metal_status_prepare(struct mesh_ctx *context,struct mesh_metal_transpo
    of mesh-metal.h from the plan, one calling sequence for every producer of the compiler's transport operands */
 int mesh_metal_range_declare(struct mesh_ctx *context,const uint32_t *calls,uint32_t ncalls,uint32_t call,
   uint32_t owner,uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range){
-  if(call>=ncalls || owner>=ncalls)return EINVAL;
-  const struct hdr *m=context->M;
-  const uint64_t page=(uint64_t)m->block*m->pgsz;
+  return mesh_metal_range_geometry(mesh_plan_quantum(context->M),calls,ncalls,call,owner,transfer,bytes,at,range);
+}
+int mesh_metal_range_geometry(uint64_t page,const uint32_t *calls,uint32_t ncalls,uint32_t call,
+  uint32_t owner,uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range){
+  if(!page || call>=ncalls || owner>=ncalls)return EINVAL;
+  const uint64_t partitions=mesh_plan_quanta(bytes,page);
+  if(partitions>UINT32_MAX)return EOVERFLOW;
   uint32_t every=0,producer=0,ordinal=0;
   for(uint32_t k=0;k<ncalls;k++){
     every+=calls[k]==calls[call];
@@ -253,7 +257,7 @@ int mesh_metal_range_declare(struct mesh_ctx *context,const uint32_t *calls,uint
     ordinal+=k<owner && calls[k]==calls[owner];
   }
   *range=(struct mesh_metal_range){.generation=owner==call?(struct mesh_graph_generation){1,1,0}:
-    (struct mesh_graph_generation){every,producer,ordinal},.partitions=(uint32_t)((bytes+page-1)/page),.page=page,
+    (struct mesh_graph_generation){every,producer,ordinal},.partitions=(uint32_t)partitions,.page=page,
     .at=at,.transfer=transfer,.owner=owner};
   return 0;
 }

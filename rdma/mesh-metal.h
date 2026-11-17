@@ -63,6 +63,8 @@ struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_gener
    at `section`; ENODATA where `planned` holds no planned rows (mesh_plan_load of an archive saved without them) */
 int mesh_metal_range_declare(struct mesh_ctx *,const uint32_t *calls,uint32_t ncalls,uint32_t call,uint32_t owner,
                              uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range);
+int mesh_metal_range_geometry(uint64_t page,const uint32_t *calls,uint32_t ncalls,uint32_t call,uint32_t owner,
+                              uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range);
 int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                              struct mesh_section section,uint32_t *field,uint32_t room,struct mesh_metal_range *range);
 /* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
