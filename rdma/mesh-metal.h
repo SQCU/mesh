@@ -67,6 +67,8 @@ int mesh_metal_range_geometry(uint64_t page,const uint32_t *calls,uint32_t ncall
                               uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range);
 int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                              struct mesh_section section,uint32_t *field,uint32_t room,struct mesh_metal_range *range);
+int mesh_metal_range_fields(const struct mesh_planned *,uint32_t call,uint32_t transfer,uint64_t page,
+                            uint32_t pages,uint32_t *field);
 /* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
    design/disjoint-pages-change-request.md C3.1, "Landings and cancellations both arrive on the count"; rdma/mesh-flow.c
    count_raise. The readiness obligation of a dispatch reading `ranges` received ranges, every quantity static but the

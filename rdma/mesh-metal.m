@@ -73,6 +73,7 @@ static void receive_words(struct mesh_ctx *context,struct mesh_metal_transport *
    without them) */
 static int planned_rows(const struct mesh_planned *planned,uint32_t call,uint32_t transfer,
   struct mesh_planned_transfer *rows){
+  if(call>=planned->calls)return EINVAL;
   if(!planned->first)return ENODATA;
   const uint32_t f=planned->call[call].function;
   if(transfer>=planned->first[f+1]-planned->first[f])return EINVAL;
@@ -81,16 +82,22 @@ static int planned_rows(const struct mesh_planned *planned,uint32_t call,uint32_
 }
 /* design/torch-capture-change-request.md item 3; MPI 4.1 §4.2.2 MPI_PARRIVED: each RECEIVE row's phase field names the
    block its logical bytes start in, a field no row names 0 */
-static int receive_fields(struct mesh_ctx *context,const struct mesh_planned *planned,struct mesh_planned_transfer rows,
-  const struct mesh_metal_input *input,uint32_t *fields){
-  const uint64_t block=(uint64_t)((struct hdr *)context->M)->block*((struct hdr *)context->M)->pgsz;
-  memset(fields,0,(size_t)input->pages*sizeof *fields);
+static int receive_fields(const struct mesh_planned *planned,struct mesh_planned_transfer rows,
+  uint64_t page,uint32_t pages,uint32_t *fields){
+  if(!page)return EINVAL;
+  if(pages)memset(fields,0,(size_t)pages*sizeof *fields);
   for(size_t k=rows.received;k<rows.sending;k++){
     const struct mesh_graph_access *row=planned->extent+k;
-    if(row->vertex>=input->pages)return EINVAL;
-    fields[row->vertex]=(uint32_t)(row->start/block);
+    if(row->vertex>=pages)return EINVAL;
+    fields[row->vertex]=(uint32_t)(row->start/page);
   }
   return 0;
+}
+int mesh_metal_range_fields(const struct mesh_planned *planned,uint32_t call,uint32_t transfer,
+  uint64_t page,uint32_t pages,uint32_t *field){
+  struct mesh_planned_transfer rows;
+  const int status=planned_rows(planned,call,transfer,&rows);
+  return status?status:receive_fields(planned,rows,page,pages,field);
 }
 
 /* J. Lee, Ph.D. dissertation, University of Michigan, 2015, §3.2.2: threadgroup g's footprint, its terms evaluated at
@@ -272,7 +279,7 @@ int mesh_metal_range_prepare(struct mesh_ctx *context,struct mesh_metal_transpor
   const uint64_t plan=binding->plan[planned->call[range->owner].function];
   range->field=field;
   receive_words(context,transport,plan,range->transfer,&range->input);
-  return range->input.pages>room?ERANGE:receive_fields(context,planned,rows,&range->input,field);
+  return range->input.pages>room?ERANGE:receive_fields(planned,rows,mesh_plan_quantum(context->M),range->input.pages,field);
 }
 int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release){

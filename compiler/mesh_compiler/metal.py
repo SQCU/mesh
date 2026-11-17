@@ -653,6 +653,8 @@ def _transport():
                                                        mesh.Q, mesh.Q, C.POINTER(Range)]),
                 ('mesh_metal_range_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.Section,
                                                        C.POINTER(mesh.U), mesh.U, C.POINTER(Range)]),
+                ('mesh_metal_range_fields', C.c_int, [C.POINTER(mesh.Planned), mesh.U, mesh.U, mesh.Q,
+                                                      mesh.U, C.POINTER(mesh.U)]),
                 ('mesh_metal_release_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U,
                                                          C.POINTER(Release)]),
                 ('mesh_metal_sending_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U, mesh.U,
