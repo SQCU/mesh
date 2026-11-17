@@ -306,6 +306,7 @@ class PlanFlow(C.Structure):
                 ('tree', C.POINTER(Z)), ('parent', C.POINTER(U)), ('run', C.POINTER(Q)), ('made', U),
                 ('members', C.POINTER(Q)), ('lead', C.POINTER(Q)), ('comm', C.POINTER(Q)), ('comms', Q),
                 ('releases', Q), ('entry', C.POINTER(PlanEntry)), ('entries', Q), ('receives', Q), ('group_bytes', Q),
+                ('positions', Q), ('blocks', Q),
                 ('ranges', U), ('consumed', U), ('sending', U), ('child', C.POINTER(Q)), ('roots', C.POINTER(Value)),
                 ('nroots', U), ('carried', C.POINTER(C.c_ubyte)), ('bound', C.POINTER(U)),
                 ('value', C.POINTER(PlanVertex)), ('values', U), ('read', C.POINTER(U)), ('here', C.POINTER(U)),
@@ -324,7 +325,8 @@ PlanAnalysis._fields_ = [
     ('use', C.POINTER(LocalUse)), ('grouped', C.POINTER(Grouped)), ('flow', C.POINTER(PlanFlow)),
     ('every', C.POINTER(U)), ('ordinal', C.POINTER(U)), ('call_of', C.POINTER(U)), ('flat', C.POINTER(U)),
     ('cause', C.POINTER(U)), ('call_first', C.POINTER(Z)), ('row', C.POINTER(Z)), ('order', C.POINTER(Z)),
-    ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('carried', C.POINTER(C.c_ubyte)), ('nodes', Nodes)]
+    ('source_row', C.POINTER(Z)), ('source_order', C.POINTER(Z)), ('carried', C.POINTER(C.c_ubyte)), ('nodes', Nodes),
+    ('owned', C.c_void_p)]
 
 
 # mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled

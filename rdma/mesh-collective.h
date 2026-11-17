@@ -318,7 +318,7 @@ struct mesh_plan_flow {
   uint64_t *members,*lead,*comm,comms;
   uint64_t releases;
   struct mesh_plan_entry *entry;
-  uint64_t entries,receives,group_bytes;
+  uint64_t entries,receives,group_bytes,positions,blocks;
   uint32_t ranges,consumed;
   uint32_t sending;
   uint64_t *child;
@@ -366,7 +366,10 @@ struct mesh_plan_analysis {
   size_t *call_first,*row,*order,*source_row,*source_order;
   unsigned char *carried;
   struct mesh_nodes nodes;
+  void *owned;
 };
+_Static_assert(sizeof(struct mesh_plan_flow)==8808 && sizeof(struct mesh_plan_analysis)==8632,
+  "mesh_plan_flow/analysis: rdma/mesh.py PlanFlow/PlanAnalysis");
 void mesh_plan_analysis_retain(struct mesh_plan_analysis *);
 void mesh_plan_analysis_free(struct mesh_plan_analysis *);
 int mesh_plan_local_analyze(const struct mesh_function *,uint32_t,const uint32_t *,uint32_t,
