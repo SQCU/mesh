@@ -18,6 +18,10 @@ class Closed(C.Structure):
     _fields_ = [('vertices', C.c_uint32), ('words', C.c_size_t), ('reached', C.POINTER(C.c_uint64))]
 
 
+class Interval(C.Structure):
+    _fields_ = [('key', C.c_uint64), ('start', C.c_uint64), ('end', C.c_uint64)]
+
+
 # one owned native result, the graph whose vertices its IDs name and the operands it was made from (`held`), freed with
 # its last view
 class Owned:

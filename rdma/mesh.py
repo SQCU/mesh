@@ -308,10 +308,33 @@ class Nodes(C.Structure):
                 ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('padding', U), ('boot', Q)]
 
 
+class PlanFlow(C.Structure):
+    pass
+
+
+class PlanEndpoint(C.Structure):
+    _fields_ = [('transfer', U), ('role', U), ('view', C.POINTER(Strided))]
+
+
+PLAN_FROM, PLAN_TO = 0, 1
+
+
+class PlanCuts(C.Structure):
+    pass
+
+
+PlanCuts._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('source', C.POINTER(PlanFlow)),
+                    ('demand', U), ('views', U), ('endpoint', C.POINTER(PlanEndpoint)),
+                    ('spans', U), ('padding', U), ('span', C.POINTER(mesh_graph.Interval)),
+                    ('previous', C.POINTER(PlanCuts)), ('instructions', Q), ('cut', C.POINTER(Q)),
+                    ('at', C.POINTER(Q)), ('route', C.POINTER(U)), ('previous_first', C.POINTER(Q)),
+                    ('previous_last', C.POINTER(Q)), ('mapped', C.c_void_p)]
+
+
 class PlanDemand(C.Structure):
     _fields_ = [('source', U), ('identity', U), ('first', U), ('mine', U), ('root', U), ('view', C.POINTER(Strided)),
-                ('tree', U), ('trees', U), ('release', U), ('leaves', Q), ('bytes', Q), ('instructions', Q),
-                ('cut', Q), ('at', Q), ('relay', U), ('on', Q), ('forwards', U), ('own', U), ('set', U),
+                ('tree', U), ('trees', U), ('release', U), ('leaves', Q), ('bytes', Q),
+                ('cuts', C.POINTER(PlanCuts)), ('local', U), ('relay', U), ('on', Q), ('forwards', U), ('own', U), ('set', U),
                 ('vertex', U), ('value', U), ('range', U), ('received', U), ('consumed', U), ('counted', U),
                 ('group', Q), ('sending', U), ('sends', U)]
 
@@ -329,11 +352,11 @@ class ViewId(C.Structure):
     _fields_ = [('id', Q), ('sequencer', U), ('padding', U), ('boot', Q)]
 
 
-class PlanFlow(C.Structure):
-    _fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINTER(Declared)), ('transfers', U),
+PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINTER(Declared)), ('transfers', U),
                 ('given', C.POINTER(Value)), ('value_lag', C.POINTER(U)), ('givens', U),
-                ('named', C.POINTER(C.c_ubyte)), ('uncovered', C.POINTER(U)), ('cut', C.POINTER(Q)),
-                ('at', C.POINTER(Q)), ('toward', Q), ('sets', U), ('set_first', C.POINTER(U)),
+                ('named', C.POINTER(C.c_ubyte)), ('uncovered', C.POINTER(U)), ('toward', Q),
+                ('endpoint', C.POINTER(PlanEndpoint)), ('transfer_rows', C.POINTER(mesh_graph.Grouping)),
+                ('sets', U), ('set_first', C.POINTER(U)),
                 ('member', C.POINTER(U)), ('set_blocks', C.POINTER(U)), ('set_far', C.POINTER(U)),
                 ('block_first', C.POINTER(U)), ('block_set', C.POINTER(U)), ('block_element', C.POINTER(U)),
                 ('weights', C.POINTER(Weight)), ('dependence', C.POINTER(Dependence)), ('dependences', U),
@@ -343,9 +366,10 @@ class PlanFlow(C.Structure):
                 ('to', U * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
                 ('capacity', D * (NODES_MOST * (NODES_MOST - 1) // 2 + 1)),
                 ('tree', C.POINTER(Z)), ('parent', C.POINTER(U)), ('run', C.POINTER(Q)), ('made', U),
-                ('members', C.POINTER(Q)), ('lead', C.POINTER(Q)), ('comm', C.POINTER(Q)), ('comms', Q),
+                ('members', C.POINTER(Q)), ('lead', C.POINTER(Q)), ('comm', C.POINTER(Q)),
+                ('span', C.POINTER(mesh_graph.Interval)), ('comms', Q),
                 ('releases', Q), ('entry', C.POINTER(PlanEntry)), ('entries', Q), ('receives', Q), ('group_bytes', Q),
-                ('positions', Q), ('blocks', Q),
+                ('blocks', Q),
                 ('ranges', U), ('consumed', U), ('sending', U), ('child', C.POINTER(Q)), ('roots', C.POINTER(Value)),
                 ('nroots', U), ('carried', C.POINTER(C.c_ubyte)), ('bound', C.POINTER(U)),
                 ('value', C.POINTER(PlanVertex)), ('values', U), ('read', C.POINTER(U)), ('here', C.POINTER(U)),
@@ -502,6 +526,10 @@ for name, result, arguments in (
                                                 C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse),
                                                 C.POINTER(C.POINTER(PlanAnalysis))]),
         ('mesh_plan_local_complete', C.c_int, [C.POINTER(PlanAnalysis), Q, C.POINTER(Local)]),
+        ('mesh_plan_cut', C.c_int, [C.POINTER(PlanGeometry), C.POINTER(PlanFlow), U,
+                                  U, C.POINTER(PlanEndpoint), U, C.POINTER(mesh_graph.Interval),
+                                  C.POINTER(PlanCuts), C.POINTER(C.POINTER(PlanCuts))]),
+        ('mesh_plan_cut_free', None, [C.POINTER(PlanCuts)]),
         ('mesh_plan_schedule', C.c_int, [C.POINTER(PlanFlow), C.POINTER(Function),
                                            C.POINTER(C.POINTER(PlanScheduleResult))]),
         ('mesh_plan_schedule_retain', None, [C.POINTER(PlanScheduleResult)]),
