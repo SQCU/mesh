@@ -1901,6 +1901,15 @@ compiler boundary and independent source review. Implemented connections:
   calls. Receipt:
   `compiler-emit/artifacts/4546012-source-correspondence/receipt.json`, SHA256
   `35e9fd24b5655b2c026e7e02298e461256266916fae76989fae91882d769f0b9`.
+- Compiler `83218bf` retains the actual CPU proxies on their kernel groups and
+  temporary template groups on their original producer. Source review covers
+  all six finalization callers and four group producers. The existing CPU
+  `StatefulAlias` observation retains two original proxies through terminal
+  emission and passes the three numerical/alias/state calls. Receipt:
+  `compiler-emit/artifacts/83218bf-cpu-kernel-owners/receipt.json`, SHA256
+  `8616a45157f2ec20cc2da50df1cdc7201a71785f485a80ca16f3a32bdb505eb7`.
+  All 78 watched inputs remained unchanged; template and outer-fusion paths
+  received source review rather than numerical execution in this observation.
 
 The [workspace producer memorandum](../../../../compiler-emit/docs/workspace-demands.md)
 names the remaining original construction/writer boundaries. CPU templates and
