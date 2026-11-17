@@ -3505,6 +3505,11 @@ static isl_set *access_own(const struct mesh_graph_domain *d, isl_space *space, 
   isl_local_space_free(local);
   return isl_set_from_basic_set(own);
 }
+static isl_map *access_launch(const struct mesh_graph_access_map *a, const uint32_t group[3], const uint32_t groups[3]) {
+  isl_map *relation = isl_map_add_dims(isl_map_copy(a->relation), isl_dim_param, 3);
+  return isl_map_intersect_domain(relation,
+    access_own(a->domain, isl_space_domain(isl_map_get_space(relation)), group, groups));
+}
 /* one threadgroup's partitions as isl enumerates its (bounded, one-dimensional) set's points */
 struct access_points { uint32_t *partition; size_t count, room; int status; };
 static isl_stat access_point(isl_point *point, void *user) {
@@ -3552,8 +3557,7 @@ int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, cons
   if (!G || !page || !partitions || a->greatest < start || a->least >= end) return 0;
   struct mesh_graph_domain *d = a->domain;
   pthread_mutex_lock(&d->context->lock);
-  isl_map *relation = isl_map_add_dims(isl_map_copy(a->relation), isl_dim_param, 3);
-  relation = isl_map_intersect_domain(relation, access_own(d, isl_space_domain(isl_map_get_space(relation)), group, groups));
+  isl_map *relation = access_launch(a, group, groups);
   isl_set *reached = access_pages(relation, start, page, partitions);
   struct access_points x = {NULL, 0, 0, reached ? 0 : ENOMEM};
   for (uint64_t w = 0; !x.status && w < G; w++) {
@@ -3586,8 +3590,12 @@ static isl_set *access_page_union(isl_ctx *ctx, uint64_t page, uint32_t partitio
     }
     int uncertain = !!a->flags;
     for (uint32_t k = 0; k < a->domain->dims; k++) uncertain |= a->domain->dim[k].kind == MESH_GRAPH_DOMAIN_INDIRECT;
-    if (!covering || !uncertain)
-      result = isl_set_union(result, access_pages(isl_map_copy(a->relation), views[i].start, page, partitions));
+    const int launch = views[i].group && views[i].groups;
+    if (covering && (uncertain || !launch)) continue;
+    isl_set *reached = access_pages(launch ? access_launch(a, views[i].group, views[i].groups) : isl_map_copy(a->relation),
+                                    views[i].start, page, partitions);
+    if (launch) reached = isl_set_project_out(reached, isl_dim_param, 0, 3);
+    result = isl_set_union(result, reached);
   }
   return result;
 }

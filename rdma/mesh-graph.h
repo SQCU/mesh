@@ -551,12 +551,16 @@ int mesh_graph_access_map_placed(const struct mesh_graph_access_map *, int64_t s
 int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *, const uint32_t group[3],
                                      const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
                                      size_t *first, uint32_t **partition);
-/* Each borrowed map's complete domain image in pages relative to its own start; whole explicitly names all pages
-   [0, partitions). The wanted union is covered by the covering union. Unknown/bounded/data-guarded or indirectly
-   indexed covering maps supply no guaranteed pages; wanted maps retain their conservative image. Different map
-   domains may share one context. A different context gives no proof. No launch geometry or byte hull is inferred.
+/* Each borrowed map's launch-domain image in pages relative to its own start; group and groups use the same
+   restriction as access_map_partitions, existentially over all executed groups. Whole explicitly names all pages
+   [0, partitions). The wanted union is covered by the covering union. Unknown/bounded/data-guarded, indirectly
+   indexed or unknown-launch covering maps supply no guaranteed pages; unknown-launch wanted maps retain their
+   full domain image. Different map domains may share one context. A different context gives no proof.
    Both sides must describe the same access stage and page coordinate system; execution/epoch order is the caller's. */
-struct mesh_graph_access_pages { const struct mesh_graph_access_map *map; int64_t start; uint32_t whole; };
+struct mesh_graph_access_pages {
+  const struct mesh_graph_access_map *map; int64_t start; uint32_t whole;
+  const uint32_t *group, *groups;
+};
 int mesh_graph_access_pages_cover(uint64_t page, uint32_t partitions,
                                   size_t covers, const struct mesh_graph_access_pages *cover,
                                   size_t wanted, const struct mesh_graph_access_pages *want, int *covered);
