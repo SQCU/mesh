@@ -116,13 +116,14 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,c
 void mesh_view_program(struct mesh_ctx *c,const struct mesh_plan_binding *binding,uint64_t *copy_offsets,uint64_t *page_offsets,
                        struct mesh_view *view){
   const struct mesh_local *local=&binding->compilation->result;
+  const struct mesh_plan_analysis *analysis=local->planned.analysis;
   struct hdr *m=c->M;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t low=UINT64_MAX,high=0;
   for(int pass=0;pass<2;pass++)
-    for(uint32_t f=0,v=0;f<=local->functions;f++){
-      const uint32_t n=f<local->functions?local->function[f].values:local->roots;
-      const struct mesh_plan_value *value=f<local->functions?local->planned.result[f].value:local->planned.root;
+    for(uint32_t f=0,v=0;f<=analysis->functions;f++){
+      const uint32_t n=f<analysis->functions?analysis->function[f].values:analysis->roots;
+      const struct mesh_plan_value *value=f<analysis->functions?local->planned.result[f].value:local->planned.root;
       for(uint32_t i=0;i<n;i++,v++)
         for(size_t k=local->first[v];k<local->first[v+1];k++)
           for(uint32_t r=0;r<value[i].section.stride;r++){

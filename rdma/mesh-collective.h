@@ -113,7 +113,7 @@ struct mesh_plan_binding {
 };
 void mesh_plan_binding_free(struct mesh_plan_binding *);
 struct mesh_plan_geometry { uint32_t pgsz,block,rows,padding; struct mesh_range arena[2]; };
-struct mesh_plan_value { struct mesh_section section; uint32_t shares,lag; };
+struct mesh_plan_value { struct mesh_section section; uint32_t shares; };
 struct mesh_plan_actors { const double *host,*work; const struct mesh_graph_dependence *edge; uint32_t parts,edges;
                           struct mesh_graph_relation *relation; };
 struct plan_schedule_result;
@@ -166,15 +166,7 @@ void mesh_planned_free(struct mesh_planned *);
    functions and roots remain unchanged */
 struct mesh_local_use { uint32_t call,value; };
 _Static_assert(sizeof(struct mesh_local_use)==8,"mesh_local_use: rdma/mesh.py LocalUse");
-/* the whole solved result's operands, as mesh_plan_local was given them (a solved result borrows them from the
-   caller; a loaded one owns its Function[] descriptors and closure header and borrows every array from its archive):
-   function[functions], root[roots], value_first[functions + 1] (produced here: function f's values are first[]'s
-   entries value_first[f] .. value_first[f + 1], the roots from value_first[functions]), calls[ncalls], chains[ncalls]
-   (NULL: each call its own head), ordered[norders] (the edges of `relation` that are orders), the calls' `closure`,
-   and use_first[roots + 1] and use[]; `grouped` a network result's grouped[functions] (mesh_plan_program's operand,
-   the caller's mesh_declared_group results, borrowed with their arrays: the original group records, each demand's
-   first row, and the rows' demand_of and release_of; a loaded one's views of its archive), NULL a local result's;
-   quantum is the original placement quantum in bytes, not arena-base alignment */
+/* compiler-emit/docs/planner-source-owner.md */
 struct mesh_grouped;
 struct plan_item { uint64_t element,blocks; uint32_t kind,function,index,copy,space; };
 struct plan_placement {
@@ -189,15 +181,16 @@ struct plan_placement {
   uint64_t *size,*start,*end,*offset,*operations;
   uint32_t *function,*index,*copy;
 };
-struct mesh_local { struct mesh_planned planned; uint64_t bytes; size_t values,offsets; size_t *first;
-                    uint64_t *offset; uint32_t functions,roots; const struct mesh_function *function;
-                    const struct mesh_value *root; size_t *value_first; const uint32_t *calls,*chains,*ordered;
-                    uint32_t ncalls,norders; const struct mesh_graph_relation *relation;
-                    const struct mesh_graph_closure *closure; const size_t *use_first;
-                    const struct mesh_local_use *use; const uint32_t *source_calls;
-                    const uint64_t *source_outstanding; uint32_t sources,padding; size_t *row,*order,*source_row,
-                    *source_order,*demand_first; uint32_t *demand_of,*release_of;
-                    const struct mesh_grouped *grouped; uint64_t quantum; struct plan_placement *placement; };
+struct mesh_local {
+  struct mesh_planned planned;
+  uint64_t bytes;
+  size_t values,offsets,*first;
+  uint64_t *offset;
+  size_t *value_first,*demand_first;
+  uint32_t *demand_of,*release_of;
+  uint64_t quantum;
+  struct plan_placement *placement;
+};
 
 int mesh_plan_local(const struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
                     const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,
