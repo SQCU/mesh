@@ -142,6 +142,24 @@ uint32_t mesh_graph_climb(const uint32_t *parent, uint32_t vertices, uint32_t ro
                           void (*visit)(void *consumer, uint32_t at, uint32_t step), void *consumer);
 void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *context, size_t k), const void *context,
                      size_t *first, size_t *order);
+/* design/planner-composition.md: owned row/ordinal results; key/context and parent remain borrowed operands. */
+struct mesh_graph_grouping {
+  uint32_t keys;
+  size_t items;
+  uint32_t (*key)(const void *, size_t);
+  const void *context;
+  size_t *first, *order, *ordinal;
+};
+int mesh_graph_group(uint32_t keys, size_t items, uint32_t (*key)(const void *, size_t), const void *context,
+                      struct mesh_graph_grouping **out);
+void mesh_graph_group_free(struct mesh_graph_grouping *);
+struct mesh_graph_tree {
+  uint32_t vertices, root;
+  const uint32_t *parent;
+  struct mesh_graph_grouping *children;
+};
+int mesh_graph_tree_create(uint32_t vertices, uint32_t root, const uint32_t *parent, struct mesh_graph_tree **out);
+void mesh_graph_tree_free(struct mesh_graph_tree *);
 /* ExecuTorch exir/memory_planning.py update_tensor_lifetime: "A tensor's lifetime are represented by the index of the
    first and last node referring that tensor in its inputs/outputs." Use k is value value[k] at position[k]; first[v]
    and last[v] the least and greatest position of value v's uses */
@@ -189,6 +207,29 @@ int mesh_graph_cost_times(const struct mesh_graph_machine *, size_t actors, cons
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
                     const uint32_t *source,uint32_t targets,const uint32_t *target,uint64_t *lags);
+/* design/planner-composition.md: the original weighted rows by view; query.delay is not an operand. */
+struct mesh_graph_dependence;
+struct mesh_graph_lag_graph {
+  uint32_t vertices;
+  const size_t *first;
+  uint32_t (*head)(const void *, size_t);
+  uint64_t (*lag)(const void *, size_t);
+  const void *context;
+};
+struct mesh_graph_lag_result {
+  const struct mesh_graph_lag_graph *graph;
+  size_t queries;
+  const struct mesh_graph_dependence *query;
+  struct mesh_graph_grouping *sources;
+  uint64_t *value;
+};
+int mesh_graph_lag_prepare(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *, size_t),
+                            uint64_t (*lag)(const void *, size_t), const void *context,
+                            struct mesh_graph_lag_graph **out);
+void mesh_graph_lag_graph_free(struct mesh_graph_lag_graph *);
+int mesh_graph_lag_queries(const struct mesh_graph_lag_graph *, size_t queries,
+                            const struct mesh_graph_dependence *query, struct mesh_graph_lag_result **out);
+void mesh_graph_lag_result_free(struct mesh_graph_lag_result *);
 /* design/joint-compilation.md §3, row 7 */
 int mesh_graph_chains(uint32_t items, const uint64_t *count, int (*before)(const void *context, uint32_t a, uint32_t b),
                       const void *context, uint64_t *chain, uint64_t *chains);
@@ -269,6 +310,16 @@ int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, c
 struct mesh_graph_dependence;
 int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *work, size_t edges,
                             const struct mesh_graph_dependence *edge, uint64_t *bound);
+struct mesh_graph_buffer_result {
+  uint32_t actors;
+  const double *host, *work;
+  size_t edges;
+  const struct mesh_graph_dependence *edge;
+  uint64_t *bound;
+};
+int mesh_graph_buffer_bounds(uint32_t actors, const double *host, const double *work, size_t edges,
+                              const struct mesh_graph_dependence *edge, struct mesh_graph_buffer_result **out);
+void mesh_graph_buffer_result_free(struct mesh_graph_buffer_result *);
 /* design/joint-compilation.md §3, row 6; lambda is mesh_graph_cycle_mean of (time, edges, from, to, delay), BSL Fig. 8's
    λmax of the graph before the added edges (which enter at infinite delay) */
 int mesh_graph_determine_delays(uint32_t vertices, const double *time, size_t edges, const uint32_t *from,
@@ -506,6 +557,39 @@ struct mesh_graph_processor { uint32_t kind, index; };
 #define MESH_GRAPH_PLAN_SUPPLIED UINT32_C(0x20000000)
 struct mesh_graph_task { uint32_t processor, place, label, copy; };
 struct mesh_graph_dependence { uint32_t from, to; uint64_t delay; };
+struct mesh_graph_chain_result {
+  uint32_t vertices;
+  const uint32_t *chain;
+  size_t edges;
+  struct mesh_graph_dependence *edge;
+};
+int mesh_graph_chain_pairs(uint32_t vertices, const uint32_t *chain, struct mesh_graph_chain_result **out);
+void mesh_graph_chain_result_free(struct mesh_graph_chain_result *);
+/* design/planner-composition.md: original byte touches and value/relay operands; derived complete cover sets. */
+struct mesh_graph_touch { uint64_t start, end; uint32_t value, member; };
+struct mesh_graph_cover { const uint32_t *member; uint32_t members, value, block; };
+struct mesh_graph_cover_result {
+  uint64_t quantum;
+  uint32_t values, blocks, extras, sets;
+  size_t touches, covers, listed;
+  const uint32_t *block_first;
+  uint64_t (*bytes)(const void *, uint32_t);
+  const void *context;
+  const struct mesh_graph_touch *touch;
+  uint32_t (*extra_member)(const void *, uint32_t);
+  uint64_t (*extra_blocks)(const void *, uint32_t);
+  const void *extra_context;
+  const struct mesh_graph_touch **order;
+  struct mesh_graph_cover *cover;
+  uint32_t *held, *first, *member, *set_blocks, *block_set, *block_element, *extra_set, *uncovered;
+};
+int mesh_graph_cover_sets(uint64_t quantum, uint32_t values, uint32_t blocks, const uint32_t *block_first,
+                           uint64_t (*bytes)(const void *, uint32_t), const void *context, size_t touches,
+                           const struct mesh_graph_touch *touch, uint32_t extras,
+                           uint32_t (*extra_member)(const void *, uint32_t),
+                           uint64_t (*extra_blocks)(const void *, uint32_t), const void *extra_context,
+                           struct mesh_graph_cover_result **out);
+void mesh_graph_cover_result_free(struct mesh_graph_cover_result *);
 struct mesh_graph_operation { uint32_t processor, primitive, vertex, object; uint64_t execution, value; };
 struct mesh_graph_synchronized { uint32_t signal, wait, state, redundant, dependence, witness; uint64_t delay; };
 _Static_assert(sizeof(struct mesh_graph_processor) == 8 && sizeof(struct mesh_graph_task) == 16 &&
@@ -601,6 +685,7 @@ int mesh_graph_relation_witness(const struct mesh_graph_relation *, size_t from_
                                 struct mesh_graph_witness *out);
 int mesh_graph_relation_cause(const struct mesh_graph_relation *, const struct mesh_graph_witness *,
                               struct mesh_graph_cause *out);
+int mesh_graph_relation_edge_cause(const struct mesh_graph_relation *, size_t edge, uint32_t *kind);
 /* design/compilation-composition-change-request.md items 6.4 and 7: mesh_graph_relation_views (self and query as
    there) whose pair test asks `decide` first. For each candidate pair of distinct views a and b (one key, hulls that
    meet, not both reads, not both write 2, both nonempty), decide(context, a, b, &d) either answers it from a retained

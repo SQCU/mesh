@@ -627,6 +627,191 @@ void mesh_graph_rows(uint32_t keys, size_t items, uint32_t (*key)(const void *co
   first[0] = 0;
 }
 
+void mesh_graph_group_free(struct mesh_graph_grouping *g) {
+  if (!g) return;
+  free(g->first); free(g->order); free(g->ordinal); free(g);
+}
+int mesh_graph_group(uint32_t keys, size_t items, uint32_t (*key)(const void *, size_t), const void *context,
+                      struct mesh_graph_grouping **out) {
+  *out = NULL;
+  if (items >= SIZE_MAX / sizeof(size_t)) return ENOMEM;
+  struct mesh_graph_grouping *g = calloc(1, sizeof *g);
+  if (!g) return ENOMEM;
+  g->keys = keys; g->items = items; g->key = key; g->context = context;
+  g->first = malloc(((size_t)keys + 1) * sizeof *g->first);
+  g->order = malloc((items + 1) * sizeof *g->order);
+  g->ordinal = malloc((items + 1) * sizeof *g->ordinal);
+  int status = g->first && g->order && g->ordinal ? 0 : ENOMEM;
+  for (size_t k = 0; !status && k < items; k++) if (key(context, k) >= keys) status = EINVAL;
+  if (!status) {
+    mesh_graph_rows(keys, items, key, context, g->first, g->order);
+    for (uint32_t v = 0; v < keys; v++)
+      for (size_t k = g->first[v]; k < g->first[v + 1]; k++) g->ordinal[g->order[k]] = k - g->first[v];
+  }
+  if (status) mesh_graph_group_free(g); else *out = g;
+  return status;
+}
+static uint32_t tree_parent(const void *context, size_t v) {
+  const struct mesh_graph_tree *tree = context;
+  return v == tree->root || tree->parent[v] >= tree->vertices ? tree->vertices : tree->parent[v];
+}
+void mesh_graph_tree_free(struct mesh_graph_tree *tree) {
+  if (!tree) return;
+  mesh_graph_group_free(tree->children); free(tree);
+}
+int mesh_graph_tree_create(uint32_t vertices, uint32_t root, const uint32_t *parent, struct mesh_graph_tree **out) {
+  *out = NULL;
+  if (vertices == UINT32_MAX || root >= vertices) return EINVAL;
+  struct mesh_graph_tree *tree = calloc(1, sizeof *tree);
+  if (!tree) return ENOMEM;
+  tree->vertices = vertices; tree->root = root; tree->parent = parent;
+  int status = mesh_graph_group(vertices + 1, vertices, tree_parent, tree, &tree->children);
+  if (status) mesh_graph_tree_free(tree); else *out = tree;
+  return status;
+}
+
+void mesh_graph_chain_result_free(struct mesh_graph_chain_result *r) {
+  if (!r) return;
+  free(r->edge); free(r);
+}
+int mesh_graph_chain_pairs(uint32_t vertices, const uint32_t *chain, struct mesh_graph_chain_result **out) {
+  *out = NULL;
+  struct mesh_graph_chain_result *r = calloc(1, sizeof *r);
+  uint32_t *last = malloc(((size_t)vertices + 1) * sizeof *last);
+  if (!r || !last) { free(r); free(last); return ENOMEM; }
+  r->vertices = vertices; r->chain = chain;
+  r->edge = malloc(((size_t)vertices + 1) * sizeof *r->edge);
+  int status = r->edge ? 0 : ENOMEM;
+  for (uint32_t v = 0; !status && v < vertices; v++) {
+    const uint32_t h = chain ? chain[v] : v;
+    if (h > v || (chain && chain[h] != h)) { status = EINVAL; break; }
+    last[v] = v;
+    if (h != v) { r->edge[r->edges++] = (struct mesh_graph_dependence){last[h], v, 0}; last[h] = v; }
+  }
+  for (uint32_t v = 0; !status && v < vertices; v++)
+    if ((!chain || chain[v] == v) && last[v] != v)
+      r->edge[r->edges++] = (struct mesh_graph_dependence){last[v], v, 1};
+  free(last);
+  if (status) mesh_graph_chain_result_free(r); else *out = r;
+  return status;
+}
+
+static int cover_touch_order(const void *a, const void *b) {
+  const struct mesh_graph_touch *x = *(const struct mesh_graph_touch *const *)a;
+  const struct mesh_graph_touch *y = *(const struct mesh_graph_touch *const *)b;
+  if (x->value != y->value) return x->value < y->value ? -1 : 1;
+  return (x->start > y->start) - (x->start < y->start);
+}
+static int cover_member_order(const void *a, const void *b) {
+  const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+  return (x > y) - (x < y);
+}
+static int cover_same(const struct mesh_graph_cover *x, const struct mesh_graph_cover *y) {
+  return x->members == y->members && !memcmp(x->member, y->member, (size_t)x->members * sizeof *x->member);
+}
+static int cover_order(const void *a, const void *b) {
+  const struct mesh_graph_cover *x = a, *y = b;
+  for (uint32_t k = 0; k < x->members && k < y->members; k++)
+    if (x->member[k] != y->member[k]) return x->member[k] < y->member[k] ? -1 : 1;
+  if (x->members != y->members) return x->members < y->members ? -1 : 1;
+  if (x->value != y->value) return x->value < y->value ? -1 : 1;
+  return (x->block > y->block) - (x->block < y->block);
+}
+void mesh_graph_cover_result_free(struct mesh_graph_cover_result *r) {
+  if (!r) return;
+  free(r->order); free(r->cover); free(r->held); free(r->first); free(r->member); free(r->set_blocks);
+  free(r->block_set); free(r->block_element); free(r->extra_set); free(r->uncovered); free(r);
+}
+int mesh_graph_cover_sets(uint64_t quantum, uint32_t values, uint32_t blocks, const uint32_t *block_first,
+                           uint64_t (*bytes)(const void *, uint32_t), const void *context, size_t touches,
+                           const struct mesh_graph_touch *touch, uint32_t extras,
+                           uint32_t (*extra_member)(const void *, uint32_t),
+                           uint64_t (*extra_blocks)(const void *, uint32_t), const void *extra_context,
+                           struct mesh_graph_cover_result **out) {
+  *out = NULL;
+  if (!quantum) return EINVAL;
+  if (touches >= SIZE_MAX / sizeof(void *)) return ENOMEM;
+  struct mesh_graph_cover_result *r = calloc(1, sizeof *r);
+  if (!r) return ENOMEM;
+  r->quantum = quantum; r->values = values; r->blocks = blocks; r->extras = extras; r->touches = touches;
+  r->block_first = block_first; r->bytes = bytes; r->context = context; r->touch = touch;
+  r->extra_member = extra_member; r->extra_blocks = extra_blocks; r->extra_context = extra_context;
+  r->order = malloc((touches + 1) * sizeof *r->order);
+  r->cover = malloc(((size_t)blocks + 1) * sizeof *r->cover);
+  r->held = malloc((touches + 1) * sizeof *r->held);
+  r->block_set = malloc(((size_t)blocks + 1) * sizeof *r->block_set);
+  r->block_element = malloc(((size_t)blocks + 1) * sizeof *r->block_element);
+  r->extra_set = malloc(((size_t)extras + 1) * sizeof *r->extra_set);
+  r->uncovered = calloc((size_t)values + 1, sizeof *r->uncovered);
+  int status = r->order && r->cover && r->held && r->block_set && r->block_element && r->extra_set && r->uncovered ? 0 : ENOMEM;
+  for (size_t k = 0; !status && k < touches; k++) {
+    r->order[k] = touch + k;
+    if (touch[k].value >= values || block_first[touch[k].value] == UINT32_MAX || touch[k].start > touch[k].end)
+      status = EINVAL;
+  }
+  if (!status) qsort(r->order, touches, sizeof *r->order, cover_touch_order);
+  for (uint32_t b = 0; !status && b < blocks; b++) r->block_set[b] = UINT32_MAX;
+  size_t members = 0;
+  for (size_t q = 0; !status && q < touches;) {
+    const uint32_t v = r->order[q]->value;
+    const uint64_t b = r->order[q]->start / quantum, low = b * quantum, extent = bytes(context, v);
+    const size_t from = members;
+    if (low >= extent || (uint64_t)block_first[v] + b >= blocks) { status = EINVAL; break; }
+    const uint64_t whole = extent - low < quantum ? extent - low : quantum;
+    uint64_t reach = low, covered = 0;
+    for (; q < touches && r->order[q]->value == v && r->order[q]->start / quantum == b; q++) {
+      const struct mesh_graph_touch *t = r->order[q];
+      if (t->end > reach) { covered += t->end - (t->start > reach ? t->start : reach); reach = t->end; }
+      r->held[members++] = t->member;
+    }
+    if (covered != whole) { members = from; continue; }
+    qsort(r->held + from, members - from, sizeof *r->held, cover_member_order);
+    size_t kept = from + 1;
+    for (size_t k = from + 1; k < members; k++) if (r->held[k] != r->held[kept - 1]) r->held[kept++] = r->held[k];
+    members = kept;
+    if (members - from >= UINT32_MAX) { status = ENOMEM; break; }
+    r->cover[r->covers++] = (struct mesh_graph_cover){r->held + from, (uint32_t)(members - from), v, (uint32_t)b};
+  }
+  if (!status) qsort(r->cover, r->covers, sizeof *r->cover, cover_order);
+  size_t sets = extras, listed = extras;
+  for (size_t c = 0; !status && c < r->covers; c++)
+    if (!c || !cover_same(r->cover + c - 1, r->cover + c)) { sets++; listed += r->cover[c].members; }
+  if (sets >= UINT32_MAX || listed >= UINT32_MAX) status = ENOMEM;
+  if (!status) {
+    r->sets = (uint32_t)sets; r->listed = listed;
+    r->first = malloc((sets + 1) * sizeof *r->first);
+    r->member = malloc((listed + 1) * sizeof *r->member);
+    r->set_blocks = calloc(sets + 1, sizeof *r->set_blocks);
+    if (!r->first || !r->member || !r->set_blocks) status = ENOMEM;
+  }
+  uint32_t s = 0, at = 0;
+  for (size_t c = 0; !status && c < r->covers; c++) {
+    if (!c || !cover_same(r->cover + c - 1, r->cover + c)) {
+      r->first[s++] = at;
+      for (uint32_t k = 0; k < r->cover[c].members; k++) r->member[at++] = r->cover[c].member[k];
+    }
+    const uint32_t b = block_first[r->cover[c].value] + r->cover[c].block;
+    r->block_set[b] = s - 1; r->block_element[b] = r->set_blocks[s - 1]++;
+  }
+  for (uint32_t k = 0; !status && k < extras; k++) {
+    const uint64_t count = extra_blocks(extra_context, k);
+    if (count > UINT32_MAX) { status = ENOMEM; break; }
+    r->extra_set[k] = s; r->first[s] = at; r->member[at++] = extra_member(extra_context, k);
+    r->set_blocks[s++] = (uint32_t)count;
+  }
+  if (!status) r->first[s] = at;
+  for (uint32_t v = 0; !status && v < values; v++) {
+    if (block_first[v] == UINT32_MAX) continue;
+    const uint64_t extent = bytes(context, v), count = extent / quantum + (extent % quantum != 0);
+    if ((uint64_t)block_first[v] + count > blocks) { status = EINVAL; break; }
+    for (uint64_t k = 0; k < count; k++)
+      if (r->block_set[block_first[v] + k] == UINT32_MAX)
+        r->block_element[block_first[v] + k] = r->uncovered[v]++;
+  }
+  if (status) mesh_graph_cover_result_free(r); else *out = r;
+  return status;
+}
+
 int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, const size_t *position,
                          size_t *first, size_t *last) {
   for (uint32_t v = 0; v < values; v++) first[v] = last[v] = SIZE_MAX;
@@ -1043,43 +1228,110 @@ static size_t lags_relax(uint32_t *heap, uint32_t *place, uint64_t *distance, si
    and a walk's sum is kept below UINT64_MAX */
 /* via[s * vertices + v], where given: the edge position k whose relaxation set v's least lag from source[s], the
    selected walk's last edge into v */
+struct lag_scratch {
+  uint64_t *distance;
+  uint32_t *heap, *place;
+  unsigned char *wanted;
+};
+static void lag_scratch_free(struct lag_scratch *s) {
+  free(s->distance); free(s->heap); free(s->place); free(s->wanted);
+}
+static int lag_scratch_create(uint32_t vertices, struct lag_scratch *s) {
+  const size_t n = (size_t)vertices + 1;
+  *s = (struct lag_scratch){malloc(n * sizeof *s->distance), malloc(n * sizeof *s->heap),
+                            malloc(n * sizeof *s->place), malloc(n)};
+  return s->distance && s->heap && s->place && s->wanted ? 0 : ENOMEM;
+}
+static void lag_search(const struct mesh_graph_lag_graph *g, uint32_t from, size_t targets,
+                        uint32_t (*target)(const void *, size_t), const void *context,
+                        struct lag_scratch *s, size_t *via) {
+  uint32_t distinct = 0;
+  memset(s->wanted, 0, (size_t)g->vertices + 1);
+  for (size_t x = 0; x < targets; x++) {
+    const uint32_t v = target(context, x);
+    if (!s->wanted[v]) { s->wanted[v] = 1; distinct++; }
+  }
+  for (uint32_t v = 0; v < g->vertices; v++) { s->distance[v] = UINT64_MAX; s->place[v] = UINT32_MAX; }
+  size_t count = 0;
+  for (size_t k = g->first[from]; k < g->first[from + 1]; k++)
+    count = lags_relax(s->heap, s->place, s->distance, count, g->head(g->context, k), 0,
+                       g->lag(g->context, k), via, k);
+  for (uint32_t left = distinct; count && left;) {
+    const uint32_t at = s->heap[0];
+    s->place[at] = UINT32_MAX;
+    if (--count) { s->heap[0] = s->heap[count]; heap_down(s->heap, s->place, lags_before, s->distance, count, 0); }
+    if (s->wanted[at] && !--left) break;
+    for (size_t k = g->first[at]; k < g->first[at + 1]; k++)
+      count = lags_relax(s->heap, s->place, s->distance, count, g->head(g->context, k), s->distance[at],
+                         g->lag(g->context, k), via, k);
+  }
+}
 static int lags_walks(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                       uint64_t (*lag)(const void *context, size_t k), const void *context, uint32_t sources,
                       const uint32_t *source, uint32_t targets, const uint32_t *target, uint64_t *lags, size_t *via) {
-  const size_t edges = first[vertices];
-  if (edges >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
-  uint32_t *heads = malloc((edges + 1) * sizeof *heads);
-  uint64_t *weights = malloc((edges + 1) * sizeof *weights), *distance = malloc(((size_t)vertices + 1) * sizeof *distance);
-  uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap), *place = malloc(((size_t)vertices + 1) * sizeof *place);
-  unsigned char *wanted = calloc((size_t)vertices + 1, 1);
-  const int result = !heads || !weights || !distance || !heap || !place || !wanted ? ENOMEM : 0;
-  uint32_t distinct = 0;
-  for (size_t k = 0; !result && k < edges; k++) { heads[k] = head(context, k); weights[k] = lag(context, k); }
-  for (uint32_t x = 0; !result && x < targets; x++)
-    if (!wanted[target[x]]) { wanted[target[x]] = 1; distinct++; }
-  for (uint32_t s = 0; !result && distinct && s < sources; s++) {
-    for (uint32_t v = 0; v < vertices; v++) { distance[v] = UINT64_MAX; place[v] = UINT32_MAX; }
-    const uint32_t from = source[s];
-    size_t count = 0, *walk = via ? via + (size_t)s * vertices : NULL;
-    for (size_t k = first[from]; k < first[from + 1]; k++)
-      count = lags_relax(heap, place, distance, count, heads[k], 0, weights[k], walk, k);
-    for (uint32_t left = distinct; count;) {
-      const uint32_t at = heap[0];
-      place[at] = UINT32_MAX;
-      if (--count) { heap[0] = heap[count]; heap_down(heap, place, lags_before, distance, count, 0); }
-      if (wanted[at] && !--left) break;
-      for (size_t k = first[at]; k < first[at + 1]; k++)
-        count = lags_relax(heap, place, distance, count, heads[k], distance[at], weights[k], walk, k);
-    }
-    for (uint32_t x = 0; x < targets; x++) lags[(size_t)s * targets + x] = distance[target[x]];
+  const struct mesh_graph_lag_graph g = {vertices, first, head, lag, context};
+  struct lag_scratch s;
+  int result = lag_scratch_create(vertices, &s);
+  for (uint32_t x = 0; !result && x < targets; x++) if (target[x] >= vertices) result = EINVAL;
+  for (uint32_t x = 0; !result && targets && x < sources; x++) {
+    if (source[x] >= vertices) { result = EINVAL; break; }
+    lag_search(&g, source[x], targets, mesh_graph_row_head, target, &s, via ? via + (size_t)x * vertices : NULL);
+    for (uint32_t y = 0; y < targets; y++) lags[(size_t)x * targets + y] = s.distance[target[y]];
   }
-  free(heads); free(weights); free(distance); free(heap); free(place); free(wanted);
+  lag_scratch_free(&s);
   return result;
 }
 int mesh_graph_lags(uint32_t vertices,const size_t *first,uint32_t (*head)(const void *context,size_t k),
                     uint64_t (*lag)(const void *context,size_t k),const void *context,uint32_t sources,
                     const uint32_t *source,uint32_t targets,const uint32_t *target,uint64_t *lags) {
   return lags_walks(vertices, first, head, lag, context, sources, source, targets, target, lags, NULL);
+}
+int mesh_graph_lag_prepare(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *, size_t),
+                            uint64_t (*lag)(const void *, size_t), const void *context,
+                            struct mesh_graph_lag_graph **out) {
+  *out = malloc(sizeof **out);
+  if (!*out) return ENOMEM;
+  **out = (struct mesh_graph_lag_graph){vertices, first, head, lag, context};
+  return 0;
+}
+void mesh_graph_lag_graph_free(struct mesh_graph_lag_graph *g) { free(g); }
+static uint32_t lag_query_source(const void *context, size_t k) {
+  return ((const struct mesh_graph_dependence *)context)[k].from;
+}
+struct lag_targets { const struct mesh_graph_lag_result *result; const size_t *order; };
+static uint32_t lag_query_target(const void *context, size_t k) {
+  const struct lag_targets *targets = context;
+  return targets->result->query[targets->order[k]].to;
+}
+void mesh_graph_lag_result_free(struct mesh_graph_lag_result *r) {
+  if (!r) return;
+  mesh_graph_group_free(r->sources); free(r->value); free(r);
+}
+int mesh_graph_lag_queries(const struct mesh_graph_lag_graph *g, size_t queries,
+                            const struct mesh_graph_dependence *query, struct mesh_graph_lag_result **out) {
+  *out = NULL;
+  if (queries >= SIZE_MAX / sizeof(uint64_t)) return ENOMEM;
+  struct mesh_graph_lag_result *r = calloc(1, sizeof *r);
+  if (!r) return ENOMEM;
+  r->graph = g; r->queries = queries; r->query = query;
+  r->value = malloc((queries + 1) * sizeof *r->value);
+  int status = r->value ? mesh_graph_group(g->vertices, queries, lag_query_source, query, &r->sources) : ENOMEM;
+  for (size_t k = 0; !status && k < queries; k++) if (query[k].to >= g->vertices) status = EINVAL;
+  struct lag_scratch s = {0};
+  if (!status) status = lag_scratch_create(g->vertices, &s);
+  for (uint32_t v = 0; !status && v < g->vertices; v++) {
+    const size_t first = r->sources->first[v], end = r->sources->first[v + 1];
+    if (first == end) continue;
+    const struct lag_targets targets = {r, r->sources->order + first};
+    lag_search(g, v, end - first, lag_query_target, &targets, &s, NULL);
+    for (size_t k = first; k < end; k++) {
+      const size_t q = r->sources->order[k];
+      r->value[q] = s.distance[query[q].to];
+    }
+  }
+  lag_scratch_free(&s);
+  if (status) mesh_graph_lag_result_free(r); else *out = r;
+  return status;
 }
 
 /* design/compilation-composition-change-request.md item 6.2: vertex contraction by mesh_graph_lags over the graph with
@@ -1522,6 +1774,17 @@ int mesh_graph_relation_cause(const struct mesh_graph_relation *r, const struct 
   const struct mesh_graph_conflict *x = root->data.conflict + witness->record;
   const size_t from = witness->reverse ? x->to_view : x->from_view, to = witness->reverse ? x->from_view : x->to_view;
   *out = (struct mesh_graph_cause){x->key, view_hazard(root->data.view + from, root->data.view + to), x->given, from, to};
+  return 0;
+}
+int mesh_graph_relation_edge_cause(const struct mesh_graph_relation *r, size_t edge, uint32_t *kind) {
+  const struct mesh_graph_relation_data *d = &r->data;
+  if (edge >= d->edges) return EINVAL;
+  *kind = MESH_GRAPH_GIVEN;
+  for (size_t k = d->first[edge]; k < d->first[edge + 1]; k++)
+    if (d->conflict[d->member[k]].kind != MESH_GRAPH_GIVEN) {
+      *kind = d->conflict[d->member[k]].kind;
+      break;
+    }
   return 0;
 }
 static uint32_t relation_tail(const void *context, size_t e) {
@@ -2569,6 +2832,21 @@ int mesh_graph_buffer_bound(uint32_t actors, const double *host, const double *w
   }
   free(time); free(from); free(to); free(delay);
   return result;
+}
+void mesh_graph_buffer_result_free(struct mesh_graph_buffer_result *r) {
+  if (!r) return;
+  free(r->bound); free(r);
+}
+int mesh_graph_buffer_bounds(uint32_t actors, const double *host, const double *work, size_t edges,
+                              const struct mesh_graph_dependence *edge, struct mesh_graph_buffer_result **out) {
+  *out = NULL;
+  struct mesh_graph_buffer_result *r = calloc(1, sizeof *r);
+  if (!r) return ENOMEM;
+  r->actors = actors; r->host = host; r->work = work; r->edges = edges; r->edge = edge;
+  r->bound = malloc(((size_t)actors + 1) * sizeof *r->bound);
+  const int status = r->bound ? mesh_graph_buffer_bound(actors, host, work, edges, edge, r->bound) : ENOMEM;
+  if (status) mesh_graph_buffer_result_free(r); else *out = r;
+  return status;
 }
 /* BSL §3, §9, Fig. 6 (Convert-to-SC-graph) and Theorem 4 */
 int mesh_graph_convert_sc(uint32_t vertices, const double *time, size_t edges, const uint32_t *from, const uint32_t *to,
