@@ -161,6 +161,20 @@ Exact bounded affine access intersection is computed through ISL's typed constra
 Creating New Sets and Relations; Properties). Pugh's *Omega Test*, 1992, §§2.1–2.3 supplies the formulation of
 dependence as integer feasibility. The resulting witnesses feed the shared dependency relation.
 
+The operator's 17 November clarification supplies the weighting operand: “if we don't know what
+'singular cost function' we're going to optimize in any of these algorithms, put a higher order
+function 'weighting-function-as-input' operand into them instead”. Each compilation round retains
+the transformed function graph, selected schedule and corresponding allocation. Lowering consumes
+that selection. A later round can use the same earlier results with different parameters.
+
+Each solver returns its own result. A transformation can read several of these as a tuple.
+For example, the dependent-flow/coflow result describes which operations may overlap, while an
+execution estimate describes duration. The former constrains legal schedules. A scheduler that
+needs task lengths evaluates its supplied weighting function on the constructed calls and the
+relevant solver results during compilation. A lookup table can supply that function. The same
+flow result remains available to fusion and target lowering. Whole-execution measurements can
+guide a later weighting choice, including a descent step where the chosen parameters admit one.
+
 ### 7. Preserve the properties while compiling consumers of solved results
 
 Lowering specializes known kinds, bindings, addresses, order and copies into concrete target/API operations
