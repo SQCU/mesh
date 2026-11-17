@@ -5984,6 +5984,23 @@ int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval) {
   return 0;
 }
 
+int mesh_graph_cut_join(uint64_t intervals, const uint64_t *cut, uint32_t spans,
+                        const struct mesh_graph_interval *span, uint64_t previous, const uint64_t *previous_cut,
+                        uint32_t *route, uint64_t *first, uint64_t *last) {
+  if (spans) for (uint64_t k = 0, r = 0; k < intervals; k++) {
+    while (r < spans && span[r].end <= cut[k]) r++;
+    if (r == spans || span[r].start > cut[k] || span[r].end < cut[k + 1]) return EINVAL;
+    route[k] = (uint32_t)r;
+  }
+  if (previous_cut) for (uint64_t k = 0, a = 0, b = 0; k < intervals; k++) {
+    while (a < previous && previous_cut[a + 1] <= cut[k]) a++;
+    if (b < a) b = a;
+    while (b < previous && previous_cut[b] < cut[k + 1]) b++;
+    first[k] = a; last[k] = b;
+  }
+  return 0;
+}
+
 /* GaijinEntertainment/DagorEngine 2baf1947, prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/heapLayout.cpp:13-23,
    do_arcs_overlap */
 int mesh_graph_arcs_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start, uint64_t b_end) {

@@ -981,6 +981,10 @@ int mesh_graph_space_time(const struct mesh_graph_signature *signature, char *te
 /* MPI 4.1 §6.1.11 */
 struct mesh_graph_interval { uint64_t key, start, end; };
 int mesh_graph_intersect(size_t count, struct mesh_graph_interval *interval);
+/* compiler-emit/docs/physical-cuts.md */
+int mesh_graph_cut_join(uint64_t intervals, const uint64_t *cut, uint32_t spans,
+                        const struct mesh_graph_interval *span, uint64_t previous, const uint64_t *previous_cut,
+                        uint32_t *route, uint64_t *first, uint64_t *last);
 /* GaijinEntertainment/DagorEngine 2baf1947, prog/gameLibs/render/daFrameGraph/backend/resourceScheduling/heapLayout.h:19
    and heapLayout.cpp:13-23, do_arcs_overlap */
 int mesh_graph_arcs_overlap(uint64_t a_start, uint64_t a_end, uint64_t b_start, uint64_t b_end);

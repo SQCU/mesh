@@ -243,6 +243,27 @@ int mesh_declared_group(const struct mesh_declared *declared,const struct mesh_w
    demand_first[f]) with the release a sent row's demand shares (release_of; MESH_ABSENT a row this node does not
    send). Analysis retains caller-owned run 0 roots and their original views. Physical construction requires a
    transported root's assigned backing; its current run 1 placement cannot supply a run 0 root's missing binding. */
+struct mesh_plan_flow;
+enum { MESH_PLAN_FROM, MESH_PLAN_TO };
+struct mesh_plan_endpoint { uint32_t transfer,role; const struct mesh_strided *view; };
+struct mesh_plan_cuts {
+  const struct mesh_plan_geometry *geometry;
+  const struct mesh_plan_flow *source;
+  uint32_t demand,views;
+  const struct mesh_plan_endpoint *endpoint;
+  uint32_t spans,padding;
+  const struct mesh_graph_interval *span;
+  const struct mesh_plan_cuts *previous;
+  uint64_t instructions;
+  uint64_t *cut,*at;
+  uint32_t *route;
+  uint64_t *previous_first,*previous_last;
+  const void *mapped;
+};
+int mesh_plan_cut(const struct mesh_plan_geometry *,const struct mesh_plan_flow *,uint32_t,
+                  uint32_t,const struct mesh_plan_endpoint *,uint32_t,const struct mesh_graph_interval *,
+                  const struct mesh_plan_cuts *,struct mesh_plan_cuts **);
+void mesh_plan_cut_free(struct mesh_plan_cuts *);
 struct mesh_plan_demand {
   uint32_t source,identity,first;
   uint32_t mine,root;
@@ -251,7 +272,9 @@ struct mesh_plan_demand {
   uint32_t tree,trees;
   uint32_t release;
   /* design/aot-compilation-change-request.md A9 */
-  uint64_t leaves,bytes,instructions,cut,at;
+  uint64_t leaves,bytes;
+  struct mesh_plan_cuts *cuts;
+  uint32_t local;
   uint32_t relay;
   uint64_t on;
   uint32_t forwards;
@@ -279,7 +302,9 @@ struct mesh_plan_flow {
   /* design/plan-to-bridge-change-request.md R2; design/disjoint-pages-change-request.md C3.3 */
   unsigned char *named;
   uint32_t *uncovered;
-  uint64_t *cut,*at,toward;
+  uint64_t toward;
+  struct mesh_plan_endpoint *endpoint;
+  struct mesh_graph_grouping *transfer_rows;
   uint32_t sets,*set_first,*member,*set_blocks,*set_far,*block_first,*block_set,*block_element;
   const struct mesh_weight *weights;
   const struct mesh_dependence *dependence;
@@ -298,9 +323,10 @@ struct mesh_plan_flow {
   uint64_t *run;
   uint32_t made;
   uint64_t *members,*lead,*comm,comms;
+  struct mesh_graph_interval *span;
   uint64_t releases;
   struct mesh_plan_entry *entry;
-  uint64_t entries,receives,group_bytes,positions,blocks;
+  uint64_t entries,receives,group_bytes,blocks;
   uint32_t ranges,consumed;
   uint32_t sending;
   uint64_t *child;
