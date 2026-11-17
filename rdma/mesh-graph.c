@@ -3525,21 +3525,11 @@ static int access_ascending(const void *a, const void *b) {
   const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
   return (x > y) - (x < y);
 }
-int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, const uint32_t group[3],
-                                     const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
-                                     size_t *first, uint32_t **partition) {
-  *partition = NULL;
-  const uint64_t G = (uint64_t)groups[0] * groups[1] * groups[2];
-  for (uint64_t w = 0; w <= G; w++) first[w] = 0;
-  const __int128 end = (__int128)start + (__int128)page * partitions;
-  if (!G || !page || !partitions || a->greatest < start || a->least >= end) return 0;
-  struct mesh_graph_domain *d = a->domain;
-  isl_ctx *ctx = d->context->ctx;
-  pthread_mutex_lock(&d->context->lock);
-  isl_map *relation = isl_map_add_dims(isl_map_copy(a->relation), isl_dim_param, 3);
-  relation = isl_map_intersect_domain(relation, access_own(d, isl_space_domain(isl_map_get_space(relation)), group, groups));
+static isl_set *access_pages(isl_map *relation, int64_t start, uint64_t page, uint32_t partitions) {
+  if (!relation) return NULL;
+  isl_ctx *ctx = isl_map_get_ctx(relation);
   /* { [b] -> [p] : start + page p <= b <= start + page p + page - 1, 0 <= p <= partitions - 1 } */
-  isl_space *space = isl_space_alloc(ctx, 3, 1, 1);
+  isl_space *space = isl_space_alloc(ctx, isl_map_dim(relation, isl_dim_param), 1, 1);
   isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
   isl_basic_map *of = isl_basic_map_universe(space);
   of = access_bound(of, local, 1, (isl_val *[]){isl_val_one(ctx), isl_val_neg(isl_val_int_from_ui(ctx, page))}, 2,
@@ -3550,7 +3540,21 @@ int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, cons
   of = access_bound(of, local, 1, (isl_val *[]){isl_val_zero(ctx), isl_val_negone(ctx)}, 2,
                     isl_val_sub(isl_val_int_from_ui(ctx, partitions), isl_val_one(ctx)));
   isl_local_space_free(local);
-  isl_set *reached = isl_map_range(isl_map_apply_range(relation, isl_map_from_basic_map(of)));
+  return isl_map_range(isl_map_apply_range(relation, isl_map_from_basic_map(of)));
+}
+int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, const uint32_t group[3],
+                                     const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
+                                     size_t *first, uint32_t **partition) {
+  *partition = NULL;
+  const uint64_t G = (uint64_t)groups[0] * groups[1] * groups[2];
+  for (uint64_t w = 0; w <= G; w++) first[w] = 0;
+  const __int128 end = (__int128)start + (__int128)page * partitions;
+  if (!G || !page || !partitions || a->greatest < start || a->least >= end) return 0;
+  struct mesh_graph_domain *d = a->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_map *relation = isl_map_add_dims(isl_map_copy(a->relation), isl_dim_param, 3);
+  relation = isl_map_intersect_domain(relation, access_own(d, isl_space_domain(isl_map_get_space(relation)), group, groups));
+  isl_set *reached = access_pages(relation, start, page, partitions);
   struct access_points x = {NULL, 0, 0, reached ? 0 : ENOMEM};
   for (uint64_t w = 0; !x.status && w < G; w++) {
     const uint32_t g[3] = {(uint32_t)(w % groups[0]), (uint32_t)(w / groups[0] % groups[1]),
@@ -3567,6 +3571,53 @@ int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, cons
   pthread_mutex_unlock(&d->context->lock);
   if (x.status) { free(x.partition); for (uint64_t w = 0; w <= G; w++) first[w] = 0; return x.status; }
   *partition = x.partition;
+  return 0;
+}
+static isl_set *access_page_union(isl_ctx *ctx, uint64_t page, uint32_t partitions, size_t count,
+                                  const struct mesh_graph_access_pages *views, int covering) {
+  isl_set *result = isl_set_empty(isl_space_set_alloc(ctx, 0, 1));
+  for (size_t i = 0; result && i < count; i++) {
+    const struct mesh_graph_access_map *a = views[i].map;
+    if (views[i].whole) {
+      isl_set_free(result);
+      result = isl_set_lower_bound_si(isl_set_universe(isl_space_set_alloc(ctx, 0, 1)), isl_dim_set, 0, 0);
+      return isl_set_upper_bound_val(result, isl_dim_set, 0,
+                                     isl_val_sub_ui(isl_val_int_from_ui(ctx, partitions), 1));
+    }
+    int uncertain = !!a->flags;
+    for (uint32_t k = 0; k < a->domain->dims; k++) uncertain |= a->domain->dim[k].kind == MESH_GRAPH_DOMAIN_INDIRECT;
+    if (!covering || !uncertain)
+      result = isl_set_union(result, access_pages(isl_map_copy(a->relation), views[i].start, page, partitions));
+  }
+  return result;
+}
+int mesh_graph_access_pages_cover(uint64_t page, uint32_t partitions,
+                                  size_t covers, const struct mesh_graph_access_pages *cover,
+                                  size_t wanted, const struct mesh_graph_access_pages *want, int *covered) {
+  *covered = 0;
+  if (!page || (covers && !cover) || (wanted && !want)) return EINVAL;
+  if (!partitions || !wanted) { *covered = 1; return 0; }
+  struct mesh_graph_context *context = NULL;
+  for (unsigned side = 0; side < 2; side++) {
+    const struct mesh_graph_access_pages *views = side ? want : cover;
+    const size_t count = side ? wanted : covers;
+    for (size_t i = 0; i < count; i++) {
+      if (views[i].whole) { if (!side) { *covered = 1; return 0; } continue; }
+      if (!views[i].map) return EINVAL;
+      struct mesh_graph_context *own = views[i].map->domain->context;
+      if (context && context != own) return 0;
+      context = own;
+    }
+  }
+  if (!context) return 0;
+  pthread_mutex_lock(&context->lock);
+  isl_set *a = access_page_union(context->ctx, page, partitions, covers, cover, 1);
+  isl_set *b = access_page_union(context->ctx, page, partitions, wanted, want, 0);
+  const isl_bool subset = a && b ? isl_set_is_subset(b, a) : isl_bool_error;
+  isl_set_free(a); isl_set_free(b);
+  pthread_mutex_unlock(&context->lock);
+  if (subset == isl_bool_error) return ENOMEM;
+  *covered = subset == isl_bool_true;
   return 0;
 }
 /* mesh_graph_access_map_save: {magic, flags, guard_source, least, greatest, dims, relation and guard text lengths}, the

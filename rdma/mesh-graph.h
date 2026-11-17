@@ -551,6 +551,15 @@ int mesh_graph_access_map_placed(const struct mesh_graph_access_map *, int64_t s
 int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *, const uint32_t group[3],
                                      const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
                                      size_t *first, uint32_t **partition);
+/* Each borrowed map's complete domain image in pages relative to its own start; whole explicitly names all pages
+   [0, partitions). The wanted union is covered by the covering union. Unknown/bounded/data-guarded or indirectly
+   indexed covering maps supply no guaranteed pages; wanted maps retain their conservative image. Different map
+   domains may share one context. A different context gives no proof. No launch geometry or byte hull is inferred.
+   Both sides must describe the same access stage and page coordinate system; execution/epoch order is the caller's. */
+struct mesh_graph_access_pages { const struct mesh_graph_access_map *map; int64_t start; uint32_t whole; };
+int mesh_graph_access_pages_cover(uint64_t page, uint32_t partitions,
+                                  size_t covers, const struct mesh_graph_access_pages *cover,
+                                  size_t wanted, const struct mesh_graph_access_pages *want, int *covered);
 /* isl's own text of the relation and its guard (isl_map_to_str, isl_set_to_str) with its domain, flags, guard
    identity and span: mesh_graph_access_map_save into *bytes (malloc'd, the caller's); mesh_graph_access_map_load the
    same relation, its domain and itself made in `context` */
