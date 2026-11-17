@@ -20,6 +20,10 @@ The original planning, scheduling and placement algorithms remain their producer
 `mesh_plan_analysis`, including its original source operands, flow results,
 transfer groups, call correspondence and storage-copy calculation.
 `mesh_plan_local_complete` produces the local physical result.
+`mesh_plan_program_compile` consumes the analysis and an explicit table of
+`mesh_plan_schedule` results. It retains those complete results and reads their
+completion/order arrays by view. The ordinary entrypoints produce that table
+through the same original calculation before invoking compilation.
 `mesh_plan_program_compile` produces a `mesh_plan_compilation` with its complete
 physical result, placement, schedule, page rows and relocatable runtime records.
 Analysis receives topology and storage geometry as explicit operands.

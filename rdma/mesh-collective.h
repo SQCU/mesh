@@ -116,10 +116,11 @@ struct mesh_plan_geometry { uint32_t pgsz,block,rows,padding; struct mesh_range 
 struct mesh_plan_value { struct mesh_section section; uint32_t shares,lag; };
 struct mesh_plan_actors { const double *host,*work; const struct mesh_graph_dependence *edge; uint32_t parts,edges;
                           struct mesh_graph_relation *relation; };
+struct plan_schedule_result;
 struct mesh_plan_function { struct mesh_plan_value *value; double *completion; uint32_t *order;
-                            const struct mesh_plan_actors *actors; };
+                            const struct mesh_plan_actors *actors; struct plan_schedule_result *schedule; };
 _Static_assert(sizeof(struct mesh_plan_value)==32 && sizeof(struct mesh_plan_actors)==40 &&
-               sizeof(struct mesh_plan_function)==32,"mesh plan results: rdma/mesh.py");
+               sizeof(struct mesh_plan_function)==40,"mesh plan results: rdma/mesh.py");
 struct mesh_planned { struct mesh_planned_call *call; struct mesh_graph_signature *signature;
                       struct mesh_graph_dependence *order; uint32_t calls,padding; size_t orders;
                       struct mesh_planned_cause *cause; uint64_t horizon;
@@ -378,14 +379,21 @@ struct plan_sync { uint32_t node,function,entry,every; int64_t base; };
 struct plan_entry { const struct mesh_plan_entry *source; uint32_t place; };
 struct plan_span { uint32_t first,count; };
 struct plan_schedule_result {
+  size_t references;
+  const struct mesh_plan_flow *flow;
+  const struct mesh_function *function;
   uint32_t first,tasks,instructions;
   size_t edges,entries,dependencies;
   uint32_t *reader;
   struct plan_span *consumer;
-  double *w,*cost,*rate,*completion,*priority;
+  double *w,*cost,*rate,*completion,*priority,*completed;
   uint32_t *resource,*from,*to,*link,*communication,*before,*after,*place;
   size_t *route;
+  struct mesh_plan_analysis *owned;
 };
+int mesh_plan_schedule(const struct mesh_plan_flow *,const struct mesh_function *,struct plan_schedule_result **);
+void mesh_plan_schedule_retain(struct plan_schedule_result *);
+void mesh_plan_schedule_free(struct plan_schedule_result *);
 struct plan_graph_result {
   const struct mesh_plan_analysis *analysis;
   uint32_t vertices,added;
@@ -409,7 +417,6 @@ struct plan_step {
   uint32_t *item,set_item,state;
   uint64_t base;
   struct plan_entry *entry;
-  double *completed;
   uint64_t phases,counts,completions,supplied,publications,status,hops,times,words;
   uint64_t deliveries,submits,syncs,rows,room,submit_room;
   uint32_t waits,tells,*wait_row;
@@ -431,7 +438,7 @@ struct mesh_plan_compilation {
   void *owned;
 };
 int mesh_plan_environment(struct mesh_ctx *,struct mesh_nodes *,struct mesh_plan_geometry *);
-int mesh_plan_program_compile(struct mesh_plan_analysis *,struct mesh_plan_compilation **);
+int mesh_plan_program_compile(struct mesh_plan_analysis *,struct plan_schedule_result *const *,struct mesh_plan_compilation **);
 int mesh_plan_program_install(struct mesh_ctx *,uint64_t,const struct mesh_plan_compilation *,uint64_t,struct mesh_plan_binding *);
 void mesh_plan_compilation_retain(struct mesh_plan_compilation *);
 void mesh_plan_compilation_free(struct mesh_plan_compilation *);

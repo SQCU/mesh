@@ -151,9 +151,13 @@ class PlanActors(C.Structure):
                 ('parts', U), ('edges', U), ('relation', C.c_void_p)]
 
 
+class PlanScheduleResult(C.Structure):
+    pass
+
+
 class PlanFunction(C.Structure):
     _fields_ = [('value', C.POINTER(PlanValue)), ('completion', C.POINTER(D)),
-                ('order', C.POINTER(U)), ('actors', C.POINTER(PlanActors))]
+                ('order', C.POINTER(U)), ('actors', C.POINTER(PlanActors)), ('schedule', C.POINTER(PlanScheduleResult))]
 
 
 class PlanAnalysis(C.Structure):
@@ -384,14 +388,14 @@ class PlanSpan(C.Structure):
     _fields_ = [('first', U), ('count', U)]
 
 
-class PlanScheduleResult(C.Structure):
-    _fields_ = [('first', U), ('tasks', U), ('instructions', U), ('edges', Z), ('entries', Z),
+PlanScheduleResult._fields_ = [('references', Z), ('flow', C.POINTER(PlanFlow)), ('function', C.POINTER(Function)),
+                ('first', U), ('tasks', U), ('instructions', U), ('edges', Z), ('entries', Z),
                 ('dependencies', Z), ('reader', C.POINTER(U)), ('consumer', C.POINTER(PlanSpan)),
                 ('w', C.POINTER(D)), ('cost', C.POINTER(D)), ('rate', C.POINTER(D)),
-                ('completion', C.POINTER(D)), ('priority', C.POINTER(D)), ('resource', C.POINTER(U)),
+                ('completion', C.POINTER(D)), ('priority', C.POINTER(D)), ('completed', C.POINTER(D)), ('resource', C.POINTER(U)),
                 ('from', C.POINTER(U)), ('to', C.POINTER(U)), ('link', C.POINTER(U)),
                 ('communication', C.POINTER(U)), ('before', C.POINTER(U)), ('after', C.POINTER(U)),
-                ('place', C.POINTER(U)), ('route', C.POINTER(Z))]
+                ('place', C.POINTER(U)), ('route', C.POINTER(Z)), ('owned', C.POINTER(PlanAnalysis))]
 
 
 class PlanGraphResult(C.Structure):
@@ -411,7 +415,7 @@ class PlanGraphResult(C.Structure):
 PlanStep._fields_ = [
     ('flow', C.POINTER(PlanFlow)), ('function', C.POINTER(Function)), ('result', C.POINTER(PlanFunction)),
     ('root_result', C.POINTER(PlanValue)), ('item', C.POINTER(U)), ('set_item', U), ('state', U), ('base', Q),
-    ('entry', C.POINTER(StepEntry)), ('completed', C.POINTER(D)), ('phases', Q), ('counts', Q),
+    ('entry', C.POINTER(StepEntry)), ('phases', Q), ('counts', Q),
     ('completions', Q), ('supplied', Q), ('publications', Q), ('status', Q), ('hops', Q), ('times', Q),
     ('words', Q), ('deliveries', Q), ('submits', Q), ('syncs', Q), ('rows', Q), ('room', Q), ('submit_room', Q),
     ('waits', U), ('tells', U), ('wait_row', C.POINTER(U)), ('sync', C.POINTER(PlanSync)),
@@ -498,7 +502,12 @@ for name, result, arguments in (
                                                 C.POINTER(U), C.POINTER(Value), U, C.POINTER(Z), C.POINTER(LocalUse),
                                                 C.POINTER(C.POINTER(PlanAnalysis))]),
         ('mesh_plan_local_complete', C.c_int, [C.POINTER(PlanAnalysis), Q, C.POINTER(Local)]),
-        ('mesh_plan_program_compile', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanCompilation))]),
+        ('mesh_plan_schedule', C.c_int, [C.POINTER(PlanFlow), C.POINTER(Function),
+                                           C.POINTER(C.POINTER(PlanScheduleResult))]),
+        ('mesh_plan_schedule_retain', None, [C.POINTER(PlanScheduleResult)]),
+        ('mesh_plan_schedule_free', None, [C.POINTER(PlanScheduleResult)]),
+        ('mesh_plan_program_compile', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
+                                               C.POINTER(C.POINTER(PlanCompilation))]),
         ('mesh_plan_program_install', C.c_int, [CONTEXT, Q, C.POINTER(PlanCompilation), Q, C.POINTER(PlanBinding)]),
         ('mesh_plan_binding_free', None, [C.POINTER(PlanBinding)]),
         ('mesh_plan_compilation_retain', None, [C.POINTER(PlanCompilation)]),
