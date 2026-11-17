@@ -584,6 +584,11 @@ def check(status):
         raise OSError(status, os.strerror(status))
 
 
+def strided(offset, element, pairs):
+    words = (Q * max(2 * len(pairs), 1))(*(word for pair in pairs for word in pair))
+    return Strided(offset, element, len(pairs), 0, words)
+
+
 # mesh-collective.h struct mesh_function, struct mesh_declared, struct mesh_weight, struct mesh_value, struct
 # mesh_dependence, struct mesh_task; mesh-graph.h struct mesh_strided; compiler/mesh_compiler/schedule.py dependences:
 # a Dependence array is held as it is, its count its length; (from, to, lag, kinds) records are converted once
@@ -591,12 +596,8 @@ def function(declared, weights, values, dependences, outstanding, tasks=(), befo
              resources=0):
     held = []
 
-    def view(offset, element, pairs):
-        held.append((Q * max(2 * len(pairs), 1))(*[word for pair in pairs for word in pair]))
-        return Strided(offset, element, len(pairs), 0, held[-1])
-
     held += [(Declared * max(len(declared), 1))(*[
-                 Declared(source, destination, identity, kind, value, 0, view(*sent), view(*landed))
+                 Declared(source, destination, identity, kind, value, 0, strided(*sent), strided(*landed))
                  for source, destination, identity, kind, value, sent, landed in declared]),
              (Weight * max(len(weights), 1))(*[Weight(*weight) for weight in weights]),
              (Value * max(len(values), 1))(*[Value(Section(0, 0, size, 0, 0), *fields, 0)
