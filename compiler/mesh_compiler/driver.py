@@ -21,15 +21,16 @@ from .schedule import analyse, call_operands, carried, schedule, unit_cost
 
 # design/aot-compilation-change-request.md A1: a module compiled alone, the program of its one call
 def compile_module(module, args, processors, placement, cost=unit_cost, planning=None, machine=None,
-                   **export_options):
-    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+                   *, transfer=None, **export_options):
+    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine,
+                            transfer=transfer)
 
 
 # design/aot-compilation-change-request.md A10: a program's calls of its captured functions
 def compile_program(program, args, functions, processors, placement, cost=unit_cost, planning=None, machine=None,
-                    **export_options):
+                    *, transfer=None, **export_options):
     return compile_captured(calls(program, args, functions, **export_options), processors, placement, cost, planning,
-                            machine)
+                            machine, transfer=transfer)
 
 
 # compiler/mesh_compiler/ir.py CapturedProgram and Planning; compiler/mesh_compiler/bridge.py planning;
@@ -52,7 +53,7 @@ def compile_program(program, args, functions, processors, placement, cost=unit_c
 # body alone with this machine's descriptors (metal.py _machines); the one call analysis (schedule.py analyse) of those
 # operands and every construction, which keeps them; ONE completed native target of the compilation machine's
 # constructions by function key and the analysis, its node Planning.here with a context and the machine without
-def compile_captured(captured, processors, placement, cost=unit_cost, planning=None, machine=None):
+def compile_captured(captured, processors, placement, cost=unit_cost, planning=None, machine=None, *, transfer=None):
     # Rejection filters are not part of even temporary integration validation.
     # Capture, construction, and planning exceptions propagate from their responsible stage.
     engines = {name: d for name, (_, d) in processors.items() if d in ENGINES}
@@ -65,7 +66,7 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
     targets = {name: (engines.get(name, device.type), device) for name, device in devices.items()}
     staged = {}
     for key, exported in captured.functions.items():
-        placed, output_processor, channels = place(exported.graph_module, placement)
+        placed, output_processor, channels = place(exported.graph_module, placement, transfer=transfer)
         graph = on_devices(placed, processors)
         staged[key] = (placed, output_processor, channels, graph, carried(graph.meta["transfers"], machines),
                        [node.meta["stated"] for node in placed.graph.nodes if node.op == "placeholder"])

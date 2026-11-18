@@ -463,7 +463,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
                 if common:
                     piece = call(graph, SLICE, (node, held, left.start, left.stop, left.step), holder or processor)
                     exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
-                    piece.meta.setdefault("collectives", {})[processor] = kind, exchange
+                    piece.meta.setdefault("collectives", {})[processor] = kind, exchange, JOIN
                     piece.meta.setdefault("blocks", {})[processor] = held, (i, devices.index(processor)), *arrays
                     pieces.append((right, piece))
             value = pieces[0][1] if pieces else call(graph, ZEROS, (nodes[0], [
@@ -512,7 +512,7 @@ def reshard(graph, value, dimension, sizes, processors, exact=False):
             piece.meta.setdefault("blocks", {})[processor] = block
             if None not in (held, dimension):
                 exchange = exchange or f"{nodes[0].name}:{dimension}:{len(graph.nodes)}"
-                piece.meta.setdefault("collectives", {})[processor] = kind, exchange
+                piece.meta.setdefault("collectives", {})[processor] = kind, exchange, JOIN
         arrived.append(pieces[0] if len(pieces) == 1 else interleaved(graph, pieces, held, processor)
                        if extents == STRIPED else reassembled(graph, pieces, held, processor))
         if wide and shape(arrived[-1])[dimension] < most(sizes):
@@ -649,7 +649,7 @@ def halos(graph, value, window, dimension, sizes, processors, name):
                 elif width > extent:
                     node = call(graph, PAD, (node, [0, 0] * (rank - 1 - dimension) + [
                         width - extent, 0][::1 if p < q else -1], 0), processors[p])
-                node.meta.setdefault("collectives", {})[processor] = "permute", f"{name}:{dimension}:{q - p}"
+                node.meta.setdefault("collectives", {})[processor] = "permute", f"{name}:{dimension}:{q - p}", JOIN
                 node.meta.setdefault("blocks", {})[processor] = dimension, (p, q), tuple(extents), tuple(starts[:-1])
                 if shared[q][p] < width:
                     skip = width - cover[q][p] if p < q else first
@@ -989,7 +989,7 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
             (out[along] - 1 - j) % len(processors) for j in range(len(processors)))]
         for j, stripe in enumerate(stripes):
             source = (out[along] - 1 - j) % len(processors)
-            stripe.meta.setdefault("collectives", {})[processors[j]] = "permute", f"{node.name}:{along}"
+            stripe.meta.setdefault("collectives", {})[processors[j]] = "permute", f"{node.name}:{along}", JOIN
             stripe.meta.setdefault("blocks", {})[processors[j]] = along, (source, j), *arrayed(
                 ranges(sizes, out[along], len(processors)))
         columns[0] = [padded(graph, n, along, sizes, j, processors[j], True) for j, n in enumerate(stripes)]
@@ -1088,14 +1088,14 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
                 parts[keeper].append(part)
     for k, held_ in enumerate(parts.values()):
         for part in held_:
-            part.meta.setdefault("collectives", {})[to[2][k]] = "reduce", f"{node.name}:{k}"
+            part.meta.setdefault("collectives", {})[to[2][k]] = "reduce", f"{node.name}:{k}", PAGES
     return *to, [padded(graph, functools.reduce(lambda a, b: call(graph, ADD, (a, b), keeper), held_), to[0], to[1],
                         k, keeper) if to[0] is not None else functools.reduce(
                             lambda a, b: call(graph, ADD, (a, b), keeper), held_)
                for k, (keeper, held_) in enumerate(parts.items())]
 
 
-def place(graph_module, placement):
+def place(graph_module, placement, *, transfer=None):
     graph_module = copy.deepcopy(graph_module)
     graph = graph_module.graph
     nodes = list(graph.nodes)
@@ -1260,7 +1260,7 @@ def place(graph_module, placement):
     placed = [n for n in graph.nodes if n.op != "placeholder"]
     transfers, instances = {}, {}
     for node in placed:
-        transfers.update(insert_send_recv(graph, node, len(transfers), instances))
+        transfers.update(insert_send_recv(graph, node, len(transfers), instances, transfer))
     for node in graph.nodes:
         node.meta.pop("blocks", None)
         node.meta.pop("collectives", None)
@@ -1279,7 +1279,7 @@ def place(graph_module, placement):
 
 # M. Abadi et al., TensorFlow, arXiv:1603.04467, section 3.2.2; design/unequal-shards-change-request.md items 2, 3
 # and 12: the transfer's geometry is the sent value's ir.views record, written after this by views(graph)
-def insert_send_recv(graph, node, first, instances):
+def insert_send_recv(graph, node, first, instances, transfer=None):
     here = node.meta["processor"]
     away = {}
     for user in node.users:
@@ -1299,9 +1299,12 @@ def insert_send_recv(graph, node, first, instances):
             arrived = graph.call_function(RECV, (channel,))
             arrived.meta.update(processor=processor, val=value)
         # design/aot-compilation-change-request.md A4 and appendix item 5; design/plan-to-bridge-change-request.md R4
-        kind, exchange = node.meta.get("collectives", {}).get(processor, ("broadcast", node))
-        collective = kind, instances.setdefault((kind, exchange), len(instances))
-        arrived.meta["consumer"] = PAGES if kind == "reduce" else JOIN
+        if transfer is None:
+            kind, exchange, consumer = node.meta.get("collectives", {}).get(processor, ("broadcast", node, JOIN))
+            collective = kind, instances.setdefault((kind, exchange), len(instances))
+        else:
+            collective, consumer = transfer(node, processor, users)
+        arrived.meta["consumer"] = consumer
         for end in (sent, arrived):
             end.meta.update(zip(("dimension", "block", "counts", "displs", "strides"),
                                 node.meta.get("blocks", {}).get(processor, ())), collective=collective)
