@@ -101,12 +101,15 @@ int mesh_metal_mask(const uint32_t groups[3],const uint32_t threads[3],size_t ac
    addition completes `total` (the lowering's count of those threadgroups, a reader's first and later pass counted
    once) resets the counter to 0 and releases. `transfer` the declared transfer of the writer's own call
    (metal_ir.h METAL_IR_PUBLISH for a CPU writer) */
-struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,owner; uint64_t origin; };
+struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,owner; };
 /* declared before mesh_plan as {.transfer,.owner} (one release group of the value: its representative transfer and
    its owner call, `total` 0 until the lowering counts it); prepared after it: the supplied and status words of that
    call's plan, in place (transfer and owner kept) */
 int mesh_metal_release_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                                uint32_t call,struct mesh_metal_release *release);
+/* mesh_plan_cut: the first source cut's supplied word, followed by one u64 word per cut. */
+int mesh_metal_origin_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *,
+                              uint32_t call,struct mesh_metal_release *,uint64_t *origin);
 /* design/problems-of-14b9a757-change-request.md, third stops 7; MPI 4.1 §3.7.3: the lifetime obligation of a range
    planned call `call`'s transfer `transfer` sends from this node (its sent ranges and the received ranges it forwards):
    no writer of its copy for execution e runs before execution e - copies's sends ended (`sent`); `extent` the bytes
@@ -122,7 +125,7 @@ int mesh_metal_sending_prepare(struct mesh_ctx *,struct mesh_metal_transport *,c
 _Static_assert(sizeof(struct mesh_metal_range)==104 &&
   offsetof(struct mesh_metal_range,generation)==40 && offsetof(struct mesh_metal_range,page)==56 &&
   offsetof(struct mesh_metal_range,at)==72 && offsetof(struct mesh_metal_range,transfer)==80 &&
-  sizeof(struct mesh_metal_readiness)==48 && sizeof(struct mesh_metal_release)==40 &&
+  sizeof(struct mesh_metal_readiness)==48 && sizeof(struct mesh_metal_release)==32 &&
   sizeof(struct mesh_metal_sending)==48 && offsetof(struct mesh_metal_sending,extent)==24,"mesh-metal.h records");
 _Static_assert(sizeof(struct mesh_metal_transport)==24,"mesh_metal_transport: rdma/mesh_compile.py Transport");
 _Static_assert(sizeof(struct mesh_metal_input)==40 && offsetof(struct mesh_metal_input,group)==8 &&
