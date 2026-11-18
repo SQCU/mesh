@@ -1,0 +1,15 @@
+# Captured program entry, 18 November 2026
+
+## A: What the Mesh caller did
+
+At Mesh `d596677f`, `examples/parallel.py` chose between two compiler entries according to whether the caller supplied function names. Both opened an exit stack, called the same exporter and capture function, and passed the result to `compile_captured`. Several clients then called `compiled(scheduled)` to copy the completed target’s signature onto a second instance of the schedule. [Driver](../compiler/mesh_compiler/driver.py) · [Capture](../compiler/mesh_compiler/export.py)
+
+`compile_captured` assumes its input has a `functions` table. The capture producer returns a `CapturedProgram` with fields `exported` and `outlined`. On this machine the old entry failed even earlier, while importing the private Torch symbol `_lstsq_fixed_selected`. The earlier joint-selection receipt describes the operations written in this body. Its execution observations concern the clean compiler. [Capture record](../compiler/mesh_compiler/ir.py) · [Earlier receipt](../../../compiler-emit/artifacts/joint-selection-review-20261118/implementation.md)
+
+## B: What the caller supplies and what the compiler must emit
+
+All three example modules that import the Mesh driver now call `compile_module`. A caller can supply the function names to preserve as an export operand. The target supplies its signature when the driver returns the schedule. For example, the crossing program names `work` once and its source calls that same function repeatedly. A10 assigns those occurrences to the outer call graph. [Crossing program](../examples/crossing.py) · [A10](aot-compilation-change-request.md#a10-call-analysis-produces-ordering-and-concurrency-bounds)
+
+I exported a module that calls `a(b(a(x)))`, with `a(x) = x + 2` and `b(x) = 3*x`, preserving both module call signatures. PyTorch’s `torch.export.unflatten` returned the FX call targets `a, b, a`. The ordinary CPU compiler (`compiler-emit` at `30cd29b`) compiled the full expression for one processor. Its package returned `11` for input `1` and `2` for input `-2`. The schedule retained the original export. [Export reader](../../../schedule-emit/schedule_emit/export.py) · [Scheduler](../../../schedule-emit/schedule_emit/driver.py) · [Compiler](../../../compiler-emit/compiler_emit/__init__.py)
+
+Whole-program Metal emission has a concrete missing operand. The planner holds the function table and the function index for every call. The target constructor selects one function. Fresh recorder installation repeats its handle across every call row. For the example above the recorder needs the handle for `a` in rows zero and two and the handle for `b` in row one, with each row’s operand bindings from the selected plan. A direct replacement of the Mesh driver also has to carry the callers’ tensor sharding, gradient outputs and engine placement through that common interface. [Target selection](../../../compiler-emit/compiler_emit/program.py) · [Recorder installation](../../../compiler-emit/compiler_emit/metal_install.py) · [Tensor sharding and training](../examples/parallel.py) · [Engine placement](../examples/engines.py)

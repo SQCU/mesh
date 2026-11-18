@@ -10,7 +10,7 @@ from torch.export.graph_signature import OutputKind
 from . import native
 from .decompose import decompose, outline
 from .devices import ENGINES, HOST, on_devices
-from .export import called, calls
+from .export import capture, export
 from .ir import Scheduled
 from .lower_inductor import lower
 from .lower_metal import construct
@@ -20,20 +20,13 @@ from .placement import place
 from .schedule import analyse, call_operands, carried, schedule, unit_cost
 
 
-# design/aot-compilation-change-request.md A1: a module compiled alone, the program of its one call
+# design/aot-compilation-change-request.md A1, A10
 def compile_module(module, args, processors, placement, cost=unit_cost, planning=None, machine=None,
                    *, rewrite_choices=(ALL_FUSIONS,), select_rewrites=None, **export_options):
     with contextlib.ExitStack() as stack:
-        return compile_captured(called(stack, module, args, **export_options), processors, placement, cost, planning,
+        captured = capture(export(stack, module, args, **export_options))
+        return compile_captured(captured, processors, placement, cost, planning,
                                 machine, rewrite_choices=rewrite_choices, select_rewrites=select_rewrites)
-
-
-# design/aot-compilation-change-request.md A10: a program's calls of its captured functions
-def compile_program(program, args, functions, processors, placement, cost=unit_cost, planning=None, machine=None,
-                    *, rewrite_choices=(ALL_FUSIONS,), select_rewrites=None, **export_options):
-    with contextlib.ExitStack() as stack:
-        return compile_captured(calls(stack, program, args, functions, **export_options), processors, placement,
-                                cost, planning, machine, rewrite_choices=rewrite_choices, select_rewrites=select_rewrites)
 
 
 # compiler/mesh_compiler/ir.py CapturedProgram and Planning; compiler/mesh_compiler/bridge.py planning;
@@ -130,11 +123,4 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
                                     analysis_context=context, rewrite_choices=rewrite_choices,
                                     select_rewrites=select_rewrites)
     return dataclasses.replace(scheduled, plan=target.plan if planning is not None else None, functions={entry: target},
-                               compilation=None)
-
-
-# design/synchronization-signature-change-request.md item 1; compiler/mesh_compiler/ir.py Scheduled.functions: the
-# one completed native target's own signature record (MetalProgramSignature), no recomposition
-def compiled(scheduled):
-    (target,) = scheduled.functions.values()
-    return dataclasses.replace(scheduled, signature=target.signature)
+                               signature=target.signature, compilation=None)

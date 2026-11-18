@@ -16,7 +16,7 @@ sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
 import mesh_graph
 from mesh_compiler import archive, shares
-from mesh_compiler.driver import compile_module, compile_program, compiled
+from mesh_compiler.driver import compile_module
 from mesh_compiler.ir import TrainingResult
 from mesh_compiler.placement import counts
 from mesh_compiler.runtime import Program
@@ -116,8 +116,7 @@ def chosen(model, inputs, placement, args, heads, loss=None):
         costs = shares.supplied(staged, segment, tuple(processors), times)
         reports = [{**found, 'key': key} for key, stage in staged.items() for found in stage.inside]
     else:
-        scheduled = compiled(compile_module(model, inputs, processors, placement(tuple(processors), args.units),
-                                            **options))
+        scheduled = compile_module(model, inputs, processors, placement(tuple(processors), args.units), **options)
         program = Program(scheduled)
         _, observations = program.function.observe(*program.prepare(inputs, {}))
         costs, reports, staged = shares.measured(program.function, scheduled, segment, tuple(processors),
@@ -191,8 +190,7 @@ def execute(model, inputs, placement, args, loss=None, functions=None, **told):
     processors = stated(args)
     options = {} if loss is None else {'loss': loss}
     placed = placement(tuple(processors))
-    scheduled = compiled(compile_module(model, inputs, processors, placed, **options) if functions is None else
-                         compile_program(model, inputs, functions, processors, placed, **options))
+    scheduled = compile_module(model, inputs, processors, placed, functions=functions or (), **options)
     if args.archive is not None:
         archive.save(args.archive, scheduled)
         scheduled = archive.load(args.archive)

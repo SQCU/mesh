@@ -15,7 +15,7 @@ sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
 sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
 import mesh_graph
 from mesh_compiler import shares
-from mesh_compiler.driver import compile_module, compiled
+from mesh_compiler.driver import compile_module
 from mesh_compiler.placement import counts
 from mesh_compiler.runtime import Arguments, Program
 
@@ -190,7 +190,7 @@ class Eager(torch.nn.Module):
 def execute(model, inputs, placement, args, loss=None, **told):
     processors = stated(args)
     options = {} if loss is None else {'loss': loss}
-    scheduled = compiled(compile_module(model, inputs, processors, placement(tuple(processors)), **options))
+    scheduled = compile_module(model, inputs, processors, placement(tuple(processors)), **options)
     result = Program(scheduled)(*inputs)
     report = {'channels': scheduled.channels, 'between machines': len(scheduled.carried),
               'signature': bytes(mesh_graph.from_record(scheduled.signature).digest).hex(), **told}

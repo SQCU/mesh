@@ -101,7 +101,7 @@ class Call:
     outputs: list
 
 
-# design/aot-compilation-change-request.md A1 and A10; compiler/mesh_compiler/export.py called, calls and substitute
+# design/aot-compilation-change-request.md A1 and A10; compiler/mesh_compiler/export.py capture and substitute
 @dataclass
 class CapturedProgram:
     exported: Exported

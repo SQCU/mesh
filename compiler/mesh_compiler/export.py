@@ -60,16 +60,6 @@ def aot_aliases(program):
     return program.graph_module.meta["aot_aliases"]
 
 
-# design/aot-compilation-change-request.md A10; compiler/mesh_compiler/export.py export and capture
-def calls(stack, program, args, functions, loss=None, kwargs=None, strict=True):
-    return capture(export(stack, program, args, loss, kwargs, strict, functions))
-
-
-# design/aot-compilation-change-request.md A1; compiler/mesh_compiler/export.py export and capture
-def called(stack, module, args, loss=None, kwargs=None, strict=True):
-    return capture(export(stack, module, args, loss, kwargs, strict))
-
-
 # design/aot-compilation-change-request.md A1 and A10; compiler/mesh_compiler/ir.py CapturedProgram
 def capture(exported):
     # torch 2.14.0 torchgen/model.py Tag nondeterministic_seeded (OpOverload.tags); J. K. Salmon et al., SC 2011, §3.1
