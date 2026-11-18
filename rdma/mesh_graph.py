@@ -211,6 +211,10 @@ class Graph:
         owned = self.search(roots, incoming=incoming)
         return ordered(owned, owned.made.contents.preorder, range(owned.made.contents.count))
 
+    def prerequisite_order(self, roots):
+        owned = self.search(roots, incoming=True)
+        return ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count))
+
     # R. E. Tarjan, SIAM J. Comput. 1(2), 1972: the finishing order of the search from the roots in reverse order over
     # rows in reverse order, the order of a stack each root and row is pushed on
     def postorder(self, roots, incoming=False):
