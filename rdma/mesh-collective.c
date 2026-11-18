@@ -3373,7 +3373,7 @@ int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,c
 struct plan_archive {
   unsigned char *bytes;
   size_t at,size,capacity;
-  int read,status;
+  int read,status,fixed;
 };
 static void plan_archive_bytes(struct plan_archive *a,void *data,size_t size){
   if(a->status)return;
@@ -3384,6 +3384,7 @@ static void plan_archive_bytes(struct plan_archive *a,void *data,size_t size){
     if(size)memcpy(data,a->bytes+a->at,size);
   }else{
     if(end>a->capacity){
+      if(a->fixed){a->status=ENOSPC;return;}
       const size_t capacity=end>SIZE_MAX/2?end:end*2;
       void *more=realloc(a->bytes,capacity);
       if(!more){a->status=ENOMEM;return;}
@@ -4833,9 +4834,7 @@ struct plan_saved_compilation { uint64_t magic,bytes,places; struct mesh_range r
   X(adjacency,(uint64_t)c->result.planned.analysis->nodes->count+1+c->places) \
   X(toward,c->places) X(place,c->places) X(rows_by,(uint64_t)c->result.planned.analysis->nodes->count+1) \
   X(listed,c->places) X(state_bytes,c->result.planned.analysis->functions)
-int mesh_plan_compilation_save(const struct mesh_plan_compilation *c,void **bytes,size_t *length){
-  *bytes=NULL;*length=0;
-  struct plan_archive out={0};
+static int plan_compilation_put(struct plan_archive *out,const struct mesh_plan_compilation *c){
   const struct mesh_planned *planned=&c->result.planned;
   struct plan_saved_compilation head={.magic=PLAN_SAVED_COMPILATION,.places=c->places,.rows=planned->rows,
     .arena={planned->arena[0],planned->arena[1]},.used={planned->used[0],planned->used[1]}};
@@ -4843,31 +4842,46 @@ int mesh_plan_compilation_save(const struct mesh_plan_compilation *c,void **byte
   int status=mesh_graph_archive(planned->signature,NULL,0,&size);
   if(status!=ERANGE)return status?status:EINVAL;
   head.signature=size;
-  plan_archive_put(&out,&head,sizeof head);
-  status=plan_local_put(&out,&c->result);
-  if(status){free(out.bytes);return status;}
-  plan_storage_put(&out,c->storage);
-  plan_signature_put(&out,planned,head.signature);
-  plan_extents_put(&out,planned,c->result.planned.analysis->functions);
-#define PUT(field,count) plan_archive_put(&out,c->field,(size_t)(count)*sizeof *c->field);
+  plan_archive_put(out,&head,sizeof head);
+  status=plan_local_put(out,&c->result);
+  if(status)return status;
+  plan_storage_put(out,c->storage);
+  plan_signature_put(out,planned,head.signature);
+  plan_extents_put(out,planned,c->result.planned.analysis->functions);
+#define PUT(field,count) plan_archive_put(out,c->field,(size_t)(count)*sizeof *c->field);
   PLAN_COMPILATION_ARRAYS(PUT)
 #undef PUT
   for(uint32_t f=0;f<c->result.planned.analysis->functions;f++){
     const struct plan_step *p=c->step+f;
-    plan_archive_put(&out,p,sizeof *p);
-#define PUT(field,count) if(p->field)plan_archive_put(&out,p->field,(size_t)(count)*sizeof *p->field);
+    plan_archive_put(out,p,sizeof *p);
+#define PUT(field,count) if(p->field)plan_archive_put(out,p->field,(size_t)(count)*sizeof *p->field);
     PLAN_STEP_ARRAYS(PUT)
 #undef PUT
     for(uint64_t j=0;j<p->geometry->entries;j++){
       const struct plan_entry entry={(void *)(uintptr_t)(p->entry[j].source-p->geometry->entry),p->entry[j].place};
-      plan_archive_put(&out,&entry,sizeof entry);
+      plan_archive_put(out,&entry,sizeof entry);
     }
-    plan_step_results_put(&out,p);
-    plan_archive_put(&out,c->state[f],(size_t)c->state_bytes[f]);
+    plan_step_results_put(out,p);
+    plan_archive_put(out,c->state[f],(size_t)c->state_bytes[f]);
   }
-  if(out.status){free(out.bytes);return out.status;}
-  head.bytes=out.size;memcpy(out.bytes,&head,sizeof head);
+  if(out->status)return out->status;
+  head.bytes=out->size;memcpy(out->bytes,&head,sizeof head);
+  return 0;
+}
+int mesh_plan_compilation_save(const struct mesh_plan_compilation *c,void **bytes,size_t *length){
+  *bytes=NULL;*length=0;
+  struct plan_archive out={0};
+  int status=plan_compilation_put(&out,c);
+  if(status){free(out.bytes);return status;}
   *bytes=out.bytes;*length=out.size;return 0;
+}
+int mesh_plan_compilation_write(const struct mesh_plan_compilation *c,void *bytes,size_t capacity,size_t *length){
+  *length=0;
+  if(!bytes || (uintptr_t)bytes%8)return EINVAL;
+  struct plan_archive out={.bytes=bytes,.capacity=capacity,.fixed=1};
+  int status=plan_compilation_put(&out,c);
+  if(!status)*length=out.size;
+  return status;
 }
 int mesh_plan_compilation_load(struct mesh_graph_context *graph,const void *bytes,size_t length,
                                void (*release)(void *),void *owner,struct mesh_plan_compilation **out){

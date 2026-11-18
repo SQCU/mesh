@@ -587,6 +587,7 @@ for name, result, arguments in (
         ('mesh_plan_binding_free', None, [C.POINTER(PlanBinding)]),
         ('mesh_plan_compilation_retain', None, [C.POINTER(PlanCompilation)]),
         ('mesh_plan_compilation_free', None, [C.POINTER(PlanCompilation)]),
+        ('mesh_plan_compilation_write', C.c_int, [C.POINTER(PlanCompilation), C.c_void_p, Z, C.POINTER(Z)]),
         ('mesh_plan_compilation_save', C.c_int, [C.POINTER(PlanCompilation), C.POINTER(C.c_void_p), C.POINTER(Z)]),
         ('mesh_plan_compilation_load', C.c_int, [C.c_void_p, C.c_void_p, Z, RELEASE, C.c_void_p,
                                                 C.POINTER(C.POINTER(PlanCompilation))]),

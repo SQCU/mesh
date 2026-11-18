@@ -534,6 +534,7 @@ int mesh_plan_program_install(struct mesh_ctx *,uint64_t,const struct mesh_plan_
 void mesh_plan_compilation_retain(struct mesh_plan_compilation *);
 void mesh_plan_compilation_free(struct mesh_plan_compilation *);
 int mesh_plan_compilation_save(const struct mesh_plan_compilation *,void **,size_t *);
+int mesh_plan_compilation_write(const struct mesh_plan_compilation *,void *,size_t capacity,size_t *length);
 int mesh_plan_compilation_load(struct mesh_graph_context *,const void *,size_t,void (*)(void *),void *,struct mesh_plan_compilation **);
 int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,const struct mesh_function *functions,
                       uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
