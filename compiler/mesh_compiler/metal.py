@@ -281,6 +281,10 @@ class Release(C.Structure):
     _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U)]
 
 
+class Origin(C.Structure):
+    _fields_ = [('word', mesh.Q), ('copies', mesh.U), ('cuts', mesh.U)]
+
+
 class Sending(C.Structure):
     _fields_ = [('sent', MetalSent), ('extent', C.POINTER(mesh_graph.Access)), ('extents', C.c_size_t),
                 ('transfer', mesh.U), ('padding', mesh.U)]
@@ -516,8 +520,8 @@ class UpstreamReadiness(C.Structure):
 
 
 class UpstreamTable(C.Structure):
-    _fields_ = [(name, mesh.U) for name in ('value', 'slot', 'later_slot', 'words', 'ranges', 'releases')] + [
-        ('padding', mesh.U * 2)]
+    _fields_ = [(name, mesh.U) for name in ('value', 'slot', 'later_slot', 'words', 'ranges', 'releases',
+                                            'origin_words', 'padding')]
 
 
 class UpstreamComposed(C.Structure):
@@ -724,6 +728,8 @@ def _transport():
                                                          C.POINTER(Release)]),
                 ('mesh_metal_origin_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U,
                                                         C.POINTER(Release), C.POINTER(mesh.Q)]),
+                ('mesh_metal_origin_slots_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U,
+                                                              C.POINTER(Release), C.POINTER(Origin)]),
                 ('mesh_metal_sending_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U, mesh.U,
                                                          C.POINTER(Sending)]),
                 ('mesh_metal_status_prepare', C.c_int, [mesh.CONTEXT, transport, mesh.Q, C.POINTER(mesh.Q)]),
@@ -799,6 +805,7 @@ def _compiler():
                 ('metal_ir_value_received', None, [P, U, C.POINTER(Range)]),
                 ('metal_ir_value_sent', None, [P, U, C.POINTER(Release)]),
                 ('metal_ir_value_origin_sent', None, [P, U, C.POINTER(Release), Q]),
+                ('metal_ir_value_origin_slots', None, [P, U, C.POINTER(Release), C.POINTER(Origin)]),
                 ('metal_ir_value_releases', C.POINTER(Release), [P, U, C.POINTER(U)]),
                 ('metal_ir_value_sending', None, [P, U, C.POINTER(Sending)]),
                 ('metal_ir_transport', None, [P, Q]),

@@ -425,10 +425,10 @@ class Target:
             compiler.metal_ir_value_received(program, value, C.byref(landed))
         for value, sender, declared in marks["sent"]:
             release = M.Release.from_buffer_copy(declared)
-            origin = mesh.Q()
-            mesh.check(transport.mesh_metal_origin_prepare(C.byref(context), C.byref(wires), C.byref(owner.binding),
-                                                          sender, C.byref(release), C.byref(origin)))
-            compiler.metal_ir_value_origin_sent(program, value, C.byref(release), origin.value)
+            origin = M.Origin()
+            mesh.check(transport.mesh_metal_origin_slots_prepare(C.byref(context), C.byref(wires), C.byref(owner.binding),
+                                                                sender, C.byref(release), C.byref(origin)))
+            compiler.metal_ir_value_origin_slots(program, value, C.byref(release), C.byref(origin))
         for sender, transfer in marks["transfers"]:
             sending = M.Sending()
             mesh.check(transport.mesh_metal_sending_prepare(C.byref(context), C.byref(wires),
