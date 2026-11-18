@@ -1985,7 +1985,7 @@ int mesh_declared_group(const struct mesh_declared *declared,const struct mesh_w
 
 /* N. Garg and J. Koenemann, FOCS 1998; `grouped` its declared rows' grouping on this node (mesh_declared_group) */
 static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *function,const struct mesh_nodes *nodes,
-                         uint64_t program,const struct mesh_grouped *grouped){
+                         uint64_t program,const struct mesh_grouped *grouped,const double *routing){
   const struct mesh_plan_geometry *m=p->geometry;
   const struct mesh_declared *declared=function->declared;
   const struct mesh_weight *weights=function->weights;
@@ -2085,9 +2085,17 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
   if((status=plan_instructions(p,m)) || (status=plan_landings(p)))goto done;
 
   if(p->demands){
+    double share_capacity[sizeof p->capacity / sizeof *p->capacity];
     for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++){
       const uint64_t c=nodes->capacity[a][b]<nodes->capacity[b][a]?nodes->capacity[a][b]:nodes->capacity[b][a];
-      if(c){p->from[p->pairs]=a;p->to[p->pairs]=b;p->capacity[p->pairs]=(double)c;p->pairs++;}
+      const double selected=routing?routing[(size_t)a*n+b]:(double)c;
+      if(routing && (!isfinite(selected) || selected<0 || selected!=routing[(size_t)b*n+a] || (selected && !c))){
+        status=EINVAL;goto done;
+      }
+      if(selected){
+        share_capacity[p->pairs]=selected;
+        p->from[p->pairs]=a;p->to[p->pairs]=b;p->capacity[p->pairs]=(double)c;p->pairs++;
+      }
     }
     const uint32_t E=p->pairs;
     uint32_t order[n];
@@ -2114,7 +2122,7 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
     share=malloc((size_t)room*sizeof *share);
     if(!root || !up || !down || !demand || !p->parent || !share){status=ENOMEM;goto done;}
     for(uint32_t i=0;i<p->demands;i++){root[i]=p->demand[i].source;down[i]=(double)p->demand[i].bytes;}
-    const uint32_t made=mesh_graph_flow(n,E,p->from,p->to,p->capacity,p->demands,root,up,down,plan_leaf,p->demand,
+    const uint32_t made=mesh_graph_flow(n,E,p->from,p->to,share_capacity,p->demands,root,up,down,plan_leaf,p->demand,
                                         MESH_PLAN_EPS,rounds,room,demand,p->parent,share);
     if(made==UINT32_MAX){status=ENOMEM;goto done;}
     p->made=made;
@@ -2916,7 +2924,7 @@ int mesh_plan_environment(struct mesh_ctx *context,struct mesh_nodes *nodes,stru
   *geometry=(struct mesh_plan_geometry){m->pgsz,m->block,mesh_rows(m),0,{mesh_arena_range(m,0),mesh_arena_range(m,1)}};
   return mesh_nodes_read(context,nodes);
 }
-static int plan_analyze_network(struct mesh_plan_analysis *a){
+static int plan_analyze_network(struct mesh_plan_analysis *a,const double *routing){
   const uint32_t count=a->functions,ncalls=a->ncalls,sources=a->sources,*calls=a->calls,*source_calls=a->source_calls;
   const struct mesh_function *functions=a->function;
   const uint64_t program=a->program;
@@ -2971,7 +2979,7 @@ static int plan_analyze_network(struct mesh_plan_analysis *a){
       status=p->own.demand && p->own.demand_of && p->own.release_of?
              mesh_declared_group(functions[f].declared,functions[f].weights,t,nodes->count,nodes->self,&p->own):ENOMEM;
     }
-    if(!status)status=plan_function(p,functions+f,nodes,program,a->grouped?a->grouped+f:&p->own);
+    if(!status)status=plan_function(p,functions+f,nodes,program,a->grouped?a->grouped+f:&p->own,routing);
     if(status)return status;
   }
   return 0;
@@ -3263,7 +3271,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,const str
   a->program=program;a->orders=orders;a->causes=causes;a->norders=norders;
   status=mesh_plan_environment(context,&environment->nodes,&environment->geometry);
   if(!status)status=plan_horizon(a);
-  if(!status)status=plan_analyze_network(a);
+  if(!status)status=plan_analyze_network(a,NULL);
   if(!status)status=plan_schedules(a,&schedules);
   if(!status)status=mesh_plan_program_compile(a,schedules,NULL,&compiled);
   if(!status)status=mesh_plan_program_install(context,group,compiled,deadline,binding);
@@ -3292,14 +3300,14 @@ static int plan_program_source(const struct mesh_nodes *nodes,const struct mesh_
   a->sources=sources;a->source_outstanding=source_outstanding;
   return 0;
 }
-int mesh_plan_program_analyze(const struct mesh_nodes *nodes,const struct mesh_plan_geometry *geometry,uint64_t program,
+int mesh_plan_program_analyze_routed(const struct mesh_nodes *nodes,const struct mesh_plan_geometry *geometry,uint64_t program,
                       struct mesh_graph_buffer_result *bounds,const uint32_t *bound_function,const struct mesh_function *functions,
                       uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
                       const uint32_t *source_calls,uint32_t sources,const uint64_t *source_outstanding,
                       const struct mesh_graph_relation *order,
                       const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
                       const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
-                      const struct mesh_local_use *use,struct mesh_plan_analysis **out){
+                      const struct mesh_local_use *use,const double *routing,struct mesh_plan_analysis **out){
   if(!out)return EINVAL;
   *out=NULL;
   if(!bounds || (bounds->queries && !bound_function))return EINVAL;
@@ -3308,9 +3316,21 @@ int mesh_plan_program_analyze(const struct mesh_nodes *nodes,const struct mesh_p
   if(status)return status;
   struct mesh_plan_analysis *a=*out;
   status=plan_bound_result(a,bounds,bound_function);
-  if(!status)status=plan_analyze_network(a);
+  if(!status)status=plan_analyze_network(a,routing);
   if(status){mesh_plan_analysis_free(a);*out=NULL;}
   return status;
+}
+int mesh_plan_program_analyze(const struct mesh_nodes *nodes,const struct mesh_plan_geometry *geometry,uint64_t program,
+                      struct mesh_graph_buffer_result *bounds,const uint32_t *bound_function,const struct mesh_function *functions,
+                      uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
+                      const uint32_t *source_calls,uint32_t sources,const uint64_t *source_outstanding,
+                      const struct mesh_graph_relation *order,
+                      const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
+                      const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
+                      const struct mesh_local_use *use,struct mesh_plan_analysis **out){
+  return mesh_plan_program_analyze_routed(nodes,geometry,program,bounds,bound_function,functions,count,grouped,
+    calls,ncalls,source_calls,sources,source_outstanding,order,ordered,norders,closure,chains,roots,nroots,
+    use_first,use,NULL,out);
 }
 int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,const struct mesh_function *functions,
                       uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
@@ -3330,7 +3350,7 @@ int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,c
       calls,ncalls,source_calls,sources,source_outstanding,order,ordered,norders,closure,chains,roots,nroots,use_first,use,&analysis);
   if(analysis)analysis->environment=environment;else free(environment);
   if(!status)status=plan_horizon(analysis);
-  if(!status)status=plan_analyze_network(analysis);
+  if(!status)status=plan_analyze_network(analysis,NULL);
   if(!status)status=plan_schedules(analysis,&schedules);
   if(!status)status=mesh_plan_program_compile(analysis,schedules,NULL,&compiled);
   if(!status)status=mesh_plan_program_install(context,group,compiled,deadline,out);

@@ -780,6 +780,48 @@ def buffer_queries(source, *operands):
     return Owned(made, LIB.mesh_graph_buffer_result_free, source, operands)
 
 
+def program_buffer_queries(calls, graph, chains, bodies, outer_queries=()):
+    """Substitute each occurrence's timed graph into the call graph for mesh_graph_buffer_queries."""
+    if graph.data.vertices != len(calls):
+        raise ValueError("each call occurrence must name one graph vertex")
+    chain = C.POINTER(ChainResult)()
+    _check(LIB.mesh_graph_chain_pairs(len(calls), chains, C.byref(chain)))
+    pairs = Owned(chain, LIB.mesh_graph_chain_result_free, graph, chains)
+    # Two zero-duration vertices denote entry and completion of each call occurrence.
+    times = [0.] * (2 * len(calls))
+    edges, queries, functions = [], [], []
+    for occurrence, function in enumerate(calls):
+        body = bodies[function].made.contents
+        base, first = len(times), len(edges)
+        times.extend(body.time[:body.vertices])
+        edges.extend((base + a, base + b, d) for a, b, d in zip(
+            getattr(body, "from")[:body.edges], body.to[:body.edges], body.delay[:body.edges]))
+        queries.extend(first + q for q in body.query[:body.queries])
+        functions.extend([function] * body.queries)
+        entry, end = 2 * occurrence, 2 * occurrence + 1
+        edges.extend((entry, v, 0) for v in range(base, len(times)))
+        edges.extend((v, end, 0) for v in range(base, len(times)))
+        if not body.vertices:
+            edges.append((entry, end, 0))
+    first = len(edges)
+    for edge in graph.data.edge[:graph.data.edges]:
+        edges.append((2 * edge.source + 1, 2 * edge.sink, edge.delay))
+    for edge in chain.contents.edge[:chain.contents.edges]:
+        edges.append((2 * edge.source + 1, 2 * edge.sink, edge.delay))
+    for edge, function in outer_queries:
+        if not 0 <= edge < graph.data.edges or not 0 <= function < len(bodies):
+            raise ValueError("outer capacity query must name a call edge and function")
+        queries.append(first + edge)
+        functions.append(function)
+    source, sink, delay = zip(*edges) if edges else ((), (), ())
+    result = buffer_queries((calls, graph, pairs, bodies, outer_queries), len(times),
+        (C.c_double * len(times))(*times), len(edges), (C.c_uint32 * len(edges))(*source),
+        (C.c_uint32 * len(edges))(*sink), (C.c_uint64 * len(edges))(*delay), len(queries),
+        (C.c_size_t * len(queries))(*queries))
+    return result, (C.c_uint32 * len(functions))(*functions)
+
+
+
 def event_lags(bounds, first, member, queries, edges=None):
     original = bounds.made.contents
     groups = C.POINTER(Grouping)()

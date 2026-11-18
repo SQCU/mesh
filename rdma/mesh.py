@@ -607,6 +607,10 @@ for name, result, arguments in (
         ('mesh_host_wait', C.c_int, [CONTEXT, Q, U, Q, U])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
+
+LIB.mesh_plan_program_analyze_routed.restype = C.c_int
+LIB.mesh_plan_program_analyze_routed.argtypes = [*LIB.mesh_plan_program_analyze.argtypes[:-1],
+                                                C.POINTER(D), C.POINTER(C.POINTER(PlanAnalysis))]
 # mesh-collective.h mesh_strided_extents (design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3): a view's maximal
 # contiguous byte ranges, the owning module's traversal.  What must stay: the header's declaration
 EXTENT = C.CFUNCTYPE(None, C.c_void_p, Q, Q)
