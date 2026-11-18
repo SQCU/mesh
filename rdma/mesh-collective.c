@@ -3054,7 +3054,7 @@ static int plan_analyze_network(struct mesh_plan_analysis *a,const double *routi
     if((status=mesh_graph_group(sources,ncalls,plan_at,source_calls,&a->source_group)))return status;
   }
   if(nodes->self>=nodes->count){status=EHOSTUNREACH;return status;}
-  if(!(program>>nodes->self&1)){status=EINVAL;return status;}
+  if(nodes->count>MESH_NODES_MOST || program>>nodes->count || !(program>>nodes->self&1))return EINVAL;
   /* design/aot-compilation-change-request.md A7; mesh-collective.h mesh_declared_group: each function's rows grouped
      once, the caller's grouping or, without one, made here */
   for(uint32_t f=0;f<count;f++){
