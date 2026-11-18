@@ -698,24 +698,38 @@ void mesh_graph_chain_result_free(struct mesh_graph_chain_result *r) {
   if (!r) return;
   free(r->edge); free(r);
 }
+/* BSL §3: successive firings on a resource, with one delay on its return edge. */
+int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_t resources,
+                               const uint32_t *resource, int singletons, struct mesh_graph_dependence *edge, size_t *edges) {
+  uint32_t *ends = malloc(2 * ((size_t)resources + 1) * sizeof *ends);
+  if (!ends) return ENOMEM;
+  uint32_t *first = ends, *last = ends + resources;
+  for (uint32_t r = 0; r < resources; r++) first[r] = UINT32_MAX;
+  *edges = 0;
+  for (uint32_t i = 0; i < vertices; i++) {
+    const uint32_t v = order ? order[i] : i;
+    if (v >= vertices) { free(ends); return EINVAL; }
+    const uint32_t r = resource ? resource[v] : v;
+    if (r >= resources) { free(ends); return EINVAL; }
+    if (first[r] == UINT32_MAX) first[r] = v;
+    else edge[(*edges)++] = (struct mesh_graph_dependence){last[r], v, 0};
+    last[r] = v;
+  }
+  for (uint32_t r = 0; r < resources; r++)
+    if (first[r] != UINT32_MAX && (singletons || last[r] != first[r]))
+      edge[(*edges)++] = (struct mesh_graph_dependence){last[r], first[r], 1};
+  free(ends);
+  return 0;
+}
+
 int mesh_graph_chain_pairs(uint32_t vertices, const uint32_t *chain, struct mesh_graph_chain_result **out) {
   *out = NULL;
+  for (uint32_t v = 0; chain && v < vertices; v++) if (chain[v] > v || chain[chain[v]] != chain[v]) return EINVAL;
   struct mesh_graph_chain_result *r = calloc(1, sizeof *r);
-  uint32_t *last = malloc(((size_t)vertices + 1) * sizeof *last);
-  if (!r || !last) { free(r); free(last); return ENOMEM; }
+  if (!r) return ENOMEM;
   r->vertices = vertices; r->chain = chain;
   r->edge = malloc(((size_t)vertices + 1) * sizeof *r->edge);
-  int status = r->edge ? 0 : ENOMEM;
-  for (uint32_t v = 0; !status && v < vertices; v++) {
-    const uint32_t h = chain ? chain[v] : v;
-    if (h > v || (chain && chain[h] != h)) { status = EINVAL; break; }
-    last[v] = v;
-    if (h != v) { r->edge[r->edges++] = (struct mesh_graph_dependence){last[h], v, 0}; last[h] = v; }
-  }
-  for (uint32_t v = 0; !status && v < vertices; v++)
-    if ((!chain || chain[v] == v) && last[v] != v)
-      r->edge[r->edges++] = (struct mesh_graph_dependence){last[v], v, 1};
-  free(last);
+  int status = r->edge ? mesh_graph_resource_cycles(vertices, NULL, vertices, chain, 0, r->edge, &r->edges) : ENOMEM;
   if (status) mesh_graph_chain_result_free(r); else *out = r;
   return status;
 }
@@ -848,12 +862,14 @@ int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, co
   return 0;
 }
 
-int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, uint32_t values, size_t uses,
+int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, const uint32_t *order, uint32_t values, size_t uses,
                               const uint32_t *value, const uint32_t *vertex, uint64_t *reached) {
   struct mesh_graph_grouping *groups = NULL;
   struct mesh_graph_closure *ancestors = NULL;
+  const struct mesh_graph_relation_data *graph = mesh_graph_relation_data(ordering);
   int status = mesh_graph_group(values, uses, mesh_graph_row_head, value, &groups);
-  if (!status) status = mesh_graph_relation_ancestors(ordering, &ancestors);
+  if (!status) status = mesh_graph_closure(graph->vertices, graph->in_first, mesh_graph_relation_incoming_head,
+                                          graph, order, 1, &ancestors);
   for (size_t k = 0; !status && k < uses; k++) if (vertex[k] >= ancestors->vertices) status = EINVAL;
   uint64_t *common = NULL;
   if (!status && !(common = malloc((ancestors->words + 1) * sizeof *common))) status = ENOMEM;
@@ -2690,7 +2706,7 @@ static int order_before(const void *context, uint32_t a, uint32_t b) {
 }
 /* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; design/plan-to-bridge-change-request.md R5; F. B. Schneider,
    ACM Comput. Surv. 1990 */
-int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place) {
+static int heap_order(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place, uint32_t *order) {
   const uint32_t vertices = rows->vertices;
   size_t *indegree = malloc(((size_t)vertices + 1) * sizeof *indegree);
   uint32_t *heap = malloc(((size_t)vertices + 1) * sizeof *heap);
@@ -2713,6 +2729,7 @@ int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const do
       const uint32_t v = heap[0];
       position[v] = UINT32_MAX;
       if (--count) { heap[0] = heap[count]; heap_down(heap, position, order_before, priority, count, 0); }
+      if (order) order[placed] = v;
       place[v] = placed++;
       for (size_t k = 0, n = rows->degree(rows->context, v); k < n; k++) {
         const uint32_t head = rows->head(rows->context, v, k);
@@ -2727,6 +2744,10 @@ int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const do
   return result;
 }
 
+int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place) {
+  return heap_order(rows, priority, place, NULL);
+}
+
 static size_t relation_degree(const void *context, uint32_t v) {
   const struct mesh_graph_relation_data *data = context;
   return data->row_first[v + 1] - data->row_first[v];
@@ -2735,10 +2756,13 @@ static uint32_t relation_row_head(const void *context, uint32_t v, size_t k) {
   const struct mesh_graph_relation_data *data = context;
   return mesh_graph_relation_head(data, data->row_first[v] + k);
 }
-int mesh_graph_relation_heap_order(const struct mesh_graph_relation *relation, const double *priority, uint32_t *place) {
+int mesh_graph_relation_heap_permutation(const struct mesh_graph_relation *relation, const double *priority, uint32_t *place, uint32_t *order) {
   const struct mesh_graph_relation_data *data = mesh_graph_relation_data(relation);
   const struct mesh_graph_rows_view rows = {data->vertices, data, relation_degree, relation_row_head};
-  return mesh_graph_heap_order_view(&rows, priority, place);
+  return heap_order(&rows, priority, place, order);
+}
+int mesh_graph_relation_heap_order(const struct mesh_graph_relation *relation, const double *priority, uint32_t *place) {
+  return mesh_graph_relation_heap_permutation(relation, priority, place, NULL);
 }
 
 /* a flat edge list's rows by `from` (mesh_graph_rows): vertex v's entries the edges order[first[v] .. first[v + 1]) */

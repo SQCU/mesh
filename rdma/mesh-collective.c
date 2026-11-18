@@ -113,6 +113,7 @@ void mesh_plan_schedule_free(struct plan_schedule_result *s){
     free(s->before);free(s->after);free(s->place);free(s->route);
     free(s->page_first);free(s->page_edge);free(s->access_role);
     free(s->task_edge);free(s->access_edge);
+    free(s->order);free(s->resource_cycle);free(s->access_query);
   }
   mesh_graph_relation_free(s->ordering);
   mesh_graph_relation_free(s->access_relation);
@@ -999,7 +1000,8 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
     mesh_graph_relation_data(kept->access_relation):NULL;
   kept->task_edge=malloc(((size_t)function->befores+1)*sizeof *kept->task_edge);
   kept->access_edge=malloc(((access_data?access_data->conflicts:0)+1)*sizeof *kept->access_edge);
-  if(!kept->task_edge || !kept->access_edge){mesh_plan_schedule_free(kept);return ENOMEM;}
+  kept->access_query=malloc(((access_data?access_data->conflicts:0)+1)*sizeof *kept->access_query);
+  if(!kept->task_edge || !kept->access_edge || !kept->access_query){mesh_plan_schedule_free(kept);return ENOMEM;}
   for(size_t k=0;access_data && k<access_data->conflicts;k++)kept->access_edge[k]=SIZE_MAX;
   uint32_t link_of[(size_t)n*n+1],path_link[(size_t)n+1],path_head[(size_t)n+1];
   uint32_t *reader=kept->reader=malloc(((size_t)demands+1)*sizeof *reader);
@@ -1063,8 +1065,10 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
            *after=kept->after=status?NULL:malloc(((size_t)dependencies+1)*sizeof *after),
            *place=kept->place=status?NULL:malloc(((size_t)instructions+1)*sizeof *place);
   size_t *route=kept->route=status?NULL:malloc(((size_t)edges+1)*sizeof *route);
+  kept->order=status?NULL:malloc(((size_t)instructions+1)*sizeof *kept->order);
+  kept->resource_cycle=status?NULL:malloc(((size_t)instructions+1)*sizeof *kept->resource_cycle);
   if(!status && (!w || !cost || !rate || !completion || !priority || !resource || !from || !to || !link || !communication ||
-                 !before || !after || !place || !route))status=ENOMEM;
+                 !before || !after || !place || !route || !kept->order || !kept->resource_cycle))status=ENOMEM;
   if(!status){
     /* design/aot-compilation-change-request.md A3; design/plan-to-bridge-change-request.md R5 */
     for(uint32_t d=0;d<demands;d++){
@@ -1155,7 +1159,12 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
       if(task->write){
         from[e]=first+task->vertex;
         to[e]=route[edge]<route[edge+1]?(uint32_t)tasks+communication[route[edge]]:to[edge];
-      }else{from[e]=to[edge];to[e]=first+task->vertex;}
+        kept->access_query[kept->access_queries++]=(struct plan_access_query){task->vertex,from[e],to[e],r+e};
+      }else{
+        from[e]=to[edge];to[e]=first+task->vertex;
+        const uint32_t arrived=route[edge]<route[edge+1]?(uint32_t)tasks+communication[route[edge+1]-1]:from[edge];
+        kept->access_query[kept->access_queries++]=(struct plan_access_query){task->vertex,arrived,to[e],SIZE_MAX};
+      }
       cost[e]=0;route[e++]=r;
     }
     route[e]=r;
@@ -1185,7 +1194,9 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
     if(!status){
       for(uint64_t j=0;j<instructions;j++)priority[j]=-completion[j];
       status=mesh_graph_relation_edges((uint32_t)instructions,(size_t)dependencies,before,after,&kept->ordering);
-      if(!status)status=mesh_graph_relation_heap_order(kept->ordering,priority,place);
+      if(!status)status=mesh_graph_relation_heap_permutation(kept->ordering,priority,place,kept->order);
+      if(!status)status=mesh_graph_resource_cycles((uint32_t)instructions,kept->order,n+2*flow->pairs+function->resources,
+        resource,1,kept->resource_cycle,&kept->resource_edges);
     }
   }
   if(status)mesh_plan_schedule_free(kept);else *out=kept;
@@ -4304,13 +4315,17 @@ static void plan_schedule_put(struct plan_archive *out,const struct plan_schedul
   if(s->access_edge)plan_archive_put(out,s->access_edge,
     (s->access_relation?mesh_graph_relation_data(s->access_relation)->conflicts:0)*sizeof *s->access_edge);
   plan_relation_put(out,s->ordering);
+  if(s->order)plan_archive_put(out,s->order,(size_t)s->instructions*sizeof *s->order);
+  if(s->resource_cycle)plan_archive_put(out,s->resource_cycle,s->resource_edges*sizeof *s->resource_cycle);
+  if(s->access_query)plan_archive_put(out,s->access_query,s->access_queries*sizeof *s->access_query);
 }
 static int plan_schedule_get(struct plan_archive *in,struct plan_schedule_result *s,
                              const struct mesh_plan_flow *flow,const struct mesh_function *function,
                              struct mesh_plan_analysis *owner,struct mesh_graph_context *context,int access_version){
   struct plan_schedule_result saved={0};
   const size_t size=access_version==0?offsetof(struct plan_schedule_result,accesses):
-                    access_version==1?offsetof(struct plan_schedule_result,task_edge):sizeof saved;
+                    access_version==1?offsetof(struct plan_schedule_result,task_edge):
+                    access_version==2?offsetof(struct plan_schedule_result,order):sizeof saved;
   const void *bytes=plan_archive_view(in,1,size);
   if(!bytes)return in->status;
   memcpy(&saved,bytes,size);
@@ -4318,6 +4333,7 @@ static int plan_schedule_get(struct plan_archive *in,struct plan_schedule_result
   *s=*view;s->references=1;s->geometry=NULL;s->function=function;s->owned=owner;
   s->access=NULL;s->access_relation=NULL;s->page_first=NULL;s->page_edge=NULL;s->access_role=NULL;
   s->event_first=NULL;s->event_member=NULL;s->task_edge=NULL;s->access_edge=NULL;s->ordering=NULL;
+  s->order=NULL;s->resource_cycle=NULL;s->access_query=NULL;
   mesh_plan_analysis_retain(owner);
   int status=plan_flow_geometry_get(in,flow,0,&s->geometry);
   if(status)return status;
@@ -4365,7 +4381,12 @@ static int plan_schedule_get(struct plan_archive *in,struct plan_schedule_result
     s->access_edge=(void *)plan_archive_view(in,s->access_relation?mesh_graph_relation_data(s->access_relation)->conflicts:0,
                                             sizeof *s->access_edge);
   if(in->status)return in->status;
-  return plan_relation_get(in,context,((struct plan_loaded *)owner->owned)->bytes,&s->ordering);
+  status=plan_relation_get(in,context,((struct plan_loaded *)owner->owned)->bytes,&s->ordering);
+  if(status)return status;
+  if(view->order)s->order=(void *)plan_archive_view(in,s->instructions,sizeof *s->order);
+  if(view->resource_cycle)s->resource_cycle=(void *)plan_archive_view(in,s->resource_edges,sizeof *s->resource_cycle);
+  if(view->access_query)s->access_query=(void *)plan_archive_view(in,s->access_queries,sizeof *s->access_query);
+  return in->status;
 }
 #undef PLAN_SCHEDULE_ARRAYS
 static void plan_functions_put(struct plan_archive *out,const struct mesh_local *local){
@@ -4430,7 +4451,7 @@ static int plan_local_put(struct plan_archive *out,const struct mesh_local *loca
   struct plan_saved_local head={.magic=PLAN_SAVED_LOCAL,.arena=local->bytes,.offsets=local->offsets,
     .orders=local->planned.orders,.horizon=local->planned.horizon,.values=local->values,.relation=relation_bytes,
     .words=c?c->words:0,.uses=a->use_first?a->use_first[a->roots]:0,.used=!!a->use_first,.functions=a->functions,.roots=a->roots,
-    .ncalls=a->ncalls,.norders=a->relation?a->norders:0,.chained=!!a->chains,.closed=!!c,.quantum=local->quantum,.padding=2};
+    .ncalls=a->ncalls,.norders=a->relation?a->norders:0,.chained=!!a->chains,.closed=!!c,.quantum=local->quantum,.padding=3};
   plan_archive_align(out);
   const size_t start=out->at;
   plan_archive_bytes(out,&head,sizeof head);
@@ -4633,7 +4654,7 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
   plan_archive_bytes(input,&head,sizeof head);
   if(input->status || head.magic!=PLAN_SAVED_LOCAL || head.bytes>input->size-start || !head.functions ||
      !head.ncalls || head.functions==UINT32_MAX || head.values==UINT64_MAX ||
-     head.padding>2 || (head.closed && head.words!=((uint64_t)head.ncalls+63)/64))return EINVAL;
+     head.padding>3 || (head.closed && head.words!=((uint64_t)head.ncalls+63)/64))return EINVAL;
   local->planned.owned=plan_loaded_new(head.functions+1);
   if(!local->planned.owned)return ENOMEM;
   int status=plan_functions_get(input,&head,analysis,local);

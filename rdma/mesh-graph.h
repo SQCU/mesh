@@ -172,7 +172,7 @@ int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, co
                          size_t *first, size_t *last);
 /* Row b contains a iff every access of a strictly precedes every access of b in ordering.
    Empty access sets are unrelated. reached has values * ceil(values/64) words. */
-int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, uint32_t values, size_t uses,
+int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, const uint32_t *order, uint32_t values, size_t uses,
                               const uint32_t *value, const uint32_t *vertex, uint64_t *reached);
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
                                int (*equal)(const void *context, uint32_t k), const void *context);
@@ -315,6 +315,7 @@ struct mesh_graph_rows_view {
 /* mesh_graph_heap_order over a rows view: the same heap (priority, then index); EINVAL for a head out of range or a
    cycle */
 int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place);
+int mesh_graph_relation_heap_permutation(const struct mesh_graph_relation *, const double *priority, uint32_t *place, uint32_t *order);
 int mesh_graph_relation_heap_order(const struct mesh_graph_relation *, const double *priority, uint32_t *place);
 /* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
    Res. 22(3), 1997, §2; design/integration-finishing-change-request.md item 2 */
@@ -631,6 +632,8 @@ struct mesh_graph_chain_result {
   size_t edges;
   struct mesh_graph_dependence *edge;
 };
+int mesh_graph_resource_cycles(uint32_t vertices, const uint32_t *order, uint32_t resources,
+                               const uint32_t *resource, int singletons, struct mesh_graph_dependence *edge, size_t *edges);
 int mesh_graph_chain_pairs(uint32_t vertices, const uint32_t *chain, struct mesh_graph_chain_result **out);
 void mesh_graph_chain_result_free(struct mesh_graph_chain_result *);
 /* design/planner-composition.md: original byte touches and value/relay operands; derived complete cover sets. */

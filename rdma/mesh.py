@@ -431,6 +431,10 @@ class PlanSpan(C.Structure):
     _fields_ = [('first', U), ('count', U)]
 
 
+class PlanAccessQuery(C.Structure):
+    _fields_ = [('task', U), ('source', U), ('sink', U), ('dependency', Z)]
+
+
 PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlowGeometry)), ('function', C.POINTER(Function)),
                 ('first', U), ('tasks', U), ('instructions', U), ('edges', Z), ('entries', Z),
                 ('dependencies', Z), ('reader', C.POINTER(U)), ('consumer', C.POINTER(PlanSpan)),
@@ -442,7 +446,9 @@ PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlo
                 ('accesses', Z), ('access', C.POINTER(mesh_graph.Viewed)), ('access_relation', C.c_void_p),
                 ('page_first', C.POINTER(U)), ('page_edge', C.POINTER(U)), ('access_role', C.POINTER(C.c_ubyte)),
                 ('event_first', C.POINTER(Z)), ('event_member', C.POINTER(U)),
-                ('task_edge', C.POINTER(Z)), ('access_edge', C.POINTER(Z)), ('ordering', C.c_void_p)]
+                ('task_edge', C.POINTER(Z)), ('access_edge', C.POINTER(Z)), ('ordering', C.c_void_p),
+                ('order', C.POINTER(U)), ('resource_cycle', C.POINTER(mesh_graph.Dependence)),
+                ('resource_edges', Z), ('access_queries', Z), ('access_query', C.POINTER(PlanAccessQuery))]
 
 
 class PlanGraphResult(C.Structure):

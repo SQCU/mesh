@@ -419,6 +419,7 @@ int mesh_plan_local_complete(struct mesh_plan_analysis *,uint64_t,struct mesh_lo
 struct plan_sync { uint32_t node,function,entry,every; int64_t base; };
 struct plan_entry { const struct mesh_plan_entry *source; uint32_t place; };
 struct plan_span { uint32_t first,count; };
+struct plan_access_query { uint32_t task,from,to;size_t dependency; };
 struct plan_schedule_result {
   size_t references;
   struct mesh_plan_flow_geometry *geometry;
@@ -440,6 +441,10 @@ struct plan_schedule_result {
   const uint32_t *event_member;
   size_t *task_edge,*access_edge;
   struct mesh_graph_relation *ordering;
+  uint32_t *order;
+  struct mesh_graph_dependence *resource_cycle;
+  size_t resource_edges,access_queries;
+  struct plan_access_query *access_query;
 };
 /* design/flow-order-and-lowering-memorandum.md: access.key is a declared transfer, vertex a Function task;
    write selects the original from view's producer, read the to view's consumer. Supplied roles are complete,
