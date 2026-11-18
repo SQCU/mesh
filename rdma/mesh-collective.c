@@ -111,7 +111,9 @@ void mesh_plan_schedule_free(struct plan_schedule_result *s){
     free(s->reader);free(s->consumer);free(s->w);free(s->cost);free(s->rate);free(s->completion);free(s->priority);
     free(s->completed);free(s->resource);free(s->from);free(s->to);free(s->link);free(s->communication);
     free(s->before);free(s->after);free(s->place);free(s->route);
+    free(s->page_first);free(s->page_edge);free(s->access_role);
   }
+  mesh_graph_relation_free(s->access_relation);
   mesh_plan_flow_geometry_free(s->geometry);
   if(s->owned)mesh_plan_analysis_free(s->owned);
   free(s);
@@ -879,14 +881,69 @@ static int plan_entry_order(const void *a,const void *b){
    O. Sinnen, Task Scheduling for Parallel Systems, Wiley, 2007; O. Sinnen and L. A. Sousa, IEEE TPDS 16(6), 2005,
    Definitions 1, 2 and 4; M. Cowan et al., MSCCLang, ASPLOS 2023, §4.2, §5.2;
    F. B. Schneider, ACM Comput. Surv. 22(4), 1990 */
+static int plan_task_accesses(struct plan_schedule_result *s){
+  if(!s->accesses)return 0;
+  const struct mesh_plan_flow *flow=s->geometry->source;
+  const uint32_t tasks=s->function->tasks,count=flow->transfers;
+  s->page_first=calloc((size_t)count+1,sizeof *s->page_first);
+  s->access_role=calloc(2*(size_t)count+1,1);
+  if(!s->page_first || !s->access_role)return ENOMEM;
+  uint64_t pages=0;
+  for(uint32_t i=0;i<count;i++){
+    pages+=s->geometry->cuts[flow->of[i]]->instructions;
+    if(pages>=UINT32_MAX-tasks)return EOVERFLOW;
+    s->page_first[i+1]=(uint32_t)pages;
+  }
+  if(s->accesses>(SIZE_MAX/sizeof(struct mesh_graph_view)-2*pages))return EOVERFLOW;
+  const size_t views=s->accesses+2*(size_t)pages;
+  struct mesh_graph_view *query=calloc(views+1,sizeof *query);
+  s->page_edge=malloc(((size_t)pages+1)*sizeof *s->page_edge);
+  if(!query || !s->page_edge){free(query);return ENOMEM;}
+  for(size_t i=0;i<s->accesses;i++){
+    const struct mesh_graph_view *a=s->access+i;
+    if(a->key>=count || a->vertex>=tasks || a->write>1){free(query);return EINVAL;}
+    query[i]=*a;s->access_role[2*a->key+a->write]=1;
+  }
+  size_t at=s->accesses;
+  for(uint32_t i=0;i<count;i++){
+    const struct mesh_plan_cuts *cuts=s->geometry->cuts[flow->of[i]];
+    for(uint32_t role=0;role<2;role++){
+      uint32_t v=0;
+      while(v<cuts->views && (cuts->endpoint[v].transfer!=i || cuts->endpoint[v].role!=role))v++;
+      if(v==cuts->views){free(query);return EINVAL;}
+      for(uint64_t q=0;q<cuts->instructions;q++)query[at++]=(struct mesh_graph_view){
+        .key=i,.view={.offset=cuts->at[(uint64_t)v*cuts->instructions+q],
+                         .element=cuts->cut[q+1]-cuts->cut[q]},
+        .vertex=tasks+s->page_first[i]+(uint32_t)q,.write=role};
+    }
+  }
+  const int status=mesh_graph_relation_views(tasks+(uint32_t)pages,views,query,0,NULL,NULL,1,free,query,
+                                            &s->access_relation);
+  if(status)free(query);
+  return status;
+}
+static int plan_task_pair(const struct plan_schedule_result *s,const struct mesh_graph_conflict *c,
+                           const struct mesh_graph_view **task,const struct mesh_graph_view **page){
+  if((c->from_view<s->accesses)==(c->to_view<s->accesses))return 0;
+  const struct mesh_graph_view *view=mesh_graph_relation_data(s->access_relation)->view;
+  *task=view+(c->from_view<s->accesses?c->from_view:c->to_view);
+  *page=view+(c->from_view<s->accesses?c->to_view:c->from_view);
+  return (*task)->write!=(*page)->write;
+}
 int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mesh_function *function,
-                       struct plan_schedule_result **out){
+                       size_t accesses,const struct mesh_graph_view *access,const size_t *event_first,
+                       const uint32_t *event_member,struct plan_schedule_result **out){
   *out=NULL;
   const struct mesh_plan_flow *flow=geometry->source;
   const struct mesh_weight *weight=flow->weights;
   const struct mesh_dependence *dependence=flow->dependence;
   const uint32_t n=flow->n,demands=flow->demands,count=flow->transfers,dependences=flow->dependences,placed=function->tasks;
-  if(function->count!=count)return EINVAL;
+  if(function->count!=count || (accesses && (!access || !placed)))return EINVAL;
+  if(event_first){
+    if(count>=UINT32_MAX/3 || event_first[0] || (event_first[3*(size_t)count] && !event_member))return EINVAL;
+    for(size_t i=0;i<3*(size_t)count;i++)if(event_first[i]>event_first[i+1])return EINVAL;
+    for(size_t i=0;i<event_first[3*(size_t)count];i++)if(event_member[i]>=placed)return EINVAL;
+  }
   if(placed && (!function->task || (count && (!function->sender || !function->receiver)) ||
                 (function->befores && !function->before)))return EINVAL;
   for(uint32_t k=0;k<function->befores;k++)
@@ -896,12 +953,17 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
   struct plan_schedule_result *kept=calloc(1,sizeof *kept);
   if(!kept)return ENOMEM;
   kept->references=1;kept->geometry=geometry;mesh_plan_flow_geometry_retain(geometry);kept->function=function;
+  kept->accesses=accesses;kept->access=access;
+  kept->event_first=event_first;kept->event_member=event_member;
+  int status=plan_task_accesses(kept);
+  if(status){mesh_plan_schedule_free(kept);return status;}
+  const struct mesh_graph_relation_data *access_data=kept->access_relation?
+    mesh_graph_relation_data(kept->access_relation):NULL;
   uint32_t link_of[(size_t)n*n+1],path_link[(size_t)n+1],path_head[(size_t)n+1];
   uint32_t *reader=kept->reader=malloc(((size_t)demands+1)*sizeof *reader);
   struct plan_span *consumer=kept->consumer=malloc(((size_t)count+1)*sizeof *consumer);
   if(!reader || !consumer){mesh_plan_schedule_free(kept);return ENOMEM;}
   uint64_t tasks=demands,edges=0,entries=0;
-  int status=0;
   for(uint32_t d=0;d<demands;d++)
     if((reader[d]=flow->demand[d].own?(uint32_t)tasks:MESH_ABSENT)!=MESH_ABSENT)edges++,tasks++;
   if(tasks>=UINT32_MAX)status=ENOMEM;
@@ -917,12 +979,14 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
                                                                declared[i].destination,NULL,NULL);
     if(tasks>=UINT32_MAX || edges>=UINT32_MAX || entries>=UINT32_MAX)status=ENOMEM;
   }
+  const uint32_t event_base=(uint32_t)tasks;
+  if(event_first){tasks+=3*(uint64_t)count;edges+=event_first[3*(size_t)count];}
   for(uint32_t k=0;!status && k<dependences;k++){
     const struct mesh_dependence *x=dependence+k;
     if(x->lag)continue;
-    const struct plan_span a=plan_tasks(flow,consumer,reader,x->from,!!(x->kinds&MESH_FROM_PRODUCED),
+    const struct plan_span a=event_first?(struct plan_span){0,1}:plan_tasks(flow,consumer,reader,x->from,!!(x->kinds&MESH_FROM_PRODUCED),
                                         !!(x->kinds&MESH_FROM_SOURCE_READ)),
-                           b=plan_tasks(flow,consumer,reader,x->to,!!(x->kinds&MESH_TO_PRODUCED),
+                           b=event_first?(struct plan_span){0,1}:plan_tasks(flow,consumer,reader,x->to,!!(x->kinds&MESH_TO_PRODUCED),
                                         !!(x->kinds&MESH_TO_SOURCE_READ));
     if((edges+=(uint64_t)a.count*b.count)>=UINT32_MAX)status=ENOMEM;
   }
@@ -930,7 +994,14 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
   const uint32_t first=(uint32_t)tasks;
   tasks+=placed;
   edges+=function->befores;
-  for(uint32_t i=0;placed && i<count;i++)edges+=1+(uint64_t)consumer[i].count;
+  for(uint32_t i=0;placed && i<count;i++){
+    if(!accesses || !kept->access_role[2*i+1])edges++;
+    if(!accesses || !kept->access_role[2*i])edges+=consumer[i].count;
+  }
+  for(size_t k=0;access_data && k<access_data->conflicts;k++){
+    const struct mesh_graph_view *task,*page;
+    edges+=plan_task_pair(kept,access_data->conflict+k,&task,&page);
+  }
   if(tasks>=UINT32_MAX || edges>=UINT32_MAX)status=ENOMEM;
   const uint64_t instructions=tasks+geometry->comms,dependencies=edges+entries;
   if(instructions>=UINT32_MAX)status=ENOMEM;
@@ -964,6 +1035,7 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
       w[consumer[i].first+q]=placed?0:weight[i].consumed;
       resource[consumer[i].first+q]=declared[i].destination;
     }
+    for(uint32_t v=event_base;event_first && v<first;v++){w[v]=0;resource[v]=n;}
     for(uint32_t k=0;k<placed;k++){
       w[first+k]=function->task[k].length;
       resource[first+k]=n+2*flow->pairs+function->task[k].resource;
@@ -986,6 +1058,7 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
         struct plan_path path={link_of,n,mesh_graph_climb(parent,n,d->source,z,NULL,NULL),z,path_link,path_head};
         mesh_graph_climb(parent,n,d->source,z,plan_path_step,&path);
         for(uint64_t q=0;q<geometry->count[flow->of[i]][j-d->tree];q++,e++){
+          if(accesses)kept->page_edge[kept->page_first[i]+geometry->lead[j]+q]=(uint32_t)e;
           from[e]=flow->of[i];
           to[e]=consumer[i].first+(declared[i].kind==MESH_PAGES?(uint32_t)(geometry->lead[j]+q):0);
           cost[e]=weight[i].page;
@@ -1002,6 +1075,12 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
     for(uint32_t k=0;k<dependences;k++){
       const struct mesh_dependence *x=dependence+k;
       if(x->lag)continue;
+      if(event_first){
+        from[e]=event_base+3*x->from+((x->kinds&MESH_FROM_PRODUCED)?0:(x->kinds&MESH_FROM_SOURCE_READ)?2:1);
+        to[e]=event_base+3*x->to+((x->kinds&MESH_TO_PRODUCED)?0:(x->kinds&MESH_TO_SOURCE_READ)?2:1);
+        cost[e]=0;route[e++]=r;
+        continue;
+      }
       const struct plan_span a=plan_tasks(flow,consumer,reader,x->from,!!(x->kinds&MESH_FROM_PRODUCED),
                                           !!(x->kinds&MESH_FROM_SOURCE_READ)),
                              b=plan_tasks(flow,consumer,reader,x->to,!!(x->kinds&MESH_TO_PRODUCED),
@@ -1013,11 +1092,27 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *geometry,const struct mes
     for(uint32_t k=0;k<function->befores;k++){
       from[e]=first+function->before[k].from;to[e]=first+function->before[k].to;cost[e]=0;route[e++]=r;
     }
+    for(size_t v=0;event_first && v<3*(size_t)count;v++)for(size_t k=event_first[v];k<event_first[v+1];k++){
+      from[e]=first+event_member[k];to[e]=event_base+(uint32_t)v;cost[e]=0;route[e++]=r;
+    }
     for(uint32_t i=0;placed && i<count;i++){
-      from[e]=first+function->sender[i];to[e]=flow->of[i];cost[e]=0;route[e++]=r;
-      for(uint32_t q=0;q<consumer[i].count;q++){
+      if(!accesses || !kept->access_role[2*i+1]){
+        from[e]=first+function->sender[i];to[e]=flow->of[i];cost[e]=0;route[e++]=r;
+      }
+      for(uint32_t q=0;(!accesses || !kept->access_role[2*i]) && q<consumer[i].count;q++){
         from[e]=consumer[i].first+q;to[e]=first+function->receiver[i];cost[e]=0;route[e++]=r;
       }
+    }
+    route[e]=r;
+    for(size_t k=0;access_data && k<access_data->conflicts;k++){
+      const struct mesh_graph_view *task,*page;
+      if(!plan_task_pair(kept,access_data->conflict+k,&task,&page))continue;
+      const uint32_t edge=kept->page_edge[page->vertex-placed];
+      if(task->write){
+        from[e]=first+task->vertex;
+        to[e]=route[edge]<route[edge+1]?(uint32_t)tasks+communication[route[edge]]:to[edge];
+      }else{from[e]=to[edge];to[e]=first+task->vertex;}
+      cost[e]=0;route[e++]=r;
     }
     route[e]=r;
   }
@@ -1062,7 +1157,7 @@ static int plan_schedules(const struct mesh_plan_analysis *analysis,struct plan_
   int status=0;
   for(uint32_t f=0;!status && f<analysis->functions;f++)
     if(analysis->flow[f].demands || analysis->function[f].tasks)
-      status=mesh_plan_schedule(analysis->flow[f].physical,analysis->function+f,schedules+f);
+      status=mesh_plan_schedule(analysis->flow[f].physical,analysis->function+f,0,NULL,NULL,NULL,schedules+f);
   if(status)plan_schedules_free(schedules,analysis->functions);else *out=schedules;
   return status;
 }
@@ -4027,20 +4122,71 @@ static void plan_schedule_put(struct plan_archive *out,const struct plan_schedul
 #define PUT(field,count) if(s->field)plan_archive_put(out,s->field,(size_t)(count)*sizeof *s->field);
   PLAN_SCHEDULE_ARRAYS(PUT)
 #undef PUT
+  if(s->accesses){
+    const uint32_t count=s->geometry->source->transfers;
+    void *bytes=NULL;size_t length=0;
+    if(!out->status)out->status=mesh_graph_relation_save(s->access_relation,&bytes,&length);
+    plan_archive_put(out,&length,sizeof length);
+    plan_archive_put(out,bytes,length);free(bytes);
+    plan_archive_put(out,s->page_first,((size_t)count+1)*sizeof *s->page_first);
+    plan_archive_put(out,s->page_edge,(size_t)s->page_first[count]*sizeof *s->page_edge);
+    plan_archive_put(out,s->access_role,2*(size_t)count);
+  }
+  if(s->event_first){
+    const size_t events=3*(size_t)s->geometry->source->transfers;
+    plan_archive_put(out,s->event_first,(events+1)*sizeof *s->event_first);
+    plan_archive_put(out,s->event_member,s->event_first[events]*sizeof *s->event_member);
+  }
 }
 static int plan_schedule_get(struct plan_archive *in,struct plan_schedule_result *s,
                              const struct mesh_plan_flow *flow,const struct mesh_function *function,
-                             struct mesh_plan_analysis *owner){
-  const struct plan_schedule_result *view=plan_archive_view(in,1,sizeof *view);
-  if(!view)return in->status;
+                             struct mesh_plan_analysis *owner,struct mesh_graph_context *context,int access_version){
+  struct plan_schedule_result saved={0};
+  const void *bytes=plan_archive_view(in,1,access_version?sizeof saved:offsetof(struct plan_schedule_result,accesses));
+  if(!bytes)return in->status;
+  memcpy(&saved,bytes,access_version?sizeof saved:offsetof(struct plan_schedule_result,accesses));
+  const struct plan_schedule_result *view=&saved;
   *s=*view;s->references=1;s->geometry=NULL;s->function=function;s->owned=owner;
+  s->access=NULL;s->access_relation=NULL;s->page_first=NULL;s->page_edge=NULL;s->access_role=NULL;
+  s->event_first=NULL;s->event_member=NULL;
   mesh_plan_analysis_retain(owner);
-  const int status=plan_flow_geometry_get(in,flow,0,&s->geometry);
+  int status=plan_flow_geometry_get(in,flow,0,&s->geometry);
   if(status)return status;
 #define GET(field,count) s->field=view->field?(void *)(uintptr_t)plan_archive_view(in,(count),sizeof *s->field):NULL;
   PLAN_SCHEDULE_ARRAYS(GET)
 #undef GET
   if(s->first>s->tasks || function->tasks!=s->tasks-s->first || s->tasks>s->instructions)return EINVAL;
+  if(!in->status && s->accesses){
+    const size_t *length=plan_archive_view(in,1,sizeof *length);
+    if(!length)return in->status;
+    const void *relation=plan_archive_view(in,*length,1);
+    if(!relation)return in->status;
+    struct plan_loaded *loaded=owner->owned;
+    __atomic_fetch_add(&loaded->bytes->references,1,__ATOMIC_RELAXED);
+    status=mesh_graph_relation_load(context,relation,*length,plan_bytes_release,loaded->bytes,&s->access_relation);
+    if(status)__atomic_fetch_sub(&loaded->bytes->references,1,__ATOMIC_RELAXED);
+    if(status)return status;
+    const struct mesh_graph_relation_data *data=mesh_graph_relation_data(s->access_relation);
+    if(s->accesses>data->views)return EINVAL;
+    s->access=data->view;
+    s->page_first=(void *)plan_archive_view(in,(size_t)flow->transfers+1,sizeof *s->page_first);
+    if(!s->page_first)return in->status;
+    const uint32_t pages=s->page_first[flow->transfers];
+    if((uint64_t)function->tasks+pages!=data->vertices)return EINVAL;
+    s->page_edge=(void *)plan_archive_view(in,pages,sizeof *s->page_edge);
+    s->access_role=(void *)plan_archive_view(in,2*(size_t)flow->transfers,1);
+    for(uint32_t i=0;!in->status && i<pages;i++)if(s->page_edge[i]>=s->edges)return EINVAL;
+  }
+  if(!in->status && view->event_first){
+    const size_t events=3*(size_t)flow->transfers;
+    if(events>s->first)return EINVAL;
+    s->event_first=plan_archive_view(in,events+1,sizeof *s->event_first);
+    if(!s->event_first)return in->status;
+    if(s->event_first[0])return EINVAL;
+    for(size_t i=0;i<events;i++)if(s->event_first[i]>s->event_first[i+1])return EINVAL;
+    s->event_member=plan_archive_view(in,s->event_first[events],sizeof *s->event_member);
+    for(size_t i=0;!in->status && i<s->event_first[events];i++)if(s->event_member[i]>=function->tasks)return EINVAL;
+  }
   return in->status;
 }
 #undef PLAN_SCHEDULE_ARRAYS
@@ -4106,7 +4252,7 @@ static int plan_local_put(struct plan_archive *out,const struct mesh_local *loca
   struct plan_saved_local head={.magic=PLAN_SAVED_LOCAL,.arena=local->bytes,.offsets=local->offsets,
     .orders=local->planned.orders,.horizon=local->planned.horizon,.values=local->values,.relation=relation_bytes,
     .words=c?c->words:0,.uses=a->use_first?a->use_first[a->roots]:0,.used=!!a->use_first,.functions=a->functions,.roots=a->roots,
-    .ncalls=a->ncalls,.norders=a->relation?a->norders:0,.chained=!!a->chains,.closed=!!c,.quantum=local->quantum};
+    .ncalls=a->ncalls,.norders=a->relation?a->norders:0,.chained=!!a->chains,.closed=!!c,.quantum=local->quantum,.padding=1};
   plan_archive_align(out);
   const size_t start=out->at;
   plan_archive_bytes(out,&head,sizeof head);
@@ -4309,7 +4455,7 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
   plan_archive_bytes(input,&head,sizeof head);
   if(input->status || head.magic!=PLAN_SAVED_LOCAL || head.bytes>input->size-start || !head.functions ||
      !head.ncalls || head.functions==UINT32_MAX || head.values==UINT64_MAX ||
-     (head.closed && head.words!=((uint64_t)head.ncalls+63)/64))return EINVAL;
+     head.padding>1 || (head.closed && head.words!=((uint64_t)head.ncalls+63)/64))return EINVAL;
   local->planned.owned=plan_loaded_new(head.functions+1);
   if(!local->planned.owned)return ENOMEM;
   int status=plan_functions_get(input,&head,analysis,local);
@@ -4319,7 +4465,7 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
     struct mesh_plan_function *result=local->planned.result+f;
     struct plan_schedule_result *schedule=result->schedule;
     if(!schedule)continue;
-    status=plan_schedule_get(input,schedule,a->flow+f,schedule->function,a);
+    status=plan_schedule_get(input,schedule,a->flow+f,schedule->function,a,analysis,head.padding);
     if(!status){result->completion=schedule->completion+schedule->first;result->order=schedule->place+schedule->first;}
   }
   if(!status)status=plan_placement_get(input,a->functions,&local->placement);

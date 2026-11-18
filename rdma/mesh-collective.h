@@ -425,8 +425,20 @@ struct plan_schedule_result {
   uint32_t *resource,*from,*to,*link,*communication,*before,*after,*place;
   size_t *route;
   struct mesh_plan_analysis *owned;
+  size_t accesses;
+  const struct mesh_graph_view *access;
+  struct mesh_graph_relation *access_relation;
+  uint32_t *page_first,*page_edge;
+  unsigned char *access_role;
+  const size_t *event_first;
+  const uint32_t *event_member;
 };
-int mesh_plan_schedule(struct mesh_plan_flow_geometry *,const struct mesh_function *,struct plan_schedule_result **);
+/* design/flow-order-and-lowering-memorandum.md: access.key is a declared transfer, vertex a Function task;
+   write selects the original from view's producer, read the to view's consumer. Supplied roles are complete,
+   including whole readers; omitted roles keep sender/receiver. Event rows 3*t+[0,1,2] are the original produced,
+   consumed, source-read completion memberships in Function task IDs, joined with zero-time vertices. */
+int mesh_plan_schedule(struct mesh_plan_flow_geometry *,const struct mesh_function *,size_t,
+                       const struct mesh_graph_view *,const size_t *,const uint32_t *,struct plan_schedule_result **);
 void mesh_plan_schedule_retain(struct plan_schedule_result *);
 void mesh_plan_schedule_free(struct plan_schedule_result *);
 struct plan_graph_result {

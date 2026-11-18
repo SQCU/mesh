@@ -425,7 +425,10 @@ PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlo
                 ('completion', C.POINTER(D)), ('priority', C.POINTER(D)), ('completed', C.POINTER(D)), ('resource', C.POINTER(U)),
                 ('from', C.POINTER(U)), ('to', C.POINTER(U)), ('link', C.POINTER(U)),
                 ('communication', C.POINTER(U)), ('before', C.POINTER(U)), ('after', C.POINTER(U)),
-                ('place', C.POINTER(U)), ('route', C.POINTER(Z)), ('owned', C.POINTER(PlanAnalysis))]
+                ('place', C.POINTER(U)), ('route', C.POINTER(Z)), ('owned', C.POINTER(PlanAnalysis)),
+                ('accesses', Z), ('access', C.POINTER(mesh_graph.Viewed)), ('access_relation', C.c_void_p),
+                ('page_first', C.POINTER(U)), ('page_edge', C.POINTER(U)), ('access_role', C.POINTER(C.c_ubyte)),
+                ('event_first', C.POINTER(Z)), ('event_member', C.POINTER(U))]
 
 
 class PlanGraphResult(C.Structure):
@@ -542,7 +545,8 @@ for name, result, arguments in (
                                              C.POINTER(C.POINTER(PlanFlowGeometry))]),
         ('mesh_plan_flow_geometry_retain', None, [C.POINTER(PlanFlowGeometry)]),
         ('mesh_plan_flow_geometry_free', None, [C.POINTER(PlanFlowGeometry)]),
-        ('mesh_plan_schedule', C.c_int, [C.POINTER(PlanFlowGeometry), C.POINTER(Function),
+        ('mesh_plan_schedule', C.c_int, [C.POINTER(PlanFlowGeometry), C.POINTER(Function), Z, C.POINTER(mesh_graph.Viewed),
+                                           C.POINTER(Z), C.POINTER(U),
                                            C.POINTER(C.POINTER(PlanScheduleResult))]),
         ('mesh_plan_schedule_retain', None, [C.POINTER(PlanScheduleResult)]),
         ('mesh_plan_schedule_free', None, [C.POINTER(PlanScheduleResult)]),
