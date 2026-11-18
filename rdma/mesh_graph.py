@@ -305,6 +305,19 @@ class Graph:
         held = _array(C.c_uint32, class_of)[0]
         return self._derived(classes, LIB.mesh_graph_relation_quotient, held, len(classes), held)
 
+    def quotient_groups(self, groups):
+        pairs = [(self.at[a], self.at[b]) for group in groups for a, b in zip(group, group[1:])]
+        classes = components(len(self.vertices), pairs + [(b, a) for a, b in pairs])
+        blocks = [[] for _ in range(max(classes, default=-1) + 1)]
+        for node, component in zip(self.vertices, classes, strict=True):
+            blocks[component].append(node)
+        quotient = self.quotient(tuple(map(tuple, blocks)), classes)
+        return quotient, {node: quotient.vertices[i] for node, i in zip(self.vertices, classes, strict=True)}
+
+    def acyclic(self):
+        position = {node: i for i, node in enumerate(self.order())}
+        return all(position[a] < position[b] for a, b in self.edges())
+
     def _derived(self, vertices, call, held, *operands):
         made = C.c_void_p()
         _check(call(self.relation.pointer, *operands, None, None, C.byref(made)))

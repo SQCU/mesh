@@ -169,6 +169,11 @@ the represented alternatives, and the target emits the selected form. Tate, Step
 Lerner give the mechanism of retaining alternatives through rewriting and extracting for
 profitability in [*Equality Saturation: A New Approach to Optimization*, §§2–3](https://cseweb.ucsd.edu/~lerner/papers/popl09.html).
 
+For a finite assignment and a supplied cost, minimizing over a free coordinate returns
+a function of the remaining coordinates. Each entry retains the minimizing assignment
+for extraction. Dechter gives variable elimination over shared scopes in
+[*Bucket Elimination: A Unifying Framework for Reasoning*](https://ics.uci.edu/~dechter/publications/r76A.pdf).
+
 ### 6. Carry compilation results through their consumers
 
 Dependency analysis returns access causes and source identities with its graph. Synchronization reduction,
