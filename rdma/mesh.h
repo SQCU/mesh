@@ -120,7 +120,7 @@ struct mesh_state { _Alignas(64) uint32_t copies; uint32_t receives,ranges,relea
   uint64_t nodes; uint32_t sender,outstanding; uint64_t submitted; _Atomic uint64_t delivered;
   _Atomic uint64_t submissions; uint64_t broadcast,arrived,room,deliveries,submits,announced;
   uint32_t waits,tells; uint64_t syncs; uint32_t calls; _Atomic uint32_t closed; uint64_t rows,submit_room,transfers;
-  uint32_t sequencer; _Atomic uint32_t removed; uint64_t boot,times; };
+  uint32_t sequencer; _Atomic uint32_t removed; uint64_t boot,times,receive_wakes; };
 _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64 &&
   offsetof(struct mesh_state,receives)==4 && offsetof(struct mesh_state,ranges)==8 && offsetof(struct mesh_state,releases)==12 &&
   offsetof(struct mesh_state,phases)==16 && offsetof(struct mesh_state,counts)==24 &&
@@ -139,7 +139,7 @@ _Static_assert(sizeof(struct mesh_state)==320 && _Alignof(struct mesh_state)==64
   offsetof(struct mesh_state,closed)==252 && offsetof(struct mesh_state,rows)==256 &&
   offsetof(struct mesh_state,submit_room)==264 && offsetof(struct mesh_state,transfers)==272 &&
   offsetof(struct mesh_state,sequencer)==280 && offsetof(struct mesh_state,removed)==284 &&
-  offsetof(struct mesh_state,boot)==288 && offsetof(struct mesh_state,times)==296,"mesh_state");
+  offsetof(struct mesh_state,boot)==288 && offsetof(struct mesh_state,times)==296 && offsetof(struct mesh_state,receive_wakes)==304,"mesh_state");
 /* JGroups ViewId.java */
 static inline struct mesh_view_id mesh_plan_view(const struct mesh_state *s){
   return (struct mesh_view_id){.id=s->serial,.sequencer=s->sequencer,.boot=s->boot};

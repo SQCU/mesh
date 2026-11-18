@@ -278,7 +278,7 @@ PLATFORM_NS = 5000000000
 # man/fi_cntr.3.md: "Counters record the number of requested operations that have completed." (`completions`)
 # 2026-11-09 (design/compilation-composition-change-request.md item 6, unit 6D): `signature` and `signature_bytes` go
 # with the plan record's region copy (the plan's signature is mesh_planned `signature` in the compilation; the exported
-# record is the composed program's), so the mirror ends at `times` (byte 304; the section stays 320 bytes by its
+# record is the composed program's). receive_wakes is relative to this state (the section stays 320 bytes by its
 # alignment).  What must stay: the words in the header's order and at its offsets
 class State(C.Structure):
     _fields_ = [('copies', U), ('receives', U), ('ranges', U), ('releases', U), ('phases', Q), ('counts', Q),
@@ -288,7 +288,7 @@ class State(C.Structure):
                 ('broadcast', Q), ('arrived', Q), ('room', Q), ('deliveries', Q), ('submits', Q), ('announced', Q),
                 ('waits', U), ('tells', U), ('syncs', Q), ('calls', U), ('closed', U), ('rows', Q),
                 ('submit_room', Q), ('transfers', Q), ('sequencer', U), ('padding4', U), ('boot', Q),
-                ('times', Q)]
+                ('times', Q), ('receive_wakes', Q)]
 
 
 # 2026-11-06 (design/compilation-coordination.md, "The root cause of the copies, and the revised work list", R-7: "Every
@@ -624,7 +624,9 @@ for name, result, arguments in (
         ('mesh_host_started', None, [CONTEXT, Q, U, Q]),
         ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q]),
         ('mesh_host_sent', Q, [CONTEXT, Q, U, Q]),
-        ('mesh_host_wait', C.c_int, [CONTEXT, Q, U, Q, U])):
+        ('mesh_host_wait', C.c_int, [CONTEXT, Q, U, Q, U]),
+        ('mesh_host_wait_fields', C.c_int, [CONTEXT, Q, U, Q, Z, C.POINTER(Q)]),
+        ('mesh_plan_receive_wakes', C.c_int, [C.POINTER(PlanCompilation), U, U, Z, C.POINTER(Q)])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 

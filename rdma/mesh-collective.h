@@ -596,6 +596,10 @@ uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uin
 uint64_t mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 /* design/disjoint-pages-change-request.md C3.6; design/problems-of-14b9a757-change-request.md 7.3 */
 int mesh_host_wait(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction);
+int mesh_host_wait_fields(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution,
+                          size_t words,const uint64_t *mask);
+int mesh_plan_receive_wakes(struct mesh_plan_compilation *,uint32_t function,uint32_t transfer,
+                            size_t words,const uint64_t *mask);
 /* design/torch-capture-change-request.md item 6 */
 void mesh_view_values(struct mesh_ctx *,const struct mesh_function *functions,const struct mesh_plan_binding *,uint32_t count,uint64_t *first,
                       uint64_t *offset,struct mesh_view *view);

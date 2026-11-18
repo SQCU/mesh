@@ -24,7 +24,8 @@ void mesh_host_publish(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,
 }
 
 /* design/disjoint-pages-change-request.md C3.1, C3.7 */
-uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+static uint64_t host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,
+                             const uint64_t *mask){
   struct hdr *m=context->M;
   const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
   const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
@@ -34,9 +35,14 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
   _Atomic uint64_t *group=(_Atomic uint64_t *)((char *)m+entry->phases+copy*mesh_group_bytes(entry->pages));
   int landed=1;
   for(uint64_t w=0;w<(pages+31)/32;w++){
+    uint32_t selected=mask?(uint32_t)(mask[w/2]>>(32*(w%2))):UINT32_MAX;
+    if(pages-32*w<32)selected&=(UINT32_C(1)<<(pages-32*w))-1;
+    if(!selected)continue;
     const uint64_t word=atomic_load_explicit(group+w,memory_order_acquire);
-    for(uint64_t k=w*32;k<pages && k<w*32+32;k++){
-      const uint32_t field=(uint32_t)(word>>(2*(k%32))&3);
+    while(selected){
+      const unsigned k=(unsigned)__builtin_ctz(selected);
+      selected&=selected-1;
+      const uint32_t field=(uint32_t)(word>>(2*k)&3);
       if(field==expected)continue;
       if(field!=behind)return UINT64_MAX;
       landed=0;
@@ -44,6 +50,10 @@ uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t trans
   }
   if(landed)return 1;
   return count>=(round+1)*pages?UINT64_MAX:0;
+}
+
+uint64_t mesh_host_arrived(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+  return host_arrived(context,plan,transfer,execution,NULL);
 }
 
 /* libfabric man/fi_cntr.3.md, fi_cntr_wait, fi_cntr_readerr; libfabric man/fi_endpoint.3.md, fi_cancel;
@@ -62,23 +72,33 @@ uint64_t mesh_host_sent(struct mesh_ctx *context,uint64_t plan,uint32_t transfer
 
 /* design/disjoint-pages-change-request.md C3.6; design/problems-of-14b9a757-change-request.md 7.3, steps 3 and 6;
    libfabric man/fi_cntr.3.md, fi_cntr_wait; mesh-call.h mesh_transfers_start, 2026-11-06 */
-int mesh_host_wait(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction){
+static int host_wait(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,
+                     uint32_t direction,size_t words,const uint64_t *mask){
   struct hdr *m=context->M;
   const struct mesh_state *state=(const struct mesh_state *)(const void *)((char *)m+plan);
   const struct mesh_publication *entry=mesh_transfer_at(m,state,transfer);
   const uint64_t copy=execution%state->copies;
+  if(mask && words!=((size_t)entry->pages+63)/64)return EINVAL;
   if(direction==MESH_SEND && !entry->sends)return 0;
   _Atomic uint64_t *word=(_Atomic uint64_t *)((char *)m+(direction==MESH_SEND?entry->completion+16*copy:entry->count+8*copy));
   for(int expired=0;;){
     const uint64_t seen=atomic_load_explicit(word,memory_order_acquire);
     const uint64_t done=direction==MESH_SEND?mesh_host_sent(context,plan,transfer,execution):
-                                             mesh_host_arrived(context,plan,transfer,execution);
+                                             host_arrived(context,plan,transfer,execution,mask);
     if(done)return done==UINT64_MAX?ECANCELED:0;
     if(expired)return ETIMEDOUT;
     expired=os_sync_wait_on_address_with_timeout(word,seen,sizeof *word,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
                                                  OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PLATFORM_NS)<0 && errno==ETIMEDOUT &&
             atomic_load_explicit(word,memory_order_acquire)==seen;
   }
+}
+
+int mesh_host_wait(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,uint32_t direction){
+  return host_wait(context,plan,transfer,execution,direction,0,NULL);
+}
+int mesh_host_wait_fields(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution,
+                          size_t words,const uint64_t *mask){
+  return host_wait(context,plan,transfer,execution,MESH_RECEIVE,words,mask);
 }
 
 struct plan_loaded;
@@ -470,7 +490,7 @@ static void plan_layout(struct plan_step *p){
   p->rows=plan_align(p->syncs+((uint64_t)p->waits+p->tells)*sizeof(struct mesh_sync));
   p->hops=plan_align(p->rows+((uint64_t)p->flow->calls+1)*sizeof(uint32_t));
   p->times=plan_align(p->hops+p->geometry->entries*plan_step_copies(p)*sizeof(struct mesh_hop));
-  p->words=p->times+(uint64_t)p->flow->transfers*sizeof(double);
+  p->words=p->times+(uint64_t)p->flow->transfers*sizeof(double)+(p->geometry->entries+63)/64*sizeof(uint64_t);
 }
 static uint64_t plan_supplied(const struct plan_step *p,const struct mesh_plan_demand *d){
   return p->base+p->supplied+(uint64_t)d->release*sizeof(uint64_t);
@@ -3353,6 +3373,27 @@ static int plan_schedule_inputs(const struct mesh_plan_analysis *analysis,struct
   return 0;
 }
 static int plan_entries(struct plan_step *steps,uint32_t count){
+/* design/plan-to-bridge-change-request.md R4. One prepared wake bit per hop, shared by every copy. */
+int mesh_plan_receive_wakes(struct mesh_plan_compilation *compiled,uint32_t function,uint32_t transfer,
+                            size_t words,const uint64_t *mask){
+  if(function>=compiled->result.planned.functions)return EINVAL;
+  const struct plan_step *p=compiled->step+function;
+  if(transfer>=p->flow->transfers)return EINVAL;
+  const uint32_t demand=p->flow->of[transfer];
+  const uint64_t entries=p->geometry->entries,offset=p->times+(uint64_t)p->flow->transfers*sizeof(double);
+  if(words!=((uint64_t)p->geometry->demand[demand].received+63)/64 ||
+     offset+(entries+63)/64*sizeof(uint64_t)>p->words)return EINVAL;
+  struct mesh_state *state=compiled->state[function];
+  state->receive_wakes=offset;
+  uint64_t *wake=(uint64_t *)((char *)state+offset);
+  for(uint64_t j=0;j<entries;j++){
+    const struct mesh_plan_entry *e=p->entry[j].source;
+    if(e->direction==MESH_RECEIVE && e->demand==demand && (mask[e->field/64]>>(e->field%64)&1))
+      wake[j/64]|=UINT64_C(1)<<(j%64);
+  }
+  return 0;
+}
+
   for(uint32_t f=0;f<count;f++){
     struct plan_step *step=steps+f;
     step->entry=malloc(((size_t)step->geometry->entries+1)*sizeof *step->entry);
