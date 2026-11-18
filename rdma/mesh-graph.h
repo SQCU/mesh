@@ -83,6 +83,9 @@ uint32_t mesh_graph_relation_incoming_head(const void *context, size_t k);
    its row of reached[u] and bit label[u] (UINT32_MAX: none), the row of an inactive v not followed (reached[v] empty);
    EINVAL also for a label at or past `columns` other than UINT32_MAX */
 struct mesh_graph_closure { uint32_t vertices; size_t words; uint64_t *reached; };
+static inline int mesh_graph_closure_contains(const struct mesh_graph_closure *closure, uint32_t row, uint32_t column) {
+  return (int)(closure->reached[(size_t)row * closure->words + column / 64] >> (column % 64) & 1);
+}
 int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                        const void *context, const uint32_t *order, ptrdiff_t step, struct mesh_graph_closure **made);
 int mesh_graph_closure_labels(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
@@ -713,6 +716,8 @@ int mesh_graph_relation_create(uint32_t vertices, size_t views, const struct mes
                                const struct mesh_graph_conflict *conflict, void (*release)(void *), void *owner,
                                struct mesh_graph_relation **out);
 const struct mesh_graph_relation_data *mesh_graph_relation_data(const struct mesh_graph_relation *);
+/* Incoming closure from the original incoming-row search's postorder; freed by mesh_graph_closure_free. */
+int mesh_graph_relation_ancestors(const struct mesh_graph_relation *, struct mesh_graph_closure **made);
 int mesh_graph_relation_quotient(struct mesh_graph_relation *parent, uint32_t classes, const uint32_t *class_of,
                                  void (*release)(void *), void *owner, struct mesh_graph_relation **out);
 int mesh_graph_relation_contract(struct mesh_graph_relation *parent, const unsigned char *kept, void (*release)(void *),

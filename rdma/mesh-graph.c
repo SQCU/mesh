@@ -289,7 +289,7 @@ static int closure_rows(uint32_t vertices, const size_t *first, uint32_t (*head)
     for (size_t j = 0; !status && j < n; j++) {
       const uint32_t u = order[(ptrdiff_t)heads[j] * step], column = label ? label[u] : u;
       if (column != UINT32_MAX && column >= columns) status = EINVAL;
-      else if (label || !(row[u / 64] >> (u % 64) & 1)) {
+      else if (label || !mesh_graph_closure_contains(c, v, u)) {
         const uint64_t *from = c->reached + (size_t)u * words;
         for (size_t w = 0; w < words; w++) row[w] |= from[w];
         if (column != UINT32_MAX) row[column / 64] |= UINT64_C(1) << (column % 64);
@@ -305,6 +305,22 @@ static int closure_rows(uint32_t vertices, const size_t *first, uint32_t (*head)
 int mesh_graph_closure(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
                        const void *context, const uint32_t *order, ptrdiff_t step, struct mesh_graph_closure **made) {
   return closure_rows(vertices, first, head, context, order, step, NULL, vertices, NULL, made);
+}
+
+int mesh_graph_relation_ancestors(const struct mesh_graph_relation *relation, struct mesh_graph_closure **made) {
+  *made = NULL;
+  const struct mesh_graph_relation_data *d = mesh_graph_relation_data(relation);
+  uint32_t *roots = malloc(((size_t)d->vertices + 1) * sizeof *roots);
+  if (!roots) return ENOMEM;
+  for (uint32_t v = 0; v < d->vertices; v++) roots[v] = v;
+  struct mesh_graph_search *search = NULL;
+  int status = mesh_graph_search(d->vertices, d->in_first, mesh_graph_relation_incoming_head, d,
+                                 d->vertices, roots, 0, &search);
+  if (!status) status = mesh_graph_closure(d->vertices, d->in_first, mesh_graph_relation_incoming_head, d,
+                                           search->postorder, 1, made);
+  mesh_graph_search_free(search);
+  free(roots);
+  return status;
 }
 
 int mesh_graph_closure_labels(uint32_t vertices, const size_t *first, uint32_t (*head)(const void *context, size_t k),
@@ -2186,7 +2202,7 @@ struct closure_members { const struct mesh_graph_closure *closed; const uint32_t
 static int closure_before(const void *context, uint32_t a, uint32_t b) {
   const struct closure_members *c = context;
   const uint32_t x = c->member[a], y = c->member[b];
-  return (int)(c->closed->reached[(size_t)y * c->closed->words + x / 64] >> (x % 64) & 1);
+  return mesh_graph_closure_contains(c->closed, y, x);
 }
 int mesh_graph_closure_chains(const struct mesh_graph_closure *closed, uint32_t items, const uint32_t *member,
                               const uint64_t *count, uint64_t *chain, uint64_t *chains) {

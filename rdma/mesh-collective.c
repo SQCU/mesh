@@ -566,7 +566,7 @@ static int plan_before(const struct plan_arcs *x,size_t a,size_t na,size_t b,siz
     uint32_t ca,ba,ea,cb,bb,eb;
     plan_occurrence(x,a,i,&ca,&ba,&ea);
     plan_occurrence(x,b,k,&cb,&bb,&eb);
-    if(ca==cb?ea>=bb:!(c->reached[(size_t)cb*c->words+ca/64]>>(ca%64)&1))return 0;
+    if(ca==cb?ea>=bb:!mesh_graph_closure_contains(c,cb,ca))return 0;
   }
   return 1;
 }
