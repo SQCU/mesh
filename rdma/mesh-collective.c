@@ -13,14 +13,23 @@
 _Static_assert(MESH_NODES_MOST<=64,"a demand's destinations are one 64-bit set of map indices");
 
 /* design/disjoint-pages-change-request.md C3.7; design/aot-compilation-change-request.md, appendix item 7 */
-void mesh_host_publish(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
-  struct hdr *m=context->M;
-  const struct mesh_publication *entry=mesh_transfer_at(m,(const struct mesh_state *)(const void *)((char *)m+plan),
-                                                        transfer);
-  _Atomic uint64_t *word=(_Atomic uint64_t *)(void *)((char *)m+entry->targets[0].word);
+static void publish_word(struct hdr *m,uint64_t offset,uint64_t execution){
+  _Atomic uint64_t *word=(_Atomic uint64_t *)(void *)((char *)m+offset);
   uint64_t seen=atomic_load_explicit(word,memory_order_relaxed);
   while(seen<execution+1 &&
         !atomic_compare_exchange_weak_explicit(word,&seen,execution+1,memory_order_release,memory_order_relaxed));
+}
+void mesh_host_publish(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint64_t execution){
+  struct hdr *m=context->M;
+  const struct mesh_publication *entry=mesh_transfer_at(m,mesh_state_at(m,plan),transfer);
+  publish_word(m,entry->targets[0].word,execution);
+}
+int mesh_host_publish_cut(struct mesh_ctx *context,uint64_t plan,uint32_t transfer,uint32_t cut,uint64_t execution){
+  struct hdr *m=context->M;
+  const struct mesh_publication *entry=mesh_transfer_at(m,mesh_state_at(m,plan),transfer);
+  if(cut>=entry->targets[0].count)return EINVAL;
+  publish_word(m,entry->origin?entry->origin+(uint64_t)cut*sizeof(uint64_t):entry->targets[0].word,execution);
+  return 0;
 }
 
 /* design/disjoint-pages-change-request.md C3.1, C3.7 */

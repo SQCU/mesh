@@ -591,6 +591,7 @@ void mesh_view_program(struct mesh_ctx *,const struct mesh_plan_binding *binding
                        struct mesh_view *view);
 
 /* design/plan-to-bridge-change-request.md R2; design/aot-compilation-change-request.md A9 */
+int mesh_host_publish_cut(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint32_t cut,uint64_t execution);
 void mesh_host_publish(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 uint64_t mesh_host_arrived(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);
 uint64_t mesh_host_sent(struct mesh_ctx *,uint64_t plan,uint32_t transfer,uint64_t execution);

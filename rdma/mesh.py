@@ -306,7 +306,7 @@ class Target(C.Structure):
 
 class Publication(C.Structure):
     _fields_ = [('sends', U), ('pages', U), ('phases', Q), ('count', Q), ('state', Q), ('targets', Target * 1),
-                ('completion', Q)]
+                ('completion', Q), ('origin', Q)]
 
 
 PUBLICATION_BYTES = 64
@@ -621,6 +621,7 @@ for name, result, arguments in (
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
         ('mesh_transfers_start', C.c_int, [CONTEXT, Q, Q]),
         ('mesh_host_publish', None, [CONTEXT, Q, U, Q]),
+        ('mesh_host_publish_cut', C.c_int, [CONTEXT, Q, U, U, Q]),
         ('mesh_host_started', None, [CONTEXT, Q, U, Q]),
         ('mesh_host_arrived', Q, [CONTEXT, Q, U, Q]),
         ('mesh_host_sent', Q, [CONTEXT, Q, U, Q]),
