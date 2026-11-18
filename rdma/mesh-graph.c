@@ -3580,6 +3580,7 @@ int mesh_graph_access_map_placed(const struct mesh_graph_access_map *a, int64_t 
    each ROOT dimension that is no reduction, on axis `axis` with group[axis] > 0, within [group g_axis, + group) */
 static isl_set *access_own(const struct mesh_graph_domain *d, isl_space *space, const uint32_t group[3],
                            const uint32_t groups[3]) {
+  isl_ctx *ctx = isl_space_get_ctx(space);
   isl_local_space *local = isl_local_space_from_space(isl_space_copy(space));
   isl_basic_set *own = isl_basic_set_universe(space);
   for (uint32_t axis = 0; axis < 3; axis++) {
@@ -3587,19 +3588,21 @@ static isl_set *access_own(const struct mesh_graph_domain *d, isl_space *space, 
         isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_param, (int)axis, 1));
     isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
                                                           isl_dim_param, (int)axis, -1);
-    own = isl_basic_set_add_constraint(own, isl_constraint_set_constant_si(c, (int)groups[axis] - 1));
+    own = isl_basic_set_add_constraint(own,
+      isl_constraint_set_constant_val(c, isl_val_sub_ui(isl_val_int_from_ui(ctx, groups[axis]), 1)));
   }
   for (uint32_t k = 0; k < d->dims; k++) {
     const struct mesh_graph_domain_dim *x = d->dim + k;
     if (x->kind != MESH_GRAPH_DOMAIN_ROOT || x->reduction || x->axis >= 3 || !group[x->axis]) continue;
     isl_constraint *c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)),
                                                           isl_dim_set, (int)k, 1);
-    own = isl_basic_set_add_constraint(own, isl_constraint_set_coefficient_si(c, isl_dim_param, (int)x->axis,
-                                                                              -(int)group[x->axis]));
+    own = isl_basic_set_add_constraint(own, isl_constraint_set_coefficient_val(c, isl_dim_param, (int)x->axis,
+      isl_val_neg(isl_val_int_from_ui(ctx, group[x->axis]))));
     c = isl_constraint_set_coefficient_si(isl_constraint_alloc_inequality(isl_local_space_copy(local)), isl_dim_set,
                                           (int)k, -1);
-    c = isl_constraint_set_coefficient_si(c, isl_dim_param, (int)x->axis, (int)group[x->axis]);
-    own = isl_basic_set_add_constraint(own, isl_constraint_set_constant_si(c, (int)group[x->axis] - 1));
+    c = isl_constraint_set_coefficient_val(c, isl_dim_param, (int)x->axis, isl_val_int_from_ui(ctx, group[x->axis]));
+    own = isl_basic_set_add_constraint(own,
+      isl_constraint_set_constant_val(c, isl_val_sub_ui(isl_val_int_from_ui(ctx, group[x->axis]), 1)));
   }
   isl_local_space_free(local);
   return isl_set_from_basic_set(own);
