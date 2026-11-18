@@ -402,7 +402,7 @@ UPSTREAM_BUFFER, UPSTREAM_SCALAR, UPSTREAM_ERROR = range(3)
 
 
 class UpstreamArgument(C.Structure):
-    _fields_ = [(name, mesh.U) for name in ('kind', 'value', 'access', 'padding')] + [('alignment', mesh.Q)]
+    _fields_ = [(name, mesh.U) for name in ('kind', 'value', 'access', 'address_access')] + [('alignment', mesh.Q)]
 
 
 # struct metal_ir_upstream_access: one access as its producer made it, `argument` its launch argument, `write` 0 a
@@ -1074,7 +1074,7 @@ class _Builder:
         lib = _upstream()
         self.identity = self.base | node
         body = Upstream(place, len(arguments), len(accesses), len(sources),
-                        _array(UpstreamArgument, [UpstreamArgument(kind, value, access, 0, 0)
+                        _array(UpstreamArgument, [UpstreamArgument(kind, value, access, access, 0)
                                                   for kind, value, access in arguments]),
                         domain, _array(UpstreamAccess, accesses), _array(mesh.Q, [self.base | s for s in sources]),
                         None if work is None else C.pointer(work), self.identity, (mesh.U * 3)(*grid),
