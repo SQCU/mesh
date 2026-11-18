@@ -864,11 +864,11 @@ class Target:
     # value (plan_calls[j], root), rebound on each instance) and paged geometry, its copies erased, its source relation
     # attached once (Target.related) and constructed once, the source program the first group's and, cloned from it
     # before its construction (metal_ir_clone: every value, operation and region identity the source's, its external
-    # marks included), a copy each further group's; `templates[j]` call j's constructed program, None where it has no
-    # program on this node; the copies released with `owned`
+    # marks included). Each rewrite retains its instances by call index. The selector reads their dispatches,
+    # storage, workgroup allocations and dependency relation. The chosen instances continue into placement.
     def constructed(self, context, plan_calls, libs, owned, prepared, choices, select):
         M, compiler, (_, device), _ = libs
-        error, templates, sources, classes = C.create_string_buffer(ROOM), [None] * len(self.rows), {}, {}
+        error, sources, classes = C.create_string_buffer(ROOM), {}, {}
         header = mesh.Header.from_address(mesh.Context.from_address(context).M) if context is not None else None
 
         def paged(j):
@@ -907,41 +907,34 @@ class Target:
                 if self.bodies[self.rows[calls[0]].function].machine is not None:
                     self.related(constructing, calls[0], libs)
                 mesh.check(compiler.metal_ir_recorder_target(constructing))
-                self.rewrites[tuple(calls)] = {choice: M.Rewrite(constructing, gpu, choice) for choice in choices}
-            selection = (select(prepared, self.rewrites) if select is not None else
-                         {calls: choices[0] for calls in self.rewrites})
-            self.selected_rewrites = {calls: variants[selection[calls]] for calls, variants in self.rewrites.items()}
-            for calls, rewrite in self.selected_rewrites.items():
-                checked(compiler.metal_ir_construct(rewrite.program, gpu, error, ROOM), error, "construction")
-                for j in calls:
-                    templates[j] = rewrite.program
+                variants = self.rewrites[tuple(calls)] = {}
+                for choice in choices:
+                    rewrite = variants[choice] = M.Rewrite(constructing, gpu, choice)
+                    checked(compiler.metal_ir_construct(rewrite.program, gpu, error, ROOM), error, "construction")
+                    rewrite.instances = {j: M.CallIR(rewrite.program) for j in calls}
         finally:
             M.PUT(gpu, M.SELECTOR[b"release"])
-        self.templates = templates
+        self.instanced(context, plan_calls, libs)
+        selection = (select(prepared, self.rewrites) if select is not None else
+                     {calls: choices[0] for calls in self.rewrites})
+        self.selected_rewrites = {calls: variants[selection[calls]] for calls, variants in self.rewrites.items()}
+        self.instances = [None] * len(self.rows)
+        for calls, rewrite in self.selected_rewrites.items():
+            for j in calls:
+                row = self.rows[j]
+                program = self.instances[j] = rewrite.instances[j].program
+                body = self.bodies[row.function].machine
+                if body is not None and (body.upstream or body.neural):
+                    from .lower_metal import emitted
+                    emitted(program, body, row.offset)
 
-    # metal-microbench metal_ir.h metal_ir_specialize, metal_ir_value_receives, metal_ir_value_sends,
-    # metal_ir_value_planned and metal_ir_lower; rdma/mesh-metal.h mesh_metal_range_declare: each original call's
-    # instance (`instances`, released with `owned`), its constructed program specialized, THAT call's Ports declared
-    # (each received range of transfer `transfer` of its owner call landing for call j, among `plan_calls`, the calls as
-    # the plan takes them, its backing bytes at its byte; `context` the compile owner's, read for its page geometry;
-    # each canonical release once, {its representative transfer, owner call}, metal_ir_value_sends appending it; each
-    # sent row's sending lifetime), each intrinsic wire's plan value (instance plan_calls[j], ValueID the wire's root;
-    # placed from that section, marks["placed"], where no joint root binds it: Target.ported `joint`), then its
-    # body's produced kernels' and Neural Engine bodies' terminal emissions (compiler/mesh_compiler/lower_metal.py
-    # emitted: its ConstructedMachine's upstream and neural, each operation at its row's append offset, Row.offset: 0
-    # where the row runs its body's own program; a copy-only row has no machine and none), then its structural
-    # lowering (transport, checks, step, the arrays the plan reads); a call with no program on this node has no instance
-    def instanced(self, context, plan_calls, libs, owned):
-        from .lower_metal import emitted
+    def instanced(self, context, plan_calls, libs):
         M, compiler, _, transport = libs
-        error, listed = C.create_string_buffer(ROOM), (mesh.U * max(len(plan_calls), 1))(*plan_calls)
-        instances = []
-        for j, (row, template) in enumerate(zip(self.rows, self.templates)):
-            if template is None:
-                instances.append(None)
-                continue
-            instance = made(compiler.metal_ir_specialize(template, error, ROOM), error, "specialization")
-            owned(lambda instance=instance: compiler.metal_ir_program_free(instance))
+        listed = (mesh.U * max(len(plan_calls), 1))(*plan_calls)
+        variants = {j: [rewrite.instances[j] for rewrite in candidates.values()]
+                    for calls, candidates in self.rewrites.items() for j in calls}
+        for j, instances in variants.items():
+            row = self.rows[j]
             (ports, wires), f, releases = self.call_ports[j], plan_calls[j], set()
             marks = {"received": [], "sent": [], "sending": {}, "transfers": [], "placed": []}
             for port in ports:
@@ -950,28 +943,28 @@ class Target:
                     mesh.check(transport.mesh_metal_range_declare(mesh.Context.from_address(context), listed,
                                                                   len(plan_calls), j, port.owner, port.transfer,
                                                                   port.bytes, port.at, C.byref(landed)))
-                    compiler.metal_ir_value_receives(instance, port.root, C.byref(landed))
+                    for instance in instances:
+                        compiler.metal_ir_value_receives(instance.program, port.root, C.byref(landed))
                     marks["received"].append((port.root, *port.section, bytes(landed)))
                 elif port.release is None or (port.owner, port.release) not in releases:
                     releases.add((port.owner, port.release))
                     release = M.Release(transfer=port.first, owner=port.owner)
-                    compiler.metal_ir_value_sends(instance, port.root, C.byref(release))
+                    for instance in instances:
+                        compiler.metal_ir_value_sends(instance.program, port.root, C.byref(release))
                     marks["sent"].append((port.root, port.owner, bytes(release)))
                 marks["transfers"].append((port.owner, port.transfer))
                 marks["sending"][port.owner, port.transfer] = port.value
             for root in wires:
-                compiler.metal_ir_value_planned(instance, root, f, root, 0)
+                for instance in instances:
+                    compiler.metal_ir_value_planned(instance.program, root, f, root, 0)
                 if (j, root) not in self.joint:
                     marks["placed"].append((root, f, root))
             for root in dict.fromkeys(copy[4] for copy in row.copies):
-                compiler.metal_ir_value_planned(instance, root, f, root, 0)
-            body = self.bodies[row.function].machine
-            if body is not None:
-                emitted(instance, body, row.offset)
-            checked(compiler.metal_ir_lower(instance, error, ROOM), error, "lowering")
+                for instance in instances:
+                    compiler.metal_ir_value_planned(instance.program, root, f, root, 0)
             row.marks = marks
-            instances.append(instance)
-        self.instances = instances
+            for instance in instances:
+                instance.lower()
 
     # rdma/mesh-collective.h struct mesh_function, mesh_plan_local: each lowered call instance's mesh.Function (its
     # actual Storages, its row's explicit roots run 0, its step appended; its retained MetalRecorderActors parts and
@@ -1573,7 +1566,6 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
         context = C.addressof(planning.context) if planning is not None else None
         target.ported(prepared, declarations, analysis, plan_calls, here)
         target.constructed(context, plan_calls, libs, instances, prepared, rewrite_choices, select_rewrites)
-        target.instanced(context, plan_calls, libs, instances)
         functions, quantum = target.functions(libs, analysis, prepared, plan_calls)
         joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
                               declared=prepared, analysis_context=analysis_context)
@@ -1586,7 +1578,7 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
             target.compile(Arena(target, owned, M, gpu) if planning is None else Mapped(target))
             owned.finalizer()
         instances.finalizer()
-    target.instances = target.templates = target.call_ports = target.targets = target.composites = None
+    target.instances = target.call_ports = target.targets = target.composites = None
     target.joint = target.intrinsic = target.direct = None
     target.landed = None
     return target

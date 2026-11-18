@@ -184,6 +184,35 @@ INLINE_MAPS, FUSE_EPILOGUE, FUSE_ROWS, ALLOW_RECOMPUTE, ALLOW_COSTLIER_GROUP = 1
 ALL_FUSIONS = INLINE_MAPS | FUSE_EPILOGUE | FUSE_ROWS
 
 
+class CallIR:
+    def __init__(self, template):
+        compiler = _compiler()
+        error = C.create_string_buffer(4096)
+        self.program = compiler.metal_ir_specialize(template, error, len(error))
+        if not self.program:
+            raise ValueError(error.value.decode())
+        self.close = weakref.finalize(self, compiler.metal_ir_program_free, self.program)
+
+    def lower(self):
+        compiler = _compiler()
+        error = C.create_string_buffer(4096)
+        if compiler.metal_ir_lower(self.program, error, len(error)):
+            raise ValueError(error.value.decode())
+        self.relation = compiler.metal_ir_relation(self.program)
+        dispatch, storage = C.POINTER(Dispatch)(), C.POINTER(Storage)()
+        dispatches = compiler.metal_ir_dispatches(self.program, C.byref(dispatch))
+        storages = compiler.metal_ir_storages(self.program, C.byref(storage))
+        count = C.c_size_t()
+        allocations = compiler.metal_ir_allocations(self.program, C.byref(count))
+        for name, pointer, type_, size in (('dispatches', dispatch, Dispatch, dispatches),
+                                            ('storages', storage, Storage, storages),
+                                            ('allocations', allocations, mesh.U, count.value)):
+            table = C.cast(pointer, C.POINTER(type_ * size)).contents if size else ()
+            if size:
+                table.owner = self
+            setattr(self, name, table)
+
+
 class Rewrite:
     def __init__(self, source, device, choices):
         lib = _compiler()
@@ -796,6 +825,8 @@ def _compiler():
                 ('metal_ir_operation_axis', C.c_int, [P, U, U, U, Q, Q]),
                 ('metal_ir_work_associations', C.POINTER(WorkAssociation), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_dispatches', U, [P, C.POINTER(C.POINTER(Dispatch))]),
+                ('metal_ir_allocations', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
+                ('metal_ir_relation', P, [P]),
                 ('metal_ir_dispatch_numerics', C.POINTER(Numeric), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_kernel_devices', None, [P, U, U * 3]),
                 ('metal_ir_lower', C.c_int, [P, C.c_char_p, C.c_size_t]),
