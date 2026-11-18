@@ -904,6 +904,7 @@ class Target:
                     compiler.metal_ir_operation_erase(constructing, op)
                 if self.bodies[self.rows[calls[0]].function].machine is not None:
                     self.related(constructing, calls[0], libs)
+                mesh.check(compiler.metal_ir_recorder_target(constructing))
                 checked(compiler.metal_ir_construct(constructing, gpu, error, ROOM), error, "construction")
                 for j in calls:
                     templates[j] = constructing

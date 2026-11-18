@@ -758,6 +758,7 @@ def _compiler():
                 ('metal_ir_if_begin', None, [P, U, U]), ('metal_ir_if_else', None, [P, U, U, C.POINTER(U)]),
                 ('metal_ir_if_end', U, [P, U, U, C.POINTER(U)]),
                 ('metal_ir_operation_erase', None, [P, U]),
+                ('metal_ir_recorder_target', C.c_int, [P]),
                 ('metal_ir_construct', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
                 ('metal_ir_work_terms', C.c_int, [P, C.POINTER(C.c_size_t), C.POINTER(C.POINTER(WorkTerm)),
                                                   C.POINTER(C.POINTER(Expr)), C.POINTER(C.POINTER(Term)),
