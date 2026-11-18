@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
 # design/the-compiler.md, order 3; design/unequal-shards-change-request.md items 8 and 9
 import os
 
 import torch
 import torch.nn.functional as F
 
-from parallel import Attention, DIM, arguments, execute
+from parallel import Attention, DIM
 
 
 SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in (('SEQ', 8192), ('VOCAB', 8192)))
@@ -33,16 +32,3 @@ def placement(processors, units='striped', sequence=None):
             return 1 if sequence in (None, node.meta['val'].shape[1]) else 2, processors, units
         return processors[0]
     return choose
-
-
-def main():
-    args = arguments('A causal language model forward and backward, its tokens, positions and targets split over '
-                     'processors in stripes of the sequence.')
-    torch.manual_seed(0)
-    ids, targets = torch.randint(0, VOCAB, (1, SEQ)), torch.randint(0, VOCAB, (1, SEQ))
-    inputs = ids, torch.arange(SEQ)[None], targets
-    return execute(Causal().eval(), inputs, lambda processors: placement(processors, sequence=SEQ), args, loss=0)
-
-
-if __name__ == '__main__':
-    main()

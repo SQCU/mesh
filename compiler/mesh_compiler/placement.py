@@ -1,5 +1,4 @@
 # design/the-compiler.md; design/data-flow.md
-import copy
 import functools
 import itertools
 import math
@@ -8,6 +7,7 @@ import pathlib
 import sys
 
 import torch
+from schedule_emit.export import derived_graph
 from torch._guards import detect_fake_mode
 from torch.fx.node import map_arg
 from torch.fx.proxy import GraphAppendingTracer
@@ -1095,16 +1095,23 @@ def partitioned(graph, node, held, want, replaced, whole, statement=None):
                for k, (keeper, held_) in enumerate(parts.items())]
 
 
-def place(graph_module, placement, *, transfer=None):
-    graph_module = copy.deepcopy(graph_module)
+def place(graph_module: torch.fx.GraphModule, placement, *, transfer=None) -> torch.fx.GraphModule:
+    original = graph_module
+    graph_module, copied = derived_graph(original)
     graph = graph_module.graph
     nodes = list(graph.nodes)
     placed = [n for n in nodes if n.op != "placeholder"]
-    stated = {n: placement(n) for n in placed if not projection(n)}
-    stated.update((n, placement(n)) for n in nodes if n.op == "placeholder")
+    stated = {copied[n]: placement(n) for n in original.graph.nodes if not projection(n)}
+    # design/aot-compilation-change-request.md A1; operations._qdwh_eigh_state
+    draw_sites = itertools.count(1 + max((n.meta["site"] for n in nodes if "site" in n.meta), default=0))
+    drawing = (ATEN._linalg_eigh, ATEN.linalg_pinv, ATEN._linalg_svd, ATEN.linalg_lstsq,
+               getattr(torch.ops.mesh, "linalg_lstsq_fixed", None))
     for node in nodes:
         if node.op == "placeholder":
             node.meta["stated"] = stated[node]
+        elif "site" not in node.meta and isinstance(node.target, torch._ops.OpOverload) and (
+                torch.Tag.nondeterministic_seeded in node.target.tags or node.target.overloadpacket in drawing):
+            node.meta["site"] = next(draw_sites)
     replaced, whole = [], {}
     # design/compilation-composition-change-request.md item 7; ir.view and ir.aliasing, the source alias owner: each
     # node of a user output position (a mutation's, export.read "destination", keeps its own producer) and each pure
@@ -1114,8 +1121,9 @@ def place(graph_module, placement, *, transfer=None):
     # operand placed by the output's own transfer as before
     output = graph.output_node()
     mutated = output.meta.get("destination", {})
-    mutations = {output.args[0][k] for k in mutated}
-    results = [n for k, n in enumerate(output.args[0])
+    output_values = pytree.tree_leaves(output.args[0])
+    mutations = {output_values[k] for k in mutated}
+    results = [n for k, n in enumerate(output_values)
                if k not in mutated and isinstance(n, torch.fx.Node) and isinstance(n.meta.get("val"), torch.Tensor)]
 
     # a pure source alias's replay predecessors: a getitem's call where that result is a view of an argument it aliases
@@ -1148,7 +1156,7 @@ def place(graph_module, placement, *, transfer=None):
     # tree), then a Tensor leaf resharded to its producer's statement at its own shape; a multi-result value's one
     # operation partitioned once under its statement (`partitioned`), the value itself never resharded (its
     # projections' transfers reshard each result); any other value under its own statement at its own shape
-    def transfer(node, held):
+    def place_value(node, held):
         multiple, statement = several_results(node), None
         if projection(node):
             held, want = [node.target(held[0], node.args[1])], None
@@ -1191,7 +1199,7 @@ def place(graph_module, placement, *, transfer=None):
     # then its getitem's); an input placeholder that input itself; a mutation's value its whole value (ir.views computes
     # it into its input); another its whole value in its original layout and extent (`required` where that differs);
     # each user output's realization its whole value there, then the output's own transfer once
-    values = mesh_graph.forward(nodes[:-1], operands, transfer)
+    values = mesh_graph.forward(nodes[:-1], operands, place_value)
     processor = stated[output]
 
     def realize(node, read):
@@ -1208,7 +1216,7 @@ def place(graph_module, placement, *, transfer=None):
     with graph.inserting_before(output):
         made = mesh_graph.forward(order, lambda node: retained[node][0], realize)
     whole.update(((node, processor), made[node]) for node in results)
-    values[output] = transfer(output, [values[u] for u in operands(output)])
+    values[output] = place_value(output, [values[u] for u in operands(output)])
     # each placeholder's own placed value: its holders' partition Nodes in holder order, or a whole one its stated
     # processor's and the placeholder itself, each with its landing geometry, (storage offset, shape, stride) of its
     # source view in the placeholder's storage (`landed`; a whole one's its own value's), None for a non-tensor
@@ -1229,20 +1237,24 @@ def place(graph_module, placement, *, transfer=None):
     # outputs, an impure node or an input part reads it (rdma/mesh_graph.py walk over the inputs from them)
     parts = {part for held in graph_module.meta["input_parts"].values() for _, part, _ in held}
     universe = list(graph.nodes)
-    live = set(mesh_graph.walk(universe, [n for n in universe if n.is_impure() or n in parts],
+    # FX treats effects inside an opaque call as unknown. Keep those calls in program order.
+    effects = {n for n in universe if n.is_impure() or n.op in ("call_module", "call_method")
+               or n.op == "call_function" and not isinstance(n.target, torch._ops.OpOverload)}
+    live = set(mesh_graph.walk(universe, parts | effects,
                                lambda n: n.all_input_nodes))
     named = {axis[0] for node in live for axis in node.meta.get("work_axes", ())}
-    graph.eliminate_dead_code(is_impure_node=lambda node: node.is_impure() or node in parts or node in named)
+    graph.eliminate_dead_code(is_impure_node=(effects | parts | named).__contains__)
     views(graph)
     # design/problems-of-14b9a757-change-request.md item 8, steps 1 to 3
     invariant = mesh_graph.forward(list(graph.nodes), lambda n: n.all_input_nodes, lambda n, read: (
-        "state" in n.meta if n.op == "placeholder" else bool(view(n)) and all(read)))
+        "state" in n.meta if n.op == "placeholder" else "val" in n.meta and bool(view(n)) and all(read)))
     # design/unequal-shards-change-request.md item 8: a call replicated where invariant or of no placeholder (the
     # placeholders' users' incoming search, once), each replicated call onto the processors of its users and of their
     # sets, an unreplicated vertex's set empty (one labelled closure over the incoming rows, its columns the processors)
     inputs = mesh_graph.Graph.adjacency(graph.nodes, lambda m: m.all_input_nodes)
     dependent = inputs.reach([n for n in inputs.vertices if n.op == "placeholder"], incoming=True)
-    replicated = [n.op == "call_function" and (invariant[n] or n not in dependent) for n in inputs.vertices]
+    replicated = [n.op == "call_function" and n not in effects and (invariant[n] or n not in dependent)
+                  for n in inputs.vertices]
     label = [n.meta.get("processor") for n in inputs.vertices]
     onto = inputs.labels(inputs.postorder(inputs.vertices, incoming=True), sorted(set(label) - {None}), label,
                          incoming=True, active=replicated)
@@ -1274,7 +1286,7 @@ def place(graph_module, placement, *, transfer=None):
     graph_module.meta["invariant"] = {processor: tuple(slices) for processor, slices in held.items()}
     graph_module.meta["transfers"] = transfers
     graph_module.recompile()
-    return graph_module, placed[-1].meta["processor"], len(transfers)
+    return graph_module
 
 
 # M. Abadi et al., TensorFlow, arXiv:1603.04467, section 3.2.2; design/unequal-shards-change-request.md items 2, 3

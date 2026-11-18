@@ -4,15 +4,16 @@
 
 ### 1. Finish lowering the whole assigned domain
 
-The frontend captures every tensor/linear-algebra program in AOT A1's domain through PyTorch export and FX (Reed et al.,
-*torch.fx*, MLSys 2022; PyTorch `torch.export.export`). Operator lowerings compose into a complete target program
+PyTorch export and FX supply the call graph for programs in AOT A1's domain (Reed et al.,
+*torch.fx*, MLSys 2022). Mesh transforms that graph and returns the transformed graph with its optimization results.
+The selected backend composes operator lowerings into a complete target program
 through full conversion (MLIR, [Dialect Conversion, Modes of Conversion](https://mlir.llvm.org/docs/DialectConversion/)).
 Source-lowering items 5/6 supply the numerical algorithms and their internal conditions for CPU, GPU and ANE placement.
 
 ### 2. Compose the requests on the same program's representations
 
-The driver composes export, placement, device assignment, schedule and target lowering as functions of explicit
-values, as `schedule-emit/schedule_emit/driver.py` demonstrates. The scheduled value carries the source bodies,
+An application supplies the source graph to Mesh and the transformed graph to its chosen lowerer, following the
+operator’s [graph boundary](graph-boundary-review-2026-11-18.md). The scheduled value carries the source bodies,
 placement, accesses, dependencies, storage, transfers and results of analysis to lowering, execution and archive.
 Unger et al., *Unity*, OSDI 2022, §1 supplies the parallel computation graph and substitutions joining computation,
 parallelization and communication.
@@ -34,7 +35,7 @@ parallelization and communication.
 
 The reference is the operator's demonstration at `/Users/mdot/schedule-emit`, commit `f41c64a`.
 
-**Position.** `driver.compile_module` composes `export`, `place`, `on_devices`, `schedule` and `argument_buffers`,
+**Position.** The reference application's `schedule_emit.driver.compile_module` composes `export`, `place`, `on_devices`, `schedule` and `argument_buffers`,
 and returns `Scheduled(exported, modules, devices, output_processor, channels, inputs, feedforward)`
 (`schedule_emit/driver.py` 14–21, `ir.py` 57–76). Capture, placement, device assignment and scheduling are
 backend-independent transformations of that value. Target lowering consumes it at `lower_inductor.lower(scheduled)`

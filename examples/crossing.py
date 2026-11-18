@@ -1,10 +1,7 @@
-#!/usr/bin/env python3
 # design/the-compiler.md, order 3; design/aot-compilation-change-request.md A4 and A10
 import os
 
 import torch
-
-import parallel
 
 
 HIDDEN = int(os.environ.get('HIDDEN', '1536'))
@@ -39,16 +36,3 @@ def placement(processors):
             return 0, processors, None
         return processors[0]
     return choose
-
-
-def main():
-    args = parallel.arguments('A chain of all-reduces of a sharded value, with optional numerical work between them.')
-    torch.manual_seed(0)
-    model = Chain(Crossing()).to(dtype=torch.float16).eval()
-    inputs = (torch.zeros(len(args.nodes), HIDDEN, dtype=torch.float16),
-              torch.randn(len(args.nodes), HIDDEN, dtype=torch.float16) / 4)
-    return parallel.execute(model, inputs, placement, args, functions={'work'})
-
-
-if __name__ == '__main__':
-    main()

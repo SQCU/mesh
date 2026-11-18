@@ -75,6 +75,9 @@ The same graph and allocation algorithms consume parameters, numerical operands,
 
 ### A9. Serialization stores the compiled operand
 
+Across successive executions, compilation writes each new callable, its bindings and the IR and solver results
+needed to revise it into distinct DMA-accessible page extents. Executions keep their selected version’s extents
+through completion. The operator sets this lifetime in the [18 November graph-boundary review](graph-boundary-review-2026-11-18.md).
 The archive stores the scheduled program, target programs, page bindings, state sections, source relations and
 derived results as compact sections with retained references (MSCCL-IR, Cowan et al. §5; ExecuTorch memory-planned
 serialization; the operator's paged-result instruction in the documentary review of 14 November).

@@ -1,15 +1,14 @@
-#!/usr/bin/env python3
 # design/parallel-layers-example.md; design/the-compiler.md, order 3
 import os
 
 import torch
 import torch.nn.functional as F
 
-from parallel import arguments, chosen, execute, megatron
+from parallel import megatron
 
 
-DIM, HEADS, FF_MULT, LAYERS, BATCH, SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in
-    (('DIM', 2048), ('HEADS', 16), ('FF_MULT', 4), ('LAYERS', 4), ('BATCH', 2), ('SEQ', 1024), ('VOCAB', 8192)))
+DIM, HEADS, FF_MULT, LAYERS, SEQ, VOCAB = (int(os.environ.get(k, v)) for k, v in
+    (('DIM', 2048), ('HEADS', 16), ('FF_MULT', 4), ('LAYERS', 4), ('SEQ', 1024), ('VOCAB', 8192)))
 ROTARY_BASE = 1000
 
 
@@ -95,17 +94,3 @@ class Inference(torch.nn.Module):
 def placement(processors, units={}):
     return megatron(processors, ('queryproj', 'keyproj', 'valueproj', 'denseproj_in', 'denseproj_gate'),
                     ('attnoutproj', 'denseproj_out'), units)
-
-
-def main():
-    args = arguments('Inference of a randomly initialized language model whose blocks add attention and '
-                     'feed-forward outputs computed from one normalized input, its weights split over processors.')
-    torch.manual_seed(0)
-    input_ids = torch.randint(0, VOCAB, (BATCH, SEQ))
-    model = Inference().eval()
-    given = chosen(model, (input_ids,), placement, args, HEADS)
-    return execute(model, (input_ids,), lambda processors: placement(processors, given), args, units=given)
-
-
-if __name__ == '__main__':
-    main()

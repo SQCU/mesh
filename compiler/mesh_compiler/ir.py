@@ -3,15 +3,13 @@ import collections
 import operator
 import pathlib
 import sys
-import threading
 from dataclasses import dataclass
 
 import torch
-from torch import Tensor
+from schedule_emit.ir import RECV, SEND, channel_of
 from torch._export.passes.collect_tracepoints_pass import CollectTracepointsPass
 from torch._functorch._aot_autograd.schemas import JointWithDescriptors
 from torch._guards import detect_fake_mode
-from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
 from torch.export.graph_signature import OutputKind
 from torch.fx.node import map_arg
 from torch.fx.operator_schemas import normalize_function
@@ -21,39 +19,11 @@ from torch.utils._python_dispatch import get_alias_info
 sys.path.append(str(pathlib.Path(__file__).parents[2] / "rdma"))
 import mesh_graph
 
-LOCAL = threading.local()
 HOST = torch.device("cpu")
-
-
-@torch.library.custom_op("mesh::send", mutates_args=())
-def send(value: Tensor, channel: int) -> None:
-    LOCAL.channels[channel].put(value)
-
-
-@send.register_fake
-def send_fake(value, channel):
-    return None
-
-
-@torch.library.custom_op("mesh::recv", mutates_args=())
-def recv(channel: int) -> Tensor:
-    return LOCAL.channels[channel].get()
-
-
-_register_effectful_op(send, _EffectType.ORDERED)
-_register_effectful_op(recv, _EffectType.ORDERED)
-SEND = torch.ops.mesh.send.default
-RECV = torch.ops.mesh.recv.default
 
 
 # rdma/mesh-collective.h MESH_JOIN, MESH_PAGES
 JOIN, PAGES = 0, 1
-
-
-def channel_of(node):
-    if node.target is SEND:
-        return node.args[1]
-    return node.args[0] if node.target is RECV else None
 
 
 # /Users/mdot/schedule-emit/schedule_emit/ir.py Exported; design/compilation-composition-change-request.md

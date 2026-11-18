@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
 # design/the-compiler.md, order 3; Lepikhin et al., GShard, arXiv:2006.16668, Algorithm 1
 import os
 
 import torch
 import torch.nn.functional as F
-
-from parallel import arguments, execute
 
 
 DIM, FFN, EXPERTS, TOP_K, TOKENS = (int(os.environ.get(k, v)) for k, v in
@@ -83,16 +80,3 @@ def placement(processors, slots):
                     return dimension, processors, None
         return processors[0]
     return choose
-
-
-def main():
-    args = arguments('Capacity-limited top-k routing, expert all-to-all, batched FFN and weighted combine, the tokens '
-                     'and the experts split over processors.')
-    torch.manual_seed(0)
-    model = MoE(len(args.nodes)).eval()
-    x = torch.randn(len(args.nodes), model.rows, DIM) / DIM ** 0.5
-    return execute(model, (x,), lambda processors: placement(processors, model.slots), args)
-
-
-if __name__ == '__main__':
-    main()

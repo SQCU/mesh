@@ -1,25 +1,13 @@
-#!/usr/bin/env python3
 # design/the-compiler.md, order 5 and "Core ML"
-import argparse
-import json
 import os
-import pathlib
 import re
-import sys
-import time
 
 import torch
 import torch.nn.functional as F
 
-sys.path.append(str(pathlib.Path(__file__).parents[1] / 'compiler'))
-sys.path.append(str(pathlib.Path(__file__).parents[1] / 'rdma'))
-import mesh_graph
-from mesh_compiler.driver import compile_module
-from mesh_compiler.runtime import Program
 
-
-ROWS, K, N, LAYERS = (int(os.environ.get(k, v)) for k, v in
-    (('ROWS', 1024), ('K', 3840), ('N', 3456), ('LAYERS', 4)))
+K, N, LAYERS = (int(os.environ.get(k, v)) for k, v in
+    (('K', 3840), ('N', 3456), ('LAYERS', 4)))
 KIND = os.environ.get('OP', 'ffn')
 
 
@@ -94,55 +82,3 @@ def placement(first, parts):
         found = re.search(r'layers[._]\d+[._]parts[._](\d+)', where)
         return parts[int(found[1])] if found else first
     return placed
-
-
-def arguments(description):
-    parser = argparse.ArgumentParser(description=description)
-    parser.add_argument('--nodes', type=int, nargs='+', required=True)
-    parser.add_argument('--device', default='mps')
-    return parser.parse_args()
-
-
-def execute(model, inputs, engines, args):
-    processors = {'projection': (args.nodes[0], args.device)}
-    parts = [f'part{place}' for place in range(len(engines))]
-    processors.update((part, (args.nodes[place % len(args.nodes)], engine))
-                      for place, (part, engine) in enumerate(zip(parts, engines)))
-    scheduled = compile_module(model, inputs, processors, placement('projection', parts))
-    program = Program(scheduled)
-    started = time.perf_counter()
-    result = program(*inputs)
-    report = {'channels': [{'function': k, 'channels': scheduled.channels[body.key]}
-                           for k, body in enumerate(program.function.target.bodies)],
-              'between machines': sum(len(transfers) for transfers in scheduled.carried.values()),
-              'processors': {name: [machine, engine] for name, (machine, engine) in processors.items()},
-              'seconds': time.perf_counter() - started,
-              'signature': bytes(program.function.signature.digest).hex(),
-              'core ml': program.function.placements()}
-    if result is not None:
-        with torch.no_grad():
-            expected = model(*inputs)
-        pairs = list(zip(torch.utils._pytree.tree_leaves(expected), torch.utils._pytree.tree_leaves(result),
-                         strict=True))
-        report['outputs'] = [list(got.shape) for _, got in pairs]
-        report['error'] = max(((got.cpu().float() - want.float()).abs().max() / want.float().abs().max()).item()
-                              for want, got in pairs)
-    print(json.dumps(report), flush=True)
-    return result
-
-
-def main():
-    args = arguments('Projections and FFN or linear partitions compiled over CPU, MPS and ANE processors.')
-    engines = os.environ.get('ENGINES', 'mps,cpu,ane').split(',')
-    width = K if KIND == 'linear' else N
-    widths = [int(x) for x in os.environ['PARTS'].split(',')] if 'PARTS' in os.environ else [
-        (j + 1) * width // len(engines) - j * width // len(engines) for j in range(len(engines))]
-    if len(widths) != len(engines) or any(n <= 0 for n in widths) or sum(widths) != width:
-        raise ValueError('PARTS supplies one positive width per engine, summing to %d' % width)
-    torch.manual_seed(0)
-    x = torch.randn(ROWS, K).half() / 4
-    return execute(Engines(widths).eval(), (x,), engines, args)
-
-
-if __name__ == '__main__':
-    main()
