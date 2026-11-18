@@ -448,7 +448,7 @@ class Target:
     # row order, each replayed (its argument storage and range workspace bound: MetalRecorderReplay), the replay
     # retained, then its program's physical accesses made on that storage (metal_ir_place), a CPU-only program's too;
     # a row with no program a NULL call; each call its planned call's
-    def placed(self, owned, libs, gpu, owner, programs, finalize):
+    def placed(self, owned, libs, gpu, owner, programs, finalize, *, numerical_bodies=()):
         M, compiler, (lib, _), transport = libs
         error, planned = C.create_string_buffer(ROOM), owner.planned
         recorder = made(lib.MetalRecorderOpen(gpu, error, ROOM), error, "recorder", errno.ENODEV)
@@ -459,8 +459,8 @@ class Target:
                 captured.append((row, None, None))
                 continue
             state, status = self.transport_state(owned, libs, gpu, owner, row, program)
-            if finalize:
-                body = self.bodies[row.function].machine
+            if numerical_bodies:
+                body = numerical_bodies[row.function].machine
                 if body is not None and (body.upstream or body.neural):
                     from .lower_metal import emitted
                     emitted(program, body, row.offset)
@@ -1099,7 +1099,7 @@ class Target:
             for a, operand in enumerate(self.operands):
                 for r, root in operand.occurrences:
                     mesh.check(compiler.metal_ir_value_external(programs[r], root, a))
-            recorder, calls = self.placed(owned, libs, gpu, owner, programs, True)
+            recorder, calls = self.placed(owned, libs, gpu, owner, programs, True, numerical_bodies=self.bodies)
             native = made(lib.MetalRecorderProgram(recorder, calls, len(calls), C.byref(owner.planned),
                                                    C.byref(owner.binding) if owner.binding is not None else None, error, ROOM),
                           error, "the program's calls")
