@@ -28,7 +28,8 @@ int mesh_host_publish_cut(struct mesh_ctx *context,uint64_t plan,uint32_t transf
   struct hdr *m=context->M;
   const struct mesh_publication *entry=mesh_transfer_at(m,mesh_state_at(m,plan),transfer);
   if(cut>=entry->targets[0].count)return EINVAL;
-  publish_word(m,entry->origin?entry->origin+(uint64_t)cut*sizeof(uint64_t):entry->targets[0].word,execution);
+  if(!entry->origin)return ENOTSUP;
+  publish_word(m,entry->origin+(uint64_t)cut*sizeof(uint64_t),execution);
   return 0;
 }
 
@@ -3325,7 +3326,7 @@ static int plan_state(struct mesh_plan_compilation *compiled,uint32_t f){
       if(cuts>1){
         if(i==d->first){entry->origin=origin;origin+=cuts*sizeof(uint64_t);}
         else entry->origin=publications[d->first].origin;
-      }
+      }else if(cuts)entry->origin=entry->targets[0].word;
       entry->state=1;
     }else if(t->destination==p->flow->self){
       entry->pages=r->received;
@@ -3367,7 +3368,7 @@ static int plan_state(struct mesh_plan_compilation *compiled,uint32_t f){
     if(e->field==MESH_ABSENT){
       const struct mesh_publication *source=publications+d->first;
       h.word=source->targets[0].word;
-      if(source->origin){h.word=source->origin+e->instruction*sizeof(uint64_t);h.field=MESH_ORIGIN_FIELD+d->release;}
+      if(source->targets[0].count>1){h.word=source->origin+e->instruction*sizeof(uint64_t);h.field=MESH_ORIGIN_FIELD+d->release;}
     }
     else{
       h.word=plan_group(p,r,c)+(uint64_t)e->field/32*sizeof(uint64_t);

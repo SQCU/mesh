@@ -262,7 +262,7 @@ int mesh_metal_origin_prepare(struct mesh_ctx *context,struct mesh_metal_transpo
   const uint64_t plan=binding->plan[planned->call[call].function];
   const struct mesh_publication *entry=mesh_transfer_at(context->M,mesh_state_at(context->M,plan),release->transfer);
   release->supplied=entry->targets[0].word-transport->offset;
-  *origin=entry->origin?entry->origin-transport->offset:0;
+  *origin=entry->targets[0].count>1?entry->origin-transport->offset:0;
   return mesh_metal_status_prepare(context,transport,plan,&release->status);
 }
 int mesh_metal_sending_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
