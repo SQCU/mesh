@@ -759,10 +759,10 @@ def buffer_queries(source, *operands):
     return Owned(made, LIB.mesh_graph_buffer_result_free, source, operands)
 
 
-def event_lags(bounds, first, member, queries):
+def event_lags(bounds, first, member, queries, edges=None):
     original = bounds.made.contents
     groups = C.POINTER(Grouping)()
-    _check(LIB.mesh_graph_group(original.vertices, original.edges,
+    _check(LIB.mesh_graph_group(original.vertices, original.edges if edges is None else edges,
                                 C.cast(LIB.mesh_graph_buffer_source, C.c_void_p),
                                 C.cast(bounds.made, C.c_void_p), C.byref(groups)))
     grouping = Owned(groups, LIB.mesh_graph_group_free, bounds)
