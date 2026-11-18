@@ -168,6 +168,33 @@ class Expr(C.Structure):
     _fields_ = [('first', mesh.U), ('terms', mesh.U), ('constant', C.c_int64)]
 
 
+class Materialization(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('operation', 'input', 'value', 'axes', 'sources')] + [
+        ('axis', C.POINTER(mesh.U)), ('source', C.POINTER(mesh.U))]
+
+
+class RewriteResult(C.Structure):
+    _fields_ = [(name, mesh.U) for name in ('choices', 'operations', 'values', 'groups')] + [
+        ('survivor', C.POINTER(mesh.U)), ('group_first', C.POINTER(C.c_size_t)),
+        ('group_member', C.POINTER(mesh.U)), ('materializations', C.c_size_t),
+        ('materialization', C.POINTER(Materialization)), ('bytes', C.POINTER(mesh.Q)), ('accesses', C.c_void_p)]
+
+
+INLINE_MAPS, FUSE_EPILOGUE, FUSE_ROWS, ALLOW_RECOMPUTE, ALLOW_COSTLIER_GROUP = 1, 2, 4, 8, 16
+ALL_FUSIONS = INLINE_MAPS | FUSE_EPILOGUE | FUSE_ROWS
+
+
+class Rewrite:
+    def __init__(self, source, device, choices):
+        lib = _compiler()
+        error = C.create_string_buffer(4096)
+        self.program = lib.metal_ir_rewrite(source, device, choices, error, len(error))
+        if not self.program:
+            raise ValueError(error.value.decode())
+        self.close = weakref.finalize(self, lib.metal_ir_program_free, self.program)
+        self.result = lib.metal_ir_rewritten(self.program).contents
+
+
 class Lapack(C.Structure):
     _fields_ = [('routine', mesh.U), ('batch', mesh.U), ('job', C.c_char * 8), ('rcond', C.c_double)]
 
@@ -760,6 +787,8 @@ def _compiler():
                 ('metal_ir_operation_erase', None, [P, U]),
                 ('metal_ir_recorder_target', C.c_int, [P]),
                 ('metal_ir_construct', C.c_int, [P, P, C.c_char_p, C.c_size_t]),
+                ('metal_ir_rewrite', P, [P, P, U, C.c_char_p, C.c_size_t]),
+                ('metal_ir_rewritten', C.POINTER(RewriteResult), [P]),
                 ('metal_ir_work_terms', C.c_int, [P, C.POINTER(C.c_size_t), C.POINTER(C.POINTER(WorkTerm)),
                                                   C.POINTER(C.POINTER(Expr)), C.POINTER(C.POINTER(Term)),
                                                   C.POINTER(C.POINTER(WorkExtent)), C.POINTER(C.POINTER(WorkAxis)),

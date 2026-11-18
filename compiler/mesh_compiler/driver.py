@@ -1,6 +1,7 @@
 # design/the-compiler.md; design/compiler-archive-assignment-2026-11-13.md; design/compilation-composition-change-
 # request.md items 1, 3, 6 and 7; design/aot-compilation-change-request.md A1 and A10: one capture, each captured
 # function's construction, one call analysis, one completed native target
+import contextlib
 import dataclasses
 
 import torch
@@ -13,7 +14,7 @@ from .export import called, calls
 from .ir import Scheduled
 from .lower_inductor import lower
 from .lower_metal import construct
-from .metal import _machines, mesh_graph
+from .metal import ALL_FUSIONS, _machines, mesh_graph
 from .operations import Generator, seeded
 from .placement import place
 from .schedule import analyse, call_operands, carried, schedule, unit_cost
@@ -21,15 +22,18 @@ from .schedule import analyse, call_operands, carried, schedule, unit_cost
 
 # design/aot-compilation-change-request.md A1: a module compiled alone, the program of its one call
 def compile_module(module, args, processors, placement, cost=unit_cost, planning=None, machine=None,
-                   **export_options):
-    return compile_captured(called(module, args, **export_options), processors, placement, cost, planning, machine)
+                   *, rewrite_choices=(ALL_FUSIONS,), select_rewrites=None, **export_options):
+    with contextlib.ExitStack() as stack:
+        return compile_captured(called(stack, module, args, **export_options), processors, placement, cost, planning,
+                                machine, rewrite_choices=rewrite_choices, select_rewrites=select_rewrites)
 
 
 # design/aot-compilation-change-request.md A10: a program's calls of its captured functions
 def compile_program(program, args, functions, processors, placement, cost=unit_cost, planning=None, machine=None,
-                    **export_options):
-    return compile_captured(calls(program, args, functions, **export_options), processors, placement, cost, planning,
-                            machine)
+                    *, rewrite_choices=(ALL_FUSIONS,), select_rewrites=None, **export_options):
+    with contextlib.ExitStack() as stack:
+        return compile_captured(calls(stack, program, args, functions, **export_options), processors, placement,
+                                cost, planning, machine, rewrite_choices=rewrite_choices, select_rewrites=select_rewrites)
 
 
 # compiler/mesh_compiler/ir.py CapturedProgram and Planning; compiler/mesh_compiler/bridge.py planning;
@@ -52,7 +56,8 @@ def compile_program(program, args, functions, processors, placement, cost=unit_c
 # body alone with this machine's descriptors (metal.py _machines); the one call analysis (schedule.py analyse) of those
 # operands and every construction, which keeps them; ONE completed native target of the compilation machine's
 # constructions by function key and the analysis, its node Planning.here with a context and the machine without
-def compile_captured(captured, processors, placement, cost=unit_cost, planning=None, machine=None):
+def compile_captured(captured, processors, placement, cost=unit_cost, planning=None, machine=None, *,
+                     rewrite_choices=(ALL_FUSIONS,), select_rewrites=None):
     # Rejection filters are not part of even temporary integration validation.
     # Capture, construction, and planning exceptions propagate from their responsible stage.
     engines = {name: d for name, (_, d) in processors.items() if d in ENGINES}
@@ -122,7 +127,8 @@ def compile_captured(captured, processors, placement, cost=unit_cost, planning=N
     constructed = {key: made for (key, group), made in constructions.items() if group == entry}
     target = native.compile_program(captured, constructed, declared, analysis,
                                     planning.here if planning is not None else machine, planning, targets=targets,
-                                    analysis_context=context)
+                                    analysis_context=context, rewrite_choices=rewrite_choices,
+                                    select_rewrites=select_rewrites)
     return dataclasses.replace(scheduled, plan=target.plan if planning is not None else None, functions={entry: target},
                                compilation=None)
 

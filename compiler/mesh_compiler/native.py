@@ -866,7 +866,7 @@ class Target:
     # before its construction (metal_ir_clone: every value, operation and region identity the source's, its external
     # marks included), a copy each further group's; `templates[j]` call j's constructed program, None where it has no
     # program on this node; the copies released with `owned`
-    def constructed(self, context, plan_calls, libs, owned):
+    def constructed(self, context, plan_calls, libs, owned, prepared, choices, select):
         M, compiler, (_, device), _ = libs
         error, templates, sources, classes = C.create_string_buffer(ROOM), [None] * len(self.rows), {}, {}
         header = mesh.Header.from_address(mesh.Context.from_address(context).M) if context is not None else None
@@ -892,6 +892,8 @@ class Target:
                 owned(lambda copy=copy: compiler.metal_ir_program_free(copy))
                 programs.append(copy)
             classes.update((constructing, calls) for constructing, calls in zip(programs, groups.values()))
+        choices = tuple(dict.fromkeys(choices))
+        self.rewrites = {}
         gpu = device()
         try:
             for constructing, calls in classes.items():
@@ -905,9 +907,14 @@ class Target:
                 if self.bodies[self.rows[calls[0]].function].machine is not None:
                     self.related(constructing, calls[0], libs)
                 mesh.check(compiler.metal_ir_recorder_target(constructing))
-                checked(compiler.metal_ir_construct(constructing, gpu, error, ROOM), error, "construction")
+                self.rewrites[tuple(calls)] = {choice: M.Rewrite(constructing, gpu, choice) for choice in choices}
+            selection = (select(prepared, self.rewrites) if select is not None else
+                         {calls: choices[0] for calls in self.rewrites})
+            self.selected_rewrites = {calls: variants[selection[calls]] for calls, variants in self.rewrites.items()}
+            for calls, rewrite in self.selected_rewrites.items():
+                checked(compiler.metal_ir_construct(rewrite.program, gpu, error, ROOM), error, "construction")
                 for j in calls:
-                    templates[j] = constructing
+                    templates[j] = rewrite.program
         finally:
             M.PUT(gpu, M.SELECTOR[b"release"])
         self.templates = templates
@@ -1527,7 +1534,8 @@ def restore(saved, directory):
 # released after it): a copy-only row's target is its CopyRecord processor's entry; `analysis_context` the
 # compilation's one analysis context (driver.py's, every construction's), the joint result's own
 # (schedule.solve_program, Solved.analysis_context)
-def compile_program(captured, machines, declarations, analysis, node, planning=None, *, targets, analysis_context):
+def compile_program(captured, machines, declarations, analysis, node, planning=None, *, targets, analysis_context,
+                    rewrite_choices=(metal.ALL_FUSIONS,), select_rewrites=None):
     from .schedule import declare_program, solve_program
 
     def built(machine):
@@ -1564,7 +1572,7 @@ def compile_program(captured, machines, declarations, analysis, node, planning=N
         target.composed(prepared, tuple(kind for kind, _ in captured.exported.outputs), here, libs, instances)
         context = C.addressof(planning.context) if planning is not None else None
         target.ported(prepared, declarations, analysis, plan_calls, here)
-        target.constructed(context, plan_calls, libs, instances)
+        target.constructed(context, plan_calls, libs, instances, prepared, rewrite_choices, select_rewrites)
         target.instanced(context, plan_calls, libs, instances)
         functions, quantum = target.functions(libs, analysis, prepared, plan_calls)
         joint = solve_program(analysis, functions, bindings, quantum, planning, plan_calls=plan_calls,
