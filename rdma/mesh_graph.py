@@ -392,9 +392,7 @@ class Lifetimes:
         n, count = len(self.at), len(value)
         self.value, self.position = (C.c_uint32 * max(count, 1))(*value), (C.c_size_t * max(count, 1))(*position)
         self.firsts, self.lasts = (C.c_size_t * max(n, 1))(), (C.c_size_t * max(n, 1))()
-        call = LIB.mesh_graph_lifetimes
-        call.restype, call.argtypes = C.c_int, [C.c_uint32, C.c_size_t, _U, _Z, _Z, _Z]
-        _check(call(n, count, self.value, self.position, self.firsts, self.lasts))
+        _check(LIB.mesh_graph_lifetimes(n, count, self.value, self.position, self.firsts, self.lasts))
 
     @property
     def first(self):
@@ -449,6 +447,8 @@ STATES = ('image', 'stronger', 'false', 'unmatched', 'satisfied', 'transformed',
 # mesh_graph_closure and mesh_graph_closure_free; MESH_GRAPH_GIVEN and SIZE_MAX
 GIVEN, SIZE = 3, 2 ** 64 - 1
 _U, _Z = C.POINTER(C.c_uint32), C.POINTER(C.c_size_t)
+LIB.mesh_graph_lifetimes.restype = C.c_int
+LIB.mesh_graph_lifetimes.argtypes = [C.c_uint32, C.c_size_t, _U, _Z, _Z, _Z]
 LIB.mesh_graph_search.restype = LIB.mesh_graph_breadth.restype = LIB.mesh_graph_closure.restype = C.c_int
 LIB.mesh_graph_search.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U, C.c_int,
                                   C.POINTER(C.POINTER(Searched))]
