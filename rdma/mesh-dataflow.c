@@ -109,31 +109,21 @@ void mesh_view_values(struct mesh_ctx *c,const struct mesh_function *functions,c
   *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
 }
 
-/* design/torch-capture-change-request.md item 6; mesh-collective.h mesh_view_program: one traversal of the retained
-   copies' rows (local->first's order; each copy's section.stride rows from local->offset[k], each row's mesh_page
-   address plan_bind_table's), its first pass the view's span, its second each copy's first row and each row as offsets
-   in it */
+/* mesh-collective.h mesh_view_program and mesh_plan_workspace: every data section precedes the publication row. */
 void mesh_view_program(struct mesh_ctx *c,const struct mesh_plan_binding *binding,uint64_t *copy_offsets,uint64_t *page_offsets,
                        struct mesh_view *view){
   const struct mesh_local *local=&binding->compilation->result;
-  const struct mesh_plan_analysis *analysis=local->planned.analysis;
   struct hdr *m=c->M;
   const uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t low=UINT64_MAX,high=0;
-  for(int pass=0;pass<2;pass++)
-    for(uint32_t f=0,v=0;f<=analysis->functions;f++){
-      const uint32_t n=f<analysis->functions?analysis->function[f].values:analysis->roots;
-      const struct mesh_plan_value *value=f<analysis->functions?local->planned.result[f].value:local->planned.root;
-      for(uint32_t i=0;i<n;i++,v++)
-        for(size_t k=local->first[v];k<local->first[v+1];k++)
-          for(uint32_t r=0;r<value[i].section.stride;r++){
-            const uint64_t row=binding->rows.first+local->offset[k]+r,
-                           a=atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed);
-            if(!pass){if(a<low)low=a;if(a+block>high)high=a+block;continue;}
-            page_offsets[row-binding->rows.first]=a-low;
-            if(!r)copy_offsets[k]=a-low;
-          }
-    }
+  for(uint32_t r=0;r+1<binding->rows.count;r++){
+    const uint64_t address=atomic_load_explicit(&mesh_page(m)[binding->rows.first+r].address,memory_order_relaxed);
+    page_offsets[r]=address;
+    if(address<low)low=address;
+    if(address+block>high)high=address+block;
+  }
+  for(uint32_t r=0;r+1<binding->rows.count;r++)page_offsets[r]-=low;
+  for(size_t k=0;k<local->offsets;k++)copy_offsets[k]=page_offsets[local->offset[k]];
   *view=high>low?(struct mesh_view){(char *)c->M+low,(size_t)(high-low)}:(struct mesh_view){NULL,0};
 }
 

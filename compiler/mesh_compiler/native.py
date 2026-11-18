@@ -399,6 +399,46 @@ class Target:
         return (*owner.span(owner.solution.function_value_first[f], self.counts[f]),
                 owner.solution.planned.result[f].value[self.counts[f]].shares)
 
+    def transport_state(self, owned, libs, gpu, owner, row, program):
+        marks, call = row.marks, row.planned
+        if not marks["transfers"]:
+            return None, 0
+        M, compiler, _, transport = libs
+        context, wires, word = mesh.Context.from_address(owner.context), M.Transport(), mesh.Q()
+        mesh.check(transport.mesh_metal_transport_create(C.byref(context), C.byref(owner.binding), gpu,
+                                                         C.byref(wires)))
+        owned(lambda wires=wires: transport.mesh_metal_transport_destroy(C.byref(wires)))
+        # rdma/mesh-metal.h: one transport view of every planned call's plan; each record prepared from the
+        # plan of the call whose transfer it names (a range from its declared owner, a release and a
+        # sending lifetime from their marks' owner call), never the emitting row's by default; the program's
+        # status word its own call's plan (mesh_metal_status_prepare: a capture's own call)
+        for value, function, index, declared in marks["received"]:
+            landed = M.Range.from_buffer_copy(declared)
+            field = (mesh.U * max(landed.partitions, 1))()
+            held = owner.solution.planned.result[function].value[index] if function is not None else (
+                owner.solution.planned.root[index])
+            mesh.check(transport.mesh_metal_range_prepare(
+                C.byref(context), C.byref(wires), C.byref(owner.binding), held.section, field, landed.partitions,
+                C.byref(landed)))
+            compiler.metal_ir_value_received(program, value, C.byref(landed))
+        for value, sender, declared in marks["sent"]:
+            release = M.Release.from_buffer_copy(declared)
+            mesh.check(transport.mesh_metal_release_prepare(C.byref(context), C.byref(wires),
+                                                            C.byref(owner.binding), sender, C.byref(release)))
+            compiler.metal_ir_value_sent(program, value, C.byref(release))
+        for sender, transfer in marks["transfers"]:
+            sending = M.Sending()
+            mesh.check(transport.mesh_metal_sending_prepare(C.byref(context), C.byref(wires),
+                                                            C.byref(owner.binding), sender, transfer,
+                                                            C.byref(sending)))
+            if sending.sent.sends:
+                compiler.metal_ir_value_sending(program, marks["sending"][sender, transfer],
+                                                C.byref(sending))
+        mesh.check(transport.mesh_metal_status_prepare(C.byref(context), C.byref(wires),
+                                                       owner.binding.plan[owner.planned.call[call].function], C.byref(word)))
+        compiler.metal_ir_transport(program, word.value)
+        return wires.state, word.value
+
     # metal_recording.h MetalRecorderPrepare, MetalRecorderPlan and MetalRecorderReplay (metal_capture.m MetalRecorder:
     # no capture is prepared after the recorder's first replay): the one recorder of the whole machine's rows, every
     # row's program, in order, transport-prepared, captured from its lowered typed program, its placement descriptors
@@ -418,41 +458,7 @@ class Target:
             if program is None:
                 captured.append((row, None, None))
                 continue
-            marks, wires, call = row.marks, None, row.planned
-            if marks["transfers"]:
-                context, wires, word = mesh.Context.from_address(owner.context), M.Transport(), mesh.Q()
-                mesh.check(transport.mesh_metal_transport_create(C.byref(context), C.byref(owner.binding), gpu,
-                                                                 C.byref(wires)))
-                owned(lambda wires=wires: transport.mesh_metal_transport_destroy(C.byref(wires)))
-                # rdma/mesh-metal.h: one transport view of every planned call's plan; each record prepared from the
-                # plan of the call whose transfer it names (a range from its declared owner, a release and a
-                # sending lifetime from their marks' owner call), never the emitting row's by default; the program's
-                # status word its own call's plan (mesh_metal_status_prepare: a capture's own call)
-                for value, function, index, declared in marks["received"]:
-                    landed = M.Range.from_buffer_copy(declared)
-                    field = (mesh.U * max(landed.partitions, 1))()
-                    held = owner.solution.planned.result[function].value[index] if function is not None else (
-                        owner.solution.planned.root[index])
-                    mesh.check(transport.mesh_metal_range_prepare(
-                        C.byref(context), C.byref(wires), C.byref(owner.binding), held.section, field, landed.partitions,
-                        C.byref(landed)))
-                    compiler.metal_ir_value_received(program, value, C.byref(landed))
-                for value, sender, declared in marks["sent"]:
-                    release = M.Release.from_buffer_copy(declared)
-                    mesh.check(transport.mesh_metal_release_prepare(C.byref(context), C.byref(wires),
-                                                                    C.byref(owner.binding), sender, C.byref(release)))
-                    compiler.metal_ir_value_sent(program, value, C.byref(release))
-                for sender, transfer in marks["transfers"]:
-                    sending = M.Sending()
-                    mesh.check(transport.mesh_metal_sending_prepare(C.byref(context), C.byref(wires),
-                                                                    C.byref(owner.binding), sender, transfer,
-                                                                    C.byref(sending)))
-                    if sending.sent.sends:
-                        compiler.metal_ir_value_sending(program, marks["sending"][sender, transfer],
-                                                        C.byref(sending))
-                mesh.check(transport.mesh_metal_status_prepare(C.byref(context), C.byref(wires),
-                                                               owner.binding.plan[planned.call[call].function], C.byref(word)))
-                compiler.metal_ir_transport(program, word.value)
+            state, status = self.transport_state(owned, libs, gpu, owner, row, program)
             ready = made(lib.MetalRecorderPrepare(recorder, program, error, ROOM), error, "preparation")
             owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
             for value, offsets, count, shares in self.placements(owner, r, program, libs):
@@ -465,8 +471,8 @@ class Target:
             for root in (root for operand in self.operands for at, root in operand.occurrences if at == r):
                 compiler.metal_ir_value_placed(program, root, None, None, 1, 0, 0)
             # metal_recording.h MetalRecorderState: the transport's state buffer and this program's status word offset
-            if wires is not None:
-                checked(lib.MetalRecorderState(recorder, ready, wires.state, word.value, error, ROOM), error,
+            if state is not None:
+                checked(lib.MetalRecorderState(recorder, ready, state, status, error, ROOM), error,
                         "the transport state")
             checked(lib.MetalRecorderPlan(recorder, ready, error, ROOM), error, "replay plan")
             emitted = compiler.metal_ir_finalize if finalize else compiler.metal_ir_loaded

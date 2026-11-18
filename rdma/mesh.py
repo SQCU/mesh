@@ -142,6 +142,11 @@ class PlannedTransfer(C.Structure):
     _fields_ = [('received', Z), ('sending', Z), ('end', Z)]
 
 
+class PlanWorkspace(C.Structure):
+    _fields_ = [('function', U), ('lifetime', U), ('copies', U), ('reusable', U),
+                ('body', U), ('value', U), ('shares', U), ('zeroed', U), ('bytes', Q), ('first', Z), ('section', Section)]
+
+
 class PlanValue(C.Structure):
     _fields_ = [('section', Section), ('shares', U)]
 
@@ -236,7 +241,8 @@ class PlanCompilation(C.Structure):
                 ('page', C.POINTER(U)), ('adjacency', C.POINTER(U)), ('toward', C.POINTER(U)),
                 ('place', C.POINTER(U)), ('rows_by', C.POINTER(Z)), ('listed', C.POINTER(Z)),
                 ('places', Q), ('state', C.POINTER(C.c_void_p)), ('state_bytes', C.POINTER(Q)),
-                ('owned', C.c_void_p), ('storage', C.POINTER(PlanStorage))]
+                ('owned', C.c_void_p), ('storage', C.POINTER(PlanStorage)), ('workspaces', Z),
+                ('workspace', C.POINTER(PlanWorkspace))]
 
 
 class PlanBinding(C.Structure):
@@ -586,6 +592,8 @@ for name, result, arguments in (
         ('mesh_plan_storage_retain', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_storage_free', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_call_slot', C.c_int, [C.POINTER(PlanCompilation), U, U, Q, C.POINTER(PlanSlot)]),
+        ('mesh_plan_program_compile_workspaces', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
+            C.POINTER(PlanStorage), C.POINTER(C.POINTER(PlanActors)), Z, C.POINTER(PlanWorkspace), C.POINTER(C.POINTER(PlanCompilation))]),
         ('mesh_plan_program_compile', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
                                                C.POINTER(PlanStorage), C.POINTER(C.POINTER(PlanCompilation))]),
         ('mesh_plan_program_install', C.c_int, [CONTEXT, Q, C.POINTER(PlanCompilation), Q, C.POINTER(PlanBinding)]),

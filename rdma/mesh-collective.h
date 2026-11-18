@@ -535,9 +535,23 @@ struct mesh_plan_compilation {
   uint64_t *state_bytes;
   void *owned;
   struct mesh_plan_storage *storage;
+  size_t workspaces;
+  struct mesh_plan_workspace *workspace;
 };
 int mesh_plan_environment(struct mesh_ctx *,struct mesh_nodes *,struct mesh_plan_geometry *);
 int mesh_plan_call_slot(const struct mesh_plan_compilation *,uint32_t call,uint32_t value,uint64_t iteration,struct mesh_plan_slot *);
+/* Target storage lives in the same physical assignment as function values, roots and transport.
+   Each workspace names its owning function, the value's complete lifetime in the storage proof,
+   its copy count and byte extent. first gives its physical allocation record and section its page rows. */
+struct mesh_plan_workspace {
+  uint32_t function, lifetime, copies, reusable, body, value, shares, zeroed;
+  uint64_t bytes;
+  size_t first;
+  struct mesh_section section;
+};
+int mesh_plan_program_compile_workspaces(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
+                                         struct mesh_plan_storage *,const struct mesh_plan_actors *const *,size_t,
+                                         struct mesh_plan_workspace *,struct mesh_plan_compilation **);
 int mesh_plan_program_compile(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
                               struct mesh_plan_storage *,struct mesh_plan_compilation **);
 int mesh_plan_program_install(struct mesh_ctx *,uint64_t,const struct mesh_plan_compilation *,uint64_t,struct mesh_plan_binding *);

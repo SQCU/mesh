@@ -28,7 +28,7 @@ from mesh_index import INDEX_LT, INDEX_LE, INDEX_GT, INDEX_GE, INDEX_EQ, INDEX_N
 INPUT, CONSTANT, TEMPORARY, OUTPUT, STATE = range(5)
 BODY, COMBINE, FINALIZE = range(3)
 NONE = 0xFFFFFFFF
-METAL_IR_STEP = 2
+METAL_IR_DATA, METAL_IR_TRANSPORT, METAL_IR_STEP = range(3)
 # metal_ir.h METAL_IR_GESDD .. METAL_IR_GELSY (struct metal_ir_lapack_call `routine`; metal-microbench 9404b7b2 GELS 5
 # and GELSY 6) and METAL_IR_CHECK_LU .. METAL_IR_CHECK_NATIVE (metal_ir_check `code`)
 LAPACK_GESDD, LAPACK_HEEVD, LAPACK_GEEV, LAPACK_GELSD, LAPACK_GELSS, LAPACK_GELS, LAPACK_GELSY = range(7)
@@ -826,6 +826,7 @@ def _compiler():
                 ('metal_ir_work_associations', C.POINTER(WorkAssociation), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_dispatches', U, [P, C.POINTER(C.POINTER(Dispatch))]),
                 ('metal_ir_allocations', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
+                ('metal_ir_sources', C.POINTER(U), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_relation', P, [P]),
                 ('metal_ir_dispatch_numerics', C.POINTER(Numeric), [P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_kernel_devices', None, [P, U, U * 3]),
