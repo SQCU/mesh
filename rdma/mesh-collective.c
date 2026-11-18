@@ -169,11 +169,42 @@ static int plan_value_before(const struct plan_step *p,uint32_t a,uint32_t b){
     return mesh_graph_closure_contains(&p->storage->before,p->storage->index[b],p->storage->index[a]);
   return !p->function->tasks && plan_value_end(p,a)<plan_value_begin(p,b);
 }
+static int plan_per_call(const struct plan_step *p,uint32_t j){
+  return p->flow->named[j] || (p->function->value[j].kind==MESH_EXECUTION && !plan_value_lag(p,j));
+}
 static uint32_t plan_value_copies(const struct plan_step *p,uint32_t j){
   const uint32_t lag=plan_value_lag(p,j);
-  if(p->flow->named[j] || (p->function->value[j].kind==MESH_EXECUTION && !lag))return plan_step_copies(p);
-  return lag?lag:1;
+  return plan_per_call(p,j)?plan_step_copies(p):lag?lag:1;
 }
+static const struct mesh_plan_slot *plan_slots(const struct mesh_plan_flow *p,uint32_t j){
+  return p->slot?p->slot+(size_t)j*(p->calls+1):NULL;
+}
+static uint32_t plan_local_copies(const struct plan_step *p,uint32_t j){
+  const struct mesh_plan_slot *slots=plan_slots(p->flow,j);
+  const uint32_t copies=plan_value_copies(p,j);
+  if(!slots || slots[p->flow->calls].local==p->flow->calls)return copies;
+  const uint32_t local=slots[p->flow->calls].local;
+  if(!local)return 0;
+  return plan_per_call(p,j)?(copies/p->flow->calls)*local:copies;
+}
+static int plan_private_copy(const struct plan_step *p,uint32_t j,uint32_t copy){
+  const struct mesh_plan_slot *slots=plan_slots(p->flow,j);
+  return !slots || (plan_per_call(p,j)?slots[copy%p->flow->calls].root==MESH_ABSENT:slots[p->flow->calls].local!=0);
+}
+static struct mesh_plan_slot plan_call_slot(const struct plan_step *p,uint32_t j,uint32_t ordinal,uint64_t iteration){
+  const struct mesh_plan_slot *slots=plan_slots(p->flow,j);
+  struct mesh_plan_slot selected=slots?slots[ordinal]:(struct mesh_plan_slot){MESH_ABSENT,ordinal};
+  if(selected.root!=MESH_ABSENT){
+    const uint32_t count=p->root_result[selected.root].section.count;
+    selected.local=count?(uint32_t)(iteration%count):0;
+  }else{
+    const uint32_t copies=plan_value_copies(p,j),calls=p->flow->calls;
+    const uint32_t c=(uint32_t)(((iteration%copies)*calls+ordinal)%copies);
+    selected.local=slots && plan_per_call(p,j)?(c/calls)*slots[calls].local+selected.local:c;
+  }
+  return selected;
+}
+
 
 static uint32_t plan_rank(uint64_t set,uint32_t v){ return (uint32_t)__builtin_popcountll(set&((UINT64_C(1)<<v)-1)); }
 static uint32_t plan_produced(const struct mesh_plan_flow *p,uint32_t i){ return p->demand[i].vertex; }
@@ -356,6 +387,16 @@ static int plan_copy_count(const struct mesh_plan_flow *p,uint32_t horizon,const
     if(most>=UINT32_MAX){plan_name(p,v,"its copies exceed the 32-bit count of a plan's copies",most);return ENOMEM;}
     if(most>*copies)*copies=(uint32_t)most;
   }
+  const uint64_t period=(uint64_t)horizon*p->calls;
+  if(period && *copies%period){
+    int bound=p->slot!=NULL;
+    for(uint32_t i=0;!bound && i<p->demands;i++)bound=p->demand[i].root!=MESH_ABSENT;
+    if(bound){
+      const uint64_t rounded=(uint64_t)*copies+period-*copies%period;
+      if(rounded>=UINT32_MAX)return ENOMEM;
+      *copies=(uint32_t)rounded;
+    }
+  }
   return 0;
 }
 static int plan_unroll(struct mesh_plan_flow *p){
@@ -479,10 +520,11 @@ static void plan_items(struct plan_step *plans,uint32_t count,const struct mesh_
     for(uint32_t j=0;j<p->function->values;j++){
       const struct mesh_value *v=p->function->value+j;
       /* a slot a use binds to a root: its storage the root's, none of its own */
-      if(v->run || (p->flow->named[j]?1u:v->wire)!=space || (p->flow->bound && p->flow->bound[j]!=MESH_ABSENT))continue;
+      if(v->run || (p->flow->named[j]?1u:v->wire)!=space || !plan_local_copies(p,j))continue;
       const uint32_t kind=v->kind==MESH_EXECUTION && !plan_value_lag(p,j)?PLAN_LOCAL:PLAN_ALONE;
       p->item[j]=p->flow->uncovered[j]?(uint32_t)x->items:MESH_ABSENT;
-      for(uint32_t c=0;p->flow->uncovered[j] && c<plan_value_copies(p,j);c++)plan_item_put(x,kind,f,j,c,p->flow->uncovered[j],space);
+      for(uint32_t c=0;p->flow->uncovered[j] && c<plan_value_copies(p,j);c++)
+        if(plan_private_copy(p,j,c))plan_item_put(x,kind,f,j,c,p->flow->uncovered[j],space);
     }
     if(!space){p->state=(uint32_t)x->items;plan_item_put(x,PLAN_ALONE,f,0,0,plan_blocks(m,p->words),0);}
   }
@@ -622,7 +664,7 @@ static int plan_block(struct plan_step *plans,uint32_t count,uint64_t quantum,co
                       struct plan_placement *x,const struct plan_program *program){
   size_t records=0;
   for(uint32_t f=0;f<count;f++)for(uint32_t j=0;j<plans[f].function->values;j++)
-    if(plans[f].function->value[j].run)records+=plan_value_copies(plans+f,j);
+    if(plans[f].function->value[j].run)records+=plan_local_copies(plans+f,j);
   for(uint32_t r=0;r<program->analysis->roots;r++)if(program->roots[r].run)records+=program->planned->horizon;
   uint64_t *size=malloc((records+1)*sizeof *size),*start=malloc((records+1)*sizeof *start),
            *end=malloc((records+1)*sizeof *end),*offset=malloc((records+1)*sizeof *offset),total=0;
@@ -638,15 +680,16 @@ static int plan_block(struct plan_step *plans,uint32_t count,uint64_t quantum,co
     const uint64_t n=operations[f],ring=(uint64_t)plan_step_copies(p)*n;
     for(uint32_t j=0;j<p->function->values;j++){
       const struct mesh_value *v=p->function->value+j;
-      if(!v->run)continue;
+      if(!v->run || !plan_local_copies(p,j))continue;
       if(p->flow->named[j] || v->wire)x->space=1;
       p->item[j]=r;
-      for(uint32_t c=0;c<plan_value_copies(p,j);c++,r++){
+      for(uint32_t c=0;c<plan_value_copies(p,j);c++){
+        if(!plan_private_copy(p,j,c))continue;
         uint64_t last;
         plan_location(p,j,n,c,start+r,&last);
         end[r]=(last+1)%ring;
         size[r]=v->section.bytes;
-        function[r]=f;index[r]=j;copy[r]=c;
+        function[r]=f;index[r]=j;copy[r++]=c;
       }
     }
   }
@@ -760,11 +803,11 @@ static uint32_t plan_page(const struct plan_placement *x,uint32_t block,uint32_t
 
 /* design/plan-to-bridge-change-request.md R2; design/torch-capture-change-request.md item 6 */
 static uint32_t plan_frame(const struct plan_step *p,const struct plan_placement *x,uint32_t block,uint32_t j,uint32_t c,
-                           uint32_t k){
+                           uint32_t original,uint32_t k){
   if(p->function->value[j].run)return plan_page(x,block,x->run,x->at[p->item[j]+c]+k);
   if(p->flow->block_first[j]==MESH_ABSENT)return plan_page(x,block,p->item[j]+c,k);
   const uint32_t at=p->flow->block_first[j]+k,s=p->flow->block_set[at];
-  return plan_page(x,block,s==MESH_ABSENT?p->item[j]+c:p->set_item+s*plan_step_copies(p)+c,p->flow->block_element[at]);
+  return plan_page(x,block,s==MESH_ABSENT?p->item[j]+c:p->set_item+s*plan_step_copies(p)+original,p->flow->block_element[at]);
 }
 static int plan_rows(struct plan_step *plans,uint32_t count,const struct mesh_plan_geometry *m,const struct plan_placement *x,
                      uint32_t *page,uint64_t rows,const struct plan_program *program){
@@ -773,8 +816,12 @@ static int plan_rows(struct plan_step *plans,uint32_t count,const struct mesh_pl
     const struct plan_step *p=plans+f;
     for(uint32_t j=0;j<p->function->values;j++){
       const struct mesh_section v=p->result->value[j].section;
-      for(uint32_t c=0;c<v.count;c++)for(uint32_t k=0;k<v.stride;k++)
-        page[v.first+(size_t)c*v.stride+k]=plan_frame(p,x,block,j,c,k);
+      for(uint32_t original=0,c=0;c<v.count;original++){
+        if(!plan_private_copy(p,j,original))continue;
+        for(uint32_t k=0;k<v.stride;k++)
+          page[v.first+(size_t)c*v.stride+k]=plan_frame(p,x,block,j,c,original,k);
+        c++;
+      }
     }
   }
   for(uint32_t r=0;r<program->analysis->roots;r++){
@@ -2064,13 +2111,20 @@ static int plan_function(struct mesh_plan_flow *p,const struct mesh_function *fu
       continue;
     }
     /* the row's root: its own, or the one a use binds its value to (plan_run `bound`: that slot's storage) */
+    const struct mesh_strided *view=t->source==p->self?&t->from:&t->to;
+    plan_view(view,&bytes,&end);
     uint32_t r=t->root?t->root-1:MESH_ABSENT;
     if(!t->root && p->bound && t->value<given && p->bound[t->value]!=MESH_ABSENT){
       r=p->bound[t->value];
-      if(r==PLAN_SEVERAL){status=EINVAL;goto done;}
+      if(r==PLAN_SEVERAL){
+        const struct mesh_plan_slot *slots=plan_slots(p,t->value);
+        for(uint32_t i=0;i<p->calls;i++)if(slots[i].root!=MESH_ABSENT){
+          if(end>p->roots[slots[i].root].section.bytes){status=EINVAL;goto done;}
+          p->carried[slots[i].root]=1;
+        }
+        r=MESH_ABSENT;
+      }
     }
-    const struct mesh_strided *view=t->source==p->self?&t->from:&t->to;
-    plan_view(view,&bytes,&end);
     if(r!=MESH_ABSENT){
       if(end>p->roots[r].section.bytes || d->mine!=MESH_ABSENT || (d->root!=MESH_ABSENT && d->root!=r)){
         status=EINVAL;goto done;
@@ -2188,7 +2242,7 @@ static void plan_free(struct mesh_plan_flow *p){
   free(p->here);mesh_graph_group_free(p->rows);free(p->edge);free(p->between);free(p->farthest);
   free(p->acyclic_indegree);free(p->acyclic_ordinal);free(p->lag_source);free(p->lag_target);
   mesh_graph_lag_matrix_free(p->lags);mesh_graph_lag_graph_free(p->lag_graph);
-  free(p->bound);free(p->value_lag);
+  free(p->slot);free(p->bound);free(p->value_lag);
 }
 
 /* one arena shared: its two ranges equal (mesh_arena_range's, plan_place's `one`) */
@@ -2330,7 +2384,7 @@ static void plan_bytes_release(void *bytes){
 struct plan_loaded { size_t references; struct plan_bytes *bytes; uint32_t relations; struct mesh_graph_relation **relation;
                      struct mesh_planned_call *call; struct mesh_function *function,*selected;
                      struct mesh_graph_closure *closure; struct mesh_plan_actors *actors; struct mesh_declared *declared;
-                     struct mesh_grouped *grouped; void *rewritten; };
+                     struct mesh_grouped *grouped; void *rewritten; int reconstructed_slots; };
 static struct plan_loaded *plan_loaded_new(uint32_t relations){
   struct plan_loaded *l=calloc(1,sizeof *l);
   if(!l)return NULL;
@@ -2611,6 +2665,39 @@ static int plan_horizon(struct mesh_plan_analysis *a){
    storage, no transfer: plan_horizon's horizon and lags over its calls, plan_unroll's copies of each function's calls,
    every run value's and run root's copies placed by one plan_block in the caller's arena (offsets plan_block's quanta of
    `quantum` bytes), the calls' parts, orders and chains as mesh_plan's planned result records them */
+static int plan_bind_slots(struct mesh_plan_analysis *a){
+  if(!a->roots)return 0;
+  for(uint32_t r=0;r<a->roots;r++)for(size_t k=a->use_first[r];k<a->use_first[r+1];k++){
+    const struct mesh_local_use use=a->use[k];
+    struct mesh_plan_flow *p=a->flow+a->calls[use.call];
+    if(!p->slot){
+      size_t cells;
+      if(__builtin_mul_overflow((size_t)p->givens,(size_t)p->calls+1,&cells) || cells>=SIZE_MAX/sizeof *p->slot)return ENOMEM;
+      p->slot=malloc((cells+1)*sizeof *p->slot);
+      p->bound=malloc(((size_t)p->givens+1)*sizeof *p->bound);
+      if(!p->slot || !p->bound)return ENOMEM;
+      for(size_t i=0;i<cells;i++)p->slot[i]=(struct mesh_plan_slot){MESH_ABSENT,0};
+    }
+    struct mesh_plan_slot *slot=p->slot+(size_t)use.value*(p->calls+1)+a->call_group->ordinal[use.call];
+    if(slot->root!=MESH_ABSENT && slot->root!=r)return EINVAL;
+    slot->root=r;
+  }
+  for(uint32_t f=0;f<a->functions;f++){
+    struct mesh_plan_flow *p=a->flow+f;
+    if(!p->slot)continue;
+    for(uint32_t j=0;j<p->givens;j++){
+      struct mesh_plan_slot *slots=p->slot+(size_t)j*(p->calls+1);
+      uint32_t common=slots[0].root,local=0;
+      for(uint32_t i=0;i<p->calls;i++){
+        if(common!=slots[i].root)common=PLAN_SEVERAL;
+        slots[i].local=local;
+        if(slots[i].root==MESH_ABSENT)local++;
+      }
+      slots[p->calls].local=local;p->bound[j]=common;
+    }
+  }
+  return 0;
+}
 static int plan_analysis_new(const struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
   const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
   const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
@@ -2646,6 +2733,7 @@ static int plan_analysis_new(const struct mesh_function *functions,uint32_t coun
     p->value_lag=calloc((size_t)p->givens+1,sizeof *p->value_lag);
     if(!p->value_lag)status=ENOMEM;
   }
+  if(!status)status=plan_bind_slots(a);
   if(status)mesh_plan_analysis_free(a);else *out=a;
   return status;
 }
@@ -2655,7 +2743,10 @@ void mesh_plan_analysis_retain(struct mesh_plan_analysis *a){
 void mesh_plan_analysis_free(struct mesh_plan_analysis *a){
   if(!a || __atomic_fetch_sub(&a->references,1,__ATOMIC_ACQ_REL)!=1)return;
   if(a->owned){
-    for(uint32_t f=0;a->flow && f<a->functions;f++){plan_flow_loaded_free(a->flow+f);free(a->flow[f].demand);}
+    for(uint32_t f=0;a->flow && f<a->functions;f++){
+      if(((struct plan_loaded *)a->owned)->reconstructed_slots){free(a->flow[f].slot);free(a->flow[f].bound);}
+      plan_flow_loaded_free(a->flow+f);free(a->flow[f].demand);
+    }
     free(a->flow);free(a->call_group);free(a->source_group);free(a->chain_pairs);mesh_graph_buffer_result_free(a->bounds);plan_loaded_free(a->owned);free(a);return;
   }
   plan_horizon_free(a);
@@ -2736,7 +2827,7 @@ static int plan_local_sections(const struct plan_step *plans,const uint32_t *roo
   size_t values=nroots,offsets=0,conflicts=0,room[4];
   for(uint32_t f=0;f<count;f++){
     values+=functions[f].values;
-    for(uint32_t j=0;j<functions[f].values;j++)if(functions[f].value[j].run)offsets+=plan_value_copies(plans+f,j);
+    for(uint32_t j=0;j<functions[f].values;j++)if(functions[f].value[j].run)offsets+=plan_local_copies(plans+f,j);
   }
   for(uint32_t r=0;r<nroots;r++)if(roots[r].run)offsets+=horizon;
   int status=plan_room(values+1,sizeof *out->first,room) || plan_room(offsets,sizeof *out->offset,room+1) ||
@@ -2756,7 +2847,7 @@ static int plan_local_sections(const struct plan_step *plans,const uint32_t *roo
         const struct mesh_value *source=functions[f].value+j;
         struct mesh_plan_value *v=out->planned.result[f].value+j;
         held[g]=v;out->first[g]=at;
-        v->section=source->section;v->section.count=plan_value_copies(plans+f,j);
+        v->section=source->section;v->section.count=plan_local_copies(plans+f,j);
         for(uint32_t c=0;source->run && c<v->section.count;c++,at++){
           out->offset[at]=x->at[plans[f].item[j]+c]*quantum;
           view[at]=(struct mesh_graph_view){.view={.offset=out->offset[at],.element=v->section.bytes},
@@ -2960,16 +3051,6 @@ static int plan_analyze_network(struct mesh_plan_analysis *a,const double *routi
   }
   if(nodes->self>=nodes->count){status=EHOSTUNREACH;return status;}
   if(!(program>>nodes->self&1)){status=EINVAL;return status;}
-  /* mesh-collective.h mesh_plan_program: the slots the calls' uses bind to program roots, once (each slot's storage
-     its root's, PLAN_SEVERAL where its function's calls bind it to more than one) */
-  for(uint32_t f=0;a->use && f<count;f++){
-    if(!(plans[f].bound=malloc(((size_t)functions[f].values+1)*sizeof *plans[f].bound))){status=ENOMEM;return status;}
-    for(uint32_t j=0;j<functions[f].values;j++)plans[f].bound[j]=MESH_ABSENT;
-  }
-  for(uint32_t r=0;a->use && r<a->roots;r++)for(size_t k=a->use_first[r];k<a->use_first[r+1];k++){
-    uint32_t *b=plans[calls[a->use[k].call]].bound+a->use[k].value;
-    *b=*b==MESH_ABSENT || *b==r?r:PLAN_SEVERAL;
-  }
   /* design/aot-compilation-change-request.md A7; mesh-collective.h mesh_declared_group: each function's rows grouped
      once, the caller's grouping or, without one, made here */
   for(uint32_t f=0;f<count;f++){
@@ -3035,8 +3116,7 @@ static int plan_sections(struct mesh_plan_compilation *compiled){
     const struct plan_step *step=compiled->step+f;
     for(uint32_t j=0;!status && j<step->function->values;j++){
       const struct mesh_value *value=step->function->value+j;
-      const int held=value->section.bytes && !(step->flow->bound && step->flow->bound[j]!=MESH_ABSENT);
-      status=plan_section(analysis->geometry,value,held?plan_value_copies(step,j):0,&rows,
+      status=plan_section(analysis->geometry,value,value->section.bytes?plan_local_copies(step,j):0,&rows,
                           &step->result->value[j].section);
     }
   }
@@ -3047,6 +3127,13 @@ static int plan_sections(struct mesh_plan_compilation *compiled){
   }
   planned->rows=(struct mesh_range){0,(uint32_t)rows+1};
   return status;
+}
+int mesh_plan_call_slot(const struct mesh_plan_compilation *compiled,uint32_t call,uint32_t value,uint64_t iteration,
+                        struct mesh_plan_slot *out){
+  const struct mesh_plan_analysis *a=compiled->result.planned.analysis;
+  if(call>=a->ncalls || value>=a->function[a->calls[call]].values)return EINVAL;
+  *out=plan_call_slot(compiled->step+a->calls[call],value,(uint32_t)a->call_group->ordinal[call],iteration);
+  return 0;
 }
 static int plan_program_placement(struct mesh_plan_compilation *compiled){
   struct mesh_planned *planned=&compiled->result.planned;
@@ -3179,8 +3266,11 @@ static int plan_state(struct mesh_plan_compilation *compiled,uint32_t f){
       frame=plan_page(compiled->placement,m->block,p->set_item+d->relay*u+c,byte/block);
     else{
       /* a root's copy t is block t: this function's copy c is of block c / calls (mesh_plan_local) */
-      const struct mesh_section x=d->root!=MESH_ABSENT?p->root_result[d->root].section:p->result->value[d->mine].section;
-      const uint32_t copy=d->root!=MESH_ABSENT?c/p->flow->calls%x.count:c%x.count;
+      struct mesh_plan_slot slot;
+      if(d->root==MESH_ABSENT)slot=plan_call_slot(p,d->mine,c%p->flow->calls,c/p->flow->calls);
+      else slot=(struct mesh_plan_slot){d->root,c/p->flow->calls%p->root_result[d->root].section.count};
+      const struct mesh_section x=slot.root!=MESH_ABSENT?p->root_result[slot.root].section:p->result->value[d->mine].section;
+      const uint32_t copy=slot.local;
       byte=cuts->at[(uint64_t)p->geometry->local[e->demand]*cuts->instructions+e->instruction];
       frame=compiled->page[x.first+(size_t)copy*x.stride+byte/block];
     }
@@ -3507,7 +3597,7 @@ static void plan_extents_put(struct plan_archive *out,const struct mesh_planned 
   plan_archive_put(out,planned->extent,planned->extents*sizeof *planned->extent);
 }
 static void plan_analysis_put(struct plan_archive *,const struct mesh_plan_analysis *);
-static int plan_analysis_get(struct plan_archive *,struct plan_loaded *,const struct mesh_function *,uint32_t,
+static int plan_analysis_get(struct plan_archive *,struct plan_loaded *,const struct mesh_function *,uint32_t,uint32_t,
                              struct mesh_plan_analysis **);
 
 /* the archived signature viewed in place (8-aligned, plan_signature_put) and read under the loaded bytes' owner: the
@@ -3765,6 +3855,7 @@ static int plan_flow_extra_get(struct plan_archive *,struct mesh_plan_flow *,con
   X(orders,2*(uint64_t)a->norders) X(causes,a->norders) X(carried,a->roots)
 static void plan_flow_put(struct plan_archive *out,const struct mesh_plan_flow *p){
   plan_archive_put(out,p,sizeof *p);
+  if(p->slot)plan_archive_put(out,p->slot,(size_t)p->givens*(p->calls+1)*sizeof *p->slot);
   plan_archive_align(out);
   for(uint32_t i=0;i<p->demands;i++){
     const struct mesh_plan_demand *d=p->demand+i;
@@ -3781,10 +3872,12 @@ static void plan_flow_put(struct plan_archive *out,const struct mesh_plan_flow *
   if(p->own.demand_of)plan_grouped_put(out,&p->own);
 }
 static int plan_flow_get(struct plan_archive *in,struct mesh_plan_flow *p,const struct mesh_function *source,
-                         const struct mesh_plan_analysis *a,uint32_t f){
-  const struct mesh_plan_flow *saved=plan_archive_view(in,1,sizeof *saved);
+                         const struct mesh_plan_analysis *a,uint32_t f,uint32_t version){
+  const struct mesh_plan_flow *saved=plan_archive_view(in,1,version<4?offsetof(struct mesh_plan_flow,slot):sizeof *saved);
   if(!saved)return in->status;
-  *p=*saved;p->demand=NULL;p->rows=NULL;p->adjacency=NULL;p->lag_graph=NULL;p->lags=NULL;p->covers=NULL;
+  memcpy(p,saved,version<4?offsetof(struct mesh_plan_flow,slot):sizeof *saved);
+  p->slot=version>=4 && saved->slot?(void *)plan_archive_view(in,(size_t)p->givens*(p->calls+1),sizeof *p->slot):NULL;
+  p->demand=NULL;p->rows=NULL;p->adjacency=NULL;p->lag_graph=NULL;p->lags=NULL;p->covers=NULL;
   p->endpoint=NULL;p->transfer_rows=NULL;p->cuts=NULL;p->counts=NULL;p->physical=NULL;
   p->geometry=a->geometry;p->declared=saved->declared?source->declared:NULL;
   p->given=saved->given?source->value:NULL;p->weights=saved->weights?source->weights:NULL;
@@ -4188,7 +4281,7 @@ static void plan_analysis_put(struct plan_archive *out,const struct mesh_plan_an
   for(uint32_t f=0;f<a->functions;f++)plan_flow_put(out,a->flow+f);
 }
 static int plan_analysis_get(struct plan_archive *in,struct plan_loaded *loaded,
-                            const struct mesh_function *functions,uint32_t count,struct mesh_plan_analysis **out){
+                            const struct mesh_function *functions,uint32_t count,uint32_t version,struct mesh_plan_analysis **out){
   const struct mesh_plan_analysis *saved=plan_archive_view(in,1,sizeof *saved);
   if(!saved)return in->status;
   if(saved->functions!=count)return EINVAL;
@@ -4240,7 +4333,7 @@ static int plan_analysis_get(struct plan_archive *in,struct plan_loaded *loaded,
     }
   }
   for(uint32_t f=0;f<count;f++){
-    const int status=plan_flow_get(in,a->flow+f,functions+f,a,f);
+    const int status=plan_flow_get(in,a->flow+f,functions+f,a,f,version);
     if(status)return status;
   }
   return 0;
@@ -4452,7 +4545,7 @@ static int plan_local_put(struct plan_archive *out,const struct mesh_local *loca
   struct plan_saved_local head={.magic=PLAN_SAVED_LOCAL,.arena=local->bytes,.offsets=local->offsets,
     .orders=local->planned.orders,.horizon=local->planned.horizon,.values=local->values,.relation=relation_bytes,
     .words=c?c->words:0,.uses=a->use_first?a->use_first[a->roots]:0,.used=!!a->use_first,.functions=a->functions,.roots=a->roots,
-    .ncalls=a->ncalls,.norders=a->relation?a->norders:0,.chained=!!a->chains,.closed=!!c,.quantum=local->quantum,.padding=3};
+    .ncalls=a->ncalls,.norders=a->relation?a->norders:0,.chained=!!a->chains,.closed=!!c,.quantum=local->quantum,.padding=4};
   plan_archive_align(out);
   const size_t start=out->at;
   plan_archive_bytes(out,&head,sizeof head);
@@ -4636,13 +4729,18 @@ static int plan_local_views_get(struct plan_archive *input,const struct plan_sav
   local->bytes=head->arena;local->values=(size_t)head->values;local->offsets=(size_t)head->offsets;local->quantum=head->quantum;
   local->first=(size_t *)(uintptr_t)first;local->offset=(uint64_t *)(uintptr_t)offset;
   local->value_first=(size_t *)(uintptr_t)value_first;
-  status=plan_analysis_get(input,loaded,loaded->function,head->functions,&local->planned.analysis);
+  status=plan_analysis_get(input,loaded,loaded->function,head->functions,head->padding,&local->planned.analysis);
   struct mesh_plan_analysis *a=local->planned.analysis;
   if(!status){
     a->calls=calls;a->chains=chains;a->ordered=ordered;a->relation=*relation;a->closure=loaded->closure;
     a->call_group->context=calls;if(a->chain_pairs)a->chain_pairs->chain=chains;
     a->root=root;a->use_first=use_first;a->use=use;
     for(uint32_t f=0;f<a->functions;f++)a->flow[f].roots=root;
+    if(head->padding<4 && a->roots){
+      loaded->reconstructed_slots=1;
+      for(uint32_t f=0;f<a->functions;f++)a->flow[f].bound=NULL;
+      status=plan_bind_slots(a);
+    }
   }
   return status;
 }
@@ -4655,7 +4753,7 @@ static int plan_local_get(struct plan_archive *input,struct mesh_local *local,in
   plan_archive_bytes(input,&head,sizeof head);
   if(input->status || head.magic!=PLAN_SAVED_LOCAL || head.bytes>input->size-start || !head.functions ||
      !head.ncalls || head.functions==UINT32_MAX || head.values==UINT64_MAX ||
-     head.padding>3 || (head.closed && head.words!=((uint64_t)head.ncalls+63)/64))return EINVAL;
+     head.padding>4 || (head.closed && head.words!=((uint64_t)head.ncalls+63)/64))return EINVAL;
   local->planned.owned=plan_loaded_new(head.functions+1);
   if(!local->planned.owned)return ENOMEM;
   int status=plan_functions_get(input,&head,analysis,local);

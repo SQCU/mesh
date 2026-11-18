@@ -315,6 +315,10 @@ class Nodes(C.Structure):
                 ('capacity', (Q * NODES_MOST) * NODES_MOST), ('sequencer', U), ('padding', U), ('boot', Q)]
 
 
+class PlanSlot(C.Structure):
+    _fields_ = [('root', U), ('local', U)]
+
+
 class PlanFlow(C.Structure):
     pass
 
@@ -400,7 +404,7 @@ PlanFlow._fields_ = [('geometry', C.POINTER(PlanGeometry)), ('declared', C.POINT
                 ('lag_source', C.POINTER(U)), ('lag_target', C.POINTER(U)),
                 ('lag_graph', C.POINTER(mesh_graph.LagGraph)), ('lags', C.POINTER(mesh_graph.LagMatrix)),
                 ('covers', C.POINTER(mesh_graph.CoverResult)), ('touch', C.POINTER(mesh_graph.Touch)),
-                ('relay', C.POINTER(U))]
+                ('relay', C.POINTER(U)), ('slot', C.POINTER(PlanSlot))]
 
 
 PlanAnalysis._fields_ = [
@@ -581,6 +585,7 @@ for name, result, arguments in (
                                        C.POINTER(C.POINTER(Q)), C.POINTER(C.POINTER(PlanStorage))]),
         ('mesh_plan_storage_retain', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_storage_free', None, [C.POINTER(PlanStorage)]),
+        ('mesh_plan_call_slot', C.c_int, [C.POINTER(PlanCompilation), U, U, Q, C.POINTER(PlanSlot)]),
         ('mesh_plan_program_compile', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
                                                C.POINTER(PlanStorage), C.POINTER(C.POINTER(PlanCompilation))]),
         ('mesh_plan_program_install', C.c_int, [CONTEXT, Q, C.POINTER(PlanCompilation), Q, C.POINTER(PlanBinding)]),

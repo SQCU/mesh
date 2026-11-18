@@ -302,6 +302,7 @@ int mesh_plan_flow_geometry(const struct mesh_plan_flow *,const struct mesh_plan
                             const uint64_t *const *,const uint32_t *,struct mesh_plan_flow_geometry **);
 void mesh_plan_flow_geometry_retain(struct mesh_plan_flow_geometry *);
 void mesh_plan_flow_geometry_free(struct mesh_plan_flow_geometry *);
+struct mesh_plan_slot { uint32_t root,local; };
 struct mesh_plan_flow {
   const struct mesh_plan_geometry *geometry;
   const struct mesh_declared *declared;
@@ -367,6 +368,7 @@ struct mesh_plan_flow {
   struct mesh_graph_cover_result *covers;
   struct mesh_graph_touch *touch;
   uint32_t *relay;
+  struct mesh_plan_slot *slot;
 };
 
 struct mesh_plan_analysis {
@@ -528,6 +530,7 @@ struct mesh_plan_compilation {
   struct mesh_plan_storage *storage;
 };
 int mesh_plan_environment(struct mesh_ctx *,struct mesh_nodes *,struct mesh_plan_geometry *);
+int mesh_plan_call_slot(const struct mesh_plan_compilation *,uint32_t call,uint32_t value,uint64_t iteration,struct mesh_plan_slot *);
 int mesh_plan_program_compile(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
                               struct mesh_plan_storage *,struct mesh_plan_compilation **);
 int mesh_plan_program_install(struct mesh_ctx *,uint64_t,const struct mesh_plan_compilation *,uint64_t,struct mesh_plan_binding *);
