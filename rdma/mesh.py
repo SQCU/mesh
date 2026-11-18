@@ -623,6 +623,9 @@ for name, result, arguments in (
 LIB.mesh_plan_program_analyze_routed.restype = C.c_int
 LIB.mesh_plan_program_analyze_routed.argtypes = [*LIB.mesh_plan_program_analyze.argtypes[:-1],
                                                 C.POINTER(D), C.POINTER(C.POINTER(PlanAnalysis))]
+LIB.mesh_plan_program_analyze_chains.restype = C.c_int
+LIB.mesh_plan_program_analyze_chains.argtypes = [*LIB.mesh_plan_program_analyze_routed.argtypes[:-1],
+                                                C.POINTER(mesh_graph.ChainResult), C.POINTER(C.POINTER(PlanAnalysis))]
 # mesh-collective.h mesh_strided_extents (design/plan-to-bridge-change-request.md R1; MPI 4.1 §6.1.3): a view's maximal
 # contiguous byte ranges, the owning module's traversal.  What must stay: the header's declaration
 EXTENT = C.CFUNCTYPE(None, C.c_void_p, Q, Q)

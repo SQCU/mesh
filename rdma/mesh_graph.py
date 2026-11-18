@@ -26,7 +26,8 @@ class Interval(C.Structure):
 # its last view
 class Owned:
     def __init__(self, made, free, graph, held=()):
-        self.made, self.graph, self.held, self.freed = made, graph, held, weakref.finalize(self, free, made)
+        self.made, self.graph, self.held = made, graph, held
+        self.freed = weakref.finalize(self, free, made) if free is not None else None
 
 
 # a borrowed native array over a span of its indices, each element read through `at`; slices are views of the same
@@ -780,13 +781,22 @@ def buffer_queries(source, *operands):
     return Owned(made, LIB.mesh_graph_buffer_result_free, source, operands)
 
 
+def chain_pairs(graph, chains):
+    if isinstance(chains, Owned):
+        if chains.made.contents.vertices != graph.data.vertices:
+            raise ValueError("chain pairs must cover each call occurrence")
+        return chains
+    pairs = C.POINTER(ChainResult)()
+    _check(LIB.mesh_graph_chain_pairs(graph.data.vertices, chains, C.byref(pairs)))
+    return Owned(pairs, LIB.mesh_graph_chain_result_free, graph, chains)
+
+
 def program_buffer_queries(calls, graph, chains, bodies, outer_queries=()):
     """Substitute each occurrence's timed graph into the call graph for mesh_graph_buffer_queries."""
     if graph.data.vertices != len(calls):
         raise ValueError("each call occurrence must name one graph vertex")
-    chain = C.POINTER(ChainResult)()
-    _check(LIB.mesh_graph_chain_pairs(len(calls), chains, C.byref(chain)))
-    pairs = Owned(chain, LIB.mesh_graph_chain_result_free, graph, chains)
+    pairs = chain_pairs(graph, chains)
+    chain = pairs.made
     # Two zero-duration vertices denote entry and completion of each call occurrence.
     times = [0.] * (2 * len(calls))
     edges, queries, functions = [], [], []

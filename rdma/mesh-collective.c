@@ -2698,18 +2698,20 @@ static int plan_bind_slots(struct mesh_plan_analysis *a){
   }
   return 0;
 }
+struct plan_analysis_source {struct mesh_plan_analysis analysis;struct mesh_graph_chain_result *owned_pairs;};
 static int plan_analysis_new(const struct mesh_function *functions,uint32_t count,const uint32_t *calls,uint32_t ncalls,
   const struct mesh_graph_relation *order,const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
   const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
-  const struct mesh_local_use *use,struct mesh_plan_analysis **out){
+  const struct mesh_local_use *use,struct mesh_graph_chain_result *pairs,struct mesh_plan_analysis **out){
   if(!out)return EINVAL;
   *out=NULL;
   if(!functions || !count || !calls || !ncalls || (norders && (!order || !ordered)) ||
      (nroots && (!roots || !use_first || !use)) || (closure && closure->vertices!=ncalls))return EINVAL;
+  if(pairs && (pairs->vertices!=ncalls || pairs->chain!=chains))return EINVAL;
   for(uint32_t f=0;f<count;f++)if(functions[f].values && !functions[f].value)return EINVAL;
   for(uint32_t j=0;j<ncalls;j++){
     const uint32_t h=chains?chains[j]:j;
-    if(calls[j]>=count || h>j || (chains && chains[h]!=h))return EINVAL;
+    if(calls[j]>=count || (!pairs && (h>j || (chains && chains[h]!=h))))return EINVAL;
   }
   for(uint32_t r=0;r<nroots;r++)for(size_t k=use_first[r];k<use_first[r+1];k++)
     if(use[k].call>=ncalls || use[k].value>=functions[calls[use[k].call]].values)return EINVAL;
@@ -2717,8 +2719,9 @@ static int plan_analysis_new(const struct mesh_function *functions,uint32_t coun
   for(uint32_t q=0;q<norders;q++)
     if(ordered[q]>=d->edges || d->edge[ordered[q]].from>=d->edge[ordered[q]].to || d->edge[ordered[q]].to>=ncalls)
       return EINVAL;
-  struct mesh_plan_analysis *a=calloc(1,sizeof *a);
-  if(!a)return ENOMEM;
+  struct plan_analysis_source *source=calloc(1,sizeof *source);
+  if(!source)return ENOMEM;
+  struct mesh_plan_analysis *a=&source->analysis;
   a->references=1;a->function=functions;a->functions=count;a->calls=calls;a->ncalls=ncalls;a->relation=order;
   a->ordered=ordered;a->norders=norders;a->closure=closure;a->chains=chains;a->root=roots;a->roots=nroots;
   a->use_first=use_first;a->use=use;
@@ -2726,7 +2729,8 @@ static int plan_analysis_new(const struct mesh_function *functions,uint32_t coun
   a->carried=calloc((size_t)nroots+1,1);
   int status=a->flow && a->carried?0:ENOMEM;
   if(!status)status=mesh_graph_group(count,ncalls,plan_at,calls,&a->call_group);
-  if(!status)status=mesh_graph_chain_pairs(ncalls,chains,&a->chain_pairs);
+  if(!status && !pairs)status=mesh_graph_chain_pairs(ncalls,chains,&source->owned_pairs);
+  a->chain_pairs=pairs?pairs:source->owned_pairs;
   for(uint32_t f=0;!status && f<count;f++){
     struct mesh_plan_flow *p=a->flow+f;
     p->given=functions[f].value;p->givens=functions[f].values;p->calls=(uint32_t)(a->call_group->first[f+1]-a->call_group->first[f]);
@@ -2752,7 +2756,7 @@ void mesh_plan_analysis_free(struct mesh_plan_analysis *a){
   plan_horizon_free(a);
   for(uint32_t f=0;a->flow && f<a->functions;f++)plan_free(a->flow+f);
   free(a->flow);free(a->carried);
-  mesh_graph_group_free(a->call_group);mesh_graph_group_free(a->source_group);mesh_graph_chain_result_free(a->chain_pairs);
+  mesh_graph_group_free(a->call_group);mesh_graph_group_free(a->source_group);mesh_graph_chain_result_free(((struct plan_analysis_source *)a)->owned_pairs);
   free(a->environment);free(a);
 }
 static void plan_steps_free(struct plan_step *steps,uint32_t count){
@@ -2783,7 +2787,7 @@ int mesh_plan_local_analyze(const struct mesh_function *functions,uint32_t count
   const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
   const struct mesh_local_use *use,struct mesh_plan_analysis **out){
   int status=plan_analysis_new(functions,count,calls,ncalls,order,ordered,norders,closure,chains,roots,nroots,
-                                use_first,use,out);
+                                use_first,use,NULL,out);
   if(status)return status;
   struct mesh_plan_analysis *a=*out;
   status=plan_horizon(a);
@@ -3364,7 +3368,7 @@ int mesh_plan(struct mesh_ctx *context,uint64_t group,uint64_t program,const str
   struct mesh_plan_analysis *a=NULL;
   struct mesh_plan_compilation *compiled=NULL;
   struct plan_schedule_result **schedules=NULL;
-  int status=plan_analysis_new(functions,count,calls,ncalls,NULL,NULL,0,NULL,chains,NULL,0,NULL,NULL,&a);
+  int status=plan_analysis_new(functions,count,calls,ncalls,NULL,NULL,0,NULL,chains,NULL,0,NULL,NULL,NULL,&a);
   if(status)return status;
   struct plan_environment *environment=malloc(sizeof *environment);
   if(!environment){mesh_plan_analysis_free(a);return ENOMEM;}
@@ -3389,17 +3393,37 @@ static int plan_program_source(const struct mesh_nodes *nodes,const struct mesh_
                       const struct mesh_graph_relation *order,
                       const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
                       const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
-                      const struct mesh_local_use *use,struct mesh_plan_analysis **out){
+                      const struct mesh_local_use *use,struct mesh_graph_chain_result *pairs,struct mesh_plan_analysis **out){
   if(!out)return EINVAL;
   *out=NULL;
   if(!nodes || !geometry || !program || !grouped || !source_calls || !sources || !source_outstanding)return EINVAL;
   int status=plan_analysis_new(functions,count,calls,ncalls,order,ordered,norders,closure,chains,roots,nroots,
-                                use_first,use,out);
+                                use_first,use,pairs,out);
   if(status)return status;
   struct mesh_plan_analysis *a=*out;
   a->nodes=nodes;a->geometry=geometry;a->program=program;a->grouped=grouped;a->source_calls=source_calls;
   a->sources=sources;a->source_outstanding=source_outstanding;
   return 0;
+}
+int mesh_plan_program_analyze_chains(const struct mesh_nodes *nodes,const struct mesh_plan_geometry *geometry,uint64_t program,
+                      struct mesh_graph_buffer_result *bounds,const uint32_t *bound_function,const struct mesh_function *functions,
+                      uint32_t count,const struct mesh_grouped *grouped,const uint32_t *calls,uint32_t ncalls,
+                      const uint32_t *source_calls,uint32_t sources,const uint64_t *source_outstanding,
+                      const struct mesh_graph_relation *order,
+                      const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
+                      const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
+                      const struct mesh_local_use *use,const double *routing,struct mesh_graph_chain_result *pairs,struct mesh_plan_analysis **out){
+  if(!out)return EINVAL;
+  *out=NULL;
+  if(!bounds || (bounds->queries && !bound_function))return EINVAL;
+  int status=plan_program_source(nodes,geometry,program,functions,count,grouped,calls,ncalls,source_calls,sources,
+                                 source_outstanding,order,ordered,norders,closure,chains,roots,nroots,use_first,use,pairs,out);
+  if(status)return status;
+  struct mesh_plan_analysis *a=*out;
+  status=plan_bound_result(a,bounds,bound_function);
+  if(!status)status=plan_analyze_network(a,routing);
+  if(status){mesh_plan_analysis_free(a);*out=NULL;}
+  return status;
 }
 int mesh_plan_program_analyze_routed(const struct mesh_nodes *nodes,const struct mesh_plan_geometry *geometry,uint64_t program,
                       struct mesh_graph_buffer_result *bounds,const uint32_t *bound_function,const struct mesh_function *functions,
@@ -3409,17 +3433,9 @@ int mesh_plan_program_analyze_routed(const struct mesh_nodes *nodes,const struct
                       const uint32_t *ordered,uint32_t norders,const struct mesh_graph_closure *closure,
                       const uint32_t *chains,const struct mesh_value *roots,uint32_t nroots,const size_t *use_first,
                       const struct mesh_local_use *use,const double *routing,struct mesh_plan_analysis **out){
-  if(!out)return EINVAL;
-  *out=NULL;
-  if(!bounds || (bounds->queries && !bound_function))return EINVAL;
-  int status=plan_program_source(nodes,geometry,program,functions,count,grouped,calls,ncalls,source_calls,sources,
-                                 source_outstanding,order,ordered,norders,closure,chains,roots,nroots,use_first,use,out);
-  if(status)return status;
-  struct mesh_plan_analysis *a=*out;
-  status=plan_bound_result(a,bounds,bound_function);
-  if(!status)status=plan_analyze_network(a,routing);
-  if(status){mesh_plan_analysis_free(a);*out=NULL;}
-  return status;
+  return mesh_plan_program_analyze_chains(nodes,geometry,program,bounds,bound_function,functions,count,grouped,
+    calls,ncalls,source_calls,sources,source_outstanding,order,ordered,norders,closure,chains,roots,nroots,
+    use_first,use,routing,NULL,out);
 }
 int mesh_plan_program_analyze(const struct mesh_nodes *nodes,const struct mesh_plan_geometry *geometry,uint64_t program,
                       struct mesh_graph_buffer_result *bounds,const uint32_t *bound_function,const struct mesh_function *functions,
@@ -3448,7 +3464,7 @@ int mesh_plan_program(struct mesh_ctx *context,uint64_t group,uint64_t program,c
   struct plan_schedule_result **schedules=NULL;
   int status=mesh_plan_environment(context,&environment->nodes,&environment->geometry);
   if(!status)status=plan_program_source(&environment->nodes,&environment->geometry,program,functions,count,grouped,
-      calls,ncalls,source_calls,sources,source_outstanding,order,ordered,norders,closure,chains,roots,nroots,use_first,use,&analysis);
+      calls,ncalls,source_calls,sources,source_outstanding,order,ordered,norders,closure,chains,roots,nroots,use_first,use,NULL,&analysis);
   if(analysis)analysis->environment=environment;else free(environment);
   if(!status)status=plan_horizon(analysis);
   if(!status)status=plan_analyze_network(analysis,NULL);
