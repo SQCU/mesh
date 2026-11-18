@@ -457,7 +457,7 @@ class Target:
         recorder = made(lib.MetalRecorderOpen(gpu, error, ROOM), error, "recorder", errno.ENODEV)
         owned(lambda: M.PUT(recorder, M.SELECTOR[b"release"]))
         buffer, captured = owner.bound(owned, M), []
-        for r, (row, program) in enumerate(zip(self.rows, programs)):
+        for r, (row, program) in enumerate(zip(self.rows, programs, strict=True)):
             if program is None:
                 captured.append((row, None, None))
                 continue
@@ -476,7 +476,7 @@ class Target:
                 compiler.metal_ir_step_placed(program, buffer, *step)
             # metal_ir.h metal_ir_value_placed with no buffer: each callable operand's root one logical copy, shared
             # by every execution (a state or mutated input is the caller's one storage), its address the invocation's
-            for root in (root for operand in self.operands for at, root in operand.occurrences if at == r):
+            for root in self.external_roots(r):
                 compiler.metal_ir_value_placed(program, root, None, None, 1, 0, 0)
             # metal_recording.h MetalRecorderState: the transport's state buffer and this program's status word offset
             if state is not None:
@@ -497,6 +497,34 @@ class Target:
             checked(compiler.metal_ir_place(program, error, ROOM), error, "placed accesses")
             calls.append(M.Call(C.pointer(replay), row.planned + 1, None, 0))
         return recorder, (M.Call * len(calls))(*calls)
+
+    def external_roots(self, row):
+        return (root for operand in self.operands for at, root in operand.occurrences if at == row)
+
+    def record(self, owned, libs, gpu, owner, programs, *, archive=None, numerical_bodies=()):
+        M, _, (lib, _), _ = libs
+        error = C.create_string_buffer(ROOM)
+        recorder, calls = self.placed(owned, libs, gpu, owner, programs, archive is None,
+                                      numerical_bodies=numerical_bodies)
+        args = (recorder, calls, len(calls), C.byref(owner.planned),
+                C.byref(owner.binding) if owner.binding is not None else None)
+        handle = (lib.MetalRecorderProgram(*args, error, ROOM) if archive is None else
+                  lib.MetalProgramLoad(*args, archive, error, ROOM))
+        native = made(handle, error, "the program's calls")
+        owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
+        return recorder, native
+
+    def read_archive(self, owned, libs, gpu, artifact, context):
+        M, compiler, _, _ = libs
+        archive = M._archive_loaded(compiler, artifact, context, gpu, C.create_string_buffer(ROOM))
+        owned(lambda: compiler.metal_ir_archive_free(archive))
+        programs = []
+        for i in range(len(self.rows)):
+            program = compiler.metal_ir_archive_program(archive, i) or None
+            if program is not None:
+                owned(lambda program=program: compiler.metal_ir_program_free(program))
+            programs.append(program)
+        return archive, programs
 
     # body k's callable interface before its lowering: each distinct input or state root (its first placeholder's), its
     # generator state, each further output root (any role but CONSTANT: the joint binding supplies every function's
@@ -1102,11 +1130,7 @@ class Target:
             for a, operand in enumerate(self.operands):
                 for r, root in operand.occurrences:
                     mesh.check(compiler.metal_ir_value_external(programs[r], root, a))
-            recorder, calls = self.placed(owned, libs, gpu, owner, programs, True, numerical_bodies=self.bodies)
-            native = made(lib.MetalRecorderProgram(recorder, calls, len(calls), C.byref(owner.planned),
-                                                   C.byref(owner.binding) if owner.binding is not None else None, error, ROOM),
-                          error, "the program's calls")
-            owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
+            _, native = self.record(owned, libs, gpu, owner, programs, numerical_bodies=self.bodies)
             warm, period = mesh.Q(), mesh.Q()
             lib.MetalProgramPhases(native, C.byref(warm), C.byref(period))
             signature, executions = mesh_graph.Signature(), mesh.Q(warm.value + period.value + 1)
@@ -1141,11 +1165,7 @@ class Target:
         with owned:
             gpu = device()
             owned(lambda: M.PUT(gpu, M.SELECTOR[b"release"]))
-            archive = M._archive_loaded(compiler, self.artifact, self.solution.analysis_context, gpu, error)
-            owned(lambda: compiler.metal_ir_archive_free(archive))
-            programs = [compiler.metal_ir_archive_program(archive, r) or None for r in range(len(self.rows))]
-            for program in (program for program in programs if program is not None):
-                owned(lambda program=program: compiler.metal_ir_program_free(program))
+            archive, programs = self.read_archive(owned, libs, gpu, self.artifact, self.solution.analysis_context)
             fixed = {}
             for r, root, name in self.constants:
                 program = programs[r]
@@ -1159,11 +1179,7 @@ class Target:
                     M._lent(constants[name], lambda release, owner: compiler.metal_ir_value_data(
                         program, root, data, storage.nbytes(), buffer, 0, owner, release), lambda _: True)
             owner = published if published is not None else Arena(self, owned, M, gpu)
-            recorder, calls = self.placed(owned, libs, gpu, owner, programs, False)
-            native = made(lib.MetalProgramLoad(recorder, calls, len(calls), C.byref(owner.planned),
-                                               C.byref(owner.binding) if owner.binding is not None else None, archive, error,
-                                               ROOM), error, "the loaded program's calls")
-            owned(lambda: M.PUT(native, M.SELECTOR[b"release"]))
+            _, native = self.record(owned, libs, gpu, owner, programs, archive=archive)
             signature = mesh_graph.from_archive(self.signature)
             owned(lambda: mesh_graph.free(signature))
             checked(lib.MetalProgramSignatureBind(native, self.node, C.byref(signature), error, ROOM), error,
