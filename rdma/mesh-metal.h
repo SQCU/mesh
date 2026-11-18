@@ -102,6 +102,9 @@ int mesh_metal_mask(const uint32_t groups[3],const uint32_t threads[3],size_t ac
    once) resets the counter to 0 and releases. `transfer` the declared transfer of the writer's own call
    (metal_ir.h METAL_IR_PUBLISH for a CPU writer) */
 struct mesh_metal_release { uint64_t supplied,status,total; uint32_t transfer,owner; };
+struct mesh_metal_origin { uint64_t word; uint32_t copies,cuts; };
+int mesh_metal_origin_slots_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *,
+                                    uint32_t call,struct mesh_metal_release *,struct mesh_metal_origin *);
 /* declared before mesh_plan as {.transfer,.owner} (one release group of the value: its representative transfer and
    its owner call, `total` 0 until the lowering counts it); prepared after it: the supplied and status words of that
    call's plan, in place (transfer and owner kept) */

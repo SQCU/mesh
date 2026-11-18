@@ -250,20 +250,32 @@ int mesh_metal_range_prepare(struct mesh_ctx *context,struct mesh_metal_transpor
   receive_words(context,transport,plan,range->transfer,&range->input);
   return mesh_metal_range_fields(planned,range,field,room);
 }
-int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release){
-  uint64_t origin;
-  return mesh_metal_origin_prepare(context,transport,binding,call,release,&origin);
-}
-int mesh_metal_origin_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release,uint64_t *origin){
+static int prepare_release(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release,
+  struct mesh_metal_origin *slots,uint64_t *legacy){
   const struct mesh_planned *planned=&binding->compilation->result.planned;
   if(call>=planned->calls)return EINVAL;
   const uint64_t plan=binding->plan[planned->call[call].function];
-  const struct mesh_publication *entry=mesh_transfer_at(context->M,mesh_state_at(context->M,plan),release->transfer);
+  const struct mesh_state *state=mesh_state_at(context->M,plan);
+  const struct mesh_publication *entry=mesh_transfer_at(context->M,state,release->transfer);
   release->supplied=entry->targets[0].word-transport->offset;
-  *origin=entry->targets[0].count>1?entry->origin-transport->offset:0;
+  const uint64_t word=entry->origin?entry->origin-transport->offset:0;
+  if(slots)*slots=entry->targets[0].stride?(struct mesh_metal_origin){word,state->copies,entry->targets[0].stride}:
+                                           (struct mesh_metal_origin){0};
+  if(legacy)*legacy=entry->targets[0].count>1 && (!entry->targets[0].stride || state->copies==1)?word:0;
   return mesh_metal_status_prepare(context,transport,plan,&release->status);
+}
+int mesh_metal_release_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release){
+  return prepare_release(context,transport,binding,call,release,NULL,NULL);
+}
+int mesh_metal_origin_slots_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release,struct mesh_metal_origin *slots){
+  return prepare_release(context,transport,binding,call,release,slots,NULL);
+}
+int mesh_metal_origin_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  const struct mesh_plan_binding *binding,uint32_t call,struct mesh_metal_release *release,uint64_t *origin){
+  return prepare_release(context,transport,binding,call,release,NULL,origin);
 }
 int mesh_metal_sending_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   const struct mesh_plan_binding *binding,uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending){
