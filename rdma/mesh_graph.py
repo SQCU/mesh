@@ -320,8 +320,20 @@ class IncidenceQuotient:
         self.components = components(vertices + targets, self.equality_edges)
         self.classes = range(max(self.components, default=-1) + 1)
         self.source_classes, self.target_classes = self.components[:vertices], self.components[vertices:]
+        grouped = C.POINTER(Grouping)()
+        target = C.byref(self.components.items, vertices * C.sizeof(C.c_uint32))
+        _check(LIB.mesh_graph_group(len(self.classes), targets, C.cast(LIB.mesh_graph_row_head, C.c_void_p),
+                                    target, C.byref(grouped)))
+        owner = Owned(grouped, LIB.mesh_graph_group_free, graph, self.components)
+        self.target_first = C.cast(grouped.contents.first, C.POINTER(C.c_size_t * (len(self.classes) + 1))).contents
+        self.target_first.owner = owner
+        self.target_order = View(owner, grouped.contents.order, range(targets), int)
         self.contracted = graph.contract(self.kept)
         self.quotient = self.contracted.quotient(self.classes, self.source_classes)
+
+    def members(self, group, targets):
+        span = range(self.target_first[group], self.target_first[group + 1])
+        return View(self.target_order.owner, self.target_order.items, span, targets.__getitem__)
 
 
 def walk(universe, starts, neighbours):
