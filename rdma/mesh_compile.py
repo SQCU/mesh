@@ -7259,7 +7259,8 @@ class Range(C.Structure):
 
 
 class Release(C.Structure):
-    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('padding', mesh.U)]
+    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U),
+                ('origin', mesh.Q)]
 
 
 class Sending(C.Structure):

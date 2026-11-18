@@ -58,7 +58,7 @@ _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/prepared-machine.md#M10 */
 /* rdma-core libibverbs/man/ibv_post_send.3, NOTES; libfabric man/fi_cntr.3.md, DESCRIPTION */
 struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t pages; uint64_t phases,count,state;
-  struct mesh_target targets[1]; uint64_t completion,padding; };
+  struct mesh_target targets[1]; uint64_t completion,origin; };
 _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 &&
   offsetof(struct mesh_publication,sends)==0 && offsetof(struct mesh_publication,pages)==4 &&
   offsetof(struct mesh_publication,phases)==8 && offsetof(struct mesh_publication,count)==16 &&
@@ -88,6 +88,7 @@ _Static_assert(sizeof(struct mesh_holder)==16 && offsetof(struct mesh_bridge_pag
    K. Fraser, Practical lock-freedom, 2004; rdma-core libibverbs/man/ibv_post_send.3, NOTES;
    libfabric man/fi_cntr.3.md, fi_cntr_readerr, and man/fi_endpoint.3.md, fi_cancel; Portals 4, counting events;
    PTX ISA, mbarrier */
+enum { MESH_ORIGIN_FIELD = 64 };
 struct mesh_hop { uint32_t page,node,direction,field; uint64_t word,count; uint32_t pages,bytes; uint64_t serial;
   uint32_t set,offset; };
 _Static_assert(sizeof(struct mesh_hop)==56 && offsetof(struct mesh_hop,word)==16 && offsetof(struct mesh_hop,count)==24 &&

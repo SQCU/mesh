@@ -974,6 +974,10 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
       struct prepared_send *record=f->sends+at;
       *record=(struct prepared_send){.word=region_word(hop->word),.field=hop->field,.pages=hop->pages,.span=span,
         .flow=f,.count=region_word(hop->count)};
+      if(hop->field!=MESH_ABSENT && hop->field>=MESH_ORIGIN_FIELD){
+        record->whole=region_word(words->supplied+(uint64_t)(hop->field-MESH_ORIGIN_FIELD)*sizeof(uint64_t));
+        record->field=MESH_ABSENT;
+      }
       record->request=(struct ibv_send_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND,
         .send_flags=IBV_SEND_SIGNALED};
     } else {
@@ -1545,7 +1549,9 @@ static __attribute__((always_inline)) inline int link_send_drain(struct port *po
       }
       struct prepared_send *record=f->sends+(f->position_set[MESH_SEND]?position_record(f,MESH_SEND,k,&at):at.at);
       const uint64_t word=atomic_load_explicit(record->word,memory_order_acquire);
-      if(record->field==MESH_ABSENT?word<=at.execution:((word>>record->field)&3)!=mesh_phase(at.round+1))break;
+      if(record->field==MESH_ABSENT ?
+         word<=at.execution && (!record->whole || atomic_load_explicit(record->whole,memory_order_acquire)<=at.execution) :
+         ((word>>record->field)&3)!=mesh_phase(at.round+1))break;
       const struct frames each=frames_of(record->span.length);
       if(state->sent-state->done>=MESH_LANE_UNITS || !gate_holds(gate,each))break;
       const uint64_t observed=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;

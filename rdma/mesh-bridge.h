@@ -120,7 +120,7 @@ struct prepared_send {
   struct ibv_sge span;
   struct ibv_send_wr request;
   struct flow *flow;
-  _Atomic uint64_t *count;
+  _Atomic uint64_t *count,*whole;
 };
 /* design/problems-of-14b9a757-change-request.md 7.3, steps 1 to 5; libfabric man/fi_cntr.3.md, fi_cntr_wait */
 static inline void prepared_send_counted(const struct prepared_send *record,int error,uint64_t by){

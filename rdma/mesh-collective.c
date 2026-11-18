@@ -482,7 +482,11 @@ static void plan_layout(struct plan_step *p){
   p->counts=plan_align(p->phases+at);
   p->completions=plan_align(p->counts+(uint64_t)p->geometry->ranges*plan_step_copies(p)*sizeof(uint64_t));
   p->supplied=plan_align(p->completions+(uint64_t)p->geometry->sending*plan_step_copies(p)*2*sizeof(uint64_t));
-  p->publications=plan_align(p->supplied+p->flow->releases*sizeof(uint64_t));
+  uint64_t origin=p->flow->releases;
+  for(uint32_t d=0;d<p->flow->demands;d++)
+    if(p->flow->demand[d].source==p->flow->self && p->geometry->cuts[d]->instructions>1)
+      origin+=p->geometry->cuts[d]->instructions;
+  p->publications=plan_align(p->supplied+origin*sizeof(uint64_t));
   p->status=plan_align(p->publications+(uint64_t)p->flow->transfers*sizeof(struct mesh_publication));
   p->deliveries=plan_align(p->status+sizeof(struct mesh_status));
   p->submits=plan_align(p->deliveries+p->room*sizeof(struct mesh_delivery));
@@ -3299,14 +3303,20 @@ static int plan_state(struct mesh_plan_compilation *compiled,uint32_t f){
     sync[k].every=p->sync[k].every;sync[k].base=p->sync[k].base;
   }
   memcpy(((char *)compiled->state[f])+p->rows,p->wait_row,((size_t)p->flow->calls+1)*sizeof *p->wait_row);
+  struct mesh_publication *publications=(void *)((char *)state+p->publications);
+  uint64_t origin=p->supplied+p->flow->releases*sizeof(uint64_t);
   for(uint32_t i=0;i<p->flow->transfers;i++){
     const struct mesh_declared *t=p->flow->declared+i;
     const struct mesh_plan_demand *d=p->flow->demand+p->flow->of[i];
     const struct mesh_plan_demand_geometry *r=p->geometry->demand+p->flow->of[i];
-    struct mesh_publication *entry=(struct mesh_publication *)(void *)(((char *)compiled->state[f])+p->publications+
-                                                                       (size_t)i*sizeof(struct mesh_publication));
+    struct mesh_publication *entry=publications+i;
     if(t->source==p->flow->self){
-      entry->targets[0]=(struct mesh_target){.word=plan_supplied(p,d),.count=1,.stride=0};
+      const uint64_t cuts=p->geometry->cuts[p->flow->of[i]]->instructions;
+      entry->targets[0]=(struct mesh_target){.word=plan_supplied(p,d),.count=(uint32_t)cuts};
+      if(cuts>1){
+        if(i==d->first){entry->origin=origin;origin+=cuts*sizeof(uint64_t);}
+        else entry->origin=publications[d->first].origin;
+      }
       entry->state=1;
     }else if(t->destination==p->flow->self){
       entry->pages=r->received;
@@ -3345,7 +3355,11 @@ static int plan_state(struct mesh_plan_compilation *compiled,uint32_t f){
     struct mesh_hop h={.page=frame,.node=e->node,.direction=e->direction,.field=MESH_ABSENT,
                        .bytes=(uint32_t)(cut[1]-cut[0]),.serial=p->flow->view.id,.set=e->set,
                        .offset=(uint32_t)(byte%block)};
-    if(e->field==MESH_ABSENT)h.word=plan_supplied(p,d);
+    if(e->field==MESH_ABSENT){
+      const struct mesh_publication *source=publications+d->first;
+      h.word=source->targets[0].word;
+      if(source->origin){h.word=source->origin+e->instruction*sizeof(uint64_t);h.field=MESH_ORIGIN_FIELD+d->release;}
+    }
     else{
       h.word=plan_group(p,r,c)+(uint64_t)e->field/32*sizeof(uint64_t);
       h.field=2*(e->field%32);
@@ -3780,6 +3794,7 @@ static void plan_state_place(const struct mesh_plan_geometry *geometry,const str
   for(uint32_t t=0;t<transfers;t++){
     plan_shift_word(&publication[t].phases,0,base);plan_shift_word(&publication[t].count,0,base);
     plan_shift_word(&publication[t].completion,0,base);plan_shift_word(&publication[t].targets[0].word,0,base);
+    plan_shift_word(&publication[t].origin,0,base);
     publication[t].state=publication[t].state?base:0;
   }
   struct mesh_hop *hop=(void *)((char *)s+s->hops);

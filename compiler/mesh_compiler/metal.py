@@ -278,7 +278,8 @@ class Range(C.Structure):
 # mesh_metal_release: one release record of a value, declared {transfer, owner} (its group's transfer and owner call),
 # prepared in place (supplied, status); 32 bytes
 class Release(C.Structure):
-    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U)]
+    _fields_ = [('supplied', mesh.Q), ('status', mesh.Q), ('total', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U),
+                ('origin', mesh.Q)]
 
 
 class Sending(C.Structure):
