@@ -459,6 +459,11 @@ class Target:
                 captured.append((row, None, None))
                 continue
             state, status = self.transport_state(owned, libs, gpu, owner, row, program)
+            if finalize:
+                body = self.bodies[row.function].machine
+                if body is not None and (body.upstream or body.neural):
+                    from .lower_metal import emitted
+                    emitted(program, body, row.offset)
             ready = made(lib.MetalRecorderPrepare(recorder, program, error, ROOM), error, "preparation")
             owned(lambda ready=ready: M.PUT(ready, M.SELECTOR[b"release"]))
             for value, offsets, count, shares in self.placements(owner, r, program, libs):
@@ -927,12 +932,7 @@ class Target:
         self.instances = [None] * len(self.rows)
         for calls, rewrite in self.selected_rewrites.items():
             for j in calls:
-                row = self.rows[j]
-                program = self.instances[j] = rewrite.instances[j].program
-                body = self.bodies[row.function].machine
-                if body is not None and (body.upstream or body.neural):
-                    from .lower_metal import emitted
-                    emitted(program, body, row.offset)
+                self.instances[j] = rewrite.instances[j].program
 
     def instanced(self, context, plan_calls, libs):
         M, compiler, _, transport = libs
