@@ -5398,11 +5398,6 @@ static int relation_restore(struct relation_reader *x, struct mesh_graph_relatio
   if (!r->parent) {
     const struct mesh_graph_view *stored = relation_take(x, e->views, sizeof *stored);
     const uint64_t *pairs = relation_take(x, e->pairs, sizeof *pairs);
-    d->conflict = relation_take(x, e->conflicts, sizeof *d->conflict);
-    r->witness = (size_t *)(uintptr_t)relation_take(x, e->witnesses, sizeof *r->witness);
-    const struct relation_origin *origin = relation_take(x, e->origins ? e->conflicts : 0, sizeof *origin);
-    const struct relation_decider *decider = relation_take(x, e->deciders, sizeof *decider);
-    const uint32_t *map = relation_take(x, e->mapped ? e->views : 0, sizeof *map);
     if (x->status) return x->status;
     if (e->origins > 1) return EINVAL;
     if (!(root->view = calloc((size_t)e->views + 1, sizeof *root->view))) return ENOMEM;
@@ -5431,6 +5426,12 @@ static int relation_restore(struct relation_reader *x, struct mesh_graph_relatio
       accessed++;
     }
     if (accessed != e->accessed) return EINVAL;
+    d->conflict = relation_take(x, e->conflicts, sizeof *d->conflict);
+    r->witness = (size_t *)(uintptr_t)relation_take(x, e->witnesses, sizeof *r->witness);
+    const struct relation_origin *origin = relation_take(x, e->origins ? e->conflicts : 0, sizeof *origin);
+    const struct relation_decider *decider = relation_take(x, e->deciders, sizeof *decider);
+    const uint32_t *map = relation_take(x, e->mapped ? e->views : 0, sizeof *map);
+    if (x->status) return x->status;
     d->vertices = e->vertices; d->views = (size_t)e->views; d->view = root->view;
     d->conflicts = (size_t)e->conflicts; d->query = e->query; r->witnesses = (size_t)e->witnesses;
     for (size_t k = 0; k < d->conflicts; k++) {
