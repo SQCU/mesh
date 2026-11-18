@@ -224,6 +224,12 @@ class Graph:
         owned = self.search(self.vertices, incoming=incoming)
         return ordered(owned, owned.made.contents.postorder, range(owned.made.contents.count - 1, -1, -1))
 
+    def convex(self, members):
+        indices = (C.c_uint32 * len(members))(*(self.at[node] for node in members))
+        result = C.c_int()
+        _check(LIB.mesh_graph_relation_convex(self.relation.pointer, len(indices), indices, 0, None, C.byref(result)))
+        return bool(result.value)
+
     # T. H. Cormen et al., 3rd ed., §22.2
     def walk(self, starts, incoming=False, active=None):
         owned = self._search(LIB.mesh_graph_breadth, starts, incoming=incoming) if active is None else self._breadth(
@@ -1157,6 +1163,8 @@ LIB.mesh_graph_relation_contract.argtypes = [C.c_void_p, C.POINTER(C.c_ubyte), C
 LIB.mesh_graph_relation_quotient.argtypes = [C.c_void_p, C.c_uint32, C.POINTER(C.c_uint32), C.c_void_p, C.c_void_p,
                                              C.POINTER(C.c_void_p)]
 LIB.mesh_graph_relation_synchronization.restype = C.c_int
+LIB.mesh_graph_relation_convex.argtypes = [C.c_void_p, C.c_size_t, C.POINTER(C.c_uint32), C.c_size_t,
+                                          C.POINTER(C.c_uint32), C.POINTER(C.c_int)]
 LIB.mesh_graph_relation_synchronization.argtypes = [C.c_void_p, C.POINTER(C.POINTER(C.c_ubyte)),
                                                     C.POINTER(C.c_size_t)]
 LIB.mesh_graph_relation_retain.restype = None

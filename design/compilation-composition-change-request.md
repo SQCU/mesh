@@ -163,6 +163,12 @@ typed intermediate inputs and outputs, so joint transformations can compose with
 Target writers and compilers emit the executable from the transformed IR and solved bindings. Each stage retains
 its predecessors through the published result views.
 
+The compiler retains equivalent numerical and communication forms in shared IR. An IR-to-IR
+transformation adds its result alongside the source. Extraction applies the caller's weighting to
+the represented alternatives, and the target emits the selected form. Tate, Stepp, Tatlock and
+Lerner give the mechanism of retaining alternatives through rewriting and extracting for
+profitability in [*Equality Saturation: A New Approach to Optimization*, §§2–3](https://cseweb.ucsd.edu/~lerner/papers/popl09.html).
+
 ### 6. Carry compilation results through their consumers
 
 Dependency analysis returns access causes and source identities with its graph. Synchronization reduction,
