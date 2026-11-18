@@ -48,6 +48,11 @@ boundary (source-lowering items 5/6). The earlier TorchInductor selection suppli
 item 5 governs the joint transformations that determine the bodies and target kernels, following the operator's
 [17 November clarification](../output_data/standalone-replacement-20261115/workgroup.md#compiler-library-selection-before-executable-emission).
 
+Plain Torch supplies the numerical ablation for the same graph and schedule. A Metal-native lowerer consumes the selected
+operations, dependencies, bindings and allocation to encode Metal 4 command buffers and use cooperative tensors where
+the selected computation calls for them. Each candidate supplies its own kernel grouping to joint selection.
+[Operator turn U156](operator-turns-2026-11-04-to-06.md) · [Metal target sources](final-lowering-sources-2026-11-06.md)
+
 **Inputs.** In the demonstration, `adapt` reads each node's `meta["val"]` shape, stride, dtype and device and the
 effectful `send` and `recv` operators (`lower_inductor.py` 66–93). Inductor's own output-stride and buffer-lifetime
 contracts (`keep_output_stride`, `never_reuse_but_free_buffers`) govern the adapted values. `Exported` supplies
