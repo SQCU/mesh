@@ -432,6 +432,8 @@ struct plan_schedule_result {
   unsigned char *access_role;
   const size_t *event_first;
   const uint32_t *event_member;
+  size_t *task_edge,*access_edge;
+  struct mesh_graph_relation *ordering;
 };
 /* design/flow-order-and-lowering-memorandum.md: access.key is a declared transfer, vertex a Function task;
    write selects the original from view's producer, read the to view's consumer. Supplied roles are complete,
@@ -441,6 +443,29 @@ int mesh_plan_schedule(struct mesh_plan_flow_geometry *,const struct mesh_functi
                        const struct mesh_graph_view *,const size_t *,const uint32_t *,struct plan_schedule_result **);
 void mesh_plan_schedule_retain(struct plan_schedule_result *);
 void mesh_plan_schedule_free(struct plan_schedule_result *);
+struct mesh_plan_storage_function {
+  struct plan_schedule_result *schedule;
+  const struct mesh_function *function;
+  size_t lifetimes;
+  const size_t *first,*last;
+  const uint32_t *index;
+  uint32_t copies,*value_lag;
+};
+struct mesh_plan_storage {
+  size_t references;
+  struct mesh_plan_analysis *analysis;
+  struct mesh_graph_buffer_result *bounds;
+  const uint32_t *bound_function;
+  uint32_t horizon;
+  uint64_t *function_lag;
+  struct mesh_plan_storage_function *function;
+  void *mapped;
+};
+int mesh_plan_storage(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
+  struct mesh_graph_buffer_result *,const uint32_t *,const size_t *,const size_t *const *,const size_t *const *,
+  const uint32_t *const *,struct mesh_plan_storage **);
+void mesh_plan_storage_retain(struct mesh_plan_storage *);
+void mesh_plan_storage_free(struct mesh_plan_storage *);
 struct plan_graph_result {
   const struct mesh_plan_analysis *analysis;
   uint32_t vertices,added;
@@ -471,6 +496,7 @@ struct plan_step {
   struct plan_sync *sync;
   struct plan_schedule_result *schedule;
   struct plan_graph_result *graph;
+  const struct mesh_plan_storage_function *storage;
 };
 struct plan_placement;
 struct mesh_plan_compilation {
@@ -484,9 +510,11 @@ struct mesh_plan_compilation {
   void **state;
   uint64_t *state_bytes;
   void *owned;
+  struct mesh_plan_storage *storage;
 };
 int mesh_plan_environment(struct mesh_ctx *,struct mesh_nodes *,struct mesh_plan_geometry *);
-int mesh_plan_program_compile(struct mesh_plan_analysis *,struct plan_schedule_result *const *,struct mesh_plan_compilation **);
+int mesh_plan_program_compile(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
+                              struct mesh_plan_storage *,struct mesh_plan_compilation **);
 int mesh_plan_program_install(struct mesh_ctx *,uint64_t,const struct mesh_plan_compilation *,uint64_t,struct mesh_plan_binding *);
 void mesh_plan_compilation_retain(struct mesh_plan_compilation *);
 void mesh_plan_compilation_free(struct mesh_plan_compilation *);

@@ -217,13 +217,26 @@ class PlanStep(C.Structure):
     pass
 
 
+class PlanStorageFunction(C.Structure):
+    _fields_ = [('schedule', C.POINTER(PlanScheduleResult)), ('function', C.POINTER(Function)), ('lifetimes', Z),
+                ('first', C.POINTER(Z)), ('last', C.POINTER(Z)), ('index', C.POINTER(U)),
+                ('copies', U), ('value_lag', C.POINTER(U))]
+
+
+class PlanStorage(C.Structure):
+    _fields_ = [('references', Z), ('analysis', C.POINTER(PlanAnalysis)),
+                ('bounds', C.POINTER(mesh_graph.BufferResult)), ('bound_function', C.POINTER(U)),
+                ('horizon', U), ('function_lag', C.POINTER(Q)),
+                ('function', C.POINTER(PlanStorageFunction)), ('mapped', C.c_void_p)]
+
+
 class PlanCompilation(C.Structure):
     _fields_ = [('references', Z), ('result', Local), ('step', C.POINTER(PlanStep)),
                 ('placement', C.POINTER(PlanPlacement)), ('root_item', C.POINTER(U)),
                 ('page', C.POINTER(U)), ('adjacency', C.POINTER(U)), ('toward', C.POINTER(U)),
                 ('place', C.POINTER(U)), ('rows_by', C.POINTER(Z)), ('listed', C.POINTER(Z)),
                 ('places', Q), ('state', C.POINTER(C.c_void_p)), ('state_bytes', C.POINTER(Q)),
-                ('owned', C.c_void_p)]
+                ('owned', C.c_void_p), ('storage', C.POINTER(PlanStorage))]
 
 
 class PlanBinding(C.Structure):
@@ -428,7 +441,8 @@ PlanScheduleResult._fields_ = [('references', Z), ('geometry', C.POINTER(PlanFlo
                 ('place', C.POINTER(U)), ('route', C.POINTER(Z)), ('owned', C.POINTER(PlanAnalysis)),
                 ('accesses', Z), ('access', C.POINTER(mesh_graph.Viewed)), ('access_relation', C.c_void_p),
                 ('page_first', C.POINTER(U)), ('page_edge', C.POINTER(U)), ('access_role', C.POINTER(C.c_ubyte)),
-                ('event_first', C.POINTER(Z)), ('event_member', C.POINTER(U))]
+                ('event_first', C.POINTER(Z)), ('event_member', C.POINTER(U)),
+                ('task_edge', C.POINTER(Z)), ('access_edge', C.POINTER(Z)), ('ordering', C.c_void_p)]
 
 
 class PlanGraphResult(C.Structure):
@@ -453,7 +467,8 @@ PlanStep._fields_ = [
     ('completions', Q), ('supplied', Q), ('publications', Q), ('status', Q), ('hops', Q), ('times', Q),
     ('words', Q), ('deliveries', Q), ('submits', Q), ('syncs', Q), ('rows', Q), ('room', Q), ('submit_room', Q),
     ('waits', U), ('tells', U), ('wait_row', C.POINTER(U)), ('sync', C.POINTER(PlanSync)),
-    ('schedule', C.POINTER(PlanScheduleResult)), ('graph', C.POINTER(PlanGraphResult))]
+    ('schedule', C.POINTER(PlanScheduleResult)), ('graph', C.POINTER(PlanGraphResult)),
+    ('storage', C.POINTER(PlanStorageFunction))]
 
 
 # mesh-collective.h mesh_host_arrived's error value: a phase ahead, or a range cancelled
@@ -550,8 +565,14 @@ for name, result, arguments in (
                                            C.POINTER(C.POINTER(PlanScheduleResult))]),
         ('mesh_plan_schedule_retain', None, [C.POINTER(PlanScheduleResult)]),
         ('mesh_plan_schedule_free', None, [C.POINTER(PlanScheduleResult)]),
+        ('mesh_plan_storage', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
+                                       C.POINTER(mesh_graph.BufferResult), C.POINTER(U), C.POINTER(Z),
+                                       C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(U)),
+                                       C.POINTER(C.POINTER(PlanStorage))]),
+        ('mesh_plan_storage_retain', None, [C.POINTER(PlanStorage)]),
+        ('mesh_plan_storage_free', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_program_compile', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
-                                               C.POINTER(C.POINTER(PlanCompilation))]),
+                                               C.POINTER(PlanStorage), C.POINTER(C.POINTER(PlanCompilation))]),
         ('mesh_plan_program_install', C.c_int, [CONTEXT, Q, C.POINTER(PlanCompilation), Q, C.POINTER(PlanBinding)]),
         ('mesh_plan_binding_free', None, [C.POINTER(PlanBinding)]),
         ('mesh_plan_compilation_retain', None, [C.POINTER(PlanCompilation)]),

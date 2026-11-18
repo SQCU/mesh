@@ -311,6 +311,7 @@ struct mesh_graph_rows_view {
 /* mesh_graph_heap_order over a rows view: the same heap (priority, then index); EINVAL for a head out of range or a
    cycle */
 int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const double *priority, uint32_t *place);
+int mesh_graph_relation_heap_order(const struct mesh_graph_relation *, const double *priority, uint32_t *place);
 /* M. Cowan et al., MSCCLang, ASPLOS 2023, §5.2, step 3; L. A. Hall, A. S. Schulz, D. B. Shmoys and J. Wein, Math. Oper.
    Res. 22(3), 1997, §2; design/integration-finishing-change-request.md item 2 */
 int mesh_graph_heap_cuts(uint32_t vertices, const double *priority, size_t edges, const uint32_t *from, const uint32_t *to,
@@ -710,6 +711,9 @@ struct mesh_graph_relation_data {
   uint32_t query;
   const struct mesh_graph_origin *origin;
 };
+/* The given dependency at index k is conflict k. Vertex IDs are independent of execution order. */
+int mesh_graph_relation_edges(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+                              struct mesh_graph_relation **out);
 void mesh_graph_relation_retain(struct mesh_graph_relation *);
 void mesh_graph_relation_free(struct mesh_graph_relation *);
 int mesh_graph_relation_create(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t conflicts,

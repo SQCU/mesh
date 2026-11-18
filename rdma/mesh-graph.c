@@ -1773,6 +1773,18 @@ int mesh_graph_relation_create(uint32_t vertices, size_t views, const struct mes
                                struct mesh_graph_relation **out) {
   return relation_root(vertices, views, view, conflicts, conflict, MESH_GRAPH_QUERY_NONE, release, owner, out);
 }
+int mesh_graph_relation_edges(uint32_t vertices, size_t edges, const uint32_t *from, const uint32_t *to,
+                              struct mesh_graph_relation **out) {
+  *out = NULL;
+  if (edges > UINT32_MAX || edges >= SIZE_MAX / sizeof(struct mesh_graph_conflict)) return EOVERFLOW;
+  struct mesh_graph_conflict *given = malloc((edges + 1) * sizeof *given);
+  if (!given) return ENOMEM;
+  for (size_t e = 0; e < edges; e++)
+    given[e] = (struct mesh_graph_conflict){from[e], to[e], MESH_GRAPH_GIVEN, (uint32_t)e, 0, SIZE_MAX, SIZE_MAX};
+  int status = mesh_graph_relation_create(vertices, 0, NULL, edges, given, free, given, out);
+  if (status) free(given);
+  return status;
+}
 int mesh_graph_relation_views(uint32_t vertices, size_t views, const struct mesh_graph_view *view, size_t supplied,
                               const uint32_t *from, const uint32_t *to, int self, void (*release)(void *), void *owner,
                               struct mesh_graph_relation **out) {
@@ -2680,6 +2692,20 @@ int mesh_graph_heap_order_view(const struct mesh_graph_rows_view *rows, const do
   }
   free(indegree); free(heap); free(position);
   return result;
+}
+
+static size_t relation_degree(const void *context, uint32_t v) {
+  const struct mesh_graph_relation_data *data = context;
+  return data->row_first[v + 1] - data->row_first[v];
+}
+static uint32_t relation_row_head(const void *context, uint32_t v, size_t k) {
+  const struct mesh_graph_relation_data *data = context;
+  return mesh_graph_relation_head(data, data->row_first[v] + k);
+}
+int mesh_graph_relation_heap_order(const struct mesh_graph_relation *relation, const double *priority, uint32_t *place) {
+  const struct mesh_graph_relation_data *data = mesh_graph_relation_data(relation);
+  const struct mesh_graph_rows_view rows = {data->vertices, data, relation_degree, relation_row_head};
+  return mesh_graph_heap_order_view(&rows, priority, place);
 }
 
 /* a flat edge list's rows by `from` (mesh_graph_rows): vertex v's entries the edges order[first[v] .. first[v + 1]) */

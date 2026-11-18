@@ -1,0 +1,197 @@
+{
+  "scope": "canonical pure analysis/schedule/compilation/archive; no installation or numerical execution",
+  "provider": "af471fed9372d40051c643d79f1babd827b00d6c0ae36440530d62fb421030c6",
+  "actual_previous_format_archives_loaded": true,
+  "records": [
+    {
+      "kind": 1,
+      "rounds": [
+        {
+          "read_pages": {
+            "0:1": [
+              0
+            ],
+            "0:2": [
+              0,
+              1
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              1
+            ],
+            "1:2": [
+              0,
+              1
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            15,
+            25,
+            24
+          ],
+          "archive_bytes": 41432,
+          "retained_loaded_schedule": true
+        },
+        {
+          "read_pages": {
+            "0:1": [
+              0
+            ],
+            "0:2": [
+              0,
+              1
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              1
+            ],
+            "1:2": [
+              0,
+              1
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            25,
+            15,
+            24
+          ],
+          "archive_bytes": 41432,
+          "retained_loaded_schedule": true
+        }
+      ]
+    },
+    {
+      "kind": 0,
+      "rounds": [
+        {
+          "read_pages": {
+            "0:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            18,
+            19,
+            17
+          ],
+          "archive_bytes": 40824,
+          "retained_loaded_schedule": true
+        },
+        {
+          "read_pages": {
+            "0:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            19,
+            18,
+            17
+          ],
+          "archive_bytes": 40824,
+          "retained_loaded_schedule": true
+        }
+      ]
+    }
+  ],
+  "abi": {
+    "Schedule": 296,
+    "StorageFunction": 64,
+    "Storage": 64,
+    "Step": 240,
+    "Compilation": 384,
+    "size_and_offset_checks": 107
+  }
+}

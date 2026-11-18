@@ -1,0 +1,205 @@
+{
+  "scope": "canonical pure analysis/schedule/compilation/archive; no installation or numerical execution",
+  "provider": "3de8d8c71664aba8759ba14c8b594678939bb1317039ccd3c8118fa7f350813d",
+  "actual_previous_format_archives_loaded": true,
+  "records": [
+    {
+      "kind": 1,
+      "rounds": [
+        {
+          "read_pages": {
+            "0:1": [
+              0
+            ],
+            "0:2": [
+              0,
+              1
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              1
+            ],
+            "1:2": [
+              0,
+              1
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            15,
+            25,
+            24
+          ],
+          "archive_bytes": 36472,
+          "retained_loaded_schedule": true
+        },
+        {
+          "read_pages": {
+            "0:1": [
+              0
+            ],
+            "0:2": [
+              0,
+              1
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              1
+            ],
+            "1:2": [
+              0,
+              1
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            25,
+            15,
+            24
+          ],
+          "archive_bytes": 36472,
+          "retained_loaded_schedule": true
+        }
+      ]
+    },
+    {
+      "kind": 0,
+      "rounds": [
+        {
+          "read_pages": {
+            "0:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            18,
+            19,
+            17
+          ],
+          "archive_bytes": 36280,
+          "retained_loaded_schedule": true
+        },
+        {
+          "read_pages": {
+            "0:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "0:3": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:1": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:2": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "1:3": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          "numerical_place": [
+            4,
+            19,
+            18,
+            17
+          ],
+          "archive_bytes": 36280,
+          "retained_loaded_schedule": true
+        }
+      ]
+    }
+  ],
+  "source_commit": "7c229f83",
+  "previous_source_commit": "8a48acd1",
+  "previous_provider": "f2cf6ddae401e481698df2e89e320da8781a8d589c01afa96667ecfa44ce82dd",
+  "abi": {
+    "sizeof": 272,
+    "offsets": {
+      "accesses": 208,
+      "access": 216,
+      "access_relation": 224,
+      "page_first": 232,
+      "page_edge": 240,
+      "access_role": 248,
+      "event_first": 256,
+      "event_member": 264
+    }
+  }
+}
