@@ -170,6 +170,10 @@ void mesh_graph_tree_free(struct mesh_graph_tree *);
    and last[v] the least and greatest position of value v's uses */
 int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, const size_t *position,
                          size_t *first, size_t *last);
+/* Row b contains a iff every access of a strictly precedes every access of b in ordering.
+   Empty access sets are unrelated. reached has values * ceil(values/64) words. */
+int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, uint32_t values, size_t uses,
+                              const uint32_t *value, const uint32_t *vertex, uint64_t *reached);
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
                                int (*equal)(const void *context, uint32_t k), const void *context);
 void mesh_graph_keyed_add(uint32_t *head, uint32_t *next, uint32_t key, uint32_t k);

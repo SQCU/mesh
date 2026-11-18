@@ -848,6 +848,39 @@ int mesh_graph_lifetimes(uint32_t values, size_t uses, const uint32_t *value, co
   return 0;
 }
 
+int mesh_graph_lifetime_order(const struct mesh_graph_relation *ordering, uint32_t values, size_t uses,
+                              const uint32_t *value, const uint32_t *vertex, uint64_t *reached) {
+  struct mesh_graph_grouping *groups = NULL;
+  struct mesh_graph_closure *ancestors = NULL;
+  int status = mesh_graph_group(values, uses, mesh_graph_row_head, value, &groups);
+  if (!status) status = mesh_graph_relation_ancestors(ordering, &ancestors);
+  for (size_t k = 0; !status && k < uses; k++) if (vertex[k] >= ancestors->vertices) status = EINVAL;
+  uint64_t *common = NULL;
+  if (!status && !(common = malloc((ancestors->words + 1) * sizeof *common))) status = ENOMEM;
+  const size_t words = ((size_t)values + 63) / 64;
+  for (uint32_t b = 0; !status && b < values; b++) {
+    uint64_t *row = reached + b * words;
+    memset(row, 0, words * sizeof *row);
+    if (groups->first[b] == groups->first[b + 1]) continue;
+    memset(common, 0xff, ancestors->words * sizeof *common);
+    for (size_t k = groups->first[b]; k < groups->first[b + 1]; k++) {
+      const uint64_t *parents = ancestors->reached + vertex[groups->order[k]] * ancestors->words;
+      for (size_t w = 0; w < ancestors->words; w++) common[w] &= parents[w];
+    }
+    for (uint32_t a = 0; a < values; a++) {
+      size_t k = groups->first[a], end = groups->first[a + 1];
+      if (k == end) continue;
+      for (; k < end; k++) {
+        const uint32_t v = vertex[groups->order[k]];
+        if (!(common[v / 64] >> (v % 64) & 1)) break;
+      }
+      if (k == end) row[a / 64] |= UINT64_C(1) << (a % 64);
+    }
+  }
+  free(common); mesh_graph_closure_free(ancestors); mesh_graph_group_free(groups);
+  return status;
+}
+
 uint32_t mesh_graph_keyed_find(const uint32_t *head, const uint32_t *next, uint32_t key,
                                int (*equal)(const void *context, uint32_t k), const void *context) {
   for (uint32_t k = head[key]; k != UINT32_MAX; k = next[k]) if (equal(context, k)) return k;

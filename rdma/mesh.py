@@ -220,7 +220,7 @@ class PlanStep(C.Structure):
 class PlanStorageFunction(C.Structure):
     _fields_ = [('schedule', C.POINTER(PlanScheduleResult)), ('function', C.POINTER(Function)), ('lifetimes', Z),
                 ('first', C.POINTER(Z)), ('last', C.POINTER(Z)), ('index', C.POINTER(U)),
-                ('copies', U), ('value_lag', C.POINTER(U))]
+                ('copies', U), ('value_lag', C.POINTER(U)), ('before', mesh_graph.Closed)]
 
 
 class PlanStorage(C.Structure):
@@ -569,6 +569,10 @@ for name, result, arguments in (
                                        C.POINTER(mesh_graph.BufferResult), C.POINTER(U), C.POINTER(Z),
                                        C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(U)),
                                        C.POINTER(C.POINTER(PlanStorage))]),
+        ('mesh_plan_storage_ordered', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),
+                                       C.POINTER(mesh_graph.BufferResult), C.POINTER(U), C.POINTER(Z),
+                                       C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(Z)), C.POINTER(C.POINTER(U)),
+                                       C.POINTER(C.POINTER(Q)), C.POINTER(C.POINTER(PlanStorage))]),
         ('mesh_plan_storage_retain', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_storage_free', None, [C.POINTER(PlanStorage)]),
         ('mesh_plan_program_compile', C.c_int, [C.POINTER(PlanAnalysis), C.POINTER(C.POINTER(PlanScheduleResult)),

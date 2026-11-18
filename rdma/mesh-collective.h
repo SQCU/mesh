@@ -450,6 +450,7 @@ struct mesh_plan_storage_function {
   const size_t *first,*last;
   const uint32_t *index;
   uint32_t copies,*value_lag;
+  struct mesh_graph_closure before;
 };
 struct mesh_plan_storage {
   size_t references;
@@ -464,6 +465,9 @@ struct mesh_plan_storage {
 int mesh_plan_storage(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
   struct mesh_graph_buffer_result *,const uint32_t *,const size_t *,const size_t *const *,const size_t *const *,
   const uint32_t *const *,struct mesh_plan_storage **);
+int mesh_plan_storage_ordered(struct mesh_plan_analysis *,struct plan_schedule_result *const *,
+  struct mesh_graph_buffer_result *,const uint32_t *,const size_t *,const size_t *const *,const size_t *const *,
+  const uint32_t *const *,uint64_t *const *,struct mesh_plan_storage **);
 void mesh_plan_storage_retain(struct mesh_plan_storage *);
 void mesh_plan_storage_free(struct mesh_plan_storage *);
 struct plan_graph_result {

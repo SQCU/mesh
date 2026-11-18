@@ -468,6 +468,8 @@ GIVEN, SIZE = 3, 2 ** 64 - 1
 _U, _Z = C.POINTER(C.c_uint32), C.POINTER(C.c_size_t)
 LIB.mesh_graph_lifetimes.restype = C.c_int
 LIB.mesh_graph_lifetimes.argtypes = [C.c_uint32, C.c_size_t, _U, _Z, _Z, _Z]
+LIB.mesh_graph_lifetime_order.restype = C.c_int
+LIB.mesh_graph_lifetime_order.argtypes = [C.c_void_p, C.c_uint32, C.c_size_t, _U, _U, C.POINTER(C.c_uint64)]
 LIB.mesh_graph_search.restype = LIB.mesh_graph_breadth.restype = LIB.mesh_graph_closure.restype = C.c_int
 LIB.mesh_graph_search.argtypes = [C.c_uint32, _Z, C.c_void_p, C.c_void_p, C.c_uint32, _U, C.c_int,
                                   C.POINTER(C.POINTER(Searched))]
