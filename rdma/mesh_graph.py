@@ -304,6 +304,25 @@ class Graph:
         return Graph(vertices, Relation(made.value, (held,), self.relation))
 
 
+
+class IncidenceQuotient:
+    """Contract unrepresented vertices and quotient by bipartite source/target incidence."""
+
+    def __init__(self, graph, targets, incidence):
+        self.graph, self.targets, self.incidence = graph, targets, incidence
+        vertices = graph.data.vertices
+        self.kept = [False] * vertices
+        self.equality_edges = []
+        for source, target in incidence:
+            self.kept[source] = True
+            self.equality_edges.extend(((source, vertices + target), (vertices + target, source)))
+        self.components = components(vertices + targets, self.equality_edges)
+        self.classes = range(max(self.components, default=-1) + 1)
+        self.source_classes, self.target_classes = self.components[:vertices], self.components[vertices:]
+        self.contracted = graph.contract(self.kept)
+        self.quotient = self.contracted.quotient(self.classes, self.source_classes)
+
+
 def walk(universe, starts, neighbours):
     return Graph.adjacency(universe, neighbours).walk(starts)
 
