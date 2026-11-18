@@ -622,6 +622,14 @@ class Callables:
     def function(self, *args):
         return _upstream().metal_ir_callables_function(self.handle, *args)
 
+    def name(self, role):
+        function = self.function(role)
+        if function:
+            lib = _upstream()
+            size = C.c_size_t()
+            data = lib.metal_ir_callables_function_name(self.handle, function, C.byref(size))
+            return C.string_at(data, size.value).decode()
+
     def role(self, *args):
         return _upstream().metal_ir_callables_role(self.handle, *args)
 
@@ -874,6 +882,7 @@ def _upstream():
                 ('metal_ir_callable_operand_table', C.POINTER(UpstreamTable), [P]),
                 ('metal_ir_callable_operand_page', C.POINTER(UpstreamPage), [P]),
                 ('metal_ir_callables_module', P, [P]), ('metal_ir_callables_function', P, [P, U]),
+                ('metal_ir_callables_function_name', P, [P, P, C.POINTER(C.c_size_t)]),
                 ('metal_ir_callable_address_function', P, [P, U]), ('metal_ir_output_function_ir', P, [P]),
                 ('metal_ir_output_parameter_ir', P, [P]), ('metal_ir_callable_operand_param', P, [P]),
                 ('metal_ir_callable_operand_view', P, [P, U]),
@@ -998,34 +1007,16 @@ def _callables(program, op, numeric):
     return Callables(program, collection, emitted)
 
 
-# metal_ir_upstream_emitted: pass `number` of produced kernel `op`, its terminal emission as its final emitter made it
-# (lower_inductor.py Emission: source, entry, compile, link; a CPU pass's `parameters`, each Parameter(type, slot,
-# pointer) as that emitter declared it: struct metal_ir_upstream_parameter; its `language`, `environment` and
-# `directory` as its producer declared its compile, None and () for a Metal pass), each field by its name. A pass
-# with no actions of its own (current Emission producers: the AotCompiled body owns the build) has no
-# compile_executable, compile_source, compile_output or link_action. An own compile/link still needs its original
-# action projection; neither its executable nor the full link context can be reconstructed from flag strings
-def _emitted(program, op, number, emission):
-    if emission.compile or emission.link:
-        raise NotImplementedError(
-            "unresolved integration: operation %d pass %d's own compiler/linker action projection, including its "
-            "original executable, source/output positions and full link context; Emission.sources %r and .output %r"
-            % (op, number, emission.sources, emission.output))
+# metal_ir.h metal_ir_upstream_emitted. The selected upstream writer supplies its complete entry.
+def _emitted(program, op, number, source, entry, parameters, language):
     lib, error = _upstream(), C.create_string_buffer(4096)
-    source = emission.source.encode() if isinstance(emission.source, str) else bytes(emission.source)
-    texts = [_array(C.c_char_p, [t.encode() for t in texts])
-             for texts in (emission.compile, emission.link, emission.environment)]
-    parameters = [UpstreamParameter(p.type.encode(), p.slot, p.pointer) for p in emission.parameters]
-    made = UpstreamEmission(
-        source=source, entry=emission.entry.encode(),
-        parameter=_array(UpstreamParameter, parameters) if parameters else None, compile=texts[0], link=texts[1],
-        bytes=len(source), parameters=len(parameters), compiles=len(emission.compile), links=len(emission.link),
-        language=None if emission.language is None else emission.language.encode(), environment=texts[2],
-        directory=None if emission.directory is None else str(emission.directory).encode(),
-        link_action=None, environments=len(emission.environment))
+    source = source.encode()
+    arguments = _array(UpstreamParameter, [UpstreamParameter(p.type.encode(), p.slot, p.pointer) for p in parameters])
+    made = UpstreamEmission(source=source, entry=entry.encode(), bytes=len(source), parameter=arguments,
+                            parameters=len(parameters), language=language.encode() if language else None)
     status = lib.metal_ir_upstream_emitted(program, op, number, C.byref(made), error, len(error))
     if status:
-        raise OSError(status, 'operation %d pass %d: %s' % (op, number, error.value.decode()))
+        raise OSError(status, "operation %d pass %d: %s" % (op, number, error.value.decode()))
 
 
 # metal_ir_upstream_configured: produced kernel `op`'s first pass's configured launch, its fields by name

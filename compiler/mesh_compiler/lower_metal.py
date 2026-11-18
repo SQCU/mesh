@@ -237,24 +237,15 @@ class ConstructedMachine:
         self.freed()
 
 
-# metal-microbench metal_ir.h stages after metal_ir_construct and an instance's port declarations
-# (metal_ir_value_receives, metal_ir_value_sends), before metal_ir_lower: each produced kernel of `machine`
-# (ConstructedMachine.upstream) in `program` at operation offset `offset` (its metal_ir_append offset there): its native
-# composition (metal_ir_upstream_composition: metal.py Composed, each page's placed origin the native's) with its one
-# callable collection (metal_ir_upstream_callables, printed once by metal_ir_callables_emit: Composed.callables)
-# composed by its producer (lower_inductor.py composed: a Metal Composition or a CPU Hosted) into its producer's
-# terminal emission (lower_inductor.py emitted) for its first pass (metal_ir_upstream_emitted pass 0, which configures
-# its pipeline or library); where it receives (later words), its later pass's terminal emission (pass 1) over the
-# same collection. Each Neural Engine body (ConstructedMachine.neural) its original Core ML program
-# (metal_ir_upstream_neural: its saved package, function, selected compute units and features)
+# metal_ir.h metal_ir_upstream_emitted. The selected program supplies its own protocol operands
+# after the joint solve. Each original compiler call writes the numerical entry for that dispatch.
 def emitted(program, machine, offset=0):
     for launched in machine.upstream:
-        at, kernel = launched.operation + offset, launched.kernel
-        made = _composition(program, at)
-        _emitted(program, at, 0, producer.emitted(kernel, producer.composed(kernel, made)))
-        if made.later_words:
-            later = _composition(program, at, None, 1, made.callables)
-            _emitted(program, at, 1, producer.emitted(kernel, producer.composed(kernel, later)))
+        at, call = launched.operation + offset, launched.kernel
+        first = _composition(program, at)
+        for number in range(2 if first.later_words else 1):
+            operands = first if not number else _composition(program, at, None, number, first.callables)
+            _emitted(program, at, number, *producer.native_source(call, producer.composed(call, operands)))
     for made in machine.neural:
         _neural(program, made.operation + offset, made.package, made.function, made.units, made.inputs,
                 made.outputs, made.states)

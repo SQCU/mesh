@@ -1020,7 +1020,8 @@ def _views(made):
 # the pass's acquire function the collection makes (metal.Callables: `later` mesh_acquire_later for pass 1, `acquire`
 # mesh_acquire_first for pass 0; None where it makes none)
 def _acquire(made):
-    return made.callables.later if made.later else made.callables.acquire
+    from .metal import CALLABLE_ACQUIRE, CALLABLE_LATER
+    return made.callables.name(CALLABLE_LATER if made.later else CALLABLE_ACQUIRE)
 
 
 # a Metal kernel's pass: each view a parameter at its slot as the protocol's parameters type it; the collection's
@@ -1050,8 +1051,9 @@ def _threaded(made, kernel, launch, *_):
                   "if (mesh_acquired.w == 0) return;"]
         if later:
             grid = "(mesh_acquired.xyz * mesh_threads + mesh_lid)"
-    if callables.release is not None:
-        exit_.append(f"{callables.release}(" + ", ".join(["mesh_lid", "mesh_threads", "mesh_step", "mesh_status",
+    from .metal import CALLABLE_RELEASE
+    if release := callables.name(CALLABLE_RELEASE):
+        exit_.append(f"{release}(" + ", ".join(["mesh_lid", "mesh_threads", "mesh_step", "mesh_status",
                                                           "mesh_supplied", "mesh_records",
                                                           *(f"mesh_{name}" for name in arrivals)]) + ");")
     return Composition(callables.source + (PAGED if made.pages else ""), tuple(parameters), BUILTINS, tuple(enter),
@@ -1098,19 +1100,53 @@ def configured(call, composition):
     return DEFINED[type(call[0])](composition, *call)
 
 
-def _group_defined(composition, group, line, graph, scheduler):
+def _group_source(group, line, graph, composition):
     with V.set_graph_handler(graph):
-        kernel_body, cpp_definition = CppScheduling.kernel_definition(group.codegen_group(None, composition),
-                                                                      line.kernel_name, group.args)
+        return group.codegen_group(None, composition)
+
+
+def _metal_source(kernel, graph, composition):
+    with V.set_graph_handler(graph), V.set_kernel_handler(kernel):
+        return kernel.codegen_kernel(kernel.metal_entry, composition)
+
+
+def _group_defined(composition, group, line, graph, scheduler):
+    kernel_body, cpp_definition = CppScheduling.kernel_definition(_group_source(group, line, graph, composition),
+                                                                  line.kernel_name, group.args)
     return dataclasses.replace(_defined(line.wrapper, line.kernel_name), kernel_body=kernel_body,
                                cpp_definition=cpp_definition)
 
 
 def _metal_defined(composition, kernel, launch, line, graph, scheduler):
-    with V.set_graph_handler(graph), V.set_kernel_handler(kernel):
-        src_code = kernel.codegen_kernel(kernel.metal_entry, composition)
+    src_code = _metal_source(kernel, graph, composition)
     return dataclasses.replace(_defined(line.wrapper, line.kernel_name),
                                kernel_body=MetalScheduling.kernel_definition(src_code, line.kernel_name))
+
+
+def native_source(call, composition):
+    kernel = call[0]
+    if isinstance(kernel, MeshMetalKernel):
+        _, _, line, graph, _ = call
+        _metal_source(kernel, graph, composition)
+        source = kernel.metal_source
+        if graph.cpp_wrapper:
+            # torch-inductor-upstream-composition.patch inserts the protocol prefix in its Python wrapper.
+            source = composition.source + "\n" + source
+        else:
+            from torch.utils._cpp_embed_headers import _embed_headers
+            from pathlib import Path
+            source = _embed_headers(source.splitlines(keepends=True), [Path(torch.__file__).parent / "include"], set())
+        return source, kernel.metal_entry, (), None
+
+    group, line, graph, _ = call
+    entry = line.kernel_name if graph.cpp_wrapper else "kernel"
+    raw = _group_source(group, line, graph, composition)
+    source = CppScheduling.defined_source(raw, entry, line.kernel_name)
+    with V.set_graph_handler(graph):
+        _, _, types = group.args.cpp_argdefs()
+    parameters = tuple(Parameter(type_, i, int(isinstance(operand, str)))
+                       for i, (type_, operand) in enumerate(zip(types, line.operands, strict=True)))
+    return source, entry, parameters + composition.typed, "c++"
 
 
 DEFINED = {MeshMetalKernel: _metal_defined, MeshKernelGroup: _group_defined}
