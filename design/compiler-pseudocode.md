@@ -15,7 +15,7 @@ The producer and its immediate consumer share those values through views.
 means append references to the complete result in the same page-table address
 space, retaining earlier results. Existing extents and layouts describe each
 section. Function-level results, joint plans and emitted programs occupy distinct
-output storage. Each planning round retains the earlier rounds it reads. Producers
+output storage. Each planning round reads its input extents by view. The calling context can reuse those extents across rounds or free them after their last use. Producers
 fill declared output buffers or expose their original output
 storage through the existing header/buffer APIs. A page reference and extent
 locate a value; its original layout describes its contents. Tensor fields use
@@ -256,8 +256,7 @@ all route positions. The common unroll factor supplies `t mod u`; received pages
 use the specified Gray phase, range counts and monotonic publication thresholds.
 Each Metal commit owns its feedback record. API-required notification handlers
 write those records, which the completion consumer reads. Invocation retirement
-releases its live bindings after their outstanding users complete. Compiler
-results retain their separate ownership until an explicit scheduled retirement.
+releases its live bindings after their outstanding users complete. The calling context frees compiler output and scratch pages through the bridge after their last use.
 
 For the reference realization, the concrete invocation consumer is
 `schedule_emit.runtime.Program(compilation.J.scheduled, compilation.E.functions)`. Those
