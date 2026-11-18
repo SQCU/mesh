@@ -11,3 +11,9 @@ Final lowering consumes that selection. It can emit fixed commands with fixed op
 ## Operator clarification
 
 “anything with a 'free choice' can be optimized jointly by other concerns, so this tells us where in a data flow this must be and how that data flow must be structured”
+
+## Operands and results
+
+Placement evaluates `transfer(value, destination, readers)` on the original FX operations. The supplied function returns the collective identity and the declared consumption granularity. A page-wise reader of a byte range depends on the arriving pieces that overlap that range. A reader of the whole operand joins every required piece. Two independent writers in one coflow can contribute to the same completion objective. [Chowdhury and Stoica, *Coflow*](https://conferences.sigcomm.org/hotnets/2012/papers/hotnets12-final51.pdf)
+
+The source dependence relation supplies legality. A provisional processor timeline can size buffers for that schedule. Using its chosen order to infer mandatory edges would make the next solver reproduce an earlier choice. The joint solver takes the source relation, communication cuts, task weights and resource assignments, and returns both its precedence relation and its chosen order. Assembly takes each processor's subsequence of that order. A subsequent fusion or expansion maps the affected occurrences to the original operands. [Plan to bridge, R3–R5](plan-to-bridge-change-request.md) · [Unger et al., *Unity*](https://www.usenix.org/conference/osdi22/presentation/unger)
