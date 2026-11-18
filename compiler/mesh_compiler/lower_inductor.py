@@ -1100,7 +1100,7 @@ def configured(call, composition):
     return DEFINED[type(call[0])](composition, *call)
 
 
-def _group_source(group, line, graph, composition):
+def _group_source(group, graph, composition):
     with V.set_graph_handler(graph):
         return group.codegen_group(None, composition)
 
@@ -1111,7 +1111,7 @@ def _metal_source(kernel, graph, composition):
 
 
 def _group_defined(composition, group, line, graph, scheduler):
-    kernel_body, cpp_definition = CppScheduling.kernel_definition(_group_source(group, line, graph, composition),
+    kernel_body, cpp_definition = CppScheduling.kernel_definition(_group_source(group, graph, composition),
                                                                   line.kernel_name, group.args)
     return dataclasses.replace(_defined(line.wrapper, line.kernel_name), kernel_body=kernel_body,
                                cpp_definition=cpp_definition)
@@ -1126,7 +1126,7 @@ def _metal_defined(composition, kernel, launch, line, graph, scheduler):
 def native_source(call, composition):
     kernel = call[0]
     if isinstance(kernel, MeshMetalKernel):
-        _, _, line, graph, _ = call
+        _, _, _, graph, _ = call
         _metal_source(kernel, graph, composition)
         source = kernel.metal_source
         if graph.cpp_wrapper:
@@ -1140,7 +1140,7 @@ def native_source(call, composition):
 
     group, line, graph, _ = call
     entry = line.kernel_name if graph.cpp_wrapper else "kernel"
-    raw = _group_source(group, line, graph, composition)
+    raw = _group_source(group, graph, composition)
     source = CppScheduling.defined_source(raw, entry, line.kernel_name)
     with V.set_graph_handler(graph):
         _, _, types = group.args.cpp_argdefs()
