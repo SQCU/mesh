@@ -978,12 +978,12 @@ static int link_prepare(struct port *port,struct flow *f,struct mesh_state *word
         .send_flags=IBV_SEND_SIGNALED};
     } else {
       struct prepared_receive *record=f->receives+at;
+      const uint64_t j=pick[d][k]%n;
+      const uint64_t *wake=(const uint64_t *)((const char *)words+words->receive_wakes);
       *record=(struct prepared_receive){.span=span,.word=region_word(hop->word),.count=region_word(hop->count),
         .field=hop->field,.pages=hop->pages,.copy=(uint32_t)(pick[d][k]/n),.notify=words->receive_wakes && (wake[j/64]>>(j%64)&1),.flow=f};
       record->request=(struct ibv_recv_wr){.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1};
     }
-      const uint64_t j=pick[d][k]%n;
-      const uint64_t *wake=(const uint64_t *)((const char *)words+words->receive_wakes);
   }
   /* the sets' tables (struct flow; design/compilation-coordination.md, "The appendix's revisions", S4, S5 and S7, with
      S7' of its "Amendments during the work"), built once here: for each direction's sets with positions on this cable,

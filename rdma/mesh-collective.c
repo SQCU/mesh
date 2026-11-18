@@ -3359,20 +3359,6 @@ static int plan_state(struct mesh_plan_compilation *compiled,uint32_t f){
   }
   return 0;
 }
-static int plan_schedule_inputs(const struct mesh_plan_analysis *analysis,struct plan_schedule_result *const *schedules){
-  for(uint32_t f=0;f<analysis->functions;f++){
-    const struct plan_schedule_result *schedule=schedules?schedules[f]:NULL;
-    const struct mesh_function *source=analysis->function+f;
-    if(!schedule){if(analysis->flow[f].demands || source->tasks)return EINVAL;continue;}
-    if(!schedule->function || !schedule->geometry || schedule->geometry->source!=analysis->flow+f ||
-       schedule->first>schedule->tasks || schedule->function->tasks!=schedule->tasks-schedule->first ||
-       schedule->tasks>schedule->instructions)return EINVAL;
-    const int status=plan_function_compatible(source,schedule->function);
-    if(status)return status;
-  }
-  return 0;
-}
-static int plan_entries(struct plan_step *steps,uint32_t count){
 /* design/plan-to-bridge-change-request.md R4. One prepared wake bit per hop, shared by every copy. */
 int mesh_plan_receive_wakes(struct mesh_plan_compilation *compiled,uint32_t function,uint32_t transfer,
                             size_t words,const uint64_t *mask){
@@ -3394,6 +3380,20 @@ int mesh_plan_receive_wakes(struct mesh_plan_compilation *compiled,uint32_t func
   return 0;
 }
 
+static int plan_schedule_inputs(const struct mesh_plan_analysis *analysis,struct plan_schedule_result *const *schedules){
+  for(uint32_t f=0;f<analysis->functions;f++){
+    const struct plan_schedule_result *schedule=schedules?schedules[f]:NULL;
+    const struct mesh_function *source=analysis->function+f;
+    if(!schedule){if(analysis->flow[f].demands || source->tasks)return EINVAL;continue;}
+    if(!schedule->function || !schedule->geometry || schedule->geometry->source!=analysis->flow+f ||
+       schedule->first>schedule->tasks || schedule->function->tasks!=schedule->tasks-schedule->first ||
+       schedule->tasks>schedule->instructions)return EINVAL;
+    const int status=plan_function_compatible(source,schedule->function);
+    if(status)return status;
+  }
+  return 0;
+}
+static int plan_entries(struct plan_step *steps,uint32_t count){
   for(uint32_t f=0;f<count;f++){
     struct plan_step *step=steps+f;
     step->entry=malloc(((size_t)step->geometry->entries+1)*sizeof *step->entry);
