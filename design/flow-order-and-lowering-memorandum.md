@@ -18,6 +18,12 @@ Placement evaluates `transfer(value, destination, readers)` on the original FX o
 
 The source dependence relation supplies legality. A provisional processor timeline can size buffers for that schedule. Using its chosen order to infer mandatory edges would make the next solver reproduce an earlier choice. The joint solver takes the source relation, communication cuts, task weights and resource assignments, and returns both its precedence relation and its chosen order. Assembly takes each processor's subsequence of that order. A subsequent fusion or expansion maps the affected occurrences to the original operands. [Plan to bridge, R3–R5](plan-to-bridge-change-request.md) · [Unger et al., *Unity*](https://www.usenix.org/conference/osdi22/presentation/unger)
 
+## Storage after a change of order
+
+An FX operation keeps its identity when the solver moves it. For example, if operation 12 reads a buffer and the selected schedule places that read third, the lifetime calculation uses position 3. The operand still belongs to operation 12. For a routed transfer, the solver supplies the instruction that reads the source buffer and the instruction that writes the destination buffer. The first and last positions of a buffer's actual uses bound its lifetime within that invocation. [ExecuTorch memory planning](https://docs.pytorch.org/executorch/stable/compiler-memory-planning.html) · [Mesh lifetime routine](../rdma/mesh-graph.h)
+
+The lifetime writer reads those uses and the selected order, writes first and last positions into fresh output arrays, and returns them alongside the original IR. The allocator indexes the new arrays with the original buffer IDs. A later choice of order gets its own output buffers. The separate calculation of capacity across invocations reads the scheduler's original dependency edges and the iteration delays. Numerical lowering consumes the chosen schedule after these transformations. [AOT compilation, A2 and A10](aot-compilation-change-request.md) · [Compilation composition](compilation-composition-change-request.md)
+
 ## Executable checks
 
 Give the solver two column projections of widths 64 and 128. Swap their weights and inspect the two external matrix calls in the CPU writer. Both programs must still produce the same final sum and activation as PyTorch. The same entry accepts a function that chooses which eligible communication regions to fuse from the selected schedule and the supplied solver results. [Column projection and fusion case](../../../compiler-emit/tests/test_transfer_consumers.py)
