@@ -3711,6 +3711,38 @@ static int access_group_fields(isl_set *reached, const uint32_t groups[3], size_
   *partition = x.partition;
   return 0;
 }
+int mesh_graph_group_incidence(const uint32_t pt[3], const uint32_t pg[3], const uint32_t ct[3], const uint32_t cg[3],
+                               size_t pairs, const struct mesh_graph_access_pair *pair, size_t *first, uint32_t **members) {
+  *members = NULL;
+  first[0] = 0;
+  if (!pairs) return EINVAL;
+  struct mesh_graph_context *context = pair[0].producer->domain->context;
+  for (size_t i = 0; i < pairs; i++)
+    if (pair[i].producer->domain->context != context || pair[i].consumer->domain->context != context) return EINVAL;
+  pthread_mutex_lock(&context->lock);
+  isl_map *all = NULL;
+  for (size_t i = 0; i < pairs; i++) {
+    isl_map *a = group_bytes(1, &pair[i].producer, pt, pg);
+    isl_map *b = group_bytes(1, &pair[i].consumer, ct, cg);
+    isl_map *hazards = isl_map_apply_range(b, isl_map_reverse(a));
+    all = i ? isl_map_union(all, hazards) : hazards;
+  }
+  isl_ctx *ctx = context->ctx;
+  isl_space *space = isl_space_alloc(ctx, 0, 3, 1);
+  isl_constraint *c = isl_constraint_alloc_equality(isl_local_space_from_space(isl_space_copy(space)));
+  uint64_t stride = 1;
+  for (unsigned d = 0; d < 3; d++) {
+    c = isl_constraint_set_coefficient_val(c, isl_dim_in, d, isl_val_int_from_ui(ctx, stride));
+    stride *= pg[d];
+  }
+  c = isl_constraint_set_coefficient_si(c, isl_dim_out, 0, -1);
+  isl_map *ids = isl_map_add_constraint(isl_map_universe(space), c);
+  isl_map *indexed = isl_map_apply_range(all, ids);
+  indexed = isl_map_move_dims(indexed, isl_dim_param, 0, isl_dim_in, 0, 3);
+  const int status = access_group_fields(isl_map_range(indexed), cg, first, members);
+  pthread_mutex_unlock(&context->lock);
+  return status;
+}
 int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, const uint32_t group[3],
                                      const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
                                      size_t *first, uint32_t **partition) {

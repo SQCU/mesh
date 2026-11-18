@@ -563,6 +563,12 @@ int mesh_graph_access_groups(const uint32_t threads[3], const uint32_t groups[3]
                              size_t producers, const struct mesh_graph_access_map *const *producer,
                              size_t consumers, const struct mesh_graph_access_map *const *consumer,
                              int subset, int *proven);
+struct mesh_graph_access_pair {
+  const struct mesh_graph_access_map *producer, *consumer;
+};
+int mesh_graph_group_incidence(const uint32_t producer_threads[3], const uint32_t producer_groups[3],
+                               const uint32_t consumer_threads[3], const uint32_t consumer_groups[3],
+                               size_t pairs, const struct mesh_graph_access_pair *, size_t *first, uint32_t **members);
 /* The phase fields of planned extents whose byte intervals each threadgroup reads. */
 int mesh_graph_access_map_fields(const struct mesh_graph_access_map *, const uint32_t group[3], const uint32_t groups[3],
                                  uint64_t origin, size_t count, const struct mesh_graph_access *extents,
