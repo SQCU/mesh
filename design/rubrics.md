@@ -605,6 +605,8 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
     2015, ICML].
   - **Floating-point non-associativity.** Summation orders that differ between members or calls decorrelate their
     rounding: last-bit differences accepted (C8). One order forced everywhere gives every member the same bias.
+    The operator's 17 November direction keeps evaluations in floating point. The permitted accommodations are
+    stochastic choice of a legal accumulation order, choosing test values on comparable scales, or both.
   - **On-policy and off-policy, training and inference.** A learner's errors on its own trajectory are correlated with
     the states those errors lead it into, and compound over a horizon T (behavior cloning's O(T²)). Data drawn from
     its own policy breaks that correlation (O(T)) [Ross, Gordon & Bagnell 2011, AISTATS, DAgger]. A measurement
