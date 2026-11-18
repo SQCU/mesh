@@ -3612,6 +3612,49 @@ static isl_map *access_launch(const struct mesh_graph_access_map *a, const uint3
   return isl_map_intersect_domain(relation,
     access_own(a->domain, isl_space_domain(isl_map_get_space(relation)), group, groups));
 }
+static isl_map *group_bytes(size_t count, const struct mesh_graph_access_map *const *maps,
+                            const uint32_t threads[3], const uint32_t groups[3]) {
+  isl_map *all = NULL;
+  for (size_t i = 0; i < count; i++) {
+    isl_set *bytes = isl_map_range(access_launch(maps[i], threads, groups));
+    bytes = isl_set_move_dims(bytes, isl_dim_set, 0, isl_dim_param, 0, 3);
+    isl_map *at = isl_map_from_domain(bytes);
+    at = isl_map_move_dims(at, isl_dim_out, 0, isl_dim_in, 3, 1);
+    all = i ? isl_map_union(all, at) : at;
+  }
+  return all;
+}
+int mesh_graph_access_groups(const uint32_t threads[3], const uint32_t groups[3],
+                             size_t producers, const struct mesh_graph_access_map *const *producer,
+                             size_t consumers, const struct mesh_graph_access_map *const *consumer,
+                             int subset, int *proven) {
+  *proven = !consumers || (!subset && !producers);
+  if (!producers || !consumers) return 0;
+  struct mesh_graph_context *ctx = producer[0]->domain->context;
+  for (size_t i = 0; i < producers; i++) {
+    const struct mesh_graph_domain *domain = producer[i]->domain;
+    if (domain->context != ctx || (subset && producer[i]->flags)) return 0;
+    if (subset) for (uint32_t d = 0; d < domain->dims; d++)
+      if (domain->dim[d].kind == MESH_GRAPH_DOMAIN_INDIRECT) return 0;
+  }
+  for (size_t i = 0; i < consumers; i++) if (consumer[i]->domain->context != ctx) return 0;
+  pthread_mutex_lock(&ctx->lock);
+  isl_map *a = group_bytes(producers, producer, threads, groups);
+  isl_map *b = group_bytes(consumers, consumer, threads, groups);
+  isl_bool yes;
+  if (subset) {
+    yes = isl_map_is_subset(b, a);
+    isl_map_free(a); isl_map_free(b);
+  } else {
+    isl_map *hazards = isl_map_apply_range(a, isl_map_reverse(b));
+    isl_map *same = isl_map_identity(isl_map_get_space(hazards));
+    yes = isl_map_is_subset(hazards, same);
+    isl_map_free(hazards); isl_map_free(same);
+  }
+  pthread_mutex_unlock(&ctx->lock);
+  *proven = yes == isl_bool_true;
+  return yes < 0 ? ENOMEM : 0;
+}
 /* one threadgroup's partitions as isl enumerates its (bounded, one-dimensional) set's points */
 struct access_points { uint32_t *partition; size_t count, room; int status; };
 static isl_stat access_point(isl_point *point, void *user) {

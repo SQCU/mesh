@@ -557,6 +557,12 @@ int mesh_graph_access_map_placed(const struct mesh_graph_access_map *, int64_t s
    (g_1 + groups[1] g_2) its partitions, ascending, partition[first[w] .. first[w + 1]) (*partition malloc'd, the
    caller's; first[groups' product + 1] the caller's). A BOUND or GUARD_DATA relation's are its own data-dependent
    bound, as its flags state */
+/* Accesses grouped by launch coordinates. A consumer may share the producer's tile completion when
+   read availability is included groupwise, and every byte hazard connects equal group coordinates. */
+int mesh_graph_access_groups(const uint32_t threads[3], const uint32_t groups[3],
+                             size_t producers, const struct mesh_graph_access_map *const *producer,
+                             size_t consumers, const struct mesh_graph_access_map *const *consumer,
+                             int subset, int *proven);
 /* The phase fields of planned extents whose byte intervals each threadgroup reads. */
 int mesh_graph_access_map_fields(const struct mesh_graph_access_map *, const uint32_t group[3], const uint32_t groups[3],
                                  uint64_t origin, size_t count, const struct mesh_graph_access *extents,
