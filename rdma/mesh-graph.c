@@ -3632,7 +3632,7 @@ static int access_ascending(const void *a, const void *b) {
   const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
   return (x > y) - (x < y);
 }
-static isl_set *access_pages(isl_map *relation, int64_t start, uint64_t page, uint32_t partitions) {
+static isl_set *access_pages(isl_map *relation, int64_t start, uint64_t page, uint64_t partitions) {
   if (!relation) return NULL;
   isl_ctx *ctx = isl_map_get_ctx(relation);
   /* { [b] -> [p] : start + page p <= b <= start + page p + page - 1, 0 <= p <= partitions - 1 } */
@@ -3649,18 +3649,8 @@ static isl_set *access_pages(isl_map *relation, int64_t start, uint64_t page, ui
   isl_local_space_free(local);
   return isl_map_range(isl_map_apply_range(relation, isl_map_from_basic_map(of)));
 }
-int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, const uint32_t group[3],
-                                     const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
-                                     size_t *first, uint32_t **partition) {
-  *partition = NULL;
+static int access_group_fields(isl_set *reached, const uint32_t groups[3], size_t *first, uint32_t **partition) {
   const uint64_t G = (uint64_t)groups[0] * groups[1] * groups[2];
-  for (uint64_t w = 0; w <= G; w++) first[w] = 0;
-  const __int128 end = (__int128)start + (__int128)page * partitions;
-  if (!G || !page || !partitions || a->greatest < start || a->least >= end) return 0;
-  struct mesh_graph_domain *d = a->domain;
-  pthread_mutex_lock(&d->context->lock);
-  isl_map *relation = access_launch(a, group, groups);
-  isl_set *reached = access_pages(relation, start, page, partitions);
   struct access_points x = {NULL, 0, 0, reached ? 0 : ENOMEM};
   for (uint64_t w = 0; !x.status && w < G; w++) {
     const uint32_t g[3] = {(uint32_t)(w % groups[0]), (uint32_t)(w / groups[0] % groups[1]),
@@ -3674,12 +3664,53 @@ int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, cons
     first[w + 1] = x.count;
   }
   isl_set_free(reached);
-  pthread_mutex_unlock(&d->context->lock);
   if (x.status) { free(x.partition); for (uint64_t w = 0; w <= G; w++) first[w] = 0; return x.status; }
   *partition = x.partition;
   return 0;
 }
-static isl_set *access_page_union(isl_ctx *ctx, uint64_t page, uint32_t partitions, size_t count,
+int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *a, const uint32_t group[3],
+                                     const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
+                                     size_t *first, uint32_t **partition) {
+  *partition = NULL;
+  const uint64_t G = (uint64_t)groups[0] * groups[1] * groups[2];
+  for (uint64_t w = 0; w <= G; w++) first[w] = 0;
+  const __int128 end = (__int128)start + (__int128)page * partitions;
+  if (!G || !page || !partitions || a->greatest < start || a->least >= end) return 0;
+  struct mesh_graph_domain *d = a->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_map *relation = access_launch(a, group, groups);
+  isl_set *reached = access_pages(relation, start, page, partitions);
+  const int status = access_group_fields(reached, groups, first, partition);
+  pthread_mutex_unlock(&d->context->lock);
+  return status;
+}
+int mesh_graph_access_map_fields(const struct mesh_graph_access_map *a, const uint32_t group[3],
+                                 const uint32_t groups[3], uint64_t origin, size_t count,
+                                 const struct mesh_graph_access *extents, size_t *first, uint32_t **fields) {
+  struct mesh_graph_domain *d = a->domain;
+  pthread_mutex_lock(&d->context->lock);
+  isl_map *launch = access_launch(a, group, groups);
+  isl_ctx *ctx = d->context->ctx;
+  isl_space *space = isl_space_alloc(ctx, 0, 1, 1);
+  isl_map *rows = isl_map_empty(isl_space_copy(space));
+  for (size_t i = 0; i < count; i++) {
+    const struct mesh_graph_access *r = extents + i;
+    if (r->start >= r->end) continue;
+    isl_map *row = isl_map_universe(isl_space_copy(space));
+    row = isl_map_lower_bound_val(row, isl_dim_in, 0, isl_val_int_from_ui(ctx, origin + r->start));
+    row = isl_map_upper_bound_val(row, isl_dim_in, 0, isl_val_int_from_ui(ctx, origin + r->end - 1));
+    row = isl_map_fix_val(row, isl_dim_out, 0, isl_val_int_from_ui(ctx, r->vertex));
+    rows = isl_map_union(rows, row);
+  }
+  isl_space_free(space);
+  rows = isl_map_add_dims(rows, isl_dim_param, 3);
+  isl_set *reached = isl_map_range(isl_map_apply_range(launch, rows));
+  first[0] = 0;
+  const int status = access_group_fields(reached, groups, first, fields);
+  pthread_mutex_unlock(&d->context->lock);
+  return status;
+}
+static isl_set *access_page_union(isl_ctx *ctx, uint64_t page, uint64_t partitions, size_t count,
                                   const struct mesh_graph_access_pages *views, int covering) {
   isl_set *result = isl_set_empty(isl_space_set_alloc(ctx, 0, 1));
   for (size_t i = 0; result && i < count; i++) {
@@ -3701,7 +3732,7 @@ static isl_set *access_page_union(isl_ctx *ctx, uint64_t page, uint32_t partitio
   }
   return result;
 }
-int mesh_graph_access_pages_cover(uint64_t page, uint32_t partitions,
+int mesh_graph_access_pages_cover(uint64_t page, uint64_t partitions,
                                   size_t covers, const struct mesh_graph_access_pages *cover,
                                   size_t wanted, const struct mesh_graph_access_pages *want, int *covered) {
   *covered = 0;

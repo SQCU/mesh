@@ -7254,7 +7254,8 @@ class Generated(C.Structure):
 
 class Range(C.Structure):
     _fields_ = [('input', Remote), ('generation', Generated), ('partitions', mesh.U), ('page', mesh.Q),
-                ('field', C.POINTER(mesh.U)), ('at', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U)]
+                ('field', C.POINTER(mesh.U)), ('at', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U),
+                ('extent', C.POINTER(mesh_graph.Access)), ('extents', C.c_size_t)]
 
 
 class Release(C.Structure):
@@ -7571,10 +7572,11 @@ def _finalized(programs, context, irs, planned, values, owned):
             continue
         p, k = builder.p, row['k']
         for value, f, v, declared in row['marks']['received']:
-            field = (mesh.U * max(declared.partitions, 1))()
-            status = transport.mesh_metal_range_prepare(C.byref(context), C.byref(made), C.byref(planned),
-                                                        planned.result[f].value[v].section, field, declared.partitions,
-                                                        C.byref(declared))
+            operands = C.byref(context), C.byref(made), C.byref(planned), planned.result[f].value[v].section
+            status = transport.mesh_metal_range_prepare(*operands, None, 0, C.byref(declared))
+            if status == errno.ERANGE:
+                fields = (mesh.U * declared.input.pages)()
+                status = transport.mesh_metal_range_prepare(*operands, fields, len(fields), C.byref(declared))
             mesh.check(status)
             compiler.metal_ir_value_received(p, value, C.byref(declared))
         for value, release in row['marks']['sent']:

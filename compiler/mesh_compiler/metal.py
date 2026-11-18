@@ -271,7 +271,8 @@ class Generated(C.Structure):
 
 class Range(C.Structure):
     _fields_ = [('input', Remote), ('generation', Generated), ('partitions', mesh.U), ('page', mesh.Q),
-                ('field', C.POINTER(mesh.U)), ('at', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U)]
+                ('field', C.POINTER(mesh.U)), ('at', mesh.Q), ('transfer', mesh.U), ('owner', mesh.U),
+                ('extent', C.POINTER(mesh_graph.Access)), ('extents', C.c_size_t)]
 
 
 # mesh_metal_release: one release record of a value, declared {transfer, owner} (its group's transfer and owner call),
@@ -717,8 +718,8 @@ def _transport():
                                                        mesh.Q, mesh.Q, C.POINTER(Range)]),
                 ('mesh_metal_range_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.Section,
                                                        C.POINTER(mesh.U), mesh.U, C.POINTER(Range)]),
-                ('mesh_metal_range_fields', C.c_int, [C.POINTER(mesh.Planned), mesh.U, mesh.U, mesh.Q,
-                                                      mesh.U, C.POINTER(mesh.U)]),
+                ('mesh_metal_range_fields', C.c_int, [C.POINTER(mesh.Planned), C.POINTER(Range),
+                                                    C.POINTER(mesh.U), mesh.U]),
                 ('mesh_metal_release_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U,
                                                          C.POINTER(Release)]),
                 ('mesh_metal_sending_prepare', C.c_int, [mesh.CONTEXT, transport, binding, mesh.U, mesh.U,

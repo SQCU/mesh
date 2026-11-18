@@ -414,12 +414,14 @@ class Target:
         # status word its own call's plan (mesh_metal_status_prepare: a capture's own call)
         for value, function, index, declared in marks["received"]:
             landed = M.Range.from_buffer_copy(declared)
-            field = (mesh.U * max(landed.partitions, 1))()
             held = owner.solution.planned.result[function].value[index] if function is not None else (
                 owner.solution.planned.root[index])
-            mesh.check(transport.mesh_metal_range_prepare(
-                C.byref(context), C.byref(wires), C.byref(owner.binding), held.section, field, landed.partitions,
-                C.byref(landed)))
+            operands = C.byref(context), C.byref(wires), C.byref(owner.binding), held.section
+            status = transport.mesh_metal_range_prepare(*operands, None, 0, C.byref(landed))
+            if status == errno.ERANGE:
+                fields = (mesh.U * landed.input.pages)()
+                status = transport.mesh_metal_range_prepare(*operands, fields, len(fields), C.byref(landed))
+            mesh.check(status)
             compiler.metal_ir_value_received(program, value, C.byref(landed))
         for value, sender, declared in marks["sent"]:
             release = M.Release.from_buffer_copy(declared)

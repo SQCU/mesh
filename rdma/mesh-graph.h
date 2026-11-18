@@ -557,6 +557,10 @@ int mesh_graph_access_map_placed(const struct mesh_graph_access_map *, int64_t s
    (g_1 + groups[1] g_2) its partitions, ascending, partition[first[w] .. first[w + 1]) (*partition malloc'd, the
    caller's; first[groups' product + 1] the caller's). A BOUND or GUARD_DATA relation's are its own data-dependent
    bound, as its flags state */
+/* The phase fields of planned extents whose byte intervals each threadgroup reads. */
+int mesh_graph_access_map_fields(const struct mesh_graph_access_map *, const uint32_t group[3], const uint32_t groups[3],
+                                 uint64_t origin, size_t count, const struct mesh_graph_access *extents,
+                                 size_t *first, uint32_t **fields);
 int mesh_graph_access_map_partitions(const struct mesh_graph_access_map *, const uint32_t group[3],
                                      const uint32_t groups[3], int64_t start, uint64_t page, uint32_t partitions,
                                      size_t *first, uint32_t **partition);
@@ -570,7 +574,7 @@ struct mesh_graph_access_pages {
   const struct mesh_graph_access_map *map; int64_t start; uint32_t whole;
   const uint32_t *group, *groups;
 };
-int mesh_graph_access_pages_cover(uint64_t page, uint32_t partitions,
+int mesh_graph_access_pages_cover(uint64_t page, uint64_t partitions,
                                   size_t covers, const struct mesh_graph_access_pages *cover,
                                   size_t wanted, const struct mesh_graph_access_pages *want, int *covered);
 /* isl's own text of the relation and its guard (isl_map_to_str, isl_set_to_str) with its domain, flags, guard

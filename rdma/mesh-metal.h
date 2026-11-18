@@ -52,7 +52,8 @@ int mesh_metal_status(struct mesh_ctx *,uint64_t plan,int cause,uint64_t *first)
    consumers' footprints are measured from (metal_ir.h: the storage root of the received value), `transfer` the
    declared transfer of planned call `owner`'s plan whose landing it is (metal_ir.h METAL_IR_ARRIVED) */
 struct mesh_metal_range { struct mesh_metal_input input; struct mesh_graph_generation generation; uint32_t partitions;
-                          uint64_t page; const uint32_t *field; uint64_t at; uint32_t transfer,owner; };
+                          uint64_t page; const uint32_t *field; uint64_t at; uint32_t transfer,owner;
+                          const struct mesh_graph_access *extent; size_t extents; };
 /* Two stages, before and after mesh_plan (design/compilation-composition-change-request.md, "Complete replacement
    workgroup": structure from the declared program, words from the plan). Declared: the range transfer `transfer` of
    call `owner` lands for call `call`'s value of `bytes` bytes, partition 0 at byte `at` of its storage, `calls` the
@@ -67,8 +68,7 @@ int mesh_metal_range_geometry(uint64_t page,const uint32_t *calls,uint32_t ncall
                               uint32_t transfer,uint64_t bytes,uint64_t at,struct mesh_metal_range *range);
 int mesh_metal_range_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                              struct mesh_section section,uint32_t *field,uint32_t room,struct mesh_metal_range *range);
-int mesh_metal_range_fields(const struct mesh_planned *,uint32_t call,uint32_t transfer,uint64_t page,
-                            uint32_t pages,uint32_t *field);
+int mesh_metal_range_fields(const struct mesh_planned *,struct mesh_metal_range *,uint32_t *field,uint32_t room);
 /* R. Nasre, M. Burtscher and K. Pingali, IPDPS 2013; Arvind, R. S. Nikhil and K. K. Pingali, ACM TOPLAS 11(4), 1989;
    design/disjoint-pages-change-request.md C3.1, "Landings and cancellations both arrive on the count"; rdma/mesh-flow.c
    count_raise. The readiness obligation of a dispatch reading `ranges` received ranges, every quantity static but the
@@ -87,19 +87,12 @@ int mesh_metal_range_fields(const struct mesh_planned *,uint32_t call,uint32_t t
    group. A ready group's reads follow a system-scope sequentially consistent fence after its last test */
 struct mesh_metal_readiness { uint32_t ranges,classes,groups,members; const struct mesh_metal_range *range;
                               uint32_t *member,*class_of; uint64_t status; };
-/* `readiness` names its ranges, groups (the grid's threadgroups, groups[0] groups[1] groups[2]), status and room for
-   class_of (groups); mesh_metal_mask_partitions makes its classes, class_of and membership (`member`, `members` u32
-   words, malloc'd: the caller's to free) from the partitions each access reaches at each threadgroup: access a's at
-   threadgroup w (w = g_0 + groups[0] (g_1 + groups[1] g_2)) partition[first[w accesses + a] .. first[w accesses + a +
-   1]), ascending, of range[a] (UINT32_MAX: of no received range): each class one distinct row of the fields its
-   threadgroups read, a field f of range d read where its partition (range[d].field[f]) is one an access of d reaches
-   (every field of a range no access names, since the dispatch reads every range it lists) */
-int mesh_metal_mask_partitions(const uint32_t groups[3],size_t accesses,const size_t *first,const uint32_t *partition,
-                               const uint32_t *range,struct mesh_metal_readiness *readiness);
-/* the same from footprints (mesh-graph.h struct mesh_graph_footprint, their terms in `term`, evaluated at each
-   threadgroup, footprint k's binding a view of range[k]): each footprint's partitions [start + terms(g), + extent) */
-int mesh_metal_mask(const uint32_t groups[3],size_t footprints,const struct mesh_graph_footprint *footprint,
-                    const struct mesh_graph_term *term,const uint32_t *range,struct mesh_metal_readiness *readiness);
+/* A numerical read uses its storage's byte coordinates. A JOIN uses all of its declared fields. */
+struct mesh_metal_access { uint32_t storage; const struct mesh_graph_access_map *map;
+                           const struct mesh_graph_footprint *footprint; uint64_t offset; };
+int mesh_metal_mask(const uint32_t groups[3],const uint32_t threads[3],size_t accesses,
+                    const struct mesh_metal_access *access,const struct mesh_graph_term *terms,
+                    const uint32_t *storage,const uint8_t *whole,struct mesh_metal_readiness *readiness);
 /* design/disjoint-pages-change-request.md C3.1, C3.2 and C3.7; PTX ISA §8.8; S. Flur et al., POPL 2017: the release
    of a published range's execution e, after all of e's stores to it: a system-scope sequentially consistent fence;
    where the status word's behind and ahead are both 0, the supplied word (view byte `supplied`, the transfer's first
@@ -126,7 +119,7 @@ struct mesh_metal_sending { struct mesh_metal_sent sent; const struct mesh_graph
 /* ENODATA where `planned` holds no planned rows (mesh_plan_load of an archive saved without them) */
 int mesh_metal_sending_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_plan_binding *binding,
                                uint32_t call,uint32_t transfer,struct mesh_metal_sending *sending);
-_Static_assert(sizeof(struct mesh_metal_range)==88 &&
+_Static_assert(sizeof(struct mesh_metal_range)==104 &&
   offsetof(struct mesh_metal_range,generation)==40 && offsetof(struct mesh_metal_range,page)==56 &&
   offsetof(struct mesh_metal_range,at)==72 && offsetof(struct mesh_metal_range,transfer)==80 &&
   sizeof(struct mesh_metal_readiness)==48 && sizeof(struct mesh_metal_release)==32 &&
