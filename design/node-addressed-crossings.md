@@ -17,6 +17,10 @@ cable's cumulative `ready` / `sent` / `landed` counts. Everything above follows 
 
 The wires are the bridge's alone. A client should name a node and some bytes, and never see a wire.
 
+macOS 26.5 presents 10 queue pairs per device (the Mini); macOS 27.0 presents 2 (the Studios). Queue pairs are
+therefore a property of the driver and firmware, not of cables, links, or anything a client of the bridge experiences
+or triggers; with node addressing no caller ever sees them.
+
 ## Node-addressed transactions
 
 A transaction is: destination node, source pages, a conversation (the communicator's identity, equal at both ends)
