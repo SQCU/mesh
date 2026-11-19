@@ -139,6 +139,106 @@ static inline uint32_t mesh_switch_route(const struct mesh_switch_fabric *f,uint
   }
   return used;
 }
+/* the earliest arrival at every node of a piece of `bytes` leaving node `from` at `t0`, over nodes outside `visited`
+   (from itself among them or not), every hop costing its expected wait in this node's view and its send time */
+static inline void mesh_switch_search(const struct mesh_switch_fabric *f,uint32_t from,double t0,uint64_t visited,double bytes,
+                                      const struct mesh_switch_envelope *view,double unit,double *at){
+  for(uint32_t v=0;v<f->nodes;v++)at[v]=INFINITY;
+  at[from]=t0;
+  uint64_t done=visited&~(UINT64_C(1)<<from);
+  for(;;){
+    uint32_t u=MESH_SWITCH_NODES;
+    for(uint32_t v=0;v<f->nodes;v++)if(!(done>>v&1) && isfinite(at[v]) && (u==MESH_SWITCH_NODES || at[v]<at[u]))u=v;
+    if(u==MESH_SWITCH_NODES)return;
+    done|=UINT64_C(1)<<u;
+    for(uint32_t l=0;l<f->links;l++){
+      const struct mesh_switch_link *x=f->link+l;
+      if(x->from!=u || done>>x->to&1)continue;
+      const double t=at[u]+mesh_switch_wait(view?view+l:NULL,unit,at[u])+bytes/x->rate+x->latency;
+      if(t<at[x->to])at[x->to]=t;
+    }
+  }
+}
+
+/* Coupled multipath splitting (as multipath TCP couples its subflows). Node `self`'s split state for one transaction:
+   for each destination, a weight and a deficit for each of its lanes. A destination's piece may take any first lane
+   whose estimated arrival is within `slack` of the best one's queueing (what the best arrival is past the
+   unloaded one-page delay to the destination, so with nothing queued only the best lane goes); among those, the one with the most
+   deficit goes, each candidate's deficit growing by its weight and the chosen one's falling by their sum. So pieces
+   spread over the near-best subflows in proportion to their weights, explicitly and deterministically. Farthest
+   destinations choose first, and a lane the piece already takes wins outright where it's near-best (it carries the
+   destination in the same SEND).
+
+   The weights are set from what pieces met: each piece's name records the hops that chose its path (node, lane,
+   time), and the destination attributes the delay from each choice to its arrival back to the chooser, in the names
+   of the traffic going the other way (no crossing of its own). mesh_switch_split_learn moves each weight toward the
+   share 1 / delay^2 gives its lane, damped, with a floor that keeps every usable lane explored. */
+struct mesh_switch_split { float weight[MESH_SWITCH_NODES][256],deficit[MESH_SWITCH_NODES][256];
+                           double delay[MESH_SWITCH_NODES][256];uint32_t count[MESH_SWITCH_NODES][256]; };
+
+static inline uint32_t mesh_switch_route_split(const struct mesh_switch_fabric *f,uint32_t self,double now,uint64_t to,uint64_t visited,
+                                               double bytes,const double *ahead,const struct mesh_switch_envelope *view,double unit,
+                                               struct mesh_switch_split *split,double slack,uint32_t *lane,uint64_t *subset){
+  double via[256][MESH_SWITCH_NODES];
+  visited|=UINT64_C(1)<<self;
+  for(uint32_t l=0;l<f->links;l++){
+    const struct mesh_switch_link *x=f->link+l;
+    for(uint32_t v=0;v<f->nodes;v++)via[l][v]=INFINITY;
+    if(x->from!=self || visited>>x->to&1)continue;
+    mesh_switch_search(f,x->to,now+ahead[l]+bytes/x->rate+x->latency,visited,bytes,view,unit,via[l]);
+  }
+  uint32_t used=0;
+  uint64_t left=to&~visited;
+  while(left){
+    uint32_t d=MESH_SWITCH_NODES;
+    for(uint32_t v=0;v<f->nodes;v++)if(left>>v&1 && (d==MESH_SWITCH_NODES || f->dist[self][v]>f->dist[self][d]))d=v;
+    left&=~(UINT64_C(1)<<d);
+    double best=INFINITY;
+    for(uint32_t l=0;l<f->links;l++)if(via[l][d]<best)best=via[l][d];
+    if(!isfinite(best))return UINT32_MAX;
+    /* the slack is a share of the best arrival's queueing only: what it is past the unloaded one-page delay */
+    const double queued=best-now-f->dist[self][d];
+    const double within=best+(queued>0?slack*queued:0);
+    /* a lane this piece already takes carries this destination too at no further send: it wins where it's near-best */
+    uint32_t pick=UINT32_MAX;
+    for(uint32_t k=0;k<used && pick==UINT32_MAX;k++)if(via[lane[k]][d]<=within)pick=lane[k];
+    if(pick!=UINT32_MAX){uint32_t k=0;while(lane[k]!=pick)k++;subset[k]|=UINT64_C(1)<<d;continue;}
+    float sum=0;
+    for(uint32_t l=0;l<f->links;l++){
+      if(!(via[l][d]<=within))continue;
+      const float w=split->weight[d][l]>0?split->weight[d][l]:1;
+      split->deficit[d][l]+=w;sum+=w;
+      if(pick==UINT32_MAX || split->deficit[d][l]>split->deficit[d][pick])pick=l;
+    }
+    split->deficit[d][pick]-=sum;
+    uint32_t k=0;while(k<used && lane[k]!=pick)k++;
+    if(k==used){lane[used]=pick;subset[used]=0;used++;}
+    subset[k]|=UINT64_C(1)<<d;
+  }
+  return used;
+}
+static inline void mesh_switch_split_attribute(struct mesh_switch_split *split,uint32_t d,uint32_t l,double delay){
+  split->delay[d][l]+=delay;split->count[d][l]++;
+}
+/* after an execution's attributions: each destination's weights toward 1 / delay^2, damped (half the step), at least
+   1/32 of the lanes' sum on every lane the destination used before or now */
+static inline void mesh_switch_split_learn(const struct mesh_switch_fabric *f,uint32_t self,struct mesh_switch_split *split){
+  for(uint32_t d=0;d<f->nodes;d++){
+    double share[256]={0},total=0;
+    for(uint32_t l=0;l<f->links;l++)if(f->link[l].from==self && split->count[d][l]){
+      const double m=split->delay[d][l]/split->count[d][l];share[l]=1/(m*m);total+=share[l];
+    }
+    if(total>0)for(uint32_t l=0;l<f->links;l++){
+      if(f->link[l].from!=self || !(split->count[d][l] || split->weight[d][l]>0))continue;
+      const float w=split->weight[d][l]>0?split->weight[d][l]:1.0f/4;
+      float next=0.5f*w+0.5f*(float)(share[l]/total);
+      if(next<1.0f/32)next=1.0f/32;
+      split->weight[d][l]=next;
+    }
+    for(uint32_t l=0;l<f->links;l++){split->delay[d][l]=0;split->count[d][l]=0;}
+  }
+}
+
 /* One lane's predictor at its sender: a GRU over each execution's observed waits (as log(1 + wait / 1 us) a bin),
    hidden 64, its weights fixed and seeded; an expansion of its state to 192 rectified features; and a linear readout
    of them, learned online by normalised LMS, that predicts the next execution's waits as a residual on this one's.
